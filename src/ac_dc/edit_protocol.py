@@ -168,13 +168,28 @@ _AGENT_VALID_MODES: frozenset[str] = frozenset({
 # 4. Accept filenames with extensions.
 # 5. Accept dotfiles.
 # 6. Accept known extensionless filenames (Makefile, Dockerfile, …).
+#
+# Inner whitespace is NOT a rejection reason. Filenames
+# containing spaces (``docs/notes/deployment modes.md``) are
+# legal on every filesystem we target, and the protocol is
+# "the whole line is the path" — see ``_handle_expect_edit``.
+# Rejecting them made such files permanently uneditable, and
+# the failure was silent: with no path candidate the EDIT
+# marker fell through as prose, so the parser emitted zero
+# blocks and there was no EditResult to report. The
+# EDIT-marker lookahead is what separates paths from prose;
+# a space-containing prose line that reaches EXPECT_EDIT is
+# either replaced by a real path candidate or resets to
+# SCANNING harmlessly.
 
 _COMMENT_PREFIXES = ("#", "//", "*", "-", ">", "```")
 
 # Matches ``foo.ext``, ``.foo.ext`` (one leading dot OK), or
-# dotted paths like ``file.py.bak``. No path separators required
-# — those are handled by the separators branch.
-_FILENAME_WITH_EXT = re.compile(r"^\.?[\w\-\.]+\.\w+$")
+# dotted paths like ``file.py.bak``. Inner spaces are allowed
+# (``deployment modes.md``) — the character class includes a
+# literal space. No path separators required; those are handled
+# by the separators branch.
+_FILENAME_WITH_EXT = re.compile(r"^\.?[\w\-\. ]+\.\w+$")
 
 # Matches ``.gitignore``, ``.env``, ``.dockerignore`` — dotfile
 # names without an extension. Single leading dot, then word
@@ -204,9 +219,11 @@ def _is_file_path(line: str) -> bool:
 
     Accepts:
 
-    - Anything containing a path separator with no inner
-      whitespace (``src/foo.py``, ``a\\b\\c``).
-    - Filenames with an extension (``foo.py``, ``.env.local``).
+    - Anything containing a path separator (``src/foo.py``,
+      ``a\\b\\c``, ``docs/deployment modes.md``). Inner spaces
+      are fine — filenames legitimately contain them.
+    - Filenames with an extension (``foo.py``, ``.env.local``,
+      ``deployment modes.md``).
     - Dotfiles without an extension (``.gitignore``, ``.env``).
     - Bare extensionless tokens of word characters with optional
       dashes/dots (``LICENSE``, ``Makefile``, ``README``,
@@ -220,8 +237,16 @@ def _is_file_path(line: str) -> bool:
     - Lines longer than 200 characters (almost certainly prose).
     - Lines starting with a prose / comment prefix
       (``#``, ``//``, ``*``, ``-``, ``>``, code fence).
-    - Multi-token lines without a path separator
-      (``This is a sentence``).
+    - Multi-token lines with neither a path separator nor an
+      extension (``This is a sentence``).
+
+    Accepting a space-containing prose line that happens to
+    carry a separator or an extension (``see src/foo.py for
+    details``) is deliberate and safe here: the lookahead
+    discards it unless an EDIT marker follows, and if one does
+    follow, the pipeline reports a file-not-found diagnostic.
+    A visible error beats the silent drop that rejecting inner
+    whitespace produced for real space-containing filenames.
     """
     # Defensive input-sanitisation. Empty-after-strip lines never
     # count; very long lines (200+ chars) are almost certainly
@@ -235,13 +260,14 @@ def _is_file_path(line: str) -> bool:
     for prefix in _COMMENT_PREFIXES:
         if stripped.startswith(prefix):
             return False
-    # Path with separators — the common case.
+    # Path with separators — the common case. Inner spaces are
+    # accepted: ``docs/notes/deployment modes.md`` is a real
+    # file, and the EDIT-marker lookahead (not this predicate)
+    # is what rules out prose.
     if "/" in stripped or "\\" in stripped:
-        # Sanity-check: no inner whitespace. A real path might
-        # contain one (rare but valid) but the LLM almost never
-        # emits such; a line with spaces is almost always prose.
-        return " " not in stripped
-    # Filename with extension — ``foo.py``, ``.env.local``, etc.
+        return True
+    # Filename with extension — ``foo.py``, ``.env.local``,
+    # ``deployment modes.md``.
     if _FILENAME_WITH_EXT.match(stripped):
         return True
     # Dotfile without extension — ``.gitignore``, ``.env``.
@@ -295,6 +321,37 @@ class EditErrorType(str, Enum):
     VALIDATION_ERROR = "validation_error"
 
 
+def has_stray_separator(new_text: str) -> bool:
+    """Return True if ``new_text`` contains a bare separator line.
+
+    A well-formed block has exactly one ``🟨🟨🟨 REPL``, and the
+    state machine consumes it on the READING_OLD → READING_NEW
+    transition. Any *further* separator line lands in the
+    new-text accumulator and would be written into the file as
+    literal text.
+
+    This is the one malformation in the protocol that damages a
+    file while reporting success: a missing end marker leaves an
+    incomplete block, a bad path drops the block, but a second
+    separator applies cleanly and silently injects a marker line
+    into the user's document. The system prompt forbids it
+    (``config/system_doc.md`` — "Never emit a second 🟨🟨🟨 REPL
+    inside a block") and ``config/system_reminder.md`` repeats
+    it every turn, but a prompt bounds frequency, not damage.
+
+    Only a *bare* separator line counts — the marker alone on
+    its line, after stripping. Prose or documentation that
+    mentions the marker inline (``the 🟨🟨🟨 REPL separator
+    divides the sections``) is legitimate content and must
+    still be editable, as must this repository's own spec files
+    which quote the markers inside fenced examples.
+    """
+    return any(
+        line.strip() == _MARKER_REPL
+        for line in new_text.split("\n")
+    )
+
+
 @dataclass
 class EditBlock:
     """A parsed edit block — pre-validation.
@@ -312,6 +369,15 @@ class EditBlock:
     # left unterminated when the stream ends have
     # ``completed=False`` and are surfaced as pending in the UI.
     completed: bool = True
+
+    @property
+    def has_stray_separator(self) -> bool:
+        """True when new text carries a bare 🟨🟨🟨 REPL line.
+
+        Signals a malformed block the pipeline must refuse
+        rather than apply. See :func:`has_stray_separator`.
+        """
+        return has_stray_separator(self.new_text)
 
 
 @dataclass

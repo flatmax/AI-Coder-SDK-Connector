@@ -31,6 +31,7 @@ from ac_dc.edit_protocol import (
     ParseResult,
     _is_file_path,
     detect_shell_commands,
+    has_stray_separator,
     parse_text,
 )
 
@@ -111,9 +112,36 @@ class TestIsFilePath:
     def test_path_with_backslash_accepted(self) -> None:
         assert _is_file_path("src\\foo.py") is True
 
-    def test_path_with_inner_space_rejected(self) -> None:
-        """Inner whitespace is prose-like — paths shouldn't contain it."""
-        assert _is_file_path("src/my file.py") is False
+    def test_path_with_inner_space_accepted(self) -> None:
+        """Filenames with spaces are real files and must be editable.
+
+        Pinned regression: the old implementation rejected any
+        path line containing inner whitespace. That made files
+        like ``docs/notes/deployment modes.md`` permanently
+        uneditable, and the failure was *silent* — with no path
+        candidate recorded, the following 🟧🟧🟧 EDIT marker fell
+        through as prose, the parser emitted zero blocks, and
+        no EditResult existed to report a failure. The user saw
+        an assistant that appeared to edit nothing.
+
+        The EDIT-marker lookahead is what disambiguates paths
+        from prose; this predicate only screens obvious prose.
+        """
+        assert _is_file_path("src/my file.py") is True
+        assert _is_file_path("docs/notes/deployment modes.md") is True
+
+    def test_bare_filename_with_inner_space_accepted(self) -> None:
+        """Space-containing names work without a separator too."""
+        assert _is_file_path("deployment modes.md") is True
+
+    def test_prose_sentence_still_rejected(self) -> None:
+        """Loosening whitespace must not accept plain prose.
+
+        A multi-word line with neither a path separator nor a
+        trailing extension is still rejected outright.
+        """
+        assert _is_file_path("This is a sentence") is False
+        assert _is_file_path("Now here's the change") is False
 
     def test_filename_with_extension_accepted(self) -> None:
         assert _is_file_path("foo.py") is True
@@ -173,6 +201,92 @@ class TestIsFilePath:
     def test_leading_trailing_whitespace_stripped(self) -> None:
         """Whitespace around a valid path is tolerated."""
         assert _is_file_path("  src/foo.py  ") is True
+
+
+# ---------------------------------------------------------------------------
+# Stray separator detection
+# ---------------------------------------------------------------------------
+
+
+class TestHasStraySeparator:
+    """Detection of a second 🟨🟨🟨 REPL inside new text."""
+
+    def test_clean_new_text(self) -> None:
+        assert has_stray_separator("just some content") is False
+
+    def test_empty_new_text(self) -> None:
+        assert has_stray_separator("") is False
+
+    def test_bare_separator_line(self) -> None:
+        assert has_stray_separator(f"content\n{REPL}") is True
+
+    def test_separator_alone(self) -> None:
+        assert has_stray_separator(REPL) is True
+
+    def test_separator_mid_text(self) -> None:
+        assert has_stray_separator(f"a\n{REPL}\nb") is True
+
+    def test_indented_separator_line(self) -> None:
+        """Leading whitespace doesn't excuse it — lines are stripped."""
+        assert has_stray_separator(f"a\n    {REPL}\nb") is True
+
+    def test_inline_mention_allowed(self) -> None:
+        """A marker inside a prose line is legitimate content.
+
+        This repository's own specs and system prompts quote the
+        markers in running prose and fenced examples. Treating
+        an inline mention as malformed would make those files
+        uneditable.
+        """
+        assert (
+            has_stray_separator(f"the {REPL} line separates them")
+            is False
+        )
+
+    def test_other_markers_allowed(self) -> None:
+        """Only the separator is checked here.
+
+        A bare EDIT or END marker in new text is a different
+        (and much rarer) malformation, and END in particular
+        cannot reach new text at all — the state machine
+        consumes it to close the block.
+        """
+        assert has_stray_separator(f"a\n{EDIT}\nb") is False
+        assert has_stray_separator(f"a\n{END}\nb") is False
+
+
+class TestEditBlockStraySeparatorProperty:
+    """The dataclass property mirrors the module function."""
+
+    def test_property_true(self) -> None:
+        block = EditBlock(
+            file_path="a.md",
+            old_text="old",
+            new_text=f"new\n{REPL}",
+        )
+        assert block.has_stray_separator is True
+
+    def test_property_false(self) -> None:
+        block = EditBlock(
+            file_path="a.md", old_text="old", new_text="new"
+        )
+        assert block.has_stray_separator is False
+
+    def test_malformed_block_from_real_parse(self) -> None:
+        """The transcript shape: REPL where END belonged.
+
+        Pins the end-to-end path — the parser still emits the
+        block (it is structurally complete), and the stray
+        separator rides along in ``new_text`` where the
+        pipeline's guard catches it.
+        """
+        text = (
+            f"docs/notes/deployment modes.md\n{EDIT}\n"
+            f"old\n{REPL}\nnew content\n{REPL}\n{END}\n"
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].has_stray_separator is True
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +628,50 @@ class TestPathDetectionIntegration:
         assert len(result.blocks) == 1
         # The second path is the one immediately before 🟧🟧🟧 EDIT.
         assert result.blocks[0].file_path == "new.py"
+
+    def test_space_containing_path_parses(self) -> None:
+        """A path with spaces round-trips through the state machine.
+
+        End-to-end companion to
+        ``test_path_with_inner_space_accepted``: the block is
+        emitted and ``file_path`` carries the spaces verbatim,
+        so the pipeline can hand it straight to
+        ``Repo.file_exists``. Nothing downstream tokenises the
+        path.
+        """
+        text = _block("docs/notes/deployment modes.md", "old", "new")
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert (
+            result.blocks[0].file_path
+            == "docs/notes/deployment modes.md"
+        )
+
+    def test_prose_mentioning_path_then_real_space_path(self) -> None:
+        """Prose carrying a path doesn't capture the block.
+
+        ``see src/a.py for details`` now passes the predicate
+        (it has a separator), so it becomes a candidate. The
+        EXPECT_EDIT state replaces it when the real path line
+        arrives, and the block binds to the real path.
+        """
+        text = (
+            "see src/a.py for details\n"
+            + _block("docs/my notes.md", "old", "new")
+        )
+        result = parse_text(text)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].file_path == "docs/my notes.md"
+
+    def test_prose_with_path_and_no_edit_marker_recovers(self) -> None:
+        """A path-bearing prose line without EDIT after is harmless."""
+        text = (
+            "I looked at src/a.py and docs/my notes.md today.\n"
+            "Nothing to change.\n"
+        )
+        result = parse_text(text)
+        assert result.blocks == []
+        assert result.incomplete == []
 
     def test_path_in_old_text_not_treated_as_new_path(self) -> None:
         """Path-like lines inside old/new text are just content."""

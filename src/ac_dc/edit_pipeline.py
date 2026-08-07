@@ -413,10 +413,33 @@ class EditPipeline:
 
         Dispatch logic:
 
+        0. Malformed block (stray separator) → ``FAILED``
         1. Create block (empty old-text) → ``_apply_create``
         2. Not-in-context file → ``NOT_IN_CONTEXT`` marker
         3. In-context file → ``_apply_modify``
         """
+        # Refuse a block whose new text carries a bare
+        # 🟨🟨🟨 REPL line. Applying it would write the marker
+        # into the file as literal text and report APPLIED —
+        # the only protocol malformation that corrupts a file
+        # while claiming success. Checked before the create /
+        # modify split because both writing paths are affected.
+        if block.has_stray_separator:
+            return EditResult(
+                file_path=block.file_path,
+                status=EditStatus.FAILED,
+                message=(
+                    "Malformed block: the replacement text "
+                    "contains a stray 🟨🟨🟨 REPL separator "
+                    "line. A block must have exactly one "
+                    "separator. Re-send this edit as a single "
+                    "well-formed block."
+                ),
+                error_type=EditErrorType.VALIDATION_ERROR.value,
+                old_preview=_preview(block.old_text),
+                new_preview=_preview(block.new_text),
+            )
+
         if block.is_create:
             return await self._apply_create(block, dry_run=dry_run)
 

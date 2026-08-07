@@ -78,6 +78,13 @@ describe('isFilePath', () => {
       expect(isFilePath('this is a sentence')).toBe(false);
     });
 
+    it('prose ending in a word but no extension', () => {
+      // Loosening the inner-whitespace rule must not let bare
+      // sentences through — an extension or a separator is
+      // still required.
+      expect(isFilePath('Now here is the change')).toBe(false);
+    });
+
     it('extensionless filename not on whitelist', () => {
       // Rakefile is in the backend whitelist but intentionally
       // not in the frontend's — the asymmetry is documented as
@@ -124,6 +131,14 @@ describe('isFilePath', () => {
 
     it('surrounding whitespace is tolerated', () => {
       expect(isFilePath('  src/foo.py  ')).toBe(true);
+    });
+
+    it('inner whitespace in a real filename', () => {
+      // Regression: these were rejected, so the backend applied
+      // the edit while the frontend rendered the block as prose.
+      // Must match the backend's `_is_file_path`.
+      expect(isFilePath('docs/notes/deployment modes.md')).toBe(true);
+      expect(isFilePath('deployment modes.md')).toBe(true);
     });
   });
 });
@@ -587,6 +602,82 @@ describe('segmentResponse - expect-edit state edge cases', () => {
     const edits = out.filter((s) => s.type === 'edit');
     expect(edits).toHaveLength(1);
     expect(edits[0].filePath).toBe('src/foo.py');
+  });
+
+  it('space-containing path is recognised as a block', () => {
+    // Regression: rejected as prose, so the block rendered as
+    // text while the backend applied it.
+    const input = [
+      'docs/notes/deployment modes.md',
+      EDIT_MARK,
+      '## Old heading',
+      REPL_MARK,
+      '## New heading',
+      END_MARK,
+    ].join('\n');
+    const out = segmentResponse(input);
+    const edits = out.filter((s) => s.type === 'edit');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].filePath).toBe('docs/notes/deployment modes.md');
+  });
+
+  it('path-bearing prose then a real block — prose survives', () => {
+    // "see src/a.py for details" now passes isFilePath (it has
+    // a separator), so it reaches expect-edit. It must be
+    // replayed into the text output, not swallowed.
+    const input = [
+      'see src/a.py for details',
+      'docs/my notes.md',
+      EDIT_MARK,
+      'old',
+      REPL_MARK,
+      'new',
+      END_MARK,
+    ].join('\n');
+    const out = segmentResponse(input);
+    const edits = out.filter((s) => s.type === 'edit');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].filePath).toBe('docs/my notes.md');
+    const joined = out
+      .filter((s) => s.type === 'text')
+      .map((t) => t.content)
+      .join('\n');
+    expect(joined).toContain('see src/a.py for details');
+  });
+
+  it('blank lines held in expect-edit are replayed for prose', () => {
+    // The candidate turns out to be prose, so the blank line
+    // held after it must come back — otherwise the paragraph
+    // break collapses in the rendered markdown.
+    const input = [
+      'I changed src/foo.py today.',
+      '',
+      'Then I stopped.',
+    ].join('\n');
+    const out = segmentResponse(input);
+    const joined = out
+      .filter((s) => s.type === 'text')
+      .map((t) => t.content)
+      .join('\n');
+    expect(joined).toBe(input);
+  });
+
+  it('fence after path-bearing prose is not swallowed', () => {
+    // The fence was held while the candidate was unresolved.
+    // Once the candidate proves to be prose the fence has to
+    // reappear, or the code block loses its opening delimiter.
+    const input = [
+      'Run the script in scripts/run.sh:',
+      '```bash',
+      './scripts/run.sh --once',
+      '```',
+    ].join('\n');
+    const out = segmentResponse(input);
+    const joined = out
+      .filter((s) => s.type === 'text')
+      .map((t) => t.content)
+      .join('\n');
+    expect(joined).toContain('```bash');
   });
 });
 

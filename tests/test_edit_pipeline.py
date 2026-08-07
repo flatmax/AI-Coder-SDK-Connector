@@ -40,6 +40,12 @@ from ac_dc.edit_pipeline import ApplyReport, EditPipeline
 from ac_dc.edit_protocol import EditBlock, EditErrorType, EditStatus
 from ac_dc.repo import Repo
 
+# Separator marker. Spelled out rather than imported from the
+# private ``edit_protocol._MARKER_REPL`` so the test pins the
+# literal bytes the LLM emits — a change to the constant should
+# fail these tests, not silently follow along.
+REPL = "🟨🟨🟨 REPL"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -467,6 +473,120 @@ class TestModifyErrors:
         assert report.results[0].status in (
             EditStatus.SKIPPED, EditStatus.FAILED,
         )
+
+
+# ---------------------------------------------------------------------------
+# Malformed blocks — stray separator
+# ---------------------------------------------------------------------------
+
+
+class TestStraySeparator:
+    """A second 🟨🟨🟨 REPL in new text must never reach disk.
+
+    The state machine consumes the first separator on the
+    READING_OLD → READING_NEW transition, so any further one
+    accumulates as new-text content. Without this guard the
+    block applies cleanly, writes the marker into the document
+    as literal text, and reports APPLIED — the only protocol
+    malformation that corrupts a file while claiming success.
+    """
+
+    async def test_modify_with_stray_separator_fails(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        (repo_dir / "doc.md").write_text("old body\n")
+        block = _modify(
+            "doc.md", "old body", f"new body\n{REPL}"
+        )
+        report = await pipeline.apply_edits(
+            [block], in_context_files={"doc.md"}
+        )
+        assert report.failed == 1
+        assert report.results[0].status == EditStatus.FAILED
+        assert report.results[0].error_type == (
+            EditErrorType.VALIDATION_ERROR.value
+        )
+
+    async def test_file_left_unchanged(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """The document keeps its original content, marker-free."""
+        (repo_dir / "doc.md").write_text("old body\n")
+        block = _modify(
+            "doc.md", "old body", f"new body\n{REPL}"
+        )
+        await pipeline.apply_edits(
+            [block], in_context_files={"doc.md"}
+        )
+        content = (repo_dir / "doc.md").read_text()
+        assert content == "old body\n"
+        assert REPL not in content
+
+    async def test_create_with_stray_separator_fails(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Creates are gated too — the check precedes the split."""
+        block = _create("fresh.md", f"line one\n{REPL}\n")
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.failed == 1
+        assert not (repo_dir / "fresh.md").exists()
+
+    async def test_not_in_context_file_still_fails(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Malformation outranks the not-in-context check.
+
+        A stray separator is a defect in the block itself, so
+        there is nothing to gain by deferring it to a retry
+        with the file added to context.
+        """
+        (repo_dir / "doc.md").write_text("old body\n")
+        block = _modify(
+            "doc.md", "old body", f"new body\n{REPL}"
+        )
+        report = await pipeline.apply_edits(
+            [block], in_context_files=set()
+        )
+        assert report.results[0].status == EditStatus.FAILED
+
+    async def test_inline_marker_mention_still_applies(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """Prose mentioning the marker inline is legitimate content.
+
+        Only a *bare* separator line is malformed. This repo's
+        own specs quote the markers in prose and fenced
+        examples; those files must stay editable.
+        """
+        (repo_dir / "spec.md").write_text("describe it\n")
+        block = _modify(
+            "spec.md",
+            "describe it",
+            f"the {REPL} line divides the two sections",
+        )
+        report = await pipeline.apply_edits(
+            [block], in_context_files={"spec.md"}
+        )
+        assert report.passed == 1
+        assert report.results[0].status == EditStatus.APPLIED
+
+    async def test_sibling_blocks_unaffected(
+        self, pipeline: EditPipeline, repo_dir: Path
+    ) -> None:
+        """One malformed block doesn't sink the others."""
+        (repo_dir / "a.md").write_text("aaa\n")
+        (repo_dir / "b.md").write_text("bbb\n")
+        good = _modify("a.md", "aaa", "AAA")
+        bad = _modify("b.md", "bbb", f"BBB\n{REPL}")
+        report = await pipeline.apply_edits(
+            [good, bad], in_context_files={"a.md", "b.md"}
+        )
+        assert report.passed == 1
+        assert report.failed == 1
+        assert (repo_dir / "a.md").read_text() == "AAA\n"
+        assert (repo_dir / "b.md").read_text() == "bbb\n"
 
 
 # ---------------------------------------------------------------------------

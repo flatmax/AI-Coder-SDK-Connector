@@ -88,17 +88,21 @@ The LLM must reproduce the marker characters exactly — no ASCII substitutions,
 ## File Path Detection
 
 - Not a comment (doesn't start with common comment prefixes or triple backticks)
-- Path with separators (slash or backslash)
-- Filename with extension
+- Path with separators (slash or backslash) — inner whitespace permitted
+- Filename with extension — inner whitespace permitted (`deployment modes.md`)
 - Dotfile without extension
 - Bare extensionless tokens (LICENSE, Makefile, README, AUTHORS, ...) — single-word lines without inner whitespace
 - Path appears immediately before start marker, with blank lines causing state reset; the start marker on the next line is what disambiguates a path declaration from a stray bare-word line in prose
+
+The whole line is the path, spaces included. Filenames containing spaces must be editable: rejecting them means the start marker falls through as prose, the parser emits zero blocks, and — because there is no block — there is no result to report, so the failure is invisible rather than diagnosed. Accepting a path-shaped prose line costs nothing by comparison; the start-marker lookahead discards it, and if a marker really does follow, the user gets a file-not-found diagnostic.
 
 ## Frontend vs Backend Path Detection
 
 - Each has its own file-path predicate — they are intentionally not identical
 - Frontend is simpler (display-only); backend is authoritative
 - Frontend may miss extensionless filenames like Makefile — block still applies correctly server-side
+- Whitespace handling must NOT diverge — a path the backend accepts and the frontend rejects renders as prose while applying to disk, so the user sees a successful edit as an ignored one
+- Frontend holds (does not drop) blank and fence lines consumed while a path candidate is unresolved, replaying them as text if the candidate turns out to be prose
 
 ## Streaming Considerations
 
@@ -111,10 +115,22 @@ The LLM must reproduce the marker characters exactly — no ASCII substitutions,
 - File exists (for modifications, not creates)
 - File is not binary (null byte check)
 - Old text found exactly once in the file
+- New text contains no bare separator line (malformed-block guard, below)
+
+### Malformed-Block Guard — Stray Separator
+
+A block whose new text contains a **bare `🟨🟨🟨 REPL` line** is refused with a validation error and never written. Checked before the create/modify split, so both writing paths are covered, and ahead of the not-in-context check — the defect is in the block itself, so deferring it to a retry gains nothing.
+
+This is the only malformation in the protocol that damages a file while reporting success. The state machine consumes the first separator on the read-old → read-new transition, so a second one accumulates as new-text *content*: the edit applies cleanly, the marker lands in the user's document as literal text, and the result says `applied`. Every other malformation fails safe — a bad path drops the block, a missing end marker leaves it incomplete.
+
+The system prompt forbids a second separator and the per-turn reminder repeats it, but a prompt bounds frequency, not damage. The guard bounds damage.
+
+Only a *bare* separator counts — the marker alone on its line, after stripping. An inline mention in prose (`the 🟨🟨🟨 REPL separator divides the sections`) is legitimate content; this repository's own specs and prompt files quote the markers in running text and fenced examples, and must stay editable.
 
 ## Failure Diagnostics
 
 - Anchor not found — old text doesn't match any location
+- Malformed block — new text carries a stray separator line
 - Ambiguous anchor — old text matches multiple locations
 - Whitespace mismatch — tabs vs spaces, trailing whitespace detected as a likely cause
 

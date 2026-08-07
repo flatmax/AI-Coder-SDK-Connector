@@ -64,12 +64,20 @@ A line is treated as a file path when it meets ALL:
 2. Non-empty after trim
 3. Does NOT start with a comment prefix: `#`, `//`, `*`, `-`, `>`, triple-backtick
 4. Matches ONE of:
-   - Contains path separator `/` or `\` (with no inner whitespace)
-   - Matches `\.?[\w\-\.]+\.\w+` (filename with extension, including dotfiles like `.env.local`)
+   - Contains path separator `/` or `\` — inner whitespace permitted
+   - Matches `\.?[\w\-\. ]+\.\w+` (filename with extension, including dotfiles like `.env.local` and space-containing names like `deployment modes.md`)
    - Matches `\.\w[\w\-\.]*` (dotfile without extension, like `.gitignore`)
    - Matches `\w[\w\-\.]*` (bare extensionless token, no inner whitespace) — covers `LICENSE`, `Makefile`, `README`, `AUTHORS`, `MY-CUSTOM-FILE`, etc.
 
 The bare-token branch is intentionally permissive. Disambiguation between a real file path and a stray single-word line in prose is performed by the parser state machine's lookahead: a path candidate must be followed (after optional blank lines) by `🟧🟧🟧 EDIT`. A bare word in prose that isn't followed by an EDIT marker resets the state machine to `SCANNING` with no harm done. There is no hardcoded allowlist of extensionless filenames.
+
+#### Inner whitespace is permitted
+
+The separator and extension branches accept paths containing spaces (`docs/notes/deployment modes.md`). An earlier revision rejected any path line with inner whitespace, on the theory that a line with spaces is almost always prose. That made space-containing files permanently uneditable, and the failure mode was silent in the worst way: with no path candidate recorded, the following `🟧🟧🟧 EDIT` line fell through as prose, the parser emitted **zero** blocks, and no `EditResult` existed — so there was no failure badge, no diagnostic, and no retry prompt. The response looked like an assistant that tried to edit and did nothing.
+
+The whole line is the path. The protocol's disambiguator is the EDIT-marker lookahead, not the shape of the path — `EXPECT_EDIT` either replaces the candidate when a better path line arrives, or resets to `SCANNING`. Prose that now reaches `EXPECT_EDIT` because it happens to carry a separator (`see src/foo.py for details`) is therefore harmless; in the rare case such a line does precede an EDIT marker, the pipeline reports `file_not_found`. A visible diagnostic is strictly better than a silent drop.
+
+Bare extensionless tokens still reject inner whitespace — a multi-word line with neither a separator nor an extension is prose.
 
 ### Frontend vs backend detection divergence
 
@@ -82,8 +90,13 @@ The webapp's edit-block segmenter (`edit-blocks.js`) and the backend parser (`ed
 | Filename with extension | ✓ | ✓ |
 | Dotfile without extension | ✓ | ✓ |
 | Bare extensionless token (`LICENSE`, `Makefile`, ...) | ✓ | ✗ (uses smaller allowlist) |
+| Inner whitespace in separator/extension paths | ✓ | ✓ |
 
 The frontend is simpler because its job is display-only — a `Makefile` edit block that fails to render as a visual block still applies correctly on the backend. The divergence is intentional; do not treat it as a bug to resolve.
+
+Inner whitespace is deliberately **not** part of that divergence. Both sides must accept it, because the asymmetry runs the wrong way: the backend would apply the edit while the frontend rendered the block as prose, so the user would see their edit silently ignored even though it succeeded on disk. Path-shape rules that decide whether a block is *recognised at all* have to match; the tolerated divergences are ones where the frontend merely under-renders a block the backend still applies.
+
+Because prose can now reach the frontend's `expect-edit` state, lines consumed there while the candidate is unresolved (blank lines, an opening code fence) are **held, not dropped**. If the candidate proves to be a real path they are wrapper noise and discarded; if it proves to be prose they are replayed into the text buffer in source order. Dropping them would collapse paragraph breaks and strip the opening fence off code blocks that follow a path-bearing sentence.
 
 ## Parser state machine
 
@@ -158,7 +171,7 @@ Each applied edit produces a result record with these fields:
 | `ambiguous_anchor` | Old text block matches multiple locations |
 | `file_not_found` | File does not exist or cannot be read |
 | `write_error` | Post-validation write to disk failed (OS error) |
-| `validation_error` | Path traversal, binary file, or other pre-condition |
+| `validation_error` | Path traversal, binary file, stray separator in new text, or other pre-condition |
 
 `error_type` is empty (empty string) on success statuses (`applied`, `already_applied`, `validated`).
 
@@ -169,6 +182,14 @@ Each applied edit produces a result record with these fields:
 ## Diagnostic messages
 
 Diagnostic messages are emitted in the `message` field of edit results. Downstream tooling (including the webapp's retry-prompt generator) may pattern-match on these strings.
+
+### Malformed block — stray separator
+
+```
+Malformed block: the replacement text contains a stray 🟨🟨🟨 REPL separator line. A block must have exactly one separator. Re-send this edit as a single well-formed block.
+```
+
+Emitted with `status = failed`, `error_type = validation_error`, and both previews populated. Detected by `edit_protocol.has_stray_separator` — true when any line of `new_text`, stripped, equals the separator marker exactly. Enforced in `EditPipeline._apply_one` before the create/modify dispatch and before the not-in-context check.
 
 ### Anchor not found — whitespace mismatch
 

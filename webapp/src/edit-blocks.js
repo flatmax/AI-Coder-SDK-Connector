@@ -64,6 +64,14 @@ const EXTENSIONLESS_FILENAMES = new Set(['Makefile', 'Dockerfile']);
  *   - OR matches dotfile regex (.gitignore, .env.local)
  *   - OR is a known extensionless name (Makefile, Dockerfile)
  *
+ * Inner whitespace is not a rejection reason — filenames like
+ * `docs/notes/deployment modes.md` are real, and rejecting them
+ * meant the backend applied an edit the frontend rendered as
+ * prose. Prose lines that now slip through (`see src/foo.py for
+ * details`) are held only until the next line proves whether an
+ * EDIT marker follows; `expect-edit` pushes non-blocks back to
+ * the text buffer, so nothing is lost from the rendered output.
+ *
  * Returns true only if exactly one of the accept rules matches.
  *
  * @param {string} line
@@ -73,18 +81,6 @@ export function isFilePath(line) {
   if (typeof line !== 'string') return false;
   const trimmed = line.trim();
   if (!trimmed || trimmed.length > 200) return false;
-
-  // File paths never contain whitespace. Rejecting prose
-  // like "edit src/foo.py" or "do not wrap src/foo.py here"
-  // is essential — without this, the segmenter would
-  // misclassify those lines as path candidates, enter the
-  // expect-edit state, consume the surrounding code-fence
-  // markers as wrapper fences, and dump fenced-block content
-  // into a prose segment where mention detection then runs.
-  // Matches the backend's `_is_file_path` rule (see
-  // specs-reference/3-llm/edit-protocol.md § File path
-  // detection — "path with inner space rejected").
-  if (/\s/.test(trimmed)) return false;
 
   // Comment prefixes — not paths.
   if (
@@ -98,11 +94,13 @@ export function isFilePath(line) {
     return false;
   }
 
-  // Path with separators — covers src/foo.py, a\b\c.ts, etc.
+  // Path with separators — covers src/foo.py, a\b\c.ts, and
+  // space-containing names like "docs/deployment modes.md".
   if (/[\/\\]/.test(trimmed)) return true;
 
-  // Filename with extension (simple case: foo.js, .env.local).
-  if (/^\.?[\w\-.]+\.\w+$/.test(trimmed)) return true;
+  // Filename with extension (foo.js, .env.local, and
+  // "deployment modes.md" — the class allows inner spaces).
+  if (/^\.?[\w\-. ]+\.\w+$/.test(trimmed)) return true;
 
   // Dotfile without extension (.gitignore, .dockerignore).
   if (/^\.\w[\w\-.]*$/.test(trimmed)) return true;
@@ -196,6 +194,18 @@ export function segmentResponse(text) {
   /** @type {string[]} */
   let agentLines = [];
 
+  // Lines consumed while in 'expect-edit' that are neither the
+  // EDIT marker nor a new path candidate — blank lines and an
+  // opening code fence. If the candidate turns out to be a real
+  // path these are wrapper noise and correctly dropped; if it
+  // turns out to be prose they must be replayed into the text
+  // buffer in source order, or paragraph breaks collapse in the
+  // rendered markdown. Only matters now that path-bearing prose
+  // ("see src/foo.py for details") can reach 'expect-edit' —
+  // before the inner-whitespace rule was lifted it could not.
+  /** @type {string[]} */
+  let heldLines = [];
+
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     const stripped = line.trim();
@@ -211,8 +221,11 @@ export function segmentResponse(text) {
           state = 'reading-agent';
         } else if (isFilePath(stripped)) {
           // Possible start of an edit block — hold the path,
-          // peek next non-blank line for EDIT marker.
-          pendingPath = stripped;
+          // peek next non-blank line for EDIT marker. Hold the
+          // raw line, not the trimmed one, so replaying prose
+          // preserves its original indentation.
+          pendingPath = line;
+          heldLines = [];
           state = 'expect-edit';
         } else {
           textBuffer.push(line);
@@ -250,36 +263,44 @@ export function segmentResponse(text) {
         if (stripped === EDIT_MARK) {
           // Confirmed block — flush any accumulated text
           // (minus optional fence wrapper) and enter the
-          // old-section.
+          // old-section. The held blank/fence lines were
+          // wrapper noise after all, so they are dropped.
           flushText();
-          currentPath = pendingPath;
+          currentPath = pendingPath === null ? null : pendingPath.trim();
           pendingPath = null;
+          heldLines = [];
           oldLines = [];
           newLines = [];
           state = 'reading-old';
         } else if (stripped === '') {
           // Blank line between path and marker is tolerated.
-          continue;
+          // Held rather than dropped — see `heldLines`.
+          heldLines.push(line);
         } else if (/^```/.test(stripped)) {
           // Fence line between path and EDIT marker — the
           // LLM wrapped its block in a code fence. Tolerate
           // the opening fence so the block still parses;
           // the closing fence after END is already handled
           // by the lookahead at the end of 'reading-new'.
-          continue;
+          heldLines.push(line);
         } else if (isFilePath(stripped)) {
           // The "path" we held was actually a text line; the
           // real path candidate is this one. Push the old
-          // pending path to the text buffer and try again.
+          // pending path and anything held since back to the
+          // text buffer, then try again.
           if (pendingPath !== null) textBuffer.push(pendingPath);
-          pendingPath = stripped;
+          for (const held of heldLines) textBuffer.push(held);
+          heldLines = [];
+          pendingPath = line;
         } else {
-          // Not a block — push the pending path back to text
-          // and resume scanning with this line.
+          // Not a block — push the pending path and held lines
+          // back to text and resume scanning with this line.
           if (pendingPath !== null) {
             textBuffer.push(pendingPath);
             pendingPath = null;
           }
+          for (const held of heldLines) textBuffer.push(held);
+          heldLines = [];
           textBuffer.push(line);
           state = 'scanning';
         }
@@ -334,9 +355,12 @@ export function segmentResponse(text) {
   // Handle truncation — stream ended mid-block.
   if (state === 'expect-edit' && pendingPath !== null) {
     // Saw a candidate path but no EDIT marker followed. Treat
-    // as text so the user sees what the LLM typed.
+    // as text so the user sees what the LLM typed, and replay
+    // any blank/fence lines held after it.
     textBuffer.push(pendingPath);
     pendingPath = null;
+    for (const held of heldLines) textBuffer.push(held);
+    heldLines = [];
   }
 
   if (state === 'reading-old' || state === 'reading-new') {
