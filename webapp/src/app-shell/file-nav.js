@@ -11,8 +11,8 @@
 import { ALT_ARROW_DEBOUNCE_MS } from './constants.js';
 import { viewerForPath } from '../viewer-routing.js';
 import {
-  captureDiffViewportState,
-  applyDiffViewportState,
+  rememberDiffViewport,
+  restoreRememberedViewport,
 } from './viewport.js';
 
 export function getFileNav(host) {
@@ -101,10 +101,16 @@ export function onGridKeyDown(host, event) {
  * SVG viewer's behaviour at the shell level for the
  * diff path.
  *
- * The map is in-memory only; it does not persist across
- * page reloads. `loadViewportState` / `doReopenLastFile`
- * cover the reload case via the single localStorage slot
- * keyed by repo + last-open-file.
+ * The capture/restore pair lives in `viewport.js` and is
+ * shared with `onNavigateFile` — every navigation away
+ * from a diff-viewer file records its viewport, so
+ * Alt+Arrow back to a file reached by any route (preview
+ * link click, picker, search hit) lands where the user
+ * left it. Without the shared capture, only files left
+ * via Alt+Arrow would be remembered, and the common
+ * "click a link out of a markdown preview, then Alt+Left
+ * back" round trip would lose both the preview pane and
+ * the scroll position.
  */
 export function flushAltArrowPending(host) {
   const targetPath = host._altArrowPending;
@@ -112,17 +118,11 @@ export function flushAltArrowPending(host) {
   if (!targetPath) return;
   const target = viewerForPath(targetPath);
   if (!target) return;
-  if (!host._diffViewportMemory) {
-    host._diffViewportMemory = new Map();
-  }
   // Capture the outgoing diff-viewer state synchronously,
   // before updateComplete resolves and openFile runs.
   // Reading after openFile would see the new file's
   // (zero) scroll, not the outgoing file's.
-  const outgoing = captureDiffViewportState(host);
-  if (outgoing && outgoing.path && outgoing.path !== targetPath) {
-    host._diffViewportMemory.set(outgoing.path, outgoing);
-  }
+  rememberDiffViewport(host);
   host.updateComplete.then(() => {
     const viewer =
       target === 'svg'
@@ -131,18 +131,7 @@ export function flushAltArrowPending(host) {
     if (!viewer) return;
     const result = viewer.openFile({ path: targetPath });
     if (target !== 'diff') return;
-    const stored = host._diffViewportMemory.get(targetPath);
-    if (!stored) return;
-    // openFile is async on the diff viewer (fetches file
-    // content). Wait for it before restoring; if it isn't
-    // a thenable for some reason, fall back to a one-frame
-    // delay so the editor at least has a chance to mount.
-    const apply = () => applyDiffViewportState(host, stored);
-    if (result && typeof result.then === 'function') {
-      result.then(apply);
-    } else {
-      requestAnimationFrame(apply);
-    }
+    restoreRememberedViewport(host, targetPath, result);
   });
 }
 

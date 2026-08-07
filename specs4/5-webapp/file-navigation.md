@@ -48,7 +48,7 @@ Multiple nodes may reference the same file path. All nodes sharing a path are co
 - The grid tracks which files the user has visited; it does not correspond to open tabs or persistent viewer state
 - Navigating back to a previously-visited node triggers a fresh fetch in the diff viewer — the content is not cached across the visit
 - Unsaved edits are discarded whenever the user navigates away from a file, whether by Alt+Arrow, picker click, or any other `navigate-file` dispatch. This is the diff viewer's no-cache policy (see [diff-viewer.md](diff-viewer.md#no-caching-across-switches))
-- No per-node viewport state. When returning to a previously-visited node the diff editor starts at the top of the file.
+- No per-node viewport state. Viewport memory is keyed by **path**, not by node — two nodes referencing the same file share one remembered viewport, and the most recent departure from that path wins. See [Viewport Memory](#viewport-memory) below.
 ## Node Creation
 ### Triggers
 Any action that opens a file creates a new node:
@@ -217,7 +217,32 @@ Matches the existing routing logic in the app shell.
 ### No Content Caching
 - When navigating away from a node, the editor content is not cached in the grid
 - Navigating back re-fetches the file from disk; any unsaved changes are lost
-- Diff viewer preserves viewport state per-file — see [diff-viewer.md](diff-viewer.md#per-file-viewport-state)
+- Content is not preserved, but *viewport* is — see [Viewport Memory](#viewport-memory)
+
+### Viewport Memory
+
+Content is refetched on every visit, but the user's **position within** a file is remembered for the session. Returning to a file lands where the user left it rather than at the top.
+
+The diff viewer holds a single file slot and discards Monaco model state on every swap, so it cannot own this memory itself (see [diff-viewer.md](diff-viewer.md#no-caching-across-switches)). The shell owns it instead: an in-memory `path → viewport` map, mirroring what the SVG viewer gets for free from its multi-file model.
+
+**Remembered per path:** editor `scrollTop` / `scrollLeft`, cursor line and column, and — for markdown and TeX — whether the preview pane was open plus its own `scrollTop`.
+
+**Capture happens on every navigation away from a diff-viewer file**, not only on Alt+Arrow. Every route out of a file records its viewport:
+
+| Departure route | Captured |
+|---|---|
+| Alt+Arrow to another node | Yes |
+| Relative link clicked in the markdown preview pane | Yes |
+| Picker click, search hit, chat file mention, edit-block link | Yes |
+| Ctrl+click markdown link, LSP go-to-definition | Yes |
+| HUD node click | Yes |
+| Programmatic reload-restore (`_refresh`) | No — the viewer is pre-restore, and a capture would race the localStorage restore for the same path |
+
+Capturing only on the Alt+Arrow path is the specific bug this rules out: the most common round trip is *read markdown in preview → click a source link → Alt+Left back*, and the departure there is a link click. If only Alt+Arrow captured, that trip would return to a top-of-file editor with the preview pane closed.
+
+**Ordering.** Capture MUST be synchronous, before the target's `openFile` swaps the Monaco model — a read afterwards returns the incoming file's zero scroll. Restore waits for `openFile` to resolve, then applies preview mode **before** the scroll offsets: toggling preview rebuilds the editor at half width, and offsets captured against the split layout would land wrong if applied to the full-width pane first.
+
+**Scope.** Session-only; the map does not survive a page reload. Reload restores a single file — the last-opened one — from `ac-last-viewport` in localStorage (see [shell.md](shell.md)). Bounded at 200 paths, evicting least-recently-touched, so a long-lived tab that browses thousands of files doesn't grow without limit.
 ## Component Architecture
 ### Role
 A component that manages the grid state and renders the HUD overlay. Hosted in the app shell as a sibling of the viewer layer.

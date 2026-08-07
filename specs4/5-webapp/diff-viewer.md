@@ -110,11 +110,12 @@ Why the full re-sync is needed — Monaco adds styles synchronously during edito
 Exactly one file is displayed at a time. The viewer holds a single active file object plus a single virtual-comparison slot (see [Load Panel](#load-panel-ad-hoc-comparison)). Opening any file replaces whatever was previously displayed.
 
 ### No Caching Across Switches
-Every `openFile` call fetches HEAD and working-copy content fresh — both panels rebuild from the returned strings. There is no `_files[]` array, no per-file content cache, no per-file viewport memory, no dirty-buffer preservation. Consequences:
+Every `openFile` call fetches HEAD and working-copy content fresh — both panels rebuild from the returned strings. There is no `_files[]` array, no per-file content cache, no per-file viewport memory, no dirty-buffer preservation *inside the viewer*. Consequences:
 - **Switching away from an unsaved file discards those edits.** The new file's fetch rebuilds the Monaco model pair; the outgoing model's buffer is disposed.
 - **Clicking the same file again refetches.** This is a feature, not a bug — the user can force-refresh at any time by clicking the picker entry.
 - **External changes (git pull, another tool writing to disk) are reflected on the next click.** No filesystem watcher is needed for consistency; user action drives refresh.
 - **Review mode transitions, discard-changes, commits, and LLM edits all require either a refetch of the active file or acceptance that the next click will pick up the new state.** Triggers that affect the currently-displayed file (review enter/exit, discard-changes on the active path, commit) should dispatch `files-reverted` or equivalent so the viewer refetches without waiting for a user click.
+- **Scroll position and preview state are *not* lost, despite the above.** The app shell keeps a per-path viewport map outside the viewer and reapplies it after `openFile` resolves. The viewer exposes the read/write surface for this (`isPreviewOpen`, `getPreviewScrollTop`, `setPreviewMode`, `restorePreviewScrollTop`, `_getModifiedEditor`) but owns none of the state. See [file-navigation.md](file-navigation.md#viewport-memory).
 
 ### Concurrent openFile
 - `openFile` is async (it fetches content) and can be invoked multiple times before the first completes

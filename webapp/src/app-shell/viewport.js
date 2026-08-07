@@ -91,6 +91,85 @@ export function applyDiffViewportState(host, state) {
 }
 
 /**
+ * Cap on the in-session per-path viewport memory. Entries
+ * are a path plus six numbers, so the cap is about keeping
+ * a long-lived tab's memory bounded rather than saving
+ * meaningful space — a session that browses a few thousand
+ * files shouldn't grow a map that never shrinks.
+ * Least-recently-touched paths are evicted first.
+ */
+export const VIEWPORT_MEMORY_LIMIT = 200;
+
+/**
+ * Capture the diff viewer's current viewport into the
+ * host's in-session per-path memory (`_diffViewportMemory`)
+ * so a later return to that path can restore it.
+ *
+ * MUST be called synchronously, before the navigation that
+ * swaps the Monaco model. Reading after `openFile` sees the
+ * incoming file's (zero) scroll rather than the outgoing
+ * file's.
+ *
+ * No-ops when the diff viewer has no active file — e.g. the
+ * SVG viewer is foregrounded and the diff slot is empty.
+ *
+ * The memory is in-memory only; it does not survive a page
+ * reload. `loadViewportState` / `doReopenLastFile` cover the
+ * reload case via the single localStorage slot keyed by
+ * repo + last-open file.
+ */
+export function rememberDiffViewport(host) {
+  if (!host._diffViewportMemory) {
+    host._diffViewportMemory = new Map();
+  }
+  const outgoing = captureDiffViewportState(host);
+  if (!outgoing || !outgoing.path) return;
+  const memory = host._diffViewportMemory;
+  // Delete-then-set moves the key to the end of Map
+  // insertion order. That's what makes the eviction below
+  // least-recently-touched rather than first-ever-seen.
+  memory.delete(outgoing.path);
+  memory.set(outgoing.path, outgoing);
+  while (memory.size > VIEWPORT_MEMORY_LIMIT) {
+    const oldest = memory.keys().next().value;
+    if (oldest === undefined) break;
+    memory.delete(oldest);
+  }
+}
+
+/**
+ * Look up a remembered viewport for `path`. Returns null
+ * when the path hasn't been visited this session.
+ */
+export function recallDiffViewport(host, path) {
+  if (!path) return null;
+  return host._diffViewportMemory?.get(path) || null;
+}
+
+/**
+ * Restore `path`'s remembered viewport once the diff
+ * viewer's `openFile` has settled. No-op when nothing is
+ * remembered for that path.
+ *
+ * `openResult` is whatever `openFile` returned. It's async
+ * on the diff viewer (it fetches file content), so we wait
+ * on it before restoring; if it isn't a thenable — a mock,
+ * or a future synchronous implementation — fall back to a
+ * one-frame delay so the editor at least has a chance to
+ * mount.
+ */
+export function restoreRememberedViewport(host, path, openResult) {
+  const stored = recallDiffViewport(host, path);
+  if (!stored) return;
+  const apply = () => applyDiffViewportState(host, stored);
+  if (openResult && typeof openResult.then === 'function') {
+    openResult.then(apply);
+  } else {
+    requestAnimationFrame(apply);
+  }
+}
+
+/**
  * Save the current diff viewer's viewport state to
  * localStorage. SVG files are excluded (SVG zoom
  * restore is not yet supported).

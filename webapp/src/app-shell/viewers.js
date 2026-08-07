@@ -11,6 +11,7 @@
 //   - specs4/5-webapp/file-navigation.md (navigate-file flow)
 
 import { viewerForPath } from '../viewer-routing.js';
+import { rememberDiffViewport } from './viewport.js';
 
 /**
  * Route a `navigate-file` event to the appropriate viewer
@@ -54,6 +55,29 @@ export function onNavigateFile(host, event) {
     host._saveViewportState();
   } catch (_) {
     // Don't let a save failure block navigation.
+  }
+  // Record the outgoing file's viewport in the in-session
+  // per-path memory too, so Alt+Arrow back to it restores
+  // scroll / cursor / preview pane. localStorage holds a
+  // single slot for the last-opened file only; the map
+  // covers "return to any file visited this session".
+  //
+  // MUST happen synchronously here, before the deferred
+  // openFile below swaps the Monaco model — a capture
+  // after the swap reads the incoming file's zero scroll.
+  //
+  // Skipped on `_refresh` (the reload-restore dispatch in
+  // doReopenLastFile). At that point the diff viewer is
+  // either empty or still showing a pre-restore state, so
+  // there's nothing worth remembering, and capturing would
+  // race the localStorage restore for the same path.
+  if (!detail._refresh) {
+    try {
+      rememberDiffViewport(host);
+    } catch (_) {
+      // Same policy as the save above — a broken capture
+      // must not block the navigation.
+    }
   }
   // Persist the new path so page refresh reopens it.
   host._saveLastOpenFile(path);

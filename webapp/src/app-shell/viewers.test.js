@@ -233,6 +233,177 @@ describe('AppShell viewer routing and navigation', () => {
     });
   });
 
+  describe('in-session viewport memory', () => {
+    async function settle(shell) {
+      await shell.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      await shell.updateComplete;
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      if (diff) await diff.updateComplete;
+    }
+
+    /**
+     * Give the diff viewer a fake active file plus the
+     * viewport-reading API the shell's capture path calls.
+     * The monaco mock in test-helpers returns a modified
+     * editor whose getScrollTop is hard-coded to 0, so we
+     * override _getModifiedEditor to report a real scroll.
+     */
+    function stubViewportState(diff, {
+      path,
+      scrollTop = 0,
+      lineNumber = 1,
+      previewOpen = false,
+      previewScrollTop = 0,
+    }) {
+      diff._file = { path, original: '', modified: '', savedContent: '' };
+      diff._getModifiedEditor = () => ({
+        getScrollTop: () => scrollTop,
+        getScrollLeft: () => 0,
+        getPosition: () => ({ lineNumber, column: 1 }),
+        setScrollTop() {},
+        setScrollLeft() {},
+        setPosition() {},
+      });
+      diff.isPreviewOpen = () => previewOpen;
+      diff.getPreviewScrollTop = () => previewScrollTop;
+    }
+
+    it('navigate-file records the outgoing file viewport', async () => {
+      // The bug this covers: only the Alt+Arrow path used
+      // to capture viewport state, so leaving a file by any
+      // other route (preview link click, picker, search
+      // hit) left nothing to restore on the way back.
+      const shell = mountShell();
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      stubViewportState(diff, {
+        path: 'docs/guide.md',
+        scrollTop: 640,
+        lineNumber: 31,
+        previewOpen: true,
+        previewScrollTop: 275,
+      });
+      // Click a source link out of the preview — this is
+      // the exact event onPreviewClick dispatches.
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'src/app.js' },
+        }),
+      );
+      await settle(shell);
+      const stored = shell._diffViewportMemory?.get('docs/guide.md');
+      expect(stored).toBeTruthy();
+      expect(stored.diff.scrollTop).toBe(640);
+      expect(stored.diff.lineNumber).toBe(31);
+      expect(stored.preview).toEqual({ open: true, scrollTop: 275 });
+    });
+
+    it('Alt+Arrow back to a link-visited md file restores preview and scroll', async () => {
+      // Full round trip: markdown in preview mode → click a
+      // .js link → Alt+Left back. Preview must reopen and
+      // both scroll surfaces must be restored.
+      const shell = mountShell();
+      await settle(shell);
+      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      // Seed the grid the way real navigation would: the md
+      // file is opened, then the link target.
+      nav.openFile('docs/guide.md');
+      stubViewportState(diff, {
+        path: 'docs/guide.md',
+        scrollTop: 640,
+        lineNumber: 31,
+        previewOpen: true,
+        previewScrollTop: 275,
+      });
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'src/app.js' },
+        }),
+      );
+      await settle(shell);
+      // Now on the .js file, with no preview.
+      stubViewportState(diff, { path: 'src/app.js', scrollTop: 12 });
+      const setPreviewMode = vi.fn();
+      const restorePreviewScrollTop = vi.fn();
+      diff.setPreviewMode = setPreviewMode;
+      diff.restorePreviewScrollTop = restorePreviewScrollTop;
+      diff.openFile = vi.fn(async () => {});
+      diff._waitForDiffReady = () => Promise.resolve();
+      // Alt+Left walks back to the markdown node.
+      shell._altArrowPending = 'docs/guide.md';
+      shell._flushAltArrowPending();
+      await settle(shell);
+      // Two frames: restoreViewport's rAF poll, then
+      // finishPreview's own deferral.
+      await new Promise((r) => requestAnimationFrame(() => r()));
+      await new Promise((r) => requestAnimationFrame(() => r()));
+      expect(diff.openFile).toHaveBeenCalledWith({
+        path: 'docs/guide.md',
+      });
+      // Preview reopens before the scroll writes — the
+      // pane width changes, so Monaco must lay out against
+      // the split layout the offsets were captured in.
+      expect(setPreviewMode).toHaveBeenCalledWith(true);
+      expect(restorePreviewScrollTop).toHaveBeenCalledWith(275);
+    });
+
+    it('viewport memory is bounded and evicts least-recently-touched', async () => {
+      const shell = mountShell();
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const { VIEWPORT_MEMORY_LIMIT } = await import('./viewport.js');
+      // Walk through one more file than the cap allows.
+      for (let i = 0; i <= VIEWPORT_MEMORY_LIMIT; i += 1) {
+        stubViewportState(diff, { path: `f${i}.py`, scrollTop: i + 1 });
+        window.dispatchEvent(
+          new CustomEvent('navigate-file', {
+            detail: { path: `f${i + 1}.py` },
+          }),
+        );
+        await settle(shell);
+      }
+      const memory = shell._diffViewportMemory;
+      expect(memory.size).toBe(VIEWPORT_MEMORY_LIMIT);
+      // The very first entry aged out; the newest survives.
+      expect(memory.has('f0.py')).toBe(false);
+      expect(memory.has(`f${VIEWPORT_MEMORY_LIMIT}.py`)).toBe(true);
+    });
+
+    it('refresh navigations do not overwrite remembered state', async () => {
+      // doReopenLastFile dispatches with _refresh: true
+      // while the viewer is still pre-restore. Capturing
+      // then would race the localStorage restore for the
+      // same path.
+      const shell = mountShell();
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      stubViewportState(diff, { path: 'a.md', scrollTop: 500 });
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'b.py' },
+        }),
+      );
+      await settle(shell);
+      expect(
+        shell._diffViewportMemory.get('a.md').diff.scrollTop,
+      ).toBe(500);
+      // A refresh dispatch while a.md shows scroll 0 must
+      // leave the remembered 500 alone.
+      stubViewportState(diff, { path: 'a.md', scrollTop: 0 });
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: 'a.md', _refresh: true },
+        }),
+      );
+      await settle(shell);
+      expect(
+        shell._diffViewportMemory.get('a.md').diff.scrollTop,
+      ).toBe(500);
+    });
+  });
+
   describe('Alt+Arrow debounce', () => {
     async function settle(shell) {
       await shell.updateComplete;

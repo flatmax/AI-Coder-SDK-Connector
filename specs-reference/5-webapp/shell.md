@@ -183,7 +183,7 @@ Malformed values (non-JSON, wrong shape, width below minimum, non-finite numbers
 | Trigger | Save scope |
 |---|---|
 | `beforeunload` | Save current viewport state — diff scroll/cursor OR svg viewBox/presentation, plus preview toggle/scroll |
-| Before navigating to a different file | Save outgoing file's viewport |
+| Before navigating to a different file | Save outgoing file's viewport. Writes **two** places: the single `ac-last-viewport` localStorage slot (for reload) and the in-session per-path map (for Alt+Arrow return). Both capture the same shape; see [In-session viewport memory](#in-session-viewport-memory) |
 | `active-file-changed` from either viewer | Save alone — the viewer has just reported a file is live, so the `type` discriminator (svg vs diff) becomes known. Without this, opening a file and reloading without further interaction leaves the stored viewport describing the *previous* file, and the restore short-circuits on path mismatch. The save is additive: when the viewer's editors aren't yet attached (SVG: `getActiveViewBox()` returns null; diff: no modified editor yet), the save no-ops via the same try/catch guards that protect the other paths, so it can't clobber a live stored viewBox. First real gesture or Monaco attach produces a follow-up save that fills in the geometry block |
 | Preview toggle (on/off) | Save alone — capturing the toggle immediately means a reload right after a toggle-then-nothing still restores the correct pane |
 | SVG viewBox change (pan, zoom, fit, presentation-mode refit) | Debounced save — the viewer emits `viewbox-changed` on every right-editor `onViewChange`; the shell coalesces via a short debounce so a wheel-zoom burst doesn't produce one write per frame |
@@ -195,6 +195,24 @@ Save wraps Monaco layout queries, preview-scroll reads, and SvgEditor viewBox re
 The preview fields are only written for files whose type has a preview toggle (markdown, TeX). Writing `preview: {open: false, scrollTop: 0}` for every plain file would bloat the stored JSON without expressing anything; omitting the key entirely keeps "no preview" and "preview closed" distinguishable in logs and future schema migrations. The same omission rule applies to `svg` — written only when the active viewer is the SVG viewer.
 
 **SVG viewBox debounce window.** 150 ms after the last `viewbox-changed` event. Shorter than the smooth-scroll animation time and longer than a single wheel tick; captures the user's "settled" viewBox rather than every intermediate frame. The final write on `beforeunload` is not debounced — it runs synchronously so the last write survives a page reload.
+
+### In-session viewport memory
+
+`ac-last-viewport` is a **single slot** — it answers "where was the user when the page closed", not "where was the user in each file they visited". Alt+Arrow returning to a file visited earlier in the session needs the latter, so the shell keeps a second, in-memory store: `_diffViewportMemory`, a `Map` of file path → the same `{path, diff, preview?}` shape written to localStorage (minus `type`, which is implied — only diff-viewer files are tracked; the SVG viewer's multi-file model already carries per-file viewBox in `_files[]`).
+
+| Property | Value |
+|---|---|
+| Lifetime | Session; cleared on reload. Reload restore is the localStorage path |
+| Key | File path. Not node ID — the nav grid may hold several nodes for one path, and they share a viewport |
+| Bound | 200 entries, evicting least-recently-touched (delete-then-set on write keeps `Map` insertion order as the LRU order) |
+| Written by | Every `navigate-file` that isn't `_refresh`, and every Alt+Arrow flush |
+| Read by | Alt+Arrow flush only — a forward navigation to a file should show it as it is on disk, at the top, not at some position the user held ten files ago |
+
+**The write must be on the shared `navigate-file` path, not only the Alt+Arrow path.** A markdown file left via a preview-pane link click and re-entered via Alt+Left is the common case (read docs → jump to the source a link points at → come back), and the departure there is a link click, not an arrow key. Capturing only on Alt+Arrow leaves that round trip restoring nothing: preview closed, editor at line 1.
+
+`_refresh` dispatches are excluded. `doReopenLastFile` uses that flag for the reload-restore navigation, at which point the viewer is empty or mid-restore — capturing would both record nothing useful and race the localStorage restore for the same path.
+
+Capture is synchronous within the event handler, before the deferred `openFile` swaps the Monaco model; a capture afterwards reads the incoming file's zero scroll. Restore awaits `openFile`, applies `setPreviewMode(true)` first, then the scroll offsets — same preview-before-scroll ordering, and for the same reason, as steps 8–9 of the restore flow below.
 
 ### Restore flow
 
