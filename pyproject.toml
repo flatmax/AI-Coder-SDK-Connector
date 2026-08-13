@@ -33,7 +33,15 @@ classifiers = [
 # Core runtime dependencies.
 # Optional integrations live under [project.optional-dependencies].
 dependencies = [
+    # Claude Code engine. Owns the agent loop, tool execution, permissions,
+    # compaction, and session persistence — see specs5/3-engine/. Pulls
+    # `mcp` (>=1.29) for the in-process MCP server that exposes AC-DC's
+    # symbol and document indexes to the agent (specs5/plan/decisions.md CC-6).
+    # The `claude` CLI itself is a Node app and is NOT installed by this
+    # dependency; it is resolved at startup (specs5/6-deployment/build.md).
+    "claude-agent-sdk>=0.2.136",
     # LLM provider abstraction (unified API for Anthropic, Bedrock, OpenAI, etc.)
+    # Removed in conversion phase 3 once the chat path no longer reaches it.
     "litellm>=1.88",
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",

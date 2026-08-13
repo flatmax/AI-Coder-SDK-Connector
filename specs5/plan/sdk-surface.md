@@ -238,10 +238,18 @@ See [`risks.md`](risks.md#r-7--bundled-cli-size-and-platform-specific-wheels).
 
 ## Environment notes
 
-- `claude-agent-sdk==0.2.136` resolves cleanly, but installing it into this repo's shared venv
-  wants to upgrade `mcp` 1.14.1 → 1.29.0. That upgrade needs to be taken deliberately, with the
-  `doc_convert` and existing MCP-adjacent code re-tested, not as a side effect of
-  `uv pip install`.
+- **Resolved and locked.** `claude-agent-sdk>=0.2.136` is declared in `pyproject.toml` and locked at
+  0.2.137. It adds nine packages (`mcp` 1.29.0 plus its HTTP/SSE transport stack) and changes the
+  version of nothing already present. `doc_convert` 188 tests green; full suite 3 480 passed.
+  Per-package accounting: [`../../specs-reference/6-deployment/build.md`](../../specs-reference/6-deployment/build.md)
+  § What adding the SDK actually pulls in.
+- **Correction to an earlier draft of this file.** It claimed the `mcp` floor collided with a
+  `doc_convert` pin of 1.14.1 and that the bump needed co-testing. There was no such pin — `mcp` was
+  not in `uv.lock` at all, and `markitdown[all]` does not depend on it. The 1.14.1 reading came from
+  `litellm`'s `proxy` extra in `/home/flatmax/.venv`, a virtualenv that contains neither `ac_dc` nor
+  `markitdown` and is not this project's environment. The repo had no materialised venv at the time.
+  The surviving constraint is a packaging one, not a resolution one: six transport packages enter the
+  dependency set that an in-process MCP server never serves.
 - Authentication conflicts: the SDK/CLI authenticates via its own config (subscription login or
   `ANTHROPIC_API_KEY`). AC⚡DC's `llm.json` `env` block currently exports provider credentials into
   the process environment on startup, which can silently redirect the CLI to a different account or

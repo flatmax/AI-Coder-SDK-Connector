@@ -102,12 +102,24 @@ Two consequences worth stating rather than discovering:
 - **Version skew is a supported state, not an error.** A user's `PATH` CLI can be newer or older than the SDK's `__cli_version__` pin. Startup records both and warns on mismatch; it does not refuse to run. Refusing would make our release cadence a gate on theirs
 - **The binary's version string describes AC⚡DC only.** It says nothing about the engine, so bug reports need both — which is why `EngineHealth` carries `cli_path`, `cli_version`, `sdk_version`, and `sdk_cli_pin` together ([`../../specs-reference/3-engine/session.md`](../../specs-reference/3-engine/session.md) § `EngineHealth`)
 
-### The `mcp` Version Floor Is a Build Constraint
+### The SDK Brings a Server Stack We Do Not Serve
 
-`claude-agent-sdk` requires `mcp` ≥ 1.29.0. The pre-conversion lockfile pinned 1.14.1, and `doc_convert`
-depends on that package too — so the upgrade is a deliberate step with `doc_convert` re-tested, not a
-side effect of installing the SDK. The lockfile refresh and the doc-convert regression run belong in the
-same commit, because splitting them produces a green build with a broken feature.
+`claude-agent-sdk` requires `mcp` ≥ 1.29.0, and `mcp` in turn pulls `starlette`, `uvicorn`,
+`sse-starlette`, `python-multipart`, `httpx-sse`, and `pydantic-settings` — the HTTP/SSE transport half
+of the MCP protocol. AC⚡DC's MCP server is **in-process** ([`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)),
+so none of that transport is used at runtime, and `pywin32` arrives for Windows only.
+
+This is a packaging decision, not a resolution problem: the stack is dead weight in the binary unless
+excluded, and excluding it means asserting that no code path reaches MCP's HTTP transport. Either choice
+is defensible; making it silently is not, because a `--exclude-module` that turns out to be wrong fails
+at MCP-server registration on a user's machine, which is the one code path every tool call goes through.
+
+An earlier draft of this section claimed the floor collided with a `doc_convert` pin of `mcp` 1.14.1.
+It does not, and there was never such a pin: `markitdown[all]` depends on `beautifulsoup4`,
+`charset-normalizer`, `defusedxml`, `magika`, `markdownify`, and `requests`, none of which is `mcp`. The
+1.14.1 sighting was `litellm`'s `proxy` extra in an unrelated virtualenv on the author's machine.
+Adding the SDK added nine packages and changed the version of none — `doc_convert` re-tested green
+(188 tests), full suite 3 480 passed.
 
 ### Release Workflow
 

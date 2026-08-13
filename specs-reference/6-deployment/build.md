@@ -267,12 +267,37 @@ for the bundled copy" from "found but unauthenticated" from "found but version-s
 action differs for each and a single "engine unavailable" message would send them looking in the wrong
 place.
 
-### The `mcp` version floor
+### What adding the SDK actually pulls in
 
-`claude-agent-sdk` requires `mcp` >= 1.29.0. The pre-conversion lockfile pinned 1.14.1, and `doc_convert`
-depends on `mcp` as well — so the bump is a deliberate step with `doc_convert` re-tested in the same
-commit, not a transitive side effect of adding the SDK. A lockfile refresh that silently satisfies the SDK
-and breaks document conversion is the exact failure this note exists to prevent.
+Measured, not predicted — `uv lock` after adding `claude-agent-sdk>=0.2.136` to `dependencies`:
+
+| Package | Version | Why it arrives |
+|---|---|---|
+| `claude-agent-sdk` | 0.2.137 | Direct |
+| `mcp` | 1.29.0 | SDK requirement (floor 1.29.0) |
+| `starlette` | 1.6.0 | `mcp` HTTP transport |
+| `uvicorn` | 0.52.1 | `mcp` HTTP transport |
+| `sse-starlette` | 3.4.8 | `mcp` SSE transport |
+| `httpx-sse` | 0.4.3 | `mcp` SSE client |
+| `python-multipart` | 0.0.32 | `starlette` form parsing |
+| `pydantic-settings` | 2.15.0 | `mcp` config |
+| `pywin32` | 312 | `mcp`, `sys_platform == 'win32'` only |
+
+Nine added, **zero existing versions changed** — no upgrades, no downgrades, no removals. `doc_convert`
+188 tests green, full suite 3 480 passed / 17 xfailed / 6 xpassed, identical to the pre-SDK baseline
+including a pre-existing `litellm` atexit `ValueError: I/O operation on closed file` that fires after the
+pytest summary and is unrelated to this change.
+
+An earlier draft of this section asserted the `mcp` floor collided with a `doc_convert` pin of 1.14.1,
+requiring a deliberate co-tested bump. **That was wrong.** `mcp` was absent from `uv.lock` entirely, and
+`markitdown[all]` does not depend on it. The 1.14.1 figure came from `litellm`'s `proxy` extra in an
+unrelated virtualenv (`/home/flatmax/.venv`) that contains neither `ac_dc` nor `markitdown` — an
+environment mistaken for the project's. The lesson worth keeping: read the lockfile, not the interpreter
+that happens to be on `PATH`.
+
+The live constraint is the one above the table — six transport packages we never serve. See
+`specs5/6-deployment/build.md` § The SDK Brings a Server Stack We Do Not Serve for the exclude-or-collect
+decision.
 
 ### Static file server — threading class name
 

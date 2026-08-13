@@ -481,5 +481,8 @@ with the rest of the LiteLLM config; startup reports the resolved source in `Eng
 
 ### `mcp` version floor
 
-`claude-agent-sdk==0.2.136` wants `mcp` ≥ 1.29.0; the repo currently pins 1.14.1. The upgrade must be
-taken deliberately with `doc_convert` re-tested, not as a side effect of installing the SDK.
+`claude-agent-sdk` 0.2.137 requires `mcp` ≥ 1.29.0. The dependency is now declared and locked at
+`mcp` 1.29.0; nothing in the pre-existing set depended on `mcp`, so it resolved without touching any
+other version. An earlier note here claimed a collision with a `doc_convert` pin of 1.14.1 — there was
+no such pin. Full accounting of what the SDK pulls in:
+`specs-reference/6-deployment/build.md` § What adding the SDK actually pulls in.
