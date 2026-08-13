@@ -5,7 +5,7 @@
 Option values, event payload shapes, and the SDK-dispatch details the pump needs. The behavioural
 contracts — one client, drain-to-result, request-ID multiplexing — are in the parent spec.
 
-Verified against `claude-agent-sdk` **0.2.136**. See `specs5/plan/sdk-surface.md` for how that surface
+Verified against `claude-agent-sdk` **0.2.137**. See `specs5/plan/sdk-surface.md` for how that surface
 was established and re-read the installed wheel before implementing.
 
 ## Byte-level formats
@@ -77,7 +77,7 @@ SDK's own units and are documented per field below (`RateLimitInfo.resets_at` is
 | Chunk coalescing | one render per animation frame (~16 ms) | Browser-side, unchanged. |
 | Concurrent user turns | 1 | Engine-internal subagents are not counted. |
 | `MINIMUM_CLAUDE_CODE_VERSION` | `"2.0.0"` | SDK-enforced floor; startup fails below it. |
-| SDK CLI pin (`__cli_version__`) | `"2.1.228"` | Mismatch above the floor warns, does not fail. |
+| SDK CLI pin (`__cli_version__`) | `"2.1.229"` | Read from the private `claude_agent_sdk._cli_version`; mismatch above the floor warns, does not fail. A missing attribute reports `"unknown"`. |
 
 ## Schemas
 
@@ -431,7 +431,7 @@ optionally `canonicalModel`, `provider`.
 `HookEventMessage`). **Everything else falls through to a generic `SystemMessage(subtype, data)`** —
 including `init` and `compact_boundary`. The pump must therefore dispatch on the `subtype` string for
 those two and read their fields out of the raw `data` dict. There is no `CompactBoundary` class in
-0.2.136.
+0.2.137.
 
 ### Assistant content blocks are not just three kinds
 

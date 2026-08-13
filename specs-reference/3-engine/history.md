@@ -6,7 +6,7 @@ On-disk layout for both stores, the `SessionStore` adapter's key-to-path mapping
 schema, and the history RPC surface. The behavioural contracts — two stores, resume-never-replays,
 append-only — are in the parent spec.
 
-Verified against `claude-agent-sdk` **0.2.136**.
+Verified against `claude-agent-sdk` **0.2.137**.
 
 ## Byte-level formats
 
@@ -314,6 +314,24 @@ never uses `isinstance`, so the store need not subclass the Protocol. Inheriting
 methods (which raise `NotImplementedError`) marks a method as *absent*, so a store that inherits and
 forgets to override `list_sessions` silently loses session listing rather than failing loudly.
 Implement all six.
+
+### The conformance harness ships with the SDK
+
+`claude_agent_sdk.testing.run_session_store_conformance(make_store, *, skip_optional=frozenset())`
+asserts 14 behavioural contracts. `make_store` is invoked **once per contract** — it may be sync or
+async — so each contract gets an isolated store and a test cannot pass by leaking state from the
+previous one.
+
+The trap is in the same place as the probe rule above: contracts for the four optional methods
+(`list_sessions`, `list_session_summaries`, `delete`, `list_subkeys`) are skipped **either** when named
+in `skip_optional` **or** when the store does not override that method. A store missing three of the
+six therefore reports a green run over 10 contracts, and nothing in the output distinguishes that from
+a complete implementation. The gate is "14 contracts asserted with an empty `skip_optional`", not "the
+harness passed".
+
+`InMemorySessionStore` is exported from the top-level package and implements all six methods plus
+`clear`, `get_entries`, and `size`. It is the reference to diff our behaviour against when a contract
+fails and the fault is ambiguous between our store and our reading of the protocol.
 
 ### Deletion is ours to police
 

@@ -119,7 +119,7 @@ is deleted.
 What remains is presentation:
 
 - `PreCompact` broadcasts that compaction is starting, so a pause is explained rather than mysterious.
-- `CompactBoundary` renders as a divider in the transcript with before/after token counts and the
+- `SystemMessage(subtype="compact_boundary")` renders as a divider in the transcript with before/after token counts and the
   trigger, so the user can see where the model's memory was condensed.
 - The Context tab shows auto-compact state and the threshold, so an imminent compaction is
   predictable rather than a surprise. See [context-visibility.md](context-visibility.md).

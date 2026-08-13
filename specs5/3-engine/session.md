@@ -121,7 +121,7 @@ events.
 | `UserMessage` → `ToolResultBlock` | `toolResult` | Result attached to its card by `tool_use_id`; collapsed by default, expandable, truncated with a "show all" affordance. |
 | `StreamEvent` | `streamChunk` (partial) | Same coalescing path as full blocks. |
 | `SystemMessage(subtype="compact_boundary")` | `compactionEvent` | A divider in the transcript recording that the engine compacted itself, with before/after token counts. |
-| `TaskStarted` / `TaskProgress` / `TaskUpdated` / `TaskNotification` | `subagentEvent` | Subagent tabs. See [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md). |
+| `TaskStartedMessage` / `TaskProgressMessage` / `TaskUpdatedMessage` / `TaskNotificationMessage` | `subagentEvent` | Subagent tabs. See [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md). |
 | `HookEventMessage` | `hookEvent` | Debug view only; not in the main transcript. |
 | `RateLimitEvent` | `rateLimit` | A warning band in the usage HUD with reset timing. |
 | `MirrorErrorMessage` | `engineHealth` | A banner: the repo-local transcript copy has a gap. Non-fatal — the turn continues. See [history.md](history.md). |

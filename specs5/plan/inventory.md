@@ -95,7 +95,7 @@ transport — ~29,700 lines, untouched.
 |---|---|---|
 | `service.py` | The jrpc-oo service replacing `LLMService`. Owns the client, the request-ID map, and the RPC surface. | [`../3-engine/session.md`](../3-engine/session.md) |
 | `session.py` | `ClaudeSDKClient` lifecycle: connect, options assembly, query, `receive_response()` pump, interrupt, disconnect, resume/fork. | [`../3-engine/session.md`](../3-engine/session.md) |
-| `messages.py` | SDK message taxonomy → server-push events. The one place that knows about `AssistantMessage`, `ToolUseBlock`, `StreamEvent`, `ResultMessage`, `TaskStarted`, `CompactBoundary`, `RateLimitEvent`. | [`../3-engine/session.md`](../3-engine/session.md) |
+| `messages.py` | SDK message taxonomy → server-push events. The one place that knows about `AssistantMessage`, `ToolUseBlock`, `StreamEvent`, `ResultMessage`, the four `Task*Message` subclasses, `SystemMessage(subtype="compact_boundary")`, and `RateLimitEvent`. | [`../3-engine/session.md`](../3-engine/session.md) |
 | `permissions.py` | `can_use_tool` callback, the awaitable browser round-trip, decision persistence, timeout/deny policy. | [`../3-engine/permissions.md`](../3-engine/permissions.md) |
 | `hooks.py` | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` / `PreCompact` / `Stop` / `SubagentStart` / `SubagentStop` handlers that drive UI broadcasts and re-indexing. | [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md) |
 | `mcp_server.py` | In-process SDK MCP server `ac-dc` exposing the indexes, review state, and repo facts as tools. | [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md) |
@@ -111,7 +111,7 @@ transport — ~29,700 lines, untouched.
 | `webapp/src/edit-blocks.js`, `edit-block-render.js` (+ tests) | Emoji edit-block parsing and rendering (CC-7). Replaced by tool-use cards and the permission diff. |
 | `webapp/src/agent-block-render.js` | `🟧🟧🟧 AGENT` block rendering (CC-8). |
 | `webapp/src/cache-warmup-progress.js` | Cache warmer progress bar. |
-| `webapp/src/compaction-progress.js` (+ test) | Our compaction toast. Replaced by a `CompactBoundary` marker in the transcript. |
+| `webapp/src/compaction-progress.js` (+ test) | Our compaction toast. Replaced by a transcript divider driven by `SystemMessage(subtype="compact_boundary")`. |
 | `webapp/src/url-chips.js`, `url-helpers.js` (+ tests) | URL curation UI (CC-9). |
 | `webapp/src/token-hud.js` | Tier bars, N/threshold labels, stability bars. Rebuilt from scratch (CC-4). |
 | `webapp/src/context-tab.js` | Budget/Cache sub-views, rebuild button, tier groups. Rebuilt from scratch (CC-4). |
@@ -211,6 +211,6 @@ A phase is not complete until its gate passes.
 | No emoji edit protocol | `grep -rn "🟧🟧🟧\|🟨🟨🟨\|🟩🟩🟩" src/ webapp/src/` returns nothing. |
 | No tier vocabulary in live code | `grep -rniE "\b(L0|L1|L2|L3)\b|stability_tracker|cache_membrane" src/ webapp/src/` returns nothing. |
 | Indexes still serve the browser | Monaco hover, go-to-definition, references, completions all resolve in a repo with mixed Python/JS/C++. |
-| `SessionStore` conforms | The SDK's `claude_agent_sdk.testing.session_store_conformance` suite passes against our implementation. |
+| `SessionStore` conforms | `claude_agent_sdk.testing.run_session_store_conformance(make_store)` asserts all **14** contracts with an empty `skip_optional` — a green run over fewer contracts means an optional method was silently skipped, not that it passed. |
 | Context tab is truthful | Tab totals match `/context` run in the CLI against the same session. |
 | Permissions cannot be answered remotely | A non-localhost client's attempt to resolve a permission request is rejected and logged. |

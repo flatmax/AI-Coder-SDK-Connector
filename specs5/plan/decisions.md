@@ -73,7 +73,9 @@ the first job costs one append per message and keeps every existing history surf
 
 **Consequence:** the LLM-driven compactor (topic-boundary detection on a smaller model, verbatim
 windows, summarize-vs-truncate) is deleted. Claude Code compacts itself; we render the
-`CompactBoundary` marker it emits so the user can see it happened.
+`SystemMessage(subtype="compact_boundary")` it emits so the user can see it happened. There is no
+`CompactBoundary` class — the subtype falls through the SDK's parser to a generic `SystemMessage`,
+so its payload is untyped and must be read defensively out of `.data`.
 
 ---
 
@@ -163,8 +165,9 @@ permission diff, specified in [`../3-engine/permissions.md`](../3-engine/permiss
 The agent-mode design (`🟧🟧🟧 AGENT` blocks, `filter_dispatchable_agents`, per-agent
 `ContextManager`s, `agent_idx` archive routing, cross-turn reconstruction, the `agents.enabled`
 config gate) is deleted. Subagents come from Claude Code's `Task` tool and are surfaced through
-`TaskStarted` / `TaskProgress` / `TaskUpdated` / `TaskNotification` messages and
-`list_subagents()`.
+`TaskStartedMessage` / `TaskProgressMessage` / `TaskUpdatedMessage` / `TaskNotificationMessage` —
+all four are `SystemMessage` **subclasses**, dispatched on `subtype` — plus the module-level
+`list_subagents(session_id, directory=None)`, which is not a client method.
 
 **Why it matters:** the entire `agent_idx`-vs-`id` two-namespace problem, the cross-turn
 reconstruction algorithm, and the mode-replay-from-archive machinery exist to solve a problem the

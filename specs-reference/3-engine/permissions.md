@@ -6,7 +6,7 @@ The `can_use_tool` signature, the awaitable RPC pair's payload shapes, the tool 
 the SDK result types. The behavioural contracts — ask-path-only, localhost-only authority, the diff
 requirement — are in the parent spec.
 
-Verified against `claude-agent-sdk` **0.2.136**.
+Verified against `claude-agent-sdk` **0.2.137**.
 
 ## Byte-level formats
 

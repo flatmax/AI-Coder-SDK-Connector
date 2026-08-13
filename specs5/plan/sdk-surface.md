@@ -1,15 +1,29 @@
 # Claude Agent SDK — Verified Surface
 
-Ground truth for the conversion, read directly from the `claude-agent-sdk` **0.2.136** wheel
+Ground truth for the conversion, read directly from the `claude-agent-sdk` **0.2.137** wheel
 (`manylinux_2_17_x86_64`) rather than from documentation. Everything below was confirmed in
 `claude_agent_sdk/types.py`, `client.py`, `_internal/sessions.py`, `_internal/transport/`, and
 `_cli_version.py`.
 
 Verified on 2026-08-12 against a local `claude` CLI at v2.1.227. The wheel pins
-`__cli_version__ = "2.1.228"` and enforces `MINIMUM_CLAUDE_CODE_VERSION = "2.0.0"`.
+`__cli_version__ = "2.1.229"` and enforces `MINIMUM_CLAUDE_CODE_VERSION = "2.0.0"`. Both live in
+private modules — `claude_agent_sdk._cli_version` and
+`claude_agent_sdk._internal.transport.subprocess_cli` — not the public namespace, so reading them
+is a deliberate coupling to SDK internals. `EngineHealth` needs the pin for skew warnings, so the
+read is worth it, but it must be wrapped: a missing attribute reports "unknown pin" rather than
+failing startup, because a private name can move in a patch release.
 
 > **Do not re-derive this by guessing.** When implementing, re-read the installed wheel — the SDK
 > moves fast and this file is a snapshot, not a contract the SDK owes us.
+
+**Re-verified 2026-08-13** against 0.2.137 installed in the project venv (the first pass read an
+unpacked wheel). The surface held: `ContextUsageResponse` carries every field CC-4 assumes,
+`ResultMessage.terminal_reason` is real, `SessionStore` and the conformance harness exist, and the
+session-management functions have the signatures recorded below. Two things were wrong here and are
+now fixed — the four `Task*Message` classes were written without their `Message` suffix, and the CLI
+pin had moved to 2.1.229. One thing was nearly "corrected" wrongly: `__cli_version__` is absent from
+the *public* namespace but present in `claude_agent_sdk._cli_version`, so a `dir(claude_agent_sdk)`
+check alone will tell you it does not exist. It does.
 
 ---
 
@@ -81,7 +95,7 @@ What comes out of `receive_response()`, and where each lands in the UI:
 | `StreamEvent` | Partial deltas | Chunk coalescing at animation-frame rate |
 | `ResultMessage` | `total_cost_usd`, `usage`, `model_usage`, `num_turns`, `duration_ms`, `is_error`, `terminal_reason` | Turn footer + usage HUD |
 | `SystemMessage(subtype="compact_boundary")` | Pre/post token counts, trigger | A rendered divider in the transcript (CC-3) |
-| `TaskStarted` / `TaskProgress` / `TaskUpdated` / `TaskNotification` | Background task and subagent lifecycle | Subagent tabs (CC-8) |
+| `TaskStartedMessage` / `TaskProgressMessage` / `TaskUpdatedMessage` / `TaskNotificationMessage` | Background task and subagent lifecycle | Subagent tabs (CC-8) |
 | `HookEventMessage` | Hook name, payload | Debug view in the Context tab |
 | `RateLimitEvent` | Limit state and reset timing | HUD warning band |
 | `MirrorErrorMessage` | Failed `SessionStore.append` batch | Health banner: the repo-local transcript has a gap |
@@ -91,7 +105,7 @@ What comes out of `receive_response()`, and where each lands in the UI:
 `SystemMessage` has dedicated subclasses for `task_started`, `task_progress`, `task_notification`,
 `task_updated`, `mirror_error`, and hook events. **Everything else — including `init` and
 `compact_boundary` — arrives as a generic `SystemMessage(subtype, data)`.** There is no
-`CompactBoundary` class in 0.2.136; the origin brief and my own first pass both assumed one. The pump
+`CompactBoundary` class in 0.2.137; the origin brief and my own first pass both assumed one. The pump
 dispatches on the subtype string and reads the raw `data` dict.
 
 Assistant content blocks are also not just three kinds: the parser emits `server_tool_use` and

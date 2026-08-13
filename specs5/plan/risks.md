@@ -176,7 +176,7 @@ CLI is resolvable, rather than failing at the first prompt.
 
 **Severity: medium. Likelihood: high over time.**
 
-The wheel pins `__cli_version__ = "2.1.228"` and enforces a floor of `2.0.0`, but `_find_cli`
+The wheel pins `__cli_version__ = "2.1.229"` and enforces a floor of `2.0.0`, but `_find_cli`
 prefers a CLI on `PATH`. The local machine has 2.1.227. Skew is the normal state, not the
 exception.
 
