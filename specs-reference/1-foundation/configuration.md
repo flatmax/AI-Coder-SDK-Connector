@@ -1,6 +1,11 @@
 # Reference: Configuration
 
-**Supplements:** `specs4/1-foundation/configuration.md`
+**Supplements:** `specs5/1-foundation/configuration.md`
+
+This twin shrank with its parent. The prompt files, the provider settings, the token-counter tables and
+the cache-tuning schemas are gone, because the subsystems they configured are gone. What is left is the
+config-directory mechanics (which did not change), the two remaining config schemas, and one quirk that
+inverted: the environment must **not** be written.
 
 ## Byte-level formats
 
@@ -25,13 +30,13 @@ When a managed file is overwritten during upgrade, the previous version is renam
 With version known from the marker:
 
 ```
-system.md.2025.06.15-14.32-a1b2c3d4
+app.json.2025.06.15-14.32-a1b2c3d4
 ```
 
 Without version marker (first upgrade of a pre-tracking install), substitutes a UTC timestamp:
 
 ```
-system.md.2025.06.15-14.32
+app.json.2025.06.15-14.32
 ```
 
 The version/timestamp suffix is separated from the filename by a literal `.`. Users can recover customizations by diffing backup against current.
@@ -52,15 +57,9 @@ Linux respects `XDG_CONFIG_HOME` when set; otherwise falls back to `~/.config/`.
 
 | File | Content |
 |---|---|
-| `system.md` | Main coding-agent system prompt |
-| `system_doc.md` | Document-mode system prompt |
-| `system_agentic_appendix.md` | Agent-spawn capability description; appended to `system.md` when `agents.enabled` is true |
-| `review.md` | Review-mode system prompt |
-| `commit.md` | Commit message generation prompt |
-| `compaction.md` | Topic boundary detection prompt |
-| `system_reminder.md` | Edit-format reinforcement appended to each user prompt |
 | `app.json` | App config defaults |
-| `snippets.json` | Prompt snippet defaults |
+| `snippets.json` | Quick-insert chat button defaults |
+| `commit.md` | Commit-message request text, sent as a user turn |
 
 Backups written before overwrite; diffs recoverable per backup naming above.
 
@@ -68,119 +67,94 @@ Backups written before overwrite; diffs recoverable per backup naming above.
 
 | File | Content |
 |---|---|
-| `llm.json` | Provider settings, model names, env vars, cache tuning |
-| `system_extra.md` | User-appended system prompt content |
+| `engine.json` | Model, permission posture, reasoning depth, thinking display, budget, CLI path override |
 
 Created from bundle on first run if absent. Subsequent upgrades leave them untouched.
 
-### Files loaded but not exposed to Settings RPC
+### Retired files (present on upgraded installs, never read)
 
-These files exist in the managed set but cannot be edited via the Settings tab:
+| File | Was |
+|---|---|
+| `llm.json` | Provider settings, model names, `env` block, cache tuning, timeouts |
+| `system.md` | Coding-agent system prompt |
+| `system_doc.md` | Document-mode system prompt |
+| `system_extra.md` | User-appended system prompt content |
+| `system_agentic_appendix.md` | Agent-spawn capability description |
+| `system_reminder.md` | Edit-format reinforcement per user prompt |
+| `review.md` | Review-mode system prompt |
+| `compaction.md` | Topic-boundary detection prompt |
+
+These are **left on disk**, not deleted, not backed up, and not migrated — see the parent spec
+§ Retired files are ignored, not deleted. `system_extra.md` is the one most likely to hold real user
+work, which is the strongest single argument for the leave-alone rule. Startup reports a leftover
+`llm.json` once, in the health banner, as ignored.
+
+### Files loaded but not exposed to Settings RPC
 
 | File | Rationale |
 |---|---|
-| `commit.md` | Rarely customized; exists for commit-message generation only |
-| `system_reminder.md` | Appended to every user prompt; editing via UI could break the edit protocol |
+| `commit.md` | Rarely customized; loaded internally for the commit-message turn only |
 
-Users wanting to customize them edit the files on disk directly.
-
-### Token counter defaults
-
-Hardcoded constants in `TokenCounter`, not read from config:
-
-| Property | Value |
-|---|---|
-| `max_input_tokens` | `1_000_000` for all currently supported models |
-| `max_output_tokens` (Opus 4.5+, Sonnet 4.6+, Fable 5, Mythos 5) | `128_000` |
-| `max_output_tokens` (Sonnet 4.5, Haiku 4.5+) | `64_000` |
-| `max_output_tokens` (older / unversioned Claude) | `8_192` |
-| `max_output_tokens` (`gpt-4` family) | `16_384` |
-| `max_output_tokens` (anything else) | `4_096` |
-| `max_history_tokens` | `max_input_tokens / 16` |
-| Tokenizer encoding | `cl100k_base` via `tiktoken` (used for all models regardless of provider) |
-| Fallback estimate when tokenizer unavailable | `len(text) // 4` |
-
-Family detection lowercases the model name. The Claude ceilings and cache minimums are resolved by parsing `claude-<family>-<major>[-<minor>]` out of the id and comparing against per-family version floors, so provider prefixes (`anthropic/`, `bedrock/au.anthropic.`), dash-or-dot minors, and date/revision suffixes (`-20251101-v1:0`) all resolve identically, and a new major inherits its family's current values without a table edit. Non-Claude limits stay plain substring matches.
-
-### Cache target computation
-
-See `specs-reference/3-llm/cache-tiering.md` § Cache target computation for the formula and model-specific `min_cacheable_tokens` values.
+`system_reminder.md` used to be the second entry. It is gone with the edit protocol.
 
 ### Config type whitelist
 
-Eight whitelisted identifiers accepted by `Settings.get_config_content` and `Settings.save_config_content`:
+Three whitelisted identifiers accepted by `Settings.get_config_content` and `Settings.save_config_content`:
 
 | Type key | Maps to |
 |---|---|
-| `litellm` | `llm.json` |
+| `engine` | `engine.json` |
 | `app` | `app.json` |
 | `snippets` | `snippets.json` |
-| `system` | `system.md` |
-| `system_extra` | `system_extra.md` |
-| `compaction` | `compaction.md` |
-| `review` | `review.md` |
-| `system_doc` | `system_doc.md` |
 
-Any other `type` value returns an error from both getter and setter. Arbitrary file paths are rejected — the whitelist is the only legal input.
+Any other `type` value returns an error from both getter and setter — including the six retired keys
+(`litellm`, `system`, `system_extra`, `compaction`, `review`, `system_doc`), which must not be
+silently accepted against a file that no longer has a consumer. Arbitrary file paths are rejected; the
+whitelist is the only legal input.
 
 ## Schemas
 
-### `llm.json`
+### `engine.json`
 
-Provider settings, model selection, cache tuning.
+Session options for the one `ClaudeSDKClient` this process owns. Every field is nullable, and **null
+means "omit the option and let the CLI decide"** rather than "substitute our own default" — see
+`specs-reference/3-engine/session.md` § Options assembly for the call site.
 
 ```pseudo
-LlmConfig:
-    env: dict[string, string]              // Environment variables to inject on load
-    model: string                          // Primary model, e.g. "anthropic/claude-sonnet-4-20250514"
-    smaller_model: string                  // Smaller model for commit messages, topic detection, summarization
-    smallerModel: string                   // camelCase alias — accepted as fallback when snake_case absent
-    cache_min_tokens: int                  // User-configurable minimum (default 1024)
-    cache_buffer_multiplier: float         // Default 1.1
-    request_timeout_seconds: float         // Streaming request wall-clock cap (default 300)
-    first_chunk_timeout_seconds: float     // Watchdog: time to first streamed chunk (default 60)
-    chunk_timeout_seconds: float           // Watchdog: max silence between chunks (default 120)
-    aux_request_timeout_seconds: float     // Aux non-streaming calls (default 60)
+EngineConfig:
+    model: string | null                   // alias or full id, e.g. "claude-opus-5"; null → CLI default
+    permission_mode: string | null         // PermissionMode; null → "default"
+    effort: string | null                  // reasoning depth; null → CLI default
+    thinking_display: string | null        // "summarized" | "omitted"; null → CLI default
+    max_budget_usd: float | null           // hard stop; null under subscription billing
+    cli_path: string | null                // explicit `claude` binary; null → discovery order
 ```
 
 **Field semantics:**
 
-- `env` — each key/value pair set as an environment variable on config load. Used for provider credentials (`ANTHROPIC_API_KEY`, `AWS_REGION`, etc.) without baking them into the config itself.
-- `model` — provider-prefixed identifier. Primary inference model.
-- `smaller_model` — provider-prefixed identifier. Used for cheap auxiliary tasks (commit messages, topic detection for compaction, URL summarization). Can be the same as `model` if no faster alternative is desired.
-- `smallerModel` — camelCase alias accepted for backwards compatibility with older configs. The accessor tries `smaller_model` first, falls back to `smallerModel` if absent.
-- `cache_min_tokens` — user override that can raise the cache target above the model's hardcoded minimum, but never below. Default 1024.
-- `cache_buffer_multiplier` — applied to the max of `cache_min_tokens` and the model's `min_cacheable_tokens`. Default 1.1 (10% headroom).
-- `request_timeout_seconds` — overall wall-clock timeout for streaming chat requests, passed to `litellm.completion` as its `timeout` kwarg. Catches stream-never-started cases. Users with very long reasoning workloads can raise this; values ≤ 0 fall back to the default.
-- `first_chunk_timeout_seconds` — watchdog enforced inside the streaming loop. Fires if the provider accepted the request but never started streaming. See `specs-reference/3-llm/streaming.md` § Streaming timeouts (three layers) for the watchdog mechanism.
-- `chunk_timeout_seconds` — inter-chunk watchdog. Reset on every received chunk. Default is generous because reasoning models can produce long quiet stretches between visible-text chunks.
-- `aux_request_timeout_seconds` — applied to commit-message generation, topic-boundary detection, and URL summarization. All three are non-streaming; the simple `timeout=` kwarg is sufficient.
+- `model` — no provider prefix. The CLI resolves aliases, and `SessionStartedPayload.model` reports what it actually resolved, which is what the UI displays. A config value and a resolved value can legitimately differ.
+- `permission_mode` — the posture a *new* session starts in, one of the six values listed in `specs-reference/3-engine/permissions.md` § `PermissionMode` has six values. Runtime changes go through `set_permission_mode()` and do not write this file.
+- `effort`, `thinking_display`, `max_budget_usd` — read once, at connect time. Changing them requires a new session; the Settings tab must say so rather than appear to apply.
+- `cli_path` — bypasses discovery. Present for installs where `PATH` holds an unexpected `claude`, or where the bundled binary must be avoided.
 
-All four timeout values are read fresh on every LLM call (not snapshotted at construction time), so hot-reloading `llm.json` via the Settings RPC takes effect immediately.
+There is **no `env` field**, and no `smaller_model`: there is no auxiliary model call left to make.
 
 ### `app.json`
 
-App-wide settings organized into four sections.
+App-wide settings organized into six sections.
 
 ```pseudo
 AppConfig:
-    url_cache: UrlCacheConfig
-    history_compaction: HistoryCompactionConfig
     doc_convert: DocConvertConfig
     doc_index: DocIndexConfig
+    indexing: IndexingConfig
+    permissions: PermissionsConfig
+    history: HistoryConfig
+    presets: dict[string, PresetConfig]
 ```
 
-**`url_cache` section:**
-
-```pseudo
-UrlCacheConfig:
-    path: string      // Directory for cached URL content; defaults to user-cache dir
-    ttl_hours: int    // Default 24
-```
-
-**`history_compaction` section:**
-
-See `specs-reference/3-llm/history.md` § Compaction config defaults for field names, types, and default values.
+Deleted sections: `url_cache`, `history_compaction`, `cache_warmup`, `cache_tiering` (including
+`flux_variant`, `flux_threshold`, and the three `membranes` entries), and `agents`.
 
 **`doc_convert` section:**
 
@@ -197,37 +171,6 @@ Default extensions list:
 [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"]
 ```
 
-**`cache_warmup` section:**
-
-```pseudo
-CacheWarmupConfig:
-    enabled: bool                  // Default true
-    interval_seconds: int          // Default 270 (4:30)
-```
-
-Drives the background cache warmer (see `specs-reference/3-llm/cache-tiering.md` § Cache warmer). `interval_seconds` should sit comfortably inside the 5-minute Anthropic cache TTL with margin for retry waits — values ≥ 300 would let the cache expire before the warm-up fires. Values ≤ 0 fall back to the default.
-
-The auto-disable runtime flag (flipped by the warmer on failure or retry-budget exhaustion) is independent of this config value — re-enabling after auto-disable currently requires application restart.
-
-**`cache_tiering` section:**
-
-```pseudo
-CacheTieringConfig:
-    flux_variant: string           // "linear" (default) | "rectified-ghk" | "bidirectional-ghk"
-    flux_threshold: float          // Default 1.0 — accumulator unit-charge threshold
-    membranes: [MembraneParams, MembraneParams, MembraneParams]
-
-MembraneParams:
-    P: float                       // Default 1.0 — permeability (per-membrane gain)
-    V_T: float                     // Default 2000.0 — soft-knee voltage scale (tokens)
-    n_admit: int                   // Active→L3 default 3; higher membranes default 0
-    pick_mode: string              // "smallest" (default) | "oldest"
-```
-
-Drives the membrane / flux controller documented in `specs-reference/3-llm/cache-tiering.md` and decision D35. The three `membranes` entries correspond to (Active→L3, L3→L2, L2→L1) in order; the L1→L0 membrane is intentionally absent because L0 is content-typed (D27). Unknown `flux_variant` values fall back to `"linear"`. Non-positive `flux_threshold` and negative `n_admit` fall back to defaults; unknown `pick_mode` values fall back to `"smallest"`.
-
-`linear` is the load-bearing form on the headline metric (paper §6.4); the GHK variants are research / ablation surfaces and incur a small numerical cost (Taylor-branch guard near `V/V_T → 0`). `bidirectional-ghk` allows controller-driven demotion (drops the rectification clamp) — empirically dominated on the headline objective per paper §6.3, retained for ablation only.
-
 **`doc_index` section:**
 
 ```pseudo
@@ -243,19 +186,74 @@ DocIndexConfig:
     keywords_max_doc_freq: float           // Default 0.6
 ```
 
-Default `keyword_model` is `"BAAI/bge-small-en-v1.5"` — a compact English sentence-transformer. Changing the model invalidates all cached keyword enrichments (the cache key includes the model name).
+Default `keyword_model` is `"BAAI/bge-small-en-v1.5"` — a compact English sentence-transformer. Changing the model invalidates all cached keyword enrichments (the cache key includes the model name). Unchanged by the conversion; the document index survives it.
+
+**`indexing` section:**
+
+```pseudo
+IndexingConfig:
+    reindex_debounce_ms: int        // Default 250
+    tool_flush_timeout_ms: int      // Default 2000
+```
+
+`reindex_debounce_ms` coalesces `PostToolUse`-triggered re-index work. `tool_flush_timeout_ms` is the
+ceiling on how long an `ac-dc` index-reading tool call may block waiting for a pending flush; on expiry
+the tool answers from the current index and says so in its result rather than stalling the agent. Both
+constants are tabulated with their rationale in `specs-reference/3-engine/session.md` § Numeric
+constants, which is authoritative if the two ever disagree.
+
+**`permissions` section:**
+
+```pseudo
+PermissionsConfig:
+    decision_timeout_s: int             // Default 300
+    no_client_timeout_s: int            // Default 30
+```
+
+See `specs-reference/3-engine/permissions.md` § Numeric constants for what each timeout protects
+against. Neither may be configured to zero or negative; those values fall back to the defaults, because
+a zero decision timeout is an auto-deny that looks like a broken dialog.
+
+**`history` section:**
+
+```pseudo
+HistoryConfig:
+    session_dir_warn_gib: float         // Default 1.0
+    mirror_gap_escalate_after: int      // Default 3
+```
+
+`session_dir_warn_gib` measures `.ac-dc4/sessions/`; the warning is one-shot per server lifetime.
+`mirror_gap_escalate_after` is how many `MirrorErrorMessage` events in one session turn the health
+indicator from a per-turn note into a persistent banner. See
+`specs-reference/3-engine/history.md` § Numeric constants.
+
+**`presets` section:**
+
+```pseudo
+PresetConfig:
+    label: string                  // Shown on the preset selector
+    tool_hint: string | null       // Default framing hint appended to a turn, e.g. "prefer reading before editing"
+    skill: string | null           // Claude Code skill name to invoke, if the preset maps to one
+    agent: string | null           // Claude Code agent name, if the preset maps to one
+```
+
+Keyed by preset id; the bundled set is `code`, `review`, `doc`, matching the snippet groups. A preset is
+a bundle of *user-turn* framing plus a snippet set — it is not an engine state, and switching one never
+reconnects the session. `skill` and `agent` name things the CLI discovered from
+`setting_sources`; a name that does not resolve is reported once and the preset still works without it.
+See `specs5/plan/decisions.md` § CC-12.
 
 ### `snippets.json`
 
-Quick-insert message templates for the chat panel, organized by mode.
+Quick-insert message templates for the chat panel, organized by preset.
 
 **Primary format (nested):**
 
 ```json
 {
   "code": [
-    {"icon": "✂️", "tooltip": "Continue truncated edit", "message": "Your last edit was truncated, please continue."},
-    {"icon": "🔍", "tooltip": "Check context", "message": "Before you make changes, tell me what you understand about the context so far."}
+    {"icon": "📋", "tooltip": "Plan first", "message": "Before changing anything, tell me your plan and which files you'd touch."},
+    {"icon": "🧪", "tooltip": "Run the tests", "message": "Run the test suite and fix what you broke."}
   ],
   "review": [
     {"icon": "🔍", "tooltip": "Full review", "message": "Give me a full review of this PR."}
@@ -274,18 +272,26 @@ Each snippet entry has:
 | `tooltip` | string | Hover text |
 | `message` | string | Inserted into the chat input on click |
 
+The format is unchanged; the *content* of the bundled defaults is not. Snippets that recited the edit
+protocol ("Your last edit was truncated, please continue") or asked for a cache rebuild have no
+referent and are replaced by ones that are useful against an agent.
+
 **Legacy flat format (backwards-compatible fallback):**
 
 ```json
 {
   "snippets": [
-    {"mode": "code", "icon": "✂️", "tooltip": "...", "message": "..."},
+    {"mode": "code", "icon": "📋", "tooltip": "...", "message": "..."},
     {"mode": "review", "icon": "🔍", "tooltip": "...", "message": "..."}
   ]
 }
 ```
 
-Reader detects the flat format by the presence of a top-level `snippets` key, groups entries by their `mode` field (default `"code"` if absent), and surfaces the result in the same nested shape as the primary format.
+Reader detects the flat format by the presence of a top-level `snippets` key, groups entries by their
+`mode` field (default `"code"` if absent), and surfaces the result in the same nested shape as the
+primary format. The key is still spelled `mode` in the legacy format — it is a file format on disk in
+users' config directories, and renaming it would break the files it exists to read. It groups by
+preset id, which the old mode names happen to match.
 
 ### Per-repo snippets override
 
@@ -293,56 +299,53 @@ A repo-local `{repo_root}/.ac-dc4/snippets.json` takes precedence over the user-
 
 ## Dependency quirks
 
-### camelCase fallback for `smaller_model`
+### The environment must not be written
 
-The `LlmConfig.smaller_model` accessor tries both forms:
+This is the inversion of the old § Provider SDK env-var caching quirk, and it matters for the same
+reason that one did: credentials are resolved once, early, and invisibly.
 
-```python
-smaller_model = config.get("smaller_model") or config.get("smallerModel")
-```
+The native engine's `apply_llm_env` exported `llm.json`'s `env` dict into `os.environ` at startup
+because litellm's provider clients (boto3 in particular) read credentials at client-construction time
+and cache them. Under Claude Code the client is the `claude` CLI, and it resolves its own credentials
+from its own config — a subscription login, `ANTHROPIC_API_KEY`, or a cloud provider setup. Exporting
+anything into the environment therefore does not configure *our* provider client, because we have none;
+it silently redirects the CLI to a different account or endpoint, and the turn bills somewhere the user
+did not choose.
 
-This exists because an earlier version of the config accepted camelCase (JavaScript convention) and some users have that form baked into their `llm.json`. New writes always use snake_case; reads tolerate both. No other field in `llm.json` has this fallback — only `smaller_model`.
+So: nothing in the config layer writes `os.environ`, there is no `apply_llm_env`, and there is no
+ordering constraint to get right. The resolved source is read back and reported in
+`EngineHealth.credential_source`, with `auth_warning` set when it is surprising. See
+`specs-reference/3-engine/session.md` § Credential resolution must not be polluted.
 
-### `tiktoken` encoding is the same for all models
-
-All token counting uses `cl100k_base` regardless of the model provider. Claude models, GPT models, Bedrock models — all counted with the same encoding. This is a deliberate simplification: the per-model differences in tokenization are small enough that budget decisions stay correct, and using one encoding avoids multi-provider tokenizer dependencies. The cost is that token counts shown to the user are approximate when the actual model is non-OpenAI.
-
-### Model version parsing for limits
-
-`TokenCounter._min_cacheable_for(model_name)` lowercases the name, parses `claude-<family>-<major>[-<minor>]` out of it, and walks that family's version floors highest-first:
-
-| Family | Floor → minimum |
-|---|---|
-| `opus` | 5.0 → 512, 4.8 → 1024, 4.7 → 2048, 4.5 → 4096 |
-| `haiku` | 4.5 → 4096 |
-| `fable`, `mythos` | 5.0 → 512 |
-| anything unparsed or unlisted (all Sonnet, pre-4 Claude, non-Claude) | 1024 |
-
-**The provider minimum is not monotonic across generations** — it *drops* from 4096 on Opus 4.5/4.6 to 512 on Opus 5 — so each generation needs its own entry rather than a single "newer means higher" rule. Sonnet is deliberately absent: every generation sits on the 1024 default.
-
-Version parsing replaced an earlier list of hardcoded substrings (`"opus-4-5"`, `"opus-4-6"`, `"haiku-4-5"`). The list silently mis-classified any model released after its last edit — `claude-opus-5` matched nothing, so it got the 1024 default (leaving 512–1023-token prefixes uncached) and, from the parallel ceilings list, an 8192-token output cap on a 128K model. Parsing means new majors and new families (`claude-fable-5`) resolve correctly untouched.
-
-Both dash and dot minor separators parse, because providers format version numbers differently (`anthropic/claude-opus-4-5` vs `anthropic/claude-opus-4.5`). The minor is capped at two digits with a negative lookahead so an 8-digit date suffix can't be read as a version — `claude-opus-4-20250514` is Opus 4.0, not Opus 4.20. Pre-4 ids put the family last (`claude-3-5-sonnet`) and deliberately don't parse; every one of them takes the defaults anyway.
-
-`ConfigManager._model_min_cacheable_tokens` delegates to this same function rather than keeping its own copy, so the two can't drift.
+A corollary worth stating because it is easy to get wrong while porting: the *subprocess* environment
+is not a back door either. The CLI is spawned by the SDK, inherits our environment, and any variable we
+add for its benefit has exactly the effect described above.
 
 ### Upgrade atomicity
 
 The version-aware upgrade is not atomic — if the process crashes mid-upgrade, some managed files may be overwritten and others not. On next startup the version marker still reflects the OLD bundled version (it's written last), so the upgrade re-runs and catches unfinished files. Partially-written files are simply overwritten again with the new bundle content; user files are never touched either way.
 
-### Provider SDK env-var caching
+Retired files are inert with respect to this: they are neither copied nor backed up nor removed, in any
+pass, at any version.
 
-Most LLM provider SDKs read environment variables at client-construction time and cache the result on the client instance. boto3 (used by litellm's Bedrock backend) is the canonical example: a Bedrock client constructed before `apply_llm_env` runs will hold the region / profile from the shell environment, and subsequent env-var changes via `os.environ[...] = ...` will not retroactively reconfigure that client.
+### Hot reload cannot reach the session
 
-litellm constructs its provider clients lazily, on the first `completion` call for a given provider. This means `apply_llm_env` only needs to run before the *first* litellm call, not before every call — but it must run at least once before any chat or aux-LLM completion is attempted. See `specs4/1-foundation/configuration.md` § Env-var export timing for the lifecycle contract.
+`app.json` reloads take effect on next use, because every consumer reads through an accessor rather
+than a snapshot dict. `engine.json` reloads mostly cannot take effect, because `ClaudeAgentOptions` is
+assembled once at connect time. Only `model` and `permission_mode` have live setters. There is no
+equivalent of the old `refresh_system_prompt` — nothing in either file participates in a prompt, so no
+config change can invalidate the engine's context.
 
-The `AWS_REGION` vs `AWS_DEFAULT_REGION` precedence is a frequent source of confusion. boto3 reads in this order: `AWS_REGION` → `AWS_DEFAULT_REGION` → profile config from `~/.aws/config` → service-level default (typically `us-east-1`). A user setting `AWS_REGION` in `llm.json` expects it to win, and it does — but only after `apply_llm_env` has exported it. Before that, a stale shell `AWS_DEFAULT_REGION` or a profile-default region wins instead.
+The failure mode to avoid is a Settings tab that accepts an `effort` change, writes the file, shows a
+success toast, and leaves the running session on the old value. See the parent spec's
+§ What a config change can and cannot do live for the required labelling.
 
 ## Cross-references
 
-- Hot reload semantics, accessor patterns, upgrade flow narrative: `specs4/1-foundation/configuration.md`
-- Cache target computation formula and per-model minimums: `specs-reference/3-llm/cache-tiering.md`
-- Compaction config field names and defaults: `specs-reference/3-llm/history.md` § Compaction config defaults
-- Keyword enrichment behavioral detail: `specs4/2-indexing/keyword-enrichment.md`
+- Hot reload semantics, accessor patterns, upgrade flow narrative: `specs5/1-foundation/configuration.md`
+- Options assembly, CLI discovery order, engine numeric constants: `specs-reference/3-engine/session.md`
+- Permission timeout rationale and `PermissionMode` values: `specs-reference/3-engine/permissions.md`
+- Session-directory sizing and mirror-gap accounting: `specs-reference/3-engine/history.md`
+- Keyword enrichment behavioral detail: `specs5/2-indexing/keyword-enrichment.md`
 - Settings RPC whitelist enforcement: `specs-reference/1-foundation/rpc-inventory.md` § Service: Settings
-- Managed vs user file upgrade behavior: `specs4/1-foundation/configuration.md` § Version-Aware Upgrade
+- Preset semantics and why modes were not kept: `specs5/plan/decisions.md` § CC-12

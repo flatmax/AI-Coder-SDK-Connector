@@ -6,7 +6,7 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 
 - Structural extraction alone is insufficient when heading text is generic or repeated
 - API references, spec suites, compliance checklists, template-based reports share subheading patterns across sections
-- Semantic keywords per section let the LLM distinguish between structurally identical sections
+- Semantic keywords per section let a reader — the agent through `doc_outline`, or a person reading an outline in the browser — distinguish between structurally identical sections
 - SVG prose blocks (text elements exceeding the label-length threshold — see [document-index.md § Long Text Elements](document-index.md#long-text-elements--prose-blocks-for-enrichment)) flow through the same pipeline as markdown sections
 
 ## Underlying Technique
@@ -43,13 +43,13 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 
 - Content patterns detected during extraction — table, code, formula
 - Annotated inline after keywords
-- Helps LLM know a section contains reference material without loading it
+- Tells the reader a section contains reference material without opening the file
 
 ### Section Size Signal
 
 - Line count from heading to next heading
 - Sections under threshold have size annotation omitted
-- Helps LLM budget file-loading decisions
+- Lets the agent judge what reading a section will cost before it spends a `Read` on it
 
 ### TF-IDF Fallback for Short Sections
 
@@ -102,9 +102,10 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 ## Packaged Release Degradation
 
 - Release binaries may not bundle the keyword library or its dependencies (large footprint)
-- Document mode remains fully functional without keywords
-- Structural outlines, cross-references, reference counting, cache tiering, and doc system prompt all work
-- Mode-switch response indicates availability; frontend shows a one-time warning toast
+- The document index remains fully functional without keywords
+- Structural outlines, cross-references, and reference counting all work; only keyword annotations are absent
+- The `doc_outline` MCP tool reports whether keywords are available, so the agent knows whether an outline without keywords means "no keywords found" or "keywords unavailable"
+- Frontend shows a one-time warning toast
 - Users running from source can install the optional extra
 
 ## Per-File Asynchronous Processing
@@ -117,7 +118,7 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 ## Eager Pre-Initialization
 
 - Model is eagerly loaded during the background startup phase before the doc-index-ready signal
-- Ensures the first mode switch never blocks on a multi-second model load
+- Ensures the first `doc_outline` call never blocks on a multi-second model load
 - Loads unconditionally, even when all files are cached — a future file change may require enrichment
 
 ## Cache Entry Replacement
@@ -125,7 +126,7 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 - When enrichment completes for a file, the enriched outline replaces the unenriched entry in both memory and on disk
 - Replacement is atomic from the perspective of subsequent cache lookups
 - The formatted output map is updated in-place so immediate queries reflect enriched content
-- No stability tracker demotion on enrichment — the content hash will change, triggering a normal demote/re-graduate, which is acceptable
+- An enrichment completion never mutates an outline mid-query; replacement is visible to the next query, not the current one
 
 ## Reference Index Rebuild After Enrichment
 

@@ -1,6 +1,15 @@
 # Packaging
 
-How config defaults, prompts, and per-repo working state are distributed with the application and managed across upgrades. The bundle embeds sensible defaults; the user config directory persists customizations across releases. A per-repo working directory holds conversation history and caches.
+How config defaults and per-repo working state are distributed with the application and managed across
+upgrades. The bundle embeds sensible defaults; the user config directory persists customizations across
+releases. A per-repo working directory holds the transcript mirror, session files, and caches.
+
+The word "prompts" left this sentence. Six of the eight bundled config files were prompt text AC⚡DC
+assembled into requests, and none of them has a consumer any more — the agent's instructions come from
+`CLAUDE.md` and `.claude/`, which live in the repository and are not ours to package. What remains is
+three config files plus one request template, and the interesting part of this spec is now the *upgrade
+path off* the old set rather than the maintenance of it. Canonical file list, whitelist, and retirement
+policy: [`../1-foundation/configuration.md`](../1-foundation/configuration.md).
 
 ## Config Directory Resolution
 
@@ -39,16 +48,37 @@ Two constant sets in the config module control upgrade behavior:
 - **Managed files** — safe to overwrite on upgrade (prompts, default settings)
 - **User files** — expected to be user-edited, never overwritten
 
-| Category | Typical files | Upgrade behavior |
+| Category | Files | Upgrade behavior |
 |---|---|---|
-| Managed | System prompts, review prompt, compaction skill, commit message prompt, document system prompt, system reminder, app config defaults, snippets | Overwritten on upgrade; old version backed up with a timestamp/version suffix |
-| User | LLM config, extra system prompt | Never overwritten; only created if missing |
+| Managed | `app.json`, `snippets.json`, `commit.md` | Overwritten on upgrade; old version backed up with a timestamp/version suffix |
+| User | `engine.json` | Never overwritten; only created if missing |
+| Retired | `llm.json`, `system.md`, `system_doc.md`, `system_extra.md`, `compaction.md`, `review.md`, `system_reminder.md` | **Left on disk untouched.** Never read, never backed up, never deleted |
 
-Files not in either set (e.g., the version marker, directory entries with a leading dot) are skipped during iteration.
+Files not in any set (e.g., the version marker, directory entries with a leading dot) are skipped during iteration.
+
+### The Retired Set Is a Third Category, Not an Absence
+
+The upgrade pass needs an explicit list of retired names, not just a shorter managed list. With only two
+sets, a retired file falls through to "not in either set" and is skipped — which is the right outcome by
+accident, and stops being right the moment someone adds a directory-iteration cleanup step or a
+"remove files not in the bundle" tidy-up. Naming them keeps the skip deliberate.
+
+`system_extra.md` is the file this matters most for. It was the designated user-customization slot, it was
+in the **user** category so it was never overwritten, and a user who wrote three hundred lines of house
+style into it over a year has that text and nothing else. It is not migrated: its content was written to be
+appended to a system prompt that no longer exists, and pasting it into `CLAUDE.md` unread could change the
+agent's behaviour in ways the user did not choose at a moment they were not consulted. Instead, startup
+reports once that the file exists and is ignored, with its path, so the user can move what they want into
+`CLAUDE.md` themselves.
+
+`llm.json` gets the same treatment for a different reason: only its model name has a successor, and its
+`env` block is actively dangerous to honour (see
+[`../1-foundation/configuration.md`](../1-foundation/configuration.md) § The environment must not be
+written).
 
 ### Exempt Managed Files
 
-Some managed files are loaded internally but not exposed to the settings RPC whitelist — they cannot be edited via the Settings tab. Loaded directly from disk by the config manager. Example — commit message prompt, system reminder.
+`commit.md` is loaded internally by the config manager but not exposed to the settings RPC whitelist — it cannot be edited via the Settings tab, only by direct filesystem access.
 
 ## Version-Aware Upgrade
 
@@ -74,42 +104,45 @@ Users who customized managed files directly (instead of using the extra prompt) 
 
 ## Default Config Values
 
-### LLM Config
+### Engine Config (`engine.json`, user file)
 
-Default values for each field:
+- Model — a plain alias the CLI resolves, not a provider-prefixed identifier. There is no provider to name
+- Permission mode — `"default"`
+- Effort and thinking display — absent by default, so the CLI's own defaults apply
+- Budget — absent by default. A shipped default here would be a spending cap the user did not choose
+- CLI path — absent by default; set only to override discovery
+- **No environment block.** The field does not exist, and a file carrying one is reported as ignored rather than honoured
 
-- Primary model — provider-prefixed identifier (e.g., an Anthropic Sonnet model)
-- Smaller model — provider-prefixed identifier for auxiliary tasks
-- Environment variables — empty by default
-- Cache minimum tokens — reasonable default
-- Cache buffer multiplier — reasonable default
-- Accepts both snake-case and camelCase keys for compatibility
+There is no smaller-model default because there is no auxiliary model call left to make: commit messages
+come from the live session as an ordinary turn, and topic detection went with the compactor.
 
-### App Config
+### App Config (`app.json`, managed file)
 
 Default sections:
 
-- URL cache — path, TTL hours
-- History compaction — enabled, trigger tokens, verbatim window, summary budget, min verbatim exchanges
 - Document conversion — enabled, supported extensions, max source size
 - Document index — keyword model, enabled, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback chars, max document frequency
+- Indexing — debounce interval for the re-index hook
+- Permissions — decision timeout, no-localhost timeout, diff ceiling, command display cap
+- History — mirror policy, session-directory size warning threshold
+- Presets — the named prompt presets offered in the chat panel
 
-### System Prompts
+Gone: the URL cache section (URL fetching is deleted) and the history-compaction section (compaction is
+the engine's, and its threshold is the engine's `autoCompactThreshold` to report, not ours to set).
 
-- Main prompt — coding-agent role, symbol map navigation, edit protocol rules, workflow guidance, failure recovery, context trust
-- Document prompt — documentation-focused role
-- Review prompt — code reviewer role
-- Commit prompt — conventional-commit style instructions
-- Compaction prompt — summarization template for topic detection
-- System reminder — edit-format reinforcement
-- Extra prompt — empty by default (user customization slot)
+### Request Templates
+
+One file, `commit.md`: the text of the commit-message *request*, sent as a user turn on the live session.
+It is no longer a system prompt for an auxiliary model, which changes how it should read — it addresses an
+agent that already has the diff in context rather than briefing a fresh model on its role. Conventional-commit
+style guidance is the substance either way.
 
 ### Snippets
 
-- Single file with nested structure keyed by mode (code, review, doc)
-- Default code snippets cover common LLM interaction patterns (continue edit, check context, verify tests, pre-commit checklist, etc.)
-- Review and doc snippets cover their respective mode workflows
+- Single file, nested structure keyed by **preset** (the successor to mode)
+- Default snippets cover common agentic patterns — ask before editing, run the tests, explain the failure, review the diff, check the plan
 - Legacy flat format supported for backwards compatibility
+- Snippets that told the model how to emit edit blocks or spawn agents are deleted; the ones that survive are the ones that were always just useful things to say
 
 ## Per-Repository Working Directory
 
@@ -117,26 +150,39 @@ A per-repo working directory at the repo root, hidden (leading dot). Created on 
 
 ### Contents
 
+The directory is `.ac-dc4/` — a new name, so a rollback to the previous release finds its own `.ac-dc3/`
+state intact rather than a directory of records it cannot parse.
+
 | Entry | Purpose | Lifecycle |
 |---|---|---|
-| Conversation history file | Persistent JSONL history | Append-only |
-| Symbol map snapshot | Current symbol map | Rewritten after each LLM response |
-| Images directory | Persisted chat images | Write on paste, read on session load |
-| Document cache directory | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
-| TeX preview directory | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |
-| Repo-local snippet override | Optional user-managed | User-edited |
+| `history.jsonl` | Mirrored transcript — the browsable archive | Append-only; a failed append surfaces as a health banner, never a silent gap |
+| `sessions/` | Engine transcripts written through our `SessionStore`, plus per-session `subagents/` | Written by the engine through us; deleted per session from the history browser |
+| `images/` | Persisted chat images | Write on paste, read on session load |
+| `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
+| `tex_preview/` | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |
+| `snippets.json` | Optional repo-local snippet override | User-edited |
+
+Gone: the symbol map snapshot (the map is rebuilt in memory and served through the MCP bridge, so a
+stale on-disk copy has no reader), the URL cache, and the `agents/` directory from the parallel-agent
+design.
+
+`sessions/` is the one entry whose growth is worth watching: it holds every turn of every session
+including subagent transcripts, and it is the engine's primary record rather than a cache. Layout and
+key derivation: [`../../specs-reference/3-engine/history.md`](../../specs-reference/3-engine/history.md)
+§ Working-directory layout.
 
 ### Creation and Gitignore
 
 - Working directory created on first run (idempotent)
-- Subdirectories (images, document cache) created by their respective subsystems with exist-ok semantics
+- Subdirectories (`sessions/`, `images/`, `doc_cache/`) created by their respective subsystems with exist-ok semantics
 - Gitignore entry added — if the working directory is not already ignored, an entry is appended to the repo's gitignore; duplicate entries avoided
 - All operations are idempotent — safe to re-run on subsequent startups
 
 ### Cleanup
 
 - No automatic cleanup of old data
-- Users can delete the working directory to reclaim space or reset state without affecting application functionality (history, images, caches all rebuild or restart empty)
+- Users can delete the working directory to reclaim space or reset state without affecting application functionality — but the loss is now larger than it was, and the spec should say so plainly: `sessions/` is the engine's transcript, so deleting it removes the ability to resume any past session. Caches rebuild; conversations do not
+- A one-shot warning appears when the working directory passes a size threshold, pointing at the history browser where deletion happens next to what is being deleted
 - TeX preview directory is the exception — cleaned on every compilation and on server startup since it holds only transient data
 
 ## Packaging and Distribution
@@ -148,6 +194,8 @@ A per-repo working directory at the repo root, hidden (leading dot). Created on 
 ## Invariants
 
 - User files are never modified during an upgrade
+- Retired files are never read, never overwritten, and never deleted; their presence is reported once, with their path
+- No config file is ever migrated automatically into `CLAUDE.md` or `.claude/`
 - Managed files are always backed up before being overwritten
 - Version marker is always updated after a successful upgrade pass
 - First run always copies all files and writes the version marker
@@ -155,4 +203,6 @@ A per-repo working directory at the repo root, hidden (leading dot). Created on 
 - Gitignore entry for the per-repo working directory is never duplicated
 - Per-repo working directory creation is idempotent
 - All reads go to the user config directory, not the bundle
-- Files outside the managed or user set are never copied or overwritten
+- Files outside the managed, user, or retired sets are never copied or overwritten
+- No packaged config file contains a credential, and no packaging step writes the process environment
+- The per-repo working directory name is version-distinct, so a rollback never reads the newer release's records

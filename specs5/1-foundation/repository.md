@@ -14,9 +14,11 @@ The repository layer wraps version control and file I/O. It is exposed to the br
 
 ### Per-Path Write Serialization
 
-The repository layer maintains an internal per-path mutex for write operations. Concurrent writes to different paths proceed in parallel; concurrent writes to the same path are serialized. The physical read → modify → write cycle (used by the edit-apply pipeline) acquires the lock for its target path and releases it after the write completes.
+The repository layer maintains an internal per-path mutex for write operations. Concurrent writes to different paths proceed in parallel; concurrent writes to the same path are serialized. Any physical read → modify → write cycle acquires the lock for its target path and releases it after the write completes.
 
-In single-agent operation, the lock is effectively never contended — only one agent writes at a time. The mutex exists so the repository layer's contract is safe for a future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) where N agents may generate edits concurrently. Implementing the lock now has zero cost in single-agent operation and unblocks the parallel case without refactoring the apply pipeline later.
+The contended case is now real rather than hypothetical. The agent's own file writes are executed by the CLI and do not pass through this layer at all, but the browser writes through it (diff-viewer saves, SVG edits, renames, staging) while a turn is in flight, and the agent's subagents write concurrently with each other. A save landing in the middle of an agent edit to the same file is a genuine race; the mutex is what makes the outcome one write or the other rather than an interleaved file.
+
+The mutex does **not** serialize AC⚡DC against the agent — nothing can, because the CLI writes to disk directly without passing through this layer. What limits the damage there is elsewhere: the `PostToolUse` broadcast makes the viewer refetch a file the agent just wrote, and the agent's own file checkpointing makes the write undoable. See [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md#reacting-to-file-changes). This layer's guarantee stops at "no interleaved write through the repository layer", and specs that need more must say so themselves.
 
 ## Git Staging
 

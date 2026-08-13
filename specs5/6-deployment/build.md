@@ -2,6 +2,13 @@
 
 How the webapp and backend are packaged for distribution. The webapp is a Vite-built SPA served by a built-in HTTP static file server; the backend is a Python package optionally packaged as a PyInstaller single-file binary. Source installs can use a fallback served from GitHub Pages.
 
+**The single-file binary is no longer self-sufficient**, and that is the headline of this file after the
+conversion. AC⚡DC used to contain its own inference client: bundle `litellm`, ship the binary, and a user
+with an API key had a working application. Now the engine is a separate Node process the user must have —
+the `claude` CLI. No amount of PyInstaller flags changes that, so the packaging story becomes "bundle
+everything we can and diagnose the one thing we cannot" (see
+[§ The Engine Is Not Bundleable](#the-engine-is-not-bundleable)).
+
 ## Webapp Bundling
 
 - Vite-based build producing a static bundle
@@ -57,10 +64,50 @@ Per-platform single-file binaries built in CI:
 
 ### Dependency Collection
 
-- `--collect-all` for packages with data files — LLM provider library, tokenizer and extensions, tree-sitter core and per-language grammars, content extraction library
+- `--collect-all` for packages with data files — the agent SDK, tree-sitter core and per-language grammars, content extraction library
 - `--hidden-import` for every ac_dc submodule and extractor (static analysis misses dynamically imported modules and modules only referenced via class registration)
 - `--hidden-import` for the RPC library
 - Runtime behavior verified in CI on each platform
+
+Removed from collection: the LLM provider library and its provider SDKs, and the tokenizer with its
+encoding data files. Both were large — the tokenizer's encodings and the provider library's model registry
+were a meaningful fraction of the binary — and both existed to do work the engine now does. Nothing
+counts tokens in this process any more (see
+[`../3-engine/context-visibility.md`](../3-engine/context-visibility.md)).
+
+The agent SDK needs `--collect-all` rather than a plain hidden import because it ships a data file that
+matters: a bundled `claude` CLI under `claude_agent_sdk/_bundled/`. See below.
+
+### The Engine Is Not Bundleable
+
+The `claude` CLI is a Node application. PyInstaller bundles Python; it cannot make a Node runtime appear,
+and shipping one would mean carrying a second language runtime plus a CLI whose release cadence is not
+ours. So the binary ships without an engine and resolves one at startup, in the SDK transport's order:
+
+1. An explicitly configured `cli_path` from `engine.json`
+2. `claude` on `PATH`
+3. The SDK's own bundled copy under `claude_agent_sdk/_bundled/claude`
+
+Option 3 is the reason for `--collect-all` on the SDK: the bundled copy is package data that a plain
+import collection would drop, and dropping it removes the fallback that makes a fresh install work at all.
+It still needs a Node runtime present, so it is a fallback rather than a solution.
+
+**Build-time verification is required.** A CI smoke test must assert that the bundled CLI path exists
+inside the built binary and that `--version` runs. Both are cheap, and both fail in the specific way this
+project has been bitten by before: a data file silently absent from a bundle, producing a runtime error on
+a user's machine that no build-time test caught.
+
+Two consequences worth stating rather than discovering:
+
+- **Version skew is a supported state, not an error.** A user's `PATH` CLI can be newer or older than the SDK's `__cli_version__` pin. Startup records both and warns on mismatch; it does not refuse to run. Refusing would make our release cadence a gate on theirs
+- **The binary's version string describes AC⚡DC only.** It says nothing about the engine, so bug reports need both — which is why `EngineHealth` carries `cli_path`, `cli_version`, `sdk_version`, and `sdk_cli_pin` together ([`../../specs-reference/3-engine/session.md`](../../specs-reference/3-engine/session.md) § `EngineHealth`)
+
+### The `mcp` Version Floor Is a Build Constraint
+
+`claude-agent-sdk` requires `mcp` ≥ 1.29.0. The pre-conversion lockfile pinned 1.14.1, and `doc_convert`
+depends on that package too — so the upgrade is a deliberate step with `doc_convert` re-tested, not a
+side effect of installing the SDK. The lockfile refresh and the doc-convert regression run belong in the
+same commit, because splitting them produces a green build with a broken feature.
 
 ### Release Workflow
 
@@ -99,7 +146,9 @@ For dev and preview modes only (webapp development, not normal usage):
 
 - Webapp bundle is always self-contained — no absolute paths, no external CDN dependencies for core features
 - Base path is always relative so the bundle can serve from any origin
-- PyInstaller binary contains everything needed — config defaults, webapp bundle, version file, all Python dependencies
+- PyInstaller binary contains every **Python-side** requirement — config defaults, webapp bundle, version file, all Python dependencies, and the SDK's bundled CLI as package data
+- The binary does **not** contain a Node runtime and does not pretend to. A missing engine degrades to a working editor with a health banner, never a failed launch ([startup.md](startup.md#engine-health-in-the-overlay))
+- CI asserts the SDK's bundled CLI path is present in the built binary before the release is published
 - Hidden imports cover every module — no "module not found" at runtime
 - SPA fallback ensures client-side routing works when users bookmark deep links
 - Webapp location priority always tried in order; first hit wins

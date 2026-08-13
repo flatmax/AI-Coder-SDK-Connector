@@ -7,6 +7,7 @@ The root component of the webapp. Owns the WebSocket connection, routes server-p
 - Single WebSocket client for the whole webapp
 - Publishes a shared RPC proxy that child components consume via a mixin
 - Hosts the draggable dialog (foreground) and the viewer background (full viewport)
+- Hosts the permission dialog, at viewport scope, above every other surface
 - Routes server-push events to child components via window-level custom events
 - Manages startup overlay and reconnection UI
 
@@ -27,12 +28,19 @@ The root component of the webapp. Owns the WebSocket connection, routes server-p
 
 Methods the server calls on the client (registered at connection time):
 
-- Streaming — chunk, complete, compaction/progress event
-- State sync — files changed, mode changed, session changed, user message, commit result
+- Turn events — chunk, thinking chunk, tool card, tool result, subagent event, stream complete, post-response complete
+- Permissions — permission request, permission resolved, permission mode changed
+- Engine state — compaction event, rate limit, hook event, engine health
+- State sync — files changed, session changed, user message, commit result
 - Startup — progress (with special filtering; see below)
 - Navigation — navigate file (carries a flag to prevent echo re-broadcast)
 - Collaboration — admission request, admission result, client joined, client left, role changed
 - Doc convert — progress
+
+`modeChanged` is gone; nothing replaced it, because there are no modes. `permissionModeChanged` is a
+different thing that happens to sound similar — it carries the permission posture, and it is the one
+broadcast the shell must never drop, since a client showing the wrong posture is a client showing the
+user the wrong authority.
 
 All dispatch to window-level custom events that the relevant child components listen for.
 
@@ -40,7 +48,7 @@ All dispatch to window-level custom events that the relevant child components li
 
 - Full-screen overlay driven by startup-progress events
 - Shows the AC⚡DC brand, a status message, and a progress bar
-- Message and percent update per stage (symbol index init, session restore, indexing, stability tiers, ready)
+- Message and percent update per stage (config load, symbol index init, engine connect, session restore, doc index, ready)
 - Fades out shortly after the ready signal
 
 ### Doc Index Stage Filtering
@@ -59,7 +67,7 @@ All dispatch to window-level custom events that the relevant child components li
 - On setup-done, fetch a full current-state snapshot via a single RPC call
 - Dispatch a state-loaded event with the full state as detail
 - Browser tab title updated from the repo name in state (no prefix, no branding)
-- Files tab restores messages, selected files, streaming status, mode state
+- Files tab restores messages, hinted files, active-stream blocks, permission posture, and any pending permission requests
 - File picker sync deferred so the picker has loaded its tree before selection is applied
 - Chat panel detects bulk message load and triggers scroll-to-bottom
 
@@ -85,6 +93,21 @@ All dispatch to window-level custom events that the relevant child components li
 - For SVG files: if the stored `type` is `svg`, route through the SVG viewer and apply presentation-mode flag before writing the viewBox — presentation mode changes the right pane's width (no left pane), and the viewBox rectangle is only meaningful against its actual container. If the stored `type` is `diff` for an `.svg` path, the user toggled to text diff; restore via the diff viewer and dispatch `toggle-svg-mode` with target `diff` after navigate so the visibility flip lands on the diff viewer. The visual ↔ text toggle buttons remain available; persistence only affects the initial restore.
 - A timeout cancels restoration if the file never opens (e.g., deleted)
 
+## Permission Dialog Hosting
+
+The permission dialog is a top-level element in the shell's shadow DOM, sibling of the dialog container
+and the viewer background, with the highest z-index in the application — above the dialog panel, above
+every progress overlay, above the startup overlay, above the toast layer.
+
+- Mounted for the shell's whole lifetime, not created on demand. A request that arrives while the browser is mid-reconnect must find a listener already there
+- Fed by the permission-request and permission-resolved callbacks, plus the `pending_permissions` list in the state snapshot
+- Its Escape binding is registered ahead of every other Escape handler in the application
+- Non-localhost clients mount the same component; it renders without decision controls
+
+See [permission-dialog.md](permission-dialog.md). It is hosted here rather than inside the dialog panel
+because the panel can be minimized, docked, dragged mostly off-screen, or showing Settings, and a
+permission request has stalled the turn.
+
 ## Viewer Background
 
 - Full-viewport background layer hosts the diff viewer and SVG viewer as siblings
@@ -100,9 +123,14 @@ The dialog is a draggable, resizable foreground panel hosting the tab bar and ta
 
 The dialog has no header bar. The chat panel's tab strip sits directly at the top of the dialog body; messages, input, and a compact LED strip follow.
 
-**Tab strip** (top of chat panel): Main + one per agent. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present. Each tab carries a per-tab 📊 Context icon (visible on hover/active/focus) that opens the Context overlay scoped to that conversation. Agent tabs additionally carry a ✕ close icon. The strip is the dialog **drag handle** — pointerdown on its empty background or the gap between buttons begins a drag; pointerdown on any tab button, Context icon, close icon, or overflow button skips drag via the `closest('button')` guard.
+**Tab strip** (top of chat panel): Main + one per subagent in the current turn. Text labels with horizontal scroll overflow and a ⋯ direct-jump menu when the strip exceeds available width. Always rendered, even with only Main present. The Main tab carries a 📊 Context icon (visible on hover/active/focus) that opens the Context overlay. Subagent tabs carry a live indicator and, while live, a ⏹ stop icon. The strip is the dialog **drag handle** — pointerdown on its empty background or the gap between buttons begins a drag; pointerdown on any tab button, Context icon, stop icon, or overflow button skips drag via the `closest('button')` guard.
 
-**LED strip** (below the textarea, above the compaction-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's stream / outcome state (cyan flashing while streaming, green for clean completion, red for error). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the tab id, mode, and state-specific diagnostic per [agent-browser.md](agent-browser.md#status-leds).
+The 📊 icon is on Main only, and no tab carries a ✕. Context is session-scoped now — there is one
+snapshot to show, not one per conversation — and a subagent tab cannot be closed because closing it never
+meant "hide a view", it meant "kill a scope AC⚡DC owned". See
+[subagent-browser.md](subagent-browser.md).
+
+**LED strip** (below the textarea, above the context-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's live / outcome state (cyan flashing while working, green for a clean finish, red for failure, amber for stopped or unknown). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the description, status, and state-specific diagnostic per [subagent-browser.md](subagent-browser.md#status-leds).
 
 **Doc Convert**: lives in the file picker's top toolbar (a 📄 button rendered only when the backend reports markitdown is installed). Clicking dispatches `request-dialog-tab` with `{tab: 'doc-convert'}`. Same toolbar pattern as Settings — both buttons replaced earlier dialog-header / FAB iterations and now live in the picker so the dialog has no header at all.
 
@@ -120,11 +148,19 @@ All four dispatch `request-dialog-minimize` which the shell catches and routes t
 - Pointerdown on the tab strip's background or the gap between buttons — drag begins.
 - Pointerdown anywhere else in the dialog (LEDs, message area, picker, input) — no drag, normal click handling.
 
-**Compaction-capacity bar**: thin 4px strip at the very bottom of the dialog (above the resize handles), rendered when the backend reports compaction is enabled and history-status data has been fetched. The fill width tracks the ratio of current history tokens to the compaction trigger threshold. Colour follows the same tri-state convention as the Context tab budget bar and Token HUD: green ≤75%, amber 75–90%, red >90%. Hidden in minimized mode along with the body and reconnect banner. Tooltip on hover gives exact token counts and percent. Refreshed via `LLMService.get_history_status` after every stream-complete, session-changed, and compaction-event broadcast.
+**Context-capacity bar**: thin 4px strip at the very bottom of the dialog (above the resize handles), rendered once a context snapshot has been seen. The fill width tracks `totalTokens / maxTokens` from the engine's own accounting, with a 1px marker at the auto-compact threshold when auto-compact is enabled. Colour follows the same tri-state convention as the Context tab's gauge: green ≤75%, amber 75–90%, red >90%. Hidden in minimized mode along with the body and reconnect banner. Tooltip on hover gives exact token counts, percent, and the distance to the threshold.
 
-**Doc index progress overlay**: an `ac-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. Distinct from the compaction-progress overlay (an `ac-compaction-progress` component rendered at viewport scope, not inside the dialog), which fires on `compaction-event` and auto-dismisses after success or error. Both overlays exist so background work surfaces without re-showing the startup overlay or stalling chat interaction.
+Fed by the `context_usage` payload on post-response-complete and by the Context tab's own fetches — never
+by a bar-specific RPC. There is no `get_history_status` any more, and no local model of a compaction
+threshold to compare against: the threshold is the engine's, reported alongside the totals. A user who
+sees the fill cross the marker knows compaction is imminent, which is what the old bar was trying to say
+and could only approximate.
 
-**Cache warmup progress overlay**: an `ac-cache-warmup-progress` component rendered at viewport scope (bottom-center, above the toast layer's z-index but below modals). Listens for the four `cache-warmup-*` window events the shell re-dispatches from server-push callbacks. Renders a 30-second countdown progress bar during the visible phase, flips to a spinner during the firing phase, briefly flashes "Cache refreshed" on success or an error reason on failure, then fades out. Cancelled events close the bar without a flash. See [cache-tiering.md § Cache Warmer](../3-llm/cache-tiering.md#cache-warmer) for the backend lifecycle.
+**Doc index progress overlay**: an `ac-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. It also carries the doc-enrichment stages, which arrive on the compaction-event channel during a session rather than at startup. Exists so background indexing surfaces without re-showing the startup overlay or stalling chat interaction.
+
+The separate viewport-scope compaction-progress overlay is gone. Compaction is the engine's now, it is
+fast, and it is reported as a boundary divider in the transcript rather than as a multi-stage pipeline
+with a progress bar (see [chat.md § Engine Event Routing](chat.md#engine-event-routing)).
 
 **Read-aloud transport overlay**: an `ac-speech-controls` component rendered at viewport scope. Unlike the progress overlays, it is **draggable** and remembers its position across sessions. It listens for the text-to-speech player's state-change window event and is visible only while a message is being read aloud, offering play/pause, a speed slider, and a per-sentence position bar. It holds no playback state — it is a remote control for the shared synthesis player and reflects its state. See [speech.md § Floating Transport](speech.md#floating-transport-controls-overlay) for the full specification.
 
@@ -164,7 +200,7 @@ Below 300 wide the tab buttons wrap to a second row; below 200 tall the body col
 
 ### Dragging
 
-The dialog header is the drag handle — `cursor: grab` on the background, `cursor: grabbing` during an active drag. Buttons inside the header (tab buttons, mode toggle, minimize) override the cursor and don't initiate drags; the header's pointerdown handler skips when `event.target.closest('button')` matches.
+The tab strip is the drag handle — `cursor: grab` on the background, `cursor: grabbing` during an active drag. Buttons inside it (tab buttons, the Context icon, subagent stop icons, the overflow menu, minimize) override the cursor and don't initiate drags; the pointerdown handler skips when `event.target.closest('button')` matches.
 
 **Drag threshold: 5px.** Below this, a header pointerdown + pointerup pair is treated as a click (no-op today, since minimize has its own button). Above the threshold, the `.dialog.dragging` class activates, the dialog undocks if still docked, and subsequent pointermove events track the pointer by applying the stored delta to the drag-start rectangle.
 
@@ -218,11 +254,19 @@ Width and position are independent — resizing the right edge while docked writ
 
 Malformed values (non-JSON, wrong shape, width below minimum, finite-number check fails) are treated as absent. Invalid keys don't propagate into the UI state.
 
-## Mode Toggle
+## Preset and Permission Controls
 
-The primary-mode segmented control and cross-reference overlay toggle live in the chat panel's search bar — not the dialog header. Only the Main tab renders these controls; agent tabs hide them entirely. See [chat.md § Mode Toggle](chat.md#mode-toggle) for the full UI specification.
+The preset selector and the permission-mode indicator live in the chat panel's action bar — not the
+dialog header. See [chat.md § Preset Selector](chat.md#preset-selector) and
+[chat.md § Permission Mode Selector](chat.md#permission-mode-selector) for the full UI specification.
 
-Rationale: mode is per-conversation in spirit (an agent could in principle inherit a different mode from its parent), and visually anchoring the controls to a specific chat tab makes the per-tab scope obvious. Today the backend has one authoritative mode for the whole service; agents inherit it via their parent scope. When the backend gains per-agent mode, the controls' read/write paths thread through `agent_tag` without a UI move.
+The shell's only stake in either is the permission-mode broadcast, which it routes like any other
+server-push event, and the rule that the posture indicator is never hidden by a collapse or a layout
+state. A dialog minimized to its tab strip still shows the posture; the indicator moves into the strip
+rather than disappearing with the body.
+
+The old cross-reference overlay toggle is gone with the modes it overlaid. Both indexes are always
+available to the agent as tools, so there is nothing to switch.
 
 ## Global Keyboard Shortcuts
 
@@ -234,7 +278,10 @@ Rationale: mode is per-conversation in spirit (an agent could in principle inher
 - Ctrl+Shift+F activates file search in the chat panel, prefilling from the current selection
 
 Alt+1 always returns to Chat regardless of which overlay is currently shown — same effect as clicking the back arrow. Alt+3 is fixed on Settings regardless of whether Convert is installed, so muscle memory survives stripped-down deployments.
-🟨🟨🟨 REPL
+
+Every shortcut is suppressed while the permission dialog is open. It is modal, its focus is trapped, and
+Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst
+possible moment.
 
 ### Ctrl+Shift+F Selection Capture
 
@@ -257,7 +304,7 @@ Alt+1 always returns to Chat regardless of which overlay is currently shown — 
 
 Two independent toast layers:
 
-- **Chat panel local toast** — rendered inside the chat panel, positioned near the input; used for chat-specific feedback (copy, commit, stream errors, URL fetch notifications)
+- **Chat panel local toast** — rendered inside the chat panel, positioned near the input; used for chat-specific feedback (copy, commit results, turn errors, rate-limit warnings, permission timeouts)
 - **App shell global toast** — rendered in the app shell at the bottom-left of the viewport (z-index above the dialog so toasts remain visible when the dialog is docked left), supports multiple simultaneous toasts with independent fade-out; used by components outside the chat panel.
 
 Components dispatch toast events; the shell catches and renders them. Chat panel's local toast does not dispatch global events.
@@ -269,5 +316,9 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - The captured `window.getSelection()` at Ctrl+Shift+F is passed by parameter, never re-read downstream
 - File and viewport state is restored after the ready signal on first connect, or immediately on reconnect — never before
 - Window resize handlers run at most once per animation frame
-- Browser tab title reflects the current repo name with no prefix
+- Browser tab title reflects the current repo name with no prefix, except while permission requests are pending, when it carries the pending marker and count
 - The startup overlay is dismissed exactly once per connection lifecycle (first connect)
+- The permission dialog is mounted for the shell's entire lifetime and renders above every other surface, including the startup overlay
+- Global keyboard shortcuts are inert while the permission dialog is open
+- The permission-mode indicator remains visible in every dialog layout state, including minimized
+- The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC

@@ -1,6 +1,6 @@
 # Reference: Document Convert
 
-**Supplements:** `specs4/4-features/doc-convert.md`
+**Supplements:** `specs5/4-features/doc-convert.md`
 
 ## Byte-level formats
 
@@ -321,7 +321,7 @@ The pptx/odp primary pipeline requires the `soffice` binary on PATH. When absent
 
 ## Cross-references
 
-- Behavioral pipeline dispatch, clean-tree gate, tab visibility, conversion flow, graceful degradation: `specs4/4-features/doc-convert.md`
+- Behavioral pipeline dispatch, clean-tree gate, tab visibility, conversion flow, graceful degradation: `specs5/4-features/doc-convert.md`
 - Config defaults for `doc_convert` section (enabled, extensions, max_source_size_mb): `specs-reference/1-foundation/configuration.md`
-- Document index consumes converted `.md` files: `specs4/2-indexing/document-index.md`
-- SVG extractor indexes extracted SVG images: `specs-reference/2-indexing/document-index.md` (when created; for now see `specs4/2-indexing/document-index.md`)
+- Document index consumes converted `.md` files: `specs5/2-indexing/document-index.md`
+- SVG extractor indexes extracted SVG images: `specs-reference/2-indexing/document-index.md` (when created; for now see `specs5/2-indexing/document-index.md`)

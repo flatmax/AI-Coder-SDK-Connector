@@ -1,6 +1,6 @@
 # Reference: Startup
 
-**Supplements:** `specs4/6-deployment/startup.md`
+**Supplements:** `specs5/6-deployment/startup.md`
 
 This is the canonical owner for startup progress stage names, reconnect backoff schedule, and port selection constants. The browser startup overlay parses progress events by stage name — exact string match matters.
 
@@ -21,9 +21,9 @@ Exact stage name strings the browser handler dispatches on:
 | Stage | When emitted | Typical percent |
 |---|---|---|
 | `symbol_index` | Symbol index initialization starts (tree-sitter parser construction) | 10 |
-| `session_restore` | Previous session is being loaded into context | 30 |
+| `engine_wiring` | Symbol and doc indexes being wired into the `ac-dc` MCP server | 30 |
 | `indexing` | Repository files being parsed in batches; message format `"Indexing repository... {N}/{M}"` | 50–90 |
-| `stability` | Stability tracker being initialized from reference graph | 80 |
+| `references` | Reference graph being built from the completed symbol index | 90 |
 | `ready` | Initialization complete; browser dismisses overlay after fade | 100 |
 | `doc_index` | Background doc-index build progress (intercepted by shell, routed to dialog header bar instead of startup overlay) | 0–100 |
 | `doc_index_error` | Structural extraction failed | — |
@@ -33,9 +33,20 @@ Exact stage name strings the browser handler dispatches on:
 
 Stage name strings are matched exactly — a typo produces unhandled events that the browser silently drops. New stages should be added only when the browser shell is updated to handle them.
 
+Two renames from the native engine, both because the stage no longer describes what happens:
+
+| Old stage | New stage | Why |
+|---|---|---|
+| `session_restore` | `engine_wiring` | Nothing is restored *into context* at startup. The transcript is read from `.ac-dc4/` in Phase 1 as a plain disk read, and no `claude` subprocess exists yet. What Phase 2 actually does at 30% is hand the indexes to the MCP bridge |
+| `stability` | `references` | The step built cache tiers from the reference graph. The tiers are gone; the graph survives for Monaco's go-to-references |
+
+Neither old name may be re-used for anything. A shell built against the old spec would show
+"Restoring session…" over a step that touches no session, and "Building cache tiers…" over a step that
+builds none — both wrong in the specific way that makes a user trust the overlay less than they should.
+
 ### Browser routing of doc-index stages
 
-The startup overlay only handles the first five stages (`symbol_index`, `session_restore`, `indexing`, `stability`, `ready`). The five doc-index stages are intercepted by the app shell's `startupProgress` handler and re-dispatched as `doc-index-progress` window events that the dialog header bar subscribes to.
+The startup overlay only handles the first five stages (`symbol_index`, `engine_wiring`, `indexing`, `references`, `ready`). The five doc-index stages are intercepted by the app shell's `startupProgress` handler and re-dispatched as `doc-index-progress` window events that the dialog header bar subscribes to.
 
 This routing is necessary because doc-index work begins after `ready` fires — the startup overlay has dismissed. Without interception, these events would either re-show the overlay (jarring) or be ignored (loss of progress visibility during a multi-minute enrichment phase).
 
@@ -103,6 +114,23 @@ const delay = delays[Math.min(this._reconnectAttempt, delays.length - 1)];
 setTimeout(() => this._attemptReconnect(), delay);
 this._reconnectAttempt++;
 ```
+
+### Engine health probe budget
+
+| Constant | Value |
+|---|---|
+| `claude --version` subprocess timeout | 3000 ms |
+| Credential-source probe timeout | 3000 ms |
+| Result caching | Once per server process; re-probed only on an explicit session restart from Settings |
+
+The probe runs in Phase 1 and must not be allowed to delay the WebSocket server. On timeout the health
+result is `unknown` with the timeout as its reason, the overlay proceeds, and the banner says the probe
+timed out rather than claiming the CLI is missing — a slow filesystem and an absent binary warrant
+different user actions.
+
+The probe never starts a session. `claude --version` is a process that exits; a `ClaudeSDKClient` connect
+is a process that stays, and doing that at startup would spawn a subprocess for every launch including
+the many where no message is ever sent.
 
 ### Phase 1 browser-wait delay
 
@@ -205,15 +233,36 @@ Mitigation: the `asyncio.sleep(0)` between batches gives the GIL a chance to swa
 On `SIGINT` or `SIGTERM`, the server shuts down gracefully:
 
 1. Set a shutdown event (stops Phase 2 if still running)
-2. Close the WebSocket server (existing connections receive close frames)
-3. Stop the webapp HTTP server
-4. Exit with status 0
+2. Resolve every pending permission request as a denial, so no `can_use_tool` callback is left awaiting
+3. Interrupt any turn in flight, then `await client.disconnect()` on the SDK client
+4. Close the WebSocket server (existing connections receive close frames)
+5. Stop the webapp HTTP server
+6. Exit with status 0
+
+| Constant | Value |
+|---|---|
+| Turn-interrupt grace before disconnect | 2000 ms |
+| `disconnect()` timeout before falling back to a kill | 5000 ms |
+| Vite child `terminate()` → `kill()` timeout | 5000 ms |
+
+**Ordering is load-bearing, and step 2 comes first.** The `can_use_tool` callback runs on the SDK's read
+loop (`specs-reference/3-engine/permissions.md` § The callback runs on the SDK's read loop). A pending
+request means that loop is parked inside our coroutine, and `disconnect()` cannot drain a transport whose
+reader is waiting on a decision that will now never arrive. Denying first releases the loop; disconnecting
+first deadlocks the shutdown until the 5-second fallback kills the subprocess.
+
+The interrupt-then-disconnect sequence exists so the CLI can flush its own session files. Those files are
+the primary transcript — `.ac-dc4/history.jsonl` is a mirror — so a hard kill mid-turn can leave the
+authoritative record shorter than what the user watched stream into the browser.
 
 Child processes (Vite dev/preview in `--dev`/`--preview` mode) are terminated with `process.terminate()` followed by `process.wait(timeout=5.0)`. If the child is still alive after 5 seconds, `process.kill()` is called.
 
 ## Cross-references
 
-- Behavioral two-phase flow, git validation, collaboration network binding: `specs4/6-deployment/startup.md`
+- Behavioral two-phase flow, git validation, collaboration network binding: `specs5/6-deployment/startup.md`
 - RPC methods called during init (`complete_deferred_init`, etc.): `specs-reference/1-foundation/rpc-inventory.md`
+- Engine health shape, CLI discovery, and credential resolution: `specs-reference/3-engine/session.md` § `EngineHealth`
+- Why the permission callback constrains shutdown ordering: `specs-reference/3-engine/permissions.md`
+- Transcript-on-disk layout read during Phase 1: `specs-reference/3-engine/history.md` § Working-directory layout
 - Build-time config and version baking: `specs-reference/6-deployment/build.md`
 - Webapp static server specifics: `specs-reference/6-deployment/build.md` § Built-in Static File Server

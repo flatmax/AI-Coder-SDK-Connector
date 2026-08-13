@@ -1,267 +1,220 @@
-# Viewers and Token HUD
+# Context Tab and Usage HUD
 
-Two surfaces that consume the same backend context-breakdown data to show different perspectives on token usage and cache state: the **Context tab** (with Budget and Cache sub-views, persistent while visible) and the **Token HUD** (floating transient overlay triggered after each LLM response). Also covers the terminal HUD printed server-side after each response.
-## Shared Backend
-Both the Context tab and the Token HUD call the same breakdown RPC. Shared capabilities:
+Two surfaces onto the same question — *what does the agent currently know, and what is it costing?* The
+**Context tab** answers it persistently, in three sections. The **Usage HUD** answers it transiently,
+once per turn, in a floating overlay. A reduced **terminal HUD** prints the same turn summary
+server-side.
 
-### Per-Context-Manager Breakdown
+The data behind both is the engine's own accounting: `get_context_usage()` for composition,
+`ResultMessage` for per-turn usage. AC⚡DC does not model context. The contract, the field list, and the
+rationale are in [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md); this file
+specifies the components.
 
-The breakdown RPC reports on a single context manager. In single-agent operation this is the user-facing context manager — the only instance that exists. A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) creates additional context managers; the breakdown RPC accepts an optional agent ID parameter to target a specific one, defaulting to the user-facing context when absent.
+## The Shift This File Records
 
-The Context tab and Token HUD are display-only; they do not drive agent execution. UI decisions (show one aggregate HUD, show per-agent HUDs, or let the user select) are UI concerns deferred to the agent-mode implementation. The backend contract is already agent-ready — the breakdown dispatches by context manager identity, not by session global state.
-### FileContext Sync Before Breakdown
-- Before computing the breakdown, the server synchronizes the in-memory file context with the current selected-files list
-- Removes files no longer selected, loads files newly selected
-- Ensures the breakdown reflects what the next LLM request would look like, not a stale snapshot
-- Defensively skips binary files and files that don't exist — these are not reported in the breakdown the way the streaming pipeline reports them, so the viewer may show a clean budget while the next actual request would exclude some files
-### Tier Content Breakdown (Shared Helper)
-A shared helper converts raw tracker items into structured detail dicts for both the frontend context breakdown and the terminal HUD. For each item it classifies the type from the key prefix (system, files, symbols, doc-symbols, history, other), extracts display name and path, and looks up the promotion threshold from the tier config. History items extract a numeric sort index from the key for correct ordering. Result is sorted: system first, then symbols / doc-symbols, files, history, other.
-### Mode-Aware Breakdown
-Breakdown dispatches to the appropriate index and system prompt based on the current mode:
-| Field | Code mode | Document mode |
-|---|---|---|
-| System tokens | Standard system prompt | Document system prompt |
-| Legend tokens | Symbol index legend | Doc index legend |
-| Map tokens | Symbol map | Doc map |
-| Map file count | Number of indexed code files | Number of indexed doc files |
-When cross-reference mode is active, legend tokens include both legends and map tokens include both maps. The file count sums both indexes.
-### Breakdown Response Shape
-Returned payload:
-- Model name
-- Current mode string
-- Cross-reference enabled flag
-- Total tokens and max input tokens
-- Cache hit rate (computed locally from tier data: cached tokens / total tokens)
-- Per-tier blocks — name, tokens, count, cached flag, contents list
-- Category breakdown — system, legend, symbol-map, files, URLs, history — with per-item details for expandable categories
-- Recent promotions and demotions
-- Session totals — prompt, completion, total, cache read, cache write
-A separate provider-cache-rate field is computed from cumulative session data when available; more accurate than the tier-based estimate since it reflects actual provider behavior. HUD and Context tab prefer provider-cache-rate when non-null, falling back to the local rate.
+The old version of this spec was mostly about our own cache. Two sub-views, a Budget / Cache pill
+toggle, tier bars in an L0–L3 palette, per-item N/threshold stability bars, promotion and demotion logs,
+synthetic `meta:` rows, an uncached synthetic tier, a fuzzy filter and sort over tier contents, a
+click-to-view map-block modal, and a manual rebuild button. All of it described AC⚡DC's belief about a
+prompt AC⚡DC assembled.
+
+None of that has a referent now, and the replacement is not a lesser version of it — it is the thing the
+old tab was an approximation *of*. Where the old tab could drift from what the provider actually
+received with no way to detect the drift from inside the app, this one renders what the engine says
+about itself. It also answers questions the old tab structurally could not: what `CLAUDE.md` costs, what
+each MCP server costs, what the system prompt is made of, which model did which part of a turn.
+
+The one real loss is per-file token attribution for selected files, which followed the file-selection
+contract out the door (see
+[decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract)).
+Files enter context because the agent read them, and `categories` reports the aggregate rather than a
+per-path split.
+
+## Shared Backend Access
+
+Both surfaces reach the engine through the same two RPCs, and neither computes anything of its own
+beyond percentages and proportional widths:
+
+- `get_context_usage()` — the composition snapshot. One round trip; no polling.
+- Per-turn usage arrives *pushed*, on `streamComplete`, so the HUD renders without a fetch.
+
+There is no shared "breakdown" RPC, no file-context synchronisation step before a read, and no
+per-context-manager targeting parameter. Those existed because the breakdown was computed from our
+in-memory state and had to be made current first; the engine's snapshot is current by construction.
+
+Subagents do not get their own snapshot. `get_context_usage()` reports the session, and a subagent's
+consumption appears in its own row and in the Session section's inventory. The old spec's
+"breakdown dispatches by context manager identity" contract is gone with the context managers.
+
 ## Context Tab
-The Context tab contains two sub-views selectable via a Budget / Cache pill toggle. Active sub-view persisted to localStorage. Both share stale-detection and refresh-on-visible behavior.
+
+Three sections, selected by a segmented control at the top: **Usage**, **Session**, **Debug**. Active
+section persisted to `localStorage`. All three share the stale-detection and refresh-on-visible
+behaviour below.
 
 ### Refresh Triggers
 
-The tab subscribes to multiple window events that signal "the breakdown payload may have changed". On every event, the tab calls `_refresh()` regardless of visibility — Context state should be current the moment the user switches to it, not after a deferred fetch resolves.
+The tab subscribes to the window events that mean "the snapshot may have changed" and calls its refresh
+on each, regardless of visibility — the tab should be current the moment the user switches to it, not
+after a deferred fetch resolves.
 
-| Event | Source | Why it triggers a refresh |
-|---|---|---|
-| `stream-complete` | `streamComplete` JRPC callback | Token usage, edit results, file count may have changed |
-| `post-response-complete` | `postResponseComplete` JRPC callback | Tier state has settled — authoritative tier display refresh |
-| `files-changed` | `filesChanged` JRPC callback | Selected files set changed, file content tokens differ |
-| `mode-changed` | `modeChanged` JRPC callback | Mode/cross-ref switched; whole breakdown shape changes |
-| `session-changed` | `sessionChanged` JRPC callback | New session; history tokens reset |
-| `active-tab-changed` | Chat panel agent-tab switch | Breakdown is per-context-manager; agent tab switches re-target |
-| `compaction-event` (stage `compacted`) | Backend compaction completion | History entries wiped and replaced; tier state shifts |
-| `agents-spawned` / `agent-closed` / `agent-mode-changed` | Backend agent lifecycle | Live-agents roster (Budget sub-view) changes |
+| Event | Why it triggers a refresh |
+|---|---|
+| `post-response-complete` | A turn just changed the context. This is the authoritative post-turn trigger |
+| `compaction-event` (stage `compact_boundary`) | The context just shrank — the most interesting moment to show |
+| `session-changed` | Resume or fork; the whole snapshot is different |
+| `mcp-status-changed` | Tool inventory and its token cost changed |
+| `permission-mode-changed` | Cheap, and the Session section shows the posture |
+| Tab becoming visible while stale | The user is looking now |
+| Manual refresh button | Explicit request |
+
+`stream-complete` is deliberately **not** a trigger. It fires before post-turn housekeeping and before
+the engine's own accounting settles, so a refresh on it reads a snapshot that is about to change. The
+HUD covers the immediate post-turn moment from pushed data; the tab waits for
+`postResponseComplete`, which carries a fresh `context_usage` payload it can adopt without a fetch at
+all.
+
+`files-changed` is no longer a trigger. Selection does not alter context.
 
 ### Refresh Queue
 
-A naive "skip when already loading" guard silently drops overlapping refresh triggers. Common case: `stream-complete` and `post-response-complete` fire close together; the first refresh wins, the second drops, and the Context tab shows pre-tier-update state until the next manual refresh click.
+A naive "skip when already loading" guard silently drops overlapping triggers, leaving the tab showing
+pre-turn state with no indication it is stale. The tab instead tracks a pending flag: when a refresh is
+in flight, an incoming trigger sets the flag and returns; the in-flight fetch's completion path checks
+the flag and re-fires once.
 
-Instead, the tab tracks a `_refreshPending` flag. When a refresh is already in flight, an incoming event sets the flag and returns. After the in-flight fetch completes, the `finally` block checks the flag and re-fires once. This collapses any number of overlapping events into "one current fetch + one queued fetch" — sufficient because the queued fetch always reads the latest backend state.
+Any number of overlapping triggers collapse into "one current fetch plus at most one queued fetch",
+which is sufficient because the queued fetch always reads the latest state. This behaviour is retained
+verbatim from the old tab — the mechanism it protected changed, the bug it fixed did not.
 
-The two-event ordering for a typical successful turn:
+### Usage Section
 
-1. `streamComplete` broadcast → `_refresh()` starts a fetch (reads pre-`_update_stability` state)
-2. `postResponseComplete` broadcast → fetch is in flight, sets `_refreshPending`
-3. First fetch returns → `finally` block sees the flag, fires a second fetch
-4. Second fetch reads post-`_update_stability` state — the UI updates with current tier data
+- **Budget gauge** — `totalTokens` against `maxTokens`, coloured green / amber / red by percentage, with the **auto-compact threshold marked on the bar**. The mark is the point of the gauge: "68% full" does not answer "am I about to be compacted?", and a marked threshold does.
+- **Category bar** — one stacked proportional bar from `categories`, in the engine's own colours, with a legend below carrying label and token count per category. Only non-zero categories appear. Deferred categories are labelled as deferred rather than silently counted, because a deferred category is not occupying context right now.
+- **Message breakdown** — conversation composition from `messageBreakdown`.
+- **Compaction forecast** — when auto-compact is enabled, the distance to the threshold in tokens and as a percentage; when it is disabled, a plain note saying so, because a disabled auto-compact changes what the gauge means.
 
-The user never sees the intermediate stale state because both fetches resolve fast (single RPC, no LLM call).
-### Budget Sub-View
-#### Layout
-- Header with current model and cache hit rate
-- Token budget bar — total used vs maximum
-- Stacked horizontal category bar showing proportional size of each category
-- Legend row with colored dots and token counts per category
-- Expandable category rows with per-item details
-- Session totals grid at the bottom
-#### Budget Bar Colors
-Green when usage is low, yellow when moderate, red when high.
-#### Stacked Category Bar
-Proportional horizontal bar visualizing relative size of each category. Each segment colored by category:
-| Category | Color |
-|---|---|
-| System | Green |
-| Symbol map | Blue |
-| Files | Amber |
-| URLs | Purple |
-| History | Orange |
-Legend row shows colored dots with labels and token counts. Only non-zero categories appear. In document mode, the symbol map label adapts (Doc Map, Sym+Docs, or Docs+Sym depending on cross-reference state).
-#### Categories
-Each category shows name, proportional bar, and token count. Expandable categories toggle to show per-item details:
-| Category | Expandable | Detail items |
+Categories are not expandable. The engine reports category totals, not per-item membership, and a
+disclosure triangle that opens onto nothing is worse than no triangle.
+
+### Session Section
+
+What this session is made of and what each part costs. This is the section that answers the question
+the old tab could not, and it is mostly a set of tables:
+
+| Group | Rows | Interaction |
 |---|---|---|
-| System prompt | No | — |
-| Symbol / doc map | Yes | Per-chunk name and tokens |
-| Files | Yes | Per-file path and tokens |
-| URLs | Yes | Per-URL with tokens |
-| History | No | — |
-Categories with zero tokens or no detail items show no toggle.
-#### Session Totals
-Fixed footer with cumulative session totals — total, prompt in, completion out, cache read, cache write. Cache read highlighted when non-zero; cache write highlighted when non-zero.
-### Cache Sub-View
-Delegates rendering to an embedded cache-tab component. When switching to the Cache sub-view, the embedded component receives a visibility call to refresh stale data.
-#### Cache Performance Header
-Summary at top with cache hit rate as a percentage label and a proportional bar. Prefers provider-cache-rate when available, falls back to local rate.
-#### Rebuild Button
-- A **🔄 Rebuild** button at the top-right of the cache body, above the performance header
-- Triggers a server-side cache tier redistribution via the rebuild RPC — see [cache-tiering.md — Manual Cache Rebuild](../3-llm/cache-tiering.md#manual-cache-rebuild)
-- Tooltip sells the outcome in user terms, not tier mechanics — e.g., "Rebuild cache — redistribute all symbols/docs into tiers L0-L3. Selected files stay in active context."
-- States — idle (🔄 Rebuild), in-flight (⏳ Rebuilding…, disabled), cross-disabled while a concurrent refresh is loading
-- On success — toast the server's message string (includes before/after item counts and per-tier distribution) and refresh the cache view
-- On restricted (non-localhost) — info toast explaining the localhost-only policy
-- On error — error toast with the server's error text; view still refreshes so the user can see current state
-- Visible to all clients but the underlying RPC is localhost-only; remote collaborators who click receive the restricted-error toast rather than triggering the rebuild
-#### Layout
-- Filter input for fuzzy match
-- Size / Name sort toggle
-- Stale indicator badge
-- Refresh button
-- Recent changes list (promotions / demotions)
-- Per-tier groups with tier totals, cached markers, expandable
-- Model and total token footer
-#### Content Group Types
-| Type | Icon | Detail |
-|---|---|---|
-| System | — | Token count |
-| Legend | — | Token count |
-| Symbols | — | File path + stability bar + tokens |
-| Doc-symbols | — | File path + stability bar + tokens |
-| Files | — | File path + stability bar + tokens |
-| URLs | — | Title + tokens |
-| History | — | Message count + tokens |
+| Memory files | Each `CLAUDE.md` / memory file with its token cost | Click opens it in the viewer |
+| System prompt sections | What the engine prepended, per section, with size | Click expands the section's text where the payload carries it |
+| Tools | Built-in, deferred built-in, and per-MCP-server groups with token cost and health | Click a server for its status detail |
+| Agents / skills / slash commands | The inventory available to this session | Click an agent or skill to open its defining file |
 
-#### Synthetic Meta Rows
+Two deliberate details:
 
-Tier content includes synthetic rows with a `meta:` prefix alongside the per-entry tracker rows. Meta rows surface sections of the assembled prompt that don't correspond to individual tracker entries — the aggregate map body (cached in L0), the file tree, fetched URLs, review-mode context, active (non-graduated) selected files, the per-turn agent-state descriptor, and the system reminder (all in the uncached tail except the cached aggregate map). Clicking a meta row opens the same map-block modal used for per-entry rows; the modal dispatches to the backend which recomputes or re-fetches the section's content.
+- **Memory files are clickable.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it.
+- **`ac-dc` appears in the tools table like any other MCP server**, with its token cost. Our own bridge is not exempt from the accounting it exists to provide (see [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)).
 
-The agent descriptor row (`meta:agent_descriptor`) and system reminder row (`meta:system_reminder`) are assembly-time injections — rebuilt fresh on every turn and prepended/appended to the outgoing user message, never persisted to history. Surfacing them in the cache viewer closes the loop on the tab's "ground truth" promise: every byte the LLM receives has a visible meta row, including transient injections that don't enter the tracker. The descriptor row is suppressed when no agents are registered; the reminder row is suppressed when the configured reminder is empty.
+### Debug Section
 
-The token counts displayed on `meta:repo_map` / `meta:doc_map` rows must match the content the click-to-view modal produces. Divergence indicates a violation of the three-way exclusion-set contract documented in [`specs-reference/3-llm/prompt-assembly.md § Symbol map exclusions`](../../specs-reference/3-llm/prompt-assembly.md#symbol-map-exclusions).
+Off by default. Diagnoses the engine, not the code:
 
-See [`specs-reference/3-llm/prompt-assembly.md § Synthetic meta rows`](../../specs-reference/3-llm/prompt-assembly.md#synthetic-meta-rows) for the full key catalog.
-#### Measured vs Unmeasured Items
-Within each tier, items split into two groups:
-- **Measured items** — non-zero token count, rendered individually with icon, name, token count, stability bar, and N/threshold label
-- **Unmeasured items** — zero token count, collapsed into a single summary line "N pre-indexed symbols/documents (awaiting measurement)"
-Unmeasured are initialized by the stability tracker from the reference graph but haven't had token counts measured yet. Label adapts — documents in doc mode, symbols in code mode.
-#### Mode-Aware Labels
-- Code mode — symbol map / pre-indexed symbols
-- Document mode — doc map / pre-indexed documents
-- Cross-reference mode — both prefixes coexist; icons differentiate symbol and doc items regardless of current mode
-#### Stability Bars
-Per-item numeric N/threshold label displayed inline, plus proportional fill bar with tier color. Tooltip shows current N and threshold. Only shown for items with an N value (symbols, files). Numeric gives precise progress; bar gives visual summary.
-#### Item Click → View Map Block
-Clicking an item name opens a modal showing the full index block for that file:
-1. Special system keys return the system prompt and legend for the current mode
-2. Current mode's index tried first
-3. Cross-mode fallback — if primary index has no data, the other index is tried (handles cross-reference mode)
-4. Error if neither index has data
-Response includes a mode field indicating which index provided the content, so the frontend can apply appropriate formatting.
-#### Fuzzy Search
-Character-subsequence matching — characters in the query must appear in order within the target but need not be contiguous. Typing `ctx` matches `context.py`, `ContextManager`, `src/ac_dc/context/manager.py`. Case-insensitive. Shares the same algorithm as the file picker's tree filter so users see consistent behavior across surfaces.
+- Recent hook traffic from `hookEvent` — which hooks fired, with payloads.
+- MCP server status detail from `get_mcp_status()`.
+- Server and CLI info from `get_server_info()`, including which `claude` binary was resolved.
+- The raw `gridRows` payload, for cross-checking our layout against the CLI's.
 
-- Filter input visible only in the Cache sub-view; empty query shows everything
-- Matches against the item's displayed path, falling back to its key name
-- Measured items are filtered individually; unmeasured items (aggregated into the "N pre-indexed …" summary line) have no per-item name and survive as long as their tier does
-- Tiers with zero measured matches and zero unmeasured items are hidden entirely — the filtered view focuses on hits
-- A "No items match …" placeholder appears when every tier is hidden
-- Filter auto-expands all surviving tiers during an active search — the user's persisted expand/collapse state is preserved and restored when the filter is cleared
-- Per-session only; not persisted to localStorage — a stale filter from a previous session would confuse more than it helps
-- Composes independently with sort, refresh, stale-detection, and the rebuild button
-#### Sort Toggle
-Size / Name toggle button switches between sorting tier contents by token count descending (default) or alphabetically. Active mode persisted to localStorage.
-#### Defaults
-L0 and active tiers expanded by default; L1/L2/L3 collapsed.
-#### Stale Indicator
-Badge appears when the tab was hidden during a stream-complete or files-changed event. Auto-refreshes on visibility.
-#### Color Palette
-Tiers use a warm-to-cool spectrum:
-- L0 — green (most stable)
-- L1 — teal
-- L2 — blue
-- L3 — amber
-- Active — orange
-- Uncached — muted grey (synthetic tier for the uncached tail; distinguishes meta rows whose content lives after the last cache breakpoint from the always-present cached tiers and from the active tier)
+`gridRows` is displayed here and **never used for layout**. It is a terminal's pre-laid-out grid;
+rendering it would couple this tab to a CLI presentation choice that can change under us.
 
-Token values in monospace. Cache writes highlighted. Errors in warning color.
+## Usage HUD
 
-#### Uncached Synthetic Tier
+Floating overlay on the viewer background, appearing after each turn.
 
-A synthetic tier named `uncached` aggregates every meta row whose content appears after the last cache breakpoint. Composition: file tree row, per-URL rows, review-context row, per-active-file rows. These sections are rebuilt on every request; no caching benefit accrues even if cache markers were placed. The tier appears after the active tier in the viewer so the user can see the uncached tail as a coherent group.
-
-The uncached tier is not present in the stability tracker's tier enum — it exists only in the context-breakdown payload and the cache viewer's rendering. Items in the uncached tier have no N/threshold values and no stability bars.
-## Token HUD (Floating Overlay)
-Floating overlay on the viewer background, appearing after each LLM response.
 ### Placement
-- Top-level element in the app-shell shadow DOM, sibling of dialog and viewer containers
-- Fixed position near a top corner, high z-index
-- Uses the RPC mixin to fetch the breakdown independently
-- Triggered by a stream-complete window event (filters out error responses)
+
+- Top-level element in the app-shell shadow DOM, sibling of the dialog and viewer containers
+- Fixed position near a top corner, high z-index — but **below the permission dialog**, which is modal over everything (see [permission-dialog.md](permission-dialog.md))
+- Triggered by the stream-complete window event, filtered to exclude errored and empty turns
+
 ### Data Flow
-1. Stream complete fires — HUD extracts token usage from result for immediate display
-2. HUD issues an async breakdown RPC for full data
-3. Once full data arrives, all sections render with complete information
-### Sections (all collapsible)
+
+One step, not two. The HUD renders entirely from the `streamComplete` payload: `usage`, `model_usage`,
+`total_cost_usd`, `duration_ms`, `num_turns`, `terminal_reason`, `permission_prompts`. Context
+percentage comes from the `context_usage` carried on `postResponseComplete`, which arrives moments
+later and updates that one line in place.
+
+The old two-phase flow — immediate partial display, then a breakdown RPC to fill in the rest — is gone.
+There is nothing left that needs a second round trip.
+
+### Sections
+
+All collapsible; collapse state persisted to `localStorage` as a serialised set of section names.
+
 | Section | Content |
 |---|---|
-| Header | Model name, cache hit percentage badge (color-coded), dismiss button |
-| Cache tiers | Per-tier proportional bar chart with per-tier sub-items showing icon, name, N/threshold label, stability bar, and token count |
-| This request | Prompt tokens, completion tokens, cache read (if > 0), cache write (if > 0) |
-| History budget | Total tokens vs max input with usage bar, colored green/yellow/red by percentage |
-| Tier changes | Promotions and demotions as individual items |
-| Session totals | Prompt in, completion out, total; cache saved and cache written when non-zero |
-### Behavior
+| Header | Model, context percentage badge (colour-coded), dismiss button |
+| This turn | Cost or billing mode, duration, engine-internal turn count, terminal reason, permission-prompt count |
+| Per-model usage | One row per entry in `model_usage` — input, output, cache read, cache creation, cost, context window |
+| Context | `totalTokens` / `maxTokens` with the auto-compact mark |
+| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play |
+| Files modified | The turn's `files_modified`, each clickable to the diff viewer |
+
+`Files modified` is new to the HUD and earns its place: the single most useful thing to know
+immediately after an agentic turn is which files changed.
+
+### Cost Under Subscription Billing
+
+`total_cost_usd` is null under a subscription. The HUD **never** renders that as `$0.00` — a zero cost
+for a turn that plainly consumed tokens reads as a broken HUD and teaches users to ignore the number
+(see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap)).
+
+Instead it labels the billing mode and shows the figures that are always meaningful: tokens, context
+percentage, and rate-limit headroom. The rate-limit section is the subscription-mode analogue of a cost
+signal, which is why it gets first-class display rather than a footnote. When `max_budget_usd` is
+configured, a spend-against-budget bar appears in its place.
+
+### Per-Model Rows Are Not Summed
+
+A turn that delegated to a subagent on a cheaper model reports two rows, and they stay two rows. "The
+expensive model did a little and the cheap model did a lot" is the shape of a well-delegated turn, and
+summing it away hides the thing worth seeing. The native engine could not express this at all — it had
+one model per request.
+
+Cache hit rate is derived per row from `cacheReadInputTokens` and `cacheCreationInputTokens`. It is a
+column, not a headline: it was headline-worthy only while AC⚡DC was the thing doing the caching.
+
+### Behaviour
+
 - Auto-hide after a few seconds, then fade out
-- Hover pauses timers; mouse leave restarts auto-hide
+- Hover pauses the timer; mouse leave restarts it
 - Dismiss button hides immediately
-- Fixed width, max-height with scroll
-- Error filtering — HUD does not appear for error responses or empty results
-- Section collapse state persisted to localStorage (stored as a serialized set of collapsed section names)
+- Fixed width, max height with internal scroll
+- Never appears for an errored or empty turn
+- A turn that ended with a mirror gap shows a marker linking to the health banner, because a HUD reporting a clean turn over a failed transcript append would be misleading
+
 ## Terminal HUD
-Printed server-side after each LLM response (not a UI component). Additionally, a one-time startup HUD is printed when the stability tracker initializes.
-### Startup Init HUD
-Printed once during server startup after stability tracker initialization completes:
-- Boxed per-tier item counts for all non-empty tiers
-- Total item count
-- Provides immediate visibility into how the reference graph was distributed
-### Post-Response HUD
-Three sections printed after each LLM response:
-#### Cache Blocks (Boxed)
-- Per-tier token counts with entry-N threshold and cached marker
-- Active tier shows token count only
-- Only non-empty tiers listed
-- Box auto-sizes to widest line
-- Cache hit percentage computed as cached tokens / total tokens
-- Each tier line followed by indented sub-item summaries grouped by type (system + legend, N symbols, N files, N history messages)
-- Sub-items aggregated by type with count and total tokens per group (uses the shared breakdown helper)
-#### Token Usage
-- Model name
-- Per-category breakdown (system, symbol/doc map, files, history, total)
-- Last-request provider-reported input and output tokens
-- Cache read and cache write counts (line omitted when both zero)
-- Session total — cumulative sum across all requests
-Mode-aware labels — "Symbol Map" in code mode, "Doc Map" in document mode. When cross-reference is active, an additional line shows the cross-referenced index's token count.
-#### Tier Changes
-- One line per change from the stability tracker's change log
-- Promotions listed first, then demotions
-- Each line shows from-tier, to-tier, and item key
+
+Printed server-side after each turn, in reduced form: model, per-model usage, cost or billing mode,
+context percentage, duration, and terminal reason. Printed for cancelled turns as well as completed
+ones — a cancelled turn still consumed tokens.
+
+Deleted with the tiering system: the boxed cache-block table, per-tier token counts with entry-N
+thresholds, the tier-changes log, the mode-aware category table, and the one-shot startup
+tier-distribution HUD.
+
 ## Invariants
-- Budget sub-view and Cache sub-view always reflect the same underlying breakdown data
-- Stale indicator always clears when the tab becomes visible and a refresh completes
-- File context is synchronized with the selected-files list before every breakdown computation
-- Breakdown dispatches to the active mode's index — no cross-mode leakage unless cross-reference mode is enabled
-- Token HUD never appears for error responses or empty results
-- HUD auto-hide is paused while the mouse is over the HUD; resumes on mouse leave
-- Section collapse state in the HUD persists across sessions via localStorage
-- Unmeasured tier items are always collapsed into a summary line; never rendered individually
-- Map-block modal dispatches to the correct index based on item key prefix, with cross-mode fallback when the primary index has no data
-- Assembly-time injections (agent descriptor, system reminder) surface as synthetic meta rows in the uncached tier; suppressed when their content is empty so the viewer doesn't show zero-token noise
-- Terminal HUD is printed after every completed LLM response, whether the stream succeeded or was cancelled
-- Startup init HUD is printed exactly once per server start, after stability tracker initialization completes
-- Cache sub-view Rebuild button is visible to all clients but rejected server-side for non-localhost callers; the restricted-error toast path is exercised rather than silently allowing a client-side dispatch
-- Rebuild button is disabled during both its own in-flight state and a concurrent context-breakdown refresh — the two reads of tracker state never overlap
-- Context tab refreshes on `post-response-complete`, not `stream-complete`, for tier-state-dependent data — `stream-complete` fires before `_update_stability` runs and would yield pre-update tracker state
-- Overlapping refresh triggers are queued via the `_refreshPending` flag rather than dropped — guarantees the final fetch sees the latest backend state regardless of how many events fired during the in-flight window
+
+- Every figure on both surfaces originates from `get_context_usage()` or from a pushed turn payload. Neither surface estimates or models context composition.
+- Category colours come from the engine's payload, not a local palette.
+- The auto-compact threshold is marked on every budget gauge while auto-compact is enabled, and its absence is labelled when it is disabled.
+- Overlapping refresh triggers collapse into one in-flight plus at most one queued fetch; no trigger is silently dropped.
+- The Context tab refreshes on `post-response-complete`, never on `stream-complete`.
+- `gridRows` is rendered only in the Debug section and never used for layout.
+- The Debug section is off by default and never required to understand normal usage.
+- Memory files, system prompt sections, and every MCP server including `ac-dc` appear in the Session section with their token cost.
+- The HUD renders without a follow-up RPC.
+- The HUD never appears for an errored or empty turn.
+- A null or zero cost is never rendered as `$0.00`; the billing mode is shown instead.
+- Per-model usage rows are never summed into one line.
+- HUD section collapse state persists across sessions via `localStorage`.
+- The terminal HUD prints after every completed turn, cancelled or not.

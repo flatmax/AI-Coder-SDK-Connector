@@ -1,12 +1,24 @@
 # Code Review
 
-A review mode that leverages git's staging mechanism to present branch changes for AI-assisted code review. By performing a soft reset, all review changes appear as staged modifications — allowing the existing file picker, diff viewer, and context engine to work unchanged. The LLM reviews code with full symbol map context, structural change analysis, and interactive conversation.
+A review mode that leverages git's staging mechanism to present branch changes for AI-assisted code
+review. By performing a soft reset, all review changes appear as staged modifications — so the file
+picker, the diff viewer, and every git tool the agent has work unchanged, on a repository whose state
+*is* the review.
+
+The conversion changed how the agent learns about the review, not the review itself. There is no longer
+a review system prompt, no injected review context block, and no pre-change symbol map held in memory.
+Instead the repository is arranged so that `git diff --cached` **is** the review, the `review_state` MCP
+tool tells the agent which arrangement it is looking at, and a read-only permission posture keeps a
+reviewer from becoming an editor by accident. Everything the old design assembled into a prompt, the
+agent can now fetch itself — and fetch at the moment it needs it, rather than once per turn.
+
 ## Architecture
 - User selects branch and base commit via an interactive git graph
 - Server verifies clean working tree, computes merge-base, performs a controlled sequence of checkouts and a soft reset
 - Result — files on disk match branch tip, git HEAD at merge-base, all review changes appear as staged modifications
 - Existing file picker, diff viewer, and context engine work unchanged
-- System prompt swapped to a dedicated review prompt; snippets swapped to review-specific set
+- Review preset activated — review snippets, review turn framing, and a read-only permission posture. No system prompt is involved
+- The `review_state` MCP tool starts answering with review facts instead of "not in review"
 - Exit reverses the state — soft reset to branch tip, checkout original branch
 ## Prerequisites
 ### Clean Working Tree
@@ -23,11 +35,20 @@ Ordered operations to transform the repository into review state:
 2. Compute merge-base between branch tip and original branch (the branch HEAD was on before review — typically master/main)
 3. Checkout the original branch (ensures a known starting point)
 4. Checkout the merge-base commit (detached HEAD, disk at pre-review state)
-5. **Build pre-change symbol map** — symbol index runs on disk
-6. Checkout the branch tip by SHA (detached HEAD, disk at reviewed state)
-7. Soft reset to merge-base — HEAD moves, all feature branch changes become staged modifications
-8. Clear file selection (frontend and server both perform this; defense in depth)
-After step 7, the repository state:
+5. Checkout the branch tip by SHA (detached HEAD, disk at reviewed state)
+6. Soft reset to merge-base — HEAD moves, all feature branch changes become staged modifications
+7. Re-index — the symbol and doc indexes now reflect the reviewed code on disk
+8. Switch the permission posture to read-only (see § Read-Only Mode) and remember the previous mode
+9. Clear file selection (frontend and server both perform this; defense in depth)
+
+The old sequence had a step between 4 and 5: build a **pre-change symbol map** while disk sat at the
+merge-base, hold it in memory, and inject it into every prompt. It is gone. The agent reaches the
+pre-change state the same way a human reviewer does — `git show`, `git diff`, `git log` — and an index
+of files that are no longer on disk cannot be served by `file_symbols` without lying about paths. What
+the map bought (topology comparison across the change) is now the agent's own work, done on demand and
+only when the review actually calls for it.
+
+After step 6, the repository state:
 | Aspect | State | Effect |
 |---|---|---|
 | Files on disk | Branch tip content | User sees reviewed code; symbol map reflects it |
@@ -40,17 +61,21 @@ After step 7, the repository state:
 - Cascades through candidates — original branch, then main, then master
 - Falls back to parent of user-selected commit if all candidates fail
 ### Branch Tip Checkout by SHA
-- Step 6 checks out by SHA, not by branch name
+- Step 5 checks out by SHA, not by branch name
 - Handles local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD at the ref pointer rather than the actual commit
 ### File Selection Clearing
-- Server-side (authoritative) — LLM service clears selected files as part of start-review, via direct property assignment (not the public setter — avoids a redundant broadcast during review entry)
+- Server-side (authoritative) — the engine service clears selected files as part of start-review, via direct property assignment (not the public setter — avoids a redundant broadcast during review entry)
 - Frontend-side (responsive) — files tab clears its own selection state on the review-started event
 - Both are required — the server clear is authoritative if events race; the frontend clear prevents a visual stale-selection window
 ## Git State Machine — Exit Sequence
 1. Soft reset to branch tip — HEAD moves, staging clears
 2. Checkout original branch — HEAD reattaches to the branch the user was on before review
-3. Rebuild symbol index — reflects restored state
+3. Rebuild symbol and doc indexes — reflects restored state
+4. Restore the permission mode remembered at entry, and the non-review preset
 If the original branch no longer exists, HEAD remains detached at branch tip SHA and the user is informed.
+
+The permission restore happens even when the git restore fails. A half-exited review that leaves the
+agent read-only is recoverable; one that silently re-arms writing against a detached HEAD is not.
 ## Error Recovery
 - If any entry step fails, the repo module attempts to return to the original branch
 - If that fails, the error is reported as-is
@@ -114,39 +139,59 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 - Branch data — name, SHA, is-current flag, is-remote flag
 - Has-more flag for pagination
 - Branch filtering — remove symbolic refs, arrow entries, bare remote aliases (e.g. `origin` when `origin/master` exists)
-## System Prompt Swap
-- On review entry, system prompt swapped from the standard coding prompt to a dedicated review prompt
-- Extra prompt still appended (user customizations apply in both modes)
-- Original prompt saved so it can be restored on exit
-- If server crashes during review, next restart loads the standard prompt (review state is not persisted)
-## Review Context in LLM Messages
-Review context is inserted as a dedicated section in the message array, between URL context and active files. See [prompt-assembly.md](../3-llm/prompt-assembly.md) for placement.
-### Review Context Content
-- Review summary — branch, merge-base and tip short SHAs, commit count, files changed, additions, deletions
-- Commit list — short SHA, message, author, relative date per commit
-- Pre-change symbol map — symbol map from the merge-base commit, captured during entry
-- Diffs for selected files — forward patches (`base..tip`) showing what the branch added relative to the review base
-### Re-Injection
-- Review context is re-injected on each message (like URL context)
-- Always current with the user's file selection
-- Stability tracker handles normal content tiering for file contents; the review block itself is rebuilt each message
-### Pre-Change Symbol Map
-- Captured during entry (step 5) while disk is at merge-base
-- Held in memory on the LLM service during the review session
-- Not persisted to disk — rebuilt if needed by re-running entry
-- Having both pre-change and current symbol maps lets the LLM compare topology before and after the reviewed changes
-### Diffs for Selected Files
-- When a file is selected (checked in the file picker), its full current content is included in working files (as usual)
-- Additionally, a forward diff (`git diff base..tip -- path`) is included in the review context section so the LLM sees the per-file change in the conventional direction (`+` lines added by the branch, `-` lines removed)
-- Selected files contribute both content and diff
-- Unselected files contribute neither
-- Deleted files contribute only the diff (no current content exists on disk)
-- Diffs run against the object database, so working-tree or index state during the review session does not affect the output
-### Token Budget
-- Large reviews cannot fit all file diffs
-- User controls token budget through file selection
-- Review status bar shows "N of M diffs in context" so the user knows how many changed files are currently included
-- Typical workflow — review files in batches via the file picker
+## Preset Swap
+
+- On review entry the review preset activates: review snippets, the review turn-framing hint, and the read-only posture
+- No system prompt is swapped, because AC⚡DC has none. A user who wants standing review instructions puts them in `CLAUDE.md`, which the CLI reads through `setting_sources` and which therefore applies in review exactly as it does elsewhere — see [decisions § CC-11](../plan/decisions.md#cc-11--setting_sources-includes-the-project-so-claudemd-is-live)
+- A project that wants a genuinely different reviewer persona uses a Claude Code **agent** or **skill**, named in the preset. That is the platform's mechanism for the job and it is versioned in the repo, which the old `review.md` never was
+- Preset state is not persisted. After a crash the next start comes up in the default preset, matching the fact that review git state is not persisted either
+
+## How the Agent Learns It Is in a Review
+
+Three channels, in order of how much they carry:
+
+**1. The repository itself.** This is the load-bearing one, and it needs no protocol. Files on disk are
+the reviewed code; `git diff --cached` is exactly the branch's change; `git log merge-base..tip` is the
+commit list. Every one of the agent's own tools sees this without being told.
+
+**2. The `review_state` MCP tool.** Reviewed branch, target branch, merge-base, and the changed-file
+list with status and diff stats. Its real job is narrower than it looks: it tells the agent that the
+repository is in AC⚡DC's *soft-reset* arrangement, which changes what `git status` means. A detached
+HEAD with a hundred staged modifications is otherwise indistinguishable from a user mid-disaster. See
+[`../3-engine/mcp-bridge.md` § `review_state`](../3-engine/mcp-bridge.md#review_state).
+
+**3. Turn framing.** The user's turn carries the review's identity the way it carries selected files —
+as a short hint, not a payload. It never carries diffs.
+
+### What is no longer injected
+
+The old design built a review context block and re-injected it on every message: summary, commit list,
+pre-change symbol map, and forward diffs for every selected file. All of it is gone.
+
+The reason is not economy, it is staleness and duplication. The block was rebuilt every turn against
+the current selection, which meant the model saw diffs it had not asked for, in an order chosen by the
+picker, for as long as the review lasted. An agent that fetches `git diff -- path` when it decides to
+look at `path` reads the same bytes, once, at the moment they are relevant — and can read the surrounding
+file, the history of the hunk, or the test that covers it, none of which the block could offer.
+
+### Diffs and selection
+
+- Selecting a file in the picker is a **hint** that the user is looking at it, nothing more (see [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract))
+- The agent decides what to read. A selected file it judges irrelevant costs nothing; an unselected file it needs is one tool call away
+- Deleted files are the case that used to need special handling — no content on disk, diff only. The agent's `git show base:path` covers it without a rule
+- Diffs the agent runs against the object database are unaffected by working-tree or index state during the session, which is the same property the old block relied on
+
+### No token budget to manage
+
+The old spec asked the user to manage a token budget through file selection, and showed "N of M diffs
+in context" to support it. Both are gone: AC⚡DC does not assemble the context and cannot count it.
+What the status bar shows instead is review shape — changed files, additions, deletions — and what
+guards the window is the engine's own compaction. The context HUD reports usage after the fact; see
+[`../3-engine/context-visibility.md`](../3-engine/context-visibility.md).
+
+A large review is still a large review. The difference is that the agent paces itself through it with
+tool calls instead of the user pacing it through checkbox batches.
+
 ## UI Components
 ### Review Mode Banner
 - Displayed at the top of the file picker when review active
@@ -166,14 +211,13 @@ Review context is inserted as a dedicated section in the message array, between 
 ### Review Status Bar
 - Slim bar above chat input
 - Shows review summary — branch, commit count, files changed, additions/deletions
-- Diff count — "N of M diffs in context"
-- Empty-selection prompt — "Select files to include diffs"
+- Changed-file count, additions, deletions
+- No "N of M diffs in context" counter — nothing about the review is injected, so there is no in-context set to count. A counter that reported file selection under that label would be a lie about what the model can see
 - Exit Review button
-### File Selection for Review Diffs
-- No separate chip-per-file UI for toggling diffs
-- Uses standard file selection — file picker checkboxes and file mentions in chat
-- Any selected file that is also in the review's changed file list automatically has its reverse diff included
-- Avoids duplicating the file picker's functionality, scales naturally to large reviews
+### File Selection in Review
+- No separate chip-per-file UI. Standard file selection — picker checkboxes and file mentions in chat
+- Selection is a hint about attention, not a diff-inclusion switch. The wording in the UI matters here: "files you're looking at", never "files in context"
+- Scales naturally to large reviews because nothing grows with the number of boxes ticked
 ### Diff Viewer in Review Mode
 - Operates unchanged
 - Left side (original) — file content from HEAD (pre-review state)
@@ -188,12 +232,12 @@ Review context is inserted as a dedicated section in the message array, between 
 - Empty diffs surface as an info toast ("No diff available for that commit")
 - The diff shown is `commit..working-tree`, not a pure parent-diff — useful during review because the user is asking "what did this commit touch in my current view's context"
 ### Review Snippets
-- Review-mode snippets stored alongside code and doc snippets in the unified snippets file
-- Snippet RPC checks review state first and returns review snippets when in review mode
+- Review snippets stored alongside the code and doc preset groups in the unified snippets file
+- The snippet RPC checks review state first and returns review snippets when a review is active, ahead of the active preset
 - Frontend does not need to distinguish — always calls the single RPC and renders whatever is returned
 - Examples — full review, security review, commit walkthrough
 ## Review State
-Held in memory on the LLM service:
+Held in memory on the engine service:
 - Active flag
 - Branch being reviewed
 - Branch tip SHA (for restoration)
@@ -203,11 +247,13 @@ Held in memory on the LLM service:
 - Commit list
 - Changed file list with status
 - Aggregate stats — commit count, files, additions, deletions
-- Pre-change symbol map
-State is not persisted across server restarts.
+- Permission mode at entry, for restoration on exit
+State is not persisted across server restarts. It is also the source for both the `get_review_state`
+RPC and the `review_state` MCP tool, which project the same in-memory record for two different
+audiences.
 
 ### Broadcast Events
-- On successful `start_review`, the backend broadcasts `reviewStarted` with the full review-state payload (pre-change symbol map stripped, matching `get_review_state()`)
+- On successful `start_review`, the backend broadcasts `reviewStarted` with the full review-state payload, matching `get_review_state()`
 - On `end_review` the backend broadcasts `reviewEnded` with the empty-state review shape (`active: false`, null fields)
 - Both events are broadcast to every connected client — the frontend shell re-dispatches as `review-started` / `review-ended` window events, which the files-tab listens for
 - Files-tab's handlers populate / clear the picker's `reviewState` prop (driving the banner) and trigger a file-tree reload so the picker reflects the soft-reset state
@@ -216,32 +262,42 @@ State is not persisted across server restarts.
 - No changes — staged files appear naturally with their normal badges and diff stats
 ### Diff Viewer
 - No changes — pre-review HEAD vs reviewed disk is a standard staged-changes diff
-### Symbol Map
-- Current symbol map reflects the reviewed codebase (disk files)
-- Pre-change symbol map injected in review context
+### Symbol and Document Indexes
 
-### Cache Tiering
+- Both are re-indexed on entry and on exit, because disk content changes underneath them
+- The indexes always describe what is on disk, which during a review is the reviewed code. There is no second index of the pre-change state, and `symbol_map` never mixes the two
+- The agent reaches pre-change structure through git, not through us
 
-- Review context (summary, commit log, pre-change symbol map) can graduate to cached tiers since it doesn't change during the review session
-- File diffs stay in the active tier as the user toggles selection
+### History
 
-### History and Compaction
+- Review conversations use the same mirrored history as any other turn. Nothing about a review is special in the transcript except the system event that records entry and exit
+- Compaction is the engine's, and it may compact away the early part of a long review. This is a real behaviour change worth stating plainly: the old design re-injected review context every turn precisely so compaction could not lose it. Now it can. What makes that acceptable is that the facts are recoverable — `review_state` and `git` are both one call away, and a compacted agent that needs the branch name asks for it
 
-- Review conversations use the standard history and compaction system
-- Review context is re-injected on every message (like URL context) so compaction of older messages doesn't lose it
+### Streaming
 
-### Streaming Chat
-
-- Chat operates normally during review
-- Review context is additional content in prompt assembly — no changes to streaming, edit parsing, or completion flow
+- Chat operates normally during review. No special-casing in the pump, no post-response edit step to skip, because there is no edit step
 
 ## Read-Only Mode
 
-- Review mode is explicitly read-only — edits are never applied to disk
-- The streaming handler checks the review-active flag and skips the edit-application step entirely
-- Edit blocks still appear in the response for reference, but the apply step is a no-op
-- Commit message generation is also skipped — the commit button is disabled in the UI
-- A future enhancement could support suggested fixes that are applied on user confirmation
+Review is read-only, and enforcing that is now a **permission** problem rather than a pipeline one.
+This is the sharpest single consequence of the conversion in this feature.
+
+The old enforcement was structural and total: edits reached disk only through AC⚡DC's apply step, so
+skipping that step during review made writes impossible. The agent writes to disk itself now, through
+the CLI, and no flag of ours sits between it and the filesystem.
+
+So review entry sets the permission posture to a read-only one — `plan` mode, the platform's own
+"read and reason, no writes, no commands" state (see
+[`../3-engine/permissions.md` § Permission Mode](../3-engine/permissions.md#permission-mode)) — and
+remembers the previous mode for exit. Consequences:
+
+- The enforcement is the CLI's, which is stronger than a rule list of ours could be: it covers `Bash`, which can write files by other means, and any future write-capable tool we have not enumerated
+- It is **overridable**, and honestly so. A user who switches out of `plan` mid-review can let the agent edit. The banner shows the posture next to the review branch for exactly this reason, and a mode change during review is recorded as a system event in the transcript
+- The user's own writes are not restricted. Diff-viewer saves and SVG edits go through the repository layer, not the engine, and remain available — a reviewer annotating a file is not the failure mode this guards against
+- Commit-message generation and the commit button stay disabled during review, as before. HEAD is at the merge-base; a commit there would be wrong regardless of who asked for it
+
+The old "edit blocks still appear for reference" behaviour has no successor and needs none: an agent in
+`plan` mode proposes changes in prose, which is what a reviewer wanted from those blocks anyway.
 
 ## Limitations
 
@@ -258,13 +314,13 @@ State is not persisted across server restarts.
 ### Root Commits
 
 - If the base commit is the first commit in the repository (no parent), the pre-review state is an empty tree
-- Pre-change symbol map will be empty, and all files appear as new additions
+- Every file appears as a new addition, and `git diff` against the merge-base shows the whole repository
 
 ### Large Reviews
 
-- Reviews with hundreds of changed files may exceed token budgets
-- User-driven file selection keeps the context manageable
-- The LLM can review files incrementally across multiple messages
+- Reviews with hundreds of changed files will not fit in one context window, and no arrangement of ours changes that
+- The agent paces itself: `review_state` for the file list, then diffs in batches of its choosing, with the engine compacting behind it
+- The user's lever is the request ("review the auth changes first"), not the checkbox set
 
 ### Branch Switching During Review
 
@@ -273,12 +329,13 @@ State is not persisted across server restarts.
 
 ## Invariants
 
-- Edits are never applied to disk while review mode is active
-- The pre-change symbol map reflects the merge-base state, not the branch tip
+- Review entry sets a read-only permission posture and records the previous one; exit restores it even if the git restore fails
+- The read-only guarantee is the engine's, and is visible in the UI rather than assumed — a user who overrides it can see that they have
+- No index ever describes the pre-change state; the indexes describe disk
 - Exit always restores the original branch, or leaves HEAD detached with an informative error
 - Clean working tree is enforced before entry — a dirty tree can never enter review mode
 - File selection is cleared on review entry by both server and frontend
-- Review context is re-injected on every message during the review session
+- `review_state` answers with review facts while a review is active and with an explicit not-in-review result otherwise; it never fabricates
 - Review state is never persisted across server restarts
 - `reviewStarted` and `reviewEnded` are broadcast to every connected client whenever the server-side review state changes — frontends never infer entry/exit from the RPC return value alone
 - The review-history graph is read-only — clicking a commit never mutates review state or triggers selection changes; it only drives the diff viewer's ad-hoc comparison panel

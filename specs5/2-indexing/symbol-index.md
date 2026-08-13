@@ -1,11 +1,11 @@
 # Symbol Index
 
-A tree-sitter based code analysis engine. Extracts classes, functions, variables, and imports from source files to produce a compact textual symbol map for LLM context and to support editor features (hover, go-to-definition, completions).
+A tree-sitter based code analysis engine. Extracts classes, functions, variables, and imports from source files to produce a compact textual symbol map, served to the agent as an MCP tool and to the editor as language features (hover, go-to-definition, completions).
 
 ## Architecture
 
 - Orchestrator coordinates parser, per-language extractors, cache, import resolver, reference graph, and formatter
-- Two formatter outputs: context (no line numbers, for LLM) and LSP (with line numbers, for editor)
+- Two formatter outputs: compact (no line numbers, for the `symbol_map` and `file_symbols` tools) and LSP (with line numbers, for the editor)
 - Singleton tree-sitter parser with multi-language support
 - Per-file mtime-based cache
 
@@ -75,17 +75,18 @@ A tree-sitter based code analysis engine. Extracts classes, functions, variables
 - Path aliases — frequent prefixes get short aliases computed from reference frequency
 - Ditto marks — repeated reference lists are collapsed
 - Test file collapsing — test files show only summary counts (classes, methods, fixtures)
-- Stable ordering — files maintain position across regenerations for cache stability
+- Stable ordering — files maintain position across regenerations, so a repeated `symbol_map` call is diffable and hits the agent's own prompt cache
 - Instance variables listed as indented nested entries under their class
 
 ## Chunked Output
 
-- Symbol map can be split into chunks for cache tier distribution
+- Symbol map can be split into chunks with a continuation token, because a large repo's map exceeds a
+  reasonable tool response size. Chunk boundaries are file boundaries, never mid-file
 
 ## Per-File Blocks
 
 - Individual file symbol blocks can be generated independently
-- Stable signature hash enables change detection for the stability tracker
+- Stable signature hash enables cheap change detection: a re-index that produces an identical hash for a file needs no downstream work
 
 ## Indexing Pipeline
 
@@ -95,16 +96,44 @@ A tree-sitter based code analysis engine. Extracts classes, functions, variables
 ## Stale Entry Cleanup
 
 - Files in the in-memory index but not in the current file list are removed from memory and invalidated in the cache
-- This handles files deleted from disk or removed from git tracking between requests
-- Must run before the stability tracker builds its active-items list, or deleted files will re-enter the tracker
+- This handles files deleted from disk or removed from git tracking, including by the agent's own `Bash` calls
+- Must run before an index-reading tool answers, or a deleted file reappears in the map and the agent is sent to read a path that no longer exists
+
+## Consumers
+
+The index has three consumers, none of which is prompt assembly:
+
+1. **Monaco language features** — hover, go-to-definition, find-references, and completions in the
+   diff viewer, via the LSP-shaped RPCs. This is the primary consumer and the reason the index
+   survived the engine conversion.
+2. **The agent, via the MCP bridge** — `symbol_map`, `file_symbols`, and `find_references` tools. See
+   [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md).
+3. **Browser navigation surfaces** — file picker outlines and the file-navigation grid.
+
+The agent and the browser read the **same index instance**. A symbol resolvable in Monaco is
+resolvable by the agent, and vice versa; there is no second copy and no divergence to reconcile.
 
 ## Snapshot Discipline
 
-Re-indexing happens only at request boundaries — specifically, at the start of each streaming request before prompt assembly. Within the execution window of a single request, the index is treated as a **read-only snapshot**: symbol map queries, per-file block lookups, and reference graph queries all return consistent data.
+Re-indexing happens at **tool-call boundaries**. Within the execution window of a single index query
+the index is a **read-only snapshot**: symbol map queries, per-file block lookups, and reference graph
+queries all return consistent data.
 
-This matters for future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) — multiple agents executing within one user request share the same snapshot. Agents never see mid-execution re-indexing. Re-indexing between iterations (planner → agents → assessor → next planner) uses the standard request-boundary mechanism; no special parallel-agent logic is needed.
+The old contract was per-request, which no longer holds: a single agentic turn may rewrite dozens of
+files, and there is no request boundary between the rewrite and the agent's next question about the
+code. Concretely, the contract is now:
 
-The index is not thread-safe for concurrent writes. Only one re-indexing pass runs at a time, and it runs on the event loop thread (or in an executor with a barrier). Concurrent reads from multiple threads within the execution window are safe because the index is not being mutated during that window.
+- A file-mutating tool call triggers an incremental re-index of the paths it touched, debounced so a
+  burst of writes does not thrash.
+- A pending re-index is **flushed synchronously before any index-reading tool returns**.
+
+The flush is not an optimisation detail — without it, an agent that just edited a file gets a map
+that predates its own edit and reasons confidently from stale structure. Misleading the agent with our
+own tool is worse than having no tool.
+
+The index is not thread-safe for concurrent writes. Only one re-indexing pass runs at a time, and it
+runs on the event loop thread (or in an executor with a barrier). Concurrent reads from multiple
+threads within a query window are safe because the index is not being mutated during that window.
 
 ## LSP Queries
 
@@ -129,7 +158,7 @@ The index is not thread-safe for concurrent writes. Only one re-indexing pass ru
 ## Caching
 
 - Per-file in-memory cache, mtime-based invalidation
-- Symbol map snapshot written to per-repo working directory after each LLM response (not before the request)
+- No on-disk map snapshot. The map is assembled in memory on demand; the per-file cache is what makes that cheap
 - Import resolution cache cleared when new files are detected
 
 ## Indexing Exclusions

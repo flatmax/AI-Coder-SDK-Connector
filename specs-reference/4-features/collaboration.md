@@ -1,6 +1,6 @@
 # Reference: Collaboration
 
-**Supplements:** `specs4/4-features/collaboration.md`
+**Supplements:** `specs5/4-features/collaboration.md`
 
 This is the canonical owner for admission message types, timeout values, and the share-info payload. Pre-JRPC handshake messages use raw WebSocket text frames, not JSON-RPC — the server hasn't created a JRPC remote for the pending client yet.
 
@@ -283,7 +283,7 @@ If this behavior is a concern for a given deployment, the recommended path is st
 
 ## Cross-references
 
-- Behavioral contracts (admission flow, role promotion, UI restrictions, first-connection handling): `specs4/4-features/collaboration.md`
+- Behavioral contracts (admission flow, role promotion, UI restrictions, first-connection handling): `specs5/4-features/collaboration.md`
 - RPC method signatures for Collab service: `specs-reference/1-foundation/rpc-inventory.md` § Service: Collab
 - Restricted error shape reused by mutating methods: `specs-reference/1-foundation/rpc-inventory.md` § Restricted error shape
-- WebSocket transport layer (bind addresses, port probing): `specs4/1-foundation/rpc-transport.md`
+- WebSocket transport layer (bind addresses, port probing): `specs5/1-foundation/rpc-transport.md`

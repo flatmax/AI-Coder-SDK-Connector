@@ -1,6 +1,19 @@
 # Claude Code Frontend
 
-**Status:** future — not implemented. This document captures the design thinking from an exploratory conversation. Revisit when token cost on the native engine becomes the dominant complaint, or when a user asks for Claude Code's tool loop against an AC⚡DC repo.
+**Status:** superseded — preserved as the origin document for the conversion. Kept verbatim
+(apart from this header) because its reasoning is still the best statement of *why*, and the
+specs assume the reader has met it.
+
+Where this document and the rest of `specs5/` disagree, the specs win. The disagreements are
+enumerated in [`sdk-surface.md § Corrections to the origin brief`](sdk-surface.md#corrections-to-the-origin-brief);
+the two most consequential are that the conversion is a **total replacement** rather than a mode
+([`decisions.md § CC-1`](decisions.md#cc-1--total-replacement-not-a-dual-engine-mode-user)), and that
+the open question about context visibility has been **answered** — `get_context_usage()` gives us
+`/context` as live data ([`decisions.md § CC-4`](decisions.md#cc-4--claude-codes-context-is-visualised-not-guessed-user)).
+
+Original status line, as written: *future — not implemented. This document captures the design
+thinking from an exploratory conversation. Revisit when token cost on the native engine becomes the
+dominant complaint, or when a user asks for Claude Code's tool loop against an AC⚡DC repo.*
 
 Sibling in spirit to `mcp-integration.md`: both describe adopting an external Anthropic surface. The difference in scope matters and is the central caveat of this document — MCP *extends* the native LLM engine, whereas this design *replaces* it. See [What this is not](#what-this-is-not).
 

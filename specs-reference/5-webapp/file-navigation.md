@@ -1,6 +1,6 @@
 # Reference: File Navigation Grid
 
-**Supplements:** `specs4/5-webapp/file-navigation.md`
+**Supplements:** `specs5/5-webapp/file-navigation.md`
 
 ## Numeric constants
 
@@ -124,6 +124,6 @@ Escape while HUD is visible hides the HUD immediately (no fade) without navigati
 
 ## Cross-references
 
-- Behavioral specification (grid operations, HUD, node creation): `specs4/5-webapp/file-navigation.md`
+- Behavioral specification (grid operations, HUD, node creation): `specs5/5-webapp/file-navigation.md`
 - Diff viewer integration (refetches on every navigate-file, no per-node viewport cache): `specs-reference/5-webapp/diff-viewer.md` § No caching across switches
 - Global keyboard shortcuts (Alt+1..M bubble-phase; Alt+Arrow capture-phase): `specs-reference/5-webapp/shell.md`

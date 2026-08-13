@@ -1,6 +1,6 @@
 # Reference: App Shell
 
-**Supplements:** `specs4/5-webapp/shell.md`
+**Supplements:** `specs5/5-webapp/shell.md`
 
 ## Numeric constants
 
@@ -94,52 +94,49 @@ Focus changes between tab switch and search activation clear the selection. Read
 
 Without throttling, rapid resize events cause feedback loops: scroll → layout shift → resize → `layout()` → forced reflow → visible jank.
 
-### `binaryFilesSkipped` server-push event
+### Viewport-scoped overlay z-index ladder
 
-Fired by the backend during `sync_file_context` whenever one or more selected files fail binary detection. Payload:
+The shell owns every viewport-scoped overlay and must keep their stacking order explicit, because a
+permission request blocks the turn and cannot be allowed to render under anything.
 
-```pseudo
-{
-    paths: list[str],   # repo-relative paths that were rejected
-}
-```
+| Layer | z-index | Notes |
+|---|---|---|
+| Dialog panel (docked or undocked) | 10 | Draggable, minimizable — the reason nothing important may live inside it |
+| Usage HUD | 500 | `pointer-events: none` on host, `auto` on the overlay child |
+| Toast layer | 900 | |
+| Startup overlay | 1000 | |
+| Permission dialog + scrim | 2000 | Above the startup overlay, per `specs5/5-webapp/permission-dialog.md` § Placement |
 
-Registered as a method on `AppShell` so jrpc-oo's `addClass(this, 'AcApp')` exposes it. Handler dispatches a `binary-files-skipped` window event and renders a single warning toast naming the rejected files and pointing the user at the Doc Convert tab. Toast wording is short — typically a leading file name plus "(+N more)" when the list is long, capped to keep the toast a single line.
+The permission dialog is the only surface above the startup overlay. A resume that replays a pending
+`can_use_tool` can produce a request while startup is still running, and a dialog rendered underneath the
+overlay would deadlock the session behind an invisible prompt.
 
-The picker's checkboxes update independently via the `filesChanged` broadcast that fires alongside this event — `binaryFilesSkipped` carries only the names for the toast, while `filesChanged` carries the post-trim selection that drives picker state. The two events are deliberately separate: future binary-rejection paths (e.g., a paste-binary handler in the chat input) might fire one without the other.
+`<ac-cache-warmup-progress>` and `<ac-compaction-progress>` are deleted from this ladder. Neither has a
+backend: there is no cache warmer, and compaction is the engine's own, announced after the fact via
+`compactionEvent` stage `compact_boundary` rather than driven through a progress UI of ours.
 
-Cross-reference: `specs-reference/3-llm/context-model.md` § Binary files in selection are trimmed at turn-start materialisation.
+`binaryFilesSkipped` is also gone. It was fired from `sync_file_context` when a selected file failed
+binary detection, and both halves of that sentence are obsolete — there is no turn-start materialisation
+step and no file-selection contract to trim. A binary file the agent tries to read fails in the agent's
+own tool result, where the agent can react to it (see `specs5/5-webapp/file-picker.md` § Binary files).
 
-### Cache warmup overlay
-
-The `<ac-cache-warmup-progress>` component renders the cache warmer's countdown and firing UI. Mounted at viewport scope (sibling of `<ac-compaction-progress>` and `<ac-token-hud>`).
+### Permission dialog hosting
 
 | Constant | Value |
 |---|---|
-| Position | `position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%)` |
-| z-index | 500 (above the dialog at z 10 and below modal overlays at 1000+) |
-| Width | min-width 280px, content-driven |
-| Pointer events | `none` on host, `auto` on overlay child (so users can dismiss accidental hovers without intercepting clicks elsewhere) |
-| Success flash duration | 1500ms before fade |
-| Error flash duration | 1500ms before fade |
-| Fade transition | 400ms |
-| Bar fill transition | `width 1s linear` (matches the 1Hz countdown tick) |
+| Mount point | Top-level element in the app-shell shadow DOM, sibling of the dialog and viewer containers |
+| Scrim | `position: fixed`, full viewport, click handler that does nothing (deliberately, not accidentally) |
+| Global shortcut suppression | Every document-level handler (Alt+1..4, Alt+M, Ctrl+Shift+F) returns early while `_permissionOpen` is true |
+| Focus restore target | The element that held focus when the *first* queued request arrived, not the most recent one |
+| Title marker | `(N) ` prefix on `document.title` while the queue is non-empty and the document is hidden |
 
-State machine driven by four window events:
-
-| Event | New state | Visual |
-|---|---|---|
-| `cache-warmup-countdown` | `counting` | Progress bar fills as `(total - remaining) / total`, label "Refreshing cache in… {remaining}s" |
-| `cache-warmup-firing` | `firing` | Spinner, label "Sending cache warm-up…" |
-| `cache-warmup-complete` (success: true) | `success` for 1500ms → fade → `idle` | Green border-left, ✓ glyph, label "Cache refreshed" |
-| `cache-warmup-complete` (success: false) | `error` for 1500ms → fade → `idle` | Red border-left, ⚠ glyph, label "Cache warm-up failed: {reason}" |
-| `cache-warmup-cancelled` | `idle` immediately | No flash, no fade — closes silently so a user-initiated stream isn't visually competed-with |
-
-Cross-reference: `specs-reference/3-llm/streaming.md` § Cache warmer events for the broadcast schemas, and `specs4/3-llm/cache-tiering.md` § Cache Warmer for the backend lifecycle.
+The suppression check is on the shell's own flag rather than on `document.activeElement` containment: the
+dialog traps focus, but a keydown fired at the document during the settling interval — before any control
+holds focus — would otherwise still reach the shell's handlers.
 
 ### Proportional rescaling baselines
 
-Used by the "same fraction of viewport" rule in `specs4/5-webapp/shell.md` § Proportional Rescaling.
+Used by the "same fraction of viewport" rule in `specs5/5-webapp/shell.md` § Proportional Rescaling.
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -169,6 +166,10 @@ The formula is `scaled = round(stored_pixels * current_viewport / baseline_viewp
 | `ac-last-open-file` | string (file path) | Last-opened file for restore on reload |
 | `ac-last-viewport` | JSON `{path, type, diff?: {...}, preview?: {open, scrollTop}, svg?: {viewBox, presentation}}` | Last viewport state of the last-opened file. The `type` field discriminates restore routing: `"diff"` routes to the diff viewer (Monaco), `"svg"` routes to the SVG viewer. For `.svg` paths, `type` reflects which viewer the user last had active — a user who toggled to text diff gets `type: "diff"` and a `diff` block; a user editing visually gets `type: "svg"` and an `svg` block. The blocks are mutually exclusive in practice; schema permits both for future mixed-mode viewers but only one is read per restore. `diff` shape: `{scrollTop, scrollLeft, lineNumber, column}`. `preview` shape: `{open: boolean, scrollTop: px}` — present only for markdown/TeX; restore treats missing as false. `svg` shape: `{viewBox: {x, y, width, height}, presentation: boolean}` — present only when `type === "svg"`; `viewBox` values are in SVG user units (matches `SvgEditor.getViewBox()`), `presentation` is whether the right pane was full-width with the left pane collapsed. Unknown or absent branches mean the feature wasn't used — restore treats missing as the default (no preview, no presentation, no SVG block). |
 | `ac-dc-enrichment-unavailable-shown` | `"true"` | One-shot flag suppressing the enrichment-unavailable warning toast across browser sessions |
+| `ac-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | Remembered answer to the file picker's denial-scope prompt. `ask` (the default) re-prompts every time; `local` writes deny rules to `.claude/settings.local.json`. Resettable from Settings (see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt) |
+| `ac-dc-permission-chime` | `"true"` / `"false"` | Whether a permission request arriving while the document is hidden plays a chime (default `"true"`) |
+| `ac-dc-context-section` | `"usage"` / `"session"` / `"debug"` | Active section of the Context tab |
+| `ac-dc-hud-collapsed` | JSON `string[]` | Collapsed HUD section names |
 
 **Repo-scoped keys:** `ac-last-open-file` and `ac-last-viewport` use a `_repoKey(key, repoName)` helper producing `{key}:{repoName}`. Prevents opening a different repo from restoring the wrong file. Falls back to the bare key when repo name not yet known.
 
@@ -238,7 +239,9 @@ File reopen is deferred until the startup overlay dismisses (on `startupProgress
 
 ## Cross-references
 
-- Behavioral specification: `specs4/5-webapp/shell.md`
+- Behavioral specification: `specs5/5-webapp/shell.md`
 - Reconnection backoff and startup progress: `specs-reference/6-deployment/startup.md`
-- Token HUD integration: `specs-reference/5-webapp/viewers-hud.md`
+- Usage HUD and Context tab integration: `specs-reference/5-webapp/viewers-hud.md`
 - File navigation grid (Alt+Arrow capture-phase handler): `specs-reference/5-webapp/file-navigation.md`
+- Permission dialog behaviour: `specs5/5-webapp/permission-dialog.md`; payload shapes and caps: `specs-reference/3-engine/permissions.md`
+- Engine state snapshot consumed on connect (`get_current_state`, incl. `pending_permissions` and `active_streams`): `specs-reference/3-engine/session.md` § `EngineState`

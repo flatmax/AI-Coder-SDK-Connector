@@ -1,6 +1,10 @@
 # File Picker
 
-Tree view of repository files with checkboxes, git status, and context menu. Left panel of the Files tab. Drives file selection (which files are in LLM context) and file navigation (which file is open in the viewer).
+Tree view of repository files with checkboxes, git status, and context menu. Left panel of the Files tab. Drives file navigation (which file is open in the viewer), the selection hint sent with a turn, and per-path read denial.
+
+What a checkbox means changed. It used to be a context contract: a checked file's full content was placed in the prompt, and an unchecked file contributed only its index block. The agent reads files itself now, so a checked file is a **hint** — it tells the agent what the user is looking at, and nothing more. The third state is no longer an index filter but a real permission rule: the agent is denied `Read` on that path. See [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract).
+
+The tree, the git status, the sorting, the context menu, the resizer, and every navigation affordance are untouched by the conversion. Only the checkbox semantics and their backend wiring changed.
 ## Tree Rendering
 ### Root Node — Branch Badge
 - Root row displays a checkbox, the repo name, and a compact pill showing the current git branch
@@ -102,53 +106,68 @@ The split-button dispatches a bubbling `git-action` window event carrying `{acti
 | Staged | Green | S |
 | Untracked | Green | U |
 | Deleted | Red | D |
-## Three-State Checkbox (Index Exclusion)
-Files have three context states controlled via the picker checkbox:
-| State | Checkbox | Visual | Context effect |
+## Three-State Checkbox (Hint and Deny-Read)
+Files have three states controlled via the picker checkbox:
+| State | Checkbox | Visual | Effect |
 |---|---|---|---|
-| Index-only (default) | Unchecked | Normal | File's index block is in context |
-| Selected | Checked | Normal | Full file content in context (index block excluded — redundant) |
-| Excluded | Unchecked | Strikethrough, dimmed, badge | No content, no index block, no tracker item |
+| Neutral (default) | Unchecked | Normal | Nothing. The agent may read the file if it decides to |
+| Hinted | Checked | Normal | The path is listed with the next turn as "what the user is looking at" |
+| Denied | Unchecked | Strikethrough, dimmed | A `Read` deny rule is in force for the path. The agent's read fails and it is told why |
+
+The middle state is advisory and the third is enforced, which is the opposite of the old arrangement —
+selection used to be the enforced thing and exclusion the advisory one. It is worth internalising,
+because it inverts what a careful user does: to keep the agent away from a file you deny it, and to point
+the agent at a file you hint it and say so in the prompt.
+
 ### Interaction Model
-- Regular click — toggles between index-only and selected
-- Shift+click — toggles between index-only and excluded; suppresses native checkbox toggle via `preventDefault` to avoid visual glitch
-- Shift+click on a selected file — excludes (removes from both selection and index)
-- Regular click on an excluded file — un-excludes and selects
-- Shift+click on a directory — toggles exclusion for all children
-- Regular click to select directory children — un-excludes any excluded children
+- Regular click — toggles between neutral and hinted
+- Shift+click — toggles between neutral and denied; suppresses the native checkbox toggle via `preventDefault` to avoid a visual glitch
+- Shift+click on a hinted file — denies (clears the hint and writes the rule)
+- Regular click on a denied file — removes the deny rule and hints the file
+- Shift+click on a directory — writes or removes a glob deny rule covering the subtree
+- Regular click to hint directory children — removes any deny rules on those children
 - Regular and shift+click on the root checkbox apply the same rules as a directory checkbox, but scoped to every file in the repository
 ### Visual Treatment
-- Excluded files — strikethrough and muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include. No badge — the strikethrough alone carries the signal.
-- Directory rows reflect descendant exclusion state so the tree surfaces exclusion without requiring every folder to be expanded:
-  - All descendant files excluded — strikethrough, muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-include all. No badge.
-  - Some descendants excluded — `✕` badge at reduced opacity (no strikethrough), tooltip indicating partial exclusion. The badge is the distinguishing signal for this state alone, where strikethrough would be misleading.
-  - None excluded — normal styling
+- Denied files — strikethrough and muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-allow. No badge — the strikethrough alone carries the signal.
+- Directory rows reflect descendant denial state so the tree surfaces it without requiring every folder to be expanded:
+  - All descendant files denied — strikethrough, muted opacity, reduced checkbox opacity, tooltip explaining shift+click to re-allow all. No badge.
+  - Some descendants denied — `✕` badge at reduced opacity (no strikethrough), tooltip indicating partial denial. The badge is the distinguishing signal for this state alone, where strikethrough would be misleading.
+  - None denied — normal styling
 - The root row uses the same three visual states as directory rows, aggregated over the entire repository
-- A directory with zero descendant files is treated as "none excluded"
-- Checkbox tooltip adapts to exclusion state — prompts differ for default vs excluded files
+- A directory with zero descendant files is treated as "none denied"
+- Checkbox tooltip adapts to state — the prompts differ for neutral, hinted, and denied
+- A denied file whose rule came from a settings file the user wrote by hand, rather than from this picker, renders identically. The picker reflects the effective rule set; it does not distinguish rules by who authored them
 ### Context Menu
-- File and directory context menus include include/exclude items as an alternative to shift+click
+- File and directory context menus include allow/deny items as an alternative to shift+click, labelled "Deny agent reads" and "Allow agent reads"
 ### Backend Coordination
-- Excluded files set stored server-side via the `set_excluded_index_files` RPC, persisted in session state
-- Exclusion is a **cache-shaping filter**, not an indexing-time filter — the underlying symbol and doc indexes remain whole-repo, so re-inclusion is instant
-- Applied at three points: synchronous removal on the exclusion event (drops `file:<path>` tracker entries, marks parent directories' dir-blocks broken), filtered out of dir-block seeding (initial init, rebuild, cross-ref enable), and filtered out of per-turn dir-block refresh
-- A `symbols:<dir>` / `docs:<dir>` / `plain_files:<dir>` block whose every indexed file is excluded is omitted entirely from seeding rather than seeded as an empty entry
-- Full contract: see [cache-tiering.md § User-Excluded Files](../3-llm/cache-tiering.md#user-excluded-files)
+- A deny writes a `Read` rule through the permissions layer — `Read(<path>)` for a file, `Read(<dir>/**)` for a directory. Shapes and destinations are in [`../../specs-reference/3-engine/permissions.md § PermissionUpdate`](../../specs-reference/3-engine/permissions.md)
+- The rule is real enforcement, applied by the CLI, not a filter we implement. Two consequences the UI must not obscure: it takes effect on the agent's very next read with no re-index and no cache invalidation, and when written to a settings file it applies to the `claude` CLI in the same repository too
+- Removing a deny removes the rule. Nothing is rebuilt, because nothing was excluded from an index — the symbol and doc indexes are always whole-repo
+- A denied read reaches the agent as a denial with a reason, so it can adapt. It does not look to the agent like a missing file, which would send it hunting
+- The hint set is browser state, forwarded to the server so it can be included in the next turn's framing and broadcast to collaborators. It is not persisted across server restarts and nothing depends on it being accurate
+
+Deleted with the tiering system: `set_excluded_index_files`, the cache-shaping filter, the three
+application points, the dir-block seeding filter, and the per-turn dir-block refresh filter. An
+exclusion is now one rule in one file.
+
+### Denial Scope Prompt
+- Denying a file or directory opens a small dialog asking where the rule should live: **This session only** (dropped when the session ends) or **Save for this checkout** (written to `.claude/settings.local.json`, git-ignored, survives restarts)
+- Two buttons plus Cancel. A "Don't ask again" checkbox persists the chosen scope as the default for future denials; Cancel never persists a preference
+- Removing a denial never prompts. The user explicitly wants the agent to see the file again, and there is no scope question to answer — every rule the picker wrote for that path is removed
+- Preference stored in `localStorage` under `ac-dc-deny-read-scope` with values `ask` (default), `session`, or `local`. Resettable from Settings
+- The dialog states the destination file by name. A rule the user cannot find is a rule the user cannot revoke
+
+This replaces the old L0-invalidation prompt, which asked a question about our cache. The question is now
+about durability and blast radius, which is a question about the user's repository — a better question to
+be asking, and one with a consequence the user can inspect afterwards.
 
 ### Binary File Selection
-- The picker accepts binary file selection (xlsx, pdf, png, zip, etc.) at click time — selection-time rejection would require an 8KB read per click and would surprise users with checkboxes that refuse to stay set
-- At turn start, `sync_file_context` detects the binary content (the repo layer raises on null-byte detection) and acts on three channels: trims the file from the scope's selected list, broadcasts `filesChanged` with the trimmed selection, and broadcasts `binaryFilesSkipped` listing the dropped paths
-- The picker receives `filesChanged` and clears the checkbox; the shell receives `binaryFilesSkipped` and renders a toast naming the rejected files with a Doc Convert hint. The user sees both signals — the checkbox clears, and the toast explains why
-- After running Doc Convert, the user selects the produced sibling markdown. Re-selecting the original binary file is allowed (and would just trigger the same drop again — the system never accumulates broken state)
-- The LLM never sees the binary file's bytes
+- The picker accepts a checkbox on a binary file (xlsx, pdf, png, zip). It is a hint, so there is nothing to reject: no content is being placed anywhere
+- The consequence lands on the agent instead. A `Read` of a binary fails back to the agent with a reason, inside its own turn, and it adapts. AC⚡DC does not intervene
+- Because the failure is the agent's rather than ours, the old machinery is gone: no turn-start binary detection, no trimming of the selected list, no `binaryFilesSkipped` broadcast, and no toast
+- What survives is the useful part. A binary row's context menu offers **Convert with Doc Convert** when the extension is supported, and the tooltip explains that the agent cannot read this file directly. The affordance is where the user already is, rather than in a toast after a turn began
+- After conversion the user hints the produced sibling markdown, which the agent can read
 
-### L0 Invalidation Prompt
-- User-driven exclusion (shift+click on a file checkbox, or the context-menu Exclude / Exclude all action) opens a confirmation dialog asking whether to invalidate L0 immediately or defer until the next L0-invalidating event. Invalidation forces a full cache rewrite; deferring leaves the excluded file visible in the cached aggregate map until the next routine invalidation event (mode switch, cross-reference toggle, manual rebuild, application restart)
-- Three buttons: Apply now (invalidate immediately), Defer (leave cache stale), Cancel (discard the pending exclusion). A "Don't ask again" checkbox persists Apply now or Defer as the default for future exclusions. Cancel never persists a preference
-- Inclusion (un-excluding a previously-excluded file via shift+click on an excluded entry, or the Include / Include all context menu action) always invalidates L0 — no prompt. The user explicitly wants the file's structural block back in the aggregate map immediately
-- Preference stored in browser localStorage under `ac-dc-l0-exclude-pref` with values `ask` (default), `always`, or `never`. Resettable via the files-tab's public `resetL0ExcludePref()` method
-- Backend RPC carries the user's choice as the third argument to `LLMService.set_excluded_index_files(files, invalidate_l0)`. Agent-scoped RPC `set_agent_excluded_index_files(agent_id, files)` does not accept the flag — agent ContextManagers share the orchestrator's L0 prefix and can't independently invalidate it
-- Full L0-invalidation contract: see [cache-tiering.md § What invalidates L0](../3-llm/cache-tiering.md#what-invalidates-l0)
 ## Context Menu
 ### File Items
 - Stage, unstage, discard (confirm)
@@ -193,18 +212,24 @@ Stage-all / unstage-all / rename / exclude-all are deliberately absent — the r
 - On remove — file removed from selected set, picker checkbox unchecked
 - In both cases — file opened in diff viewer
 
-## Auto-Add from Not-In-Context Edits
+## Agent-Modified File Highlight
 
-- When the LLM attempts to edit files not in active context, those files are automatically added to the selected list (see [edit-protocol.md](../3-llm/edit-protocol.md))
-- Picker receives the updated selection via the standard broadcast and updates checkboxes
-- Parent directories of auto-added files are auto-expanded
+The old picker auto-selected files in two situations: when the LLM tried to edit a file that was not in
+context, and when it created a new one. Both existed because an edit could only land on a file whose
+content was in the prompt — selection was the mechanism, so selection had to be repaired.
 
-## Auto-Add from Created Files
+Neither situation exists. The agent edits what it likes and creates what it likes, and its writes do not
+consult the selection at all. Auto-selecting after the fact would be a hint the user never gave, about
+work already done.
 
-- When the LLM successfully creates a new file via an edit block, the file is automatically added to the selected list (see [edit-protocol.md](../3-llm/edit-protocol.md))
-- Picker receives the updated selection via the standard broadcast and updates checkboxes
-- Parent directories of created files are auto-expanded
-- Unlike not-in-context auto-adds, no retry prompt is generated in the chat input
+What replaces it is observation:
+
+- `PostToolUse` broadcasts name the paths the agent just wrote. The picker refreshes those rows' git status and diff stats in place, without a full tree reload
+- Modified paths get a turn-scoped **touched** marker — a small accent dot — so a user scanning the tree after a turn can see the blast radius without reading the transcript. The marker clears on the next user turn
+- Parent directories of touched files auto-expand, which is the one behaviour worth keeping from the old auto-add: a file the agent changed in a collapsed subtree is a file the user will not notice
+- A path the agent created appears in the tree on the next refresh like any other new file
+
+Nothing is auto-hinted and no retry prompt is composed. Both belonged to the edit protocol.
 
 ## Middle-Click Path Insertion
 
@@ -286,13 +311,14 @@ The files tab (parent of both picker and chat panel) coordinates all file-relate
 ### Responsibilities
 
 - Selection sync — receives selection-changed from picker, updates server and chat panel directly
-- Exclusion sync — receives exclusion-changed from picker, forwards to server
+- Deny-read sync — receives the picker's denial-changed event, resolves the scope prompt, and writes or removes the rule through the permissions RPC
 - File mentions — receives file-mention-click from chat, toggles selection, updates picker and chat panel
 - Message preservation — syncs messages from chat before selection updates to prevent stale message overwrites
 - Review lifecycle — clears selection on review entry, refreshes tree, updates chat panel's review state
 - Filter bridge — forwards filter-from-chat events to the picker's set-filter method
 - Path insertion — routes insert-path from picker middle-click to chat textarea
 - File tree refresh — forwards files-modified from chat to picker's load-tree method and re-dispatches on window
+- Touched markers — forwards the turn's modified paths from `PostToolUse` broadcasts to the picker, and clears them when the next user turn starts
 
 ### Direct Update Pattern (Architectural)
 
@@ -308,7 +334,7 @@ The pattern (used consistently across all selection-changing operations):
 4. Directly set the picker's selected-files + request update
 5. Notify server via the selected-files RPC
 
-Where it's used — selection-changed handler, file-mention-click handler, files-changed handler, review-started handler, state-loaded handler, exclusion-changed handler.
+Where it's used — selection-changed handler, file-mention-click handler, files-changed handler, review-started handler, state-loaded handler, denial-changed handler.
 
 Without the message sync step, the following failure occurs: user sends message → chat panel updates its messages array → user clicks file mention → files tab re-renders → chat panel receives the files tab's stale messages prop → latest messages are lost.
 
@@ -317,10 +343,15 @@ Without the message sync step, the following failure occurs: user sends message 
 When a review starts (via review-started event from the review selector):
 
 1. Set review state to active with review details
-2. Clear selected files to empty (review starts with no files selected)
+2. Clear the hint set (a review starts with nothing hinted — the diff is the subject, not a file list)
 3. Reset picker's selected files to empty set
 4. Refresh picker's file tree (now shows staged changes from soft reset)
 5. Update chat panel's selected files and review state
+
+Deny-read rules are **not** cleared on review entry and not restored on exit. They are the user's
+standing policy about their repository, and a review is not a reason to hand the agent access it was
+denied. The read-only permission posture the review installs is a separate mechanism and is layered on
+top (see [code-review.md](../4-features/code-review.md#read-only-mode)).
 
 ## State Persistence
 
@@ -331,10 +362,14 @@ When a review starts (via review-started event from the review selector):
 
 ## Invariants
 
-- Three-state checkbox always reflects server-side state after any toggle
-- File selection never persists across server restart (only across browser reloads when server is running)
+- The checkbox's denied state always reflects the effective rule set after any toggle, including rules the picker did not write
+- A denial always names its destination before it is written; no rule is written from a guess about scope
+- Removing a denial never prompts and always removes every rule the picker wrote for that path
+- The hint set never persists across server restart (only across browser reloads while the server is running), and nothing depends on its accuracy
 - Auto-selection runs exactly once per component lifetime
 - Middle-click path insertion always suppresses the subsequent browser selection-buffer paste
-- Review entry clears selection on both server and frontend — defense in depth
+- Review entry clears the hint set on both server and frontend — defense in depth — and never alters deny-read rules
 - Direct-update pattern for selection changes never triggers a parent re-render that would reset child scroll or interaction state
 - File search exit restores the previous expanded state of the full tree
+- Touched markers are turn-scoped: they are never persisted and always cleared when the next user turn starts
+- The picker never auto-hints a file in response to something the agent did

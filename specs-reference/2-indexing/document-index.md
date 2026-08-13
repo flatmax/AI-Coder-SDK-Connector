@@ -1,6 +1,6 @@
 # Reference: Document Index
 
-**Supplements:** `specs4/2-indexing/document-index.md`
+**Supplements:** `specs5/2-indexing/document-index.md`
 
 ## Byte-level formats
 
@@ -23,7 +23,7 @@
 ### Heading syntax
 
 ```
-## Cache Tiering (cache, promotion, stability) [table] [code] ~85ln ←4
+## Permission Modes (permission, mode, tool, gate) [table] [code] ~85ln ←4
 ```
 
 - Heading-level prefix: `#` repeated level times, followed by space (`## ` for level 2, `#### ` for level 4)
@@ -44,17 +44,17 @@ Braces indicate optional segments. Each segment has a leading space only when pr
 ### Full file block example
 
 ```
-docs/guides/context-and-history.md [spec]:
-  # Context & History ~280ln ←5
-  ## ContextManager (FileContext, token budget, shed) [code] ~85ln ←3
-    →src/ac_dc/context.py
-  ## History Compaction (trigger threshold, verbatim window) [code] ~120ln ←2
-    ### Topic Detection (LLM boundary, confidence score) ~45ln
-      →cache_tiering.md#History-Compaction-Interaction
-    ### Verbatim Window (recent exchanges, min preserved) ~30ln
-  ## Token Budget (remaining, cache target, prompt estimate) [table] ~40ln
-    →prompt_assembly.md#History-Placement
-  links: prompt_assembly.md, cache_tiering.md
+docs/guides/sessions-and-history.md [spec]:
+  # Sessions & History ~280ln ←5
+  ## Session Lifecycle (connect, options, terminal reason) [code] ~85ln ←3
+    →src/ac_dc/engine/session.py
+  ## Mirrored Store (append path, mirror gap, flush policy) [code] ~120ln ←2
+    ### Record Schema (envelope fields, image refs) ~45ln
+      →history.md#Mirror-Gap-Accounting
+    ### Resume and Fork (session id, fork semantics) ~30ln
+  ## Context Usage (categories, HUD thresholds) [table] ~40ln
+    →context-visibility.md#Category-Mapping
+  links: history.md, context-visibility.md
 ```
 
 ### Outgoing ref indentation

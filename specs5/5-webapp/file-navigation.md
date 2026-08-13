@@ -57,7 +57,7 @@ Any action that opens a file creates a new node:
 | File picker click | File-clicked from file picker |
 | Search result click | Navigate-file from search tab |
 | Chat file mention click | File-mention-click from chat panel |
-| Edit block file link | Navigate-file from edit block rendering |
+| Tool card file link | Navigate-file from an Edit/Write/Read tool card's path or goto icon |
 | Server navigate-file RPC | Navigate-file callback on app shell |
 | LSP go-to-definition | Definition jump within editor |
 ### Non-Triggers

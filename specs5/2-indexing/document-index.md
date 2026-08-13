@@ -1,12 +1,12 @@
 # Document Index
 
-A document-oriented analog to the symbol index. Extracts structural outlines from documentation files and feeds them through the same cache tiering system used for code. Supports markdown and SVG.
+A document-oriented analog to the symbol index. Extracts structural outlines from documentation files and serves them to the agent as an MCP tool and to the browser's navigation surfaces. Supports markdown and SVG.
 
 ## Motivation
 
 - Symbol index covers programming languages only; documentation files appear by path but produce no structural representation
 - Many repositories are documentation-heavy (specs, READMEs, wikis, design docs)
-- Structural awareness of document content significantly improves LLM navigation without loading full text
+- Structural awareness of document content lets an agent navigate a docs tree without reading every file, and lets the browser show an outline for a file it has not opened
 
 ## Core Mapping
 
@@ -34,7 +34,7 @@ A document-oriented analog to the symbol index. Extracts structural outlines fro
 ## Compact Output Format
 
 - Text block structurally similar to symbol map output
-- Flows into the same cache tier system
+- Returned by the `doc_outline` tool, whole-repo or scoped to a subtree
 - Annotations added — document type, keywords per heading, section-level cross-references, incoming reference counts, content-type hints, section sizes
 
 ### Annotations
@@ -214,8 +214,8 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 
 ### SVG Indexing Policy
 
-- SVG structural extraction is doc-mode only — in code mode, SVGs produce no outline
-- Rationale — in code mode, SVGs are implementation artifacts; in doc mode, they are documentation (architecture diagrams, flowcharts)
+- SVG structural extraction is unconditional. The old policy made it mode-dependent (implementation artifacts in code mode, documentation in doc mode); with modes gone there is nothing left to switch on, and an SVG outline is cheap enough that withholding it buys nothing
+- A `doc_outline` call scoped to a subtree therefore returns SVG outlines alongside markdown ones. The caller's scope, not a global mode, decides whether diagrams are in view
 - Short text labels (≤ 80 chars) skip enrichment — they are already concise identifiers and running KeyBERT on individual words produces no useful signal
 - Long text elements (> 80 chars) are treated as prose blocks and participate in keyword enrichment via the same pipeline used for markdown sections — see "Long Text Elements" above
 - SVG files with no prose blocks skip enrichment entirely (the common case — architecture diagrams and flowcharts are almost entirely labels)
@@ -241,9 +241,9 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 ### Triggers
 
 - Server startup (background structural extraction, then enrichment)
-- Switch to doc mode (re-index changed files)
-- Every chat in doc mode — full `index_repo(file_list)` pass with the current repo file list, which re-extracts changed files via the mtime cache AND prunes stale entries for files that no longer exist on disk (user deleted, `git rm`, branch switch)
-- LLM edits a doc file (explicit invalidation + re-extraction + enrichment queue)
+- `PostToolUse` for a tool that wrote a document file — targeted invalidation, re-extraction, and an enrichment queue entry (see [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md#reacting-to-file-changes))
+- Before a `doc_outline` tool call answers — any pending re-index is flushed first, so the agent never reads an outline that predates its own edit
+- Periodically, and on repo-changing events (branch switch, commit, review enter/exit) — a full `index_repo(file_list)` pass that re-extracts changed files via the mtime cache AND prunes stale entries for files no longer on disk (user deleted, `git rm`, branch switch)
 - User edits in viewer (lazy detection via mtime on next structure pass)
 
 ### Mtime-Based Cache
@@ -253,17 +253,17 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 
 ### Explicit Invalidation
 
-- LLM edits trigger invalidation of both symbol and doc caches for all modified files
+- The agent's file-writing tool calls trigger invalidation of both symbol and doc caches for all modified files
 - Modified files get fresh unenriched outlines instantly
 - Enrichment is queued for background processing
 
 ### Two-Phase Principle
 
-- Structural extraction is synchronous and instant (< 5ms per file); exposed as `doc_index_ready` on the LLM service's mode-state RPC
+- Structural extraction is synchronous and instant (< 5ms per file); exposed as `doc_index_ready` on the engine service's state snapshot
 - Keyword enrichment is asynchronous and never blocks user-facing operations; completion exposed as `doc_index_enriched`
-- Mode switches are instant — unenriched outlines are available immediately
-- Chat requests never wait for enrichment
-- Features gated on structural readiness only (cross-reference toggle, doc mode activation) check `doc_index_ready`; features that cosmetically benefit from enriched outlines (keyword display in compact format) check `doc_index_enriched` but degrade gracefully when False
+- Preset switches are instant — unenriched outlines are available immediately
+- A turn never waits for enrichment; a `doc_outline` call waits only for structural extraction
+- Features gated on structural readiness only (the `doc_outline` tool, outline display) check `doc_index_ready`; features that cosmetically benefit from enriched outlines (keyword display in compact format) check `doc_index_enriched` but degrade gracefully when False
 
 ## Disk Persistence
 
@@ -277,7 +277,7 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 ## Structure-Only Cache Lookup
 
 - A separate code path accepts any cached outline regardless of keyword model
-- Used by mode switching and chat requests to avoid blocking on enrichment
+- Used by preset switching and tool calls to avoid blocking on enrichment
 - Files whose mtime has changed are re-parsed; enriched or unenriched outlines are reused as-is
 
 ## Progress Feedback
@@ -285,34 +285,48 @@ No shapes at all — falls to spatial clustering. Reading order (y then x): "Sys
 - Non-blocking header progress bar in the dialog header
 - Shows current file and completion percentage during background enrichment
 - Auto-dismisses when all pending files are enriched
-- Driven by per-file progress events sent as compaction/progress callbacks
+- Driven by the per-file `doc_enrichment_*` progress events on the `compactionEvent` channel
 - No toast — toasts would obstruct the chat input area during multi-minute enrichment
 
 ## Graceful Degradation
 
 - If the keyword library is unavailable, structural outlines still work fully
-- Heading tree, cross-references, reference counting, cache tiering, and doc-mode system prompt all function without keywords
-- A one-time warning toast informs the user on mode switch
+- Heading tree, cross-references, reference counting, and the `doc_outline` tool all function without keywords
+- A one-time warning toast informs the user
 - Header progress bar is suppressed when no enrichment is possible
 
-## Integration with Cache Tiering
+## Consumers
 
-- Document outline blocks are tracked as `doc:{path}` items
-- Same N-value tracking, tier graduation, and cascade as code symbols
-- Documents change less frequently than code, so they tend to stabilize at higher tiers quickly
+- **The agent, via the MCP bridge** — the `doc_outline` tool. This is the index's highest-value
+  consumer: there is no built-in equivalent, and SVG in particular is otherwise opaque to an agent
+  (`Read` on an SVG returns coordinate soup; the outline returns a labelled containment hierarchy).
+  See [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md).
+- **Browser document navigation** — markdown outline navigation, SVG structure display, and
+  cross-reference following.
+- **The document converter** — provenance and staleness classification.
+
+Keyword enrichment continues to run, because keywords are what make an outline searchable by intent
+rather than by heading text. See [keyword-enrichment.md](keyword-enrichment.md).
 
 ## Snapshot Discipline
 
-Re-indexing happens only at request boundaries. Within the execution window of a single request, the document index is treated as a **read-only snapshot** — outline queries, per-file block lookups, and reference graph queries all return consistent data.
+Re-indexing happens at **tool-call boundaries**. Within the execution window of a single query the
+document index is a **read-only snapshot** — outline queries, per-file block lookups, and reference
+graph queries all return consistent data.
 
-Background keyword enrichment runs outside any request's execution window. A request that starts while enrichment is in progress sees whatever outlines are currently cached (enriched or unenriched); enrichment completions never mutate the snapshot mid-request.
+A file-mutating tool call triggers incremental re-extraction of the touched document files (debounced),
+and a pending re-index is flushed synchronously before any index-reading tool returns. Structure is
+re-extracted immediately; keyword enrichment remains deferred, since it is CPU-bound and an unenriched
+outline is still a correct outline.
 
-This matters for future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) — multiple agents within one user request share the same snapshot. Re-indexing between iterations uses the standard request-boundary mechanism.
+Background keyword enrichment runs outside any query window. A query that starts while enrichment is in
+progress sees whatever outlines are currently cached (enriched or unenriched); enrichment completions
+never mutate a snapshot mid-query.
 
 ## Invariants
 
 - A file's unchanged outline is never re-extracted
 - SVG files never undergo keyword enrichment
-- Keyword enrichment never blocks a mode switch or chat request
+- Keyword enrichment never blocks a turn, a `doc_outline` call, or any other user-facing operation
 - The outline's content hash is stable for unchanged content
-- Mode-appropriate dispatch — dispatch on key prefix, not on current mode
+- Extractor dispatch is by file extension alone — there is no global mode to consult

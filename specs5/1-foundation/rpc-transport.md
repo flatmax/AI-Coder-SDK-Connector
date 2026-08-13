@@ -55,8 +55,8 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 
 ## Concurrency
 
-- Only one user-initiated LLM streaming request is active at a time (enforced by the LLM service)
-- A user-initiated request may spawn additional internal streams (e.g. parallel agents) that share the parent's request ID as a prefix and are distinguished by child IDs — these coexist under the parent request and are not blocked by the single-stream guard (see [streaming.md](../3-llm/streaming.md#multiple-agent-streams-under-a-parent-request))
+- Only one user-initiated turn is active at a time (enforced by the engine service, see [session.md](../3-engine/session.md#concurrency-guard))
+- The guard counts user intent, not engine activity: subagents spawned by the agent's `Task` tool are internal to the turn and are never blocked by it. Their events are correlated by agent ID inside the parent turn's request ID (see [session.md](../3-engine/session.md#message-taxonomy--ui))
 - Request IDs are the multiplexing primitive — the transport never assumes a singleton stream; every server-push event carries the exact ID of the stream it belongs to
 - Non-streaming calls are served concurrently
 - All state is global across connected clients; file selection and streaming are broadcast to all admitted remotes

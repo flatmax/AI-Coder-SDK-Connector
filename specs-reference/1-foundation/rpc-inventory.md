@@ -1,8 +1,15 @@
 # Reference: RPC Method Signatures
 
-**Supplements:** `specs4/1-foundation/rpc-inventory.md`
+**Supplements:** `specs5/1-foundation/rpc-inventory.md`
 
-The behavioral inventory in specs4 lists every RPC method with a one-line purpose. This twin pins the argument and return shapes — what the caller passes, what comes back, and the envelope conventions that surround every call.
+The behavioral inventory in specs5 lists every RPC method with a one-line purpose. This twin pins the argument and return shapes — what the caller passes, what comes back, and the envelope conventions that surround every call.
+
+**Division of labour with the layer-3 twins.** Engine-facing shapes — `EngineState`, `EngineHealth`,
+turn methods, live controls, permissions, sessions, history, context usage, and every turn-scoped
+`AcApp` event — are pinned in `specs-reference/3-engine/{session,permissions,history}.md`. They are not
+repeated here. What this twin owns is the transport envelope, `Repo`, `Settings`, `Collab`,
+`DocConvert`, the non-engine half of `ClaudeCodeService` (review, snippets, LSP, navigation, TeX,
+commit workflow), and the `AcApp` events that are not turn-scoped.
 
 ## Byte-level formats
 
@@ -14,7 +21,7 @@ Browser-generated, correlates streaming callbacks to the originating request.
 {epoch_ms}-{6-char-alphanumeric}
 ```
 
-See `specs-reference/3-llm/streaming.md` § Request ID format for the full format specification. The RPC layer treats these as opaque strings.
+See `specs-reference/3-engine/session.md` § Request ID format for the full format specification. The RPC layer treats these as opaque strings.
 
 ### Response envelope shape
 
@@ -125,7 +132,8 @@ Branches:
 | `Repo.list_branches` | — | `{branches: list[{name, sha, message, is_current}], current: str}` |
 | `Repo.list_all_branches` | — | `list[{name, sha, is_current, is_remote}]` sorted by recency, deduplicated |
 | `Repo.resolve_ref` | `ref: str` | `str \| null` — full SHA or null if unresolvable |
-| `Repo.is_clean` | — | `bool` |
+| `Repo.checkout_branch` | `branch: str` | `{status: str, branch: str, sha: str}` or `{error: str}` — DWIM on remote refs; refuses a dirty tree |
+| `Repo.is_clean` | `include_untracked?: bool` | `bool` — untracked files ignored by default |
 
 Commit graph:
 
@@ -182,133 +190,47 @@ TeX preview:
 | `Repo.is_make4ht_available` | — | `bool` |
 | `Repo.compile_tex_preview` | `content: str, file_path?: str` | `{html: str}` or `{error: str, log?: str, install_hint?: str}` |
 
-### Service: LLMService — browser → server
+### Service: ClaudeCodeService — browser → server
 
-State:
+The service that replaced `LLMService`. The RPC namespace is the Python class name (see § Dependency
+quirks), so the rename is visible on the wire and nothing forwards the old namespace.
 
-| Method | Arguments | Return |
-|---|---|---|
-| `LLMService.get_current_state` | — | `CurrentState` (see below) |
-| `LLMService.set_selected_files` | `files: list[str]` | `list[str]` — filtered list (non-existent paths removed) |
-| `LLMService.get_selected_files` | — | `list[str]` |
-| `LLMService.set_excluded_index_files` | `files: list[str]` | `list[str]` |
-| `LLMService.get_excluded_index_files` | — | `list[str]` |
+The engine-facing half of this service is pinned elsewhere and deliberately not duplicated:
 
-`CurrentState` shape:
+| Group | Twin |
+|---|---|
+| State (`get_current_state` → `EngineState`), engine health, file selection, denied-read files, turns, live controls, introspection | `specs-reference/3-engine/session.md` § Service: ClaudeCodeService |
+| `resolve_permission` and the permission payloads | `specs-reference/3-engine/permissions.md` |
+| Sessions, mirrored history, subagent transcripts | `specs-reference/3-engine/history.md` § RPC surface |
 
-```pseudo
-CurrentState:
-    messages: list[MessageDict]
-    selected_files: list[string]
-    excluded_index_files: list[string]
-    streaming_active: bool
-    active_streams: list[ActiveStream]    // empty when no stream in flight
-    session_id: string
-    repo_name: string
-    init_complete: bool
-    mode: "code" | "doc"
-    cross_ref_ready: bool
-    cross_ref_enabled: bool
-    doc_convert_available: bool
-    review_state: ReviewState         // always present; check `active` flag
-    enrichment_status: "unavailable" | "pending" | "building" | "complete"
-
-ActiveStream:
-    request_id: string
-    agent_id: string | null            // null for main scope; agent's id for agent scope
-    accumulated_content: string        // chunks received so far; full content semantics
-```
-
-The `active_streams` field lets a refreshed browser re-attach to its own in-flight stream after the WebSocket reconnects. See `specs-reference/3-llm/streaming.md` § Stream resumption snapshot for the per-entry field semantics; see `specs4/3-llm/streaming.md` § Stream Resumption After Reconnect for the behavioral contract.
-
-`MessageDict` shape matches the JSONL record schema in `specs-reference/3-llm/history.md` § JSONL record schema. For in-memory use, the `id`, `session_id`, and `timestamp` fields may be absent; the core triad is `{role, content, system_event?}`.
-
-Streaming:
-
-| Method | Arguments | Return |
-|---|---|---|
-| `LLMService.chat_streaming` | `request_id: str, message: str, files?: list[str], images?: list[str], excluded_urls?: list[str]` | `{status: "started"}` — immediately; content arrives via `streamChunk`/`streamComplete` events |
-| `LLMService.cancel_streaming` | `request_id: str` | `{status: str}` or `{error: str}` |
-
-Images in the `chat_streaming` call are base64 data URIs. The synchronous return is `{status: "started"}`; actual response delivery is via server-push events.
-
-`excluded_urls` is the per-turn exclusion set from the chip UI's include checkbox. Fetched URLs the user has unchecked are omitted from the prompt's URL section for that turn via `URLService.format_url_context(excluded=…)`. The URLs stay in the service's session-scoped fetched dict — chips remain visible and can be re-included on a later turn by re-checking the box. See `specs4/4-features/url-content.md` § URL Chips UI for the chip-state lifecycle.
-
-Sessions:
-
-| Method | Arguments | Return |
-|---|---|---|
-| `LLMService.new_session` | — | `{session_id: str}` |
-| `LLMService.history_new_session` | — | `{session_id: str}` — alias for `new_session` |
-| `LLMService.load_session_into_context` | `session_id: str` | `{messages: list[MessageDict], session_id: str}` |
-| `LLMService.history_list_sessions` | `limit?: int` | `list[SessionSummary]` — see `specs-reference/3-llm/history.md` § Session summary shape |
-| `LLMService.history_get_session` | `session_id: str` | `list[MessageDict]` — full messages with metadata |
-| `LLMService.history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, message_id, role, content_preview, timestamp}]` |
-| `LLMService.get_history_status` | — | `{tokens: int, max: int, percent: int, session_count: int}` |
+The rest is browser-facing plumbing with no engine involvement, and lives here.
 
 Commit workflow:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.generate_commit_message` | `diff_text: str` | `str` |
-| `LLMService.commit_all` | — | `{status: "started"}` — commit runs in background; result broadcast via `commitResult` event |
-| `LLMService.reset_to_head` | — | `{status: str, system_event_message: str}` |
+| `ClaudeCodeService.generate_commit_message` | `diff_text: str` | `{status: "started", request_id: str}` — the message arrives as a normal turn in the transcript |
+| `ClaudeCodeService.commit_all` | — | `{status: "started"}` — commit runs in background; result broadcast via `commitResult` |
+| `ClaudeCodeService.reset_to_head` | — | `{status: str, system_event_message: str}` |
 
-Context inspection:
-
-| Method | Arguments | Return |
-|---|---|---|
-| `LLMService.get_context_breakdown` | — | `ContextBreakdown` (see below) |
-| `LLMService.get_file_map_block` | `path: str` | `{path: str, content: str, mode: "code" \| "doc"}` or `{error: str}` |
-| `LLMService.rebuild_cache` | — | `{status: "rebuilt", mode, items_before, items_after, tier_counts, file_tier_counts, message}` or `{error: str}` |
-
-`ContextBreakdown` shape:
-
-```pseudo
-ContextBreakdown:
-    model: string
-    total_tokens: integer
-    max_input_tokens: integer
-    blocks: list[TierBlock]
-    breakdown: CategoryBreakdown
-    session_totals: {prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens}
-    mode: "code" | "doc"
-    cross_ref_enabled: bool
-
-TierBlock:
-    tier: "L0" | "L1" | "L2" | "L3" | "active"
-    tokens: integer
-    items: list[TrackedItemView]
-
-CategoryBreakdown:
-    system: integer
-    symbol_map: integer
-    files: integer
-    urls: integer
-    history: integer
-```
-
-Mode:
-
-| Method | Arguments | Return |
-|---|---|---|
-| `LLMService.get_mode` | — | `{mode, doc_index_ready, doc_index_building, cross_ref_ready, cross_ref_enabled, enrichment_status}` |
-| `LLMService.switch_mode` | `mode: "code" \| "doc"` | `{mode: str, message?: str, building?: bool, keywords_available?: bool, keywords_message?: str}` or `{error: str}` |
-| `LLMService.set_cross_reference` | `enabled: bool` | `{status: str, cross_ref_enabled: bool, message?: str}` |
+`generate_commit_message` changed shape with the conversion. It no longer calls an auxiliary model and
+returns a string; it sends `commit.md` plus the diff as a **user turn** on the live session, so the
+answer streams like any other turn and is visible in history. See
+`specs5/1-foundation/configuration.md` § Config File Set.
 
 Review:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.check_review_ready` | — | `{clean: bool, message?: str}` |
-| `LLMService.get_commit_graph` | `limit?: int, offset?: int, include_remote?: bool` | Same shape as `Repo.get_commit_graph` — this is a delegation endpoint |
-| `LLMService.start_review` | `branch: str, base_commit: str` | `{status: "review_active", branch, base_commit, commits, changed_files, stats}` or `{error: str}` |
-| `LLMService.end_review` | — | `{status: "restored"}` or `{error: str, status?: "partial"}` |
-| `LLMService.get_review_state` | — | `ReviewState` or `{active: false}` |
-| `LLMService.get_review_file_diff` | `path: str` | `{path: str, diff: str}` |
-| `LLMService.get_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` — mode-aware |
+| `ClaudeCodeService.check_review_ready` | — | `{clean: bool, message?: str}` |
+| `ClaudeCodeService.get_commit_graph` | `limit?: int, offset?: int, include_remote?: bool` | Same shape as `Repo.get_commit_graph` — a delegation endpoint |
+| `ClaudeCodeService.start_review` | `branch: str, base_commit: str` | `{status: "review_active", branch, base_commit, commits, changed_files, stats}` or `{error: str}` |
+| `ClaudeCodeService.end_review` | — | `{status: "restored"}` or `{error: str, status?: "partial"}` |
+| `ClaudeCodeService.get_review_state` | — | `ReviewState` or `{active: false}` |
+| `ClaudeCodeService.get_review_file_diff` | `path: str` | `{path: str, diff: str}` |
 
-`ReviewState` shape:
+`ReviewState` shape — also the type of `EngineState.review_state`, and the payload the `review_state`
+MCP tool projects for the agent:
 
 ```pseudo
 ReviewState:
@@ -321,28 +243,27 @@ ReviewState:
     stats?: {commit_count, files_changed, additions, deletions}
 ```
 
-URL handling:
+Snippets:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.detect_urls` | `text: str` | `list[{url: str, type: str, display_name: str}]` |
-| `LLMService.fetch_url` | `url: str, use_cache?: bool, summarize?: bool, summary_type?: str, user_text?: str` | `URLContent` dict |
-| `LLMService.detect_and_fetch` | `text: str, use_cache?: bool, summarize?: bool` | `list[URLContent]` |
-| `LLMService.get_url_content` | `url: str` | `URLContent` — may have `error: "URL not yet fetched"` sentinel |
-| `LLMService.invalidate_url_cache` | `url: str` | `{status: str}` |
-| `LLMService.remove_fetched_url` | `url: str` | `{status: str}` |
-| `LLMService.clear_url_cache` | — | `{status: str}` |
+| `ClaudeCodeService.get_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` — for the active preset |
+| `ClaudeCodeService.get_review_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` |
+
+`get_snippets` is preset-aware where it used to be mode-aware; the return shape is unchanged. See
+`specs5/plan/decisions.md` § CC-12.
 
 LSP:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.lsp_get_hover` | `path: str, line: int, col: int` | `{contents: str}` — 1-indexed coordinates |
-| `LLMService.lsp_get_definition` | `path: str, line: int, col: int` | `{file: str, range: Range}` |
-| `LLMService.lsp_get_references` | `path: str, line: int, col: int` | `list[{file: str, range: Range}]` |
-| `LLMService.lsp_get_completions` | `path: str, line: int, col: int, prefix?: str` | `list[{label: str, kind: str, detail: str}]` |
+| `ClaudeCodeService.lsp_get_hover` | `path: str, line: int, col: int` | `{contents: str}` — 1-indexed coordinates |
+| `ClaudeCodeService.lsp_get_definition` | `path: str, line: int, col: int` | `{file: str, range: Range}` |
+| `ClaudeCodeService.lsp_get_references` | `path: str, line: int, col: int` | `list[{file: str, range: Range}]` |
+| `ClaudeCodeService.lsp_get_completions` | `path: str, line: int, col: int, prefix?: str` | `list[{label: str, kind: str, detail: str}]` |
 
-`Range` shape uses 1-indexed line/column:
+All four are served from the surviving symbol index (`specs5/2-indexing/symbol-index.md`) and never
+reach the engine. `Range` uses 1-indexed line/column:
 
 ```pseudo
 Range:
@@ -354,9 +275,23 @@ Navigation and TeX:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `LLMService.navigate_file` | `path: str` | `{status: str, path: str}` — broadcasts to all clients |
-| `LLMService.is_tex_preview_available` | — | `{available: bool, install_hint?: str}` |
-| `LLMService.compile_tex_preview` | `content: str, file_path?: str` | `{html: str}` or `{error: str, log?: str, install_hint?: str}` |
+| `ClaudeCodeService.navigate_file` | `path: str` | `{status: str, path: str}` — broadcasts to all clients |
+| `ClaudeCodeService.is_tex_preview_available` | — | `{available: bool, install_hint?: str}` |
+| `ClaudeCodeService.compile_tex_preview` | `content: str, file_path?: str` | `{html: str}` or `{error: str, log?: str, install_hint?: str}` |
+
+#### Deleted methods and their shapes
+
+Removed with the native engine, listed so a reader of old code knows nothing replaced them:
+`get_context_breakdown` (and the `ContextBreakdown` / `TierBlock` / `CategoryBreakdown` shapes),
+`rebuild_cache`, `get_file_map_block`, `get_mode` / `switch_mode` / `set_cross_reference`,
+`load_session_into_context`, `get_history_status`, the seven URL methods (`detect_urls`, `fetch_url`,
+`detect_and_fetch`, `get_url_content`, `invalidate_url_cache`, `remove_fetched_url`,
+`clear_url_cache`), and the four agent-turn methods (`get_turn_archive`, `get_agent_history`,
+`close_agent_context`, `set_agent_selected_files`).
+
+The nearest surviving thing to `get_context_breakdown` is `get_context_usage`, and it is not the same
+shape or the same idea — it reports the engine's own categories, not our tiers. See
+`specs5/3-engine/context-visibility.md`.
 
 ### Service: Settings — browser → server
 
@@ -364,13 +299,13 @@ Navigation and TeX:
 |---|---|---|
 | `Settings.get_config_content` | `type: str` | `str` — raw file content |
 | `Settings.save_config_content` | `type: str, content: str` | `{status: str}` |
-| `Settings.reload_llm_config` | — | `{status: str}` |
+| `Settings.reload_engine_config` | — | `{status: str}` |
 | `Settings.reload_app_config` | — | `{status: str}` |
-| `Settings.get_config_info` | — | `{model: str, smaller_model: str, config_dir: str}` |
+| `Settings.get_config_info` | — | `{model: str \| null, config_dir: str, cli_path: str}` — `model: null` means the CLI's default |
 | `Settings.get_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` |
 | `Settings.get_review_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` |
 
-The `type` argument is a whitelisted identifier — not a file path. See `specs4/1-foundation/configuration.md` for the whitelist.
+The `type` argument is a whitelisted identifier — not a file path. The whitelist is `engine`, `app`, `snippets`. See `specs5/1-foundation/configuration.md` for what each one maps to and which changes need a new session.
 
 ### Service: Collab — browser → server
 
@@ -394,61 +329,46 @@ Only registered when `--collab` is passed on the command line.
 
 ### Service: AcApp — server → browser (client-side callbacks)
 
-Methods the server calls on connected browsers. Each returns `true` as an acknowledgement unless otherwise noted.
+Methods the server calls on connected browsers. Each returns `true` as an acknowledgement unless
+otherwise noted.
 
-Streaming:
+Every turn-scoped event — `sessionStarted`, `streamChunk`, `thinkingChunk`, `toolUse`, `toolResult`,
+`subagentEvent`, `hookEvent`, `rateLimit`, `compactionEvent`, `streamComplete`,
+`postResponseComplete`, `permissionRequest`, `permissionResolved`, `permissionModeChanged`,
+`engineHealth`, `userMessage` — is pinned in `specs-reference/3-engine/session.md` § Service: AcApp,
+with the permission pair in the permissions twin. Note in particular that `streamChunk` kept its name
+but changed its contract: the payload is now a `{block_id, seq, content, done}` object whose `content`
+is cumulative **within a block**, not within the turn.
 
-| Method | Arguments | Return |
-|---|---|---|
-| `AcApp.streamChunk` | `request_id: str, content: str` | `true` |
-| `AcApp.streamComplete` | `request_id: str, result: StreamCompleteResult` | `true` |
-| `AcApp.compactionEvent` | `request_id: str, event: {stage, ...}` | `true` |
-
-See `specs-reference/3-llm/streaming.md` for `StreamCompleteResult` and per-stage `compactionEvent` payload shapes.
-
-Broadcasts:
+What remains here are the events that are not turn-scoped and did not change:
 
 | Method | Arguments | Return |
 |---|---|---|
 | `AcApp.filesChanged` | `selected_files: list[str]` | `true` |
-| `AcApp.userMessage` | `data: {content: str}` | `true` |
 | `AcApp.commitResult` | `result: {sha, short_sha, message, status, error?}` | `true` |
-| `AcApp.modeChanged` | `data: {mode: str, cross_ref_enabled?: bool}` | `true` |
 | `AcApp.sessionChanged` | `data: {session_id: str, messages: list[MessageDict]}` | `true` |
-
-Startup:
-
-| Method | Arguments | Return |
-|---|---|---|
 | `AcApp.startupProgress` | `stage: str, message: str, percent: int` | `true` |
-
-Navigation:
-
-| Method | Arguments | Return |
-|---|---|---|
 | `AcApp.navigateFile` | `data: {path: str}` | `true` |
-
-Collaboration:
-
-| Method | Arguments | Return |
-|---|---|---|
 | `AcApp.admissionRequest` | `data: {client_id, ip, requested_at}` | `true` |
 | `AcApp.admissionResult` | `data: {client_id, ip, admitted, replaced?}` | `true` |
 | `AcApp.clientJoined` | `data: {client_id, ip, role, is_localhost}` | `true` |
 | `AcApp.clientLeft` | `data: {client_id, ip, role}` | `true` |
 | `AcApp.roleChanged` | `data: {role, reason}` | `true` |
-
-Doc convert:
-
-| Method | Arguments | Return |
-|---|---|---|
 | `AcApp.docConvertProgress` | `data: {...}` — shape varies by progress stage | `true` |
+
+`MessageDict` is a record from the mirrored store; its schema is in
+`specs-reference/3-engine/history.md` § Mirrored store record schema. In-memory uses may omit `id`,
+`session_id`, and `timestamp`; the core triad is `{role, content, system_event?}`.
+
+Deleted: `AcApp.modeChanged`. Nothing replaced it — there are no modes.
 
 ## Dependency quirks
 
 ### RPC prefix derivation from Python class name
 
-`server.add_class(instance)` derives the RPC namespace from `type(instance).__name__` — the Python class name, not the variable name. So `server.add_class(llm_service)` where `llm_service` is an instance of `LLMService` produces RPC endpoints like `LLMService.chat_streaming`, not `llm_service.chat_streaming`.
+`server.add_class(instance)` derives the RPC namespace from `type(instance).__name__` — the Python class name, not the variable name. So `server.add_class(engine_service)` where `engine_service` is an instance of `ClaudeCodeService` produces RPC endpoints like `ClaudeCodeService.chat_streaming`, not `engine_service.chat_streaming`.
+
+This is why the `LLMService` → `ClaudeCodeService` rename is a wire-visible change that has to be made in the browser call sites at the same time, and why it cannot be softened by keeping a variable name.
 
 This differs from the browser side's `addClass(this, 'AcApp')` which takes an explicit namespace string as the second argument. On the server, passing a second argument to `add_class()` either raises or silently overrides the derived name — the codebase never passes a second argument.
 
@@ -489,9 +409,10 @@ The Python side's `ExposeClass` unwraps this — the handler sees normal paramet
 
 ## Cross-references
 
-- Behavioral inventory with method purposes and grouping: `specs4/1-foundation/rpc-inventory.md`
-- Connection lifecycle, reconnection, streaming patterns: `specs4/1-foundation/rpc-transport.md`
-- Streaming payload shapes (`streamChunk`, `streamComplete`, `compactionEvent`): `specs-reference/3-llm/streaming.md`
-- Message dict schema stored in history: `specs-reference/3-llm/history.md` § JSONL record schema
-- Edit result shapes in `streamComplete.result.edit_results`: `specs-reference/3-llm/edit-protocol.md` § Per-block result
-- Collaboration restriction policy and admission flow: `specs4/4-features/collaboration.md`
+- Behavioral inventory with method purposes and grouping: `specs5/1-foundation/rpc-inventory.md`
+- Connection lifecycle, reconnection, streaming patterns: `specs5/1-foundation/rpc-transport.md`
+- Engine method and event shapes (`EngineState`, `ChunkPayload`, `StreamCompleteResult`, `compactionEvent` stages): `specs-reference/3-engine/session.md`
+- Permission request, decision, and rule shapes: `specs-reference/3-engine/permissions.md`
+- Mirrored-store record schema, session listing, subagent keys: `specs-reference/3-engine/history.md`
+- MCP tool argument and result shapes for the `ac-dc` server: `specs5/3-engine/mcp-bridge.md`
+- Collaboration restriction policy and admission flow: `specs5/4-features/collaboration.md`

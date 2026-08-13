@@ -1,19 +1,24 @@
 # Reference Graph
 
-A unified view of cross-file references used by both the symbol index (code → code) and the document index (doc → doc, doc → code). The graph feeds cache tier initialization and navigation features.
+A unified view of cross-file references used by both the symbol index (code → code) and the document index (doc → doc, doc → code). The graph answers "what uses this?" for the editor, for the agent, and for the compact map annotations.
 
 ## Purpose
 
+- Answer find-references queries — for Monaco, and for the agent via the `find_references` MCP tool
 - Quantify how files are connected — which depend on which, which are central, which are isolated
-- Supply the stability tracker with initial tier assignments based on connectivity
 - Power per-file reference annotations in the compact map outputs (incoming reference counts)
+
+Reference resolution is the graph's distinctive value over text search. `Grep` over-matches on common
+identifier names and under-matches on aliased imports; the graph resolves imports properly. Both the
+editor and the agent get the same answer, which is a useful property in itself — the user and the
+agent are never looking at different call-site sets.
 
 ## Two Separate Implementations
 
 - Code reference index — tracks symbol usage across code files
 - Document reference index — tracks heading- and doc-level links
-- Both expose the same protocol methods consumed by the stability tracker
-- The stability tracker does not inspect internal node types; it operates on file-level connectivity
+- Both expose the same query protocol
+- Consumers operate on file-level connectivity and do not inspect internal node types
 
 ## Code Reference Index
 
@@ -76,13 +81,17 @@ A unified view of cross-file references used by both the symbol index (code → 
 - `connected_components()` — set of file clusters
 - `file_ref_count(path)` — incoming reference count
 
-These two methods are all the stability tracker requires. Internal node types and edge shapes differ between indexes, but the protocol is uniform.
+Internal node types and edge shapes differ between indexes, but the protocol is uniform.
 
-## Clustering for Tier Initialization
+## Connected Components
 
-- The stability tracker calls `connected_components()` to seed cached tiers with connectivity-correlated files
-- Orphan files (no mutual references) are distributed into the smallest tier via greedy bin-packing
-- Without this, one-way references and isolated files would never register in the tracker at startup
+Components cluster files that reference each other mutually. Their original consumer — seeding cache
+tiers with connectivity-correlated files — no longer exists. They remain useful for surfacing
+structure: "these eleven files form a subsystem" is a better answer to a whole-repo orientation
+question than an alphabetical file list, and the `symbol_map` tool uses component membership to order
+its output so related files appear together rather than by path.
+
+Orphan files (no mutual references) are still isolated nodes and still appear in every listing.
 
 ## Builtin Identifier Exclusion
 
@@ -91,7 +100,7 @@ These two methods are all the stability tracker requires. Internal node types an
 
 ## Invariants
 
-- Adding a file with no references produces an isolated node — it is still visible to the tracker
+- Adding a file with no references produces an isolated node — it is still visible to every consumer
 - Removing a file removes all edges involving it
 - Rebuild from scratch is deterministic — same inputs produce the same graph
 - Connected components are disjoint and cover all referenced nodes

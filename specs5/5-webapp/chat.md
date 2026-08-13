@@ -1,46 +1,129 @@
 # Chat
 
 The chat panel renders conversation messages, handles streaming display, manages auto-scrolling, and owns the user input area. It is the primary interaction surface within the Files tab. It also hosts the history browser and session-management controls.
+
+What it renders changed more than how it renders. A turn is no longer "a user message, then one
+assistant message with edit blocks in it". A turn is a **sequence of blocks** — text, thinking, tool
+calls with their results — produced by an agent that reads files, runs commands, and spawns subagents
+on its own initiative. The panel's job is to make that legible without turning into a log viewer, and
+to be honest about the one thing that is genuinely new: the agent acts on the repository while the user
+watches.
+
+The permission dialog is not part of this spec even though it interrupts this panel; see
+[permission-dialog.md](permission-dialog.md).
+
 ## Message Display
 - Scrollable list of message cards — user, assistant, system event
 - Keyed rendering for DOM reuse across updates
 - User cards may include image thumbnails
-- Assistant cards render markdown with syntax highlighting, math, edit blocks, and file mentions
-- System event cards (commit, reset, mode switch) use distinct styling — dashed border, muted color, "System" role label
-### Finish-Reason Badge Placement
-- Severity-split between top and bottom of the assistant card
-- Natural completions (`stop`, `end_turn`) — muted green ✓ badge in the bottom-left of the card, paired with the hover toolbar; fades in on mouse-enter alongside the copy/paste icons. Positive confirmation that the stream ended cleanly without competing with role label or body content for attention
-- Error/warning reasons (`length` truncation, `content_filter`, `tool_calls`, `function_call`, unknown) — badge inline with the role label at the top of the card, always visible. Users notice these before reading the body
+- Assistant cards render markdown with syntax highlighting, math, and file mentions
+- Within an assistant turn, tool cards and thinking regions are rendered inline in arrival order (see [§ Tool Cards](#tool-cards) and [§ Thinking Regions](#thinking-regions))
+- System event cards (commit, reset, session switch, permission-mode change, compaction boundary) use distinct styling — dashed border, muted color, "System" role label
+### Terminal-Reason Badge Placement
+The badge reports `terminal_reason` from `streamComplete` rather than a provider finish reason. Same
+severity split, different vocabulary:
+- Natural completions (`completed`) — muted green ✓ badge in the bottom-left of the card, paired with the hover toolbar; fades in on mouse-enter alongside the copy/paste icons. Positive confirmation that the turn ended cleanly without competing with role label or body content for attention
+- Interruptions (`aborted_streaming`, `aborted_tools`) — neutral grey badge at the top, always visible. The user caused these, so they are information rather than warning, but they must be visible: an interrupted turn may have left a half-finished edit on disk
+- Error and limit reasons (`max_turns`, refusals, API error statuses, unknown values) — badge inline with the role label at the top of the card, always visible. Users notice these before reading the body
+- `terminal_reason` is null on older CLIs and on local slash-command results; no badge is drawn rather than a badge claiming success
 - Card reserves extra bottom padding when a natural badge is present so the absolute-positioned badge doesn't overlap the last line of content
 ## Streaming Display
-### Chunk Processing
-- Chunks coalesced per animation frame — a pending variable stores the latest content; the frame callback reads and clears it before updating the streaming content property
-- Each chunk carries full accumulated content, not deltas — dropped or reordered chunks are harmless
-- First chunk begins rendering the streaming card; subsequent chunks update content in place
+### Block-Keyed Rendering
+- Every streaming event carries a **block identity**, a sequence number, and content that is cumulative *within that block* (see [`../3-engine/session.md` § Chunk semantics change](../3-engine/session.md#chunk-semantics-change))
+- The panel keys rendered elements by block identity. A chunk updates its block in place; blocks appear in arrival order and never reorder
+- A chunk whose `seq` is not greater than the highest seen for its block is discarded. Within a block, drops and reorderings are harmless; across blocks, arrival order is the contract
+- Chunks coalesced per animation frame — a pending map of block id → latest content is drained by the frame callback, which then updates the rendered blocks
+- The first chunk of a turn begins rendering the streaming card; subsequent chunks update blocks in place
 - Streaming card uses a force-visible class so content-visibility optimizations don't hide it
+
+The old contract — every chunk carries the entire accumulated turn — is gone, and with it the property
+that any single chunk could rebuild the whole view. The replacement is weaker but bounded: any single
+chunk can rebuild *its block*. This is why block identity has to be threaded through every rendering
+path rather than treated as an optimisation.
 ### Code Block Scroll Preservation
 - Markdown HTML replacement on each chunk loses horizontal scroll positions on code blocks
 - Before updating, snapshot scrollLeft of every code block inside the streaming card (by index)
 - After DOM rebuild completes, restore the saved scroll positions
 - Skipped when no code block was scrolled (common case)
+- Block-keyed rendering shrinks the blast radius: only the block being updated is rebuilt, so scroll positions in earlier blocks survive without help
 ### Passive Stream Adoption
-- When a chunk arrives with a request ID the client did not initiate, adopt the stream as passive
+- When an event arrives with a request ID the client did not initiate, adopt the stream as passive
 - Sets current request ID and a passive-stream flag
 - On completion of a passive stream, prepend the user message from the result (since the passive client didn't add it optimistically)
+### Reconnect Replay
+- On reconnect, `get_current_state` carries `active_streams`, each with the turn's blocks in order and each block's current content
+- The panel renders the block list, then resumes applying live chunks. A user who refreshed mid-turn sees the turn as it stands, not an empty card that fills in from the next token
+- Replay is block state, not a chunk log: superseded thinking content and intermediate renderings are not recoverable, and the panel must not imply otherwise
+- Any `pending_permissions` in the same snapshot are handed to the permission dialog immediately
 
 ### Streaming State Keyed by Request ID
 
-Streaming state (current content buffer, passive flag, streaming card DOM node) is keyed by request ID, not held as a singleton. In single-stream operation, there is at most one active key at a time; the singleton-like behavior is an emergent property, not a structural assumption.
+Streaming state (per-block content, passive flag, streaming card DOM node) is keyed by request ID, not held as a singleton. Only one user-initiated turn is active at a time, so there is at most one active key; the singleton-like behavior is an emergent property, not a structural assumption.
 
-A future parallel-agent mode (see [parallel-agents.md](../7-future/parallel-agents.md)) produces N concurrent streams under a parent user-request ID, each with a child ID. The chat panel renders N streaming cards, keyed by child ID. Chunk routing dispatches each chunk to its card by matching its request ID against the keyed state map.
+Subagents produce concurrent activity *inside* one turn. Their events carry the parent turn's request ID plus an `agent_id`, so routing is two-level: request ID selects the turn, `agent_id` selects where inside it the event belongs. Main-scope events have a null `agent_id`.
 
-The transport never assumes a singleton stream — every chunk carries the exact ID of the stream it belongs to (see [streaming.md](../3-llm/streaming.md#chunk-delivery-semantics)). The chat panel's routing layer is the frontend counterpart to that contract.
+The transport never assumes a singleton stream — every event carries the exact ID of the stream it belongs to (see [`../1-foundation/rpc-transport.md` § Concurrency](../1-foundation/rpc-transport.md#concurrency)). The chat panel's routing layer is the frontend counterpart to that contract.
+
+## Thinking Regions
+
+- `thinkingChunk` events render into a collapsed region above the text they precede, labelled with a token count once known
+- Expanded state is per-block and remembered for the session; a user who expands one does not get every subsequent one expanded
+- The configured thinking display setting (`summarized`, `omitted`) governs what arrives at all. When it is `omitted`, no region is drawn — not an empty one
+- Thinking content is never included in copy-message or read-aloud output; it is the agent's scratch space, not its answer
+
+## Tool Cards
+
+A tool card is the unit that carries what the agent *did*, as opposed to what it said.
+
+### Card Anatomy
+- Header — tool name, a one-line input summary (≤ 200 chars), and a status dot. MCP tools show their server name (`ac-dc`) as a chip so a user can tell an AC⚡DC tool from a built-in one
+- Body — collapsed by default. Expands to the full tool input and the result
+- Result — attached to its card by `tool_use_id`, truncated with a "show all" affordance and the full byte count. Error results are **expanded by default**; the status flag is what drives that, not string sniffing
+- Footer — duration, and the files the call modified (each clickable, navigating to the diff viewer)
+- A gated marker on cards whose call went through a permission prompt, so the transcript records that the user authorised it
+- Subagent attribution — a card with a non-null `agent_id` renders indented under its subagent's row rather than at turn level
+
+### Status
+| Status | Rendering |
+|---|---|
+| Pending | Grey dot, animated. The call is in flight |
+| Awaiting permission | Amber dot with a lock glyph. The dialog is open or queued |
+| Ok | Green dot |
+| Error | Red dot, body expanded |
+| Denied | Amber dot, with the denial reason as the body. The agent saw this reason too |
+
+### Diff Rendering for Edit and Write
+`Edit` and `Write` inputs are diffs in disguise, and rendering them as raw JSON wastes the panel's most
+useful affordance. An `Edit` card renders `old_string` → `new_string` as a two-level diff; a `Write`
+card renders new-file content, or a diff against the file on disk when it exists.
+
+#### Two-Level Diff Highlighting
+- Line-level diff — Myers algorithm via diff library, produces context/remove/add typed lines
+- Pairing — adjacent runs of remove followed by add are paired 1:1 for character-level diffing
+- Character-level diff — word-level diff on each pair, producing segment arrays with equal/delete/insert types
+- Rendering — paired lines show the word-level changes highlighted within the line-level background color
+- Unpaired lines show only the line-level highlight
+
+This is the same algorithm the old edit-block renderer used, and the permission dialog uses it too (see
+[permission-dialog.md](permission-dialog.md)). It is the one piece of the edit-protocol UI worth
+keeping: the protocol is gone, but "show me precisely what changed on this line" is not a
+protocol-specific need.
+
+### Todo Lists
+- `TodoWrite` calls render as a checklist that **replaces** the previous list rather than appending another card, so a long turn shows one live plan instead of fifteen snapshots
+- The list stays visible while the turn runs and collapses to its final state afterwards
+
+### What Tool Cards Deliberately Do Not Do
+- No re-running a tool call from the transcript. The agent owns its tool loop; a UI that lets the user replay a call outside that loop produces state the agent does not know about
+- No editing a tool input before it runs — that is the permission dialog's job, and only to the extent of allow/deny
+- No hiding tool calls behind a global "show tools" switch. A turn where the agent silently modified nine files is exactly the turn a user needs to see
+
 ## Markdown Rendering
 - Dedicated Marked instance for chat, separate from the diff-viewer preview instance
 - Code renderer override — language label, copy button, syntax highlighting
 - All other block elements use marked defaults (no preview-specific logic)
 - Math extension — display and inline expressions rendered via KaTeX with parse-failure fallback
-- Applies to user and assistant messages equally — users type markdown-literate text (matching what the LLM receives), so the UI renders it the same way. The renderer handles escaping internally, so passing user content through it is safe against HTML injection
+- Applies to user and assistant messages equally — users type markdown-literate text (matching what the agent receives), so the UI renders it the same way. The renderer handles escaping internally, so passing user content through it is safe against HTML injection
 ### Syntax Highlighting
 - Explicit language registration for common languages (JavaScript, TypeScript, Python, JSON, Bash, CSS, HTML, YAML, C, C++, diff, markdown)
 - Fenced blocks with recognized language are highlighted directly
@@ -51,36 +134,12 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Default opacity zero; fades in on hover via CSS — no visual flicker during streaming
 - Click handling delegated through the markdown content click handler
 - Shows brief confirmation after click
-## Edit Block Rendering
-- Edit blocks detected mid-stream render as pending with a partial diff preview
-- On stream completion, per-edit results are merged into the assistant message
-- On final render, each edit block shows — file path (clickable, navigates to diff viewer at the edit location), status badge, error message (for failed edits), diff lines
-### Edit Block Segmentation
-- Frontend parser splits raw LLM text into segments — text, edit, edit-pending
-- Segment types distinguish complete from incomplete blocks (stream ended mid-block)
-- File path line immediately preceding the start marker is attached to the edit segment
-- Code fence stripping — handles LLM formatting quirk where blocks are wrapped in triple backticks
-### Two-Level Diff Highlighting
-- Line-level diff — Myers algorithm via diff library, produces context/remove/add typed lines
-- Pairing — adjacent runs of remove followed by add are paired 1:1 for character-level diffing
-- Character-level diff — word-level diff on each pair, producing segment arrays with equal/delete/insert types
-- Rendering — paired lines show the word-level changes highlighted within the line-level background color
-- Unpaired lines show only the line-level highlight
-### Status Badges
-- Applied — green, written to disk
-- Already applied — green, new content already present in file
-- Failed — red, with error detail
-- Skipped — amber, pre-condition failure
-- Not in context — amber, file was added to context for next attempt
-- Validated — blue, dry-run passed
-- New — green, file creation
-- Pending — grey, streaming not yet complete
 ## File Mentions
 ### Detection (Final Render Only)
 - Scan assistant message HTML for known repo file paths
 - Pre-filter by substring match, sort candidates by path length descending (longer paths match first)
 - Build combined regex, replace matches with clickable spans
-- Also collect file paths from edit block headers
+- Also collect file paths from tool cards — the tool's input paths and its `files_modified` list
 - Replacement operates only on text segments between HTML tags — tag attributes never touched
 - Matches inside code blocks skipped; matches inside inline code replaced normally
 ### Click Handling
@@ -88,46 +147,46 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - File summary chips in the "Files Referenced" section only toggle selection — no navigation
 - On add — accumulate input text with natural phrasing
 - On remove — just update selection
-- In-context files display with a muted "in-context" style
+- Selected files display with a muted style
 ### File Summary Section
 - Below each assistant message with file references
-- Chips show check mark (in context) or plus (not in context)
+- Chips show a check mark (selected) or plus (not selected)
 - "Add All" button when multiple files can be added at once
 - Section only shown for final rendered messages, never during streaming
+- The wording is "selected", never "in context". Selection is a hint about what the user is looking at; it does not put a file in the model's context (see [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract))
 ### Input Accumulation on Add
 - When a file is added via mention click, the chat input text is accumulated using natural phrasing
 - Templates — "The file X added. Do you want to see more files before you continue?" for the first add, updated to join multiple files naturally on subsequent adds
 - Falls back to appending a parenthetical note for non-matching input states
 - Only basename (filename without directory path) used in accumulated text
-## Edit Summary Banner
-- Rendered at the end of the assistant message, not the top
-- Aggregate counts — applied, already applied, failed, skipped, not-in-context
-- Color-coded stat badges (green, amber, red)
-- Individual failure listing when failures are present — file path (clickable), error type badge, error message
-- When not-in-context edits are present, a note indicates the auto-populated retry prompt
-- When ambiguous-anchor failures are present, a similar note references the retry prompt
-## Retry Prompts
-### Ambiguous Anchor Retry
-- On stream completion, inspect edit results for ambiguous-match failures
-- Auto-compose a retry prompt listing each failure with file path and error detail
-- Place in chat textarea, auto-resize, but do not send
-- User reviews, edits, or discards before sending
-### Not-In-Context Retry
-- When not-in-context edits are detected, auto-populate chat textarea with retry prompt naming added files
-- Single file — "The file X has been added to context. Please retry the edit for: …"
-- Multiple files — plural phrasing
-- Not auto-sent — user reviews and sends when ready
-- Note: may overwrite an earlier ambiguous-anchor prompt if both are present in the same response — acceptable
-### Old-Text-Mismatch Retry
-- When old-text-mismatch failures occur on files already in active context, auto-populate retry prompt
-- Reminds the LLM that the file is already in context and asks it to re-read before retrying
-- Not auto-sent
-- Anchor-not-found failures do not trigger this prompt (different class of problem)
+
+## Turn Footer
+
+Replaces the edit summary banner. Rendered at the end of the assistant turn, not the top:
+
+- Files modified — the union of every tool result's `files_modified`, deduplicated, each clickable through to the diff viewer. This is the answer to "what did it just do to my repo?" and it is the footer's most important line
+- Tool calls, and how many needed a permission prompt
+- Duration, engine-internal turn count
+- Usage — per-model token counts. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))
+- A mirror-gap marker when the turn failed to append to the repo-local transcript, linking to the health banner
+
+### No Retry Prompts
+
+The old panel auto-composed three kinds of retry prompt into the textarea — ambiguous anchor,
+not-in-context, old-text mismatch — because a failed edit was a dead end that only the user could
+break. None of them survive, and nothing replaces them.
+
+The reason is structural rather than cosmetic. Those failures were failures of *our* apply pipeline
+against a model that had no way to look at the file. The agent's `Edit` tool fails back to the agent,
+which can read the file, look again, and retry inside the same turn. A panel that composed a retry
+prompt for the user to send would be racing the agent's own recovery, and would usually lose.
+
 ## Message Action Buttons
 - Hoverable toolbars at top-right and bottom-right of each message card (both ends for long messages)
 - Copy raw text to clipboard
 - Insert raw text into chat input
 - Read aloud — speaks the message via text-to-speech; toggles to a stop control while this message is the one playing. Shown only when the browser supports speech synthesis. See [speech.md § Read Aloud](speech.md#read-aloud-text-to-speech)
+- **Undo file changes** — on user message cards only, calls `rewind_files(user_message_id)` to restore the files as they were before that turn. Confirmation dialog first; the result names the restored paths. This is the UI for `/rewind`, and it restores *files*, not the conversation — the transcript is unchanged and the panel says so
 - Not shown on streaming messages
 ## Scrolling
 ### Auto-Scroll
@@ -136,6 +195,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Scroll-up detection during streaming — a passive scroll listener tracks position and only disengages auto-scroll when the user scrolls upward by more than a threshold; pure observer-based detection would false-trigger during content reflows
 - Observer only re-engages auto-scroll; never disengages during active streaming
 - Double animation-frame wait pattern for scroll-to-bottom — ensures DOM has fully reflowed before setting scroll position
+- Tool cards expanding (an error result, a user click) change height mid-turn. Height changes from expansion never disengage auto-scroll — only a deliberate upward scroll does
 ### Scroll-to-Bottom Button
 - Appears when user has scrolled up
 - Click scrolls to bottom
@@ -147,14 +207,19 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Minimize/maximize — same, no explicit save/restore needed
 - Session load — reset scroll state, scroll to bottom
 ### Auto-Scroll for Non-Streaming Messages
-- Messages added outside streaming (commit, compaction) follow the same scroll-respect rule — if at bottom, scroll down; if scrolled up, leave unchanged
+- Messages added outside streaming (commit, compaction boundary, permission-mode change) follow the same scroll-respect rule — if at bottom, scroll down; if scrolled up, leave unchanged
 ## Input Area
 ### Text Input
 - Auto-resizing textarea
 - Enter to send, Shift+Enter for newline
 - Image paste — base64 encoded, size and count limits enforced
 - Undo/redo workaround — native undo is broken in shadow DOM textareas when the framework re-renders set value programmatically; intercept Ctrl+Z and delegate via deprecated exec-command fallback
-- Draft persistence — the in-progress draft for the main tab is written to `localStorage` on every input event and restored on reconnect / refresh. Cleared on send. Pending images are not persisted; agent tabs have their own input state but their drafts are not saved (agent tabs are turn-scoped). See `specs-reference/5-webapp/chat.md` for the storage key
+- Draft persistence — the in-progress draft is written to `localStorage` on every input event and restored on reconnect / refresh. Cleared on send. Pending images are not persisted. See `specs-reference/5-webapp/chat.md` for the storage key
+### Slash Commands
+- A leading `/` is not intercepted by the panel. Custom commands from `.claude/commands/` are the engine's and pass through untouched
+- A built-in CLI command that has an AC⚡DC equivalent returns `{status: "unsupported"}` synchronously with the equivalent named; the panel renders that as a system note pointing at the affordance (for example `/context` → the Context tab), and the text is never sent to the model
+- An unmapped `/command` gets the same treatment without an equivalent. A mistyped command must never turn into a question the agent tries to answer
+- See [`../3-engine/session.md` § Slash Command Equivalents](../3-engine/session.md#slash-command-equivalents)
 ### Paste Suppression
 - When middle-click inserts a path into the textarea, a flag on the chat panel tells the paste handler to suppress the browser's selection-buffer paste
 - Flag is a one-shot — set on insert, consumed by the next paste event
@@ -165,9 +230,12 @@ The transport never assumes a singleton stream — every chunk carries the exact
 1. @-filter active — remove query, clear filter
 2. Snippet drawer open — close drawer
 3. Default — clear textarea
+
+The permission dialog is modal and takes Escape before any of this; Escape there is an explicit deny,
+never a dismiss (see [permission-dialog.md](permission-dialog.md)).
 ### Stop Button
-- During streaming, Send transforms into Stop
-- Click cancels the active request
+- During a turn, Send transforms into Stop
+- Click calls `cancel_streaming`, which interrupts the engine. The button then shows a brief draining state until `streamComplete` arrives — the turn is not over until the engine says so, and pretending otherwise loses the tail
 ### Input History
 - A separate component hosted inside the chat input area — the chat panel owns the interaction lifecycle
 - Records every sent message
@@ -176,7 +244,7 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Substring filter, capped at a size limit, duplicates moved to the end rather than creating a second entry
 - Items displayed oldest-first (top) to newest (bottom)
 - Up/Down navigate; Enter selects; Escape restores original input
-- Session seeding — when a session is loaded, all user messages from that session are added to the input history for up-arrow recall
+- Session seeding — when a session is resumed, all user messages from that session are added to the input history for up-arrow recall
 - Long entries (including multi-line messages) collapse to a single ellipsis-clipped line; the full text is disclosed via native `title` tooltip on hover. No inline preview pane
 - Overflow — when entries exceed the initial visible window, the list scrolls within a bounded height. Filter input is the primary discovery mechanism for older entries
 ### Snippet Drawer
@@ -195,24 +263,17 @@ The transport never assumes a singleton stream — every chunk carries the exact
 - Thumbnail previews with remove button below textarea
 - Lightbox overlay on click (full-size view, Escape to close)
 - Re-attach button on thumbnails and in lightbox (see [images.md](../4-features/images.md))
-- Token counting via provider formula with fallback estimate
+- No token estimate is shown. AC⚡DC does not count tokens; the turn footer reports what the engine actually used
 - Not automatically re-sent on subsequent messages — display-only after original send
-### URL Chips
-- Strip of chips between the pending-images strip and the textarea showing URLs detected in the current input or previously fetched during the session
-- Debounced detection via `LLMService.detect_urls` on input change (~300ms); stale responses discarded via generation counter
-- Four chip states — detected (fetch button + dismiss), fetching (spinner), fetched (include/exclude checkbox + clickable label + remove), errored (error message + dismiss)
-- Clicking the fetched chip label opens a modal showing the URLContent payload (title, summary/readme/content body, symbol map for GitHub repos)
-- Remove calls `LLMService.remove_fetched_url` so the backend's in-memory fetched dict stays in sync
-- Detected chips are pruned when the URL is no longer in input; fetched and errored chips survive input edits
-- On send, detected and fetching chips clear; fetched and errored survive
-- On session-changed, all chips clear
-- The streaming handler's own URL detection (during `_stream_chat`) is the authoritative path for injecting URL content into the LLM context; the chip UI is an awareness and control surface layered on top. The exclusion checkbox is honoured — on send, the chat panel collects every fetched chip whose include checkbox is unchecked and passes the URL list as the 5th positional arg to `LLMService.chat_streaming`. The backend threads the list through `_stream_chat` → `_detect_and_fetch_urls` → `URLService.format_url_context(excluded=…)` so unchecked URLs stay out of the prompt for that turn. The URLs themselves remain in the URL service's session-scoped `_fetched` dict so the chip stays visible and the user can re-include by re-checking the box on a later turn
-- See [url-content.md](../4-features/url-content.md) for the full URL service behaviour
+### Links and URLs
+- A URL in the input is just text. There are no URL chips, no fetch button, no per-turn include/exclude checkboxes, and no URL modal
+- The agent fetches what it needs with its own web tools, gated by the permission dialog like any other tool call, and the fetch appears in the transcript as a tool card
+- This is a real loss of control surface and worth naming: the user can no longer curate a URL set across turns. What they get instead is a fetch they can see, deny, and read the result of
 ## Action Bar
 
 Two visual groups separated by a thin vertical divider:
 
-- Search group — search-mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation, and the context-mode controls (primary mode + cross-reference) at the right end
+- Search group — search-mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation, and the preset / permission controls at the right end
 - Session group — new session, open history browser (hidden in file search mode)
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
@@ -229,60 +290,49 @@ Git action buttons (copy diff, commit, reset) and the review toggle live in the 
 
 The action bar uses a dual-direction collapse pattern keyed on whether the search bar has focus:
 
-- **Search has focus** → neighbouring action-bar controls (mode toggle, reasoning toggle, session buttons, and their dividers) hide via the `.search-collapsible` CSS rule. The search bar expands to fill the row, exposing its segmented mode control, option toggles (Aa / .* / ab), match counter, and prev/next nav arrows
+- **Search has focus** → neighbouring action-bar controls (preset selector, session buttons, and their dividers) hide via the `.search-collapsible` CSS rule. The search bar expands to fill the row, exposing its segmented mode control, option toggles (Aa / .* / ab), match counter, and prev/next nav arrows
 - **Search loses focus** → those controls return, and the search bar's own inner controls collapse via `.search-bar:not(:focus-within)` so only the text input remains visible. Placeholder text (`Search messages…` / `Search files…`) carries the active mode at rest
 
-The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (mode toggle, reasoning, sessions visible) — never both fighting for the same row. Active toggles inside the search bar (segmented mode, option toggles) and outside it (mode toggle, cross-reference, reasoning) share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
+The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (preset, sessions visible) — never both fighting for the same row. Active toggles inside the search bar and outside it share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
 
-## Mode Toggle
+The **permission-mode indicator is exempt from collapse.** It is the one control in the row that must never be hidden by a focus state: a user who cannot see whether the agent is allowed to write files has lost the plot, and a search box is not a good enough reason.
 
-The primary-mode segmented control and cross-reference overlay toggle sit at the right end of the search bar, after the match-navigation arrows. Three controls total — two for the primary mode, one for cross-reference.
+## Preset Selector
 
-### Tab-Scoped Visibility
+Replaces the mode toggle. A preset is a bundle of snippets, turn framing, and optionally a Claude Code
+skill or agent — see [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
 
-- Rendered only when the active tab is `main` — agent tabs hide the controls entirely
-- Agents inherit the mode from their parent scope at spawn time and cannot switch independently in the current backend; hiding the UI on agent tabs avoids implying a capability that doesn't exist
-- When the backend gains per-agent mode (a future commit), the controls render on every tab and the read/write paths thread through `agent_tag`. The UI gate moves at that time; the controls themselves are unchanged
-
-### Primary Mode (Segmented)
-
-- Two mutually-exclusive icon buttons — `💻` (code mode) and `📄` (document mode)
+- A small segmented control at the right end of the search bar, one button per configured preset (`💻` code, `📄` doc by default; the review preset activates from review state, not from this control)
 - Active button shows accent-coloured background, a 1px ring, and a soft outer halo in the same accent colour — the halo is the load-bearing affordance because the icon-only buttons live on a dark background where a tint shift alone is hard to read at a glance
-- Clicking the inactive button calls the mode-switch RPC
-- No-op when already in the target mode (the backend would no-op too, but the frontend short-circuits to save a round-trip)
-- Disabled when RPC isn't connected
-- Tooltips disclose the full mode name and what each mode does
+- Clicking an inactive button changes the preset. The change is **local and immediate**: it swaps the snippet set and the framing hint for the next turn. There is no RPC round-trip to wait on and no engine state to reconcile, because the engine has no idea presets exist
+- No cross-reference toggle. Both indexes are always available as tools; there is nothing to switch on
+- Rendered on every tab. There is no per-tab preset gating, because subagent views are read-only and have no input to frame
 
-### Cross-Reference (Overlay Toggle)
+### What Changed and Why It Is Simpler
 
-- Single icon button — `🔀`
-- Active state uses a distinct accent colour (amber) to separate it visually from the primary-mode accent (blue), with the same ring + halo treatment so users learn one "this is glowing therefore active" rule across both controls
-- Clicking calls the set-cross-reference RPC with the inverted current state
-- Disabled under the same conditions as the primary mode buttons
-- Tooltip switches between "Cross-reference ON — both indexes active (click to disable)" and "Cross-reference OFF — click to add the other index alongside" depending on state
+The mode toggle was a *backend* control: it swapped the system prompt, changed which index fed prompt
+assembly, reset the cross-reference flag, broadcast `modeChanged`, and had to be synchronised across
+clients so nobody sent a turn under a stale assumption. None of that applies. Preset state is browser
+state, the way the snippet drawer's open/closed state is browser state.
 
-### State Synchronization
+The consequence for collaboration: presets are **per-client**, not global. Two collaborators can hold
+different presets without conflict, because a preset only shapes the turn its holder sends. This is a
+deliberate simplification, not an oversight — the old global mode existed because the prompt was global.
 
-- Initial state hydrated from the backend's `get_current_state` snapshot on RPC ready
-- Updated via `mode-changed` window events broadcast by the backend
-- When a `mode-changed` event reports a primary mode different from the current UI state, the cross-reference flag is reset to false locally — mirrors the backend's reset-on-switch behaviour per [modes.md](../3-llm/modes.md)
-- RPC call failures surface as toasts; restricted errors (non-localhost caller) use warning type rather than error
+## Permission Mode Selector
 
-### Feedback
-
-- The state flip happens via the `mode-changed` broadcast, not optimistically on RPC success — prevents the UI from racing the broadcast when multiple clients are connected
-- Failed RPCs (mode switch rejected, cross-reference toggle rejected) surface as toasts naming the reason
-
-### Non-Localhost Clients
-
-- Controls are rendered and clickable for every participant — the frontend has no signal distinguishing localhost from remote callers
-- The backend's `_check_localhost_only` guard rejects mode-switch and cross-reference RPCs from non-localhost callers with a `restricted` error; the chat panel surfaces this as a warning toast
-- `mode-changed` broadcasts update the UI state on every client (including non-localhost) so they passively follow the host's authoritative mode
+- A labelled control in the action bar showing the current permission mode, always visible (see [`../3-engine/permissions.md` § Permission Mode](../3-engine/permissions.md#permission-mode))
+- Clicking opens the mode list with the plain-language description of each. `bypassPermissions` carries an explicit warning and is never preselected
+- Selecting calls `set_permission_mode()`. The UI flips on the **broadcast**, not optimistically on RPC success, so multiple clients cannot disagree about the posture
+- A mode change is recorded in the transcript as a system event naming who changed it — the posture is part of the conversation's history, because it changes what the rest of the conversation could do
+- Non-localhost participants see the control in a read-only form. The RPC would reject them; showing a live-looking control that always fails is worse than showing the truth
+- During review the mode is read-only-by-default and the control says why, with an override path (see [`../4-features/code-review.md` § Read-Only Mode](../4-features/code-review.md#read-only-mode))
 
 ### Review Status Bar
 
 - When review mode is active, a slim status bar appears above the chat input
-- Shows review summary (branch, commits, file/line stats) and diff inclusion count
+- Shows review summary — branch, commits, files changed, additions/deletions — and the read-only posture
+- No diff-inclusion count; nothing about the review is injected, so there is no in-context set to count
 - Commit button is disabled during review
 - See [code-review.md](../4-features/code-review.md)
 
@@ -291,34 +341,50 @@ The primary-mode segmented control and cross-reference overlay toggle sit at the
 - Snippets reloaded from the server whenever context changes:
   - On RPC ready (initial connection and reconnect)
   - On review state change (entering or exiting review mode)
-  - On mode change (code ↔ document)
-- Server returns mode-appropriate snippets; frontend does not distinguish between modes
+  - On preset change
+- Server returns review snippets when a review is active, otherwise the active preset's set; the frontend does not distinguish
 
-## Agent Archive Integration
+## Subagent Activity
 
-Turns in which the main LLM spawned agents have an associated archive of per-agent conversations (see [history.md](../3-llm/history.md#agent-turn-archive) and [agent-browser.md](agent-browser.md) for the UI spec).
+The agent spawns subagents with its own `Task` tool. They are internal to the turn: AC⚡DC does not
+create them, cannot send them a message, and cannot grant them files.
 
-- The chat panel surfaces these via additional tabs in its own tab strip — one "Main" tab plus one tab per agent spawned in any turn within the current session
-- Each agent tab is a full chat panel instance targeting the agent's `ContextManager`, not a read-only viewer — the user can reply to an agent in its tab to resume its work, or grant files by ticking the picker while that tab is active. There is no per-tab close affordance; agents are dismissed only by `new_session` (which clears the entire agent team alongside main's history) or by loading a different session. See [agent-browser.md § Tab Lifetime](agent-browser.md#tab-lifetime) for the full lifecycle
-- The chat itself IS the spine of every turn — the Main tab shows the user message and the assistant response. In agent-mode turns, the assistant response's `content` naturally includes the main LLM's decomposition narration, any review-and-iterate decisions, and the final synthesis, because all of that came from the same LLM's output stream. The Main tab renders it exactly as any other assistant message; no special card layout is needed for agent-mode turns
-- Assistant messages in the Main tab are schema-identical between agent-mode and non-agent-mode turns. The distinguishing signal is the tab strip — a turn that spawned agents surfaces its agent tabs for as long as they're live, and surfaces a "View agents" affordance in the Main tab's scrollback for historical turns whose archives still exist on disk
-- Per-tab state (selection, URL chips, input draft, scroll position, active request ID) is scoped to each tab; switching tabs swaps the visible state without discarding any tab's values
-- Historical agent tabs (populated from the archive when the user scrolls back to a previous turn) are read-only — input boxes disabled, ContextManager long gone, but the full conversation is browsable
+- A turn that spawns subagents grows a row per subagent inside the assistant turn — description, task type, live status, last tool name, token usage
+- Tool cards from a subagent render indented under its row, keyed by `agent_id`
+- A row is terminal when its status reaches a terminal value. A task can reach a terminal status with no notification event, so the row must not wait for one to stop spinning
+- Clicking a row opens its full transcript in the subagent browser (see [subagent-browser.md](subagent-browser.md))
+- A live subagent can be stopped — `stop_task(task_id)` — from its row. This is the only write affordance a subagent row has
+
+### What the Old Agent Tabs Did That This Does Not
+
+The old design gave each spawned agent a **full interactive chat tab**: its own `ContextManager`, its
+own file selection, its own input box. A user could reply to an agent to resume its work.
+
+That is not possible and will not come back. A `Task` subagent is a conversation between the agent and
+itself; there is no seam for a third party to speak into it, and inventing one would mean running our
+own parallel agent framework alongside the engine's — exactly the duplication this conversion exists to
+remove. What is left is observation plus a stop button, which covers the case that actually mattered in
+practice: watching a long fan-out and killing one that has gone wrong.
 
 ## Commit and Reset Flows
 
 ### Commit (Server-Driven)
 
-- Commit button calls the commit-all RPC, which returns immediately with a started status
-- Server performs the full pipeline in a background task (stage all → get diff → generate commit message → commit)
+- Commit button calls `commit_all`, which returns immediately with a started status
+- Server performs the pipeline in a background task: stage all → get the staged diff → send `commit.md` plus the diff as a **user turn** on the live session → commit with the response
 - On completion, server broadcasts the commit result to all connected clients
 - All clients show a toast with the short SHA and first line, add a system event message card, and refresh the file tree
 - A commit-in-progress guard on both client and server prevents concurrent commits
 - Chat panel shows a progress message during the commit, replaced by the result when the broadcast arrives
 
+The message-generation step is now an ordinary turn, which has two visible consequences: it appears in
+the transcript like any other exchange (the user can see what the diff was and what came back), and it
+occupies the single-turn slot, so a commit and a chat turn cannot run at once. Both are improvements
+over a hidden auxiliary model call that left no trace.
+
 #### Commit-Result Error Path
 
-Because the RPC returns a started status synchronously, the synchronous error branch only catches pre-launch rejections (no repo, already committing, non-localhost). Everything the background pipeline can fail at — staging, **commit-message generation**, the commit itself — surfaces only through the broadcast `commitResult` event. The broadcast carries an `error` string (and, for LLM failures, a structured `error_info` dict matching the streaming completion's error shape; see [streaming.md § Commit-Message Generation Failure](../3-llm/streaming.md#commit-message-generation-failure)).
+Because the RPC returns a started status synchronously, the synchronous error branch only catches pre-launch rejections (no repo, already committing, non-localhost, a turn already in flight). Everything the background pipeline can fail at — staging, **the message-generation turn**, the commit itself — surfaces only through the broadcast `commitResult` event. The broadcast carries an `error` string and, for engine failures, a structured `error_info` dict matching the turn's error shape.
 
 Multiple components listen to the broadcast for their own in-flight flag, but exactly one is responsible for surfacing the error:
 
@@ -326,48 +392,62 @@ Multiple components listen to the broadcast for their own in-flight flag, but ex
 - **The chat-panel handler** clears its own flag and, on an error, returns without appending a system-event card — deliberately deferring the visible feedback to the shell's toast. It must not duplicate the toast.
 - **The file-picker handler** only clears its in-flight flag.
 
-The most common error here is the smaller model's context window being exceeded by an oversized staged diff; its tailored message points the user at committing fewer files rather than at their network. A regression that drops the shell's toast makes every background commit failure invisible — the button silently re-enables with no user-facing feedback.
+The failure modes changed with the mechanism. There is no smaller model and no separate context window
+to exceed; an oversized staged diff now consumes the session's context and may trigger compaction, and
+a denied permission or an interrupted turn can leave the pipeline with no message to commit. Each needs
+its own message: "commit fewer files", "the turn was interrupted", "permission denied". A regression
+that drops the shell's toast makes every background commit failure invisible — the button silently
+re-enables with no user-facing feedback.
 
 ### Reset to HEAD
 
 - Click shows a confirmation dialog
 - On confirm — calls reset RPC
-- Server records a system event message in context and history
+- Server records a system event message in the mirrored history
 - Client displays the system event card and refreshes the file tree
+- The system event is **not** fed back to the model. The engine's context is the engine's; a reset the agent does not know about is a real hazard, and the honest mitigation is that the next turn's tool calls see the reset files, not that we narrate it
 
 ## Broadcast Handling
 
 ### User Message Broadcast
 
-- Server broadcasts the user message to all clients before streaming begins
+- Server broadcasts the user message to all clients before the turn begins, carrying the request ID, the framing's file list, and image refs
 - Sending client ignores the broadcast if it has an active request ID that is not a passive stream — it already added the message optimistically
-- Collaborator clients add the message to their list immediately so the user message appears before streaming
+- Collaborator clients add the message to their list immediately so the user message appears before streaming, with the same file hints the sender saw
 
 ### Session Sync
 
-- Session-loaded event (from remote or local) replaces the entire message list
+- Session-changed event (from remote or local) replaces the entire message list
 - Handler resets streaming state, enables auto-scroll, seeds input history from user messages in the loaded session
-- Same event fires for both local history browser load and remote collaborator load — convergent handler
+- Same event fires for a local resume and a remote collaborator's resume — convergent handler
 
 ## Toast System (Chat-Local)
 
 - Rendered inside the chat panel, positioned near the input
 - Auto-dismisses after a short interval
-- Used for chat-specific feedback — copy success, commit result, stream errors, URL fetch notifications
+- Used for chat-specific feedback — copy success, commit result, turn errors, rate-limit warnings
 - Does not dispatch global toast events; separate from the shell's global toast layer
 
-### Compaction Event Routing
+### Engine Event Routing
 
-Handler routes compaction/progress event stages to appropriate feedback:
+Handler routes `compactionEvent` stages and adjacent engine events to appropriate feedback:
 
-| Stage | Handling |
+| Stage / event | Handling |
 |---|---|
-| URL fetch / URL ready | Transient local toast during streaming |
-| Compacting | Transient local toast indicating compaction in progress |
-| Compacted | Replace message list with compacted messages from the event payload; success toast |
-| Doc enrichment queued / file done / complete / failed | Not rendered as toast — header progress bar handles these (see [shell.md](shell.md) and [document-index.md](../2-indexing/document-index.md)) |
+| `pre_compact` | Transient local toast — the engine is about to compact |
+| `compact_boundary` | A divider card in the transcript with before/after token counts. **Not** a message-list replacement: the engine compacted its own context, and our mirrored transcript is unchanged |
+| `reindex` | No toast. The file tree and viewers refresh on `postResponseComplete` |
+| Doc enrichment queued / file done / complete / failed | Not rendered as a toast — header progress bar handles these (see [shell.md](shell.md) and [document-index.md](../2-indexing/document-index.md)) |
+| `rateLimit` | Warning toast on `allowed_warning`, error toast on `rejected`, both naming the reset time. The usage HUD carries the persistent version |
+| `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption |
 
-Handler accepts events for both the current streaming request ID and the most recently completed request ID, since compaction runs asynchronously after stream completion.
+Handler accepts events for both the current streaming request ID and the most recently completed request ID, since post-turn housekeeping runs asynchronously after `streamComplete`.
+
+The `compacted` stage of the old pipeline — which replaced the whole message list with a
+model-generated summary — has no successor. Compaction is the engine's, it happens to the engine's
+context, and the transcript the user is reading is not affected by it. What the divider communicates is
+"the agent's memory of everything above this line is now a summary", which is a fact about the model,
+not about the page.
 
 ## History Browser
 
@@ -375,6 +455,7 @@ Handler accepts events for both the current streaming request ID and the most re
 - Left panel — session list or search results; preview text, relative timestamp, message count badge
 - Right panel — messages for selected session with simplified markdown rendering and image thumbnails
 - Header — title, search input, close button
+- All three reads (list, messages, search) come from the mirrored store, never from the engine's transcripts. Browsing history never touches the engine
 
 ### Interactions
 
@@ -382,27 +463,39 @@ Handler accepts events for both the current streaming request ID and the most re
 - Session selection — click loads messages via the session messages RPC; preserves selection on close/reopen
 - Message actions — hover reveals copy and paste-to-prompt buttons
 - Context menu — right-click a message shows options to load in left or right panel of diff viewer, copy, paste to prompt
-- Load session — calls the load-session RPC, dispatches session-loaded event (with messages), closes browser
+- **Resume session** — calls `resume_session(session_id)`, which reconnects the engine with that session's context. Dispatches the session-changed event and closes the browser
+- **Resume as a fork** — same, with forking, leaving the original session untouched. Offered as the secondary action on a session that has already been resumed once, because continuing two branches of one session id is how a transcript becomes unreadable
 - Close — backdrop click, close button, or Escape
+
+### Resume Is Not Load
+
+The old browser "loaded a session into context" — it read our records and rebuilt a prompt from them.
+Resume hands the engine a session id and lets it restore its own context. The distinction shows up in
+the UI in two places that must be got right:
+
+- Resuming **replaces the live session**. It is not a preview. The browser confirms before resuming if the current session has messages the user has not seen the end of
+- A session in our store that the engine cannot resume (its transcript is gone, or it was written by a different CLI major) is shown as **browsable but not resumable**, with the reason. The alternative — a resume button that fails — trains users to distrust the list
 
 ### Events
 
 | Event | Direction | Purpose |
 |---|---|---|
-| `session-loaded` | Outward (bubbles) | Carries loaded session messages to chat panel |
+| `session-changed` | Outward (bubbles) | Carries the resumed session's messages to the chat panel |
 | `paste-to-prompt` | Outward (bubbles) | Carries message text to insert into chat input |
 | `load-diff-panel` | Outward (bubbles) | Load content in diff viewer left or right panel |
 
 ## Invariants
 
-- Each streaming chunk replaces the accumulated content, never appends a delta — order and completeness of chunks are independent
+- Every rendered streaming element is keyed by block identity; a chunk with a stale `seq` for its block is discarded rather than applied
+- Content is cumulative within a block and never assumed cumulative across a turn
 - Only final-rendered messages detect file mentions — streaming messages never process mentions
-- Retry prompts are never auto-sent; user always reviews before sending
-- Auto-scroll never disengages during active streaming without a deliberate upward scroll beyond a threshold
+- Auto-scroll never disengages during active streaming without a deliberate upward scroll beyond a threshold; height changes from tool-card expansion never disengage it
 - The chat-local toast never dispatches global toast events
-- Commit and reset messages persist to history as system event messages via the server, not client-side
-- Session-loaded handler resets streaming state before replacing the message list
+- Commit, reset, permission-mode changes, and compaction boundaries persist to the mirrored history as system events via the server, not client-side
+- No system event is fed back to the model
+- Session-changed handler resets streaming state before replacing the message list
 - Passive stream completion always prepends the user message from the result if present
-- Turns that did not spawn agents render identically to today — the agent region and collapse tab never appear
-- Agent-mode and non-agent-mode assistant messages share the same card layout; the only runtime signal of agent involvement is the collapse tab's presence for the active turn
-- The active turn (for agent region routing) is determined solely by chat scroll position; no separate navigation state exists
+- A turn's tool cards are never hidden by a global preference; the transcript always shows what the agent did
+- The permission-mode indicator is visible in every layout state of the action bar
+- A slash command with no engine meaning is never sent to the model as prose
+- The panel never re-runs a tool call, never edits a tool input, and never speaks into a subagent

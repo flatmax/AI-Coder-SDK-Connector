@@ -1,6 +1,6 @@
 # Reference: Symbol Index
 
-**Supplements:** `specs4/2-indexing/symbol-index.md`
+**Supplements:** `specs5/2-indexing/symbol-index.md`
 
 ## Byte-level formats
 
@@ -134,4 +134,6 @@ Requires `tree-sitter >= 0.21` for the `Language(callable)` wrapping API. Earlie
 ## Cross-references
 
 - Reference graph shape and connected-component clustering: `specs-reference/2-indexing/reference-graph.md` (when created)
-- Prompt assembly consumes the map via `get_symbol_map(exclude_files=...)` — consumer detail lives with prompt assembly, not duplicated here
+- The `symbol_map` and `file_symbols` MCP tools consume the map via `get_symbol_map()` / `get_file_symbols(path)`; tool argument and result shapes live in `specs-reference/3-engine/mcp-bridge.md`, not duplicated here
+- The LSP methods (`hover`, `definition`, `references`, `completions`) consume the same in-memory index; their wire shapes live in `specs-reference/1-foundation/rpc-inventory.md`
+- There is no `exclude_files` parameter any more. Nothing is excluded from an index; read denial is a permission rule, not an index filter (see `specs5/plan/decisions.md` § CC-14)

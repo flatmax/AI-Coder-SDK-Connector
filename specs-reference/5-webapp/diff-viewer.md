@@ -1,8 +1,8 @@
 # Reference: Diff Viewer
 
-**Supplements:** `specs4/5-webapp/diff-viewer.md`
+**Supplements:** `specs5/5-webapp/diff-viewer.md`
 
-This is the canonical owner for Monaco configuration detail (worker paths, module entry, MATLAB tokenizer, language map) and virtual-file schemas. Consumers (SVG viewer for mode-toggle dispatch; chat panel for edit-block goto) reference here rather than duplicate.
+This is the canonical owner for Monaco configuration detail (worker paths, module entry, MATLAB tokenizer, language map) and virtual-file schemas. Consumers reference here rather than duplicate: the SVG viewer for mode-toggle dispatch, the chat panel for tool-card goto, and the permission dialog — which embeds a Monaco diff of its own and must therefore use this configuration verbatim, since a dialog whose diff renders differently from the viewer's would undermine the one thing it exists to show.
 
 ## Byte-level formats
 
@@ -42,7 +42,7 @@ Maps file extensions (case-insensitive, lowercase-compared after normalization) 
 Two extensions deliberately split conventions:
 
 - `.h` resolves to `c`, not `cpp` — matches the symbol index's language-for-file rule (see `specs-reference/2-indexing/symbol-index.md` § dependency quirks). Mixed-language repos stay consistent between viewer highlighting and symbol extraction.
-- `.svg` resolves to `xml` for the diff viewer's text-mode fallback. When the SVG viewer is active, it's not a diff-viewer concern; see `specs4/5-webapp/svg-viewer.md` for the SVG↔text toggle.
+- `.svg` resolves to `xml` for the diff viewer's text-mode fallback. When the SVG viewer is active, it's not a diff-viewer concern; see `specs5/5-webapp/svg-viewer.md` for the SVG↔text toggle.
 
 ### Monaco package entries
 
@@ -54,7 +54,7 @@ Two import paths matter and must not be confused:
 | `monaco-editor/esm/vs/editor/editor.api.js` | API surface only — no contributions | **Never** — missing find widget, hover, diff decoration renderer, bracket matching, etc. |
 | `monaco-editor/esm/vs/editor/editor.worker.js` | Editor web worker entry | Imported from a thin `monaco-worker.js` module, compiled via Vite's `?worker` suffix |
 
-See `specs4/5-webapp/diff-viewer.md` § "Monaco Module Entry" for the full failure-mode diagnosis.
+See `specs5/5-webapp/diff-viewer.md` § "Monaco Module Entry" for the full failure-mode diagnosis.
 
 ### Worker labels
 
@@ -97,7 +97,7 @@ self.MonacoEnvironment = {
 };
 ```
 
-The `?worker` suffix is Vite-specific. Non-Vite bundlers (webpack, esbuild, Rollup) use different conventions — see the bundler's documented Web Worker pattern. The older pattern `new Worker(new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url), { type: 'module' })` is unreliable under Vite's dep optimizer and silently produces non-working diff editors (see `specs4/5-webapp/diff-viewer.md` § "Vite + `new URL` pitfall").
+The `?worker` suffix is Vite-specific. Non-Vite bundlers (webpack, esbuild, Rollup) use different conventions — see the bundler's documented Web Worker pattern. The older pattern `new Worker(new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url), { type: 'module' })` is unreliable under Vite's dep optimizer and silently produces non-working diff editors (see `specs5/5-webapp/diff-viewer.md` § "Vite + `new URL` pitfall").
 
 ### MATLAB Monarch tokenizer vocabulary
 
@@ -372,8 +372,9 @@ Cache the probe result class-side — TeX package installation is out-of-band of
 
 ## Cross-references
 
-- Behavioral contracts — layout, modes, single-file no-cache model, LSP integration, markdown/TeX preview, concurrent-openFile generation counter, save pipeline, file navigation grid, invariants: `specs4/5-webapp/diff-viewer.md`
-- SVG ↔ text mode toggle handler (app shell dispatches `toggle-svg-mode`): `specs4/5-webapp/svg-viewer.md`
-- Edit block goto and search-text dispatch: `specs-reference/3-llm/edit-protocol.md` (for marker bytes) + `specs4/5-webapp/chat.md` (for the goto icon's navigate-file dispatch)
+- Behavioral contracts — layout, modes, single-file no-cache model, LSP integration, markdown/TeX preview, concurrent-openFile generation counter, save pipeline, file navigation grid, invariants: `specs5/5-webapp/diff-viewer.md`
+- SVG ↔ text mode toggle handler (app shell dispatches `toggle-svg-mode`): `specs5/5-webapp/svg-viewer.md`
+- Tool-card goto and search-text dispatch: `specs5/5-webapp/chat.md` § Tool Cards (the goto icon's `navigate-file` dispatch, with `line` from an `Edit` card's target and `search_text` from its `old_string`)
+- Diff bodies inside the permission dialog — same Monaco configuration, same two-level highlighting, opened on the first changed hunk rather than line 1: `specs5/5-webapp/permission-dialog.md` § `write` — the diff is the feature
 - Repository base64 fetch (for preview image resolution): `specs-reference/1-foundation/rpc-inventory.md` § `Repo.get_file_base64`
-- Monaco worker configuration guidance with diagnostic probe: `specs4/5-webapp/diff-viewer.md` § "Monaco Worker Configuration"
+- Monaco worker configuration guidance with diagnostic probe: `specs5/5-webapp/diff-viewer.md` § "Monaco Worker Configuration"

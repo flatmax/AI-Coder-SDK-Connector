@@ -1,63 +1,118 @@
 # Configuration
 
-Configuration is split across multiple files, each with a distinct purpose. A settings service provides RPC methods for reading, editing, and reloading configs. Packaged builds copy configs to a persistent user directory on first run.
+Configuration is split across a small set of files, each with a distinct purpose. A settings service
+provides RPC methods for reading, editing, and reloading configs. Packaged builds copy configs to a
+persistent user directory on first run.
+
+Two things shrank this layer dramatically. AC⚡DC no longer has prompts, so the prompt files are gone;
+and AC⚡DC no longer talks to a provider, so the credential and cache-tuning machinery is gone with
+them. What remains is thin, and deliberately so: **the engine's own configuration is not ours to
+own**. `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/`, and `.claude/commands/` belong to the
+user and reach the session through `setting_sources` (see
+[decisions § CC-11](../plan/decisions.md#cc-11--setting_sources-includes-the-project-so-claudemd-is-live)),
+not through anything in this spec.
 
 ## Config File Set
 
-- LLM config (provider settings, model, env vars, cache tuning)
-- App config (URL cache, history compaction, document conversion, document index)
-- System prompt (main LLM instructions)
-- Agentic coding appendix (optional — describes the agent-spawn capability; appended to the system prompt only when `agents.enabled` is true in app config)
-- Extra prompt (appended to system prompt)
-- Document system prompt (replaces main prompt in document mode)
-- Review system prompt (replaces main prompt in review mode)
-- Compaction skill prompt (template for history summarization)
-- Commit message prompt (for commit message generation)
-- System reminder (edit-format reinforcement appended to each user prompt)
-- Snippets (quick-insert buttons, all modes in one file)
+| File | Kind | Purpose |
+|---|---|---|
+| `engine.json` | User | Model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override |
+| `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
+| `snippets.json` | Managed | Quick-insert chat buttons, keyed by preset |
+| `commit.md` | Managed | The commit-message request text |
 
-## LLM Config
+Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`, `system_doc.md`,
+`system_extra.md`, `system_agentic_appendix.md`, `review.md`, `compaction.md`, `system_reminder.md`.
+Every one of them existed to shape a prompt AC⚡DC no longer assembles.
 
-- Environment variables to inject on load
-- Primary model name (accepts both snake_case and camelCase for secondary fields)
-- Smaller/faster model for auxiliary tasks (commit messages, topic detection, summarization)
-- Cache tuning — minimum cacheable tokens, buffer multiplier
-- Model-aware cache target computation (provider-specific minimums)
+`commit.md` survives with a changed nature: it is no longer a system prompt for an auxiliary model
+call, it is the text of a **user turn** sent to the session, and its result appears in the transcript
+like any other turn. It is a template, not an instruction to a hidden model.
+
+## Engine Config
+
+`engine.json`, a user file, never overwritten on upgrade.
+
+- **Model** — an alias or full model name. Null means the CLI's default, which is the right default for us: the CLI tracks model availability more closely than our config does.
+- **Default permission mode** — the posture a new session starts in. `default` unless the user changes it. Live changes go through `set_permission_mode()` and do not write this file unless the user asks to make them the default.
+- **Effort** and **thinking display** — reasoning depth, and whether thinking is shown, summarised, or hidden.
+- **Budget** — an optional `max_budget_usd` hard stop. Null under subscription billing, where cost is unreported and a budget would be meaningless. See [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap).
+- **CLI path override** — an explicit `claude` binary, for installations where discovery picks the wrong one or the bundled CLI is deliberately not used.
+
+### No credentials, and no environment export
+
+`engine.json` has **no `env` block, and configuration exports nothing into the process
+environment.**
+
+This is the single most important reversal in this spec. The old `llm.json` carried an `env` dict that
+`apply_llm_env` exported at startup, because provider SDKs read credentials from the environment at
+client-construction time. Under Claude Code the `claude` CLI resolves its own credentials — a
+subscription login, `ANTHROPIC_API_KEY`, or a cloud provider configuration — and injecting anything
+into the environment changes which account a turn bills to, silently and invisibly.
+
+The consequences to preserve:
+
+- Nothing in the config layer writes `os.environ`. There is no equivalent of `apply_llm_env`, and no ordering constraint about calling it before constructing a service.
+- The **resolved** credential source is read back and reported in engine health, so the user can see which account is in use without us managing it. See [`../3-engine/session.md`](../3-engine/session.md).
+- A surprising credential source (an API key present when the user expects a subscription) is an engine-health banner, not a silent fact.
 
 ## App Config
 
-- URL cache — path, TTL hours
-- History compaction — enabled flag, trigger threshold, verbatim window, summary budget, minimum verbatim exchanges
-- Document conversion — enabled flag, supported extensions, max source size
-- Document index — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
-- Agents — `enabled` flag gating the parallel-agents capability (default `false`). When `false`, the system prompt omits the agent-spawn block description and the main LLM cannot emit agent-spawn blocks regardless of task shape. See [parallel-agents.md](../7-future/parallel-agents.md#user-control--agent-mode-toggle) for the user-facing toggle and [settings.md](../5-webapp/settings.md#agentic-coding-toggle) for the Settings card
-- Cache warmup — `enabled` flag (default `true`) and `interval_seconds` (default `270`) controlling the background cache warmer. Keeps the provider prompt cache hot during idle periods by issuing periodic minimal warm-up calls. See [cache-tiering.md § Cache Warmer](../3-llm/cache-tiering.md#cache-warmer) for the full lifecycle
+`app.json`, a managed file with bundled defaults.
+
+- **Document conversion** — enabled flag, supported extensions, max source size
+- **Document index** — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
+- **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `ac-dc` tool call may wait for a pending flush
+- **Permissions** — the decision timeout and the shorter no-localhost-client timeout
+- **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates
+- **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
+
+Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux
+parameter), `cache_warmup`, and `agents`. The first two describe subsystems the engine now owns; the
+third and fourth describe a cache that no longer exists; the last gated a spawn protocol replaced by
+the `Task` tool.
 
 ## Snippets
 
-- Single file with nested structure keyed by mode (code, review, doc)
+- Single file with nested structure keyed by preset (code, review, doc)
 - Each snippet has an icon, tooltip, and message text
-- Default code snippets cover common LLM interaction patterns
 - Legacy flat format supported for backwards compatibility
+- Repo-local override first, then the app config directory
+
+The snippet *content* changes with the conversion even though the mechanism does not: snippets that
+recited the edit protocol or asked for a cache rebuild are meaningless, and are replaced by ones that
+are useful against an agent (ask it to plan first, to run the tests, to review its own diff).
 
 ## Config Directory Resolution
 
 - Development mode — config directory relative to source tree
-- Packaged builds — bundled configs embedded in executable, copied to platform-specific user directory on first run
+- Packaged builds — bundled configs embedded in the executable, copied to a platform-specific user directory on first run
 - Platform paths — Linux, Windows, macOS conventions
 - Version marker file tracks which release populated the directory
-- All reads go to user directory so edits persist
+- All reads go to the user directory so edits persist
 
 ## Managed vs User Files
 
-- Managed files — safe to overwrite on upgrade (prompts, default settings)
-- User files — never overwritten (LLM config, extra prompt)
-- Upgrade creates backup copies of overwritten managed files with version suffix
+- Managed files — safe to overwrite on upgrade (`app.json`, `snippets.json`, `commit.md`)
+- User files — never overwritten (`engine.json`)
+- Upgrade creates backup copies of overwritten managed files with a version suffix
 - Files outside either set are skipped during iteration
+
+### Retired files are ignored, not deleted
+
+The conversion removes eight files from the managed set. The upgrade pass must **leave them on disk**
+rather than deleting them. They may contain a user's customised prompt text, that text represents real
+work, and an upgrade that silently deletes it is hostile — the more so because the deletion would be
+irreversible and the file would never be read again either way. Ignoring them costs a few kilobytes;
+deleting them costs trust.
+
+For the same reason, a leftover `llm.json` is not migrated automatically. Its model name is the only
+field with a successor, and the rest of it (`env`, cache tuning, timeouts) maps to nothing. Startup
+notices the file, reports it once in the health banner as ignored, and does not touch it.
 
 ## Version-Aware Upgrade
 
-- On startup, compare bundled version against installed version marker
+- On startup, compare the bundled version against the installed version marker
 - Matching versions — no action (fast path)
 - Differing versions — new files copied, managed files backed up and overwritten, user files preserved
 - Version marker updated to current
@@ -71,79 +126,56 @@ Configuration is split across multiple files, each with a distinct purpose. A se
 ## Loading and Caching
 
 - App config loaded once and cached; hot-reload available
-- Downstream consumers read config values through accessor methods, not snapshot dicts — allows hot-reloaded values to take effect immediately
-- LLM config read on init and on explicit reload; env vars applied on load
-- System prompts read fresh from files; concatenated at assembly time — edits to prompt files (e.g. `system.md`, `system_extra.md`) take effect on next LLM request without any explicit reload
+- Downstream consumers read config values through accessor methods, not snapshot dicts, so hot-reloaded values take effect immediately
 - Snippets loaded on request with two-location fallback: repo-local first, then app config directory
+- Engine config read on init and on explicit reload
 
-### Env-var export timing
+### What a config change can and cannot do live
 
-The `env` dict in `llm.json` is exported into the process environment via `apply_llm_env`. This must happen before any code path that constructs an LLM provider client — provider SDKs (notably AWS boto3 used by Bedrock) typically read environment variables at client-construction time and cache them on the client instance.
+Session options are assembled once, at connect time. That makes the reload story sharper than it was,
+and the UI must be honest about it:
 
-The contract: `apply_llm_env` runs on cold start (before any service that may invoke litellm is constructed) and again on every `reload_llm_config` call.
+| Change | Effect |
+|---|---|
+| Model | Live, via `set_model()` |
+| Permission mode | Live, via `set_permission_mode()` |
+| Effort, thinking display, budget, CLI path | Requires a new session. The Settings tab says so, and offers the action, rather than appearing to apply and quietly not |
+| App config (indexing, doc index, presets, timeouts) | Live on the next use — nothing in it reaches the engine's options |
 
-`ConfigManager.__init__` deliberately does NOT call `apply_llm_env`. Construction stays free of process-state side effects so tests, settings inspection, and other non-runtime consumers can build a `ConfigManager` without rewriting `os.environ`. The cold-start entry point (`main.run`) is responsible for the first call, immediately after constructing the config manager and before any provider-touching service is built.
-
-Skipping this call on cold start produces a confusing failure mode: the first LLM request fails with the provider's "wrong region" / "wrong credentials" error because the SDK fell through to the shell environment or default profile; saving any change in the LLM-config UI then triggers `reload_llm_config`, which finally exports the env, and the *next* request succeeds. The cold-start call is what prevents this.
-
-### System Prompt Refresh on App-Config Reload
-
-Some prompt composition depends on app-config values rather than prompt files. The agent-mode toggle (`agents.enabled`) is the canonical example — flipping it changes whether `get_system_prompt()` appends the agentic appendix.
-
-The context manager caches the assembled prompt: at session start, at mode switches, and at review entry / exit. Without explicit refresh, an app-config change that affects prompt composition only takes effect on the next mode switch or session restart — a confusing UX where the Settings tab says the toggle is on but the LLM doesn't see the agentic appendix for several turns.
-
-The Settings service handles this by calling `LLMService.refresh_system_prompt()` after a successful `reload_app_config()`. The refresh re-reads the current mode's prompt from the config manager and installs it on the context manager. The change is visible on the very next user turn.
-
-Refresh semantics:
-
-- Respects review mode — if review is active, the refresh is skipped. The review prompt was installed via `save_and_replace_system_prompt` and remains authoritative until review exit, at which point `restore_system_prompt` re-reads the current base prompt from config.
-- Respects the active mode — refreshes the doc-mode prompt in doc mode, the code-mode prompt otherwise.
-- Best-effort from the Settings side — a refresh failure logs a warning but doesn't invalidate the config reload. The next mode switch or session restart picks up the new prompt regardless.
-- Localhost-only — the same gate as all other mutation-class operations.
-
-Reloading LLM config (`reload_llm_config`) does NOT trigger a prompt refresh. LLM config affects model selection and provider credentials; it doesn't affect prompt composition.
-
-### Bundled Fallback for the Agentic Appendix
-
-The agent-spawn capability file (`system_agentic_appendix.md`) uses the standard two-stage read: user config directory first, then the bundled copy when the user file is absent. This matches the fallback rule for the base system prompt and every other prompt-composition file.
-
-The rationale is cross-version compatibility. `system_agentic_appendix.md` was added to the managed-files set in a specific release. Users who installed AC⚡DC before that release have a version marker that prevents the upgrade pass from copying the file on subsequent startups (version-matching short-circuits the upgrade). Their `agents.enabled` toggle would then silently produce no appendix text — the toggle would appear to flip on in the Settings tab, the `agents_enabled` flag in `app.json` would read `true`, but the LLM would receive the base prompt without agent instructions and agent-spawn blocks would never appear. The bundled fallback papers over the cross-version gap so "toggle on" reliably produces agent instructions regardless of install history.
-
-Users who want to suppress the appendix text do so via the `agents.enabled` flag in `app.json` (the Settings-tab toggle writes to this flag). There is no separate "toggle on but appendix suppressed" configuration — the toggle is the one and only control for whether agent instructions reach the LLM.
-
-Users who want to customise the appendix text can edit their user-directory copy. Edits survive upgrades via the standard managed-file backup mechanism — the upgrade pass backs up the user copy with a timestamped suffix and installs the new bundled version, so customisations remain recoverable.
-
-## Token Counter Data Sources
-
-- Hardcoded model-family defaults (no runtime provider registry lookup)
-- Fallback estimate when tokenizer unavailable
-- Model-aware minimum cacheable tokens
+There is no equivalent of the old `refresh_system_prompt`, and no "prompt composition depends on app
+config" problem, because there is no prompt. A config change never invalidates the engine's context.
 
 ## Settings Service
 
 - Whitelisted config types can be read, written, and reloaded
 - Arbitrary file paths rejected
-- Some managed files (commit prompt, system reminder) are loaded internally but not exposed via the RPC whitelist — can only be edited directly on disk
-
-## Prompt Assembly Helpers
-
-- System prompt (main + extra)
-- Document system prompt (doc + extra)
-- Review prompt (review + extra)
-- Compaction prompt
-- Commit prompt
-- System reminder (prepended with blank lines)
-- Snippets (mode-aware)
+- The whitelist is now three entries — `engine`, `app`, `snippets` — down from eight; the five prompt entries went with the prompt files
+- `commit.md` is loaded internally but not exposed via the whitelist, as before
 
 ## Per-Repository Working Directory
 
-- Created on first run under repository root (hidden)
-- Auto-added to `.gitignore`
-- Holds persistent history, symbol map snapshot, image files, per-repo snippet overrides, document outline cache
+`.ac-dc4/` under the repository root, created on first run, hidden, auto-added to `.gitignore`. It
+holds:
+
+| Entry | Contents |
+|---|---|
+| `history.jsonl` | The mirrored transcript — AC⚡DC's browsable archive |
+| `sessions/` | Engine transcripts written through our `SessionStore`, plus subagent transcripts |
+| `images/` | Pasted images, referenced from history records |
+| `doc_cache/` | Document outline cache |
+| `tex_preview/` | Generated TeX preview output |
+| `snippets.json` | Optional per-repo snippet override |
+
+Gone: the symbol map snapshot (the map is rebuilt in memory and served as a tool), the URL cache, and
+`agents/` from the parallel-agent design.
 
 ## Invariants
 
 - User files are never modified during upgrade
-- All reads go to the user config directory (not the bundle)
-- Hot-reload changes take effect on the next LLM request without server restart
+- Retired managed files are never deleted
+- All reads go to the user config directory, not the bundle
+- **Nothing in this layer writes to the process environment**
+- No configuration file contains a provider credential
+- App-config hot-reload takes effect without a server restart and without disturbing the engine session
 - The whitelist rejects unknown config type names
+- A setting that cannot take effect until a new session is labelled as such in the UI

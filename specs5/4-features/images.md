@@ -1,6 +1,14 @@
 # Image Persistence
 
-Images pasted into the chat input are persisted to disk so they can be displayed when loading previous sessions. Stored as individual files in the per-repo working directory, referenced by content hash in the JSONL history.
+Images pasted into the chat input are persisted to disk so they can be displayed when browsing previous
+sessions. Stored as individual files in the per-repo working directory, referenced by content hash in
+the mirrored JSONL history.
+
+This feature survives the conversion almost intact, because it never had anything to do with the
+engine. It is a browser affordance plus a disk format: the data URI goes to the engine once, as part of
+the turn, and the file on disk is what lets us render it again a week later. What changed is only the
+writer's name and the fact that a *resumed* session's images come from two places — see § Session
+Loading and Resume.
 
 ## Storage Location
 
@@ -43,16 +51,29 @@ Images pasted into the chat input are persisted to disk so they can be displayed
 - Legacy image count field — kept for backward compatibility, deprecated
 - Old messages with count-only field load correctly but won't have displayable images
 
-## LLM Service Integration
+## Engine Service Integration
 
-- Streaming handler passes the actual image data URIs (list of strings) to the persistence layer, not just a count
-- The persistence method accepts either a list of strings (saves each image, stores filenames as refs) or an integer (legacy path, stored as-is)
+- `ClaudeCodeService.chat_streaming(request_id, message, files, images, viewer)` receives the data URIs and does two independent things with them: forwards them to the SDK as the user turn's image content blocks, and hands the same list to the persistence layer
+- The persistence layer accepts either a list of strings (saves each image, stores filenames as refs) or an integer (legacy path, stored as-is)
+- Persistence happens on the way in, before the turn starts, so an interrupted or failed turn still has its images on disk and in the mirror
+- The `userMessage` broadcast carries `image_refs` (filenames), not data URIs, so a collaborator's transcript renders from disk rather than re-receiving megabytes over the WebSocket
 
-## Session Loading
+## Session Loading and Resume
 
-- Load-session-into-context, get-session-messages-for-context, and history-get-session all reconstruct images from refs
-- Frontend receives data URI arrays ready to render
+- `history_get_session` and the initial `get_current_state` reconstruct images from refs. Frontend receives data URI arrays ready to render
 - Each reconstruction is independent — a failed image read does not prevent other images from loading
+- `load_session_into_context` and `get_session_messages_for_context` are gone. Loading a past session into the model's view is `resume_session`, which hands the engine its own transcript; we never re-inject message content
+
+### Resume has two image sources, and only one is ours
+
+After `resume_session`, the model's view of the images comes from the **engine's** transcript, which
+holds the original content blocks. The browser's view comes from **our** mirror, which holds refs to
+files on disk. Both are correct and they are not the same data.
+
+The consequence to hold onto: deleting `.ac-dc4/images/` blinds the *browser*, not the model. A resumed
+turn can still reason about an image the user can no longer see. The reverse also holds — a mirror gap
+(see [`../3-engine/history.md`](../3-engine/history.md)) can leave an image on disk with no record
+pointing at it, which is a leak, not a failure.
 
 ## Frontend Paste Input
 
@@ -61,7 +82,7 @@ Images pasted into the chat input are persisted to disk so they can be displayed
 - Maximum images per message (default 5)
 - Encoding — base64 data URI
 - Display — thumbnail previews with remove button, below textarea
-- Token counting — provider's image token formula; fallback estimate per image
+- No token counting. AC⚡DC no longer estimates what an image costs; the engine reports actual usage in `streamComplete` and the context HUD reflects it afterwards (see [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md))
 
 ## Frontend Message Display
 
@@ -94,9 +115,9 @@ Two interaction paths to re-attach an image to the current input:
 
 ## What Does Not Change
 
-- Images are not automatically re-sent to the LLM on subsequent messages — display-only after original send (but can be manually re-attached)
-- Token counting for images unchanged
+- AC⚡DC never re-sends an image. The engine keeps the original content blocks in its own context for the rest of the session, so the model does not need us to; re-attaching is a deliberate user action that sends a fresh copy
 - Image size and count limits unchanged
+- The on-disk format, the naming scheme, and the ref field are unchanged — an `.ac-dc4/images/` directory written by the native engine reads correctly here
 
 ## Cleanup
 

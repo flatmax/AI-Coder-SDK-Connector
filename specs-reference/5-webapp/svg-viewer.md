@@ -1,6 +1,6 @@
 # Reference: SVG Viewer
 
-**Supplements:** `specs4/5-webapp/svg-viewer.md`
+**Supplements:** `specs5/5-webapp/svg-viewer.md`
 
 This twin captures numeric constants, dispatch tables, and coordinate-math rules for the SvgEditor component. Specs4 describes the behavioral surface (select, drag, resize, vertex edit, multi-selection, marquee, text edit, undo, copy/paste); this twin pins the exact constants and per-element dispatch needed to reproduce the editor faithfully.
 
@@ -378,7 +378,7 @@ Escape is the one exception — it clears SVG selection regardless of focus, bec
 
 ## Cross-references
 
-- Behavioral specification (interaction modes, synchronization, invariants): `specs4/5-webapp/svg-viewer.md`
-- Pan/zoom contract — read-only editor flag, silent-write mutex, viewBox authority: `specs4/5-webapp/svg-viewer.md` § Synchronized Pan/Zoom
-- SVG↔text mode toggle event: `specs4/5-webapp/diff-viewer.md` § ~~~SVG ↔ Text Diff Mode Toggle~~~ (and reciprocal on this spec's parent)
-- Doc index SVG extractor (shares auto-ID filter, long-text threshold, geometric containment model): `specs4/2-indexing/document-index.md` § SVG Extraction
+- Behavioral specification (interaction modes, synchronization, invariants): `specs5/5-webapp/svg-viewer.md`
+- Pan/zoom contract — read-only editor flag, silent-write mutex, viewBox authority: `specs5/5-webapp/svg-viewer.md` § Synchronized Pan/Zoom
+- SVG↔text mode toggle event: `specs5/5-webapp/diff-viewer.md` § ~~~SVG ↔ Text Diff Mode Toggle~~~ (and reciprocal on this spec's parent)
+- Doc index SVG extractor (shares auto-ID filter, long-text threshold, geometric containment model): `specs5/2-indexing/document-index.md` § SVG Extraction

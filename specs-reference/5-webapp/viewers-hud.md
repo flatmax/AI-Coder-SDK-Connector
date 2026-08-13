@@ -1,10 +1,19 @@
-# Reference: Viewers and HUD
+# Reference: Context Tab and Usage HUD
 
-**Supplements:** `specs4/5-webapp/viewers-hud.md`
+**Supplements:** `specs5/5-webapp/viewers-hud.md`
+
+The payload shapes both surfaces render are canonical elsewhere and are **not** duplicated here:
+
+- `ContextUsageResponse` (the `get_context_usage()` return): `specs5/plan/sdk-surface.md` § `get_context_usage()` return shape
+- `get_context_usage` RPC envelope (`{usage, fetched_at}` / `{error}`): `specs-reference/3-engine/session.md` § Service: ClaudeCodeService
+- `streamComplete` / `postResponseComplete` payloads: `specs-reference/3-engine/session.md` § Service: AcApp
+
+What follows is what the components add on top: geometry, thresholds, formatting rules, and the local
+state they keep.
 
 ## Numeric constants
 
-### Token HUD auto-hide
+### Usage HUD auto-hide
 
 | Constant | Value |
 |---|---|
@@ -14,246 +23,143 @@
 | Hover behavior | Pauses timer; mouse leave restarts auto-hide |
 | Dismiss button | Hides immediately (no fade) |
 
-### Token HUD warm-up variant
-
-The HUD also fires on successful cache warm-ups (window event `cacheWarmupComplete` with `success: true`). Rendered identically to a per-turn HUD with two differences:
-
-| Aspect | Per-turn | Per-warmup |
-|---|---|---|
-| Header label | Configured model name | `🌡️ Cache warmup` |
-| Header tooltip | Empty | Explanation of the warm-up's billing model |
-| Request grid `Completion` row | Provider's completion_tokens | 0 (warm-ups set `max_tokens=2`) |
-| Request grid `Reasoning` row | Provider's reasoning_tokens | 0 |
-| Request grid `Prompt` / `Cache Read` / `Cache Write` rows | Real-turn values | Warm-up's values |
-| Session totals section | Reflects cumulative real-turn usage | Reflects cumulative warm-up + real-turn usage (warm-up tokens already accumulated server-side) |
-| Tier / Budget / Changes sections | Same | Same — no warm-up-specific behavior |
-
-Failure broadcasts (`success: false`) do NOT trigger the HUD. The `ac-cache-warmup-progress` floating overlay already shows the failure flash, and a HUD populated with zeros would be misleading.
+The cache-warmup HUD variant is deleted — there is no warmer, so there is no synthetic two-token request
+to report. With it goes the whole "per-warmup vs per-turn" column table: every HUD is now a turn.
 
 ### HUD geometry
 
 | Constant | Value |
 |---|---|
 | Position | `position: fixed; top: 16px; right: 16px` |
-| Z-index | 10000 |
+| Z-index | 500 — **below** the permission dialog's 2000 (see `specs-reference/5-webapp/shell.md` § Viewport-scoped overlay z-index ladder) |
 | Width | 340 px fixed |
 | Max height | 80 vh with overflow scroll |
 
-### Cache hit rate color thresholds
+The z-index dropped from 10000. A HUD floating over a modal permission request would obscure the one
+surface in the app that blocks a turn, and the HUD is transient information about a turn that is already
+over.
 
-| Rate | Color | CSS class |
-|---|---|---|
-| ≥ 50% | Green | `.hit-rate.good` |
-| ≥ 20% | Amber | `.hit-rate.warn` |
-| < 20% | Red | `.hit-rate.poor` |
+### Context gauge colour thresholds
 
-Applies to both the HUD header badge and the Cache sub-view's performance bar.
+Applies to the Context tab's budget gauge, the HUD header badge, and the shell's context-capacity bar, so
+all three agree at a glance.
 
-### Budget bar color thresholds
-
-| Usage % | Color |
+| Fill % of `maxTokens` | Colour |
 |---|---|
 | ≤ 75% | Green |
 | 75–90% | Amber |
 | > 90% | Red |
 
-Applies to the Budget sub-view's token budget bar and the HUD's history budget section.
+**The threshold marker overrides the palette when auto-compact is enabled.** When
+`autoCompactThreshold` is present, the amber boundary moves to `autoCompactThreshold - 10%` of
+`maxTokens` and the red boundary to the threshold itself, because "red" should mean "about to be
+compacted", not "past an arbitrary fraction". With auto-compact disabled the fixed 75/90 boundaries
+apply and the gauge carries a "no auto-compact" label.
 
-### Compaction status percent cap
-
-Returned `percent` capped at 999 — a pathological ratio shouldn't produce a four-digit percent that overflows the UI progress bar.
-
-## Schemas
-
-### Tier color palette
-
-Warm-to-cool spectrum:
-
-| Tier | Color name | Hex | Rationale |
-|---|---|---|---|
-| L0 | Green | `#50c878` | Most stable — calming, rare-event |
-| L1 | Teal | `#2dd4bf` | Very stable |
-| L2 | Blue | `#60a5fa` | Moderately stable |
-| L3 | Amber | `#f59e0b` | Entry tier — warming toward change |
-| Active | Orange | `#f97316` | Uncached — warmest, most volatile |
-
-Used consistently across:
-- Token HUD tier chart
-- Cache sub-view tier group headers
-- Cache sub-view stability bars (per-item fill color matches tier)
-- Terminal HUD (logged as prefix emoji rather than hex color)
-
-Cross-surface consistency matters — users eyeball the tier colors and need to map them immediately.
-
-### Category color palette (budget stacked bar)
-
-| Category | Hex |
+| Marker property | Value |
 |---|---|
-| System | `#50c878` (green) |
-| Symbol map / Doc map | `#60a5fa` (blue) |
-| Files | `#f59e0b` (amber) |
-| URLs | `#a78bfa` (purple) |
-| History | `#f97316` (orange) |
+| Position | `autoCompactThreshold / maxTokens` as a percentage of bar width |
+| Rendering | 2 px vertical rule, full bar height, with a `title` giving the absolute token figure |
+| Absent when | `isAutoCompactEnabled` is false, or `autoCompactThreshold` is absent from the payload |
 
-### Content group type icons
+### Category bar
 
-Per-item icons in the Cache sub-view:
+| Aspect | Value |
+|---|---|
+| Colour source | `categories[].color`, verbatim from the payload. **No local palette.** |
+| Ordering | Payload order, unmodified — the engine's order matches what `/context` shows |
+| Zero-token categories | Omitted entirely from bar and legend |
+| Deferred categories (`isDeferred`) | Rendered in the legend with a "deferred" label and **excluded from the stacked bar**, since a deferred category is not occupying context now |
+| Minimum segment width | 2 px, so a small non-zero category is visible rather than rounded away |
+| Expandable | No. The payload carries category totals, not per-item membership |
 
-| Type | Icon | Key prefix |
+The native engine's five-colour category palette (`System` green, `Symbol Map` blue, `Files` amber,
+`URLs` purple, `History` orange) and the entire L0–L3 tier palette are deleted. Both encoded our own
+composition model; the engine now supplies both the categories and their colours.
+
+### Per-model row derivations
+
+`model_usage` rows are rendered as-is with two computed columns:
+
+| Column | Formula | Suppressed when |
 |---|---|---|
-| System | ⚙️ | `system:` |
-| Legend | 📖 | (rendered as part of system line) |
-| Symbols | 📦 | `symbol:` |
-| Doc symbols | 📝 | `doc:` |
-| Files | 📄 | `file:` |
-| URLs | 🔗 | `url:` |
-| History | 💬 | `history:` |
+| Cache hit % | `cacheReadInputTokens / (inputTokens + cacheReadInputTokens) × 100` | Denominator is 0 → render `—` |
+| Context window | `contextWindow` from the row, formatted with thousands separators | Field absent |
 
-### Tier change markers (terminal HUD)
+Cache-hit colour thresholds are retained from the native engine (≥ 50% green, ≥ 20% amber, below that
+default text) but the metric is demoted from a header badge to a table column. It was headline-worthy
+only while AC⚡DC was the thing doing the caching.
 
-| Change type | Prefix |
+**Rows are never summed.** No total row, no aggregate header figure. A turn that delegated to a cheaper
+model reports two rows and keeps two rows.
+
+Deleted with the cache: `provider_cache_rate` and its precedence rule over a locally computed
+`cache_hit_rate` (there is no local computation to prefer against), and Cache ROI
+(`(cache_read / cache_write − 1) × 100`), which answered "is our cache paying for itself" about a cache
+we no longer own.
+
+### Cost rendering
+
+Driven by `total_cost_usd` on the `ResultMessage`, which is `null` under subscription billing.
+
+| Condition | Row | Value | Tooltip |
+|---|---|---|---|
+| `total_cost_usd` is a positive number | Shown | `$0.0000` (4 decimals) | Absolute turn cost |
+| `total_cost_usd` is `0` and tokens were consumed | Shown | Billing-mode label, e.g. `subscription` | `This turn is billed under your plan, not per token.` |
+| `total_cost_usd` is `null` | Shown | Billing-mode label | Same |
+| `max_budget_usd` configured | Additional bar | `spent / max_budget_usd` with the gauge palette | Remaining budget in dollars |
+
+**`$0.00` is never rendered.** A zero cost for a turn that plainly consumed tokens reads as a broken HUD
+and teaches users to ignore the figure (`specs5/plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap`).
+
+4-decimal precision is retained for the priced case: a turn whose subagents ran on a cheap model can cost
+fractions of a cent, and 2 decimals would round it to `$0.00` — the exact display this rule exists to
+prevent.
+
+The native engine's `priced_request_count` / `unpriced_request_count` split is gone. It existed because
+litellm's pricing table could lack an entry for a configured model; the CLI reports cost or reports
+nothing, with no third "we could not price this" state.
+
+### Thinking token rendering
+
+`usage` carries no separate reasoning-token field. Thinking arrives as content blocks, and its token cost
+is inside `outputTokens` — so there is no Reasoning row in either surface. The Thinking Regions in the
+transcript are where thinking is visible (`specs5/5-webapp/chat.md` § Thinking Regions); the HUD does not
+try to price it separately.
+
+### Refresh queue
+
+| Aspect | Value |
 |---|---|
-| Promotion | 📈 |
-| Demotion | 📉 |
+| In-flight guard | One `get_context_usage()` call at a time |
+| Queue depth | Exactly 1 — a trigger arriving during a fetch sets `_refreshPending`; the completion path re-fires once and clears it |
+| Rationale | A dropped trigger leaves the tab showing pre-turn state with no staleness indicator |
+| Adopt-without-fetch | A `postResponseComplete` carrying `context_usage` is adopted directly; no RPC is issued |
+| Staleness threshold | `fetched_at` older than the most recent `postResponseComplete` marks the view stale and triggers a refresh on next visibility |
 
-### Provider-cache-rate precedence
+Polling is absent from every surface. The native engine's 1 Hz cache-warmer status poll is deleted along
+with the warmer, and nothing replaced it: `get_context_usage()` is fetched on state change only.
 
-The `cache_hit_rate` field in the breakdown response is computed locally (cached tokens / total tokens). A separate `provider_cache_rate` is computed from cumulative session data (`cache_read_tokens / input_tokens`) — more accurate since it reflects actual provider behavior.
+### Terminal HUD format
 
-**Precedence rule:** Both HUD and Context tab prefer `provider_cache_rate` when non-null, falling back to the local `cache_hit_rate`. The fallback path is taken on the very first request (no cumulative session data yet).
-
-### Cache Hit % (per-request and Session Totals)
-
-The fraction of prompt input that was served from the provider's cache, expressed as a percentage. Computed at two scopes:
-
-- **Per-request** (rendered in This Request / Last Request): `(cache_read / prompt) × 100` for the request that just completed.
-- **Per-session** (rendered in Session Totals): `(cache_read_tokens / input_tokens) × 100` cumulative across all requests this session.
-
-Distinct from the [`cache_hit_rate`](#provider-cache-rate-precedence) badge in the HUD header — the badge shows whichever of `provider_cache_rate` or local `cache_hit_rate` is available; this metric is always cumulative provider data and is rendered explicitly in both HUD body sections (webapp Token HUD + terminal HUD).
-
-**Color thresholds:**
-
-| Hit % | Color |
-|---|---|
-| `>= 50%` | Green |
-| `>= 20%` | Amber |
-| `< 20%` | No color (default text) |
-| Suppressed (`—`) | No color — `prompt == 0` (no input on this request, or no requests yet this session) |
-
-The thresholds match the HUD header badge's [cache hit rate color thresholds](#cache-hit-rate-color-thresholds) for consistency — a green per-request row aligns with a green header badge.
-
-The metric is shown alongside the raw `Cache Read` / `Cache Written` token-count rows so an operator gets both the absolute and the relative view in one section.
-
-### Cache ROI (Session Totals)
-
-A separate metric from the cache hit rate above. The hit rate answers "what fraction of this request's input came from cache"; ROI answers "is the cache paying for itself across the session".
-
-**Formula:** `((cache_read_tokens / cache_write_tokens) − 1) × 100`, expressed as a signed percentage.
-
-| Reading | Meaning |
-|---|---|
-| `+0%` (zero) | Cache writes have been read back exactly once — the session broke even on cache-write cost. |
-| `+100%` | Each written token has been read back twice — strong amortisation. |
-| `+200%` and up | High-leverage caching; common in long-running sessions with stable system prompts. |
-| Negative | Writes haven't been fully read back yet. Normal at the start of a session before hits accumulate. |
-| Suppressed (`—`) | `cache_write_tokens == 0`. No write activity to amortise; the metric is undefined. |
-
-Rendered in the Session Totals section of both the Token HUD and the terminal HUD. Color: green when `>= 0`, amber when negative. Suppressed-row shows muted text and `—` rather than a number.
-
-Why ROI alongside the hit-rate percentage: the hit-rate badge in the HUD header reflects the current request's cache behavior (a snapshot), but a session that has issued one large cache-write and zero subsequent reads will show 0% hit rate AND a large negative ROI — the same underlying state expressed two different ways. ROI surfaces the "have we paid back the write?" question that the hit-rate doesn't capture.
-
-### Reasoning row rendering
-
-The `reasoning_tokens` field (subset of `completion_tokens` representing hidden reasoning — Claude extended thinking, o1/o3) is rendered in two places:
-
-**Token HUD — "This Request" section:**
-Persistent row, always rendered even when `reasoning_tokens == 0`. Rationale: zero is informative ("this model doesn't reason") and distinguishes genuine absence from "the backend forgot to report it". Label carries tooltip text "Hidden reasoning tokens (subset of Completion). Zero for models without extended thinking." so the user understands the relationship to `completion_tokens` without parsing field names.
-
-**Context tab — Session Totals grid:**
-Conditional row. Rendered only when the session's cumulative `completion` count is non-zero — a fresh session with no LLM calls suppresses the row entirely (an empty zero is noise). Tooltip text: "Cumulative hidden reasoning tokens across this session (subset of Completion Out — already billed inside it, shown separately for visibility)."
-
-Neither place adds `reasoning_tokens` to the `completion_tokens` total — the provider already bills them under completion, and double-counting would inflate displayed usage. The row is a breakdown, not an addition.
-
-### Cost row rendering (Context tab only)
-
-Per operator preference, `cost_usd` renders in the Context tab's Session Totals only — not in the per-request HUD. The HUD shows transient per-request state; cost belongs with cumulative session metrics.
-
-Three display cases driven by `priced_request_count` and `unpriced_request_count`:
-
-| Condition | Row visibility | Label | Value format | Tooltip |
-|---|---|---|---|---|
-| `priced == 0 && unpriced == 0` | Row hidden | — | — | — |
-| `priced > 0 && unpriced == 0` | Shown | Cost | `$0.0000` (4 decimals) | `{N} request(s) priced.` |
-| `priced > 0 && unpriced > 0` | Shown | Cost | `$0.0000 (partial)` | `Priced: {N} request(s). {M} additional request(s) could not be priced (LiteLLM pricing table missing the model). True total is higher.` |
-| `priced == 0 && unpriced > 0` | Shown | Cost | `—` | `{N} request(s) could not be priced (LiteLLM pricing table missing the model used).` |
-
-The `—` case (no priced requests but requests were made) is distinct from the hidden case (no requests at all). Distinguishing "unknown cost" from "no activity" matters for self-hosted models and brand-new releases where LiteLLM's pricing table hasn't caught up yet — rendering `$0.0000` there would misleadingly suggest the session was free.
-
-**4-decimal precision:** Typical per-session costs range from `$0.01` to `$10`; 4 decimals preserve sub-cent granularity for cheap auxiliary-model calls (commit-message generation, topic detection) which individually cost fractions of a cent. A session with many aux calls and few primary-model calls would round to `$0.00` at 2 decimals, hiding the actual spend.
-
-**Color:** Green (`#7ee787`) when priced > 0, secondary text color when rendering `—`. Matches the color treatment of `cache_hit` in the same grid.
-
-### Startup init HUD
-
-Printed once during server startup after stability tracker initialization completes:
+Printed server-side after each turn, cancelled or not:
 
 ```
-╭─ Initial Tier Distribution ─╮
-│ L0       12 items            │
-│ L1       18 items            │
-│ L2       17 items            │
-│ L3       17 items            │
-├─────────────────────────────┤
-│ Total: 64 items              │
-╰─────────────────────────────╯
+Model: claude-opus-4-6
+Turn:  8.4s · 3 turns · completed · 2 permission prompts
+Usage: claude-opus-4-6      12,481 in / 1,208 out · cache 41,502 r / 0 w · 78% hit
+       claude-haiku-4-5      3,004 in /   612 out · cache      0 r / 0 w ·  0% hit
+Cost:  $0.1842
+Ctx:   118,204 / 200,000 (59%) · auto-compact at 160,000
+Files: src/auth/session.py, src/auth/tokens.py
 ```
 
-Shows per-tier item counts for all non-empty tiers. Box auto-sizes to widest line. Provides immediate visibility into how the reference graph was distributed on startup.
+One `Usage:` line per `model_usage` entry, first line labelled, continuations aligned. `Cost:` prints the
+billing mode when `total_cost_usd` is null. `Files:` is omitted when the turn modified nothing.
 
-### Post-response HUD
-
-Three sections printed after each LLM response:
-
-**Cache blocks (boxed):**
-
-```
-╭─ Cache Blocks ────────────────────────────╮
-│ L0         (12+)    1,622 tokens [cached] │
-│ L1          (9+)   11,137 tokens [cached] │
-│ L2          (6+)    8,462 tokens [cached] │
-│ L3          (3+)      388 tokens [cached] │
-│ active             19,643 tokens          │
-├───────────────────────────────────────────┤
-│ Total: 41,252 | Cache hit: 52%           │
-╰───────────────────────────────────────────╯
-```
-
-Each cached tier shows `{name} ({entry_n}+)` — the entry N threshold — followed by token count and `[cached]` marker. Active tier shows token count only. Only non-empty tiers listed. Box width auto-sizes to the widest line.
-
-**Token usage:**
-
-```
-Model: bedrock/anthropic.claude-sonnet-4-20250514
-System:         1,622
-Symbol Map:    34,355
-Files:              0
-History:       21,532
-Total:         57,509 / 1,000,000
-Last request:  74,708 in, 34 out
-Cache:         read: 21,640, write: 48,070
-Session total: 182,756
-```
-
-Labels adapt by mode: "Symbol Map" in code mode, "Doc Map" in document mode. Cross-reference mode adds an additional line.
-
-**Tier changes:**
-
-```
-📈 L3 → L2: symbol:src/ac_dc/context.py
-📉 L2 → active: symbol:src/ac_dc/repo.py
-```
-
-One line per change from the stability tracker's change log. Promotions first, then demotions.
+Deleted: the boxed `╭─ Cache Blocks ─╮` table with per-tier `(entry_n+)` thresholds, the mode-aware
+category table with its "Symbol Map" / "Doc Map" label swap, the 📈/📉 tier-change log, and the one-shot
+`╭─ Initial Tier Distribution ─╮` startup box.
 
 ## Schemas
 
@@ -261,59 +167,59 @@ One line per change from the stability tracker's change log. Promotions first, t
 
 | Key | Purpose |
 |---|---|
-| `ac-dc-context-subview` | `"budget"` / `"cache"` — active Context tab sub-view |
-| `ac-dc-cache-expanded` | JSON-serialized array of expanded tier names |
-| `ac-dc-cache-sort` | `"size"` / `"name"` — Cache sub-view sort mode |
-| `ac-dc-budget-expanded` | JSON-serialized array of expanded category names |
-| `ac-dc-hud-collapsed` | JSON-serialized array of collapsed section names in the Token HUD |
+| `ac-dc-context-section` | `"usage"` / `"session"` / `"debug"` — active Context tab section (unknown values fall back to `"usage"`) |
+| `ac-dc-context-debug-enabled` | `"true"` / `"false"` — whether the Debug section is offered at all (default `"false"`) |
+| `ac-dc-session-expanded` | JSON-serialized array of expanded Session-section group names |
+| `ac-dc-hud-collapsed` | JSON-serialized array of collapsed section names in the Usage HUD |
 
-Cache sub-view defaults: L0 and active expanded; L1/L2/L3 collapsed.
+Session-section defaults: Memory files and Tools expanded; System prompt sections and Agents/skills
+collapsed.
 
-### Cache warmer status row
+Deleted keys: `ac-dc-context-subview` (the Budget/Cache pill toggle), `ac-dc-cache-expanded`,
+`ac-dc-cache-sort`, `ac-dc-budget-expanded`. On upgrade they are simply ignored — no migration, since
+none of them names a section that still exists.
 
-Always-on indicator at the top of the Cache sub-view, above the cache-hit-rate header. Complementary to the floating `ac-cache-warmup-progress` overlay (which handles the loud final-30 s heads-up regardless of which dialog tab is open) — the dialog row covers the silent 240 s before that, plus the disabled state.
+### Session-section row shapes
 
-**Render states:**
+Rows are projections of the payload, not new state. What the component adds is the click target:
 
-| State | Glyph | Label | Right-side affordance | Border |
-|---|---|---|---|---|
-| Active | 🌡️ | `Cache warmer active — next firing in` | Countdown `M:SS` (or `Ns` under a minute) | Blue left-border (`var(--accent-primary, #58a6ff)`) |
-| Disabled by runtime failure | ⚠️ | `Warmer disabled — <last_disabled_reason>` | Re-enable button | Red left-border (`#f85149`) |
-| Disabled by config | 🌡️ | `Warmer disabled in config` | None | Grey left-border (`#8b949e`) |
-| Pre-first-fetch | 🌡️ | `Cache warmer status…` | None | None (placeholder, prevents pop-in) |
+| Group | Source field | Click action |
+|---|---|---|
+| Memory files | `memoryFiles[]` (`path`, `tokens`) | `navigate-file` window event with the path — opens it in the diff viewer |
+| System prompt sections | `systemPromptSections[]` | Expands inline where the entry carries text; inert where it carries only a size |
+| Tools — built-in | `systemTools[]` | None |
+| Tools — deferred built-in | `deferredBuiltinTools[]` | None; labelled "deferred" |
+| Tools — per MCP server | `mcpTools[]` grouped by server prefix | Opens the server's `get_mcp_status()` detail |
+| Agents | `agents[]` | Opens the defining file under `.claude/agents/` |
+| Skills | `skills` | Opens the defining file |
+| Slash commands | `slashCommands` | None |
 
-**Polling:**
+The `ac-dc` server is grouped and rendered by the same code path as any third-party server, with no
+special-casing and no exemption from the token column.
 
-| Aspect | Value |
-|---|---|
-| Interval | 1000 ms |
-| Lifecycle | Started on Cache sub-view activation; stopped on sub-view switch or component unmount |
-| Inactive cost | Zero — Budget sub-view does not poll |
-| RPC | `LLMService.get_cache_warmer_status()` — read-only, safe for collaborators |
+### Debug section content
 
-**Re-enable button:**
+| Panel | Source | Cap |
+|---|---|---|
+| Hook traffic | `hookEvent` broadcasts, in arrival order | 100 most recent, ring buffer |
+| MCP status | `get_mcp_status()` | — |
+| Server info | `get_server_info()` | — |
+| Raw `gridRows` | `gridRows` from the last snapshot | Rendered as preformatted JSON |
 
-| Aspect | Value |
-|---|---|
-| RPC | `LLMService.enable_cache_warmer()` — localhost-only mutation |
-| Behavior | Calls `CacheWarmer.enable()` server-side; clears `last_disabled_reason` and reschedules next firing |
-| Feedback | Success toast `"Cache warmer re-enabled"` (`type: success`); on restricted error, info toast with the server's reason; on transport error, error toast with the message |
-| Disabled when | `!rpcConnected` |
+`gridRows` is rendered **only here** and never parsed for layout. It is the CLI's pre-laid-out terminal
+grid; consuming it would couple our layout to a presentation choice that can change under us.
 
-**Countdown formatting:**
+### Mirror-gap marker
 
-`_formatWarmerCountdown(seconds)` returns:
-- `"—"` when `seconds` is null/non-finite
-- `"Ns"` when `seconds < 60` (ceiled to whole seconds)
-- `"M:SS"` otherwise (minutes floored, seconds ceiled to fill, zero-padded)
-
-**Drift between layers:**
-
-The dialog row's countdown and the floating overlay's countdown can drift by ±1 s during the visible-30 s phase — the overlay updates per-broadcast (server-side ticker), the dialog row updates per-poll-tick (client-side). Drift is harmless; the two indicators agreeing reinforces the "warmer is firing" signal.
+When a turn's `MirrorErrorMessage` was seen, the HUD renders a marker row linking to the shell's health
+banner rather than reporting a clean turn. Field: a boolean the chat panel sets on the turn record, not
+something in the engine payload — the engine's turn succeeded; ours failed to write it down.
 
 ## Cross-references
 
-- Behavioral specification (Context tab, HUD lifecycle, Cache sub-view rebuild): `specs4/5-webapp/viewers-hud.md`
-- Cache tier numeric thresholds (entry_n, promotion thresholds): `specs-reference/3-llm/cache-tiering.md`
-- Session totals and token usage shape: `specs-reference/3-llm/streaming.md` § Token usage shape
-- Context breakdown RPC payload: `specs-reference/1-foundation/rpc-inventory.md` § LLMService.get_context_breakdown
+- Behavioral specification (sections, refresh triggers, HUD lifecycle): `specs5/5-webapp/viewers-hud.md`
+- Engine-side contract and field-by-field rationale: `specs5/3-engine/context-visibility.md`
+- `ContextUsageResponse` shape: `specs5/plan/sdk-surface.md`
+- RPC envelope and turn-completion payloads: `specs-reference/3-engine/session.md`
+- Overlay stacking and the context-capacity bar: `specs-reference/5-webapp/shell.md`
+- Why `get_context_breakdown` has no successor: `specs-reference/1-foundation/rpc-inventory.md`

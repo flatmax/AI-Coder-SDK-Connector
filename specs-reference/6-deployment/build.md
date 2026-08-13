@@ -1,6 +1,6 @@
 # Reference: Build
 
-**Supplements:** `specs4/6-deployment/build.md`
+**Supplements:** `specs5/6-deployment/build.md`
 
 This is the canonical owner for PyInstaller flag sequences, Vite optimizeDeps entries, and package-name lists that the build pipeline depends on.
 
@@ -35,9 +35,7 @@ pyinstaller --onefile --name ac-dc-{platform} \
     --add-data "src/ac_dc/VERSION{sep}ac_dc" \
     --add-data "src/ac_dc/config{sep}ac_dc/config" \
     --add-data "webapp/dist{sep}ac_dc/webapp_dist" \
-    --collect-all=litellm \
-    --collect-all=tiktoken \
-    --collect-all=tiktoken_ext \
+    --collect-all=claude_agent_sdk \
     --collect-all=tree_sitter \
     --collect-all=tree_sitter_python \
     --collect-all=tree_sitter_javascript \
@@ -45,8 +43,6 @@ pyinstaller --onefile --name ac-dc-{platform} \
     --collect-all=tree_sitter_c \
     --collect-all=tree_sitter_cpp \
     --collect-all=trafilatura \
-    --hidden-import=boto3 \
-    --hidden-import=botocore \
     --hidden-import=ac_dc \
     --hidden-import=ac_dc.collab \
     --hidden-import=ac_dc.doc_convert \
@@ -66,9 +62,7 @@ Packages that ship data files PyInstaller's static analysis can't discover autom
 
 | Package | Reason |
 |---|---|
-| `litellm` | Model registry data, provider-specific token counts |
-| `tiktoken` | BPE merge rules and encoding tables |
-| `tiktoken_ext` | Optional tiktoken extensions (open-source registry) |
+| `claude_agent_sdk` | Ships the bundled `claude` CLI under `_bundled/` — an **executable data file**, not a Python module, so import-graph analysis never sees it |
 | `tree_sitter` | Core library's runtime data |
 | `tree_sitter_python` | Compiled grammar (`.so` / `.dll` / `.dylib`) |
 | `tree_sitter_javascript` | Compiled grammar |
@@ -79,14 +73,23 @@ Packages that ship data files PyInstaller's static analysis can't discover autom
 
 Missing any of these produces a runtime `ModuleNotFoundError` (for the package itself) or a silent data-file-not-found failure (grammars that fail to load silently leave the language unavailable).
 
+`litellm`, `tiktoken`, and `tiktoken_ext` are removed. The model registry and the BPE encoding tables were
+collected so this process could pick a provider and count tokens, and it does neither now — the engine
+resolves the model and reports its own token accounting.
+
+`claude_agent_sdk`'s collection has a sharper failure mode than the others, and it is worth spelling out
+because it is the one a build-time test must cover. A dropped tree-sitter grammar silently removes a
+language from the symbol index: bad, but the app still runs. A dropped `_bundled/claude` removes the third
+and last entry in the CLI resolution chain, so a user whose `PATH` has no `claude` gets an application that
+starts, renders, indexes — and cannot hold a conversation. CI asserts the path exists inside the built
+binary and that the file is executable.
+
 ### `--hidden-import` module list
 
 Modules PyInstaller's static analyzer misses because they're imported dynamically or only referenced by string name:
 
 | Module | Why missed |
 |---|---|
-| `boto3` | Only imported by `litellm` when Bedrock provider is used |
-| `botocore` | Transitive dep of `boto3`; static analyzer misses both when `boto3` is only imported via `litellm` |
 | `ac_dc` | Package root — static analyzer sees only the entry point's direct imports |
 | `ac_dc.collab` | Registered via `add_class()` dynamically; not imported directly by `main.py` |
 | `ac_dc.doc_convert` | Same — registered via `add_class()` |
@@ -141,7 +144,7 @@ The package root resolution (`import { JRPCClient } from '@flatmax/jrpc-oo'`) go
 | Webapp static server | 18999 | Built-in HTTP server for bundled webapp (or Vite dev server in dev mode) |
 | PyInstaller port probe start | Same as above | Server scans upward from this port if taken |
 
-CLI flags `--server-port` and `--webapp-port` override; see `specs4/6-deployment/startup.md` for probing behavior.
+CLI flags `--server-port` and `--webapp-port` override; see `specs5/6-deployment/startup.md` for probing behavior.
 
 ### Webapp location priority
 
@@ -177,26 +180,35 @@ After extraction (PyInstaller's `--onefile` mode unpacks to a temp directory at 
 {MEIPASS}/
 ├── ac_dc/
 │   ├── VERSION                    # baked version string
-│   ├── config/                    # bundled config defaults
-│   │   ├── llm.json
+│   ├── config/                    # bundled config defaults — three files plus one template
+│   │   ├── engine.json
 │   │   ├── app.json
 │   │   ├── snippets.json
-│   │   ├── system.md
-│   │   └── ...
+│   │   └── commit.md
 │   └── webapp_dist/               # Vite-built webapp
 │       ├── index.html
 │       ├── assets/
 │       │   ├── index-{hash}.js
 │       │   └── index-{hash}.css
 │       └── ...
-├── litellm/                       # --collect-all targets
-├── tiktoken/
+├── claude_agent_sdk/              # --collect-all targets
+│   └── _bundled/
+│       └── claude                 # the fallback engine — must be present AND executable
 ├── tree_sitter/
 ├── tree_sitter_python/
 └── ...
 ```
 
 The `ac_dc/` subtree matches what `pip install ac-dc` produces on disk, so `Path(__file__).parent` resolves consistently between source installs, pip installs, and PyInstaller bundles.
+
+The bundled config directory is now exhaustively listable — four entries, no `└── ...`. The six retired
+prompt files are not bundled, and a user's copies of them survive in the user config directory untouched
+(see `specs5/6-deployment/packaging.md` § The Retired Set Is a Third Category, Not an Absence).
+
+**The executable bit is load-bearing and PyInstaller does not always preserve it.** `--onefile` unpacks to
+a temp directory at startup, and a data file that lands without the execute permission produces a
+`PermissionError` from the SDK transport's spawn — at first-turn time, on a user's machine, with a message
+that says nothing about packaging. The CI check must test `os.access(path, os.X_OK)`, not just existence.
 
 ### Webapp dist layout (Vite build output)
 
@@ -242,9 +254,25 @@ export default defineConfig({
 
 The `tree_sitter_typescript` pip package exposes `language_typescript()` (for `.ts`) and `language_tsx()` (for `.tsx`) but **not** `language()`. PyInstaller's `--collect-all=tree_sitter_typescript` picks up both grammars as data files, but the loader code must probe for the function names individually. See `specs-reference/2-indexing/symbol-index.md` § dependency quirks for the loader pattern.
 
-### litellm's Bedrock provider requires boto3
+### The bundled CLI still needs a Node runtime
 
-When a user configures a Bedrock model (e.g., `bedrock/anthropic.claude-sonnet-4`), `litellm` lazy-imports `boto3`. PyInstaller's static analyzer doesn't see the import chain, so `boto3` and its transitive dep `botocore` must be explicitly listed as `--hidden-import`. Missing these produces a runtime `ModuleNotFoundError` only when a user actually selects a Bedrock model — not caught by build-time tests that use other providers.
+`claude_agent_sdk/_bundled/claude` is a Node application, so collecting it does not make the binary
+self-sufficient — it makes the binary carry an engine that runs *if* Node is installed. PyInstaller cannot
+bundle a Node runtime, and doing so by hand would mean shipping a second language runtime and tracking a
+release cadence that is not ours.
+
+So the packaging contract is deliberately partial: bundle what we can, resolve at startup, and diagnose
+precisely when resolution fails. `EngineHealth` distinguishes "no `claude` found on `PATH` and no runtime
+for the bundled copy" from "found but unauthenticated" from "found but version-skewed", because the user
+action differs for each and a single "engine unavailable" message would send them looking in the wrong
+place.
+
+### The `mcp` version floor
+
+`claude-agent-sdk` requires `mcp` >= 1.29.0. The pre-conversion lockfile pinned 1.14.1, and `doc_convert`
+depends on `mcp` as well — so the bump is a deliberate step with `doc_convert` re-tested in the same
+commit, not a transitive side effect of adding the SDK. A lockfile refresh that silently satisfies the SDK
+and breaks document conversion is the exact failure this note exists to prevent.
 
 ### Static file server — threading class name
 
@@ -265,16 +293,29 @@ Without the suppression, every browser tab close or navigation-during-load produ
 
 ### Static file server — bind address
 
-Binds to `127.0.0.1` by default (localhost only). Binds to `0.0.0.0` when `--collab` is passed. Same rule applies to the WebSocket server and the Vite dev/preview servers. See `specs4/4-features/collaboration.md` for the contract.
+Binds to `127.0.0.1` by default (localhost only). Binds to `0.0.0.0` when `--collab` is passed. Same rule applies to the WebSocket server and the Vite dev/preview servers. See `specs5/4-features/collaboration.md` for the contract.
 
 ### GitHub Pages — alternative webapp source
 
-Source installs (`pip install -e .`) that skip `npm run build` can use a GitHub Pages deployment as the webapp source instead. The backend's webapp location priority falls through all three local paths and, if configured, redirects the browser to the GitHub Pages URL. Deployed via a GitHub Actions workflow on push to `main`. Version skew between pip-installed backend and GitHub-hosted frontend is possible but minor — the RPC surface is stable enough to tolerate one or two-week lag.
+Source installs (`pip install -e .`) that skip `npm run build` can use a GitHub Pages deployment as the webapp source instead. The backend's webapp location priority falls through all three local paths and, if configured, redirects the browser to the GitHub Pages URL. Deployed via a GitHub Actions workflow on push to `main`.
+
+Version skew between a pip-installed backend and a GitHub-hosted frontend is possible, and the tolerance
+for it narrowed with the conversion. The old claim — "the RPC surface is stable enough to tolerate one or
+two-week lag" — held when the frontend consumed accumulated-text chunks and a handful of broadcasts. It is
+weaker now: a frontend predating the block-identity chunk contract discards nothing (it has no `seq`
+tracking) and renders duplicated text, and one predating `permissionRequest` shows no dialog at all while
+the server blocks a turn waiting for a decision that no client can send.
+
+Both are silent failures, so the frontend sends its build version on connect and the server warns when the
+major RPC-contract version differs. The contract version is bumped only for breaking payload changes —
+chunk shape, permission flow, state snapshot — not for every release.
 
 ## Cross-references
 
-- Startup sequence and port probing: `specs4/6-deployment/startup.md`
+- Startup sequence and port probing: `specs5/6-deployment/startup.md`
 - Config file upgrade flow and version marker: `specs-reference/1-foundation/configuration.md`
-- Collaboration bind-address policy: `specs4/4-features/collaboration.md`
+- Collaboration bind-address policy: `specs5/4-features/collaboration.md`
 - Tree-sitter TypeScript loader quirk: `specs-reference/2-indexing/symbol-index.md`
-- Symbol map compact format produced by the packaged backend: `specs-reference/2-indexing/symbol-index.md`
+- Symbol map compact format served through the MCP bridge: `specs-reference/2-indexing/symbol-index.md`
+- CLI resolution order, version-skew fields, and `EngineHealth`: `specs-reference/3-engine/session.md`
+- Chunk contract the frontend/backend version check protects: `specs-reference/3-engine/session.md` § Block identity

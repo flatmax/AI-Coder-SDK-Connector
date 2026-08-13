@@ -36,8 +36,8 @@ For each PDF page:
 ### SVG Text Preservation
 - SVG export emits text as text elements rather than decomposing each character into individual glyph paths
 - Keeps sentences intact, produces smaller SVGs, makes text selectable and searchable in the SVG viewer
-- Extracted text is always written to the companion markdown file for searchability and LLM context
-- SVGs preserve every `<text>` element verbatim. Body prose appears in both the markdown (for grep / LLM context) and the SVG (for visual fidelity). The cost is mild output bloat; the alternative — stripping body prose from the SVG when the markdown has it — silently lost diagram labels because PyMuPDF's text-anchor coordinates and figure bboxes live in different coordinate spaces with no reliable conversion between them
+- Extracted text is always written to the companion markdown file so it is greppable, indexable, and readable by the agent's own `Read`
+- SVGs preserve every `<text>` element verbatim. Body prose appears in both the markdown (for grep and agent reading) and the SVG (for visual fidelity). The cost is mild output bloat; the alternative — stripping body prose from the SVG when the markdown has it — silently lost diagram labels because PyMuPDF's text-anchor coordinates and figure bboxes live in different coordinate spaces with no reliable conversion between them
 - Result for PDFs — text in both markdown and SVG; diagrams remain self-describing because their internal labels are never at risk
 - Result for presentations — same as PDFs: text in both artifacts, layout preserved
 - The legacy `doc_convert.strip_svg_text_when_present` config flag is deprecated and ignored. Setting the flag logs a one-time warning at startup
@@ -256,7 +256,7 @@ The availability query reports status of each dependency:
 - PyMuPDF importable
 - Combined PDF pipeline available (both LibreOffice and PyMuPDF)
 
-The feature is entirely optional — document index, mode toggle, keyword enrichment, and all other doc-mode features work without it.
+The feature is entirely optional — the document index, keyword enrichment, and the `doc_outline` tool all work without it; they simply have fewer markdown files to describe.
 
 ## Progress Events
 

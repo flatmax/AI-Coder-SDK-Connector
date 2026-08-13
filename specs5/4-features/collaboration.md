@@ -1,6 +1,16 @@
 # Collaboration
 
-Collaboration mode allows multiple browsers to connect to a single backend. The first connection is auto-admitted as the host; subsequent connections require explicit admission from any already-admitted user via a toast prompt. Once admitted, non-localhost participants see the full UI and receive all broadcast events but cannot send prompts, mutate LLM state, or perform git operations. Disabled by default — enabled via an explicit CLI flag.
+Collaboration mode allows multiple browsers to connect to a single backend. The first connection is
+auto-admitted as the host; subsequent connections require explicit admission from any already-admitted
+user via a toast prompt. Once admitted, non-localhost participants see the full UI and receive all
+broadcast events but cannot send prompts, mutate engine state, perform git operations, **or answer a
+permission prompt**. Disabled by default — enabled via an explicit CLI flag.
+
+That last restriction is new and is the highest-stakes rule in this spec. Answering a permission prompt
+authorises a specific tool call — including arbitrary `Bash` — so a participant who could answer one
+would turn collaboration mode into a remote-code-execution grant. See
+[decisions § CC-15](../plan/decisions.md#cc-15--permission-prompts-are-localhost-only) and
+[`../3-engine/permissions.md` § Collaboration and Authority](../3-engine/permissions.md#collaboration-and-authority).
 ## Activation
 - Disabled by default for security
 - Enabled via a CLI flag
@@ -73,18 +83,30 @@ Role and localhost are independent concepts:
 Restricted to localhost connections (non-localhost participants get an error):
 | Category | Operations |
 |---|---|
-| LLM interaction | Chat streaming, commit message generation, cancel streaming |
-| Session management | New session, load session, new history session |
-| LLM state | Set selected files, switch mode, set cross-reference |
+| Turns | Chat streaming, commit-message turn, cancel streaming |
+| Permissions | **Resolve permission**, set permission mode |
+| Session management | New session, resume session (with or without fork), delete engine session |
+| Engine state | Set selected files, set denied-read files, set model, rewind files, stop a subagent task |
+| MCP control | Reconnect an MCP server, toggle an MCP server |
 | Review mode | Start review, end review |
 | Git operations | Commit, stage/unstage/discard files, rename/delete/create/write files, reset hard, stage all |
-| Settings | Save config, reload LLM config, reload app config |
+| Settings | Save config, reload engine config, reload app config |
 | Doc convert | Convert files |
+
+`resolve_permission` is the entry that is not obviously mutating and is nevertheless the most powerful
+method in the inventory. `rewind_files` and `stop_task` are restricted for the ordinary reason: both
+change state the host is responsible for. MCP toggles are restricted because they change what tools
+exist for everyone.
 ### Read-Only Operations (Available to All)
-- File content, file tree, search, current state
-- Flat file list, symbol map, context breakdown
-- Session list, session messages
+- File content, file tree, search, engine state snapshot
+- Flat file list, LSP queries, doc outlines
+- Engine health, context usage, MCP server status, advertised server info
+- Session list, session messages, history search, subagent transcripts
 - Collaboration queries — admit/deny, connected clients
+
+Read-only introspection is deliberately unrestricted. Watching a turn — its tool calls, its context
+usage, its health — is the entire point of collaboration; a participant who can see less than the host
+cannot review what the agent did.
 ### Enforcement Mechanism
 - Service classes check caller identity via a shared collaboration reference
 - A per-message context identifier is set before each dispatch (inside the receive loop)
@@ -107,7 +129,8 @@ Restricted to localhost connections (non-localhost participants get an error):
 - Client left — broadcast when a client disconnects
 - Role changed — sent to a specific client when their role changes
 - Navigate file — broadcast when any client navigates to a file (all clients open the same file)
-- Mode changed — broadcast when a localhost client switches mode or toggles cross-reference
+- Permission mode changed — broadcast when a localhost client changes the permission posture, with who changed it
+- Permission request / resolved — broadcast to everyone; only localhost clients can answer
 - Session changed — broadcast when a localhost client starts a new session or loads one
 ## Raw WebSocket Messages (Pre-JRPC)
 Sent on the raw WebSocket before JRPC setup, for pending clients:
@@ -145,11 +168,12 @@ When collaboration is disabled:
 When the calling client is non-localhost, the frontend applies restrictions:
 - Chat input area replaced with a static "Viewing as participant" bar
 - File picker context menu — git-mutating items hidden (rename, delete, new file)
-- File picker checkboxes hidden (cannot change LLM context)
+- File picker checkboxes hidden — selection is the host's attention hint and only the host sets it
 - Commit button hidden
 - Settings tab editing disabled
-- Mode toggle disabled
-- New session / load session disabled
+- Permission-mode selector shown but read-only — a participant must be able to *see* the posture the agent is operating under, and must not be able to change it
+- Permission dialog shown in a watch-only form: the request, the diff or command, and who is being asked, with the buttons absent and a line saying the host is deciding
+- New session / resume session disabled
 - Review mode controls hidden
 Everything else works — browsing files, viewing diffs, searching, reading chat history, using tabs.
 ## Network Binding
@@ -198,12 +222,16 @@ Remote collaborators open the share link (which uses the host's LAN IP) to load 
 - Each client opens the file in its diff viewer or SVG viewer
 - Events originating from a remote broadcast carry a flag so the receiving client does not re-broadcast, preventing loops
 
-### Mode Sync
+### Permission Sync
 
-- When a localhost client switches mode or toggles cross-reference, the server broadcasts a mode-changed event
-- All browsers update their UI — tab visibility, mode toggle state, available controls
-- Non-localhost clients passively follow the server's authoritative mode — they never attempt to initiate a switch
-- See [modes.md](../3-llm/modes.md) for the full mode sync protocol
+Modes are gone, and with them the mode-sync protocol. What needs syncing now is the permission posture
+and the permission dialog:
+
+- When a localhost client changes the permission mode, the server broadcasts the change with the mode and who set it; every browser updates its indicator, and the change is recorded in the transcript as a system event
+- A permission request is broadcast to everyone. Localhost clients get the dialog with buttons; participants get the same content, read-only
+- Concurrent localhost clients race and the first decision wins; the dialog closes on the others with a note naming who answered
+- If no localhost client is connected when a request arrives, it is denied after a short timeout with a reason that says nobody was there. A headless AC⚡DC with only remote participants therefore degrades toward `plan`-like behaviour rather than toward something permissive
+- See [`../3-engine/permissions.md`](../3-engine/permissions.md) for the decision protocol and timeouts
 
 ### Session Sync
 
@@ -211,16 +239,17 @@ Remote collaborators open the share link (which uses the host's LAN IP) to load 
 - All browsers clear their chat panel and display the new conversation state
 - Collaborators always see the same conversation context
 
-### Chat History
+### Chat History and Mid-Turn Join
 
-- On admission, the new client fetches current state as part of its normal setup
-- They see all messages exchanged so far
-- If streaming is in progress when they join, they miss already-sent chunks but adopt the stream as passive and see the complete message on completion
+- On admission, the new client fetches the engine state snapshot as part of its normal setup, and sees every mirrored message exchanged so far
+- If a turn is in flight, the snapshot's `active_streams` carries the turn's rendered blocks so far. A joining client replays them and then follows live chunks — it does not have to wait for completion to see what is happening
+- Any pending permission request is in the same snapshot, so a joining client renders the dialog (or its watch-only form) immediately instead of missing the broadcast
+- Blocks whose content is cumulative-within-block make this cheap: replay is the current state of each block, not a chunk log
 
-### Cache Tiering
+### Context Visibility
 
-- No changes — stability tracker and cache tiers are server-side state
-- All clients see the same token HUD data when they request it
+- The context HUD reads `get_context_usage`, which is unrestricted, so every client sees the same numbers
+- The numbers are the engine's own accounting, not ours, which makes them the same for every viewer by construction — there is no client-side estimate to drift
 
 ### Code Review Mode
 
@@ -246,15 +275,16 @@ Remote collaborators open the share link (which uses the host's LAN IP) to load 
 - Admitted clients cannot be removed in the initial implementation
 - The host can restart the server to clear all connections
 
-### Single LLM Stream
+### Single Turn
 
-- Only one LLM request can be active at a time (existing constraint)
+- Only one user-initiated turn is active at a time (existing constraint, now enforced by the engine service)
+- Subagents the agent spawns are internal to that turn and do not count
 - Participants cannot queue prompts
 
-### Mid-Stream Join
+### Mid-Turn Join Is Approximate
 
-- A client admitted while streaming is in progress will miss already-sent chunks
-- Passive stream adoption ensures they see the complete message on completion
+- A client admitted mid-turn sees block state, not keystroke-level history: it gets each block's current content, not the order the chunks arrived in
+- Thinking blocks that have already been superseded are not replayed
 
 ### No Follow Mode
 
@@ -274,8 +304,10 @@ Remote collaborators open the share link (which uses the host's LAN IP) to load 
 
 - The first connection is always auto-admitted as host; subsequent connections are always screened
 - Non-localhost participants cannot call any mutating RPC method — restricted calls always return an error without side effects
+- No permission prompt is ever answered by a non-localhost client, in any mode, including when no localhost client is connected
+- The permission posture is visible to every admitted client and settable by none but localhost
 - Admission-pending clients have no JRPC state and no exposed methods
 - Host disconnection always results in promotion of another admitted client, or a reset if no clients remain
 - Same-IP pending requests never accumulate — new requests always replace older ones from the same IP
 - Collaboration-aware server behaves identically to the base server in single-user mode (no flag)
-- Single active LLM stream policy applies across all connected clients, not per-client
+- The single-active-turn policy applies across all connected clients, not per-client

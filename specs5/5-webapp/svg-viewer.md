@@ -296,9 +296,10 @@ All toolbar-level actions are accessible only via keyboard. Element-level shortc
 - No changes needed — dispatches navigate-file events for all file types; app shell handles routing
 ### Search Tab
 - Search results for SVG files route through the same navigate-file → app shell → SVG viewer path
-### Edit Blocks
-- LLM edit blocks for SVG files are applied normally (text-based edits)
-- After application, refresh updates the SVG viewer's content if the file is open
+### Agent Edits
+- The agent edits SVG files through its own `Edit` / `Write` tools, as text — the viewer takes no part in applying them
+- The `PostToolUse` hook's files-modified broadcast triggers refresh, which updates the SVG viewer's content if the file is open
+- A user's unsaved handle-drag edits are lost by that refresh, the same as in the diff viewer's no-cache policy — the file on disk is authoritative
 ## Context Menu
 Right-clicking on the right (editable) panel opens a context menu. Some actions are always visible; alignment and snap-to-axis are gated on the current selection so the menu shows only what's actionable.
 | Action | Visibility | Description |

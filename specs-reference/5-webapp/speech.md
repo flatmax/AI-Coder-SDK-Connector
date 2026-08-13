@@ -1,8 +1,8 @@
 # Reference: Speech
 
-**Supplements:** `specs4/5-webapp/speech.md`
+**Supplements:** `specs5/5-webapp/speech.md`
 
-Concrete constants for the read-aloud (text-to-speech) feature. Dictation (speech-to-text) needs no supplementary detail — its specs4 spec is self-sufficient.
+Concrete constants for the read-aloud (text-to-speech) feature. Dictation (speech-to-text) needs no supplementary detail — its specs5 spec is self-sufficient.
 
 ## Byte-level formats
 
@@ -134,6 +134,6 @@ The transport's drag handlers are bound to pointer events but only read `clientX
 
 ## Cross-references
 
-- Behavioral specification (read-aloud flow, sentence rationale, transport, state model, invariants): `specs4/5-webapp/speech.md`
-- Speaker button placement in the message toolbar: `specs4/5-webapp/chat.md` § Message Action Buttons
-- Overlay registration at viewport scope: `specs4/5-webapp/shell.md`
+- Behavioral specification (read-aloud flow, sentence rationale, transport, state model, invariants): `specs5/5-webapp/speech.md`
+- Speaker button placement in the message toolbar: `specs5/5-webapp/chat.md` § Message Action Buttons
+- Overlay registration at viewport scope: `specs5/5-webapp/shell.md`

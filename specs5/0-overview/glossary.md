@@ -1,170 +1,99 @@
 # Glossary
 
-Authoritative definitions of terms used across the spec suite. When a spec uses one of these terms, it links here rather than re-defining.
+Authoritative definitions of terms used across the spec suite. When a spec uses one of these terms, it
+links here rather than re-defining.
 
-## Caching and Stability
+Terms specific to the Claude Agent SDK — `ClaudeSDKClient`, `ResultMessage`, `can_use_tool`,
+`PermissionUpdate`, `get_context_usage()` — are defined by the SDK, not by us. Where a definition here
+paraphrases one, [`../plan/sdk-surface.md`](../plan/sdk-surface.md) is the verified record of what the
+SDK actually does.
 
-- **Tier** — a stability level assigned to each item the LLM sees. Five levels: L0 (most stable, terminal — no further promotion), L1, L2, L3, active (uncached). Each cached tier maps to one `cache_control` breakpoint in the assembled prompt.
-- **Active** — the uncached content rebuilt on every request. New items, recently-changed items, and the current turn's content all live here. Not a cache tier in the provider sense — the prompt contains it directly, without a cache marker.
-- **N value** — a per-item age counter. Increments by 1 every cycle for every item; resets to 0 on hash mismatch (edit) or teleport. Above the Active→L3 admission gate, N has no semantic role in promotion eligibility — the membrane / flux controller (D35) drives promotions on token-mass imbalance, not on per-item N. Below the gate, N is the entire promotion criterion: an Active item graduates to L3 once `N ≥ n_admit` (default 3).
-- **Admission gate (`n_admit`)** — the only live N threshold under D35/D36. Default 3. Files in Active become eligible to graduate to L3 once their N value reaches `n_admit`. Above L3 there are no per-tier N thresholds; the flux equation handles promotion. Configured per-membrane in `app.json`.
-- **Graduation** — the specific case of promotion from active into L3 when an item satisfies `N ≥ n_admit` and the Active→L3 membrane fires.
-- **Cascade** — the bottom-up relaxation pass that runs after each LLM response. Implemented as the membrane / flux controller's iterate-to-equilibrium loop across the four live membranes (Active→L3, L3→L2, L2→L1, L1→L0). A tier with an item leaving (teleport-to-Active on edit/deselect, history graduation, file deletion) is "broken"; the loop redistributes mass upward via the flux equation until a full pass fires no moves.
-- **Broken tier** — a tier whose cache block has been invalidated this cycle (by teleport, deselection, file deletion, or other explicit invalidation). The relaxation loop runs to redistribute mass.
-- **Cache target tokens** — the minimum tokens a cache block must contain for the provider to actually cache it. Computed as `max(user_min, model_min) × buffer_multiplier`. Model minimums: 4096 for Opus 4.5/4.6/Haiku 4.5; 1024 for Sonnet and other Claude models. User minimum configurable via `llm.json`; buffer multiplier defaults to 1.1.
-- **Ripple promotion** — the chain reaction when the relaxation loop's promotion of an item out of a tier alters V on the membrane below, allowing the next pass to fire there too. Can propagate from L3 all the way to L0 in a single cycle. Bounded by `_MAX_RELAX_ITERS` and by the rectified-GHK self-arresting deadband.
-- **History isolation (D37)** — `history:*` items in L3 are protected from movement (cannot be picked as movers) AND invisible to V/c on every membrane (filtered out of `c_lower`, `c_upper`, `t_lower`, `t_upper`). Once history graduates into L3 via the piggyback path, flux never moves it; only `purge_history` (compaction, new-session reset) or manual rebuild can remove it.
+## Engine and Session
 
-## Context and Content
+- **Engine** — the `claude` CLI subprocess, driven through the Claude Agent SDK. Owns the model call, the context window, prompt caching, compaction, tool execution, and file checkpointing. AC⚡DC starts it, frames turns for it, gates its tools, and renders its output; nothing else.
+- **Client** — one `ClaudeSDKClient`, one per repository, owning one engine subprocess. Created at startup and never re-created behind the user's back: a silent restart loses context the user believes is still there.
+- **Session** — an engine-owned conversation identified by a session ID issued by the engine. AC⚡DC records the ID, groups its own records by it, and passes it back to resume — it never mints session IDs itself.
+- **Turn** — one user intent and everything the engine does in response: assistant text, thinking, tool calls, tool results, subagents, and a terminating `ResultMessage`. One user-initiated turn runs at a time.
+- **Framing** — the small deterministic block the server prepends to a turn describing UI state the agent cannot otherwise observe: selected file paths, the active file, a cursor range, review-mode facts. Bounded, and never file content. Framing plus attached images are the whole of AC⚡DC's contribution to what the model sees.
+- **Message pump** — the single component that reads the SDK message stream and translates it into AC⚡DC events. The only code in the system that knows SDK message types. Always drains to `ResultMessage`, including on cancellation.
+- **Terminal reason** — why a turn ended, as reported on `ResultMessage`: normal completion, `aborted_streaming`, `aborted_tools`, error. Rendered in the turn footer.
+- **Preset** — a named bundle of snippet set, default tool hint, and optionally a Claude Code skill or agent definition, replacing the old code/document/cross-reference modes. Switching a preset changes UI affordances only: it does not swap a system prompt, reset context, or invalidate a cache. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
+- **Subagent** — an agent the engine spawns through its `Task` tool, with its own context and transcript. Internal to the parent turn; not gated by the one-turn-at-a-time guard, and identified by a stable engine-issued agent ID.
+- **Hook** — an engine callback AC⚡DC registers to observe or intercept lifecycle points (`PreToolUse`, `PostToolUse`, `Stop`, `PreCompact`). Hooks are how AC⚡DC learns that files changed; they are not a display channel.
 
-- **Active items** — the list of items the tracker considers "in uncached context for this request". Built fresh each request from: selected files' full content, unselected files' index blocks, fetched URL content, non-graduated history messages. Passes into the stability tracker's cascade.
-- **File context** — the in-memory map of `{relative_path: content}` for files the user has selected. Separate from the full-repo file tree (which is just paths) and from the symbol/doc index (which is structural only). Populated on-demand from disk via the Repo layer.
-- **Working files** — the uncached "Here are the files:" section in the assembled prompt, containing full content of selected files that haven't graduated to a cached tier. Rendered as fenced code blocks without language tags.
-- **Index block** — the compact structural description of a single file. For code: the symbol map entry listing classes, functions, methods, imports. For docs: the outline listing headings, keywords, content-type markers, cross-references. Always smaller than full file content; suitable for inclusion in context even when the full file isn't.
-- **Symbol map** — the full compact representation of every code file in the repo, assembled from individual symbol index blocks. Appears once in the prompt, typically in L0 (or L1 for large repos). Has a legend at the top abbreviating kinds (`c`/`m`/`f`/`af`/`am`/`v`/`p`/`i`) and path aliases (`@1/`, `@2/`).
-- **Doc map** — the equivalent for document files. Same structural role, different extractors and annotations (keywords, content-type markers, incoming reference counts).
-- **Legend** — the abbreviation key prepended to a map output so the LLM can decode the compact notation. Includes kind codes, annotation markers, and path aliases.
+## Streaming Protocol
 
-## Edits
+- **RPC** — Remote Procedure Call. JSON-RPC 2.0 over a single WebSocket connection, provided by the jrpc-oo library.
+- **Bidirectional RPC** — either side may call methods on the other. The browser calls server methods (read files, chat, settings); the server pushes events to the browser (stream chunks, completion, permission requests, broadcasts).
+- **Server-push event** — an RPC call initiated by the server and delivered to the browser. Streaming (`streamChunk`, `thinkingChunk`, `toolUse`, `toolResult`), lifecycle (`sessionStarted`, `streamComplete`, `postResponseComplete`), engine state (`compactionEvent`, `rateLimit`, `engineHealth`), permission requests, and collaboration events.
+- **Request ID** — a correlation token generated by the browser for each turn. Format `{epoch_ms}-{6-char-alnum}`. Routes events to the right chat card, keys the server's in-flight turn map, and — with the session ID — identifies a turn in the mirrored store. Retained from the native engine deliberately: every browser surface is already built on it.
+- **Block identity** — the identifier carried by every streaming event naming which block of the turn the content belongs to. Content is cumulative *within* a block; ordering across blocks is arrival order. Replaces the native engine's full-accumulated-content chunks, which cannot survive a turn made of heterogeneous blocks.
+- **Passive stream** — a turn the current client did not initiate, typically one a collaborator sent. The chat panel adopts the stream's request ID and renders it exactly as if it had initiated it.
+- **`streamComplete`** — fires on `ResultMessage`; finalises the assistant turn and carries usage, cost, duration, and terminal reason.
+- **`postResponseComplete`** — fires after post-turn housekeeping settles: mirror flushed, touched files re-indexed, context usage refetched. Derived views (Context tab, file tree) wait for this; the chat panel does not.
 
-- **Edit block** — the LLM's structured proposal for a file change. Three marker lines bracket two content sections: `🟧🟧🟧 EDIT` (orange squares) starts the old-text section, `🟨🟨🟨 REPL` (yellow squares) separates old from new, `🟩🟩🟩 END` (green squares) closes the block. File path appears on the line immediately before the start marker.
-- **Anchor** — the old text inside an edit block. The apply pipeline searches for it in the target file as a contiguous block. Exactly-one match is required for the edit to apply.
-- **Ambiguous anchor** — old text that matches multiple locations in the file. The edit fails with a diagnostic; the frontend auto-populates a retry prompt asking the LLM to include more surrounding context.
-- **In-context edit** — an edit block targeting a file that is currently in the user's selected-files set. Full content is in context; the LLM saw the actual file and its old-text anchor should be accurate.
-- **Not-in-context edit** — an edit block targeting a file the LLM has only seen as an index block (compact map entry), not full content. The apply pipeline marks these as `NOT_IN_CONTEXT`, auto-adds the file to selected files, and the frontend auto-populates a retry prompt.
+## Tools and Permissions
 
-## Modes
+- **Tool card** — the chat-panel rendering of one tool call: name, one-line input summary, status, duration, expandable full input and result. Created on `PreToolUse` and correlated to its result by `tool_use_id`. Failures are expanded by default; successes are collapsed.
+- **Permission request** — a `can_use_tool` callback suspended in the engine while a browser dialog is answered. The engine is genuinely blocked; the dialog is not advisory.
+- **Permission decision** — allow once, deny with a reason, or always-allow. Always-allow writes a scoped tool-plus-pattern rule (`Bash(npm test:*)`, `Edit(src/**)`) into project permission settings via a `PermissionUpdate` — never a bare tool grant and never an invisible in-memory one.
+- **Permission mode** — the session's standing posture: `default`, `plan`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `auto`. Switched live, always visible in the UI, broadcast to all clients, and recorded as a system event.
+- **Timeout deny** — the outcome of a permission request nobody answers. Denied with a reason distinguishing "nobody was there" from "the user said no", so the agent knows it was not refused on the merits.
+- **Checkpoint** — the engine's per-user-message file snapshot, enabled by file checkpointing. `rewind_files()` restores files to one. Restores **files only** — the conversation is not rewound, and the affordance must not imply otherwise.
+- **MCP bridge** — the in-process MCP server AC⚡DC exposes to the engine under the name `ac-dc`, publishing the surviving indexes as six read-only tools: `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state`, `ui_state`. The inversion of the old plan: AC⚡DC *is* an MCP server rather than a consumer of them. See [decisions § CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text).
+- **Todo list** — the agent's `TodoWrite` state, hoisted out of the tool-card stream into a persistent checklist rather than rendered as a series of cards.
 
-- **Code mode** — primary mode where the symbol index feeds structural context. System prompt emphasizes code navigation, edit protocol, file selection. Snippets are code-oriented.
-- **Document mode** — primary mode where the document index feeds structural context. System prompt emphasizes document work, outline awareness, cross-reference linking. Snippets are doc-oriented.
-- **Cross-reference mode** — an overlay on either primary mode that adds the *other* index's file blocks alongside the primary. Both legends appear in L0. Tier dispatch is prefix-based (`symbol:` vs `doc:`) so a single tier can contain a mix. Resets to off on every primary mode switch.
+## History and Sessions
 
-## Sessions and History
+- **Engine transcript** — the session record the SDK resumes from, in the CLI's own format, opaque to us. Written through our `SessionStore` so a copy lands under `.ac-dc4/sessions/`. Compacted by the engine, on the engine's schedule.
+- **Mirrored store** — AC⚡DC's own append-only archive at `.ac-dc4/history.jsonl`: rendered messages plus our metadata (image refs, framing's selected files, request IDs, tool summaries, turn results, system events). Feeds the history browser, session list, and full-text search. Never compacted, never rewritten, never fed back into a prompt.
+- **Mirror gap** — a hole in the mirrored store, announced by the SDK as a `MirrorErrorMessage` and surfaced as an engine-health banner. Non-fatal: the turn continues and the engine transcript is unaffected. A silent gap would leave a wrong record looking right.
+- **Resume** — restoring a session by passing its ID to the SDK, which restores its own context including its own compactions. Never a replay: AC⚡DC does not reconstruct a conversation by feeding the mirror back into a prompt, which is exactly how a session comes to look correct in the UI while the model's view has diverged.
+- **Fork** — branching from an existing session via `fork_session`, leaving the original intact. Offered wherever resume is, because it is the safe choice when revisiting old work.
+- **Compaction** — the engine summarising its own context when it approaches the window limit. AC⚡DC neither triggers nor implements it; it renders the resulting **compact boundary** as a transcript divider with before/after token counts.
+- **System event** — an operational event (commit, reset, preset switch, permission-mode change, compaction boundary, session switch) recorded in the mirrored store and rendered with distinct card styling. Unlike the native engine's system events, these are **not** fed back to the model — there is no prompt to inject them into.
 
-- **Session** — a grouping of related chat messages identified by a session ID. New session = new ID; loading a previous session = current session ID becomes the loaded one. Session boundaries are the natural unit for history browsing.
-- **Compaction** — LLM-driven summarization that runs after the assistant response when conversation history token count exceeds the configured trigger. A smaller model detects the topic boundary; earlier messages are either truncated (hard topic switch, high confidence) or replaced with a generated summary.
-- **Verbatim window** — the most recent messages preserved unchanged during compaction. Sized by token count (recent tokens under `verbatim_window_tokens`) and/or message count (at least `min_verbatim_exchanges` recent user messages).
-- **Topic boundary** — the message index where the conversation subject shifted, detected by a smaller LLM. Reported with a reason string and a confidence score; compaction logic decides whether to truncate or summarize based on both.
-- **System event** — an operational event (commit, reset, mode switch, compaction) recorded as a pseudo-user message with a `system_event: true` flag. Rendered with distinct card styling; included in LLM context so the model knows what happened; persisted in history.
+## Context Visibility
 
-## Collaboration
-
-- **Host** — the first-connected client in a collaboration session; auto-admitted. Only localhost clients can send prompts or mutate state, regardless of host role.
-- **Participant** — a subsequently-connected client admitted by the host. Sees the full UI, receives all broadcasts (streaming, file changes, events), but cannot send prompts or mutate state if non-localhost.
-- **Localhost client** — a client whose peer IP is loopback (`127.0.0.1`, `::1`) or an address assigned to a local network interface. Localhost status is orthogonal to host/participant role; what matters for restrictions is localhost-ness, not role.
-- **Admission** — the approval flow for non-first connections. Raw WebSocket messages (`admission_pending`, `admission_granted`, `admission_denied`) carry the pre-JRPC handshake. A toast appears on every admitted client for the host to accept or deny. 120-second timeout; same-IP requests replace older pending ones.
-
-## Files and Indexing
-
-- **Selected files** — files the user has ticked in the file picker. Full content enters active context; the corresponding index block is excluded from the main symbol/doc map (would be redundant).
-- **Excluded files** — files the user has explicitly removed from the cache via the file picker's three-state checkbox. The underlying symbol and doc indexes still cover them — exclusion is a cache-shaping filter, not an indexing-time filter — but they are subtracted from every dir-block at seed time and per-turn refresh, and any `file:<path>` tracker entry is dropped on the exclusion event. The LLM does not see them in any tier. Used when a repo's map alone exceeds the context budget. Re-inclusion is instant: the next turn's seed picks the file back up from the live index.
-- **Index-only file** — the default state for a file: not selected, not excluded. Only its index block appears in context (as part of the symbol map / doc map), not its full content.
-- **Reference graph** — the cross-file usage relationships. Code graph: import statements and call sites. Doc graph: heading-anchored links and image embeds. Used for tier initialization (connected components cluster related files into the same tier) and for incoming-ref counts in the compact map output.
-- **Connected component** — a cluster of files linked via mutual bidirectional references. The stability tracker uses connected components as the initial grouping for tier distribution — related files tend to be edited together, so they share stability characteristics.
-
-## UI
-
-- **Dialog** — the draggable foreground panel hosting the four tabs (chat, context, settings, doc convert). Resizable, minimizable, persists position to localStorage.
-- **Viewer** — the background layer filling the viewport behind the dialog. Hosts the Monaco diff viewer and the SVG viewer as absolutely-positioned siblings; only one is visible at a time. Routed by file extension.
-- **Status LED** — the circular indicator in the diff viewer's top-right corner showing save state. Green = clean; orange pulsing = dirty (click to save); cyan = new file.
-- **Token HUD** — the floating transient overlay showing per-request token breakdown after each LLM response. Auto-hides after 8 seconds; hover pauses; click ✕ dismisses.
-- **File navigation grid** — the 2D spatial graph of files the user has opened. Traversed with Alt+Arrow keys while a fullscreen HUD is visible. Each Alt+Arrow move re-fetches the target file (no per-node cache).
-
-## Protocol
-
-- **RPC** — Remote Procedure Call. JSON-RPC 2.0 running over a single WebSocket connection. Provided by the jrpc-oo library.
-- **Bidirectional RPC** — either side (browser or server) can call methods on the other. Browser calls server methods (read files, chat, settings); server pushes events to browser (streaming chunks, completion, broadcasts).
-- **Server-push event** — an RPC call initiated by the server and delivered to the browser. Used for streaming content (`streamChunk`), completion notifications (`streamComplete`), progress updates (`compactionEvent`), state broadcasts (`filesChanged`, `modeChanged`, `sessionChanged`, `commitResult`), and collaboration events (`admissionRequest`, `clientJoined`).
-- **Request ID** — a correlation token generated by the browser for each streaming request. Format: `{epoch_ms}-{6-char-alnum}`. Used by the frontend to route chunks to the correct streaming card when multiple streams could coexist.
-- **Passive stream** — a stream the current client did not initiate; typically a streaming response to a prompt another collaborator sent. The chat panel adopts the stream's request ID and renders its chunks in a streaming card, same as if it had initiated the call.
-
-## Document Conversion
-
-- **Provenance header** — the HTML/XML comment at the top of each converted file recording source filename, SHA-256 of source content, and extracted image filenames. Lets the scanner classify the output as `current` / `stale` / `conflict` without re-running conversion.
-- **Clean-tree gate** — the precondition requiring zero uncommitted changes before conversion or review mode can start. Ensures the operation's diffs are clean and attributable.
-- **Managed file** — a config file safe to overwrite on release upgrade. Prompts, default settings, snippets. Old version backed up with version suffix.
-- **User file** — a config file never touched on upgrade. LLM config (API keys, model choice) and extra system prompt. Only created if missing on first run.
-
-## Review
-
-- **Review mode** — a read-only state presenting a branch's changes via git soft reset. Files on disk show the branch tip; HEAD is at the merge-base; staged changes = the feature branch's changes. File picker, diff viewer, context engine all work unchanged.
-- **Merge-base** — the commit where the reviewed branch diverged from the target branch (typically master/main). Review shows changes introduced by the feature branch only, excluding changes that arrived via merge commits from the target.
-- **Reverse diff** — the patch showing what would revert a file to its pre-review state. Included in review context for selected files so the LLM can see both the current (reviewed) code and what it replaced.
-- **Pre-change symbol map** — the symbol map built at the merge-base commit and included in review context. Lets the LLM compare structural topology before and after the reviewed changes.
-
-## Context and Content
-
-- **Active items** — the list of items in uncached context for the current request
-- **File context** — in-memory cache of file contents selected for inclusion
-- **Working files** — the uncached file content section in the assembled prompt
-- **Index block** — compact structural description of a file (symbol map entry or doc outline)
-- **Symbol map** — full compact representation of all code symbols in the repo
-- **Doc map** — full compact representation of all document outlines in the repo
-- **Legend** — abbreviation key prepended to a map output
-
-## Edits
-
-- **Edit block** — the LLM's structured proposal for a file change, bracketed by `🟧🟧🟧 EDIT` / `🟨🟨🟨 REPL` / `🟩🟩🟩 END` marker lines
-- **Anchor** — the old text in an edit block, searched exactly in the file
-- **Ambiguous anchor** — old text matching multiple locations in the file
-- **In-context edit** — edit targeting a file that is currently selected (full content in context)
-- **Not-in-context edit** — edit targeting a file the LLM saw only as an index block
-
-## Modes
-
-- **Code mode** — symbol index feeds context, standard system prompt
-- **Document mode** — doc index feeds context, document-focused system prompt
-- **Cross-reference mode** — both indexes active, for either primary mode
-
-## Sessions and History
-
-- **Session** — a grouping of related messages with a unique ID
-- **Compaction** — history summarization triggered by token threshold
-- **Verbatim window** — most recent messages preserved unchanged during compaction
-- **Topic boundary** — point where conversation subject shifted, detected by a smaller LLM
-- **System event** — operational event (commit, reset, mode switch) recorded as a pseudo-user message
-
-## Collaboration
-
-- **Host** — the first-connected client (auto-admitted)
-- **Participant** — a subsequently-connected client (admission-gated)
-- **Localhost client** — client whose peer IP is loopback or a local interface
-- **Admission** — the approval flow for non-first connections
+- **Context usage** — the engine's own accounting of its context window, read via `get_context_usage()`: total and maximum tokens, the auto-compact threshold, per-category token costs, message breakdown, and the session's memory files, system-prompt sections, tools, agents, skills, and commands. The same numbers the CLI's `/context` prints, rendered live.
+- **Category** — one labelled slice of context usage (system prompt, tools, memory files, messages, and so on), carrying its own colour from the engine. The tab adopts the engine's colours so the two surfaces cannot disagree.
+- **Usage HUD** — the transient overlay showing per-turn cost and per-model token usage from `ResultMessage`, plus rate-limit warnings. Replaces the native engine's token HUD, which reported numbers AC⚡DC computed itself.
 
 ## Files and Indexing
 
-- **Selected files** — files the user has checked in the file picker (full content in context)
-- **Excluded files** — see the full definition under Caching and Content above
-- **Index-only file** — default state (not selected, not excluded) — only the index block is in context
-- **Reference graph** — cross-file usage relationships (imports, calls, doc links)
-- **Connected component** — cluster of files linked via mutual references
+- **Selected files** — files ticked in the file picker. A **hint**: their paths travel in the turn's framing so the agent knows what the user is pointing at, and they drive the diff viewer and navigation grid. Their content is not injected; the agent reads what it wants with `Read`. See [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract).
+- **Deny-read file** — the file picker's third checkbox state, repurposed from the old cache-exclusion state: it writes a `Read(path)` deny rule, stopping the agent from reading the file. The indexes still cover it; denial is a permission, not an indexing filter.
+- **Index block** — the compact structural description of a single file. For code, the symbol map entry listing classes, functions, methods, imports; for documents, the outline listing headings, keywords, content-type markers, and cross-references.
+- **Symbol map** — the compact structural representation of every code file in the repo, assembled from index blocks and returned by the `symbol_map` tool. Prefixed by a legend.
+- **Doc map** — the document equivalent: outlines with keywords, content-type markers, and incoming-reference counts.
+- **Legend** — the abbreviation key prepended to a map so the reader can decode the compact notation: kind codes (`c`/`m`/`f`/`af`/`am`/`v`/`p`/`i`), annotation markers, and path aliases (`@1/`, `@2/`).
+- **Reference graph** — cross-file usage relationships. Code: imports and call sites. Documents: heading-anchored links and image embeds. Backs the `find_references` tool, Monaco's references view, and incoming-reference counts in map output.
+- **Index snapshot** — the guarantee that an index is internally consistent for the duration of a tool call. Re-indexing is debounced and incremental, but a pending flush completes before any `ac-dc` tool answers, so the agent never sees a half-updated repo.
 
 ## UI
 
-- **Dialog** — the draggable foreground panel hosting tabs
-- **Viewer** — the background diff editor or SVG editor
-- **Status LED** — circular indicator on the diff viewer showing save state
-- **Token HUD** — floating overlay showing per-request token breakdown
-- **File navigation grid** — 2D spatial graph of opened files traversed with Alt+Arrow
+- **Dialog** — the draggable foreground panel hosting the tabs (chat, context, settings, doc convert). Resizable, minimizable, position persisted to localStorage.
+- **Viewer** — the background layer filling the viewport behind the dialog. Hosts the Monaco diff viewer and the SVG viewer as absolutely-positioned siblings, one visible at a time, routed by file extension.
+- **Status LED** — the circular save-state indicator in the diff viewer's top-right corner. Green = clean; orange pulsing = dirty (click to save); cyan = new file.
+- **File navigation grid** — the 2-D spatial graph of files the user has opened, traversed with Alt+Arrow while a fullscreen HUD is visible. Each move re-fetches the target file.
+- **Engine health banner** — the non-blocking notice for engine-level trouble that is not a turn failure: a mirror gap, an MCP server that failed to start, a CLI version the adapter has not been verified against, an unexpected credential source.
 
-## Protocol
+## Collaboration
 
-- **RPC** — Remote Procedure Call over WebSocket (JSON-RPC 2.0)
-- **Bidirectional RPC** — either side can call methods on the other
-- **Server-push event** — RPC call initiated by server, delivered to browser
-- **Request ID** — correlation token generated by the browser for each streaming request
-- **Passive stream** — a stream the current client did not initiate (broadcast from another client's action)
+- **Host** — the first-connected client in a collaboration session; auto-admitted. Host role does not confer mutation rights: only localhost clients can send prompts, answer permission requests, or mutate state.
+- **Participant** — a subsequently-connected, host-admitted client. Sees the full UI and receives all broadcasts, including permission requests and their outcomes, but cannot answer them if non-localhost.
+- **Localhost client** — a client whose peer IP is loopback (`127.0.0.1`, `::1`) or an address assigned to a local interface. Localhost-ness, not host/participant role, is what restrictions test.
+- **Admission** — the approval flow for non-first connections, carried by raw WebSocket messages (`admission_pending`, `admission_granted`, `admission_denied`) before the JRPC handshake. A toast appears on every admitted client; 120-second timeout; a same-IP request replaces an older pending one.
 
 ## Document Conversion
 
-- **Provenance header** — HTML/XML comment embedded in converted files recording source file, hash, and extracted assets
-- **Clean-tree gate** — precondition requiring no uncommitted changes before conversion or review
-- **Managed file** — config file safe to overwrite on upgrade
-- **User file** — config file never touched on upgrade
+- **Provenance header** — the HTML/XML comment at the top of each converted file recording source filename, SHA-256 of source content, and extracted image filenames. Lets the scanner classify output as `current` / `stale` / `conflict` without re-running conversion.
+- **Clean-tree gate** — the precondition requiring zero uncommitted changes before conversion or review mode can start, so the operation's diffs are clean and attributable.
+- **Managed file** — a config file safe to overwrite on release upgrade (default settings, snippets). The old version is backed up with a version suffix.
+- **User file** — a config file never touched on upgrade. Created only if missing on first run.
 
 ## Review
 
-- **Review mode** — read-only state presenting a branch's changes via git soft reset
-- **Merge-base** — commit where the reviewed branch diverged from the target branch
-- **Reverse diff** — patch showing what would revert a file to its pre-review state
-- **Pre-change symbol map** — symbol map built at the merge-base commit for structural comparison
+- **Review mode** — a read-only state presenting a branch's changes via git soft reset. Files on disk show the branch tip; HEAD sits at the merge-base; staged changes are the feature branch's changes. The file picker and diff viewer work unchanged, and the agent learns the branch and merge-base from framing and the `review_state` tool.
+- **Merge-base** — the commit where the reviewed branch diverged from the target branch, so review shows only what the feature branch introduced, excluding changes that arrived by merge.
+- **Reverse diff** — the patch that would revert a file to its pre-review state. A viewer concept now: it is rendered for the user rather than injected into a prompt, and an agent that wants it runs `git diff`.
