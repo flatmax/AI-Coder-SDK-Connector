@@ -361,6 +361,7 @@ describe('describeRule', () => {
       label: 'Always allow Bash(npm test:*)',
       destination: '.claude/settings.local.json',
       derived: false,
+      session: false,
     });
   });
 
@@ -380,6 +381,25 @@ describe('describeRule', () => {
       label: 'Always allow Write',
       destination: '.claude/settings.json',
       derived: true,
+      session: false,
+    });
+  });
+
+  it('flags a session grant, which is written to no file at all', () => {
+    // The CLI suggests this destination for a read outside the working
+    // directory (observed: Read(//home/<user>/**), destination 'session'),
+    // so the button's tooltip has to promise something different from the
+    // settings-file case.
+    expect(describeRule({
+      tool_name: 'Read',
+      rule_content: '//home/someone/**',
+      destination: 'session',
+      origin: 'cli',
+    })).toEqual({
+      label: 'Always allow Read(//home/someone/**)',
+      destination: '(this session only)',
+      derived: false,
+      session: true,
     });
   });
 

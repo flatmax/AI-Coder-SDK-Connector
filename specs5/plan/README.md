@@ -25,12 +25,19 @@ The state phase 3 inherits:
   pre-existing and unrelated — `test_odp_routes_to_libreoffice_when_available` needs PyMuPDF
   (`import fitz`), which is not installed. `doc_convert/` is on the keep-unchanged list.
 
-**Two open findings are waiting on a decision, not on a phase.** Both change permission semantics,
-so neither was changed on a guess. They are written up in full at the end of the phase-2 entry in
-[`delivery.md`](delivery.md): a derived always-allow rule that over-grants (`Edit(**)` at the repo
-root grants the whole repo), and an always-allow tooltip that contradicts a session-scoped rule the
-CLI itself suggested. Settle these before phase 4 adds hooks, because a `PreToolUse` hook that
-returns a decision shadows `can_use_tool` entirely.
+**The always-allow rule derivation was wrong in four ways and is fixed.** Two of them were recorded
+as open findings when phase 2 first closed; probing the live CLI for what it actually suggests turned
+them into four confirmed defects, all now corrected — see the phase-2 entry in
+[`delivery.md`](delivery.md). The observed suggestion shapes are recorded in
+[`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md).
+
+**One piece of that is still open**, and it is UI rather than correctness: for an in-repo edit the
+CLI's only suggestion is a mode switch to `acceptEdits`, which we deliberately do not put behind a
+button labelled "always allow this call". Offering it honestly needs a second control — "accept all
+edits for the rest of this session" — wired to the `set_permission_mode` the panel already exposes.
+Worth doing before phase 4 adds hooks, because a `PreToolUse` hook that returns a decision shadows
+`can_use_tool` entirely, and a gate with an unfinished control is a bad thing to build a second gate
+on top of.
 
 **First thing to check on resuming:** whether the phase-2 work is committed. It was still in the
 working tree when the session ended — ~5k insertions across 56 tracked files, plus untracked

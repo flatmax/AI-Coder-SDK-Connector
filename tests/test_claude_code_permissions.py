@@ -432,11 +432,100 @@ class TestSuggestedRules:
         rules = derive_suggested_rules(tmp_path, "Bash", {"command": "ls -la"}, "exec", None)
         assert rules[0]["rule_content"] == "ls:*"
 
-    def test_a_derived_write_rule_is_scoped_to_the_directory(self, tmp_path):
+    def test_a_derived_write_rule_grants_only_the_approved_file(self, tmp_path):
+        """The CLI's own rule "matches only the literal path you approved".
+
+        Not ``src/ac_dc/**``, which reads like "this directory" but is
+        recursive in gitignore syntax.
+        """
         rules = derive_suggested_rules(
             tmp_path, "Edit", {"file_path": "src/ac_dc/x.py"}, "write", None
         )
-        assert rules[0]["rule_content"] == "src/ac_dc/**"
+        assert rules[0]["rule_content"] == "src/ac_dc/x.py"
+
+    def test_a_file_at_the_repo_root_does_not_grant_the_repo(self, tmp_path):
+        """The regression this pins.
+
+        Deriving the *parent directory* of a root-level file produced ``**``
+        — every file in the repository — from one click on a dialog that
+        named a single file.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Write", {"file_path": "README.md"}, "write", None
+        )
+        assert rules[0]["rule_content"] == "README.md"
+
+    @pytest.mark.parametrize(
+        ("tool", "tool_class", "expected"),
+        [
+            ("Write", "write", "Edit"),
+            ("Edit", "write", "Edit"),
+            ("MultiEdit", "write", "Edit"),
+            ("Read", "read", "Read"),
+            ("Glob", "read", "Read"),
+        ],
+    )
+    def test_a_path_rule_names_the_tool_the_cli_checks(
+        self, tmp_path, tool, tool_class, expected
+    ):
+        """Claude Code consults path rules for Edit and Read only.
+
+        A rule written for Write/MultiEdit/NotebookEdit/Glob is accepted,
+        never consulted, and warned about at startup — so "always allow"
+        would write a rule that does nothing and the user would be asked
+        again on the very next call.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, tool, {"file_path": "a/b.py", "path": "a/b.py"}, tool_class, None
+        )
+        assert rules[0]["tool_name"] == expected
+
+    def test_the_label_names_the_rule_that_will_be_written(self, tmp_path):
+        """A Write request whose rule is an Edit rule must say Edit."""
+        rules = derive_suggested_rules(
+            tmp_path, "Write", {"file_path": "a/b.py"}, "write", None
+        )
+        assert rules[0]["label"] == "Always allow Edit(a/b.py)"
+
+    def test_a_notebook_edit_uses_its_own_path_key(self, tmp_path):
+        rules = derive_suggested_rules(
+            tmp_path, "NotebookEdit", {"notebook_path": "nb/x.ipynb"}, "write", None
+        )
+        assert rules[0]["tool_name"] == "Edit"
+        assert rules[0]["rule_content"] == "nb/x.ipynb"
+
+    def test_a_read_tool_with_no_consulted_rule_derives_nothing(self, tmp_path):
+        """Grep takes a path but is not a name the CLI checks path rules for.
+
+        A rule whose effect we cannot predict is worse than no rule: it
+        would read as a grant while doing nothing.
+        """
+        assert derive_suggested_rules(
+            tmp_path, "Grep", {"path": "src"}, "read", None
+        ) == []
+
+    def test_a_path_outside_the_repo_is_anchored_absolutely(self, tmp_path):
+        """``//`` is the CLI's anchor for the filesystem root.
+
+        A single leading slash means "relative to the settings file", so
+        ``/etc/hosts`` would resolve under the project root and the rule
+        would never match the file the user approved.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Read", {"file_path": "/etc/hosts"}, "read", None
+        )
+        assert rules[0]["rule_content"] == "//etc/hosts"
+
+    def test_gitignore_metacharacters_in_a_path_are_escaped(self, tmp_path):
+        """Otherwise a rule fails to match its own path, or matches siblings.
+
+        The CLI escapes these for the same reason; a directory named
+        ``[2024-06] Reports`` is the documented case.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Edit", {"file_path": "[2024-06] Reports/x.py"}, "write", None
+        )
+        assert rules[0]["rule_content"] == r"\[2024-06\] Reports/x.py"
 
     def test_no_bare_tool_grant_is_ever_derived(self, tmp_path):
         """The one rule we could derive for these is a bare grant. Never."""

@@ -35,6 +35,47 @@ WebFetch(domain:*.example.com)
 
 A rule with `rule_content: None` is a bare tool grant. AC⚡DC never writes one — see the parent spec.
 
+#### Path rules are gitignore patterns, and only two tool names are consulted
+
+Verified against CLI 2.1.229 and the published permission reference. Four properties, each of
+which AC⚡DC got wrong before phase 2 closed:
+
+- **Only `Edit(path)` and `Read(path)` rules are checked.** A path rule written for `Write`,
+  `MultiEdit`, `NotebookEdit` or `Glob` is *accepted, never consulted*, and warned about at
+  startup (CLI v2.1.210+). Write `Edit(docs/**)` in place of `Write(docs/**)`, and
+  `Read(docs/**)` in place of `Glob(docs/**)`. A derived rule named for the requesting tool is
+  therefore a silent no-op: the user grants it and is asked again on the next call.
+- **`*` matches within one path segment; `**` matches across directories.** So `<dir>/**` is the
+  whole subtree, not "this directory", and at the repo root it degenerates to `**` — every file
+  in the repository.
+- **Anchors.** `//path` is absolute from the filesystem root; `/path` is relative to the
+  *settings source*; a bare relative pattern anchors at the working directory. A rule for a file
+  outside the repo therefore needs `//`, or it resolves under the project root and never matches.
+- **Generated rules are escaped.** When the CLI turns an approved path into a rule it escapes
+  gitignore metacharacters so the rule "matches only the literal path you approved". Without it a
+  directory named `[2024-06] Reports` yields a rule that fails to match its own path.
+
+#### What the CLI actually suggests
+
+Observed against CLI 2.1.229 by denying every request and logging `context.suggestions` verbatim:
+
+| Request | Suggestion |
+|---|---|
+| `Edit` on an in-repo file | `setMode` → `acceptEdits`, `destination: "session"`. **No rule at all.** |
+| `Read` on a file outside the working directory | `addRules` → `Read(//home/<user>/**)`, `destination: "session"` |
+| `Bash` on a compound command | `addRules` → `Bash(<the literal sub-command needing approval>)`, `destination: "localSettings"` |
+
+Three consequences worth stating, because each contradicts a reasonable guess:
+
+- **A file-modification always-allow is a mode switch, not a rule**, and it is not persisted —
+  the published tier table gives its lifetime as "until session end" and says outright that the
+  approval "isn't saved to the file". So a dialog that only renders `addRules` suggestions shows
+  the user nothing the CLI offered for a write.
+- **`destination: "session"` is normal, not an edge case.** Any dialog copy that denies the
+  existence of session-scoped grants is false.
+- **Persisted rules go to `localSettings`**, `.claude/settings.local.json` at the git root — not
+  to `projectSettings`.
+
 ## Numeric constants
 
 | Constant | Value | Notes |

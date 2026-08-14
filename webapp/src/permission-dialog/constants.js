@@ -98,12 +98,25 @@ export const FLAG_TOOLTIPS = {
  * What the "always allow" tooltip must say, because both consequences
  * are otherwise discovered rather than known
  * (permission-dialog.md § Always allow shows the rule, not a promise).
+ *
+ * Two tooltips, because the destination decides which is true. An earlier
+ * single tooltip asserted "there is no invisible session-only grant behind
+ * this button", which the CLI disproves: it suggests
+ * `destination: 'session'` for reads outside the working directory, and a
+ * file-modification approval is session-scoped by design rather than
+ * written to a settings file. The chip already shows the destination, so
+ * the tooltip must agree with it instead of denying one of its values.
  */
 export const ALWAYS_ALLOW_TOOLTIP =
   'Writes a rule to a settings file you can read and revoke. '
   + 'It applies to the claude CLI in this repository too, not just '
-  + 'AC-DC. There is no invisible session-only grant behind this '
-  + 'button.';
+  + 'AC-DC.';
+
+export const ALWAYS_ALLOW_SESSION_TOOLTIP =
+  'Holds for the rest of this session only. Nothing is written to a '
+  + 'settings file, and the grant is gone when the engine restarts — so '
+  + 'there is nothing to revoke afterwards, and nothing to find later '
+  + 'either.';
 
 /** Destination file for each rule destination the CLI names. */
 export const DESTINATION_FILES = {

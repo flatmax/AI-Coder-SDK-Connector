@@ -283,27 +283,59 @@ the wheel wins: `specs5/5-webapp/permission-dialog.md`, `specs5/5-webapp/chat.md
 `specs5/4-features/collaboration.md`, `specs5/plan/sdk-surface.md`,
 `specs-reference/3-engine/permissions.md` and `specs-reference/3-engine/session.md`.
 
-### Two findings that need a decision, not a phase
+### Always-allow: four bugs, found by asking the CLI instead of guessing
 
-Both are recorded rather than fixed, because both change permission semantics and neither is safe to
-change on a guess:
+Phase 2 first shipped with two findings recorded-but-unfixed, on the grounds that changing
+permission semantics on a guess was worse than documenting the doubt. The way out was to stop
+guessing: a throwaway probe connected with a `can_use_tool` that denied everything and logged
+`context.suggestions` verbatim. That is the authoritative source, since the plan makes the installed
+wheel win over any document — and it turned two suspicions into four confirmed defects. The observed
+suggestion shapes are now recorded in
+[`specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md) § What
+the CLI actually suggests.
 
-- **A derived always-allow rule over-grants.** `_derived_path_rule` says it scopes the rule to the
-  containing directory, but it emits `<dir>/**`, and the CLI's own grammar makes `**` recursive
-  (its error text: `Examples: ["Bash(npm run build)", "Edit(docs/**)", "Read(~/.zshrc)"]. Use * for
-  wildcards.`). For a file at the repo root the rule is therefore `Edit(**)` — **always-allow on one
-  root file grants writes to every file in the repo.** The current behaviour is pinned by
-  `test_claude_code_permissions.py::TestSuggestedRules::test_a_derived_write_rule_is_scoped_to_the_directory`,
-  whose name asserts the intent while its value asserts the subtree. Over-granting is unsafe and
-  quiet; under-granting is merely annoying, so the fix probably is `*` — but that needs the CLI's
-  single-`*` semantics confirmed first, and derived rules are only the *fallback* path (the CLI's own
-  `context.suggestions` are preferred), so this fires less often than it looks.
-- **The always-allow tooltip and a CLI suggestion disagree.** The first dialog's always-allow label
-  read `Read(//home/flatmax/**)` — note the double slash — with its destination rendered
-  "(this session only)", while the button's tooltip asserts "There is no invisible session-only
-  grant behind this button". That rule came from `context.suggestions` with `origin: "cli"`, so the
-  double slash is the CLI's formatting rather than ours; but either the tooltip is wrong or we
-  should stop accepting session-scoped CLI suggestions under a button that promises otherwise.
+Fixed:
+
+- **The derived rule named the wrong tool, so it did nothing.** Rules were built from the requesting
+  tool's name, giving `Write(src/ac_dc/**)` for a `Write` call. Claude Code consults path rules for
+  `Edit` and `Read` only; anything else is accepted, never consulted, and warned about at startup
+  (v2.1.210+). Clicking "always allow" wrote a rule to settings that had no effect, and the user was
+  asked again on the next call. `_RULE_TOOL_FOR_PATHS` now maps write tools to `Edit` and read tools
+  to `Read`, and the button's label names the rule that will actually be written. Tools with no
+  consulted path rule — `Grep` among them — derive nothing.
+- **The derived rule over-granted.** `_derived_path_rule` emitted `<dir>/**`, which reads like "this
+  directory" but is a whole-subtree match in gitignore syntax, and collapsed to `**` for a file at
+  the repo root: one click on a dialog naming a single file granted writes to every file in the
+  repository. It now grants **the literal path approved and nothing else**, mirroring the CLI, whose
+  own generated rule "matches only the literal path you approved".
+- **A path outside the repo was anchored wrongly.** The rule was `/home/x/**` where `/path` means
+  "relative to the settings source", so it would have resolved under the project root and never
+  matched. Absolute paths now carry the CLI's `//` anchor. Gitignore metacharacters in the path are
+  escaped too, so a directory like `[2024-06] Reports` produces a rule that matches itself.
+- **The always-allow tooltip asserted something false.** It said "There is no invisible session-only
+  grant behind this button". The CLI suggests `destination: "session"` for reads outside the working
+  directory, and a file-modification approval is session-scoped by design — the published tier table
+  gives its lifetime as "until session end". There are now two tooltips and the one shown agrees
+  with the destination chip beside it.
+
+One correction to the earlier write-up: the `//` in `Read(//home/flatmax/**)` is not a formatting
+quirk of the CLI's. It is the documented anchor for an absolute filesystem path, and our own code
+was the thing getting it wrong.
+
+### The always-allow control a write never gets
+
+Still open, and now precisely characterised. For an in-repo file edit the CLI's **only** suggestion
+is `setMode` → `acceptEdits` with `destination: "session"`; it offers no rule whatsoever.
+`derive_suggested_rules` drops non-`addRules` suggestions, so every write falls through to our
+derived rule, and the CLI's actual offer is never shown.
+
+That drop is deliberate and should stay: switching to `acceptEdits` stops the dialog appearing for
+*every* later edit, which is a far larger grant than the one call on screen, so it cannot honestly
+share a button labelled "always allow this call". Offering it means a second, differently-labelled
+control — "accept all edits for the rest of this session" — wired to `set_permission_mode`, which
+the panel already exposes. The reason it is not in this phase is that it is new UI with its own
+copy, not a correctness fix. The consequence of leaving it: approving a write grants exactly one
+file per click, and there is no way to say "stop asking" from the dialog.
 
 ### Deliberately not built
 

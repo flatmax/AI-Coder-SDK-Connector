@@ -679,6 +679,30 @@ describe('deciding', () => {
     expect(button.title).toContain('claude CLI');
   });
 
+  it('tells the truth about a session grant, which writes to no file', async () => {
+    // The CLI suggests destination 'session' for a read outside the working
+    // directory. The old single tooltip asserted "there is no invisible
+    // session-only grant behind this button", which was false for exactly
+    // this case — and it is the CLI's suggestion, not one of ours.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload({
+      suggested_rules: [{
+        tool_name: 'Read',
+        rule_content: '//home/someone/**',
+        behavior: 'allow',
+        destination: 'session',
+        origin: 'cli',
+      }],
+    }));
+
+    const button = decision(el, 'allow-always');
+    expect(button.textContent).toContain('(this session only)');
+    expect(button.title).toContain('rest of this session only');
+    expect(button.title).not.toContain('settings file you can read and revoke');
+  });
+
   it('marks a rule AC-DC guessed rather than one the CLI suggested', async () => {
     publishRpc();
     const el = mount();

@@ -214,6 +214,11 @@ export function describeRule(rule) {
     label: `${verb} ${rule.tool_name}${target}`,
     destination: DESTINATION_FILES[rule.destination] || rule.destination || '',
     derived: rule.origin !== 'cli',
+    // Session grants are not written anywhere, so the tooltip has to
+    // promise something different. The CLI suggests this destination for
+    // reads outside the working directory, so it is a normal case rather
+    // than an edge one.
+    session: rule.destination === 'session',
   };
 }
 

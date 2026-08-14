@@ -558,18 +558,64 @@ def _derived_command_rule(command: str) -> str | None:
     return f"{head}:*"
 
 
+# Claude Code consults path rules for ``Edit`` and ``Read`` only. A path
+# rule written for ``Write``, ``MultiEdit``, ``NotebookEdit`` or ``Glob`` is
+# accepted, never consulted, and warned about at startup (CLI v2.1.210+) —
+# so "always allow" would write a rule that silently does nothing and the
+# user would be asked again on the next call. Mapping to the tool the CLI
+# actually checks is the whole point of this table.
+#
+# Tools absent from it derive no path rule at all: ``Grep`` takes a ``path``
+# but is not one of the two names the CLI checks, and a rule we cannot
+# predict the effect of is worse than no rule.
+_RULE_TOOL_FOR_PATHS = {
+    "Write": "Edit",
+    "Edit": "Edit",
+    "MultiEdit": "Edit",
+    "NotebookEdit": "Edit",
+    "Read": "Read",
+    "Glob": "Read",
+    "NotebookRead": "Read",
+}
+
+# Characters gitignore treats as pattern syntax. The CLI escapes these in a
+# path it turns into a rule, "so the generated rule matches only the literal
+# path you approved" — without it, a directory called ``[2024-06] Reports``
+# produces a rule that does not match its own path.
+_GITIGNORE_META = "\\*?[]"
+
+
+def _escape_gitignore(path: str) -> str:
+    """Escape a literal path for use as a gitignore-style rule pattern."""
+    return "".join(f"\\{ch}" if ch in _GITIGNORE_META else ch for ch in path)
+
+
 def _derived_path_rule(repo_root: Path, raw_path: Any) -> str | None:
+    """A rule granting **the one path approved**, and nothing else.
+
+    This mirrors the CLI, which "escapes gitignore pattern characters in
+    that path … so the generated rule matches only the literal path you
+    approved". It deliberately does not widen to the containing directory.
+
+    An earlier version emitted ``<dir>/**``, which reads like "this
+    directory" but is recursive in gitignore syntax — and for a file at the
+    repo root it collapsed to ``**``, so approving one root file granted
+    writes to every file in the repository. Widening a grant beyond what
+    the user looked at is the one error this dialog exists to prevent;
+    being too narrow only costs another prompt.
+    """
     absolute = _resolve_path(repo_root, raw_path)
     if absolute is None:
         return None
     try:
         relative = absolute.relative_to(repo_root)
     except ValueError:
-        # Outside the repo: scope the rule to the directory itself rather
-        # than writing an absolute glob that reads like a whole-disk grant.
-        return f"{absolute.parent}/**"
-    parent = relative.parent
-    return "**" if str(parent) == "." else f"{parent.as_posix()}/**"
+        # Outside the repo. The leading ``//`` is the CLI's anchor for an
+        # absolute filesystem path; a single leading slash means "relative
+        # to the settings file", so ``/home/x`` would resolve under the
+        # project root and never match.
+        return f"//{_escape_gitignore(absolute.as_posix().lstrip('/'))}"
+    return _escape_gitignore(relative.as_posix())
 
 
 def derive_suggested_rules(
@@ -593,7 +639,16 @@ def derive_suggested_rules(
         kind = getattr(suggestion, "type", None)
         if kind != "addRules":
             # setMode / addDirectories are not rules and have no place on a
-            # control labelled "always allow this call".
+            # control labelled "always allow this call": switching to
+            # acceptEdits stops the dialog appearing for *every* later edit,
+            # which is a far larger grant than the one call on screen.
+            #
+            # Know the consequence before changing this. Observed against
+            # CLI 2.1.229: for an in-repo file edit the CLI's *only*
+            # suggestion is `setMode acceptEdits (session)` — it offers no
+            # rule at all — so every write falls through to the derived rule
+            # below. Offering the mode switch honestly means a second,
+            # differently-labelled control, not reusing this one.
             logger.debug("Ignoring a %r permission suggestion from the CLI", kind)
             continue
         behavior = getattr(suggestion, "behavior", None) or "allow"
@@ -619,10 +674,13 @@ def derive_suggested_rules(
         if content:
             rules.append(_suggested_rule(tool_name, content))
     elif tool_class in ("write", "read"):
+        rule_tool = _RULE_TOOL_FOR_PATHS.get(tool_name)
         key = _WRITE_PATH_KEYS.get(tool_name, "file_path")
         content = _derived_path_rule(repo_root, tool_input.get(key) or tool_input.get("path"))
-        if content:
-            rules.append(_suggested_rule(tool_name, content))
+        if rule_tool and content:
+            # Named for the tool the CLI checks, not the tool that asked, so
+            # the label states the rule that will actually be written.
+            rules.append(_suggested_rule(rule_tool, content))
     # Deliberately nothing for `mcp`, `delegate`, or `interact`: the only
     # rule we could derive for them is a bare tool grant, and AC-DC never
     # writes one (specs5/3-engine/permissions.md § Decisions).

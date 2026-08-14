@@ -12,7 +12,7 @@
 
 import { html } from 'lit';
 
-import { ALWAYS_ALLOW_TOOLTIP } from './constants.js';
+import { ALWAYS_ALLOW_SESSION_TOOLTIP, ALWAYS_ALLOW_TOOLTIP } from './constants.js';
 import { answersComplete, describeRule, offersAlwaysAllow } from './queue.js';
 
 /**
@@ -53,7 +53,9 @@ export function renderDecisions(host, payload) {
                   class="decision"
                   data-decision="allow-always"
                   ?disabled=${settling}
-                  title=${ALWAYS_ALLOW_TOOLTIP}
+                  title=${primaryRule?.session
+                    ? ALWAYS_ALLOW_SESSION_TOOLTIP
+                    : ALWAYS_ALLOW_TOOLTIP}
                   @click=${() => host._decide('allow_always')}
                 >
                   <span class="rule-label">${primaryRule?.label ?? 'Always allow'}</span>
