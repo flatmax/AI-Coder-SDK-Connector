@@ -78,6 +78,21 @@ export const DEFAULT_DENY_REASONS = {
 export const ESCAPE_DENY_REASON = 'dismissed by the user';
 
 /**
+ * The `action` values on a `permissionResolved` broadcast that mean the
+ * call went ahead. Mirrors `ALLOW_ACTIONS` in
+ * src/ac_dc/claude_code/permissions.py.
+ *
+ * Named once and imported by everything that has to tell an approval from a
+ * denial, because the alternative is what it replaced: `action === 'allow'`
+ * written out in two places, which rendered a tool card the user had
+ * approved with "always allow" as *denied* — the amber lock and the denial
+ * body, on a call that ran. Anything added to the engine's set has to be
+ * added here, and that is easier to remember about one list than three
+ * comparisons.
+ */
+export const ALLOW_ACTIONS = ['allow', 'allow_always', 'allow_mode'];
+
+/**
  * Advisory `flags` that move default focus from Allow to Deny. The
  * flags themselves gate nothing — they are heuristics — but where the
  * *default focus* lands is exactly the right weight for a heuristic

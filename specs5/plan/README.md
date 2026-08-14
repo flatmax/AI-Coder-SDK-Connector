@@ -21,28 +21,36 @@ The state phase 3 inherits:
   permission-gated write, was verified live against the bundled CLI 2.1.229.
 - **`LLMService` and `src/ac_dc/llm/` are intact and still registered, and nothing in the chat path
   reaches them.** That is deliberate, per the no-interleaving rule below. Phase 3 deletes them.
-- **Suites:** python 1 failed / 3872 passed; webapp 89 files / 3202 passed. The single failure is
+- **Suites:** python 1 failed / 3897 passed; webapp 89 files / 3215 passed. The single failure is
   pre-existing and unrelated — `test_odp_routes_to_libreoffice_when_available` needs PyMuPDF
   (`import fitz`), which is not installed. `doc_convert/` is on the keep-unchanged list.
 
-**The always-allow rule derivation was wrong in four ways and is fixed.** Two of them were recorded
-as open findings when phase 2 first closed; probing the live CLI for what it actually suggests turned
-them into four confirmed defects, all now corrected — see the phase-2 entry in
-[`delivery.md`](delivery.md). The observed suggestion shapes are recorded in
+**The permission gate was wrong in six ways and is fixed.** Two were recorded as open findings when
+phase 2 first closed; probing the live CLI for what it actually suggests turned them into six
+confirmed defects, all now corrected — see the phase-2 entry in [`delivery.md`](delivery.md). The
+observed suggestion shapes are recorded in
 [`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md).
+The last two of the six were a shell rule that granted more than the dialog showed (a click on
+`git push origin main` authorised `git push --force origin main`, because the derived rule was the
+prefix `git push:*`; the literal command is now the default and the prefix is a second entry in the
+rule menu) and a transcript that rendered an approved call as denied whenever the approval came from
+"always allow".
 
-**One piece of that is still open**, and it is UI rather than correctness: for an in-repo edit the
-CLI's only suggestion is a mode switch to `acceptEdits`, which we deliberately do not put behind a
-button labelled "always allow this call". Offering it honestly needs a second control — "accept all
-edits for the rest of this session" — wired to the `set_permission_mode` the panel already exposes.
-Worth doing before phase 4 adds hooks, because a `PreToolUse` hook that returns a decision shadows
-`can_use_tool` entirely, and a gate with an unfinished control is a bad thing to build a second gate
-on top of.
+**The mode control that was open is now built.** For an in-repo edit the CLI's only suggestion is a
+mode switch to `acceptEdits`, which we still refuse to put behind a button labelled "always allow
+this call" — it now has its own amber control, "accept all edits for the rest of this session", that
+says what it costs including the diffs it stops showing. The mode rides back to the CLI on the
+permission result rather than as a separate `set_permission_mode` control request, because the CLI is
+blocked waiting on that result and a second control request would deadlock on a slow user. The CLI
+applies such a mode silently — `permissionMode` appears only in the `init` message — so the broker
+reports the switch back through the service, which broadcasts `permissionModeChanged` and keeps the
+panel's mode pill truthful.
 
-**First thing to check on resuming:** whether the phase-2 work is committed. It was still in the
-working tree when the session ended — ~5k insertions across 56 tracked files, plus untracked
-`src/ac_dc/claude_code/permissions.py`, `webapp/src/permission-dialog/`, and the new
-`chat-panel/{blocks,block-render,permission-mode}.js` with their tests. `git status` answers it.
+**One open decision, one word wide:** derived rules still name `destination: "projectSettings"`
+(`.claude/settings.json`, git-tracked) where the CLI persists its own approvals to `localSettings`
+(`.claude/settings.local.json`, gitignored). As it stands, an "always allow" can land a permission
+grant in a committed file. Changing it is a one-word edit in `derive_suggested_rules`; it was left
+alone because which file a grant belongs in is a policy call, not a bug fix.
 
 ## The one-paragraph version
 

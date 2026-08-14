@@ -406,6 +406,20 @@ export const PERMISSION_DIALOG_STYLES = css`
     font-weight: 600;
   }
 
+  /* The mode switch. Marked out from the rule buttons beside it because it
+     grants something of a different kind — every later edit in the session
+     rather than one path — and a control that looks like its neighbour
+     reads as a variation on it. Amber, the same warning colour the derived
+     tag uses, rather than the green of the primary action. */
+  button.decision.mode-switch {
+    color: #e3b341;
+    border-color: #6d4c0f;
+  }
+
+  button.decision.mode-switch:hover:not(:disabled) {
+    background: #2d2410;
+  }
+
   .split {
     display: flex;
     align-items: stretch;

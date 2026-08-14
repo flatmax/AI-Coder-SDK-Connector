@@ -134,9 +134,9 @@ the browser dialog.
 
 | Module | Lines | Role |
 |---|---|---|
-| `claude_code/permissions.py` | 1254 | `can_use_tool` gate: request classification, the pending-request registry, `derive_suggested_rules`, `build_answer_input`, deny/allow/always-allow resolution |
-| `claude_code/service.py` | 860 (+346) | `resolve_permission`, `set_denied_read_files`, permission events, `doc_convert_available` on `EngineState` |
-| `claude_code/session.py` | 812 (+21) | Passes the gate to `build_options`; permission-mode changes without a reconnect |
+| `claude_code/permissions.py` | 1490 | `can_use_tool` gate: request classification, the pending-request registry, `derive_suggested_rules`, `build_answer_input`, deny/allow/always-allow resolution |
+| `claude_code/service.py` | 881 (+367) | `resolve_permission`, `set_denied_read_files`, permission events, `doc_convert_available` on `EngineState` |
+| `claude_code/session.py` | 824 (+33) | Passes the gate to `build_options`; permission-mode changes without a reconnect |
 | `claude_code/options.py` | 214 (+30) | The `system_prompt` preset fix (below) |
 | `claude_code/messages.py` | 979 (+31) | `compact_boundary`, subagent framing |
 
@@ -149,19 +149,19 @@ from its previous size to 68 tests to pin it.
 `src/ac_dc/main.py` (+116): registers the permission plumbing, and kills the CLI child on shutdown
 (see [The orphan fix](#the-orphan-fix)).
 
-**Frontend.** `webapp/src/permission-dialog/` is new (4695 lines incl. tests):
+**Frontend.** `webapp/src/permission-dialog/` is new (4970 lines incl. tests):
 
 | Module | Lines | Role |
 |---|---|---|
-| `index.js` | 951 | `<ac-permission-dialog>` |
+| `index.js` | 952 | `<ac-permission-dialog>` |
 | `bodies.js` | 282 | Per-tool request bodies |
-| `queue.js` | 272 | Serialises concurrent requests; one dialog at a time |
-| `styles.js` | 523 | |
-| `decisions.js` | 183 | Decision payload assembly |
+| `queue.js` | 306 | Serialises concurrent requests; one dialog at a time |
+| `styles.js` | 537 | |
+| `decisions.js` | 212 | Decision payload assembly |
 | `diff-editor.js` | 177 | The `Write` preview |
-| `constants.js` | 114 | |
+| `constants.js` | 142 | |
 
-`webapp/src/chat-panel/` gained `blocks.js` (545), `block-render.js` (904) and `permission-mode.js`
+`webapp/src/chat-panel/` gained `blocks.js` (557), `block-render.js` (904) and `permission-mode.js`
 (276), and `streaming.js` was substantially rewritten (1582 lines changed) to consume the Claude
 Code event stream instead of the native one. `styles.js` (+825 net) carries the turn-block UI.
 
@@ -220,11 +220,11 @@ exit.
 
 ### Tests
 
-508 python tests across seven files, all offline:
+533 python tests across seven files, all offline:
 
 | File | Tests | What it pins |
 |---|---|---|
-| `test_claude_code_permissions.py` | 81 | Request classification, the pending registry, suggested-rule derivation, `build_answer_input`, resolution paths |
+| `test_claude_code_permissions.py` | 106 | Request classification, the pending registry, suggested-rule derivation, `build_answer_input`, resolution paths |
 | `test_claude_code_service.py` | 153 | The RPC surface incl. the 13 localhost gates, permission events, `doc_convert_available` |
 | `test_claude_code_session.py` | 83 | Gate wiring, permission-mode change without reconnect |
 | `test_claude_code_messages.py` | 77 | `compact_boundary`, subagent framing |
@@ -235,20 +235,20 @@ exit.
 `test_main_shutdown.py` spawns real child processes rather than mocking `os.kill`, because the thing
 under test *is* signal delivery — a mock would pass whether or not the signal reached anything.
 
-Frontend, 496 tests across the modules this phase touched or created:
+Frontend, 509 tests across the modules this phase touched or created:
 
 | File | Tests |
 |---|---|
 | `chat-panel/block-render.test.js` | 128 |
-| `chat-panel/blocks.test.js` | 81 |
-| `permission-dialog/dialog.test.js` | 82 |
+| `chat-panel/blocks.test.js` | 82 |
+| `permission-dialog/dialog.test.js` | 88 |
 | `chat-panel/streaming.test.js` | 64 |
-| `permission-dialog/queue.test.js` | 53 |
+| `permission-dialog/queue.test.js` | 59 |
 | `chat-panel/events.test.js` | 50 |
 | `chat-panel/permission-mode.test.js` | 38 |
 
-Whole-suite state at the close of the phase: python **1 failed, 3872 passed**, webapp **89 files,
-3202 passed**. The one failure is below.
+Whole-suite state at the close of the phase: python **1 failed, 3897 passed**, webapp **89 files,
+3215 passed**. The one failure is below.
 
 **Phase 1's absence assertions are now partly deleted**, as phase 1's entry said they should be:
 `resolve_permission` and `set_denied_read_files` exist and are tested. `history_list` and
@@ -283,13 +283,13 @@ the wheel wins: `specs5/5-webapp/permission-dialog.md`, `specs5/5-webapp/chat.md
 `specs5/4-features/collaboration.md`, `specs5/plan/sdk-surface.md`,
 `specs-reference/3-engine/permissions.md` and `specs-reference/3-engine/session.md`.
 
-### Always-allow: four bugs, found by asking the CLI instead of guessing
+### Always-allow: six bugs, found by asking the CLI instead of guessing
 
 Phase 2 first shipped with two findings recorded-but-unfixed, on the grounds that changing
 permission semantics on a guess was worse than documenting the doubt. The way out was to stop
 guessing: a throwaway probe connected with a `can_use_tool` that denied everything and logged
 `context.suggestions` verbatim. That is the authoritative source, since the plan makes the installed
-wheel win over any document — and it turned two suspicions into four confirmed defects. The observed
+wheel win over any document — and it turned two suspicions into six confirmed defects. The observed
 suggestion shapes are now recorded in
 [`specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md) § What
 the CLI actually suggests.
@@ -317,25 +317,58 @@ Fixed:
   directory, and a file-modification approval is session-scoped by design — the published tier table
   gives its lifetime as "until session end". There are now two tooltips and the one shown agrees
   with the destination chip beside it.
+- **The derived shell rule over-granted, the same way the path rule did.** `_derived_command_rule`
+  emitted a prefix pattern, so `git push:*` authorised `git push --force origin main` from a click
+  on a dialog that said `git push origin main`. The CLI derives the literal sub-command; the
+  default is now the literal command, with the prefix kept as a second entry in the rule menu the
+  dialog already had. That answers the friction objection without making the broad grant the thing
+  a fast click gets. The command is stripped but not otherwise normalised — collapsing its internal
+  whitespace would produce a rule that never matches, which is the first bug in this list again.
+- **The transcript rendered an approved call as denied.** `applyPermissionOutcome` cleared the
+  denial only for `action === 'allow'`, so a call approved with "always allow" got the amber lock
+  and a denial body — while it ran. No test covered it; the two frontend comparisons are now one
+  imported `ALLOW_ACTIONS`, mirroring the engine's, and a test iterates every allow action.
 
 One correction to the earlier write-up: the `//` in `Read(//home/flatmax/**)` is not a formatting
 quirk of the CLI's. It is the documented anchor for an absolute filesystem path, and our own code
 was the thing getting it wrong.
 
-### The always-allow control a write never gets
+### The always-allow control a write never gets — now built
 
-Still open, and now precisely characterised. For an in-repo file edit the CLI's **only** suggestion
-is `setMode` → `acceptEdits` with `destination: "session"`; it offers no rule whatsoever.
-`derive_suggested_rules` drops non-`addRules` suggestions, so every write falls through to our
-derived rule, and the CLI's actual offer is never shown.
+For an in-repo file edit the CLI's **only** suggestion is `setMode` → `acceptEdits` with
+`destination: "session"`; it offers no rule whatsoever. `derive_suggested_rules` dropped
+non-`addRules` suggestions, so the CLI's actual offer was never shown.
 
-That drop is deliberate and should stay: switching to `acceptEdits` stops the dialog appearing for
-*every* later edit, which is a far larger grant than the one call on screen, so it cannot honestly
-share a button labelled "always allow this call". Offering it means a second, differently-labelled
-control — "accept all edits for the rest of this session" — wired to `set_permission_mode`, which
-the panel already exposes. The reason it is not in this phase is that it is new UI with its own
-copy, not a correctness fix. The consequence of leaving it: approving a write grants exactly one
-file per click, and there is no way to say "stop asking" from the dialog.
+The drop stands for the rule control — switching to `acceptEdits` stops the dialog appearing for
+*every* later edit, a far larger grant than the one call on screen, so it cannot honestly share a
+button labelled "always allow this call". It now has its own control: `derive_suggested_mode`
+picks the suggestion up, the payload carries `suggested_mode`, and an `allow_mode` decision applies
+it. Four things about it are load-bearing:
+
+- **The mode rides back on the permission result** as a `setMode` `PermissionUpdate`, not as a
+  separate `set_permission_mode` control request. It is atomic with the allow, and — the reason
+  that matters — the CLI is *waiting* on this response, so issuing another control request before
+  answering it is a deadlock waiting for a slow user.
+- **The offered mode comes from the request the engine built, never from the decision.**
+  `resolve_permission` is localhost-only, but a mode is a session-wide grant, and a client able to
+  name its own could name `bypassPermissions`. `_MODE_OFFERS` holds the modes we have copy for;
+  `bypassPermissions` is absent from it and re-checked when the update is built.
+- **The CLI applies the mode without announcing it.** `permissionMode` appears only in the `init`
+  system message, so nothing on the stream would have told the mode selector. The broker gained a
+  `note_mode` callback; the service updates the session's cached mode and broadcasts the
+  `permissionModeChanged` the selector already listens for, attributed to the dialog. Without it
+  the selector would keep claiming `default` while the engine accepted edits silently — the exact
+  class of lie the rest of this section is about.
+- **The copy states what is lost, not just what is granted.** "you will not see a diff for it" is
+  the consequence a user would otherwise discover. The engine owns that copy so the button cannot
+  describe a consequence the engine does not apply.
+
+Still divergent from the CLI, and left alone deliberately: our derived rules default to
+`destination: "projectSettings"` (`.claude/settings.json`, git-tracked) where the CLI persists
+approvals to `localSettings` (`.claude/settings.local.json`, gitignored). The button does name the
+file, so it is not dishonest — but it means an always-allow can land a permission grant in a
+committed file and share it with the whole team. One-word fix; not made here because it changes
+which file gets written and deserves its own decision.
 
 ### Deliberately not built
 

@@ -183,7 +183,14 @@ DENY_SHUTDOWN_REASON = (
 
 DENY_DEFAULT_REASON = "The user denied this call without giving a reason."
 
-_DECISION_ACTIONS = frozenset({"allow", "allow_always", "deny", "deny_interrupt"})
+_DECISION_ACTIONS = frozenset(
+    {"allow", "allow_always", "allow_mode", "deny", "deny_interrupt"}
+)
+
+# The actions that let the call through. Named once, because "is this a
+# denial?" is asked in several places and enumerating the allows at each
+# one is how a new allow ends up rendered as a denial.
+ALLOW_ACTIONS = frozenset({"allow", "allow_always", "allow_mode"})
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +212,10 @@ class PendingPermission:
     resolved: bool = False
     resolved_by: str | None = None
     suggested_rules: list[dict[str, Any]] = field(default_factory=list)
+    # Held here, not read back off the wire. `resolve_permission` is
+    # localhost-only, but a mode is a session-wide grant and the request we
+    # built is the only trustworthy statement of which one was offered.
+    suggested_mode: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -541,21 +552,44 @@ def _suggested_rule(
 
 
 # Commands whose first token is a subcommand dispatcher: `git status` is a
-# meaningfully different grant from `git push`, so the derived rule keeps two
+# meaningfully different grant from `git push`, so the prefix rule keeps two
 # tokens. Only used when the CLI offered no suggestion of its own.
 _TWO_TOKEN_COMMANDS = frozenset(
     {"git", "npm", "pnpm", "yarn", "uv", "pip", "cargo", "go", "docker", "make", "gh", "poetry"}
 )
 
 
-def _derived_command_rule(command: str) -> str | None:
-    tokens = command.strip().split()
+def _derived_command_rules(command: str) -> list[str]:
+    """Rule contents for a shell command, **narrowest first**.
+
+    The first is the literal command, which is what the CLI itself derives
+    (observed against 2.1.229: a compound command produced
+    ``Bash(echo "---exit:$?---")``, the exact sub-command needing approval).
+    It grants precisely what the dialog put on screen, and nothing else.
+
+    The second is a prefix pattern. It is offered as a *choice* rather than
+    as the default because it grants more than the user looked at:
+    ``git push:*`` covers ``git push --force origin main`` from a click on a
+    dialog that said ``git push origin main``. Prefix rules are legitimate
+    syntax and are the right thing to write by hand in a settings file —
+    they are the wrong thing to put behind the button someone reaches for
+    without reading it.
+
+    The command is stripped but otherwise left alone. Collapsing its
+    internal whitespace would produce a rule that does not match the
+    command it came from, which is the same silent no-op as naming the
+    wrong tool in a path rule.
+    """
+    literal = command.strip()
+    tokens = literal.split()
     if not tokens:
-        return None
+        return []
     head = tokens[0]
     if head in _TWO_TOKEN_COMMANDS and len(tokens) > 1 and not tokens[1].startswith("-"):
-        return f"{head} {tokens[1]}:*"
-    return f"{head}:*"
+        prefix = f"{head} {tokens[1]}:*"
+    else:
+        prefix = f"{head}:*"
+    return [literal, prefix]
 
 
 # Claude Code consults path rules for ``Edit`` and ``Read`` only. A path
@@ -638,18 +672,18 @@ def derive_suggested_rules(
     for suggestion in suggestions or []:
         kind = getattr(suggestion, "type", None)
         if kind != "addRules":
-            # setMode / addDirectories are not rules and have no place on a
+            # setMode and addDirectories are not rules and have no place on a
             # control labelled "always allow this call": switching to
             # acceptEdits stops the dialog appearing for *every* later edit,
             # which is a far larger grant than the one call on screen.
             #
-            # Know the consequence before changing this. Observed against
-            # CLI 2.1.229: for an in-repo file edit the CLI's *only*
-            # suggestion is `setMode acceptEdits (session)` — it offers no
-            # rule at all — so every write falls through to the derived rule
-            # below. Offering the mode switch honestly means a second,
-            # differently-labelled control, not reusing this one.
-            logger.debug("Ignoring a %r permission suggestion from the CLI", kind)
+            # A setMode suggestion is not discarded, though — it is offered
+            # by its own separately-labelled control, built by
+            # ``derive_suggested_mode`` below. Observed against CLI 2.1.229:
+            # for an in-repo file edit the CLI's *only* suggestion is
+            # `setMode acceptEdits (session)`, so dropping it outright meant
+            # never offering what the terminal offers for the same call.
+            logger.debug("Not a rule suggestion (%r); not on the rule control", kind)
             continue
         behavior = getattr(suggestion, "behavior", None) or "allow"
         destination = getattr(suggestion, "destination", None) or "projectSettings"
@@ -670,8 +704,7 @@ def derive_suggested_rules(
         return rules
 
     if tool_class == "exec" and isinstance(tool_input.get("command"), str):
-        content = _derived_command_rule(tool_input["command"])
-        if content:
+        for content in _derived_command_rules(tool_input["command"]):
             rules.append(_suggested_rule(tool_name, content))
     elif tool_class in ("write", "read"):
         rule_tool = _RULE_TOOL_FOR_PATHS.get(tool_name)
@@ -685,6 +718,59 @@ def derive_suggested_rules(
     # rule we could derive for them is a bare tool grant, and AC-DC never
     # writes one (specs5/3-engine/permissions.md § Decisions).
     return rules
+
+
+# The permission modes a dialog may offer, and the copy that states what
+# each one costs. A mode absent from this table is never offered, however
+# insistently the CLI suggests it: the control has to say what the user is
+# giving up, and copy we have not written is copy we cannot stand behind.
+#
+# `bypassPermissions` will never be in here. It is the one mode the plan
+# forbids reaching by accident, and a dialog button is exactly the accident.
+_MODE_OFFERS: dict[str, dict[str, str]] = {
+    "acceptEdits": {
+        "label": "Accept all edits for the rest of this session",
+        "detail": (
+            "Every later file edit is applied without asking — you will not "
+            "see a diff for it, and this dialog will not open for it. Reads, "
+            "shell commands and MCP calls still ask. Lasts until the engine "
+            "restarts; nothing is written to a settings file. The permission "
+            "mode control in the chat panel shows and undoes it."
+        ),
+    },
+}
+
+
+def derive_suggested_mode(suggestions: Any) -> dict[str, Any] | None:
+    """The mode switch the CLI offered for this call, or ``None``.
+
+    Only ever what the CLI suggested. AC-DC does not invent a mode switch:
+    a rule grants one path or one command and can be read back out of a
+    settings file, whereas a mode change silences the gate wholesale, and
+    that is not a grant to offer on our own initiative.
+
+    Returns at most one — the first recognised suggestion. The CLI sends a
+    single ``setMode`` per call, and two mode buttons on one dialog would
+    be a worse answer than ignoring the second.
+    """
+    for suggestion in suggestions or []:
+        if getattr(suggestion, "type", None) != "setMode":
+            continue
+        mode = getattr(suggestion, "mode", None)
+        offer = _MODE_OFFERS.get(mode) if isinstance(mode, str) else None
+        if offer is None:
+            logger.debug("Not offering the CLI's suggested permission mode %r", mode)
+            continue
+        return {
+            "mode": mode,
+            # `session` is what the CLI suggests and the only destination
+            # that makes sense: a mode persisted to settings would outlive
+            # the session that asked for it.
+            "destination": getattr(suggestion, "destination", None) or "session",
+            "label": offer["label"],
+            "detail": offer["detail"],
+        }
+    return None
 
 
 def summarise_request(tool_name: str, tool_input: dict[str, Any], tool_class: str) -> str:
@@ -821,6 +907,12 @@ Broadcast = Callable[[Event], Awaitable[None]]
 # so the dialog can be attributed to a turn without this module knowing
 # anything about turns.
 NotePrompt = Callable[[str | None], str | None]
+# Tells the caller the session's permission mode has changed underneath it,
+# because the CLI applies a mode carried on a permission result without
+# announcing it on the message stream. Without this the mode selector keeps
+# showing the mode the session started in, which is a lie about what the
+# next tool call will do.
+NoteMode = Callable[[str], Awaitable[None]]
 
 
 class PermissionBroker:
@@ -838,6 +930,12 @@ class PermissionBroker:
         ``(tool_use_id) -> request_id | None``. Called once per request so
         the turn's translator can count the prompt and mark the tool card
         as gated. Returns the request ID the dialog belongs to.
+    note_mode:
+        ``async (mode) -> None``. Called after a decision that switches the
+        session's permission mode, so the caller can update the mode it
+        reports and tell the browsers. Optional: the mode still reaches the
+        CLI without it — what goes missing is everyone else's knowledge of
+        it.
     localhost_available:
         ``() -> bool``. Whether a localhost client is connected *now*.
         Only shortens the timeout — the authority check itself is the
@@ -852,6 +950,7 @@ class PermissionBroker:
         *,
         broadcast: Broadcast,
         note_prompt: NotePrompt | None = None,
+        note_mode: NoteMode | None = None,
         localhost_available: Callable[[], bool] | None = None,
         decision_timeout: float = DECISION_TIMEOUT,
         no_localhost_timeout: float = NO_LOCALHOST_TIMEOUT,
@@ -860,6 +959,7 @@ class PermissionBroker:
         self._repo_root = Path(repo_root)
         self._broadcast = broadcast
         self._note_prompt = note_prompt
+        self._note_mode = note_mode
         self._localhost_available = localhost_available or (lambda: True)
         self._decision_timeout = decision_timeout
         self._no_localhost_timeout = no_localhost_timeout
@@ -950,6 +1050,7 @@ class PermissionBroker:
             future=loop.create_future(),
             expires_at=expires_at,
             suggested_rules=list(payload.get("suggested_rules") or []),
+            suggested_mode=payload.get("suggested_mode"),
         )
         self._pending[permission_id] = pending
 
@@ -1031,7 +1132,7 @@ class PermissionBroker:
                 ),
             }
 
-        action, reason, rule = self._normalise(pending, decision)
+        action, reason, rule, mode = self._normalise(pending, decision)
         updated_input = decision.get("updated_input") if isinstance(decision, dict) else None
         if not isinstance(updated_input, dict):
             updated_input = None
@@ -1061,14 +1162,33 @@ class PermissionBroker:
                     "action": action,
                     "reason": reason,
                     "rule": rule,
+                    "mode": mode,
                     "updated_input": updated_input,
                 }
             )
         logger.info(
             "Permission %s resolved as %s by %s", permission_id, action, resolved_by
         )
-        await self._announce(pending, action=action, reason=reason, rule=rule)
+        await self._announce(pending, action=action, reason=reason, rule=rule, mode=mode)
+        if mode is not None:
+            await self._note_mode_change(mode)
         return {"status": "accepted"}
+
+    async def _note_mode_change(self, mode: dict[str, Any]) -> None:
+        """Tell the caller a decision moved the session's permission mode.
+
+        After the announcement, and never in place of it: the dialog has to
+        close even if this fails, because the call itself has already been
+        answered.
+        """
+        if self._note_mode is None:
+            return
+        try:
+            await self._note_mode(str(mode.get("mode")))
+        except Exception:
+            logger.exception(
+                "Could not report the permission-mode switch to %r", mode.get("mode")
+            )
 
     # ------------------------------------------------------------------
     # Internals
@@ -1148,6 +1268,9 @@ class PermissionBroker:
                 tool_class,
                 getattr(context, "suggestions", None),
             ),
+            "suggested_mode": derive_suggested_mode(
+                getattr(context, "suggestions", None)
+            ),
             "diff": diff,
             "command": (
                 build_command_payload(self._repo_root, tool_name, tool_input)
@@ -1163,15 +1286,15 @@ class PermissionBroker:
 
     def _normalise(
         self, pending: PendingPermission, decision: Any
-    ) -> tuple[str, str | None, dict[str, Any] | None]:
-        """Coerce a browser decision into ``(action, reason, rule)``.
+    ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any] | None]:
+        """Coerce a browser decision into ``(action, reason, rule, mode)``.
 
         A malformed decision becomes a deny with a reason rather than an
         error: the user pressed a button and is entitled to have the turn
         move on, and a deny is the safe reading of an unreadable answer.
         """
         if not isinstance(decision, dict):
-            return "deny", DENY_DEFAULT_REASON, None
+            return "deny", DENY_DEFAULT_REASON, None, None
 
         action = decision.get("action")
         if action not in _DECISION_ACTIONS:
@@ -1184,13 +1307,28 @@ class PermissionBroker:
                 "deny",
                 f"AC-DC did not recognise the decision {action!r}, so the call was denied.",
                 None,
+                None,
             )
 
         if action in ("deny", "deny_interrupt"):
             reason = decision.get("reason")
             if not isinstance(reason, str) or not reason.strip():
                 reason = DENY_DEFAULT_REASON
-            return action, reason, None
+            return action, reason, None, None
+
+        if action == "allow_mode":
+            # The mode comes from the request we built, never from the
+            # decision. A client that could name its own mode could name
+            # `bypassPermissions` and turn one click on one dialog into a
+            # session with no gate at all.
+            mode = pending.suggested_mode
+            if mode is None:
+                logger.warning(
+                    "Permission %s asked to switch mode, but no mode was offered "
+                    "for it; allowing once",
+                    pending.permission_id,
+                )
+            return action, None, None, mode
 
         rule: dict[str, Any] | None = None
         if action == "allow_always":
@@ -1211,7 +1349,7 @@ class PermissionBroker:
                     decision.get("rule_index"),
                     len(rules),
                 )
-        return action, None, rule
+        return action, None, rule, None
 
     def _to_result(self, pending: PendingPermission, decision: dict[str, Any]) -> Any:
         """Map a recorded decision to the SDK's result type."""
@@ -1226,8 +1364,19 @@ class PermissionBroker:
 
         updates = None
         rule = decision.get("rule")
+        mode = decision.get("mode")
         if rule:
             update = self._build_update(rule)
+            if update is not None:
+                updates = [update]
+        elif mode:
+            # The mode rides back on the permission result rather than going
+            # out as a separate `set_permission_mode` control request. Two
+            # reasons: it is atomic with the allow, so there is no window in
+            # which the mode changed but the call did not; and the CLI is
+            # waiting on *this* response, so issuing another control request
+            # before answering it is a deadlock waiting for a slow user.
+            update = self._build_mode_update(mode)
             if update is not None:
                 updates = [update]
         return PermissionResultAllow(
@@ -1258,6 +1407,30 @@ class PermissionBroker:
             logger.exception("Could not build a PermissionUpdate from %r", rule)
             return None
 
+    def _build_mode_update(self, mode: dict[str, Any]) -> Any | None:
+        """A ``PermissionUpdate`` that switches the session's mode.
+
+        Re-checks the mode against ``_MODE_OFFERS`` rather than trusting the
+        recorded decision. The check is cheap and it is the last point
+        before the CLI acts, which is where a guard on a session-wide grant
+        belongs.
+        """
+        from claude_agent_sdk import PermissionUpdate
+
+        name = mode.get("mode")
+        if not isinstance(name, str) or name not in _MODE_OFFERS:
+            logger.warning("Refusing to switch to the permission mode %r", name)
+            return None
+        try:
+            return PermissionUpdate(
+                type="setMode",
+                mode=name,
+                destination=mode.get("destination") or "session",
+            )
+        except Exception:
+            logger.exception("Could not build a setMode PermissionUpdate from %r", mode)
+            return None
+
     async def _deny_on_timeout(
         self, pending: PendingPermission, localhost: bool, timeout: float
     ) -> Any:
@@ -1285,6 +1458,7 @@ class PermissionBroker:
         action: str,
         reason: str | None,
         rule: dict[str, Any] | None,
+        mode: dict[str, Any] | None = None,
     ) -> None:
         """Close the dialog on every client, with attribution."""
         try:
@@ -1299,6 +1473,10 @@ class PermissionBroker:
                         "reason": reason,
                         "resolved_by": pending.resolved_by or "unknown",
                         "rule_written": rule,
+                        # What the decision changed beyond this one call, so a
+                        # second window can say *why* its dialogs stopped
+                        # appearing rather than looking broken.
+                        "mode_set": (mode or {}).get("mode"),
                     },
                     turn_scoped=False,
                 )

@@ -34,6 +34,7 @@ from ac_dc.claude_code.permissions import (
     build_question_payload,
     classify_tool,
     command_flags,
+    derive_suggested_mode,
     derive_suggested_rules,
     read_denied_read_files,
     summarise_request,
@@ -390,11 +391,19 @@ class FakeRule:
 
 
 class FakeSuggestion:
-    def __init__(self, rules, kind="addRules", behavior="allow", destination="projectSettings"):
+    def __init__(
+        self,
+        rules,
+        kind="addRules",
+        behavior="allow",
+        destination="projectSettings",
+        mode=None,
+    ):
         self.type = kind
         self.rules = rules
         self.behavior = behavior
         self.destination = destination
+        self.mode = mode
 
 
 class TestSuggestedRules:
@@ -410,8 +419,12 @@ class TestSuggestedRules:
         assert rules[0]["origin"] == "cli"
         assert rules[0]["rule_content"] == "git status:*"
 
-    def test_a_non_rule_suggestion_is_ignored(self, tmp_path):
-        """setMode has no place on a control labelled 'always allow this call'."""
+    def test_a_non_rule_suggestion_is_not_on_the_rule_control(self, tmp_path):
+        """setMode has no place on a control labelled 'always allow this call'.
+
+        It is not thrown away — ``derive_suggested_mode`` picks it up for its
+        own control — but it must not arrive as a rule.
+        """
         rules = derive_suggested_rules(
             tmp_path,
             "Bash",
@@ -421,16 +434,48 @@ class TestSuggestedRules:
         )
         assert all(rule["origin"] == "derived" for rule in rules)
 
-    def test_a_derived_command_rule_keeps_the_subcommand(self, tmp_path):
+    def test_the_default_command_rule_is_the_literal_command(self, tmp_path):
+        """The narrowest rule comes first, so it is the one a click gets.
+
+        ``git push:*`` would authorise ``git push --force origin main`` from a
+        dialog that said ``git push origin main``. The CLI derives the literal
+        sub-command for the same reason.
+        """
         rules = derive_suggested_rules(
             tmp_path, "Bash", {"command": "git push origin main"}, "exec", None
         )
-        assert rules[0]["rule_content"] == "git push:*"
+        assert rules[0]["rule_content"] == "git push origin main"
         assert rules[0]["origin"] == "derived"
 
-    def test_a_plain_command_gets_one_token(self, tmp_path):
+    def test_the_prefix_rule_is_offered_second(self, tmp_path):
+        """Still available — as a deliberate choice from the menu, not a default."""
+        rules = derive_suggested_rules(
+            tmp_path, "Bash", {"command": "git push origin main"}, "exec", None
+        )
+        assert [rule["rule_content"] for rule in rules] == [
+            "git push origin main",
+            "git push:*",
+        ]
+
+    def test_a_plain_command_prefixes_on_one_token(self, tmp_path):
         rules = derive_suggested_rules(tmp_path, "Bash", {"command": "ls -la"}, "exec", None)
-        assert rules[0]["rule_content"] == "ls:*"
+        assert [rule["rule_content"] for rule in rules] == ["ls -la", "ls:*"]
+
+    def test_a_command_rule_keeps_the_command_intact(self, tmp_path):
+        """Collapsing internal whitespace would produce a rule that never matches.
+
+        Same silent no-op as naming the wrong tool in a path rule: written to
+        settings, consulted, and never true.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Bash", {"command": '  echo "a  b" \n'}, "exec", None
+        )
+        assert rules[0]["rule_content"] == 'echo "a  b"'
+
+    def test_a_blank_command_derives_nothing(self, tmp_path):
+        assert derive_suggested_rules(
+            tmp_path, "Bash", {"command": "   "}, "exec", None
+        ) == []
 
     def test_a_derived_write_rule_grants_only_the_approved_file(self, tmp_path):
         """The CLI's own rule "matches only the literal path you approved".
@@ -534,6 +579,73 @@ class TestSuggestedRules:
 
 
 # ---------------------------------------------------------------------------
+# The mode switch
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestedMode:
+    """What the CLI's ``setMode`` suggestion becomes.
+
+    Observed against CLI 2.1.229: an in-repo file edit produces exactly one
+    suggestion — ``setMode acceptEdits``, destination ``session`` — and no
+    rule at all. Dropping it meant AC-DC never offered what the terminal
+    offers for the same call.
+    """
+
+    def test_the_clis_accept_edits_suggestion_is_offered(self):
+        offer = derive_suggested_mode(
+            [FakeSuggestion([], kind="setMode", mode="acceptEdits", destination="session")]
+        )
+        assert offer["mode"] == "acceptEdits"
+        assert offer["destination"] == "session"
+        assert offer["label"]
+        assert offer["detail"]
+
+    def test_the_copy_states_what_stops_being_asked(self):
+        """The whole point of a separate control is that it says what it costs."""
+        offer = derive_suggested_mode(
+            [FakeSuggestion([], kind="setMode", mode="acceptEdits")]
+        )
+        assert "diff" in offer["detail"]
+        assert "shell" in offer["detail"].lower()
+
+    def test_bypass_permissions_is_never_offered(self):
+        """The mode the plan forbids reaching by accident.
+
+        A dialog button is exactly the accident, so it is refused at the
+        table rather than guarded at the button.
+        """
+        assert derive_suggested_mode(
+            [FakeSuggestion([], kind="setMode", mode="bypassPermissions")]
+        ) is None
+
+    def test_an_unknown_mode_is_not_offered(self):
+        """Copy we have not written is copy we cannot stand behind."""
+        assert derive_suggested_mode(
+            [FakeSuggestion([], kind="setMode", mode="somethingNew")]
+        ) is None
+        assert derive_suggested_mode(
+            [FakeSuggestion([], kind="setMode", mode=None)]
+        ) is None
+
+    def test_a_rule_suggestion_is_not_a_mode(self):
+        assert derive_suggested_mode(
+            [FakeSuggestion([FakeRule("Bash", "ls:*")])]
+        ) is None
+        assert derive_suggested_mode(None) is None
+
+    def test_only_the_first_recognised_mode_is_offered(self):
+        """Two mode buttons on one dialog is a worse answer than ignoring one."""
+        offer = derive_suggested_mode(
+            [
+                FakeSuggestion([], kind="setMode", mode="bypassPermissions"),
+                FakeSuggestion([], kind="setMode", mode="acceptEdits"),
+            ]
+        )
+        assert offer["mode"] == "acceptEdits"
+
+
+# ---------------------------------------------------------------------------
 # The callback contract
 # ---------------------------------------------------------------------------
 
@@ -589,6 +701,100 @@ class TestCanUseTool:
         allow = await task
         assert allow.updated_permissions is None
         assert events.only("permissionResolved")["rule_written"] is None
+
+    async def test_allow_mode_carries_a_set_mode_update(self, broker, events):
+        """The mode rides back on the permission result.
+
+        Not out as a separate ``set_permission_mode`` control request: the CLI
+        is waiting on *this* response, so issuing another control request
+        before answering it is a deadlock waiting for a slow user.
+        """
+        context = FakeContext(
+            suggestions=[
+                FakeSuggestion([], kind="setMode", mode="acceptEdits", destination="session")
+            ]
+        )
+        task = await ask(broker, context=context)
+        payload = events.only("permissionRequest")
+        assert payload["suggested_mode"]["mode"] == "acceptEdits"
+        await broker.resolve(payload["permission_id"], {"action": "allow_mode"})
+        allow = await task
+        assert type(allow).__name__ == "PermissionResultAllow"
+        assert len(allow.updated_permissions) == 1
+        assert allow.updated_permissions[0].type == "setMode"
+        assert allow.updated_permissions[0].mode == "acceptEdits"
+        assert allow.updated_permissions[0].destination == "session"
+
+    async def test_a_mode_switch_is_reported_to_the_caller(self, tmp_path, events):
+        """Otherwise the mode selector keeps showing the mode the session
+        started in, which is a lie about what the next tool call will do —
+        the CLI applies the update without announcing it on the stream."""
+        noted: list[str] = []
+
+        async def note_mode(mode):
+            noted.append(mode)
+
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            note_mode=note_mode,
+            decision_timeout=5.0,
+        )
+        context = FakeContext(
+            suggestions=[FakeSuggestion([], kind="setMode", mode="acceptEdits")]
+        )
+        task = await ask(broker, context=context)
+        pid = events.only("permissionRequest")["permission_id"]
+        await broker.resolve(pid, {"action": "allow_mode"})
+        await task
+        assert noted == ["acceptEdits"]
+        assert events.only("permissionResolved")["mode_set"] == "acceptEdits"
+
+    async def test_a_failing_mode_report_still_answers_the_call(self, tmp_path, events):
+        """The dialog has to close even if the notification fails: the call
+        itself has already been answered."""
+
+        async def note_mode(mode):
+            raise RuntimeError("no")
+
+        broker = PermissionBroker(
+            tmp_path, broadcast=events, note_mode=note_mode, decision_timeout=5.0
+        )
+        context = FakeContext(
+            suggestions=[FakeSuggestion([], kind="setMode", mode="acceptEdits")]
+        )
+        task = await ask(broker, context=context)
+        pid = events.only("permissionRequest")["permission_id"]
+        assert await broker.resolve(pid, {"action": "allow_mode"}) == {
+            "status": "accepted"
+        }
+        assert (await task).updated_permissions[0].type == "setMode"
+
+    async def test_allow_mode_with_nothing_offered_allows_once(self, broker, events):
+        """A client cannot conjure a mode switch out of an action name.
+
+        The mode comes from the request the broker built. Without one, the
+        call is allowed — the user did press allow — and no update goes back.
+        """
+        task = await ask(broker)
+        pid = events.only("permissionRequest")["permission_id"]
+        await broker.resolve(pid, {"action": "allow_mode"})
+        allow = await task
+        assert allow.updated_permissions is None
+        assert events.only("permissionResolved")["mode_set"] is None
+
+    async def test_a_client_cannot_name_its_own_mode(self, broker, events):
+        """``resolve_permission`` is localhost-only, but a mode is a
+        session-wide grant: a client able to name one could name
+        ``bypassPermissions`` and turn one click into a session with no
+        gate."""
+        task = await ask(broker)
+        pid = events.only("permissionRequest")["permission_id"]
+        await broker.resolve(
+            pid, {"action": "allow_mode", "mode": "bypassPermissions"}
+        )
+        allow = await task
+        assert allow.updated_permissions is None
 
     async def test_updated_input_is_passed_through(self, broker, events):
         task = await ask(broker)

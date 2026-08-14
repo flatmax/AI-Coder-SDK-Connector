@@ -14,6 +14,7 @@ import {
   countdownUrgency,
   defaultDenyReason,
   defaultFocusTarget,
+  describeMode,
   describeRule,
   expiryMs,
   formatCountdown,
@@ -437,6 +438,58 @@ describe('offersAlwaysAllow', () => {
       .toBe(false);
     expect(offersAlwaysAllow({ tool_class: 'exec' })).toBe(false);
     expect(offersAlwaysAllow(null)).toBe(false);
+  });
+});
+
+describe('describeMode', () => {
+  const offer = {
+    mode: 'acceptEdits',
+    destination: 'session',
+    label: 'Accept all edits for the rest of this session',
+    detail: 'Every later file edit is applied without asking.',
+  };
+
+  it('carries the engine\'s own copy through to the button', () => {
+    // The engine is the side that knows which modes it will offer and what
+    // each one costs. Splitting that between the two sides would let a
+    // button describe a consequence the engine does not apply.
+    expect(describeMode({ tool_class: 'write', suggested_mode: offer })).toEqual({
+      mode: 'acceptEdits',
+      label: 'Accept all edits for the rest of this session',
+      detail: 'Every later file edit is applied without asking.',
+      destination: '(this session only)',
+    });
+  });
+
+  it('is null when the CLI offered no mode', () => {
+    expect(describeMode({ tool_class: 'write' })).toBeNull();
+    expect(describeMode({ tool_class: 'write', suggested_mode: null })).toBeNull();
+    expect(describeMode(null)).toBeNull();
+  });
+
+  it('is null for a question, which no standing grant can answer', () => {
+    expect(describeMode({ tool_class: 'interact', suggested_mode: offer }))
+      .toBeNull();
+  });
+
+  it('renders nothing it cannot label honestly', () => {
+    // A button that names a mode but not its consequence is the promise the
+    // spec forbids, one level up from a rule with no rule text.
+    expect(describeMode({
+      tool_class: 'write', suggested_mode: { mode: 'acceptEdits' },
+    })).toBeNull();
+    expect(describeMode({
+      tool_class: 'write', suggested_mode: { label: 'do a thing' },
+    })).toBeNull();
+  });
+
+  it('tolerates a missing detail rather than dropping the control', () => {
+    const described = describeMode({
+      tool_class: 'write',
+      suggested_mode: { mode: 'acceptEdits', label: 'Accept edits' },
+    });
+    expect(described.detail).toBe('');
+    expect(described.destination).toBe('');
   });
 });
 

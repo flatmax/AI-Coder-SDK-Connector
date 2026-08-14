@@ -30,6 +30,7 @@ import { LitElement, html } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 import { PERMISSION_DIALOG_STYLES } from './styles.js';
 import {
+  ALLOW_ACTIONS,
   ANNOUNCE_AT_SECONDS,
   CHIME_SETTING_KEY,
   CLASS_GLYPHS,
@@ -374,7 +375,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     } else if (action === 'shutdown') {
       message = 'A pending permission request was denied — the session shut down.';
     } else if (detail.resolved_by && detail.resolved_by !== 'localhost') {
-      message = `${action === 'allow' || action === 'allow_always' ? 'Allowed' : 'Denied'}`
+      message = `${ALLOW_ACTIONS.includes(action) ? 'Allowed' : 'Denied'}`
         + ` by another window (${detail.resolved_by}).`;
     } else {
       return;

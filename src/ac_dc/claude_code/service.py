@@ -159,6 +159,7 @@ class ClaudeCodeService:
             self._repo_root,
             broadcast=self._broadcast,
             note_prompt=self._note_permission_prompt,
+            note_mode=self._note_permission_mode,
             localhost_available=self._localhost_available,
         )
         self.session = EngineSession(
@@ -566,6 +567,26 @@ class ClaudeCodeService:
         if note is None:
             return None
         return note(tool_use_id)
+
+    async def _note_permission_mode(self, mode: str) -> None:
+        """A permission decision moved the mode; keep everyone in step.
+
+        The CLI has already applied it — the update travelled back on the
+        permission result — so this does not call ``set_permission_mode``.
+        It updates what the session reports and broadcasts the same event
+        the mode selector already listens for, attributed to the dialog so
+        the mode does not appear to have changed itself.
+        """
+        note = getattr(self.session, "note_permission_mode", None)
+        if note is not None:
+            note(mode)
+        await self._broadcast(
+            Event(
+                "permissionModeChanged",
+                {"mode": mode, "by": "permission dialog"},
+                turn_scoped=False,
+            )
+        )
 
     def _localhost_available(self) -> bool:
         """Whether any connected client could answer a permission request.

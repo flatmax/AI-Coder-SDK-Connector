@@ -1,6 +1,6 @@
 // The decision row.
 //
-// Two rules shape this file, both from
+// Three rules shape this file, the first two from
 // specs5/5-webapp/permission-dialog.md § Decisions:
 //
 //   - Controls occupy fixed positions regardless of tool class, so
@@ -9,11 +9,20 @@
 //   - "Always allow" is labelled with the rule text and the file it will
 //     be written to. A button labelled "always allow" with no rule text
 //     is the promise the engine spec forbids.
+//   - A mode switch gets its own button. `acceptEdits` stops this dialog
+//     opening for every later edit in the session, which is a different
+//     and much larger thing than a rule granting one path — so it cannot
+//     share a control whose label speaks about this call.
 
 import { html } from 'lit';
 
 import { ALWAYS_ALLOW_SESSION_TOOLTIP, ALWAYS_ALLOW_TOOLTIP } from './constants.js';
-import { answersComplete, describeRule, offersAlwaysAllow } from './queue.js';
+import {
+  answersComplete,
+  describeMode,
+  describeRule,
+  offersAlwaysAllow,
+} from './queue.js';
 
 /**
  * The decision row for a request the caller may answer.
@@ -41,6 +50,7 @@ export function renderDecisions(host, payload) {
   const edited = host._hasEdits();
   const rules = payload.suggested_rules || [];
   const primaryRule = describeRule(rules[host._ruleIndex] || rules[0]);
+  const mode = describeMode(payload);
   const interact = payload.tool_class === 'interact';
 
   return html`
@@ -105,6 +115,23 @@ export function renderDecisions(host, payload) {
                   `
                 : null}
             </span>
+          `
+        : null}
+
+      ${mode
+        ? html`
+            <button
+              class="decision mode-switch"
+              data-decision="allow-mode"
+              ?disabled=${settling}
+              title=${mode.detail}
+              @click=${() => host._decide('allow_mode')}
+            >
+              <span class="rule-label">${mode.label}</span>
+              ${mode.destination
+                ? html`<span class="destination">→ ${mode.destination}</span>`
+                : null}
+            </button>
           `
         : null}
 

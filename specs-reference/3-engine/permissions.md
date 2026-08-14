@@ -74,7 +74,51 @@ Three consequences worth stating, because each contradicts a reasonable guess:
 - **`destination: "session"` is normal, not an edge case.** Any dialog copy that denies the
   existence of session-scoped grants is false.
 - **Persisted rules go to `localSettings`**, `.claude/settings.local.json` at the git root — not
-  to `projectSettings`.
+  to `projectSettings`. AC⚡DC's derived rules still default to `projectSettings`, which is a
+  git-tracked file. That divergence is open.
+
+#### How AC⚡DC answers a mode suggestion
+
+A `setMode` suggestion is **offered on its own control**, never folded into "always allow". The
+reason is the size of the grant: `acceptEdits` stops the dialog opening for every later edit in
+the session, so a user who clicks a button labelled for *this call* would silence the gate for
+calls they never saw. The mode is applied by returning a `setMode` `PermissionUpdate` on the
+allow — not by a separate `set_permission_mode` control request, which would deadlock: the CLI is
+waiting on the permission response and will not service another control request until it lands.
+
+Two constraints on which modes may be offered:
+
+- Only modes AC⚡DC holds copy for, so the control can state what stops being asked. An
+  unrecognised mode is logged and dropped rather than rendered with a generic label.
+- **Never `bypassPermissions`**, at either end — not in the offer table, and re-checked when the
+  update is built. A dialog button is precisely the accident the no-bypass rule exists to prevent.
+
+The mode a decision applies is read from the request the broker built, never from the decision
+that comes back over the wire. `resolve_permission` is localhost-only, but a mode is a
+session-wide grant, and the offered mode is the only trustworthy statement of which one was on
+screen.
+
+The CLI applies the update **without announcing it on the message stream** — `permissionMode`
+appears only in the `init` system message. Anything caching the session's mode must therefore be
+told separately, or the mode selector goes on reporting the mode the session started in.
+
+#### Derived rules for shell commands
+
+When the CLI offers no suggestion of its own, AC⚡DC derives two, **narrowest first**:
+
+| Order | For `git push origin main` | Grants |
+|---|---|---|
+| 1 (default) | `Bash(git push origin main)` | exactly what the dialog showed |
+| 2 (menu) | `Bash(git push:*)` | every `git push`, including `--force` |
+
+The literal command is the default because it is what the CLI derives and because the prefix
+pattern grants more than the user looked at. The prefix stays available as a deliberate choice
+from the rule menu: it is legitimate syntax and the right thing to write by hand, and the wrong
+thing to put behind the button someone reaches for without reading it.
+
+The command is stripped but not otherwise normalised. Collapsing its internal whitespace would
+produce a rule that does not match the command it came from — the same silent no-op as naming the
+wrong tool in a path rule.
 
 ## Numeric constants
 
@@ -229,6 +273,7 @@ PermissionRequestPayload:
     display_name: string | null        // the CLI's short noun phrase for the action
     description: string | null         // the CLI's subtitle
     suggested_rules: list[SuggestedRule]
+    suggested_mode: SuggestedMode | null   // the CLI's setMode suggestion, if it made one
     diff: DiffPayload | null           // present for tool_class == "write"
     command: CommandPayload | null     // present for tool_class == "exec"
     question: QuestionPayload | null   // present for tool_class == "interact"
@@ -242,6 +287,12 @@ SuggestedRule:
     behavior: "allow" | "deny" | "ask"
     destination: string
     origin: "cli" | "derived"          // cli ⇒ came from context.suggestions
+
+SuggestedMode:
+    mode: string                       // only modes the engine holds copy for; never bypassPermissions
+    destination: string                // "session" — a persisted mode would outlive the session
+    label: string                      // rendered on the mode control
+    detail: string                     // what stops being asked, for the control's tooltip
 
 DiffPayload:
     path: string
@@ -298,12 +349,15 @@ something to do incidentally. See `specs5/5-webapp/permission-dialog.md` § `int
 
 ```pseudo
 PermissionDecision:
-    action: "allow" | "allow_always" | "deny" | "deny_interrupt"
+    action: "allow" | "allow_always" | "allow_mode" | "deny" | "deny_interrupt"
     reason: string | null              // required for deny actions
     rule_index: integer | null         // index into suggested_rules, for allow_always
     updated_input: object | null       // when the user edited the input; Bash/Write/NotebookEdit only
     answers: list[list[integer]] | null  // interact only: chosen option indices, one list per question
 ```
+
+`allow_mode` carries **no mode name**. The engine applies the mode from `suggested_mode` on the
+request it built; a decision that could name its own mode could name `bypassPermissions`.
 
 Returns:
 
@@ -366,10 +420,18 @@ PermissionResolvedPayload:
     reason: string | null
     resolved_by: string                // client id, or "timeout"
     rule_written: SuggestedRule | null
+    mode_set: string | null             // the mode the decision switched the session to
 ```
 
 Closes the dialog on every other client, including non-localhost observers, and gives them the
-attribution note.
+attribution note. `mode_set` is there so a second window can say *why* its dialogs stopped
+appearing rather than looking broken; a decision that sets it is also followed by a
+`permissionModeChanged` broadcast, because the CLI applies the mode silently.
+
+Every action in `ALLOW_ACTIONS` — `allow`, `allow_always`, `allow_mode` — means the call went
+ahead. Anything else is a denial. Consumers must test membership rather than `== "allow"`: the
+transcript renderer compared against `"allow"` alone and marked calls approved with "always allow"
+as *denied*, with the amber lock and a denial body, on calls that ran.
 
 ### Tool classification map
 

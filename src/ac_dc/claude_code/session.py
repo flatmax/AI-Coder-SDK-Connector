@@ -703,6 +703,18 @@ class EngineSession:
         self._permission_mode = mode
         return mode
 
+    def note_permission_mode(self, mode: str) -> None:
+        """Record a mode the CLI has *already* been told about.
+
+        A permission decision can carry a ``setMode`` update back on its
+        result, which the CLI applies without saying so on the message
+        stream. Sending it a second time through ``set_permission_mode``
+        would be a redundant control request; leaving this cached value
+        stale would make ``permission_mode`` report the mode the session
+        started in rather than the one it is in.
+        """
+        self._permission_mode = mode
+
     async def set_model(self, model: str | None = None) -> str | None:
         """Switch models mid-session. ``None`` restores the CLI default."""
         await self._require_client().set_model(model)

@@ -711,6 +711,78 @@ describe('deciding', () => {
     expect(decision(el, 'allow-always').textContent).toContain('derived');
   });
 
+  // -------------------------------------------------------------------
+  // The session mode switch
+  // -------------------------------------------------------------------
+
+  const acceptEditsMode = {
+    mode: 'acceptEdits',
+    destination: 'session',
+    label: 'Accept all edits for the rest of this session',
+    detail: 'Every later file edit is applied without asking — you will not '
+      + 'see a diff for it. Shell commands still ask.',
+  };
+
+  it('offers the mode switch on its own control, not on always-allow', async () => {
+    // `acceptEdits` stops this dialog opening for every later edit in the
+    // session. That is a different and much larger thing than a rule
+    // granting one path, so it cannot share a button whose label speaks
+    // about this call.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, writePayload({ suggested_mode: acceptEditsMode }));
+
+    const button = decision(el, 'allow-mode');
+    expect(button).toBeTruthy();
+    expect(button.textContent).toContain('rest of this session');
+    expect(decision(el, 'allow-always').textContent)
+      .not.toContain('rest of this session');
+  });
+
+  it('says what the mode switch costs, including the lost diff', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, writePayload({ suggested_mode: acceptEditsMode }));
+
+    const button = decision(el, 'allow-mode');
+    expect(button.title).toContain('diff');
+    expect(button.textContent).toContain('(this session only)');
+  });
+
+  it('sends allow_mode, and never the mode name, when it is clicked', async () => {
+    // The mode comes from the request the engine built. A client able to
+    // name one could name `bypassPermissions`.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, writePayload({ suggested_mode: acceptEditsMode }));
+
+    decision(el, 'allow-mode').click();
+    await settle(el);
+
+    expect(lastResolve().args).toEqual(['perm_write', { action: 'allow_mode' }]);
+  });
+
+  it('has no mode control when the CLI offered no mode', async () => {
+    // AC-DC never invents one: a rule grants one path and can be read back
+    // out of a settings file, whereas a mode silences the gate wholesale.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+    expect(decision(el, 'allow-mode')).toBeNull();
+  });
+
+  it('never offers a mode switch on a question', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload({ suggested_mode: acceptEditsMode }));
+    expect(decision(el, 'allow-mode')).toBeNull();
+  });
+
   it('sends the chosen rule index with an always-allow', async () => {
     publishRpc();
     const el = mount();

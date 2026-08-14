@@ -23,6 +23,13 @@
 //   - Tool blocks are keyed by the SDK's own `tool_use_id`, because the
 //     result references it. No correlation table on either side.
 
+// The one import: a plain array of protocol strings, no side effects, so the
+// module stays a pile of pure functions. It is imported rather than repeated
+// because the dialog and this file have to agree on which decisions let a
+// call through, and when they disagreed the transcript called an approved
+// call denied.
+import { ALLOW_ACTIONS } from '../permission-dialog/constants.js';
+
 /**
  * Fresh per-turn block state.
  *
@@ -267,10 +274,15 @@ export function markAwaitingPermission(turn, toolUseId) {
 /**
  * Record how a permission request for a tool call was resolved.
  *
- * `allow` clears the amber lock and lets the call go back to pending — the
- * engine is running it now. Everything else (deny, timeout, shutdown) is a
- * denial, and the reason is rendered as the card's body because the agent saw
- * that same reason and will act on it.
+ * Any of the allow actions clears the amber lock and lets the call go back to
+ * pending — the engine is running it now. Everything else (deny, timeout,
+ * shutdown) is a denial, and the reason is rendered as the card's body because
+ * the agent saw that same reason and will act on it.
+ *
+ * The test is against `ALLOW_ACTIONS`, not `=== 'allow'`. "Always allow" and
+ * the session mode switch both let the call through while reporting their own
+ * action name, and treating either as a denial marks a card the user approved
+ * as refused.
  */
 export function applyPermissionOutcome(turn, payload) {
   if (!turn || !payload || typeof payload !== 'object') return false;
@@ -280,7 +292,7 @@ export function applyPermissionOutcome(turn, payload) {
   if (block === undefined || block.kind !== 'tool') return false;
   block.awaiting = false;
   block.gated = true;
-  if (payload.action === 'allow') {
+  if (ALLOW_ACTIONS.includes(payload.action)) {
     block.denial = null;
     return true;
   }

@@ -541,7 +541,21 @@ describe('applyPermissionOutcome', () => {
     expect(toolStatus(turn.blocks[0])).toBe('denied');
   });
 
-  it('anything that is not allow is a denial, verbatim', () => {
+  it('every allow action clears the lock, not just the plain one', () => {
+    // The bug this pins: the test used to be `action === 'allow'`, so a call
+    // the user approved with "always allow" — or with the session mode
+    // switch — rendered as *denied*, amber lock and denial body, on a call
+    // that ran. Adding an allow action to the engine without adding it to
+    // ALLOW_ACTIONS reintroduces exactly that.
+    for (const action of ['allow', 'allow_always', 'allow_mode']) {
+      const turn = gatedTurn();
+      applyPermissionOutcome(turn, { tool_use_id: 'toolu_1', action });
+      expect(turn.blocks[0].denial).toBeNull();
+      expect(toolStatus(turn.blocks[0])).toBe('pending');
+    }
+  });
+
+  it('anything that is not an allow is a denial, verbatim', () => {
     // Timeout and shutdown are denials with their own names, and the name is
     // the difference between "you said no" and "nobody answered".
     for (const action of ['timeout', 'shutdown', 'cancelled']) {

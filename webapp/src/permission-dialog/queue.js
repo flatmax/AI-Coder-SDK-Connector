@@ -202,7 +202,7 @@ export function defaultDenyReason(payload) {
  * (permission-dialog.md § Always allow shows the rule, not a promise).
  *
  * @param {object|null} rule
- * @returns {{label: string, destination: string, derived: boolean}|null}
+ * @returns {{label: string, destination: string, derived: boolean, session: boolean}|null}
  */
 export function describeRule(rule) {
   if (!rule || !rule.tool_name) return null;
@@ -235,6 +235,35 @@ export function offersAlwaysAllow(payload) {
   if (!payload || payload.tool_class === 'interact') return false;
   return Array.isArray(payload.suggested_rules)
     && payload.suggested_rules.length > 0;
+}
+
+/**
+ * Describe the mode switch the CLI offered for this call, if any.
+ *
+ * The copy comes from the engine, which is the side that knows which modes
+ * it is willing to offer and what each one costs. Splitting that between
+ * the two sides would let a button describe a consequence the engine does
+ * not actually apply, so anything without both a mode and a label is not
+ * rendered at all.
+ *
+ * Never for `interact`, for the same reason `offersAlwaysAllow` is not:
+ * there is no standing grant that answers a future question.
+ *
+ * @param {object|null} payload
+ * @returns {{mode: string, label: string, detail: string, destination: string}|null}
+ */
+export function describeMode(payload) {
+  if (!payload || payload.tool_class === 'interact') return null;
+  const offer = payload.suggested_mode;
+  if (!offer || typeof offer.mode !== 'string' || !offer.mode) return null;
+  if (typeof offer.label !== 'string' || !offer.label) return null;
+  return {
+    mode: offer.mode,
+    label: offer.label,
+    detail: typeof offer.detail === 'string' ? offer.detail : '',
+    destination: DESTINATION_FILES[offer.destination]
+      || offer.destination || '',
+  };
 }
 
 /**
