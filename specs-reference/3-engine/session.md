@@ -50,9 +50,16 @@ Assigned by the pump, opaque to the browser:
 
 `n` is a monotonic per-turn integer, incremented when a block first appears — whether from a
 `content_block_start` stream event or from an unseen block in a completed assistant message. The
-map from SDK identity (`(StreamEvent.uuid, event["index"])` for partials, `(message uuid, content
-index)` for full blocks) to `block_id` is pump-internal state, which is what keeps SDK message types
+map from SDK identity to `block_id` is pump-internal state, which is what keeps SDK message types
 out of the transport.
+
+The partial-block key is `(parent_tool_use_id or "", streaming message id, event["index"])`, where
+the message id comes from the `message_start` event's `message.id`. **Not** `StreamEvent.uuid`: that
+is a per-event identifier, unique to each delta, so keying on it makes every delta open a new block.
+`parent_tool_use_id` is in the key because a subagent streams concurrently with its parent and both
+number their content blocks from 0. Full blocks key on `(parent_tool_use_id or "", message_id or
+uuid, content index)`, which is what lets a completed assistant message reuse — and correct — the
+block its own partials already rendered.
 
 Tool cards use `tool_use_id` directly because the tool result references it, so no correlation table
 is needed on either side.
@@ -103,7 +110,7 @@ ClaudeAgentOptions(
     model=cfg.model,                                # omitted when null → CLI default
     max_budget_usd=cfg.max_budget_usd,              # omitted when null
     effort=cfg.effort,                              # omitted when null
-    thinking=ThinkingConfig(display=cfg.thinking_display),   # "summarized" | "omitted"
+    thinking={"type": "adaptive", "display": cfg.thinking_display},  # "summarized" | "omitted"
     resume=session_id,                              # omitted for a new session
     fork_session=True,                              # only when branching
 )
@@ -114,6 +121,15 @@ Never set `allowed_tools`, `agents`, or `system_prompt` — see the parent spec.
 
 `PermissionMode` is `Literal["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk",
 "auto"]`.
+
+`thinking` is a TypedDict union (`ThinkingConfigAdaptive | ThinkingConfigEnabled |
+ThinkingConfigDisabled`), not a class — there is no `ThinkingConfig(display=…)` constructor.
+`"adaptive"` leaves the token budget to the model, which is the CLI's own posture; `display` is the
+only part the user chose. Verified against 0.2.137 on 2026-08-14.
+
+`cli_path` should be set to the binary AC⚡DC already resolved and version-checked. Left unset, the
+SDK re-runs its own discovery, which has no fallback where ours does — so the binary named in the
+engine-health record would not necessarily be the binary that runs.
 
 ### Service: ClaudeCodeService — browser → server
 
@@ -157,9 +173,15 @@ Live controls:
 |---|---|---|
 | `set_permission_mode` | `mode: PermissionMode` | `{mode: str}` or `{error: str}` |
 | `set_model` | `model: str` | `{model: str}` or `{error: str}` |
-| `rewind_files` | `user_message_id: str` | `{restored: list[str]}` or `{error: str}` |
+| `rewind_files` | `user_message_id: str` | `{restored: list[str], user_message_id: str}` or `{error: str}` |
 | `stop_task` | `task_id: str` | `{status: str}` or `{error: str}` |
 | `resolve_permission` | `permission_id: str, decision: PermissionDecision` | see `specs-reference/3-engine/permissions.md` |
+
+`rewind_files`'s `restored` list is **always empty**. The SDK's `ClaudeSDKClient.rewind_files()`
+returns `None`, so the set of restored paths cannot be derived from that call — an earlier draft of
+this table promised a list nothing can populate. The frontend should refresh the file tree on success
+rather than trusting the list. Echoing `user_message_id` back lets a client correlate the answer with
+the undo affordance it came from.
 
 Introspection:
 
@@ -460,10 +482,16 @@ disconnecting mid-turn is the normal case here rather than an edge case.
 
 ### CLI discovery and version skew
 
-The SDK transport's `_find_cli` resolves, in order: an explicitly configured path, `claude` on `PATH`,
-then the bundled `claude_agent_sdk/_bundled/claude`. Startup must log which one was selected and its
-version, because a system CLI newer or older than `__cli_version__` changes behaviour in ways that are
-otherwise invisible.
+The SDK transport resolves, in order: an explicitly configured `cli_path`, the bundled
+`claude_agent_sdk/_bundled/claude`, then `claude` on `PATH`. **The bundled binary wins over `PATH`** —
+verified in `SubprocessCLITransport._find_cli` at 0.2.137 on 2026-08-14, which checks
+`_find_bundled_cli()` before `shutil.which("claude")`. An earlier draft of this section had `PATH`
+second; it did not, so a machine with a newer system CLI still runs the wheel's copy unless
+`cli_path` says otherwise.
+
+Startup must log which one was selected and its version, because a system CLI newer or older than
+`__cli_version__` changes behaviour in ways that are otherwise invisible. The SDK itself only *warns*
+on skew; refusing to start on an unusably old CLI is AC⚡DC's job, not the SDK's.
 
 ### RPC namespace derives from the Python class name
 

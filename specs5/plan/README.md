@@ -59,8 +59,8 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 
 | Phase | Scope | Exit criterion |
 |---|---|---|
-| **0. Plan and specs** | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
-| **1. Engine spike** | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
+| **0. Plan and specs** ✅ | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
+| **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
 | **2. Chat on the new engine** | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
 | **3. Rip-out** | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
@@ -70,6 +70,9 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 
 Phases 1–3 are the risky ones and should not be interleaved: keep the native engine intact and
 reachable until phase 2's exit criterion is genuinely met, then delete in one commit.
+
+A phase is recorded in [`delivery.md`](delivery.md) when its exit criterion is met — what landed,
+what was deliberately left out, and what the next phase has to do first.
 
 ## Ordering constraints that are not obvious
 

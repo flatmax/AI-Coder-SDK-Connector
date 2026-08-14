@@ -71,7 +71,7 @@ From `ClaudeAgentOptions`. Fields AC⚡DC uses, and why:
 | `enable_file_checkpointing` | `True` | Undo. Requires the `extra_args` flag above. |
 | `mcp_servers` | `{"ac-dc": <in-process server>}` | CC-6. |
 | `max_budget_usd` | optional, from config | A hard stop the native engine never had. |
-| `effort` / `thinking` | optional, from config | `ThinkingConfig.display` is `"summarized"` or `"omitted"`. |
+| `effort` / `thinking` | optional, from config | `thinking` is a TypedDict, not a class: `{"type": "adaptive", "display": "summarized" \| "omitted"}`. |
 | `resume` / `fork_session` | on session load | CC-3. |
 | `session_store` | our implementation | CC-3; mirrors the transcript into `.ac-dc4/`. |
 | `session_store_flush` | `"eager"` | Batched flushing holds a turn's tail until the result message. |
@@ -233,8 +233,10 @@ migration tool and the repair for a reported mirror gap.
 ## Packaging: the wheel bundles a 295 MB CLI
 
 `claude_agent_sdk/_bundled/claude` is a ~295 MB platform-specific binary, which is why the wheel is
-`manylinux_2_17_x86_64` rather than `py3-none-any`. The transport's `_find_cli` prefers an
-explicitly configured path, then a CLI on `PATH`, then the bundled copy.
+`manylinux_2_17_x86_64` rather than `py3-none-any`. The transport prefers an explicitly configured
+`cli_path`, then **the bundled copy, then a CLI on `PATH`** — `_find_cli` calls
+`_find_bundled_cli()` before `shutil.which("claude")`. An earlier draft of this paragraph had those
+last two the other way round; see [Corrections found while implementing phase 1](#corrections-found-while-implementing-phase-1).
 
 Consequences for [`../6-deployment/packaging.md`](../6-deployment/packaging.md):
 
@@ -290,3 +292,57 @@ Collected in one place, because the brief is otherwise a good design document an
 | A `CompactBoundary` message type | No such class — `SystemMessage(subtype="compact_boundary")` |
 | `SessionStore` owns the transcript | It mirrors the CLI's local transcript, after the local write |
 | Message list | Missing `MirrorErrorMessage`; assistant blocks also include `server_tool_use` and `advisor_tool_result` |
+
+---
+
+## Corrections found while implementing phase 1
+
+**Verified 2026-08-14** against 0.2.137 in the project venv, bundled CLI 2.1.229, plus two live runs
+of `scripts/engine_smoke.py`. Each row below is a place where a document in this repo contradicted the
+installed wheel or the observed CLI. Per
+[`../0-overview/implementation-guide.md`](../0-overview/implementation-guide.md) § Reading the SDK rule
+2, the wheel wins and the spec was corrected rather than worked around.
+
+| Where | Said | Actually | Fixed in |
+|---|---|---|---|
+| This file, § Packaging | `_find_cli` order is `cli_path` → `PATH` → bundled | `cli_path` → **bundled** → `PATH`; `_find_bundled_cli()` is checked before `shutil.which` | this file |
+| `specs-reference/3-engine/session.md` § Options | `thinking=ThinkingConfig(display=…)` | `thinking` is a TypedDict union with no such constructor; correct value is `{"type": "adaptive", "display": …}` | that file |
+| `specs-reference/3-engine/session.md` § Block identity | Partial-block key is `(StreamEvent.uuid, event["index"])` | `StreamEvent.uuid` is per-*event*, so every delta would open a new block. Key is `(parent_tool_use_id or "", message_start's message.id, index)` | that file |
+| `specs-reference/3-engine/session.md` § RPC | `rewind_files` returns `{restored: list[str]}` | `ClaudeSDKClient.rewind_files()` returns `None`; the list cannot be populated from that call | that file |
+| `specs-reference/3-engine/session.md` § CLI discovery | Implied the SDK enforces the version floor | The SDK only *warns* on skew. Refusing to start on an unusable CLI is ours to do | that file |
+
+### Not a correction, but absent from every spec
+
+- **`ConversationResetMessage`** is in the SDK's `Message` union (`new_conversation_id`, `uuid`,
+  `session_id`) and appears in no spec. Routed to `systemEvent` rather than dropped.
+- **`SystemMessage(subtype="status")`** — observed live, in no spec and in no SDK type. The CLI emits
+  it before each model request, carrying `{"status": "requesting"}`. It arrived four times in a
+  three-tool-call turn. Currently falls through to `systemEvent`, which is the designed behaviour for
+  an unknown subtype; if the UI ever wants a "thinking…" indicator that is not tied to a thinking
+  block, this is the signal to use.
+- **`ThinkingConfigAdaptive.display`** is annotated `NotRequired[Literal["summarized", "omitted"]]`,
+  so `typing.get_args` needs one layer unwrapped before it yields the two strings. Relevant only to
+  the drift test that probes it.
+
+### Observations from the live runs
+
+Both runs used `--permission-mode plan`, so nothing was written.
+
+- **The taxonomy the pump actually produced**, from one three-tool-call turn: `sessionStarted`,
+  `systemEvent` ×4, `toolUse` ×3, `toolResult` ×3, `streamChunk` ×36, `thinkingChunk`, `streamComplete`.
+  No channel went unexercised except the ones phase 1 has no source for yet (`subagentEvent`,
+  `hookEvent`, `rateLimit`, `compactionEvent`, `engineHealth`).
+- **`--replay-user-messages` works**: `user_message_id` came back populated
+  (`07b76464-…`), which is the ID `rewind_files()` will need in phase 3.
+- **The interrupt drain works against the real CLI.** Cancelling 4 s in produced a genuine
+  `ResultMessage` with `terminal_reason: "aborted_streaming"`, `subtype:
+  "error_during_execution"`, `is_error: true`, and a populated `errors` list carrying an
+  `[ede_diagnostic]` string. The pump ran to the result rather than hanging, and `cancelled` was
+  reported `true` — note that an interrupted turn is `is_error: true`, so the UI must read
+  `cancelled` before deciding whether to show a failure.
+- **`total_cost_usd` is populated on Bedrock** (0.273 and 0.0034 for the two runs). It is not
+  subscription-only, so the "null means not priced" path stays untested here.
+- **The credential warning fires as designed.** This machine has `$CLAUDE_CODE_USE_BEDROCK` set *and*
+  a subscription login at `~/.claude/.credentials.json`; `detect_credentials()` reported
+  `Amazon Bedrock (via CLAUDE_CODE_USE_BEDROCK)` and warned about the shadowed login. This is exactly
+  the CC-11 pollution case, arriving from the ambient environment rather than from `llm.json`.

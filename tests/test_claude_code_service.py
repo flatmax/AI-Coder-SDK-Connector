@@ -1,0 +1,775 @@
+"""Tests for ac_dc.claude_code.service — conversion phase 1.
+
+The engine is faked; what is under test is the *outward* half of a turn.
+The properties that matter here are the ones a browser depends on:
+
+- **The RPC namespace is the class name.** ``add_service`` derives it from
+  ``type(instance).__name__``, so a rename breaks every frontend call site.
+- **Event arity is fixed.** Turn-scoped events take ``(request_id,
+  payload)``; session-wide events take ``(payload,)``. Getting this wrong
+  puts a payload where the frontend expects an ID.
+- **``postResponseComplete`` always fires**, after ``streamComplete``, with
+  the right request ID — the Context tab and file tree wait on it.
+- **The engine connects lazily**, so phase 1 adds no ``claude``
+  subprocess to app startup while the native engine still serves the UI.
+- **Slash commands never reach the model.** Forwarding ``/compact`` as
+  prose turns a command into a question.
+- **Failures are returned, not raised.** An RPC exception reaches the
+  browser as a generic transport error instead of an actionable message.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+
+import pytest
+
+from ac_dc.claude_code.engine_config import EngineConfig
+from ac_dc.claude_code.health import EngineHealth, EngineStartupError
+from ac_dc.claude_code.messages import Event
+from ac_dc.claude_code.service import SLASH_EQUIVALENTS, ClaudeCodeService
+from ac_dc.claude_code.session import (
+    EngineNotReadyError,
+    SessionLostError,
+    TurnInProgressError,
+)
+
+REQUEST_ID = "1736956800000-a1b2c3"
+PNG = "data:image/png;base64,aGk="
+
+
+class FakeConfig:
+    def __init__(self, repo_root, config_dir=None):
+        self.repo_root = repo_root
+        self.config_dir = config_dir
+
+
+class FakeSession:
+    """Stands in for ``EngineSession``: records calls, replays outcomes."""
+
+    def __init__(self):
+        self.health = EngineHealth(cli_version="2.1.229")
+        self.ready = False
+        self.session_id = None
+        self.streaming_active = False
+        self.permission_mode = "default"
+        self.model = None
+
+        self.connect_calls: list[str | None] = []
+        self.connect_error: BaseException | None = None
+        self.disconnect_calls = 0
+        self.turns: list[object] = []
+        self.admit_error: BaseException | None = None
+        self.control_calls: list[tuple[str, tuple]] = []
+        self.control_error: BaseException | None = None
+        self.interrupt_result = {"status": "interrupting"}
+        self.context_usage = {"total_tokens": 1000}
+        # Events the fake pump emits for each turn.
+        self.turn_events: list[Event] = [
+            Event("streamChunk", {"block_id": f"{REQUEST_ID}:b0", "content": "Hi"}),
+            Event("streamComplete", {"response": "Hi", "is_error": False}),
+        ]
+
+    def active_streams(self):
+        return []
+
+    async def connect(self, resume=None, fork_session=False):
+        self.connect_calls.append(resume)
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.ready = True
+        self.health.connected = True
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        self.ready = False
+
+    def admit(self, request_id):
+        if self.admit_error is not None:
+            raise self.admit_error
+
+    async def run_turn(self, turn, emit=None):
+        self.turns.append(turn)
+        self.streaming_active = True
+        try:
+            for event in self.turn_events:
+                if isinstance(event, BaseException):
+                    raise event
+                if emit is not None:
+                    await emit(event)
+        finally:
+            self.streaming_active = False
+        return {"response": "Hi"}
+
+    async def interrupt(self, request_id=None):
+        self.control_calls.append(("interrupt", (request_id,)))
+        if self.control_error is not None:
+            raise self.control_error
+        return self.interrupt_result
+
+    async def set_permission_mode(self, mode):
+        from ac_dc.claude_code.engine_config import PERMISSION_MODES
+
+        self.control_calls.append(("set_permission_mode", (mode,)))
+        if self.control_error is not None:
+            raise self.control_error
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"Unknown permission mode {mode!r}.")
+        self.permission_mode = mode
+        return mode
+
+    async def set_model(self, model=None):
+        self.control_calls.append(("set_model", (model,)))
+        if self.control_error is not None:
+            raise self.control_error
+        self.model = model
+        return model
+
+    async def rewind_files(self, user_message_id):
+        self.control_calls.append(("rewind_files", (user_message_id,)))
+        if self.control_error is not None:
+            raise self.control_error
+
+    async def stop_task(self, task_id):
+        self.control_calls.append(("stop_task", (task_id,)))
+        if self.control_error is not None:
+            raise self.control_error
+
+    async def get_context_usage(self):
+        self.control_calls.append(("get_context_usage", ()))
+        if self.control_error is not None:
+            raise self.control_error
+        return self.context_usage
+
+    async def get_mcp_status(self):
+        if self.control_error is not None:
+            raise self.control_error
+        return {"servers": []}
+
+    async def reconnect_mcp_server(self, name):
+        self.control_calls.append(("reconnect_mcp_server", (name,)))
+        if self.control_error is not None:
+            raise self.control_error
+
+    async def toggle_mcp_server(self, name, enabled):
+        self.control_calls.append(("toggle_mcp_server", (name, enabled)))
+        if self.control_error is not None:
+            raise self.control_error
+
+    async def get_server_info(self):
+        if self.control_error is not None:
+            raise self.control_error
+        return {"commands": ["review"]}
+
+
+class Recorder:
+    """The ``event_callback`` indirection, recording ``(name, *args)``."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.error: BaseException | None = None
+
+    async def __call__(self, name, *args):
+        self.calls.append((name, *args))
+        if self.error is not None:
+            raise self.error
+
+    def names(self):
+        return [call[0] for call in self.calls]
+
+    def payload_of(self, name):
+        return next(call[-1] for call in self.calls if call[0] == name)
+
+    def call_of(self, name):
+        return next(call for call in self.calls if call[0] == name)
+
+
+@pytest.fixture
+def events():
+    return Recorder()
+
+
+@pytest.fixture
+def service(tmp_path, events):
+    """A service on a fake engine, with no CLI anywhere in sight."""
+    svc = ClaudeCodeService(
+        FakeConfig(tmp_path),
+        event_callback=events,
+        engine_config=EngineConfig(),
+    )
+    svc.session = FakeSession()
+    return svc
+
+
+async def finish_turns(service):
+    """Await the background turn tasks a chat_streaming call spawned."""
+    for _ in range(50):
+        tasks = [t for t in service._turn_tasks if not t.done()]
+        if not tasks:
+            break
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def connected(service, events):
+    """Get the lazy connect out of the way, so a test sees only its own events."""
+    await service.connect_engine()
+    events.calls.clear()
+
+
+async def send(service, message="hello", **kwargs):
+    answer = await service.chat_streaming(REQUEST_ID, message, **kwargs)
+    await finish_turns(service)
+    return answer
+
+
+# ---------------------------------------------------------------------------
+# The RPC surface itself
+# ---------------------------------------------------------------------------
+
+
+class TestRpcSurface:
+    def test_the_class_name_is_the_rpc_namespace(self):
+        """Renaming this class renames every RPC. It is interface."""
+        assert ClaudeCodeService.__name__ == "ClaudeCodeService"
+
+    def test_the_methods_the_frontend_calls_exist(self, service):
+        for name in (
+            "chat_streaming",
+            "cancel_streaming",
+            "get_current_state",
+            "get_engine_health",
+            "get_selected_files",
+            "set_selected_files",
+            "set_permission_mode",
+            "set_model",
+            "rewind_files",
+            "stop_task",
+            "get_context_usage",
+            "get_mcp_status",
+            "reconnect_mcp_server",
+            "toggle_mcp_server",
+            "get_server_info",
+            "connect_engine",
+        ):
+            assert callable(getattr(service, name)), name
+
+    def test_phase_two_and_three_methods_are_absent(self, service):
+        """A stub that reported success would be worse than a missing method."""
+        for name in (
+            "resolve_permission",
+            "get_denied_read_files",
+            "set_denied_read_files",
+            "history_list",
+        ):
+            assert not hasattr(service, name), name
+
+
+# ---------------------------------------------------------------------------
+# Lazy connect
+# ---------------------------------------------------------------------------
+
+
+class TestLazyConnect:
+    def test_construction_does_not_connect(self, tmp_path, events):
+        """Phase 1 must not add a CLI subprocess to every app startup."""
+        svc = ClaudeCodeService(FakeConfig(tmp_path), event_callback=events)
+        svc.session = FakeSession()
+        assert svc.session.connect_calls == []
+        assert events.calls == []
+
+    async def test_the_first_turn_connects(self, service):
+        await send(service)
+        assert service.session.connect_calls == [None]
+
+    async def test_a_second_turn_does_not_reconnect(self, service):
+        await send(service)
+        await send(service)
+        assert len(service.session.connect_calls) == 1
+
+    async def test_two_first_turns_at_once_connect_once(self, service):
+        """Otherwise two clients sending together spawn two subprocesses."""
+        await asyncio.gather(
+            service.chat_streaming(REQUEST_ID, "one"),
+            service.chat_streaming("1736956800001-zzzzzz", "two"),
+        )
+        await finish_turns(service)
+        assert len(service.session.connect_calls) == 1
+
+    async def test_connect_engine_is_idempotent(self, service):
+        first = await service.connect_engine()
+        second = await service.connect_engine()
+        assert first["status"] == second["status"] == "ready"
+        assert len(service.session.connect_calls) == 1
+
+    async def test_connect_engine_passes_a_resume_id(self, service):
+        await service.connect_engine("prev-session")
+        assert service.session.connect_calls == ["prev-session"]
+
+    async def test_connect_broadcasts_the_health_record(self, service, events):
+        await service.connect_engine()
+        payload = events.payload_of("engineHealth")
+        assert payload["connected"] is True
+        assert payload["cli_version"] == "2.1.229"
+
+    async def test_a_startup_failure_is_returned_not_raised(self, service, events):
+        """An RPC exception loses the actionable message."""
+        service.session.connect_error = EngineStartupError("claude not found")
+        answer = await service.connect_engine()
+        assert answer == {"error": "claude not found", "reason": "startup_failed"}
+        # Still broadcast, so the UI can show why it is unavailable.
+        assert "engineHealth" in events.names()
+
+    async def test_a_turn_that_cannot_connect_says_why(self, service):
+        service.session.connect_error = EngineStartupError("claude not found")
+        answer = await service.chat_streaming(REQUEST_ID, "hello")
+        assert answer == {"error": "claude not found", "reason": "startup_failed"}
+        assert service.session.turns == []
+
+    async def test_the_startup_error_shows_up_in_health(self, service):
+        service.session.connect_error = EngineStartupError("claude not found")
+        await service.connect_engine()
+        assert service.get_engine_health()["last_error"] == "claude not found"
+
+    async def test_a_live_error_is_not_masked_by_the_startup_error(self, service):
+        service.session.connect_error = EngineStartupError("claude not found")
+        await service.connect_engine()
+        service.session.health.last_error = "broken pipe"
+        assert service.get_engine_health()["last_error"] == "broken pipe"
+
+
+# ---------------------------------------------------------------------------
+# Slash commands
+# ---------------------------------------------------------------------------
+
+
+class TestSlashCommands:
+    @pytest.mark.parametrize(
+        "command", sorted(k for k, v in SLASH_EQUIVALENTS.items() if v)
+    )
+    async def test_a_mapped_command_names_its_equivalent(self, service, command):
+        answer = await service.chat_streaming(REQUEST_ID, f"/{command}")
+        assert answer["status"] == "unsupported"
+        assert answer["command"] == command
+        assert answer["equivalent"] in answer["message"]
+
+    @pytest.mark.parametrize(
+        "command", sorted(k for k, v in SLASH_EQUIVALENTS.items() if v is None)
+    )
+    async def test_an_unmappable_command_says_there_is_no_equivalent(
+        self, service, command
+    ):
+        answer = await service.chat_streaming(REQUEST_ID, f"/{command}")
+        assert answer["status"] == "unsupported"
+        assert "no equivalent here" in answer["message"]
+        assert "equivalent" not in answer
+
+    async def test_a_slash_command_never_starts_the_engine(self, service, events):
+        """It is answered locally: no connect, no turn, no broadcast."""
+        await service.chat_streaming(REQUEST_ID, "/compact")
+        assert service.session.connect_calls == []
+        assert service.session.turns == []
+        assert events.calls == []
+
+    async def test_arguments_do_not_hide_the_command(self, service):
+        answer = await service.chat_streaming(REQUEST_ID, "/model opus")
+        assert answer["command"] == "model"
+
+    async def test_case_and_whitespace_do_not_hide_the_command(self, service):
+        answer = await service.chat_streaming(REQUEST_ID, "  /CLEAR  ")
+        assert answer["command"] == "clear"
+
+    async def test_a_custom_command_reaches_the_engine(self, service):
+        """.claude/commands/ is the CLI's business, not ours."""
+        await send(service, "/review the diff")
+        assert service.session.turns[0].message == "/review the diff"
+
+    async def test_a_lone_slash_reaches_the_engine(self, service):
+        await send(service, "/")
+        assert service.session.turns[0].message == "/"
+
+    async def test_a_mid_message_slash_is_not_a_command(self, service):
+        await send(service, "what does /compact do?")
+        assert len(service.session.turns) == 1
+
+
+# ---------------------------------------------------------------------------
+# Turns
+# ---------------------------------------------------------------------------
+
+
+class TestChatStreaming:
+    async def test_it_returns_as_soon_as_the_turn_is_admitted(self, service):
+        answer = await service.chat_streaming(REQUEST_ID, "hello")
+        assert answer == {"status": "started"}
+        await finish_turns(service)
+
+    async def test_the_turn_carries_the_request_id_and_message(self, service):
+        await send(service, "hello")
+        turn = service.session.turns[0]
+        assert turn.request_id == REQUEST_ID
+        assert turn.message == "hello"
+
+    async def test_files_default_to_the_picker_selection(self, service, tmp_path):
+        (tmp_path / "a.py").write_text("x")
+        service.set_selected_files(["a.py"])
+        await send(service)
+        assert service.session.turns[0].files == ["a.py"]
+
+    async def test_an_explicit_empty_list_means_no_files(self, service, tmp_path):
+        """Distinct from omitting the argument, which means "use the picker"."""
+        (tmp_path / "a.py").write_text("x")
+        service.set_selected_files(["a.py"])
+        await send(service, files=[])
+        assert service.session.turns[0].files == []
+
+    async def test_the_viewer_payload_becomes_framing_input(self, service):
+        await send(service, viewer={"path": "src/a.py", "start_line": 4})
+        viewer = service.session.turns[0].viewer
+        assert viewer.path == "src/a.py"
+        assert viewer.start_line == 4
+
+    async def test_a_malformed_viewer_payload_does_not_fail_the_turn(self, service):
+        await send(service, viewer={"nonsense": True})
+        assert service.session.turns[0].viewer is None
+
+    async def test_images_reach_the_turn(self, service):
+        await send(service, images=[PNG])
+        assert service.session.turns[0].images == [PNG]
+
+    async def test_the_user_message_is_broadcast_before_the_turn(self, service, events):
+        """A collaborator sees the message even if the turn then fails."""
+        await connected(service, events)
+        await send(service, "hello")
+        assert events.names()[0] == "userMessage"
+        assert events.payload_of("userMessage")["content"] == "hello"
+
+    async def test_the_user_message_is_session_wide(self, service, events):
+        """Everyone's transcript gets it, so it takes no request-ID argument."""
+        await send(service, "hello")
+        name, payload = events.call_of("userMessage")
+        assert name == "userMessage"
+        assert isinstance(payload, dict)
+        assert payload["request_id"] == REQUEST_ID
+
+    async def test_data_uris_are_never_broadcast(self, service, events):
+        """A handful of screenshots would be megabytes per client."""
+        await send(service, "look", images=[PNG])
+        payload = events.payload_of("userMessage")
+        assert payload["image_refs"] == []
+        assert PNG not in str(payload)
+
+    @pytest.mark.parametrize(
+        ("error", "reason"),
+        [
+            (TurnInProgressError("already running"), "turn_in_progress"),
+            (EngineNotReadyError("still starting"), "not_ready"),
+            (SessionLostError("session gone"), "session_lost"),
+            (ValueError("no request id"), "bad_request"),
+        ],
+    )
+    async def test_admission_failures_carry_a_reason_code(self, service, error, reason):
+        """So the frontend can distinguish retry from resume from bug."""
+        service.session.admit_error = error
+        answer = await service.chat_streaming(REQUEST_ID, "hello")
+        assert answer["reason"] == reason
+        assert answer["error"] == str(error)
+
+    async def test_a_rejected_turn_broadcasts_nothing(self, service, events):
+        await connected(service, events)
+        service.session.admit_error = TurnInProgressError("already running")
+        await service.chat_streaming(REQUEST_ID, "hello")
+        assert events.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Event dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestEventDispatch:
+    async def test_turn_scoped_events_lead_with_the_request_id(self, service, events):
+        await send(service)
+        name, request_id, payload = events.call_of("streamChunk")
+        assert name == "streamChunk"
+        assert request_id == REQUEST_ID
+        assert payload["content"] == "Hi"
+
+    async def test_session_wide_events_carry_only_a_payload(self, service, events):
+        await service.connect_engine()
+        assert len(events.call_of("engineHealth")) == 2
+
+    async def test_post_response_complete_follows_stream_complete(self, service, events):
+        await send(service)
+        names = events.names()
+        assert names.index("streamComplete") < names.index("postResponseComplete")
+
+    async def test_post_response_complete_carries_the_request_id(self, service, events):
+        """It fires after the active turn is cleared, so it cannot be looked up."""
+        await send(service)
+        _, request_id, payload = events.call_of("postResponseComplete")
+        assert request_id == REQUEST_ID
+        assert payload["files_reindexed"] == []
+        assert payload["context_usage"] == {"total_tokens": 1000}
+        assert payload["disk_warning"] is None
+
+    async def test_post_response_complete_fires_even_when_the_turn_fails(
+        self, service, events
+    ):
+        """The Context tab and file tree wait on it; skipping it leaves them stale."""
+        service.session.turn_events = [RuntimeError("pump exploded")]
+        await send(service)
+        assert "postResponseComplete" in events.names()
+
+    async def test_a_failure_outside_the_pump_still_completes_the_stream(
+        self, service, events
+    ):
+        service.session.turn_events = [RuntimeError("pump exploded")]
+        await send(service)
+        payload = events.payload_of("streamComplete")
+        assert payload["is_error"] is True
+        assert payload["terminal_reason"] == "engine_error"
+
+    async def test_a_failed_usage_refetch_is_not_a_failed_turn(self, service, events):
+        service.session.context_usage = None
+        service.session.control_error = RuntimeError("no response")
+        await send(service)
+        assert events.payload_of("postResponseComplete")["context_usage"] is None
+
+    async def test_usage_is_not_refetched_from_a_disconnected_engine(
+        self, service, events
+    ):
+        service.session.ready = True
+        service.session.turn_events = []
+
+        async def drop_ready(turn, emit=None):
+            service.session.ready = False
+            return {}
+
+        service.session.run_turn = drop_ready
+        await send(service)
+        assert events.payload_of("postResponseComplete")["context_usage"] is None
+
+    async def test_a_broadcast_failure_does_not_break_the_turn(
+        self, service, events, caplog
+    ):
+        """A closed WebSocket must not truncate work the engine is doing."""
+        events.error = RuntimeError("socket closed")
+        with caplog.at_level(logging.WARNING):
+            await send(service)
+        assert events.names().count("streamChunk") == 1
+        assert "postResponseComplete" in events.names()
+        assert "socket closed" in caplog.text
+
+    async def test_no_callback_yet_is_not_an_error(self, tmp_path):
+        """It is wired after the RPC server starts, so it can be absent."""
+        svc = ClaudeCodeService(FakeConfig(tmp_path), engine_config=EngineConfig())
+        svc.session = FakeSession()
+        await send(svc)
+        assert len(svc.session.turns) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cancellation
+# ---------------------------------------------------------------------------
+
+
+class TestCancel:
+    async def test_cancel_passes_the_request_id_through(self, service):
+        answer = await service.cancel_streaming(REQUEST_ID)
+        assert answer == {"status": "interrupting"}
+        assert ("interrupt", (REQUEST_ID,)) in service.session.control_calls
+
+    async def test_a_cancel_failure_is_returned_not_raised(self, service):
+        service.session.control_error = RuntimeError("no response")
+        answer = await service.cancel_streaming(REQUEST_ID)
+        assert "no response" in answer["error"]
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+
+class TestState:
+    def test_current_state_has_every_key_the_frontend_reads(self, service):
+        state = service.get_current_state()
+        assert set(state) == {
+            "messages",
+            "selected_files",
+            "denied_read_files",
+            "session_id",
+            "repo_name",
+            "init_complete",
+            "engine_ready",
+            "streaming_active",
+            "active_streams",
+            "permission_mode",
+            "model",
+            "pending_permissions",
+            "doc_index_ready",
+            "doc_index_enriched",
+            "review_state",
+            "engine_health",
+        }
+
+    def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
+        state = service.get_current_state()
+        assert state["engine_ready"] is False
+        assert state["streaming_active"] is False
+        assert state["session_id"] is None
+        assert state["permission_mode"] == "default"
+
+    def test_later_phase_keys_are_present_but_empty(self, service):
+        """So the frontend contract does not change when they populate."""
+        state = service.get_current_state()
+        assert state["messages"] == []
+        assert state["denied_read_files"] == []
+        assert state["pending_permissions"] == []
+
+    def test_the_repo_name_comes_from_the_root(self, tmp_path, events):
+        root = tmp_path / "my-project"
+        root.mkdir()
+        svc = ClaudeCodeService(FakeConfig(root), event_callback=events)
+        assert svc.get_current_state()["repo_name"] == "my-project"
+
+    def test_it_falls_back_to_cwd_without_a_repo_root(self, events):
+        svc = ClaudeCodeService(FakeConfig(None), event_callback=events)
+        assert svc.get_current_state()["repo_name"] == Path.cwd().name
+
+
+class TestSelectedFiles:
+    def test_existing_files_are_kept(self, service, tmp_path):
+        (tmp_path / "a.py").write_text("x")
+        assert service.set_selected_files(["a.py"]) == ["a.py"]
+        assert service.get_selected_files() == ["a.py"]
+
+    def test_a_stale_selection_is_dropped(self, service):
+        """A deleted file must not frame a turn with a path that is gone."""
+        assert service.set_selected_files(["deleted.py"]) == []
+
+    def test_absolute_paths_are_accepted(self, service, tmp_path):
+        target = tmp_path / "a.py"
+        target.write_text("x")
+        assert service.set_selected_files([str(target)]) == [str(target)]
+
+    def test_junk_entries_are_dropped(self, service):
+        assert service.set_selected_files(["", None, 42]) == []
+
+    def test_none_clears_the_selection(self, service, tmp_path):
+        (tmp_path / "a.py").write_text("x")
+        service.set_selected_files(["a.py"])
+        assert service.set_selected_files(None) == []
+
+    def test_the_returned_list_is_a_copy(self, service, tmp_path):
+        (tmp_path / "a.py").write_text("x")
+        returned = service.set_selected_files(["a.py"])
+        returned.append("b.py")
+        assert service.get_selected_files() == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# Live controls
+# ---------------------------------------------------------------------------
+
+
+class TestLiveControls:
+    async def test_permission_mode_change_is_broadcast(self, service, events):
+        assert await service.set_permission_mode("plan") == {"mode": "plan"}
+        payload = events.payload_of("permissionModeChanged")
+        assert payload == {"mode": "plan", "by": "user"}
+
+    async def test_a_bad_mode_lists_the_valid_ones(self, service, events):
+        answer = await service.set_permission_mode("yolo")
+        assert "yolo" in answer["error"]
+        assert "plan" in answer["valid_modes"]
+        assert events.calls == []
+
+    async def test_a_control_on_a_lost_session_reports_the_reason(self, service):
+        service.session.control_error = SessionLostError("session gone")
+        assert await service.set_permission_mode("plan") == {"error": "session gone"}
+
+    async def test_an_unexpected_control_failure_is_wrapped(self, service):
+        service.session.control_error = RuntimeError("no response")
+        answer = await service.set_permission_mode("plan")
+        assert "Could not change the permission mode" in answer["error"]
+
+    async def test_model_change_returns_the_applied_model(self, service):
+        assert await service.set_model("claude-opus-5") == {"model": "claude-opus-5"}
+        assert await service.set_model(None) == {"model": None}
+
+    async def test_rewind_does_not_claim_to_know_what_was_restored(self, service):
+        """The SDK's rewind_files() returns nothing; refresh the tree instead."""
+        answer = await service.rewind_files("msg-uuid-1")
+        assert answer == {"restored": [], "user_message_id": "msg-uuid-1"}
+        assert ("rewind_files", ("msg-uuid-1",)) in service.session.control_calls
+
+    async def test_a_rewind_failure_is_returned(self, service):
+        service.session.control_error = RuntimeError("no checkpoint")
+        assert "no checkpoint" in (await service.rewind_files("m"))["error"]
+
+    async def test_stop_task_reports_stopping_not_stopped(self, service):
+        """The kill is asynchronous; the task reports its own terminal status."""
+        answer = await service.stop_task("task-1")
+        assert answer == {"status": "stopping", "task_id": "task-1"}
+
+    async def test_context_usage_is_timestamped(self, service):
+        answer = await service.get_context_usage()
+        assert answer["usage"] == {"total_tokens": 1000}
+        assert answer["fetched_at"].startswith("20")
+
+    async def test_context_usage_on_a_cold_engine_reports_the_reason(self, service):
+        service.session.control_error = EngineNotReadyError("not connected")
+        assert await service.get_context_usage() == {"error": "not connected"}
+
+    async def test_mcp_status_passes_through(self, service):
+        assert await service.get_mcp_status() == {"servers": []}
+
+    async def test_mcp_controls_report_what_they_did(self, service):
+        assert await service.reconnect_mcp_server("ac-dc") == {
+            "status": "reconnecting",
+            "name": "ac-dc",
+        }
+        assert await service.toggle_mcp_server("ac-dc", False) == {
+            "status": "ok",
+            "name": "ac-dc",
+            "enabled": False,
+        }
+
+    async def test_server_info_passes_through(self, service):
+        assert await service.get_server_info() == {"commands": ["review"]}
+
+    async def test_absent_server_info_is_an_empty_dict(self, service):
+        service.session.get_server_info = lambda: _none()
+        assert await service.get_server_info() == {}
+
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+
+class TestShutdown:
+    async def test_shutdown_disconnects_the_engine(self, service):
+        await service.connect_engine()
+        await service.shutdown()
+        assert service.session.disconnect_calls == 1
+
+    async def test_shutdown_cancels_a_turn_in_flight(self, service):
+        release = asyncio.Event()
+
+        async def hang(turn, emit=None):
+            service.session.turns.append(turn)
+            await release.wait()
+
+        service.session.run_turn = hang
+        await service.chat_streaming(REQUEST_ID, "hello")
+        await asyncio.sleep(0)
+        await service.shutdown()
+        await finish_turns(service)
+        assert service.session.disconnect_calls == 1
+
+
+async def _none():
+    return None

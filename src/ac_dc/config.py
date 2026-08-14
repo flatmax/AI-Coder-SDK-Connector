@@ -58,6 +58,7 @@ _MANAGED_FILES = frozenset({
 })
 
 _USER_FILES = frozenset({
+    "engine.json",
     "llm.json",
     "system_extra.md",
 })

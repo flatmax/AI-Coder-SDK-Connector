@@ -708,6 +708,22 @@ async def run(
         experimental=experimental,
     )
 
+    # Claude Code engine — conversion phase 1. Registered as a second
+    # service so the RPC surface (ClaudeCodeService.*) exists and can be
+    # exercised, while LLMService still serves the UI. The two do not
+    # share state and the native chat path is untouched; phase 2 wires
+    # permissions, phase 3 switches the frontend over
+    # (specs5/plan/README.md).
+    #
+    # The engine connects lazily — on the first turn or an explicit
+    # ClaudeCodeService.connect_engine() call — deliberately. Connecting
+    # here would add a second `claude` subprocess (~295 MB) to every
+    # startup for a service nothing is calling yet.
+    from ac_dc.claude_code import ClaudeCodeService
+    claude_code_service = ClaudeCodeService(
+        config, repo=repo, event_callback=event_callback,
+    )
+
     # Wire the LLMService reference into Settings so
     # reload_app_config can refresh the system prompt when
     # app-config changes affect prompt composition (notably
@@ -734,6 +750,7 @@ async def run(
         repo._collab = collab_instance
         settings._collab = collab_instance
         doc_convert._collab = collab_instance
+        claude_code_service._collab = collab_instance
     else:
         server = RpcServer(
             port=server_port,
@@ -745,6 +762,7 @@ async def run(
     server.add_service(llm_service)
     server.add_service(settings)
     server.add_service(doc_convert)
+    server.add_service(claude_code_service)
 
     # Wire the post-write callback — every successful file
     # write/create/rename on Repo triggers
