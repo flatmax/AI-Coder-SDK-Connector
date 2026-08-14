@@ -97,6 +97,12 @@ class TestLibreOfficeDispatch:
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
+        # The route this test pins needs BOTH deps. Without PyMuPDF the
+        # pre-flight check in convert_pptx_via_libreoffice falls back to
+        # markitdown without ever spawning soffice, so `calls` stays empty
+        # and the assertion below fails for a reason that has nothing to do
+        # with dispatch. Same guard as the pptx case above.
+        _require_pymupdf()
         _write_source(scan_root, "deck.odp", b"fake odp")
 
         doc_convert.convert_files(["deck.odp"])

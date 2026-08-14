@@ -21,9 +21,12 @@ The state phase 3 inherits:
   permission-gated write, was verified live against the bundled CLI 2.1.229.
 - **`LLMService` and `src/ac_dc/llm/` are intact and still registered, and nothing in the chat path
   reaches them.** That is deliberate, per the no-interleaving rule below. Phase 3 deletes them.
-- **Suites:** python 1 failed / 3897 passed; webapp 89 files / 3215 passed. The single failure is
-  pre-existing and unrelated — `test_odp_routes_to_libreoffice_when_available` needs PyMuPDF
-  (`import fitz`), which is not installed. `doc_convert/` is on the keep-unchanged list.
+- **Suites are green:** python 3897 passed, nothing failing; webapp 89 files / 3215 passed. The one
+  long-standing failure — `test_odp_routes_to_libreoffice_when_available` — was a test bug, not a
+  missing install: PyMuPDF is an optional extra, and without it an `.odp` correctly falls back
+  without spawning soffice, so the test's dispatch assertion failed for an unrelated reason. It now
+  carries the `_require_pymupdf()` guard its `.pptx` sibling already had and skips honestly. No
+  production code touched; `doc_convert/` stays on the keep-unchanged list.
 
 **The permission gate was wrong in six ways and is fixed.** Two were recorded as open findings when
 phase 2 first closed; probing the live CLI for what it actually suggests turned them into six

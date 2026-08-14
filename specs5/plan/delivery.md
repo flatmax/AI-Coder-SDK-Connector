@@ -247,17 +247,27 @@ Frontend, 509 tests across the modules this phase touched or created:
 | `chat-panel/events.test.js` | 50 |
 | `chat-panel/permission-mode.test.js` | 38 |
 
-Whole-suite state at the close of the phase: python **1 failed, 3897 passed**, webapp **89 files,
-3215 passed**. The one failure is below.
+Whole-suite state at the close of the phase: python **3897 passed** with nothing failing, webapp
+**89 files, 3215 passed**. The one failure that stood here is fixed — below.
 
 **Phase 1's absence assertions are now partly deleted**, as phase 1's entry said they should be:
 `resolve_permission` and `set_denied_read_files` exist and are tested. `history_list` and
 `get_denied_read_files` are still asserted absent — phase 5 and the file-picker work respectively.
 
-One pre-existing failure in the full python run, untouched by this phase and unrelated to it:
-`test_doc_convert/test_libreoffice_pipeline.py::TestLibreOfficeDispatch::test_odp_routes_to_libreoffice_when_available`,
-which needs PyMuPDF (`import fitz` fails) that is not installed. `doc_convert/` is on the
-inventory's keep-unchanged list and this phase's diff touches none of it.
+**One pre-existing failure, unrelated to this phase, now fixed** — and the first diagnosis of it
+was wrong, which is the interesting part.
+`test_doc_convert/test_libreoffice_pipeline.py::TestLibreOfficeDispatch::test_odp_routes_to_libreoffice_when_available`
+was recorded here as "needs PyMuPDF, which is not installed", implying an `import fitz` escaping
+somewhere. It was not. The failure was `assert 0 == 1` on the call log: PyMuPDF is an **optional**
+extra (`docs-convert` in `pyproject.toml`), `convert_pptx_via_libreoffice` pre-flight-checks it at
+`pdf_pipeline.py:94`, and without it an `.odp` falls back to markitdown **without ever spawning
+soffice**. That fallback is the documented, intended behaviour; the test was asserting the
+LibreOffice route was taken without declaring that it needs both deps. Its `.pptx` sibling twenty
+lines above guards itself with `_require_pymupdf()`; the `.odp` case had been written without it.
+Adding the same guard turns a false failure into an honest skip, so a base install now runs the
+suite green: `tests/test_doc_convert/` is **113 passed, 75 skipped**, and the whole python suite has
+no failures. No production code was touched — `doc_convert/` is on the inventory's keep-unchanged
+list and stays there.
 
 ### Live verification
 
