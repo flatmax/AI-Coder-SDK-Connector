@@ -133,6 +133,18 @@ export const ALWAYS_ALLOW_SESSION_TOOLTIP =
   + 'there is nothing to revoke afterwards, and nothing to find later '
   + 'either.';
 
+/**
+ * What the "shared" tag on a rule row has to say (CC-16).
+ *
+ * `.claude/settings.json` is git-tracked, so this grant is not personal: it
+ * reaches every checkout that pulls the commit, and nobody there clicked
+ * anything.
+ */
+export const SHARED_RULE_TOOLTIP =
+  'Writes the rule to the git-tracked settings file, so it applies to '
+  + 'everyone who pulls it — not just you. Commit it deliberately, or pick '
+  + 'the row above to keep the grant on this machine.';
+
 /** Destination file for each rule destination the CLI names. */
 export const DESTINATION_FILES = {
   projectSettings: '.claude/settings.json',

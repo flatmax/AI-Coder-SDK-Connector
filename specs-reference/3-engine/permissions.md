@@ -74,8 +74,9 @@ Three consequences worth stating, because each contradicts a reasonable guess:
 - **`destination: "session"` is normal, not an edge case.** Any dialog copy that denies the
   existence of session-scoped grants is false.
 - **Persisted rules go to `localSettings`**, `.claude/settings.local.json` at the git root — not
-  to `projectSettings`. AC⚡DC's derived rules still default to `projectSettings`, which is a
-  git-tracked file. That divergence is open.
+  to `projectSettings`. AC⚡DC's derived rules follow the CLI here (CC-16): `localSettings` is the
+  default, and `projectSettings` is reachable only from the extra, `shared`-tagged menu row. A
+  destination the CLI names is used exactly as named, `session` included.
 
 #### How AC⚡DC answers a mode suggestion
 
@@ -108,8 +109,14 @@ When the CLI offers no suggestion of its own, AC⚡DC derives two, **narrowest f
 
 | Order | For `git push origin main` | Grants |
 |---|---|---|
-| 1 (default) | `Bash(git push origin main)` | exactly what the dialog showed |
-| 2 (menu) | `Bash(git push:*)` | every `git push`, including `--force` |
+| 1 (default) | `Bash(git push origin main)` → `localSettings` | exactly what the dialog showed, on this machine |
+| 2 (menu) | `Bash(git push:*)` → `localSettings` | every `git push`, including `--force` |
+| 3 (menu, tagged `shared`) | `Bash(git push origin main)` → `projectSettings` | what the dialog showed, for everyone who pulls the commit |
+
+Row 3 exists once per dialog, not once per rule, and it always carries the *narrowest* content: the
+wider grant and the wider audience must not arrive on the same click. It is built only for rules
+AC⚡DC derived — a CLI suggestion keeps the destination the CLI chose, since promoting its
+`session` suggestion to a committed rule would invent a persisted grant it declined to ask for.
 
 The literal command is the default because it is what the CLI derives and because the prefix
 pattern grants more than the user looked at. The prefix stays available as a deliberate choice
@@ -207,7 +214,7 @@ PermissionUpdate(
     type="addRules",
     rules=[PermissionRuleValue(tool_name="Bash", rule_content="npm test:*")],
     behavior="allow",
-    destination="projectSettings",
+    destination="localSettings",
 )
 ```
 
@@ -215,9 +222,17 @@ PermissionUpdate(
   AC⚡DC writes `addRules` only.
 - `behavior` ∈ `allow`, `deny`, `ask`.
 - `destination` ∈ `userSettings`, `projectSettings`, `localSettings`, `session`. Default for "always
-  allow" is `projectSettings` (`.claude/settings.json`, committed and shared with the CLI).
-  `session` is never used for "always allow" — an invisible in-memory grant is exactly what the parent
-  spec forbids.
+  allow" is `localSettings` (`.claude/settings.local.json`, git-ignored) — the file the CLI persists
+  its own approvals to (CC-16). `projectSettings` is offered as one extra menu row, tagged `shared`,
+  because a git-tracked grant reaches every checkout that pulls it. AC⚡DC never *chooses* `session`
+  for a derived rule — an invisible in-memory grant is what the parent spec forbids — but it does
+  pass one back unchanged when the CLI suggested it, which for reads outside the cwd is the common
+  case.
+- **No derived rule may name a path under `.claude/`.** `Edit(.claude/settings.json)` is a permission
+  to grant permissions: with it the agent can write `"Bash(*)": "allow"` into its own gate. The check
+  is on a path component, so `.claude-notes.md` is unaffected, and it holds for absolute paths too —
+  `~/.claude/settings.json` is the same escalation one directory further out. Such a call is still
+  approvable once; it simply never becomes standing.
 - `to_dict()` emits camelCase (`toolName`, `ruleContent`); the dataclass is what we pass, the dict is
   what goes on the wire.
 
@@ -287,6 +302,7 @@ SuggestedRule:
     behavior: "allow" | "deny" | "ask"
     destination: string
     origin: "cli" | "derived"          // cli ⇒ came from context.suggestions
+    shared: bool                       // true ⇒ writes the git-tracked file; the row is tagged
 
 SuggestedMode:
     mode: string                       // only modes the engine holds copy for; never bypassPermissions

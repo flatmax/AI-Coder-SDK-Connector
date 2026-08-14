@@ -380,6 +380,10 @@ file, so it is not dishonest — but it means an always-allow can land a permiss
 committed file and share it with the whole team. One-word fix; not made here because it changes
 which file gets written and deserves its own decision.
 
+> **Closed at the start of phase 3** by [`decisions.md`](decisions.md) CC-16: `localSettings` is the
+> default, `projectSettings` survives as one `shared`-tagged menu row, and no derived rule may name a
+> path under `.claude/` — the second defect the first one was hiding.
+
 ### Deliberately not built
 
 - **No `Edit`/`MultiEdit` input editing in the dialog.** `Write` gets a diff preview the user can

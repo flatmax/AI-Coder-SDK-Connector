@@ -363,6 +363,7 @@ describe('describeRule', () => {
       destination: '.claude/settings.local.json',
       derived: false,
       session: false,
+      shared: false,
     });
   });
 
@@ -383,6 +384,7 @@ describe('describeRule', () => {
       destination: '.claude/settings.json',
       derived: true,
       session: false,
+      shared: false,
     });
   });
 
@@ -401,7 +403,21 @@ describe('describeRule', () => {
       destination: '(this session only)',
       derived: false,
       session: true,
+      shared: false,
     });
+  });
+
+  it('flags the row that writes to the git-tracked file', () => {
+    // Two rows differing only by `.local` in a filename is a distinction a
+    // person reading quickly will not make, and the consequence — the grant
+    // reaching everyone who pulls — is not undone by unclicking (CC-16).
+    expect(describeRule({
+      tool_name: 'Edit',
+      rule_content: 'src/x.py',
+      destination: 'projectSettings',
+      origin: 'derived',
+      shared: true,
+    }).shared).toBe(true);
   });
 
   it('passes an unmapped destination through verbatim', () => {

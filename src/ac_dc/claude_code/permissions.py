@@ -525,6 +525,22 @@ def build_answer_input(
     return {**tool_input, "answers": answers}
 
 
+# Where an "always allow" grant is written (CC-16).
+#
+# `localSettings` is `.claude/settings.local.json`, git-ignored, and it is
+# where the CLI persists its own approvals (observed against 2.1.229 and
+# recorded in specs-reference/3-engine/permissions.md). Defaulting anywhere
+# else means the same approval lands in a different file depending on which
+# front end the user was in, so "what have I allowed here?" has two answers.
+#
+# `projectSettings` is `.claude/settings.json`, git-tracked. It is reachable
+# only through the separately-tagged menu entry built below, because a grant
+# that arrives in someone else's checkout by `git pull` is wider than the
+# one call the dialog put on screen — and wider than its label admits.
+DEFAULT_RULE_DESTINATION = "localSettings"
+SHARED_RULE_DESTINATION = "projectSettings"
+
+
 def _rule_label(tool_name: str, rule_content: str | None, behavior: str) -> str:
     target = f"({rule_content})" if rule_content else ""
     verb = {"allow": "Always allow", "deny": "Always deny", "ask": "Always ask about"}.get(
@@ -538,8 +554,9 @@ def _suggested_rule(
     rule_content: str | None,
     *,
     behavior: str = "allow",
-    destination: str = "projectSettings",
+    destination: str = DEFAULT_RULE_DESTINATION,
     origin: str = "derived",
+    shared: bool = False,
 ) -> dict[str, Any]:
     return {
         "label": _rule_label(tool_name, rule_content, behavior),
@@ -548,6 +565,9 @@ def _suggested_rule(
         "behavior": behavior,
         "destination": destination,
         "origin": origin,
+        # True only for the one entry that writes to the git-tracked file.
+        # The dialog needs it to say so; nothing else depends on it.
+        "shared": shared,
     }
 
 
@@ -637,9 +657,23 @@ def _derived_path_rule(repo_root: Path, raw_path: Any) -> str | None:
     writes to every file in the repository. Widening a grant beyond what
     the user looked at is the one error this dialog exists to prevent;
     being too narrow only costs another prompt.
+
+    Returns ``None`` for anything under a ``.claude/`` directory, wherever it
+    is (CC-16). A rule granting writes to `.claude/settings.json` is a
+    permission to grant permissions: once the agent holds it, it can write
+    ``"Bash(*)": "allow"`` into its own gate and this dialog never opens
+    again. The call itself stays approvable — once, on purpose, by a human
+    reading the diff — but no click here turns it into a standing grant.
     """
     absolute = _resolve_path(repo_root, raw_path)
     if absolute is None:
+        return None
+    if any(part == ".claude" for part in absolute.parts):
+        logger.info(
+            "No standing rule derived for %s: paths under .claude/ grant the "
+            "power to grant permissions (CC-16)",
+            absolute,
+        )
         return None
     try:
         relative = absolute.relative_to(repo_root)
@@ -686,7 +720,10 @@ def derive_suggested_rules(
             logger.debug("Not a rule suggestion (%r); not on the rule control", kind)
             continue
         behavior = getattr(suggestion, "behavior", None) or "allow"
-        destination = getattr(suggestion, "destination", None) or "projectSettings"
+        # A destination the CLI named is used as named — including `session`,
+        # which it suggests often. The default only covers a suggestion that
+        # omitted one.
+        destination = getattr(suggestion, "destination", None) or DEFAULT_RULE_DESTINATION
         for rule in getattr(suggestion, "rules", None) or []:
             name = getattr(rule, "tool_name", None)
             if not name:
@@ -717,7 +754,28 @@ def derive_suggested_rules(
     # Deliberately nothing for `mcp`, `delegate`, or `interact`: the only
     # rule we could derive for them is a bare tool grant, and AC-DC never
     # writes one (specs5/3-engine/permissions.md § Decisions).
+    if rules:
+        rules.append(_shared_variant(rules[0]))
     return rules
+
+
+def _shared_variant(rule: dict[str, Any]) -> dict[str, Any]:
+    """The same rule, written to the git-tracked file instead (CC-16).
+
+    Offered for the *narrowest* derived rule only, and only as an extra menu
+    entry — one more row, not a second row per rule. A team allowlist is a
+    real thing to want; making it the same click as a personal grant is what
+    CC-16 rules out.
+
+    Never built for a CLI suggestion. The CLI chooses its own destination and
+    frequently chooses `session`; turning that into a committed rule would
+    invent a persisted grant it declined to ask for.
+    """
+    return {
+        **rule,
+        "destination": SHARED_RULE_DESTINATION,
+        "shared": True,
+    }
 
 
 # The permission modes a dialog may offer, and the copy that states what
@@ -1401,7 +1459,7 @@ class PermissionBroker:
                     )
                 ],
                 behavior=rule.get("behavior") or "allow",
-                destination=rule.get("destination") or "projectSettings",
+                destination=rule.get("destination") or DEFAULT_RULE_DESTINATION,
             )
         except Exception:
             logger.exception("Could not build a PermissionUpdate from %r", rule)

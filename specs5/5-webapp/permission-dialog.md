@@ -170,10 +170,17 @@ avoid.
 ### Always allow shows the rule, not a promise
 
 The control is labelled with the rule that will be written and its destination is stated next to it
-(`.claude/settings.json` for a project rule; `.claude/settings.local.json` for a local one). Rules
-suggested by the CLI (`origin: "cli"`) are offered first and unlabelled; a rule AC⚡DC derived itself is
-marked "derived" so the user knows the pattern is our guess at their intent rather than the CLI's own
-normalisation.
+(`.claude/settings.local.json` for the default, local grant; `.claude/settings.json` for the shared
+one). Rules suggested by the CLI (`origin: "cli"`) are offered first and unlabelled; a rule AC⚡DC
+derived itself is marked "derived" so the user knows the pattern is our guess at their intent rather
+than the CLI's own normalisation.
+
+A grant is **local by default** and reaches the git-tracked file only through the last menu row,
+which carries a `shared` tag as well as the filename (CC-16). Two rows differing only by `.local` in
+a path is not a distinction someone clicking quickly will make, and this one cannot be undone by
+clicking again: the grant travels to every checkout that pulls the commit, where nobody clicked
+anything. Nothing in the menu ever names a path under `.claude/` — a rule over the settings file is
+a permission to grant permissions.
 
 Two consequences are stated in the control's tooltip rather than left to be discovered:
 

@@ -296,3 +296,56 @@ execution grant, which is precisely what the existing restriction policy exists 
 **Consequence:** if no localhost client is connected when a permission request arrives, the
 request is denied after a timeout with a reason the transcript records. A headless AC⚡DC cannot
 be driven by a remote collaborator into running commands.
+
+---
+
+## CC-16 — Always-allow grants persist to `localSettings`, and never to `.claude/**` **(user)**
+
+A rule derived from an "always allow" click names `destination: "localSettings"`
+(`.claude/settings.local.json`, git-ignored). `projectSettings` is not a default; it is available
+only as an explicitly-labelled second entry in the rule menu that says the grant will be committed.
+Separately, no derived rule may ever name a path under `.claude/`.
+
+**Why it matters:** three reasons, in order of weight.
+
+1. **It is where the CLI puts its own grants.** Observed against CLI 2.1.229 and recorded in
+   [`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md):
+   a persisted rule goes to `localSettings`. With AC⚡DC defaulting to `projectSettings`, the same
+   approval landed in a different file depending on which front end the user happened to be in, so
+   "what have I allowed in this repo?" had two answers and only one of them was the CLI's.
+2. **A click must not become a commit.** `.claude/settings.json` is git-tracked. AC⚡DC is a
+   multi-client system (CC-15, [`../4-features/collaboration.md`](../4-features/collaboration.md)):
+   one participant's trust decision would have become the team's checked-in policy, shared by the
+   next `git push`. A shared allowlist is a policy, and a policy deserves a reviewed edit rather
+   than a button. The dialog copy never said "and share this with your team", and a grant wider
+   than its label is the defect class the six always-allow fixes were about.
+3. **`.claude/**` is a permission to grant permissions.** Approving one write to
+   `.claude/settings.json` would otherwise derive `Edit(.claude/settings.json)`, after which the
+   agent can write `Bash(*): allow` into its own gate and the dialog never opens again. The
+   exclusion is unconditional and does not depend on which destination is chosen, because the
+   escalation is in the *path*, not the file the rule lives in.
+
+**Consequence:** `derive_suggested_rules` returns no rule at all for a write under `.claude/`, so
+such a call is approvable once but never permanently. `permissions.py` continues to honour an
+explicit `destination` on a CLI suggestion; the change is to what AC⚡DC's own derivation defaults.
+
+## CC-17 — The HUD and Context tab are replaced in phase 3, not vacated **(user)**
+
+`token-hud.js` and `context-tab.js` are deleted by the rip-out and immediately replaced with
+minimal panels over Claude Code's own numbers. The designed visualisation remains phase 6.
+
+**Why it matters:** both files are fed by `get_context_breakdown` and are written in tier
+vocabulary — the RPC and the concept both go with the engine. Leaving them mounted past phase 3
+would leave two panels that render nothing, or worse, a last-known number that never updates
+again; and a permanently-empty panel is indistinguishable to a user from a broken one. Deleting
+them without replacement instead leaves the product with no answer to "how full is the context and
+what did that turn cost" for a whole phase.
+
+The replacement is small because phase 2 already shipped the data path: the result event carries
+`num_turns`, `usage`, `model_usage` and `total_cost_usd`, the service refreshes `context_usage`
+after every turn, and `get_context_usage` exists as an RPC. What is missing is only rendering.
+
+**Consequence:** phase 3 adds a HUD strip (context percentage, per-turn cost, active model) and a
+Context tab that lists what `get_context_usage()` reports. Phase 6 upgrades them into the
+visualisation [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md) describes,
+starting from a working panel and a gate that can already be checked against `/context`.

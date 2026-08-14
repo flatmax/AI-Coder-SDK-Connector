@@ -458,6 +458,19 @@ export const PERMISSION_DIALOG_STYLES = css`
     margin-left: 6px;
   }
 
+  /* Louder than the derived tag on purpose: a derived rule may be wrong and
+     asks to be read, whereas a shared one leaves this machine (CC-16). */
+  .shared-tag {
+    color: #f0883e;
+    border: 1px solid #f0883e;
+    border-radius: 4px;
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    margin-left: 6px;
+    padding: 0 4px;
+    text-transform: uppercase;
+  }
+
   .menu {
     position: absolute;
     bottom: 46px;

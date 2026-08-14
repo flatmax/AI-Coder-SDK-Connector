@@ -49,11 +49,14 @@ applies such a mode silently — `permissionMode` appears only in the `init` mes
 reports the switch back through the service, which broadcasts `permissionModeChanged` and keeps the
 panel's mode pill truthful.
 
-**One open decision, one word wide:** derived rules still name `destination: "projectSettings"`
+**The open decision is closed:** derived rules named `destination: "projectSettings"`
 (`.claude/settings.json`, git-tracked) where the CLI persists its own approvals to `localSettings`
-(`.claude/settings.local.json`, gitignored). As it stands, an "always allow" can land a permission
-grant in a committed file. Changing it is a one-word edit in `derive_suggested_rules`; it was left
-alone because which file a grant belongs in is a policy call, not a bug fix.
+(`.claude/settings.local.json`, gitignored), so an "always allow" could land a permission grant in a
+committed file. `localSettings` is now the default and `projectSettings` is offered only as an
+explicitly-labelled menu entry — [`decisions.md#cc-16`](decisions.md). Closing it surfaced a second
+defect of the same kind: nothing stopped a derived rule from naming a path under `.claude/`, which
+would have turned one approved write into `Edit(.claude/settings.json)` — a permission to grant
+permissions. Derived rules now refuse that path outright.
 
 ## The one-paragraph version
 
@@ -110,7 +113,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **0. Plan and specs** ✅ | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
 | **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
-| **3. Rip-out** | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. | `grep -r litellm src/` is empty; test suite green. |
+| **3. Rip-out** | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
 | **6. Context and cost visualisation** | Context tab rebuilt on `get_context_usage()`; HUD rebuilt on `ResultMessage.model_usage` and `RateLimitEvent`. | The Context tab shows the same numbers as `/context` in the CLI, live. |

@@ -202,7 +202,8 @@ export function defaultDenyReason(payload) {
  * (permission-dialog.md § Always allow shows the rule, not a promise).
  *
  * @param {object|null} rule
- * @returns {{label: string, destination: string, derived: boolean, session: boolean}|null}
+ * @returns {{label: string, destination: string, derived: boolean,
+ *   session: boolean, shared: boolean}|null}
  */
 export function describeRule(rule) {
   if (!rule || !rule.tool_name) return null;
@@ -214,6 +215,12 @@ export function describeRule(rule) {
     label: `${verb} ${rule.tool_name}${target}`,
     destination: DESTINATION_FILES[rule.destination] || rule.destination || '',
     derived: rule.origin !== 'cli',
+    // The one entry that writes to the git-tracked file (CC-16). The
+    // destination chip alone does not carry it: two menu rows differing only
+    // by `.local` in a filename is a distinction a person reading quickly
+    // will not make, and the consequence — the grant reaching everyone who
+    // pulls — is not recoverable by unclicking.
+    shared: rule.shared === true,
     // Session grants are not written anywhere, so the tooltip has to
     // promise something different. The CLI suggests this destination for
     // reads outside the working directory, so it is a normal case rather

@@ -16,7 +16,11 @@
 
 import { html } from 'lit';
 
-import { ALWAYS_ALLOW_SESSION_TOOLTIP, ALWAYS_ALLOW_TOOLTIP } from './constants.js';
+import {
+  ALWAYS_ALLOW_SESSION_TOOLTIP,
+  ALWAYS_ALLOW_TOOLTIP,
+  SHARED_RULE_TOOLTIP,
+} from './constants.js';
 import {
   answersComplete,
   describeMode,
@@ -78,6 +82,10 @@ export function renderDecisions(host, payload) {
                         + 'not suggest it, so check that it matches what you mean.'
                       }>derived</span>`
                     : null}
+                  ${primaryRule?.shared
+                    ? html`<span class="shared-tag" title=${SHARED_RULE_TOOLTIP}
+                      >shared</span>`
+                    : null}
                 </button>
                 ${rules.length > 1
                   ? html`
@@ -107,6 +115,10 @@ export function renderDecisions(host, payload) {
                             <span class="destination">→ ${described.destination}</span>
                             ${described.derived
                               ? html`<span class="derived-tag">derived</span>`
+                              : null}
+                            ${described.shared
+                              ? html`<span class="shared-tag" title=${SHARED_RULE_TOOLTIP}
+                                >shared</span>`
                               : null}
                           </button>
                         `;

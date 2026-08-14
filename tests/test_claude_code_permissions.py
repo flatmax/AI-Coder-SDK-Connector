@@ -452,14 +452,17 @@ class TestSuggestedRules:
         rules = derive_suggested_rules(
             tmp_path, "Bash", {"command": "git push origin main"}, "exec", None
         )
-        assert [rule["rule_content"] for rule in rules] == [
+        assert [rule["rule_content"] for rule in rules if not rule["shared"]] == [
             "git push origin main",
             "git push:*",
         ]
 
     def test_a_plain_command_prefixes_on_one_token(self, tmp_path):
         rules = derive_suggested_rules(tmp_path, "Bash", {"command": "ls -la"}, "exec", None)
-        assert [rule["rule_content"] for rule in rules] == ["ls -la", "ls:*"]
+        assert [rule["rule_content"] for rule in rules if not rule["shared"]] == [
+            "ls -la",
+            "ls:*",
+        ]
 
     def test_a_command_rule_keeps_the_command_intact(self, tmp_path):
         """Collapsing internal whitespace would produce a rule that never matches.
@@ -576,6 +579,106 @@ class TestSuggestedRules:
         """The one rule we could derive for these is a bare grant. Never."""
         for tool, klass in (("Task", "delegate"), ("mcp__x__y", "mcp"), ("AskUserQuestion", "interact")):
             assert derive_suggested_rules(tmp_path, tool, {}, klass, None) == []
+
+
+# ---------------------------------------------------------------------------
+# Where a grant is written (CC-16)
+# ---------------------------------------------------------------------------
+
+
+class TestRuleDestination:
+    """A click must not commit a permission grant.
+
+    The CLI persists its own approvals to ``localSettings``
+    (``.claude/settings.local.json``, git-ignored). AC-DC defaulted to
+    ``projectSettings`` (``.claude/settings.json``, git-tracked), so the same
+    approval landed in a different file depending on which front end the user
+    was in — and one of those files travels to the rest of the team on the
+    next push.
+    """
+
+    def test_a_derived_rule_defaults_to_the_git_ignored_file(self, tmp_path):
+        rules = derive_suggested_rules(
+            tmp_path, "Edit", {"file_path": "a/b.py"}, "write", None
+        )
+        assert rules[0]["destination"] == "localSettings"
+        assert rules[0]["shared"] is False
+
+    def test_the_shared_variant_is_last_and_says_so(self, tmp_path):
+        """One extra row, not a second row per rule.
+
+        A team allowlist is a real thing to want; it is just not the same
+        click as a personal grant.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Bash", {"command": "git push origin main"}, "exec", None
+        )
+        shared = [rule for rule in rules if rule["shared"]]
+        assert len(shared) == 1
+        assert rules[-1] is shared[0]
+        assert shared[0]["destination"] == "projectSettings"
+        # The narrowest rule, not the prefix: the wider grant and the wider
+        # audience must not arrive on the same click.
+        assert shared[0]["rule_content"] == "git push origin main"
+
+    def test_a_cli_suggestion_gets_no_shared_variant(self, tmp_path):
+        """The CLI chose its destination. We do not widen the audience for it."""
+        rules = derive_suggested_rules(
+            tmp_path,
+            "Bash",
+            {"command": "git status"},
+            "exec",
+            [FakeSuggestion([FakeRule("Bash", "git status")], destination="localSettings")],
+        )
+        assert [rule["destination"] for rule in rules] == ["localSettings"]
+        assert not any(rule["shared"] for rule in rules)
+
+    def test_a_session_suggestion_stays_session(self, tmp_path):
+        """`session` is what the CLI suggests for a read outside the cwd.
+
+        Turning it into a committed rule would invent a persisted grant it
+        declined to ask for.
+        """
+        rules = derive_suggested_rules(
+            tmp_path,
+            "Read",
+            {"file_path": "/etc/hosts"},
+            "read",
+            [FakeSuggestion([FakeRule("Read", "//etc/hosts")], destination="session")],
+        )
+        assert [rule["destination"] for rule in rules] == ["session"]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/agents/reviewer.md",
+            "nested/.claude/settings.json",
+            "/home/someone/.claude/settings.json",
+        ],
+    )
+    def test_no_standing_grant_is_derived_for_the_claude_directory(self, tmp_path, path):
+        """A rule over ``.claude/`` is a permission to grant permissions.
+
+        With ``Edit(.claude/settings.json)`` written, the agent can add
+        ``"Bash(*)": "allow"`` to its own gate and the dialog never opens
+        again. The call stays approvable once, by a human reading the diff.
+        """
+        assert derive_suggested_rules(
+            tmp_path, "Edit", {"file_path": path}, "write", None
+        ) == []
+
+    def test_a_file_merely_named_like_the_claude_directory_is_fine(self, tmp_path):
+        """The guard is on a path *component*, not a substring.
+
+        ``.claude-notes`` is an ordinary file and refusing it would be a
+        second prompt for no reason.
+        """
+        rules = derive_suggested_rules(
+            tmp_path, "Edit", {"file_path": "docs/.claude-notes.md"}, "write", None
+        )
+        assert rules[0]["rule_content"] == "docs/.claude-notes.md"
 
 
 # ---------------------------------------------------------------------------
