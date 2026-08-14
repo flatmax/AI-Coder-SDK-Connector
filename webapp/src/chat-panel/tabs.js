@@ -3,9 +3,6 @@
 // Owns:
 //   - Tab state lookup by request ID (routes
 //     stream chunks/completions to the right tab)
-//   - Active-tab snapshot/restore for URL chips
-//     (singleton ac-url-chips element shows the
-//     active tab's chips; we snapshot on switch)
 //   - Tab activation, close, overflow menu
 //   - Tab strip rendering
 //   - Agent-tab spawning when the orchestrator's
@@ -83,63 +80,6 @@ export function findTabForRequest(panel, requestId) {
     }
   }
   return null;
-}
-
-// ---------------------------------------------------------------
-// Active-tab transition + URL-chip snapshot/restore
-// ---------------------------------------------------------------
-
-/**
- * Snapshot the leaving tab's URL chip state from the
- * singleton ``ac-url-chips`` element.
- *
- * Runs synchronously before ``_activeTabIdValue`` flips
- * so the Map read still reflects the departing tab.
- *
- * Defensive against early calls — before any render the
- * element doesn't exist in shadowRoot, in which case
- * there's nothing to snapshot.
- *
- * Stores a shallow copy so subsequent mutations to the
- * element's live Map don't retroactively alter the
- * snapshot. The chip-state values are themselves
- * objects; we don't deep-clone them because chip-state
- * mutation goes through ``_chips = new Map(...)``
- * reassignment in the component, not in-place edits.
- */
-export function snapshotUrlChipsForTab(panel, tabId) {
-  if (typeof tabId !== 'string' || !tabId) return;
-  const tab = panel._tabs.get(tabId);
-  if (!tab) return;
-  const chipsEl = panel.shadowRoot?.querySelector('ac-url-chips');
-  if (!chipsEl || !chipsEl._chips) return;
-  tab.urlChips = new Map(chipsEl._chips);
-}
-
-/**
- * Install the entering tab's URL chip snapshot into the
- * ``ac-url-chips`` element.
- *
- * Defers through ``updateComplete`` so the setter's
- * ``requestUpdate`` cycle finishes first — reading
- * shadowRoot synchronously after a property flip can
- * return a stale reference in some edge cases.
- *
- * An entering tab with no snapshot (freshly spawned
- * agent, or main tab in a new session) gets a fresh
- * empty Map. The chip component's render path handles
- * empty Maps by hiding the strip entirely.
- */
-export function restoreUrlChipsForTab(panel, tabId) {
-  panel.updateComplete.then(() => {
-    const chipsEl = panel.shadowRoot?.querySelector('ac-url-chips');
-    if (!chipsEl) return;
-    const tab = panel._tabs.get(tabId);
-    if (!tab) return;
-    chipsEl._chips = tab.urlChips
-      ? new Map(tab.urlChips)
-      : new Map();
-  });
 }
 
 // ---------------------------------------------------------------
@@ -811,9 +751,9 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
       // the work.
       //
       // Preserved: existing.messages (history
-      // accumulates across turns), existing.selectedFiles
-      // (per-tab file selection survives),
-      // existing.urlChips.
+      // accumulates across turns) and
+      // existing.selectedFiles (per-tab file selection
+      // survives).
       if (task) {
         existing.messages = [
           ...existing.messages,

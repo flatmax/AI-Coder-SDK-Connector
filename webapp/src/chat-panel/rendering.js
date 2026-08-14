@@ -6,7 +6,7 @@
 // that stitches them together. All functions take
 // the chat-panel instance as their first argument
 // — same convention as tabs.js / search.js /
-// streaming.js / urls.js / input.js.
+// streaming.js / input.js.
 //
 // The split is by visual region rather than by
 // state contract, so reading the render code top-
@@ -15,26 +15,35 @@
 //   render → tab strip → messages wrapper
 //                         → messages list
 //                           → renderMessage (per card)
+//                             → renderCompactionDivider (boundary marks)
 //                             → renderMessageToolbar
-//                             → renderAssistantBody
-//                             → renderEditSummary
-//                             → renderFileSummary
+//                             → renderTurnBlocks   (Claude Code turns)
+//                             → renderAssistantBody (native-engine turns)
+//                             → renderTurnFooter   (Claude Code turns)
+//                             → renderEditSummary   (native-engine turns)
+//                             → renderFileSummary   (native-engine turns)
 //                             → renderMessageImages
-//                             → renderFinishBadge
+//                             → renderTerminalBadge / renderFinishBadge
 //                           → renderStreamingMessage
 //                         → renderFileSearchOverlay
 //                       → disconnected-note
 //                       → input-area
 //                         → action bar
+//                           → renderPermissionModeSelector
 //                         → renderSearchBar
 //                         → renderSnippetDrawer
 //                         → input-history
 //                         → renderPendingImages
-//                         → ac-url-chips
 //                         → input row + send column
-//                       → ac-history-browser
+//                       → ac-history-browser (inert until phase 5)
 //                       → renderLightbox
-//                       → renderUrlViewDialog
+//
+// Assistant cards render one of two ways. A turn produced by Claude Code carries
+// a `blocks` array and goes through `renderTurnBlocks` / `renderTurnFooter`; a
+// turn from the native engine carries prose and goes through
+// `renderAssistantBody` / `renderEditSummary`. Both paths stay live through
+// phase 2 because the native engine is still constructed and old messages in a
+// restored transcript are still in the old shape. Phase 3 deletes the second.
 //
 // Helpers like `collectMessageFiles` and
 // `proseContainsPath` are kept here too because
@@ -54,15 +63,18 @@ import { renderEditCard } from '../edit-block-render.js';
 import { renderAgentCard } from '../agent-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
-import { renderLedRow } from './led-row.js';
-import { renderTabStrip } from './tabs.js';
 import {
-  _EXPERIMENTAL_ENABLED,
-  _REASONING_EFFORT_LEVELS,
-  _REASONING_EFFORT_ABBREV,
-  formatRunDuration,
-  parseAgentTabId,
-} from './helpers.js';
+  compactionSummary,
+  renderTerminalBadge,
+  renderTurnBlocks,
+  renderTurnFooter,
+  terminalBadge,
+} from './block-render.js';
+import { isEmptyTurn } from './blocks.js';
+import { renderLedRow } from './led-row.js';
+import { renderPermissionModeSelector } from './permission-mode.js';
+import { renderTabStrip } from './tabs.js';
+import { formatRunDuration, parseAgentTabId } from './helpers.js';
 import {
   computeSearchMatches,
   onFileSearchNext,
@@ -90,138 +102,51 @@ import {
   onLightboxKeyDown,
   onMessagesClick,
   onMessagesScroll,
-  onNewSession,
-  onOpenHistory,
   openLightbox,
   pasteMessageToPrompt,
   reattachImage,
   removePendingImage,
   send,
-  toggleReasoning,
-  setReasoningEffort,
   toggleSnippetDrawer,
   copyMessageText,
   speakMessage,
 } from './input.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
-import {
-  closeUrlViewDialog,
-  onUrlFetchRequested,
-  onUrlRemoveRequested,
-  onUrlViewKeyDown,
-  onUrlViewRequested,
-} from './urls.js';
 
 // ---------------------------------------------------------------
-// Mode toggle helper
+// What left the action bar in phase 2
 // ---------------------------------------------------------------
-
-/**
- * Resolve the active tab's mode + cross-ref state.
- *
- * Main tab reads from ``_mode`` / ``_crossRefEnabled``
- * (broadcast-driven from the orchestrator's
- * ``mode-changed`` events). Agent tabs read from
- * ``_tabModes`` (broadcast-driven from
- * ``agent-mode-changed`` events). The two state
- * sources are independent — switching mode on an
- * agent tab does NOT touch main's state and vice
- * versa.
- *
- * Returns ``{primary, xref}`` where ``primary`` is
- * ``'code'`` or ``'doc'`` and ``xref`` is bool.
- */
-function _resolveActiveTabMode(panel) {
-  if (panel._activeTabId === 'main') {
-    return {
-      primary: panel._mode,
-      xref: panel._crossRefEnabled,
-    };
-  }
-  const combined = panel._tabModes?.get(panel._activeTabId)
-    || 'code';
-  const xref = combined.endsWith('+xref');
-  const primary = combined.replace('+xref', '');
-  return { primary, xref };
-}
-
-/**
- * Render the mode toggle.
- *
- * Always rendered when the chat panel is mounted —
- * historical (read-only) tabs still benefit from
- * seeing what mode the agent ran in, even though
- * the toggle is disabled there.
- *
- * Disabled rules:
- *   - RPC disconnected — every tab.
- *   - Main tab: disabled when not localhost (collab
- *     participants can't switch the host's mode).
- *   - Agent tab: disabled while the agent is
- *     streaming (matches the backend's mid-stream
- *     rejection at ``LLMService.switch_agent_mode``).
- *   - Historical agent tab: always disabled (the
- *     ContextManager no longer exists).
- */
-function renderModeToggle(panel) {
-  const { primary, xref } = _resolveActiveTabMode(panel);
-  const isMain = panel._activeTabId === 'main';
-  const tab = panel._tabs.get(panel._activeTabId);
-  const streaming = !!(tab && tab.streaming);
-  const readOnly = !!(tab && tab.readOnly);
-  // Disabled rules. The localhost-only check is
-  // enforced by the backend (`_check_localhost_only`
-  // returns a `restricted` error which surfaces as
-  // a toast); we don't pre-gate here because no
-  // frontend signal currently carries the localhost
-  // flag.
-  const disabled = !panel.rpcConnected
-    || (!isMain && streaming)
-    || readOnly;
-  const codeTitle = isMain
-    ? 'Code mode — symbol index feeds context'
-    : streaming
-      ? 'Wait for the agent to finish before switching mode'
-      : 'Code mode — symbol index feeds this agent';
-  const docTitle = isMain
-    ? 'Document mode — doc index feeds context'
-    : streaming
-      ? 'Wait for the agent to finish before switching mode'
-      : 'Document mode — doc index feeds this agent';
-  const xrefTitle = streaming && !isMain
-    ? 'Wait for the agent to finish before toggling cross-reference'
-    : xref
-      ? 'Cross-reference ON — both indexes active (click to disable)'
-      : 'Cross-reference OFF — click to add the other index alongside';
-  return html`
-    <div class="mode-toggle search-collapsible" role="group"
-      aria-label="Context mode">
-      <div class="mode-segmented">
-        <button
-          class="mode-btn ${primary === 'code' ? 'active' : ''}"
-          ?disabled=${disabled}
-          title=${codeTitle}
-          aria-pressed=${primary === 'code'}
-          @click=${() => panel._switchMode('code')}
-        >💻</button>
-        <button
-          class="mode-btn ${primary === 'doc' ? 'active' : ''}"
-          ?disabled=${disabled}
-          title=${docTitle}
-          aria-pressed=${primary === 'doc'}
-          @click=${() => panel._switchMode('doc')}
-        >📄</button>
-      </div>
-      <button
-        class="crossref-btn ${xref ? 'active' : ''}"
-        ?disabled=${disabled}
-        title=${xrefTitle}
-        aria-pressed=${xref}
-        @click=${() => panel._toggleCrossRef()}
-      >🔀</button>
-    </div>
-  `;
-}
+//
+// Four controls used to sit on this bar and no longer do. Each drove the native
+// engine, and each would have kept reporting success while changing nothing once
+// the chat path moved to Claude Code. That is the exact failure the permission
+// dialog exists to prevent — a control whose visible state does not describe
+// what the engine will do — so they come off in the same commit that repoints
+// the path rather than in phase 3 with the engine itself:
+//
+//   💻/📄 + 🔀 — `LLMService.switch_mode` / `set_cross_reference`, choosing
+//     which index fed the native engine's context assembly. Claude Code builds
+//     its own context by reading files with its own tools; there is no index to
+//     switch. The context story returns in phase 6 as the Context tab and HUD,
+//     which *report* real usage instead of steering an index we no longer own.
+//
+//   🧠 + effort — reasoning flags passed as `chat_streaming` arguments the new
+//     signature does not take. Worse than merely inert: phase 2 renders thinking
+//     blocks, so a 🧠 toggle would read as the switch that controls them.
+//
+//   ✨ — `LLMService.new_session`. Session lifecycle belongs to the CLI now and
+//     lands in phase 5 alongside resume; a button that reset the wrong engine's
+//     conversation would leave the visible transcript and the real one disagreeing.
+//
+//   📜 — the history browser, reading native-engine session files. Phase 5.
+//
+// `ac-url-chips` went with them, for the same reason at one remove: the chips
+// fetched URLs into the native engine's context. The CLI has WebFetch.
+//
+// What replaces the lot is the permission-mode selector — the one action-bar
+// control that genuinely changes what the next tool call does. It is deliberately
+// the first child and deliberately outside every `.search-collapsible` group:
+// expanding the search bar must not be able to hide the safety posture.
 
 // ---------------------------------------------------------------
 // Top-level render
@@ -239,20 +164,17 @@ function renderModeToggle(panel) {
  *   │  file-search overlay (when in file mode)   │
  *   ├─ disconnected-note (when RPC down) ────────┤
  *   ├─ input-area ───────────────────────────────┤
- *   │  action-bar                                 │
+ *   │  action-bar (permission mode + search)      │
  *   │  search-bar                                 │
  *   │  snippet drawer (if open)                   │
  *   │  ac-input-history                           │
  *   │  pending images (if any)                    │
- *   │  ac-url-chips                               │
  *   │  input row (textarea + send column)         │
  *   ├─ ac-history-browser (modal) ────────────────┤
- *   ├─ lightbox (if open) ───────────────────────┤
- *   └─ URL view dialog (if open) ────────────────┘
+ *   └─ lightbox (if open) ───────────────────────┘
  *
- * The two overlays at the end (lightbox + URL
- * view) live at component-root level so they can
- * cover the whole shadow root regardless of
+ * The lightbox lives at component-root level so it
+ * can cover the whole shadow root regardless of
  * scroll position inside the messages list.
  */
 export function render(panel) {
@@ -287,81 +209,9 @@ export function render(panel) {
       : ''}
     <div class="input-area">
       <div class="action-bar" role="toolbar">
-        ${renderModeToggle(panel)}
-        <div class="action-group search-collapsible">
-          ${_EXPERIMENTAL_ENABLED
-            ? html`<div class="reasoning-control">
-                <button
-                  class="action-button reasoning-toggle ${panel
-                    ._reasoningEnabled
-                    ? 'active'
-                    : ''}"
-                  @click=${() => toggleReasoning(panel)}
-                  aria-label=${panel._reasoningEnabled
-                    ? 'Disable reasoning mode'
-                    : 'Enable reasoning mode'}
-                  aria-pressed=${panel._reasoningEnabled}
-                  title=${panel._reasoningEnabled
-                    ? `Reasoning enabled (effort: ${panel._reasoningEffort}) — extra thinking tokens. Click to disable.`
-                    : 'Reasoning disabled. Click to enable extended thinking for harder problems. (Experimental)'}
-                >
-                  🧠
-                  ${panel._reasoningEnabled
-                    ? html`<span class="reasoning-effort-badge"
-                        >${_REASONING_EFFORT_ABBREV[panel._reasoningEffort] ??
-                        panel._reasoningEffort}</span
-                      >`
-                    : ''}
-                </button>
-                ${panel._reasoningEnabled
-                  ? html`<select
-                      class="reasoning-effort-select"
-                      .value=${panel._reasoningEffort}
-                      @change=${(e) =>
-                        setReasoningEffort(panel, e.target.value)}
-                      aria-label="Reasoning effort level"
-                      title="Reasoning effort — higher means deeper thinking and more tokens. xhigh/max only apply on models that support them."
-                    >
-                      ${_REASONING_EFFORT_LEVELS.map(
-                        (level) => html`<option
-                          value=${level}
-                          ?selected=${level === panel._reasoningEffort}
-                        >
-                          ${level}
-                        </option>`,
-                      )}
-                    </select>`
-                  : ''}
-              </div>`
-            : ''}
-        </div>
+        ${renderPermissionModeSelector(panel)}
         <div class="action-divider search-collapsible" aria-hidden="true"></div>
         ${renderSearchBar(panel)}
-        ${panel._searchMode === 'file' || panel._activeTabId !== 'main'
-          ? ''
-          : html`
-              <div class="action-divider" aria-hidden="true"></div>
-              <div class="action-group search-collapsible">
-                <button
-                  class="action-button new-session-button"
-                  ?disabled=${!panel.rpcConnected || panel._streaming}
-                  @click=${() => onNewSession(panel)}
-                  aria-label="Start a new session"
-                  title="New session (clears the conversation)"
-                >
-                  ✨
-                </button>
-                <button
-                  class="action-button history-button"
-                  ?disabled=${!panel.rpcConnected}
-                  @click=${() => onOpenHistory(panel)}
-                  aria-label="Open history browser"
-                  title="Browse past sessions"
-                >
-                  📜
-                </button>
-              </div>
-            `}
       </div>
       ${panel._snippetDrawerOpen
         ? renderSnippetDrawer(panel)
@@ -373,11 +223,6 @@ export function render(panel) {
       ${panel._pendingImages.length > 0
         ? renderPendingImages(panel)
         : ''}
-      <ac-url-chips
-        @url-fetch-requested=${(e) => onUrlFetchRequested(panel, e)}
-        @url-remove-requested=${(e) => onUrlRemoveRequested(panel, e)}
-        @url-view-requested=${(e) => onUrlViewRequested(panel, e)}
-      ></ac-url-chips>
       <div class="input-row">
         <textarea
           class="input-textarea"
@@ -446,219 +291,6 @@ export function render(panel) {
       @session-loaded=${() => panel._onHistorySessionLoaded()}
     ></ac-history-browser>
     ${panel._lightboxImage ? renderLightbox(panel) : ''}
-    ${panel._urlViewDialog ? renderUrlViewDialog(panel) : ''}
-  `;
-}
-
-// ---------------------------------------------------------------
-// URL view dialog
-// ---------------------------------------------------------------
-
-/**
- * Render the URL content viewer overlay. Shows
- * the URLContent payload's most useful fields —
- * title, body (summary preferred over readme over
- * content), and (for GitHub repos) a symbol map.
- *
- * Layout when a symbol map is present: tabbed,
- * with "Content" and "Symbol Map" tabs. Each tab
- * panel fills the dialog's available body height
- * and scrolls independently. Generic URLs (no
- * symbol map) skip the tab bar entirely.
- */
-export function renderUrlViewDialog(panel) {
-  const { url, content } = panel._urlViewDialog;
-  const title = content.title || url;
-  const body =
-    content.summary || content.readme || content.content || '';
-  const hasSymbolMap = !!content.symbol_map;
-  const activeTab = panel._urlViewTab || 'content';
-  return html`
-    <div
-      class="lightbox-backdrop"
-      tabindex="0"
-      @click=${(e) => {
-        if (e.target === e.currentTarget) {
-          closeUrlViewDialog(panel);
-        }
-      }}
-      @keydown=${(e) => onUrlViewKeyDown(panel, e)}
-      aria-modal="true"
-      role="dialog"
-      aria-label="URL content viewer"
-    >
-      <div
-        class="lightbox-content url-view-dialog"
-        style="
-          background: rgba(22, 27, 34, 0.98);
-          border: 1px solid rgba(240, 246, 252, 0.15);
-          border-radius: 8px;
-          padding: 1.5rem;
-          max-width: 60rem;
-          width: 90vw;
-          height: 80vh;
-          max-height: 80vh;
-          display: flex;
-          flex-direction: column;
-          color: var(--text-primary, #c9d1d9);
-          text-align: left;
-          overflow: hidden;
-        "
-      >
-        <div style="
-          display: flex;
-          align-items: flex-start;
-          gap: 1rem;
-          margin-bottom: 1rem;
-          flex-shrink: 0;
-        ">
-          <div style="flex: 1; min-width: 0;">
-            <h3 style="
-              margin: 0 0 0.25rem 0;
-              font-size: 1.125rem;
-              overflow: hidden;
-              text-overflow: ellipsis;
-            ">${title}</h3>
-            <a
-              href=${url}
-              target="_blank"
-              rel="noopener noreferrer"
-              style="
-                font-size: 0.8125rem;
-                color: var(--accent-primary, #58a6ff);
-                word-break: break-all;
-              "
-            >${url} ↗</a>
-          </div>
-          <button
-            class="lightbox-button"
-            @click=${() => closeUrlViewDialog(panel)}
-            title="Close (Escape)"
-          >✕ Close</button>
-        </div>
-        ${hasSymbolMap
-          ? html`<div
-              role="tablist"
-              aria-label="URL content sections"
-              style="
-                display: flex;
-                gap: 0.25rem;
-                border-bottom: 1px solid rgba(240, 246, 252, 0.15);
-                margin-bottom: 1rem;
-                flex-shrink: 0;
-              "
-            >
-              <button
-                role="tab"
-                aria-selected=${activeTab === 'content'}
-                @click=${() => { panel._urlViewTab = 'content'; }}
-                style=${urlTabStyle(activeTab === 'content')}
-              >Content</button>
-              <button
-                role="tab"
-                aria-selected=${activeTab === 'symbols'}
-                @click=${() => { panel._urlViewTab = 'symbols'; }}
-                style=${urlTabStyle(activeTab === 'symbols')}
-              >Symbol Map</button>
-            </div>`
-          : ''}
-        ${hasSymbolMap && activeTab === 'symbols'
-          ? renderUrlViewSymbolsTab(content.symbol_map)
-          : renderUrlViewContentTab(content, body)}
-      </div>
-    </div>
-  `;
-}
-
-/**
- * Styling for a URL-view tab button. Inline
- * styles rather than a class because the dialog
- * body itself is inlined; keeping everything
- * inline keeps the component's CSS surface
- * small.
- */
-function urlTabStyle(active) {
-  const baseColor = active
-    ? 'var(--accent-primary, #58a6ff)'
-    : 'var(--text-secondary, #8b949e)';
-  const border = active
-    ? '2px solid var(--accent-primary, #58a6ff)'
-    : '2px solid transparent';
-  return `
-    background: transparent;
-    border: none;
-    border-bottom: ${border};
-    color: ${baseColor};
-    padding: 0.5rem 1rem;
-    font: inherit;
-    font-weight: ${active ? '600' : '400'};
-    cursor: pointer;
-    margin-bottom: -1px;
-  `;
-}
-
-function renderUrlViewContentTab(content, body) {
-  return html`
-    <div style="
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-    ">
-      ${content.summary_type
-        ? html`<div style="
-            font-size: 0.75rem;
-            color: var(--text-secondary, #8b949e);
-            margin-bottom: 0.5rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            flex-shrink: 0;
-          ">Summary (${content.summary_type})</div>`
-        : ''}
-      <pre style="
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        max-width: 100%;
-        box-sizing: border-box;
-        font-family: inherit;
-        font-size: 0.875rem;
-        line-height: 1.5;
-        margin: 0;
-        padding: 0;
-        background: transparent;
-        border: none;
-      ">${body || '(no content)'}</pre>
-    </div>
-  `;
-}
-
-function renderUrlViewSymbolsTab(symbolMap) {
-  return html`
-    <div style="
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-    ">
-      <pre style="
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        max-width: 100%;
-        box-sizing: border-box;
-        font-family: 'SFMono-Regular', Consolas, monospace;
-        font-size: 0.8125rem;
-        line-height: 1.4;
-        background: rgba(13, 17, 23, 0.6);
-        border: 1px solid rgba(240, 246, 252, 0.1);
-        border-radius: 4px;
-        padding: 0.75rem;
-        margin: 0;
-      ">${symbolMap}</pre>
-    </div>
   `;
 }
 
@@ -762,6 +394,11 @@ export function renderLightbox(panel) {
  * pass.
  */
 export function renderMessage(panel, msg, index) {
+  // A compaction boundary is not a message anyone wrote — it is a mark in the
+  // transcript saying the agent's memory of everything above it is now a
+  // summary. It gets no role label, no toolbar and no body, because there is
+  // nothing to attribute, copy or reply to.
+  if (msg.compaction) return renderCompactionDivider(panel, msg, index);
   const roleClass = msg.system_event
     ? 'role-system'
     : `role-${msg.role}`;
@@ -798,6 +435,13 @@ export function renderMessage(panel, msg, index) {
         ${unsafeHTML(renderMarkdown(msg.content))}
       </div>
     `;
+  } else if (msg.role === 'assistant' && Array.isArray(msg.blocks)) {
+    // Claude Code turn. The blocks ARE the body — text, thinking, tool cards,
+    // subagent rows, the plan — in the order the engine produced them.
+    bodyHtml = renderTurnBlocks(panel, msg.blocks, {
+      subagents: msg.subagents,
+      settled: true,
+    });
   } else if (msg.role === 'assistant') {
     bodyHtml = renderAssistantBody(
       panel,
@@ -815,20 +459,30 @@ export function renderMessage(panel, msg, index) {
   const images = Array.isArray(msg.images) ? msg.images : [];
   const toolbar = renderMessageToolbar(panel, msg, index);
   const highlightClass = isHighlighted ? ' search-highlight' : '';
-  // Split finish-reason placement by severity. Natural
-  // completions (stop / end_turn) are positive
-  // confirmation that the stream ended cleanly — they
-  // belong at the end of the response, where the eye
-  // lands when finished reading. Error/warning badges
-  // (truncation, content_filter, tool_calls) stay next
-  // to the role label at the top so users notice them
-  // before reading.
-  const isNaturalFinish =
-    msg.role === 'assistant' &&
-    !msg.system_event &&
-    (msg.finishReason === 'stop' || msg.finishReason === 'end_turn');
-  const topFinishBadge =
-    msg.finishReason && !isNaturalFinish
+  const isBlockTurn =
+    msg.role === 'assistant' && !msg.system_event && Array.isArray(msg.blocks);
+  // Split badge placement by severity. A natural finish is positive
+  // confirmation that the turn ended cleanly — it belongs at the end of the
+  // response, where the eye lands when finished reading. Everything else
+  // (interrupted, refused, limit reached, engine fault) stays next to the role
+  // label at the top so users notice it before reading.
+  //
+  // Two vocabularies coexist during the engine conversion: the native path's
+  // provider `finishReason`, and Claude Code's `terminal_reason`. They are
+  // placed by the same rule but labelled by different tables, because a
+  // `terminal_reason` of `completed` and a `finishReason` of `stop` are not the
+  // same claim and one badge cannot honestly cover both.
+  const terminal = isBlockTurn ? terminalBadge(msg.terminalReason) : null;
+  const isNaturalFinish = isBlockTurn
+    ? terminal?.placement === 'footer'
+    : msg.role === 'assistant'
+      && !msg.system_event
+      && (msg.finishReason === 'stop' || msg.finishReason === 'end_turn');
+  const topFinishBadge = isBlockTurn
+    ? (terminal && terminal.placement === 'header'
+        ? renderTerminalBadge(msg.terminalReason)
+        : '')
+    : msg.finishReason && !isNaturalFinish
       ? renderFinishBadge(msg.finishReason)
       : '';
   // Frozen run-timer badge — assistant messages only,
@@ -843,22 +497,24 @@ export function renderMessage(panel, msg, index) {
       ? renderRunTimer(msg.durationMs, false)
       : '';
   const bottomFinishBadge = isNaturalFinish
-    ? renderFinishBadge(msg.finishReason)
+    ? (isBlockTurn
+        ? renderTerminalBadge(msg.terminalReason)
+        : renderFinishBadge(msg.finishReason))
     : '';
-  // File summary section — settled assistant
-  // messages only. The streaming card uses
-  // renderStreamingMessage which doesn't call
-  // this path.
-  const fileSummary =
-    msg.role === 'assistant' && !msg.system_event
+  // Summary below the body. A Claude Code turn gets one footer carrying files
+  // modified, tool-call and prompt counts, duration, per-model usage and cost.
+  // The native path keeps its two-banner arrangement — an edit summary derived
+  // from our own apply pipeline, and a file summary derived by scanning the
+  // prose for paths. Neither has an equivalent here: the agent owns its edits
+  // and reports the files it touched, so the footer states what happened
+  // instead of inferring it.
+  const fileSummary = isBlockTurn
+    ? renderTurnFooter(panel, msg.turn, msg.files)
+    : msg.role === 'assistant' && !msg.system_event
       ? renderFileSummary(panel, collectMessageFiles(panel, msg))
       : '';
-  // Edit summary banner — settled assistant
-  // messages with edit results. Rendered BEFORE
-  // the file summary so the order in the card is:
-  // body, edits, files.
   const editSummary =
-    msg.role === 'assistant' && !msg.system_event
+    msg.role === 'assistant' && !msg.system_event && !isBlockTurn
       ? renderEditSummary(panel, msg)
       : '';
   // View-agents affordance for historical
@@ -871,7 +527,7 @@ export function renderMessage(panel, msg, index) {
   // itself, so a duplicate affordance would be
   // noise.
   const viewAgents =
-    msg.role === 'assistant' && !msg.system_event
+    msg.role === 'assistant' && !msg.system_event && !isBlockTurn
       ? renderViewAgentsAffordance(panel, msg)
       : '';
   const finishFooterClass = bottomFinishBadge
@@ -895,6 +551,54 @@ export function renderMessage(panel, msg, index) {
         ? html`<div class="finish-reason-footer">${bottomFinishBadge}</div>`
         : ''}
       <div class="message-toolbar bottom">${toolbar}</div>
+    </div>
+  `;
+}
+
+/**
+ * Render a compaction boundary as a divider.
+ *
+ * Kept deliberately quiet: a rule, a label, the before/after counts, and the
+ * trigger when the engine named one. The sentence explaining what compaction
+ * means to the conversation lives in the tooltip rather than the transcript,
+ * because a user who sees three of these in a session should not have to read
+ * the same paragraph three times.
+ *
+ * Still a `.message-card` with a `data-msg-index`, so chat search can scroll to
+ * it and highlight it like any other entry — the boundary's token counts are
+ * exactly the sort of thing someone searches back for.
+ *
+ * Per specs5/5-webapp/chat.md § Engine Event Routing.
+ */
+export function renderCompactionDivider(panel, msg, index) {
+  const { counts, trigger } = compactionSummary(msg.compaction);
+  const matches = computeSearchMatches(panel);
+  const currentMatchIdx =
+    matches.length > 0
+      ? matches[Math.max(0, panel._searchCurrentIndex) % matches.length]
+      : -1;
+  const isHighlighted =
+    panel._searchQuery.trim() !== '' && index === currentMatchIdx;
+  return html`
+    <div
+      class="message-card compaction-divider${isHighlighted
+        ? ' search-highlight'
+        : ''}"
+      data-msg-index=${index}
+      title="The agent's memory of everything above this line is now a summary. This transcript is unchanged."
+    >
+      <span class="compaction-rule"></span>
+      <span class="compaction-label">
+        <span class="compaction-glyph" aria-hidden="true">⌁</span>
+        Context compacted
+        ${counts
+          ? html`<span class="compaction-counts">${counts}</span>`
+          : ''}
+        ${trigger
+          ? html`<span class="compaction-trigger">${trigger}</span>`
+          : ''}
+      </span>
+      <span class="compaction-rule"></span>
     </div>
   `;
 }
@@ -1408,20 +1112,22 @@ function _onAgentCardClick(panel, event) {
 }
 
 /**
- * Render the streaming card. Uses the assistant-
- * role styling with an accent border to
- * distinguish it from settled messages. Content
- * goes through the same segmenter as final
- * messages so pending edit blocks show up as
- * cards mid-stream. Blinking cursor sits after
- * the body so it's visible regardless of whether
- * the last segment is prose or an edit block in
- * progress.
+ * Render the streaming card — the live turn, using the assistant-role styling
+ * with an accent border to distinguish it from settled messages.
  *
- * editResults is undefined — the backend hasn't
- * sent stream-complete yet, so every edit
- * segment renders in its pending/in-flight
- * state.
+ * The body is the same block renderer the settled card uses, with
+ * `settled: false`. That is the point: a tool card mid-turn and the same card
+ * after the turn ends are the same element in the same place, so nothing jumps
+ * when the result lands. What `settled: false` changes is only what would be
+ * wrong to claim early — file mentions wait for final content, and the plan is
+ * marked live.
+ *
+ * A turn with no blocks yet gets a waiting line instead of an empty card. The
+ * gap between "request accepted" and the first chunk is real (the engine spawns
+ * the CLI, the CLI initialises) and an empty card reads as a hang.
+ *
+ * The blinking cursor sits after the body so it is visible whatever the last
+ * block is.
  */
 export function renderStreamingMessage(panel) {
   // Live run timer — elapsed since the prompt was sent.
@@ -1434,6 +1140,7 @@ export function renderStreamingMessage(panel) {
     typeof startedAt === 'number'
       ? Math.max(0, Date.now() - startedAt)
       : null;
+  const turn = panel._turnBlocks;
   return html`
     <div class="message-card role-assistant streaming">
       <div class="role-label">
@@ -1441,12 +1148,12 @@ export function renderStreamingMessage(panel) {
           ? renderRunTimer(elapsedMs, true)
           : ''}
       </div>
-      ${renderAssistantBody(
-        panel,
-        panel._streamingContent,
-        undefined,
-        true,
-      )}
+      ${isEmptyTurn(turn)
+        ? html`<div class="turn-waiting">Working…</div>`
+        : renderTurnBlocks(panel, turn.blocks, {
+            subagents: turn.subagents,
+            settled: false,
+          })}
       <span class="cursor"></span>
     </div>
   `;

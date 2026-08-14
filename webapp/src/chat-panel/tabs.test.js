@@ -1470,13 +1470,29 @@ describe('ChatPanel close-tab backend wiring', () => {
 });
 
 // ---------------------------------------------------------------------------
-// C2b — per-tab text routing via agent_tag
+// The send path, per tab
 // ---------------------------------------------------------------------------
+//
+// This section used to be "C2b — per-tab text routing via agent_tag": every
+// test asserted the tab's id landed in `chat_streaming`'s 6th argument, so a
+// send from an agent tab reached that tab's own `ContextManager`.
+//
+// There is no agent_tag any more, and nothing for it to route to. One CLI
+// session holds one turn; a `Task` call's subagent output is attributed by its
+// `tool_use_id` (blocks.js), not by opening a second stream. `chat_streaming`
+// takes five arguments — `(request_id, message, files, images, viewer)` — and
+// the two reasoning arguments went with it (the CLI decides when to think).
+//
+// What survives is the part that was never about the tag: a send reads the
+// *active* tab. Its file selection goes out, its state records the turn. That
+// property still holds with several tabs open, and it is what these tests pin
+// alongside the arity itself — a positional shape is easy to break quietly,
+// since a stale extra argument is simply ignored by the RPC layer.
 
-describe('ChatPanel agent_tag routing', () => {
+describe('ChatPanel send path', () => {
   async function setupWithAgentTab() {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const agentTabId = 'frontend-trivial';
@@ -1485,38 +1501,57 @@ describe('ChatPanel agent_tag routing', () => {
     return { panel: p, started, agentTabId };
   }
 
-  it('main tab sends agent_tag=null', async () => {
+  it('sends the five arguments chat_streaming takes', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
+    p._tabs.get('main').selectedFiles = ['main.py'];
     p._input = 'hello from main';
     await p._send();
     await settle(p);
     expect(started).toHaveBeenCalledOnce();
     const args = started.mock.calls[0];
-    expect(args).toHaveLength(8);
-    expect(args[5]).toBeNull();
-    expect(args[6]).toBe(false);
-    // 8th arg — reasoning effort level (default xhigh).
-    expect(args[7]).toBe('xhigh');
+    expect(args).toHaveLength(5);
+    expect(args[0]).toBe(p._tabs.get('main').currentRequestId);
+    expect(args[1]).toBe('hello from main');
+    expect(args[2]).toEqual(['main.py']);
+    expect(args[3]).toEqual([]);
+    // viewer framing — explicitly null rather than omitted, so the arity
+    // stays unambiguous for the phase that fills it in.
+    expect(args[4]).toBeNull();
   });
 
-  it('sends the selected reasoning effort level', async () => {
+  it('the reasoning controls do not reach the wire', async () => {
+    // `_reasoningEnabled` / `_reasoningEffort` are declared but inert since
+    // phase 2. Setting them must not grow the argument list — a 6th or 7th
+    // argument would be dropped on the floor, so nothing else would complain.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    // Simulate the dropdown changing the effort level.
+    p._reasoningEnabled = true;
     p._reasoningEffort = 'minimal';
     p._input = 'hello';
     await p._send();
     await settle(p);
-    expect(started).toHaveBeenCalledOnce();
-    expect(started.mock.calls[0][7]).toBe('minimal');
+    expect(started.mock.calls[0]).toHaveLength(5);
   });
 
-  it('agent tab sends its id as agent_tag', async () => {
+  it('the selection list comes from the active tab', async () => {
+    const { panel, started, agentTabId } =
+      await setupWithAgentTab();
+    panel._tabs.get('main').selectedFiles = ['main.py'];
+    panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
+    panel._activeTabId = agentTabId;
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    expect(started.mock.calls[0][2]).toEqual(['agent.py']);
+  });
+
+  it('the turn is recorded on the sending tab only', async () => {
     const { panel, started, agentTabId } =
       await setupWithAgentTab();
     panel._activeTabId = agentTabId;
@@ -1524,14 +1559,17 @@ describe('ChatPanel agent_tag routing', () => {
     panel._input = 'hello from agent';
     await panel._send();
     await settle(panel);
-    expect(started).toHaveBeenCalledOnce();
-    const args = started.mock.calls[0];
-    expect(args[5]).toBe('frontend-trivial');
+    const agent = panel._tabs.get(agentTabId);
+    expect(agent.currentRequestId).toBe(started.mock.calls[0][0]);
+    expect(agent.streaming).toBe(true);
+    const main = panel._tabs.get('main');
+    expect(main.currentRequestId).toBeNull();
+    expect(main.streaming).toBe(false);
   });
 
-  it('different agent tabs route to their own ids', async () => {
+  it('each tab sends under its own request id', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._tabs.set('frontend-trivial', p._makeTabState());
@@ -1551,62 +1589,35 @@ describe('ChatPanel agent_tag routing', () => {
     await p._send();
     await settle(p);
     expect(started).toHaveBeenCalledTimes(2);
-    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
-    expect(started.mock.calls[1][5]).toBe('backend-auth');
+    expect(started.mock.calls[0][1]).toBe('from frontend');
+    expect(started.mock.calls[1][1]).toBe('from backend');
+    expect(started.mock.calls[1][0]).not.toBe(started.mock.calls[0][0]);
+    expect(p._tabs.get('backend-auth').currentRequestId).toBe(
+      started.mock.calls[1][0],
+    );
   });
 
-  it('agent ids survive across turns (id-based reuse)', async () => {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    const p = mountPanel();
-    await settle(p);
-    p._tabs.set('persistent-agent', p._makeTabState());
-    p._tabLabels.set('persistent-agent', 'persistent-agent');
-    p._activeTabId = 'persistent-agent';
-    await settle(p);
-    p._input = 'hello';
-    await p._send();
-    await settle(p);
-    expect(started.mock.calls[0][5]).toBe('persistent-agent');
-  });
-
-  it('agent tab selection list comes from active tab', async () => {
+  it('switching back to main sends from main', async () => {
     const { panel, started, agentTabId } =
       await setupWithAgentTab();
     panel._tabs.get('main').selectedFiles = ['main.py'];
     panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
     panel._activeTabId = agentTabId;
     await settle(panel);
-    panel._input = 'hi';
+    panel._input = 'from agent';
     await panel._send();
     await settle(panel);
-    const args = started.mock.calls[0];
-    expect(args[2]).toEqual(['agent.py']);
-  });
-
-  it('switching back to main after agent send routes correctly', async () => {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    const p = mountPanel();
-    await settle(p);
-    p._tabs.set('frontend-trivial', p._makeTabState());
-    p._tabLabels.set('frontend-trivial', 'frontend-trivial');
-    p._activeTabId = 'frontend-trivial';
-    await settle(p);
-    p._input = 'from agent';
-    await p._send();
-    await settle(p);
-    expect(started.mock.calls[0][5]).toBe('frontend-trivial');
-    p._tabs.get('frontend-trivial').streaming = false;
-    p._tabs.get('frontend-trivial').currentRequestId = null;
-    p._activeTabId = 'main';
-    await settle(p);
-    p._input = 'from main';
-    await p._send();
-    await settle(p);
-    expect(started.mock.calls[1][5]).toBeNull();
+    panel._tabs.get(agentTabId).streaming = false;
+    panel._tabs.get(agentTabId).currentRequestId = null;
+    panel._activeTabId = 'main';
+    await settle(panel);
+    panel._input = 'from main';
+    await panel._send();
+    await settle(panel);
+    expect(started.mock.calls[1][2]).toEqual(['main.py']);
   });
 });
+
 
 // ---------------------------------------------------------------------------
 // D1 — Streaming indicator on tab labels
@@ -1726,7 +1737,7 @@ describe('ChatPanel D1 streaming indicator', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._tabs.set('turn_abc/agent-00', p._makeTabState());
@@ -1751,7 +1762,7 @@ describe('ChatPanel D1 streaming indicator', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._tabs.set('turn_abc/agent-00', p._makeTabState());
@@ -1779,7 +1790,7 @@ describe('ChatPanel D1 streaming indicator', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const agentTabId = 'turn_abc/agent-00';
@@ -1804,7 +1815,7 @@ describe('ChatPanel D1 streaming indicator', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const agentTabId = 'turn_abc/agent-00';
@@ -2125,160 +2136,62 @@ describe('ChatPanel D2 tab cycling shortcuts', () => {
 });
 
 // ---------------------------------------------------------------------------
-// URL chip per-tab snapshot / restore (D21 per-tab state)
+// Per-tab block state
 // ---------------------------------------------------------------------------
 //
-// Per specs4/5-webapp/agent-browser.md § Per-Tab State.
+// This section used to cover the URL chips' per-tab snapshot/restore. The
+// chips are gone — they fetched URLs into the native engine's context and the
+// CLI has WebFetch — but the property they were pinning is not: switching tabs
+// must not carry one tab's live turn state onto another's.
+//
+// `turnBlocks` is what needs that guarantee now. It differs from the chips in
+// one way that matters: it is mutated in place rather than snapshotted, so the
+// tab state IS the live object and there is no copy step to get wrong. What
+// there is to get wrong is sharing — two tabs holding one object would render
+// each other's tool cards.
 
-describe('ChatPanel URL chip per-tab state', () => {
-  it('snapshots chips to leaving tab on switch', async () => {
+describe('ChatPanel per-tab block state', () => {
+  it('each tab gets its own block state', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
     seedTab(p, 'agent-0');
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://main.com', type: 'generic', display_name: 'main' },
-    ]);
-    await settle(p);
-    expect(chipsEl._chips.size).toBe(1);
-    p._activeTabId = 'agent-0';
-    await settle(p);
-    const mainTab = p._tabs.get('main');
-    expect(mainTab.urlChips).toBeInstanceOf(Map);
-    expect(mainTab.urlChips.has('https://main.com')).toBe(true);
+    const main = p._tabs.get('main').turnBlocks;
+    const agent = p._tabs.get('agent-0').turnBlocks;
+    expect(main).not.toBe(agent);
+    expect(main.index).not.toBe(agent.index);
+    expect(main.subagents).not.toBe(agent.subagents);
   });
 
-  it('restores chips from entering tab snapshot', async () => {
+  it('a block on one tab does not appear on another', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
     seedTab(p, 'agent-0');
-    const agentChips = new Map();
-    agentChips.set('https://agent.com', {
-      url: 'https://agent.com',
-      type: 'generic',
-      displayName: 'agent',
-      status: 'fetched',
-      content: { content: 'body' },
-      excluded: false,
-    });
-    p._tabs.get('agent-0').urlChips = agentChips;
+    const main = p._tabs.get('main').turnBlocks;
+    main.blocks.push({ blockId: 'r1:b0', kind: 'text', content: 'main only' });
+    main.index.set('r1:b0', main.blocks[0]);
     p._activeTabId = 'agent-0';
     await settle(p);
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    expect(chipsEl._chips.size).toBe(1);
-    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
+    expect(p._tabs.get('agent-0').turnBlocks.blocks).toEqual([]);
+    // And the accessor follows the active tab rather than the last write.
+    expect(p._turnBlocks.blocks).toEqual([]);
   });
 
-  it('fresh tab with no snapshot gets empty Map', async () => {
+  it('the accessor reads through to the active tab', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
     seedTab(p, 'agent-0');
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://main.com', type: 'generic', display_name: 'main' },
-    ]);
-    await settle(p);
+    expect(p._turnBlocks).toBe(p._tabs.get('main').turnBlocks);
     p._activeTabId = 'agent-0';
     await settle(p);
-    expect(chipsEl._chips.size).toBe(0);
+    expect(p._turnBlocks).toBe(p._tabs.get('agent-0').turnBlocks);
   });
 
-  it('round-trip switch preserves per-tab state', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    seedTab(p, 'agent-0');
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://main.com', type: 'generic', display_name: 'main' },
-    ]);
-    await settle(p);
-    p._activeTabId = 'agent-0';
-    await settle(p);
-    chipsEl.updateDetected([
-      { url: 'https://agent.com', type: 'generic', display_name: 'agent' },
-    ]);
-    await settle(p);
-    p._activeTabId = 'main';
-    await settle(p);
-    expect(chipsEl._chips.has('https://main.com')).toBe(true);
-    expect(chipsEl._chips.has('https://agent.com')).toBe(false);
-    p._activeTabId = 'agent-0';
-    await settle(p);
-    expect(chipsEl._chips.has('https://agent.com')).toBe(true);
-    expect(chipsEl._chips.has('https://main.com')).toBe(false);
-  });
-
-  it('snapshot is a copy, not a reference', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    seedTab(p, 'agent-0');
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://a.com', type: 'generic', display_name: 'a' },
-    ]);
-    await settle(p);
-    p._activeTabId = 'agent-0';
-    await settle(p);
-    const snapshot = p._tabs.get('main').urlChips;
-    const snapshotSize = snapshot.size;
-    chipsEl._chips = new Map();
-    chipsEl._chips.set('https://new.com', {
-      url: 'https://new.com',
-      type: 'generic',
-      displayName: 'new',
-      status: 'detected',
-      excluded: false,
-    });
-    expect(snapshot.size).toBe(snapshotSize);
-    expect(snapshot.has('https://new.com')).toBe(false);
-  });
-
-  it('session-changed clears all per-tab snapshots', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    seedTab(p, 'agent-0');
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://main.com', type: 'generic', display_name: 'main' },
-    ]);
-    await settle(p);
-    p._activeTabId = 'agent-0';
-    await settle(p);
-    expect(p._tabs.get('main').urlChips).not.toBeNull();
-    pushEvent('session-changed', {
-      session_id: 'sess_new',
-      messages: [],
-    });
-    await settle(p);
-    for (const tab of p._tabs.values()) {
-      expect(tab.urlChips).toBeNull();
-    }
-  });
-
-  it('no-op when switching to same tab', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    const chipsEl = p.shadowRoot.querySelector('ac-url-chips');
-    chipsEl.updateDetected([
-      { url: 'https://a.com', type: 'generic', display_name: 'a' },
-    ]);
-    await settle(p);
-    expect(p._tabs.get('main').urlChips).toBeNull();
-    p._activeTabId = 'main';
-    await settle(p);
-    expect(p._tabs.get('main').urlChips).toBeNull();
-  });
-
-  it('snapshot survives when element not yet rendered', async () => {
-    // Defensive — pre-first-render switches must
-    // tolerate a missing element.
+  it('switching tabs pre-first-render does not throw', async () => {
+    // Defensive — same guarantee the chips section pinned, for the same
+    // reason: a tab switch can land before the panel has rendered once.
     publishFakeRpc({});
     const p = mountPanel();
     p._tabs.set('agent-0', p._makeTabState());

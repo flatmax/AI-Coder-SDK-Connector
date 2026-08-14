@@ -8,9 +8,6 @@
 //   - generateRequestId: backend-compatible request ID
 //   - parseAgentTabId: tab ID → agent identifier
 //   - deriveAgentTabLabel: tab strip label for an agent
-//   - buildAmbiguousRetryPrompt
-//   - buildInContextMismatchRetryPrompt
-//   - buildNotInContextRetryPrompt
 //   - localStorage helpers for persisted toggles
 //   - Scroll thresholds
 //   - _EXPERIMENTAL_ENABLED gate
@@ -86,91 +83,6 @@ export function deriveAgentTabLabel(agentIdx, task) {
 
   const keep = _AGENT_LABEL_MAX_LENGTH - 1;
   return `${full.slice(0, keep)}…`;
-}
-
-/**
- * Build a retry prompt for ambiguous-anchor edit failures.
- *
- * @param {Array} editResults — from stream-complete result
- * @returns {string | null}
- */
-export function buildAmbiguousRetryPrompt(editResults) {
-  const ambiguous = editResults.filter(
-    (r) => r && r.error_type === 'ambiguous_anchor',
-  );
-  if (ambiguous.length === 0) return null;
-  const lines = [
-    'Some edits failed because the old text matched multiple',
-    'locations in the file. Please retry with more surrounding',
-    'context lines to make the match unique:',
-    '',
-  ];
-  for (const r of ambiguous) {
-    const file = r.file_path || r.file || '(unknown file)';
-    const msg = r.message || 'Ambiguous match';
-    lines.push(`- ${file}: ${msg}`);
-  }
-  return lines.join('\n');
-}
-
-/**
- * Build a retry prompt for anchor-not-found failures on files
- * that ARE currently in the active context.
- *
- * @param {Array} editResults — from stream-complete result
- * @param {Array<string>} selectedFiles — active file selection
- * @returns {string | null}
- */
-export function buildInContextMismatchRetryPrompt(
-  editResults,
-  selectedFiles,
-) {
-  const selectedSet = new Set(selectedFiles);
-  const mismatches = editResults.filter((r) => {
-    if (!r || r.error_type !== 'anchor_not_found') return false;
-    const path = r.file_path || r.file;
-    return typeof path === 'string' && selectedSet.has(path);
-  });
-  if (mismatches.length === 0) return null;
-  const lines = [
-    'The following edit(s) failed because the old text didn\'t',
-    'match the actual file content. The file(s) are already in',
-    'your context — please re-read them carefully and retry',
-    'with the correct text:',
-    '',
-  ];
-  for (const r of mismatches) {
-    const file = r.file_path || r.file || '(unknown file)';
-    const msg = r.message || 'Old text not found';
-    lines.push(`- ${file}: ${msg}`);
-  }
-  return lines.join('\n');
-}
-
-/**
- * Build a retry prompt for not-in-context auto-adds.
- *
- * @param {Array<string>} filesAutoAdded — from stream-complete
- * @returns {string | null}
- */
-export function buildNotInContextRetryPrompt(filesAutoAdded) {
-  if (!Array.isArray(filesAutoAdded) || filesAutoAdded.length === 0) {
-    return null;
-  }
-  const files = filesAutoAdded.filter(
-    (f) => typeof f === 'string' && f,
-  );
-  if (files.length === 0) return null;
-  const isSingle = files.length === 1;
-  const subject = isSingle
-    ? `The file ${files[0]}`
-    : `The files ${files.join(', ')}`;
-  const verb = isSingle ? 'has' : 'have';
-  const target = isSingle ? 'the edit' : 'the edits';
-  return (
-    `${subject} ${verb} been added to context. ` +
-    `Please retry ${target} for: ${files.join(', ')}`
-  );
 }
 
 /**

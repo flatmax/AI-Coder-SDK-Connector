@@ -66,7 +66,8 @@ The transport never assumes a singleton stream — every event carries the exact
 
 ## Thinking Regions
 
-- `thinkingChunk` events render into a collapsed region above the text they precede, labelled with a token count once known
+- `thinkingChunk` events render into a collapsed region above the text they precede, labelled `Thinking…` while chunks are arriving and `Thinking` once the block reports `done`
+- **No token count.** An earlier draft asked for one. No payload carries per-block thinking tokens: `thinkingChunk` is `{block_id, seq, content, done}` and the turn's `usage` is a single total covering text, tools and thinking together. The number would have to be invented — a character count dressed up as tokens is worse than no number, so the label carries none
 - Expanded state is per-block and remembered for the session; a user who expands one does not get every subsequent one expanded
 - The configured thinking display setting (`summarized`, `omitted`) governs what arrives at all. When it is `omitted`, no region is drawn — not an empty one
 - Thinking content is never included in copy-message or read-aloud output; it is the agent's scratch space, not its answer
@@ -78,7 +79,7 @@ A tool card is the unit that carries what the agent *did*, as opposed to what it
 ### Card Anatomy
 - Header — tool name, a one-line input summary (≤ 200 chars), and a status dot. MCP tools show their server name (`ac-dc`) as a chip so a user can tell an AC⚡DC tool from a built-in one
 - Body — collapsed by default. Expands to the full tool input and the result
-- Result — attached to its card by `tool_use_id`, truncated with a "show all" affordance and the full byte count. Error results are **expanded by default**; the status flag is what drives that, not string sniffing
+- Result — attached to its card by `tool_use_id`. A truncated result is marked as truncated and names the full byte count; there is **no "show all"**, because the engine sends only the preview and the untruncated text never leaves the server, so the button would expand to the content it already showed. Saying how much was withheld is the honest version of that affordance. Error results are **expanded by default**; the status flag is what drives that, not string sniffing
 - Footer — duration, and the files the call modified (each clickable, navigating to the diff viewer)
 - A gated marker on cards whose call went through a permission prompt, so the transcript records that the user authorised it
 - Subagent attribution — a card with a non-null `agent_id` renders indented under its subagent's row rather than at turn level
@@ -94,8 +95,17 @@ A tool card is the unit that carries what the agent *did*, as opposed to what it
 
 ### Diff Rendering for Edit and Write
 `Edit` and `Write` inputs are diffs in disguise, and rendering them as raw JSON wastes the panel's most
-useful affordance. An `Edit` card renders `old_string` → `new_string` as a two-level diff; a `Write`
-card renders new-file content, or a diff against the file on disk when it exists.
+useful affordance. An `Edit` card renders `old_string` → `new_string` as a two-level diff. A `MultiEdit`
+renders one hunk per entry in `edits`, so a call that rewrites four places in a file reads as four hunks
+rather than one incoherent diff. A `NotebookEdit` renders `new_source`.
+
+A `Write` card renders its new content against an empty old side, which is an all-add diff. **Not a diff
+against the file on disk.** An earlier draft asked for that; the `toolUse` payload carries only the new
+content, and the panel has no read path that could fetch the old content without racing the write it is
+describing — the permission dialog is open at that moment and the file may be gone by the time a reply
+lands. Rendering what the payload contains is the honest rendering. A real before/after for a `Write`
+belongs to the diff viewer, which reads the working tree after the call lands; the footer's file chips
+are the link to it.
 
 #### Two-Level Diff Highlighting
 - Line-level diff — Myers algorithm via diff library, produces context/remove/add typed lines
@@ -491,7 +501,7 @@ the UI in two places that must be got right:
 - Only final-rendered messages detect file mentions — streaming messages never process mentions
 - Auto-scroll never disengages during active streaming without a deliberate upward scroll beyond a threshold; height changes from tool-card expansion never disengage it
 - The chat-local toast never dispatches global toast events
-- Commit, reset, permission-mode changes, and compaction boundaries persist to the mirrored history as system events via the server, not client-side
+- Commit, reset, permission-mode changes, and compaction boundaries persist to the mirrored history as system events via the server, not client-side. **Not yet true of compaction boundaries.** `SessionStore` is a phase-5 deliverable and nothing constructs one, so `session_store` is always `None` and there is no mirrored history to persist into. The `compact_boundary` divider is appended to the client's message list only and does not survive a reload. The rest of the invariant holds: the divider is appended from the broadcast event on every connected client, never optimistically by the one that triggered it, so the clients agree with each other even though none of them agrees with the disk
 - No system event is fed back to the model
 - Session-changed handler resets streaming state before replacing the message list
 - Passive stream completion always prepends the user message from the result if present

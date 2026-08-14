@@ -14,8 +14,9 @@
 //      is explicit about why).
 //   2. Hold `selectedFiles` as a Set. Listen for the picker's
 //      `selection-changed` event, update the server via
-//      `LLMService.set_selected_files`, update the picker's
-//      `selectedFiles` prop directly.
+//      `ClaudeCodeService.set_selected_files`, update the picker's
+//      `selectedFiles` prop directly. (Agent tabs still write to
+//      `LLMService.set_agent_selected_files` — see selection.js.)
 //   3. Listen for `files-changed` (server broadcast) so
 //      selection changes from the server (auto-add for
 //      not-in-context edits, collab broadcasts) update the

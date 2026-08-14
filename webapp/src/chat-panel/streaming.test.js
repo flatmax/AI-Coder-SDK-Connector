@@ -1,10 +1,10 @@
-// Tests for streaming flow: chunks, completion, request-ID
-// filtering, agent spawn from completion, retry-prompt
-// population, and stream-start error handling.
+// Tests for streaming flow: block-keyed chunks, what a completed turn freezes
+// onto its message, request-ID filtering, the turn-outcome helper the LED row
+// reads, subagent rows, and stream-start error handling.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { computeLastEditOutcome, onStreamRetry } from './streaming.js';
+import { computeTurnOutcome, onStreamRetry } from './streaming.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -20,24 +20,30 @@ describe('ChatPanel streaming events', () => {
   async function sendAndGetRequestId(panel, message = 'hi') {
     // Send and return the ID the chat panel generated.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = message;
     await panel._send();
     return started.mock.calls[0][0];
   }
 
+  function textChunk(reqId, content, seq = 0) {
+    return {
+      requestId: reqId,
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq,
+        content,
+        done: false,
+      },
+    };
+  }
+
   it('renders streaming chunks in the assistant slot', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p, 'hi');
-    pushEvent('stream-chunk', {
-      requestId: reqId,
-      content: 'Hello',
-    });
-    pushEvent('stream-chunk', {
-      requestId: reqId,
-      content: 'Hello, world',
-    });
+    pushEvent('stream-chunk', textChunk(reqId, 'Hello', 0));
+    pushEvent('stream-chunk', textChunk(reqId, 'Hello, world', 1));
     await settle(p);
     const streaming = p.shadowRoot.querySelector(
       '.message-card.streaming',
@@ -50,29 +56,29 @@ describe('ChatPanel streaming events', () => {
     // Collaboration — a stream from another user's prompt
     // arrives with a different request ID.
     const p = mountPanel();
-    const reqId = await sendAndGetRequestId(p, 'hi');
-    pushEvent('stream-chunk', {
-      requestId: 'other-request-id',
-      content: 'should not render',
-    });
+    await sendAndGetRequestId(p, 'hi');
+    pushEvent(
+      'stream-chunk',
+      textChunk('other-request-id', 'should not render', 0),
+    );
     await settle(p);
     const streaming = p.shadowRoot.querySelector(
       '.message-card.streaming',
     );
     expect(streaming).toBeTruthy();
     expect(streaming.textContent).not.toContain('should not');
+    // Still waiting on its own first chunk, rather than showing someone
+    // else's turn.
+    expect(streaming.querySelector('.turn-waiting')).toBeTruthy();
   });
 
   it('moves streamed content into messages on stream-complete', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p, 'hi');
-    pushEvent('stream-chunk', {
-      requestId: reqId,
-      content: 'partial',
-    });
+    pushEvent('stream-chunk', textChunk(reqId, 'partial', 0));
     pushEvent('stream-complete', {
       requestId: reqId,
-      result: { response: 'final answer' },
+      result: { response: 'final answer', terminal_reason: 'completed' },
     });
     await settle(p);
     expect(p.messages).toHaveLength(2);
@@ -85,32 +91,59 @@ describe('ChatPanel streaming events', () => {
     ).toBeNull();
   });
 
-  it('uses last streaming content when result lacks response', async () => {
-    // Cancelled streams produce a completion without `response`.
+  it('a stopped turn keeps what it had produced', async () => {
+    // The panel no longer reconstructs the partial text from its own
+    // accumulator. The engine's `response` is the concatenation of the
+    // turn's text blocks, and an interrupted turn reports what it got to.
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p, 'hi');
-    pushEvent('stream-chunk', {
-      requestId: reqId,
-      content: 'partial content',
-    });
+    pushEvent('stream-chunk', textChunk(reqId, 'partial content', 0));
     pushEvent('stream-complete', {
       requestId: reqId,
-      result: { cancelled: true },
+      result: {
+        response: 'partial content',
+        cancelled: true,
+        terminal_reason: 'aborted_streaming',
+      },
     });
     await settle(p);
     expect(p.messages[1].content).toBe('partial content');
+    expect(p.messages[1].blocks[0].content).toBe('partial content');
+    // An interruption badges next to the role label, not as an error.
+    const badge = p.shadowRoot.querySelector('.finish-reason-badge');
+    expect(badge).toBeTruthy();
+    expect(badge.className).toContain('severity-neutral');
   });
 
-  it('renders an error message when completion carries error', async () => {
+  it('an errored completion toasts the engine reason', async () => {
+    // There is no `result.error`. A failed turn reports `is_error` with the
+    // CLI's own `errors` list, and the panel says what the engine said
+    // rather than classifying it — the CLI owns the retry and the taxonomy.
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p, 'hi');
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { error: 'something broke' },
-    });
-    await settle(p);
-    expect(p.messages[1].role).toBe('assistant');
-    expect(p.messages[1].content).toContain('something broke');
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      pushEvent('stream-complete', {
+        requestId: reqId,
+        result: {
+          response: '',
+          is_error: true,
+          terminal_reason: 'engine_error',
+          errors: ['something broke'],
+        },
+      });
+      await settle(p);
+      const errors = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0].message).toContain('something broke');
+      expect(p.messages[1].role).toBe('assistant');
+      expect(p.messages[1].turn.is_error).toBe(true);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
   });
 });
 
@@ -127,7 +160,7 @@ describe('ChatPanel run timer', () => {
 
   async function sendAt(panel, nowMs, message = 'hi') {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     vi.spyOn(Date, 'now').mockReturnValue(nowMs);
     panel._input = message;
@@ -141,7 +174,15 @@ describe('ChatPanel run timer', () => {
     // Advance the clock; the streaming card recomputes
     // elapsed from Date.now() - streamStartedAt on render.
     Date.now.mockReturnValue(1_004_200);
-    pushEvent('stream-chunk', { requestId: reqId, content: 'Hi' });
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'Hi',
+        done: false,
+      },
+    });
     await settle(p);
     expect(p._streamStartedAt).toBe(1_000_000);
     const streaming = p.shadowRoot.querySelector(
@@ -185,7 +226,12 @@ describe('ChatPanel run timer', () => {
     Date.now.mockReturnValue(3_002_000);
     pushEvent('stream-complete', {
       requestId: reqId,
-      result: { error: 'boom' },
+      result: {
+        response: '',
+        is_error: true,
+        terminal_reason: 'engine_error',
+        errors: ['boom'],
+      },
     });
     await settle(p);
     expect(p.messages[1].durationMs).toBe(2000);
@@ -224,207 +270,346 @@ describe('ChatPanel run timer', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Increment D field threading — onStreamComplete
+// What onStreamComplete freezes onto the settled message
 // ---------------------------------------------------------------------------
+//
+// This section used to pin `turn_id` and `agent_blocks` threading for the
+// agent-browser affordance. Both are gone (see the agent-tabs section). What a
+// settled message carries now is the turn itself: its blocks, its subagent
+// rows, the files it touched, and the result payload the footer renders.
+//
+// "Frozen" is the load-bearing word. The live block records are mutated in
+// place while a turn runs, and the same state object is reused by the next
+// turn, so anything the message keeps has to be a copy — otherwise the next
+// turn rewrites history the user has already read.
 
-describe('ChatPanel onStreamComplete threads agentic fields', () => {
+describe('ChatPanel onStreamComplete freezes the turn', () => {
   async function sendAndGetRequestId(panel, message = 'hi') {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = message;
     await panel._send();
     return started.mock.calls[0][0];
   }
 
-  it('settled assistant carries turn_id when present', async () => {
-    // Per spec specs4/5-webapp/agent-browser.md §
-    // Historical Turns — the "View agents (N)"
-    // affordance below an assistant message reads
-    // `msg.turn_id` to look up `get_turn_archive`.
-    // Without this thread-through, an agentic turn
-    // would render with no affordance even though
-    // the backend persisted the field.
+  it('the blocks survive the turn state being reset', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'the answer',
+        done: true,
+      },
+    });
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'the answer', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    // Live state is empty and ready for the next turn...
+    expect(p._turnBlocks.blocks).toEqual([]);
+    // ...while the message kept its own copy.
+    const msg = p.messages[1];
+    expect(msg.blocks).toHaveLength(1);
+    expect(msg.blocks[0].content).toBe('the answer');
+    expect(msg.content).toBe('the answer');
+  });
+
+  it('a tool card is copied one level deeper', async () => {
+    // A late tool result, or the next turn reusing the record, must not be
+    // able to reach into a settled card.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_1',
+        name: 'Read',
+        input: { file_path: 'a.py' },
+      },
+    });
+    pushEvent('tool-result', {
+      requestId: reqId,
+      data: { tool_use_id: 'toolu_1', status: 'ok', preview: 'x = 1' },
+    });
+    await settle(p);
+    const live = p._turnBlocks.index.get('toolu_1');
+    expect(live).toBeTruthy();
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: '', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    const frozen = p.messages[1].blocks[0];
+    expect(frozen).not.toBe(live);
+    expect(frozen.tool.name).toBe('Read');
+    expect(frozen.result.status).toBe('ok');
+  });
+
+  it('the subagent rows ride along', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('subagent-event', {
+      requestId: reqId,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        description: 'audit the parser',
+        status: 'completed',
+        terminal: true,
+      },
+    });
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    const rows = p.messages[1].subagents;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).toBe('audit the parser');
+    expect(rows[0].terminal).toBe(true);
+    expect(p._turnBlocks.subagents.size).toBe(0);
+  });
+
+  it('files are the union of the result and the tool results', async () => {
+    // The result message is authoritative when it arrives, but a turn that
+    // ended badly may carry tool results it never summarised.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_1',
+        name: 'Write',
+        input: { file_path: 'b.py' },
+      },
+    });
+    pushEvent('tool-result', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_1',
+        status: 'ok',
+        files_modified: ['b.py'],
+      },
+    });
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
-        response: 'delegated',
-        turn_id: 'turn_abc',
+        response: 'wrote them',
+        terminal_reason: 'completed',
+        files_modified: ['a.py', 'b.py'],
       },
     });
     await settle(p);
-    expect(p.messages[1].turn_id).toBe('turn_abc');
+    // Deduplicated, the result's own list first.
+    expect(p.messages[1].files).toEqual(['a.py', 'b.py']);
   });
 
-  it('settled assistant carries agent_blocks when present', async () => {
+  it('the result payload is snapshotted for the footer', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'spawning',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'frontend', task: 'ui', agent_idx: 0 },
-          { id: 'backend', task: 'api', agent_idx: 1 },
-        ],
-      },
-    });
+    const result = {
+      response: 'done',
+      terminal_reason: 'completed',
+      tool_calls: 3,
+      permission_prompts: 1,
+      num_turns: 2,
+      duration_ms: 4200,
+      total_cost_usd: null,
+    };
+    pushEvent('stream-complete', { requestId: reqId, result });
     await settle(p);
     const msg = p.messages[1];
-    expect(msg.agent_blocks).toEqual([
-      { id: 'frontend', task: 'ui', agent_idx: 0 },
-      { id: 'backend', task: 'api', agent_idx: 1 },
-    ]);
+    expect(msg.turn).toEqual(result);
+    expect(msg.turn).not.toBe(result);
+    expect(msg.terminalReason).toBe('completed');
   });
 
-  it('non-agentic completion has no turn_id or agent_blocks', async () => {
-    // Pre-Increment-A turns and any non-agentic
-    // turn must produce a clean message shape.
-    // Optional-key omission keeps the rendered
-    // card unchanged for the common case.
+  it('terminalReason is null when the engine reports none', async () => {
+    // Older CLIs and locally-handled results report nothing, and the badge
+    // must then be absent rather than claiming success.
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
     pushEvent('stream-complete', {
       requestId: reqId,
-      result: { response: 'plain reply' },
+      result: { response: 'done' },
     });
     await settle(p);
-    const msg = p.messages[1];
-    expect('turn_id' in msg).toBe(false);
-    expect('agent_blocks' in msg).toBe(false);
+    expect(p.messages[1].terminalReason).toBeNull();
+    expect(
+      p.shadowRoot.querySelector('.finish-reason-badge'),
+    ).toBeNull();
   });
 
-  it('empty agent_blocks array is omitted from the message', async () => {
-    // Backend sends [] when no agents spawned —
-    // we shouldn't store the empty array because
-    // the renderer's affordance-visibility check
-    // is `agent_blocks?.length > 0`. Storing []
-    // wastes memory and gives renderers two
-    // ways to spell "no agents".
+  it('a bad terminal reason badges the card', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'gave up', terminal_reason: 'max_turns' },
+    });
+    await settle(p);
+    const badge = p.shadowRoot.querySelector('.finish-reason-badge');
+    expect(badge).toBeTruthy();
+    expect(badge.getAttribute('title')).toContain('max_turns');
+  });
+
+  it('user_message_id lands on the user message, not the reply', async () => {
+    // It identifies the turn for `rewind_files`, and "put the files back the
+    // way they were before I asked this" belongs on the card that asked.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p, 'change it');
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'changed',
+        terminal_reason: 'completed',
+        user_message_id: 'msg-uuid-1',
+      },
+    });
+    await settle(p);
+    expect(p.messages[0].role).toBe('user');
+    expect(p.messages[0].user_message_id).toBe('msg-uuid-1');
+    expect(p.messages[1].user_message_id).toBeUndefined();
+  });
+
+  it('a turn that produced nothing appends nothing', async () => {
+    // No blocks, no response, no error — a locally-handled command, say. An
+    // empty assistant card would read as the agent ignoring the prompt.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: '', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+    expect(p.messages[0].role).toBe('user');
+  });
+
+  it('an empty turn that errored still appends', async () => {
+    // A badge with nothing under it is still the honest answer; silence
+    // would leave the user waiting for a reply that never comes.
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
-        response: 'no agents',
-        turn_id: 'turn_abc',
-        agent_blocks: [],
+        response: '',
+        is_error: true,
+        terminal_reason: 'engine_error',
+        errors: ['the CLI exited'],
       },
     });
     await settle(p);
-    expect('agent_blocks' in p.messages[1]).toBe(false);
-    expect(p.messages[1].turn_id).toBe('turn_abc');
-  });
-
-  it('non-array agent_blocks is rejected defensively', async () => {
-    // A malformed payload mustn't crash or
-    // produce a phantom field. Drop silently —
-    // turn_id still rides through.
-    const p = mountPanel();
-    const reqId = await sendAndGetRequestId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'malformed',
-        turn_id: 'turn_abc',
-        agent_blocks: 'not-an-array',
-      },
-    });
-    await settle(p);
-    expect('agent_blocks' in p.messages[1]).toBe(false);
-    expect(p.messages[1].turn_id).toBe('turn_abc');
-  });
-
-  it('empty-string turn_id is omitted', async () => {
-    // The factories generate non-empty strings,
-    // but defensive against a backend bug — empty
-    // string shouldn't produce a `turn_id` field
-    // that callers then fail to look up.
-    const p = mountPanel();
-    const reqId = await sendAndGetRequestId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok', turn_id: '' },
-    });
-    await settle(p);
-    expect('turn_id' in p.messages[1]).toBe(false);
-  });
-
-  it('error-path completion still threads turn_id', async () => {
-    // Errored turns can still have spawned
-    // agents up to the failure point. The error
-    // message replaces the assistant content but
-    // turn_id should ride through so the
-    // archive affordance still works for
-    // partial turns.
-    const p = mountPanel();
-    const reqId = await sendAndGetRequestId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        error: 'rate limit hit',
-        turn_id: 'turn_abc',
-      },
-    });
-    await settle(p);
-    expect(p.messages[1].turn_id).toBe('turn_abc');
-    // Error path doesn't carry agent_blocks (the
-    // backend skips spawn-block dispatch on
-    // error per `_streaming.py`), so omit
-    // defensively.
-    expect('agent_blocks' in p.messages[1]).toBe(false);
+    expect(p.messages).toHaveLength(2);
+    expect(p.messages[1].role).toBe('assistant');
+    expect(p.messages[1].terminalReason).toBe('engine_error');
   });
 });
 
 // ---------------------------------------------------------------------------
-// Chunk coalescing via rAF
+// Chunk coalescing and block identity
 // ---------------------------------------------------------------------------
+//
+// The old contract was that every chunk carried the whole accumulated turn, so
+// a dropped chunk cost nothing and any one chunk could rebuild the view. The
+// replacement is narrower: content is cumulative *within a block*, so a chunk
+// can rebuild its own block and nothing else. `seq` is what makes that safe
+// against reordering.
 
 describe('ChatPanel chunk coalescing', () => {
-  it('applies the latest content on each animation frame', async () => {
-    const p = mountPanel();
+  async function startStream(panel) {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    await settle(p);
-    p._input = 'hi';
-    await p._send();
-    const reqId = started.mock.calls[0][0];
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    return started.mock.calls[0][0];
+  }
 
-    pushEvent('stream-chunk', { requestId: reqId, content: 'a' });
-    pushEvent('stream-chunk', { requestId: reqId, content: 'ab' });
-    pushEvent('stream-chunk', {
+  function textChunk(reqId, content, seq, block = 'b0') {
+    return {
       requestId: reqId,
-      content: 'abc',
-    });
+      chunk: {
+        block_id: `${reqId}:${block}`,
+        seq,
+        content,
+        done: false,
+      },
+    };
+  }
+
+  it('the newest chunk for a block is what renders', async () => {
+    const p = mountPanel();
+    const reqId = await startStream(p);
+    pushEvent('stream-chunk', textChunk(reqId, 'a', 0));
+    pushEvent('stream-chunk', textChunk(reqId, 'ab', 1));
+    pushEvent('stream-chunk', textChunk(reqId, 'abc', 2));
     await settle(p);
-    expect(p._streamingContent).toBe('abc');
+    const blocks = p._turnBlocks.blocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].content).toBe('abc');
+    expect(blocks[0].seq).toBe(2);
   });
 
-  it('uses full content, not delta accumulation', async () => {
-    // Dropped chunks are harmless because each carries the
-    // full accumulated content.
+  it('a chunk that arrives out of order is discarded', async () => {
+    // Not merged, not appended — dropped. The higher `seq` already carries
+    // everything the older one did.
     const p = mountPanel();
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    const reqId = await startStream(p);
+    pushEvent('stream-chunk', textChunk(reqId, 'first second', 1));
+    pushEvent('stream-chunk', textChunk(reqId, 'first', 0));
     await settle(p);
-    p._input = 'hi';
-    await p._send();
-    const reqId = started.mock.calls[0][0];
+    expect(p._turnBlocks.blocks[0].content).toBe('first second');
+  });
+
+  it('a second block appends rather than replacing', async () => {
+    // Block identity is the whole point: text either side of a tool call is
+    // two blocks, and the later one must not overwrite the earlier.
+    const p = mountPanel();
+    const reqId = await startStream(p);
+    pushEvent('stream-chunk', textChunk(reqId, 'before the call', 0, 'b0'));
+    pushEvent('stream-chunk', textChunk(reqId, 'after the call', 0, 'b1'));
+    await settle(p);
+    expect(p._turnBlocks.blocks.map((b) => b.content)).toEqual([
+      'before the call',
+      'after the call',
+    ]);
+    const rendered = p.shadowRoot.querySelectorAll(
+      '.message-card.streaming .block-text',
+    );
+    expect(rendered).toHaveLength(2);
+  });
+
+  it('a payload with no block_id is unroutable and ignored', async () => {
+    // The engine always sends one. Inventing a block for a payload without
+    // it would put unattributable text in the transcript.
+    const p = mountPanel();
+    const reqId = await startStream(p);
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: 'first',
-    });
-    pushEvent('stream-chunk', {
-      requestId: reqId,
-      content: 'third chunk content',
+      chunk: { seq: 0, content: 'nowhere to put this' },
     });
     await settle(p);
-    expect(p._streamingContent).toBe('third chunk content');
+    expect(p._turnBlocks.blocks).toEqual([]);
+  });
+
+  it('_streamingContent is no longer the accumulator', async () => {
+    // It survives in tab state as the field the old single-string contract
+    // wrote to. Nothing writes it during a turn now; the blocks hold the
+    // text. Pinned so a partial revert to string accumulation is loud.
+    const p = mountPanel();
+    const reqId = await startStream(p);
+    pushEvent('stream-chunk', textChunk(reqId, 'abc', 0));
+    await settle(p);
+    expect(p._streamingContent).toBe('');
   });
 });
 
@@ -437,8 +622,8 @@ describe('ChatPanel cancel', () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     const cancel = vi.fn().mockResolvedValue({ status: 'ok' });
     publishFakeRpc({
-      'LLMService.chat_streaming': started,
-      'LLMService.cancel_streaming': cancel,
+      'ClaudeCodeService.chat_streaming': started,
+      'ClaudeCodeService.cancel_streaming': cancel,
     });
     const p = mountPanel();
     await settle(p);
@@ -457,8 +642,8 @@ describe('ChatPanel cancel', () => {
       .fn()
       .mockRejectedValue(new Error('already done'));
     publishFakeRpc({
-      'LLMService.chat_streaming': started,
-      'LLMService.cancel_streaming': cancel,
+      'ClaudeCodeService.chat_streaming': started,
+      'ClaudeCodeService.cancel_streaming': cancel,
     });
     const p = mountPanel();
     await settle(p);
@@ -478,251 +663,45 @@ describe('ChatPanel cancel', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Retry prompt population (stream-complete)
+// Retry prompt population — removed
 // ---------------------------------------------------------------------------
-
-describe('ChatPanel retry prompt population', () => {
-  async function sendAndGetId(panel, text = 'hi') {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    await settle(panel);
-    panel._input = text;
-    await panel._send();
-    await settle(panel);
-    return started.mock.calls[0][0];
-  }
-
-  it('populates textarea with ambiguous retry prompt', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p, 'please edit');
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'editing now',
-        edit_results: [
-          {
-            file: 'a.py',
-            status: 'failed',
-            error_type: 'ambiguous_anchor',
-            message: 'Ambiguous match (2 locations)',
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._input).toContain('a.py');
-    expect(p._input).toContain('retry with more surrounding');
-  });
-
-  it('populates textarea with not-in-context retry prompt', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'done',
-        edit_results: [],
-        files_auto_added: ['src/new.py'],
-      },
-    });
-    await settle(p);
-    expect(p._input).toContain('The file src/new.py');
-    expect(p._input).toContain('has been added');
-  });
-
-  it('not-in-context wins over ambiguous when both present', async () => {
-    // Last-wins ordering in _maybePopulateRetryPrompt.
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'tried',
-        edit_results: [
-          {
-            file: 'a.py',
-            error_type: 'ambiguous_anchor',
-            message: 'two matches',
-          },
-        ],
-        files_auto_added: ['b.py'],
-      },
-    });
-    await settle(p);
-    expect(p._input).toContain('The file b.py');
-    expect(p._input).toContain('has been added');
-    expect(p._input).not.toContain('surrounding context');
-  });
-
-  it('in-context mismatch prompt fires for selected file anchor_not_found', async () => {
-    const p = mountPanel({
-      selectedFiles: ['src/selected.py'],
-    });
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'attempted',
-        edit_results: [
-          {
-            file: 'src/selected.py',
-            error_type: 'anchor_not_found',
-            message: 'Old text not found',
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._input).toContain('already in');
-    expect(p._input).toContain('src/selected.py');
-    expect(p._input).toContain('re-read');
-  });
-
-  it('ambiguous prompt wins over in-context mismatch', async () => {
-    const p = mountPanel({ selectedFiles: ['a.py'] });
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'attempted',
-        edit_results: [
-          {
-            file: 'a.py',
-            error_type: 'anchor_not_found',
-            message: 'not found',
-          },
-          {
-            file: 'b.py',
-            error_type: 'ambiguous_anchor',
-            message: 'two matches',
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._input).toContain('b.py');
-    expect(p._input).toContain('retry with more surrounding');
-    expect(p._input).not.toContain('already in');
-  });
-
-  it('does not populate when all edits succeeded', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'all good',
-        edit_results: [
-          { file: 'a.py', status: 'applied' },
-          { file: 'b.py', status: 'applied' },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._input).toBe('');
-  });
-
-  it('does not populate when result has no edit_results', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'plain response' },
-    });
-    await settle(p);
-    expect(p._input).toBe('');
-  });
-
-  it('does not populate when stream completes with an error', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        error: 'server broke',
-        edit_results: [
-          {
-            file: 'a.py',
-            error_type: 'ambiguous_anchor',
-            message: 'two matches',
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._input).toBe('');
-  });
-
-  it('does not clobber user-typed text', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    p._input = 'I was typing this';
-    await settle(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'done',
-        files_auto_added: ['auto.py'],
-      },
-    });
-    await settle(p);
-    expect(p._input).toBe('I was typing this');
-  });
-
-  it('does not populate for passive streams (other request IDs)', async () => {
-    const p = mountPanel();
-    await settle(p);
-    pushEvent('stream-complete', {
-      requestId: 'other-client-id',
-      result: {
-        response: 'their response',
-        files_auto_added: ['their-file.py'],
-      },
-    });
-    await settle(p);
-    expect(p._input).toBe('');
-  });
-
-  it('focuses the textarea after populating', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'done',
-        files_auto_added: ['new.py'],
-      },
-    });
-    await settle(p);
-    const ta = p.shadowRoot.querySelector('.input-textarea');
-    expect(p.shadowRoot.activeElement).toBe(ta);
-  });
-
-  it('positions cursor at end of populated text', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'done',
-        files_auto_added: ['new.py'],
-      },
-    });
-    await settle(p);
-    const ta = p.shadowRoot.querySelector('.input-textarea');
-    expect(ta.selectionStart).toBe(p._input.length);
-    expect(ta.selectionEnd).toBe(p._input.length);
-  });
-});
+//
+// Twelve tests used to check that a failed edit populated the textarea with a
+// follow-up prompt: "retry with more surrounding context", "the file has been
+// added to the context", and so on. They read `result.edit_results`, which was
+// our apply pipeline's report on the marker blocks it had just tried to apply.
+//
+// The agent applies its own edits. A failed `Edit` tool call comes back to the
+// agent as a tool result and it retries on its own — usually before the user
+// has finished reading the card. Writing a retry prompt into the box would put
+// words in the user's mouth about a failure that has already been handled, so
+// the builders went with the pipeline.
 
 // ---------------------------------------------------------------------------
-// Agent tab spawning (D21 Phase C2a)
+// Agent tabs and subagents
 // ---------------------------------------------------------------------------
+//
+// Twenty-two tests used to live here, driving `stream-complete` payloads with
+// `{turn_id, agent_blocks}` and asserting a tab appeared per block. The native
+// engine spawned real sibling conversations that way, each with its own
+// `ContextManager`, and each needed a tab to talk to.
+//
+// Claude Code's subagents are internal to a turn: the agent calls `Task`, the
+// subagent's output is attributed to that call's `tool_use_id`, and there is
+// nothing to send a message to. So they render as a row nested under the card
+// that spawned them, and `streamComplete` spawns nothing.
+//
+// `spawnAgentTabs` and the `agentsSpawned` broadcast that drives it are still
+// wired — they go in phase 3 with the rest of the native engine, so that the
+// phase-2 diff is about the new path rather than about removing the old one.
+// Nothing emits `agentsSpawned` on the Claude Code path, which is why the
+// first test below matters: the removal has to be provable from the panel's
+// behaviour, not from the absence of a caller.
 
-describe('ChatPanel agent tab spawning — gating', () => {
+describe('ChatPanel agent tabs', () => {
   async function startMainStream(panel, message = 'hi') {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = message;
     await panel._send();
@@ -730,432 +709,145 @@ describe('ChatPanel agent tab spawning — gating', () => {
     return started.mock.calls[0][0];
   }
 
-  it('no spawn when agent_blocks is missing', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'plain response',
-        turn_id: 'turn_abc',
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
-    expect(p._tabs.has('main')).toBe(true);
-  });
-
-  it('no spawn when agent_blocks is empty array', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'no agents',
-        turn_id: 'turn_abc',
-        agent_blocks: [],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
-  });
-
-  it('no spawn when turn_id is missing', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'missing turn_id',
-        agent_blocks: [
-          { id: 'agent-0', task: 'do it', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
-  });
-
-  it('no spawn on error completion', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        error: 'something broke',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'agent-0', task: 'do it', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
-  });
-
-  it('no spawn on cancelled completion', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        cancelled: true,
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'agent-0', task: 'do it', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
-  });
-
-  it('no spawn for agent-tab completions (tree depth 1)', async () => {
-    // Agents can't spawn sub-agents — tree depth is 1.
-    const p = mountPanel();
-    await settle(p);
-    const agentTabId = 'turn_xyz/agent-00';
-    p._tabs.set(agentTabId, p._makeTabState());
-    p._tabLabels.set(agentTabId, 'Agent 00');
-    p._activeTabId = agentTabId;
-    await settle(p);
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    await settle(p);
-    p._input = 'continue';
-    await p._send();
-    await settle(p);
-    const reqId = started.mock.calls[0][0];
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'nested agents',
-        turn_id: 'turn_nested',
-        agent_blocks: [
-          { id: 'agent-0', task: 'nested', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(2);
-    expect(p._tabs.has('turn_nested/agent-00')).toBe(false);
-  });
-});
-
-describe('ChatPanel agent tab spawning — tab creation', () => {
-  async function startMainStream(panel, message = 'hi') {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    await settle(panel);
-    panel._input = message;
-    await panel._send();
-    await settle(panel);
-    return started.mock.calls[0][0];
-  }
-
-  it('creates one tab per valid block, keyed by agent id', async () => {
+  it('a completion carrying agent_blocks spawns nothing', async () => {
     const p = mountPanel();
     const reqId = await startMainStream(p);
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
         response: 'delegated',
+        terminal_reason: 'completed',
         turn_id: 'turn_abc',
         agent_blocks: [
           { id: 'frontend-trivial', task: 'first', agent_idx: 0 },
           { id: 'backend-auth', task: 'second', agent_idx: 1 },
-          { id: 'docs-update', task: 'third', agent_idx: 2 },
         ],
       },
     });
     await settle(p);
-    expect(p._tabs.size).toBe(4); // main + 3 agents
-    expect(p._tabs.has('frontend-trivial')).toBe(true);
-    expect(p._tabs.has('backend-auth')).toBe(true);
-    expect(p._tabs.has('docs-update')).toBe(true);
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+    // Nor is either field lifted onto the settled message — the
+    // "View agents (N)" affordance they fed is gone with them.
+    expect(p.messages[1].agent_blocks).toBeUndefined();
+    expect(p.messages[1].turn_id).toBeUndefined();
   });
 
-  it('tab id matches the spawn block id verbatim', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'a', task: 't', agent_idx: 0 },
-          { id: 'streaming-pipeline', task: 't', agent_idx: 7 },
-          { id: 'with-suffix-42', task: 't', agent_idx: 42 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.has('a')).toBe(true);
-    expect(p._tabs.has('streaming-pipeline')).toBe(true);
-    expect(p._tabs.has('with-suffix-42')).toBe(true);
-  });
-
-  it('seeds each tab with task as initial user message', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          {
-            id: 'auth-refactor',
-            task: 'refactor the auth module',
-            agent_idx: 0,
-          },
-        ],
-      },
-    });
-    await settle(p);
-    const tab = p._tabs.get('auth-refactor');
-    expect(tab).toBeTruthy();
-    expect(tab.messages).toHaveLength(1);
-    expect(tab.messages[0]).toEqual({
-      role: 'user',
-      content: 'refactor the auth module',
-    });
-  });
-
-  it('copies main tab selected files into each agent tab', async () => {
+  it('the agentsSpawned broadcast still spawns tabs', async () => {
     const p = mountPanel();
     p._tabs.get('main').selectedFiles = ['src/auth.py', 'src/db.py'];
     const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'a0', task: 't', agent_idx: 0 },
-          { id: 'a1', task: 't', agent_idx: 1 },
-        ],
-      },
+    pushEvent('agents-spawned', {
+      turn_id: 'turn_abc',
+      parent_request_id: reqId,
+      agent_blocks: [
+        {
+          id: 'auth-refactor',
+          task: 'refactor the auth module',
+          agent_idx: 0,
+        },
+        { id: 'a1', task: '', agent_idx: 1 },
+      ],
     });
     await settle(p);
-    const tab0 = p._tabs.get('a0');
-    const tab1 = p._tabs.get('a1');
-    expect(tab0.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
-    expect(tab1.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
-    expect(tab0.selectedFiles).not.toBe(tab1.selectedFiles);
-    expect(tab0.selectedFiles).not.toBe(p._tabs.get('main').selectedFiles);
-  });
-
-  it('labels use deriveAgentTabLabel', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'a0', task: 'refactor auth', agent_idx: 0 },
-          { id: 'a1', task: '', agent_idx: 1 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabLabels.get('a0')).toBe(
-      'Agent 00: refactor auth',
+    expect(p._tabs.size).toBe(3);
+    // Keyed by the block id verbatim, labelled by index and task.
+    expect(p._tabLabels.get('auth-refactor')).toBe(
+      'Agent 00: refactor the auth module',
     );
     expect(p._tabLabels.get('a1')).toBe('Agent 01');
-  });
-
-  it('does not switch to a newly spawned tab', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    expect(p._activeTabId).toBe('main');
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'a0', task: 't', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
+    const tab = p._tabs.get('auth-refactor');
+    // Seeded with the task, so the tab opens showing what it was asked.
+    expect(tab.messages).toEqual([
+      { role: 'user', content: 'refactor the auth module' },
+    ]);
+    // Selection copied, not shared — an agent tab changing its own picker
+    // must not move the main tab's.
+    expect(tab.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
+    expect(tab.selectedFiles).not.toBe(
+      p._tabs.get('main').selectedFiles,
+    );
+    // Focus stays where the user left it.
     expect(p._activeTabId).toBe('main');
   });
 
-  it('tab strip grows after first spawn', async () => {
-    // Strip is always present (per spec, the per-tab
-    // 📊 Context icon is the only path to the Context
-    // overlay). Spawning the first agent grows it from
-    // 1 button (Main) to 2 (Main + agent-0).
+  it('a malformed agentsSpawned payload spawns nothing', async () => {
     const p = mountPanel();
-    await settle(p);
-    expect(
-      p.shadowRoot.querySelectorAll('.tab-strip-tab').length,
-    ).toBe(1);
     const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'a0', task: 't', agent_idx: 0 },
-        ],
+    const block = { id: 'a', task: 't', agent_idx: 0 };
+    const malformed = [
+      { parent_request_id: reqId, agent_blocks: [block] },
+      { turn_id: '', parent_request_id: reqId, agent_blocks: [block] },
+      { turn_id: 't', parent_request_id: reqId, agent_blocks: [] },
+      { turn_id: 't', parent_request_id: reqId, agent_blocks: 'nope' },
+      { turn_id: 't', parent_request_id: reqId },
+      {
+        turn_id: 't',
+        parent_request_id: reqId,
+        agent_blocks: [{ id: 'a', task: 't', agent_idx: 'zero' }],
       },
-    });
-    await settle(p);
-    const strip = p.shadowRoot.querySelector('.tab-strip');
-    expect(strip).toBeTruthy();
-    const buttons = strip.querySelectorAll('.tab-strip-tab');
-    expect(buttons.length).toBe(2);
-  });
-});
-
-describe('ChatPanel agent tab spawning — defensive', () => {
-  async function startMainStream(panel, message = 'hi') {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    await settle(panel);
-    panel._input = message;
-    await panel._send();
-    await settle(panel);
-    return started.mock.calls[0][0];
-  }
-
-  it('idempotent on duplicate stream-complete', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    const result = {
-      response: 'ok',
-      turn_id: 'turn_abc',
-      agent_blocks: [
-        { id: 'agent-0', task: 'initial', agent_idx: 0 },
-      ],
-    };
-    pushEvent('stream-complete', { requestId: reqId, result });
-    await settle(p);
-    const tab = p._tabs.get('agent-0');
-    tab.messages.push({ role: 'assistant', content: 'agent reply' });
-    pushEvent('stream-complete', { requestId: reqId, result });
-    await settle(p);
-    const same = p._tabs.get('agent-0');
-    expect(same).toBe(tab);
-    expect(same.messages).toHaveLength(2);
-    expect(same.messages[1].content).toBe('agent reply');
-  });
-
-  it('skips entries with non-numeric agent_idx', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'agent-0', task: 'good', agent_idx: 0 },
-          { id: 'agent-bad', task: 'bad', agent_idx: 'zero' },
-          { id: 'agent-1', task: 'also good', agent_idx: 1 },
-        ],
+      {
+        turn_id: 't',
+        parent_request_id: reqId,
+        agent_blocks: [null, undefined],
       },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(3); // main + 2
-    expect(p._tabs.has('agent-0')).toBe(true);
-    expect(p._tabs.has('agent-1')).toBe(true);
-  });
-
-  it('skips entries with negative agent_idx', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'agent-neg', task: 't', agent_idx: -1 },
-        ],
-      },
-    });
+    ];
+    for (const detail of malformed) {
+      pushEvent('agents-spawned', detail);
+    }
     await settle(p);
     expect(p._tabs.size).toBe(1);
   });
 
-  it('non-array agent_blocks silently drops', async () => {
+  it('a subagent renders as a row inside the turn', async () => {
+    // The replacement for a tab: nested under the `Task` card that spawned
+    // it, live until its status is terminal, with Stop as the only write
+    // affordance — AC⚡DC did not create it and cannot message it.
     const p = mountPanel();
     const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
+    pushEvent('tool-use', {
       requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: 'not an array',
+      data: {
+        tool_use_id: 'toolu_task',
+        name: 'Task',
+        input: { description: 'audit the parser' },
+      },
+    });
+    pushEvent('subagent-event', {
+      requestId: reqId,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        tool_use_id: 'toolu_task',
+        description: 'audit the parser',
+        task_type: 'Explore',
+        status: 'running',
       },
     });
     await settle(p);
-    expect(p._tabs.size).toBe(1);
-  });
-
-  it('null blocks within array are skipped', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
+    const row = p.shadowRoot.querySelector('.subagent-row');
+    expect(row).toBeTruthy();
+    expect(row.classList.contains('live')).toBe(true);
+    expect(row.querySelector('.subagent-desc').textContent)
+      .toContain('audit the parser');
+    expect(row.querySelector('.subagent-stop')).toBeTruthy();
+    // A terminal status ends the live state and takes Stop away.
+    pushEvent('subagent-event', {
       requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          null,
-          { id: 'agent-0', task: 't', agent_idx: 0 },
-          undefined,
-        ],
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        status: 'completed',
+        terminal: true,
+        summary: 'no issues found',
       },
     });
     await settle(p);
-    expect(p._tabs.size).toBe(2);
-    expect(p._tabs.has('agent-0')).toBe(true);
-  });
-
-  it('non-string task falls back to empty string', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: 'turn_abc',
-        agent_blocks: [
-          { id: 'agent-0', task: null, agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    const tab = p._tabs.get('agent-0');
-    expect(tab).toBeTruthy();
-    expect(p._tabLabels.get('agent-0')).toBe('Agent 00');
-    expect(tab.messages[0].content).toBe('');
-  });
-
-  it('empty turn_id is rejected', async () => {
-    const p = mountPanel();
-    const reqId = await startMainStream(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: {
-        response: 'ok',
-        turn_id: '',
-        agent_blocks: [
-          { id: 'agent-0', task: 't', agent_idx: 0 },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p._tabs.size).toBe(1);
+    const done = p.shadowRoot.querySelector('.subagent-row');
+    expect(done.classList.contains('terminal')).toBe(true);
+    expect(done.querySelector('.subagent-stop')).toBeNull();
+    expect(done.querySelector('.subagent-summary').textContent)
+      .toContain('no issues found');
   });
 });
 
@@ -1166,7 +858,7 @@ describe('ChatPanel agent tab spawning — defensive', () => {
 describe('ChatPanel onStreamRetry toast', () => {
   async function startMainStream(panel, message = 'hi') {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = message;
     await panel._send();
@@ -1318,199 +1010,151 @@ describe('ChatPanel onStreamRetry toast', () => {
 });
 
 // ---------------------------------------------------------------------------
-// C2d — stale-tag error handling on chat_streaming resolution
+// Last-completion outcome (LED row state)
 // ---------------------------------------------------------------------------
+//
+// `computeLastEditOutcome(error, errorInfo, editResults)` read our own apply
+// pipeline's `EditResult` list, classified anchor failures, and built a
+// tooltip out of them. There is no such list: the agent owns its edits and
+// reports them as tool results. `computeTurnOutcome(result, files)` replaces
+// it and takes the engine's own verdict — `is_error`, `terminal_reason`,
+// `cancelled` — with the turn's modified files standing in for the applied
+// count, since "N files changed" is the question the tooltip was always
+// answering.
 
-// ---------------------------------------------------------------------------
-// Last-completion outcome (LED row state, Scope B commit 3)
-// ---------------------------------------------------------------------------
-
-describe('computeLastEditOutcome — pure helper', () => {
-  it('clean run with no edits → clean / 0', () => {
-    const outcome = computeLastEditOutcome(null, null, undefined);
-    expect(outcome).toEqual({
+describe('computeTurnOutcome — pure helper', () => {
+  it('no result at all → clean / 0', () => {
+    expect(computeTurnOutcome(null, null)).toEqual({
       status: 'clean',
       appliedCount: 0,
       failureReason: null,
     });
   });
 
-  it('all-applied edits → clean / count', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      { file: 'a.py', status: 'applied' },
-      { file: 'b.py', status: 'applied' },
-      { file: 'c.py', status: 'applied' },
-    ]);
+  it('the modified-file count is the applied count', () => {
+    const outcome = computeTurnOutcome({}, ['a.py', 'b.py', 'c.py']);
     expect(outcome.status).toBe('clean');
     expect(outcome.appliedCount).toBe(3);
     expect(outcome.failureReason).toBeNull();
   });
 
-  it('mix of applied + already_applied + skipped → clean', () => {
-    // None of these statuses count as failures. The
-    // agent's edit pipeline ran and produced no error;
-    // already-applied / skipped / not-in-context are
-    // all benign.
-    const outcome = computeLastEditOutcome(null, null, [
-      { file: 'a.py', status: 'applied' },
-      { file: 'b.py', status: 'already_applied' },
-      { file: 'c.py', status: 'skipped' },
-      { file: 'd.py', status: 'not_in_context' },
-    ]);
+  it('a non-array file list counts as none', () => {
+    expect(computeTurnOutcome({}, null).appliedCount).toBe(0);
+    expect(computeTurnOutcome({}, 'oops').appliedCount).toBe(0);
+    expect(computeTurnOutcome({}, undefined).appliedCount).toBe(0);
+  });
+
+  it('a cancelled turn is clean, and still counts its edits', () => {
+    // The user stopped it. A red LED would read as a fault, and the files it
+    // wrote before the stop are real.
+    const outcome = computeTurnOutcome(
+      { cancelled: true, terminal_reason: 'aborted_streaming' },
+      ['a.py'],
+    );
     expect(outcome.status).toBe('clean');
     expect(outcome.appliedCount).toBe(1);
+    expect(outcome.failureReason).toBeNull();
   });
 
-  it('one failed edit → error / message', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      { file: 'a.py', status: 'applied' },
-      {
-        file: 'b.py',
-        status: 'failed',
-        error_type: 'anchor_not_found',
-        message: 'Old text not found',
-      },
-    ]);
+  it('is_error → error, reasoned from the engine errors list', () => {
+    const outcome = computeTurnOutcome(
+      { is_error: true, errors: ['rate limit exceeded'] },
+      ['a.py'],
+    );
     expect(outcome.status).toBe('error');
+    // Partial credit — the tooltip still says what got written.
     expect(outcome.appliedCount).toBe(1);
-    expect(outcome.failureReason).toBe(
-      'b.py: Old text not found',
-    );
-  });
-
-  it('failure without message falls back to error_type', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      {
-        file: 'b.py',
-        status: 'failed',
-        error_type: 'ambiguous_anchor',
-        message: '',
-      },
-    ]);
-    expect(outcome.failureReason).toBe(
-      'ambiguous_anchor in b.py',
-    );
-  });
-
-  it('failure without file or error_type → generic', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      { status: 'failed' },
-    ]);
-    expect(outcome.failureReason).toBe('edit failed');
-  });
-
-  it('multiple failures → first one wins for tooltip', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      {
-        file: 'a.py',
-        status: 'failed',
-        message: 'first failure',
-      },
-      {
-        file: 'b.py',
-        status: 'failed',
-        message: 'second failure',
-      },
-    ]);
-    expect(outcome.failureReason).toContain('first failure');
-    expect(outcome.failureReason).not.toContain(
-      'second failure',
-    );
-  });
-
-  it('stream error wins over edit failures', () => {
-    // Stream-level error means the response is partial;
-    // any edit results are unreliable. Tooltip should
-    // reflect the stream error, not the (incidental)
-    // edit failure.
-    const outcome = computeLastEditOutcome(
-      'something broke',
-      { message: 'rate limit exceeded' },
-      [
-        {
-          file: 'a.py',
-          status: 'failed',
-          message: 'anchor missing',
-        },
-      ],
-    );
-    expect(outcome.status).toBe('error');
     expect(outcome.failureReason).toBe('rate limit exceeded');
-    // appliedCount still tracked — caller may want to
-    // show partial credit even on stream error.
-    expect(outcome.appliedCount).toBe(0);
   });
 
-  it('stream error without errorInfo uses raw error', () => {
-    const outcome = computeLastEditOutcome(
-      'network died',
-      null,
-      undefined,
+  it('an API status is worth showing verbatim', () => {
+    const outcome = computeTurnOutcome(
+      { is_error: true, api_error_status: 529 },
+      [],
     );
-    expect(outcome.failureReason).toBe('network died');
+    expect(outcome.failureReason).toBe('API error 529');
   });
 
-  it('stream error with empty errorInfo.message falls back', () => {
-    // Defensive — classifier may produce an
-    // errorInfo dict with an empty message.
-    const outcome = computeLastEditOutcome(
-      'fallback string',
-      { message: '', error_type: 'unknown' },
-      undefined,
+  it('falls back to the subtype, then to a generic phrase', () => {
+    expect(
+      computeTurnOutcome(
+        { is_error: true, subtype: 'error_during_execution' },
+        [],
+      ).failureReason,
+    ).toBe('error during execution');
+    expect(
+      computeTurnOutcome({ is_error: true }, []).failureReason,
+    ).toBe('the turn failed');
+  });
+
+  it('a bad terminal reason is an error even without is_error', () => {
+    // A turn that hit the turn limit did not do what was asked, and
+    // `is_error` is false for it.
+    const outcome = computeTurnOutcome(
+      { terminal_reason: 'max_turns' },
+      [],
     );
-    expect(outcome.failureReason).toBe('fallback string');
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('max turns');
   });
 
-  it('non-array editResults treated as empty', () => {
-    expect(
-      computeLastEditOutcome(null, null, null).appliedCount,
-    ).toBe(0);
-    expect(
-      computeLastEditOutcome(null, null, 'oops').appliedCount,
-    ).toBe(0);
-    expect(
-      computeLastEditOutcome(null, null, undefined)
-        .appliedCount,
-    ).toBe(0);
-  });
-
-  it('non-object entries skipped', () => {
-    const outcome = computeLastEditOutcome(null, null, [
-      null,
-      undefined,
-      'string',
-      42,
-      { file: 'a.py', status: 'applied' },
-    ]);
-    expect(outcome.appliedCount).toBe(1);
+  it('terminal_reason "completed" is clean', () => {
+    const outcome = computeTurnOutcome(
+      { terminal_reason: 'completed' },
+      ['a.py'],
+    );
     expect(outcome.status).toBe('clean');
+    expect(outcome.failureReason).toBeNull();
+  });
+
+  it('a permission denial is not a failure', () => {
+    // The permission system working as designed. Red here would train users
+    // to read the LED as noise.
+    const outcome = computeTurnOutcome(
+      {
+        terminal_reason: 'completed',
+        permission_denials: [{ tool_name: 'Bash' }],
+      },
+      [],
+    );
+    expect(outcome.status).toBe('clean');
+  });
+
+  it('is_error outranks a clean terminal reason', () => {
+    const outcome = computeTurnOutcome(
+      {
+        is_error: true,
+        terminal_reason: 'completed',
+        errors: ['broke late'],
+      },
+      [],
+    );
+    expect(outcome.status).toBe('error');
+    expect(outcome.failureReason).toBe('broke late');
   });
 });
 
 describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
   async function sendAndGetRequestId(panel, message = 'hi') {
-    const { vi } = await import('vitest');
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = message;
     await panel._send();
     return started.mock.calls[0][0];
   }
 
-  it('clean completion → clean outcome on active tab', async () => {
+  it('clean completion → clean outcome on the active tab', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
         response: 'all done',
-        edit_results: [
-          { file: 'a.py', status: 'applied' },
-          { file: 'b.py', status: 'applied' },
-        ],
+        terminal_reason: 'completed',
+        files_modified: ['a.py', 'b.py'],
       },
     });
     await settle(p);
@@ -1520,37 +1164,47 @@ describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
     expect(outcome.appliedCount).toBe(2);
   });
 
-  it('failure → error outcome with diagnostic', async () => {
+  it('counts files the result omitted but a tool result reported', async () => {
+    // The outcome is computed from the same union the footer renders, so a
+    // turn that ended badly still says what it wrote.
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
-    pushEvent('stream-complete', {
+    pushEvent('tool-use', {
       requestId: reqId,
-      result: {
-        response: 'tried',
-        edit_results: [
-          {
-            file: 'a.py',
-            status: 'failed',
-            error_type: 'anchor_not_found',
-            message: 'Old text not found',
-          },
-        ],
+      data: {
+        tool_use_id: 'toolu_1',
+        name: 'Write',
+        input: { file_path: 'x.py' },
       },
     });
+    pushEvent('tool-result', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_1',
+        status: 'ok',
+        files_modified: ['x.py'],
+      },
+    });
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'wrote it', terminal_reason: 'completed' },
+    });
     await settle(p);
-    const outcome = p._tabs.get('main').lastEditOutcome;
-    expect(outcome.status).toBe('error');
-    expect(outcome.failureReason).toContain('a.py');
+    expect(
+      p._tabs.get('main').lastEditOutcome.appliedCount,
+    ).toBe(1);
   });
 
-  it('stream error → error outcome', async () => {
+  it('an engine error → error outcome with the engine reason', async () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p);
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
-        error: 'something broke',
-        error_info: { message: 'rate limit exceeded' },
+        response: '',
+        is_error: true,
+        terminal_reason: 'engine_error',
+        errors: ['rate limit exceeded'],
       },
     });
     await settle(p);
@@ -1559,10 +1213,26 @@ describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
     expect(outcome.failureReason).toBe('rate limit exceeded');
   });
 
-  it('inactive-tab completion writes to that tab', async () => {
+  it('a stopped turn → clean outcome', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'partial',
+        cancelled: true,
+        terminal_reason: 'aborted_streaming',
+      },
+    });
+    await settle(p);
+    expect(
+      p._tabs.get('main').lastEditOutcome.status,
+    ).toBe('clean');
+  });
+
+  it('an inactive tab gets its own outcome', async () => {
     const p = mountPanel();
     await settle(p);
-    // Set up agent tab with its own in-flight request.
     p._tabs.set('agent-0', p._makeTabState());
     p._tabLabels.set('agent-0', 'Agent 0');
     const agentTab = p._tabs.get('agent-0');
@@ -1570,69 +1240,57 @@ describe('ChatPanel onStreamComplete writes lastEditOutcome', () => {
     agentTab.currentRequestId = 'r-agent-1';
     p.requestUpdate();
     await settle(p);
-    // Active tab is still main.
     expect(p._activeTabId).toBe('main');
     pushEvent('stream-complete', {
       requestId: 'r-agent-1',
       result: {
         response: 'agent done',
-        edit_results: [
-          { file: 'x.py', status: 'applied' },
-        ],
+        terminal_reason: 'completed',
+        files_modified: ['x.py'],
       },
     });
     await settle(p);
     expect(agentTab.lastEditOutcome).not.toBeNull();
     expect(agentTab.lastEditOutcome.status).toBe('clean');
     expect(agentTab.lastEditOutcome.appliedCount).toBe(1);
-    // Main tab's outcome is unaffected.
+    // The tab the user is looking at is untouched.
     expect(p._tabs.get('main').lastEditOutcome).toBeNull();
   });
 
-  it('initial state is null', async () => {
+  it('starts out null', async () => {
     const p = mountPanel();
     await settle(p);
     expect(p._tabs.get('main').lastEditOutcome).toBeNull();
   });
 
-  it('outcome overwrites on subsequent completions', async () => {
+  it('the next completion overwrites it', async () => {
     const p = mountPanel();
     let reqId = await sendAndGetRequestId(p);
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
         response: 'first',
-        edit_results: [
-          {
-            file: 'a.py',
-            status: 'failed',
-            message: 'first failure',
-          },
-        ],
+        is_error: true,
+        errors: ['first failure'],
       },
     });
     await settle(p);
     expect(
       p._tabs.get('main').lastEditOutcome.status,
     ).toBe('error');
-    // Second turn — clean.
     reqId = await sendAndGetRequestId(p, 'second');
     pushEvent('stream-complete', {
       requestId: reqId,
       result: {
         response: 'second',
-        edit_results: [
-          { file: 'b.py', status: 'applied' },
-        ],
+        terminal_reason: 'completed',
+        files_modified: ['b.py'],
       },
     });
     await settle(p);
-    expect(
-      p._tabs.get('main').lastEditOutcome.status,
-    ).toBe('clean');
-    expect(
-      p._tabs.get('main').lastEditOutcome.appliedCount,
-    ).toBe(1);
+    const outcome = p._tabs.get('main').lastEditOutcome;
+    expect(outcome.status).toBe('clean');
+    expect(outcome.appliedCount).toBe(1);
   });
 });
 
@@ -1645,7 +1303,16 @@ describe('ChatPanel stream-start error handling', () => {
     return tabId;
   }
 
-  it('stale agent_tag closes tab, switches to main, toasts', async () => {
+  // There is no `agent_tag`, so there is no stale one. The two tests that
+  // used to live here drove `{error: "agent not found"}` and asserted the
+  // panel closed the agent tab, switched to main, and called
+  // `LLMService.close_agent_context`. `chat_streaming` cannot produce that
+  // error any more — the service has no per-tab context to lose — and a
+  // frontend that still closed tabs on an error string would delete a user's
+  // conversation over the wording of an engine message. These pin the
+  // inverse.
+
+  it('an "agent not found" error leaves the tab alone', async () => {
     const chatStreaming = vi
       .fn()
       .mockResolvedValue({ error: 'agent not found' });
@@ -1653,56 +1320,52 @@ describe('ChatPanel stream-start error handling', () => {
       .fn()
       .mockResolvedValue({ status: 'ok', closed: false });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
       'LLMService.close_agent_context': closeAgent,
     });
     const p = mountPanel();
     await settle(p);
     const tabId = await setupAgentTab(p);
-    const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
-    try {
-      p._input = 'hello stale';
-      await p._send();
-      await settle(p);
-      expect(p._tabs.has(tabId)).toBe(false);
-      expect(p._activeTabId).toBe('main');
-      const warnings = toastListener.mock.calls
-        .map((c) => c[0].detail)
-        .filter((d) => d.type === 'warning');
-      expect(warnings.length).toBeGreaterThan(0);
-      expect(warnings[0].message).toMatch(/Agent tab closed/);
-    } finally {
-      window.removeEventListener('ac-toast', toastListener);
-    }
+    p._input = 'hello stale';
+    await p._send();
+    await settle(p);
+    expect(p._tabs.has(tabId)).toBe(true);
+    expect(p._activeTabId).toBe(tabId);
+    expect(closeAgent).not.toHaveBeenCalled();
   });
 
-  it('stale agent_tag removes optimistic user message', async () => {
+  it('the optimistic user message stays where it was sent', async () => {
+    // It used to be rolled back on the way to closing the tab. Now the turn
+    // simply failed to start: the prompt the user wrote stays on the card
+    // above the error, which is what makes the error legible.
     const chatStreaming = vi
       .fn()
       .mockResolvedValue({ error: 'agent not found' });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
-      'LLMService.close_agent_context': vi
-        .fn()
-        .mockResolvedValue({ status: 'ok', closed: false }),
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
-    await setupAgentTab(p);
+    const tabId = await setupAgentTab(p);
     p._input = 'stale message';
     await p._send();
     await settle(p);
-    const mainTab = p._tabs.get('main');
-    expect(mainTab.messages).toEqual([]);
+    const tab = p._tabs.get(tabId);
+    expect(tab.messages[0]).toMatchObject({
+      role: 'user',
+      content: 'stale message',
+    });
+    expect(tab.messages[1].content).toContain('agent not found');
+    // And nothing leaked onto main.
+    expect(p._tabs.get('main').messages).toEqual([]);
   });
 
   it('generic error appends assistant error message in current tab', async () => {
     const chatStreaming = vi.fn().mockResolvedValue({
-      error: 'Another stream is active (request xyz)',
+      error: 'The engine is not connected',
     });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
@@ -1713,15 +1376,15 @@ describe('ChatPanel stream-start error handling', () => {
     expect(p.messages[0].role).toBe('user');
     expect(p.messages[0].content).toBe('hello');
     expect(p.messages[1].role).toBe('assistant');
-    expect(p.messages[1].content).toContain('Another stream');
+    expect(p.messages[1].content).toContain('not connected');
   });
 
   it('generic error clears streaming state', async () => {
     const chatStreaming = vi.fn().mockResolvedValue({
-      error: 'Malformed agent_tag',
+      error: 'The working directory is not a repository',
     });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
@@ -1735,10 +1398,10 @@ describe('ChatPanel stream-start error handling', () => {
 
   it('generic error on agent tab keeps the tab open', async () => {
     const chatStreaming = vi.fn().mockResolvedValue({
-      error: 'Another stream is active',
+      error: 'The engine is not connected',
     });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
@@ -1750,7 +1413,7 @@ describe('ChatPanel stream-start error handling', () => {
     expect(p._activeTabId).toBe(tabId);
     const tab = p._tabs.get(tabId);
     expect(tab.messages).toHaveLength(2);
-    expect(tab.messages[1].content).toContain('Another stream');
+    expect(tab.messages[1].content).toContain('not connected');
   });
 
   it('"agent not found" on main tab does NOT close anything', async () => {
@@ -1758,7 +1421,7 @@ describe('ChatPanel stream-start error handling', () => {
       .fn()
       .mockResolvedValue({ error: 'agent not found' });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
@@ -1775,7 +1438,7 @@ describe('ChatPanel stream-start error handling', () => {
       .fn()
       .mockRejectedValue(new Error('network died'));
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const consoleSpy = vi
       .spyOn(console, 'error')
@@ -1793,36 +1456,16 @@ describe('ChatPanel stream-start error handling', () => {
     }
   });
 
-  it('stale tag clears request tracking', async () => {
+  it('a failed start marks the owning tab, not just the panel', async () => {
+    // `send()` flips the panel-level flags, which are the *active* tab's
+    // reactive surface. The per-tab outcome the LED row reads has to be
+    // written too, or a turn that never started leaves the LED showing
+    // whatever the previous turn did.
     const chatStreaming = vi
       .fn()
-      .mockResolvedValue({ error: 'agent not found' });
+      .mockResolvedValue({ error: 'The engine is not connected' });
     publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
-      'LLMService.close_agent_context': vi
-        .fn()
-        .mockResolvedValue({ status: 'ok', closed: false }),
-    });
-    const p = mountPanel();
-    await settle(p);
-    await setupAgentTab(p);
-    p._input = 'hi';
-    await p._send();
-    await settle(p);
-    expect(p._streaming).toBe(false);
-    expect(p._currentRequestId).toBeNull();
-  });
-
-  it('stale tag still fires close_agent_context via _onTabClose', async () => {
-    const chatStreaming = vi
-      .fn()
-      .mockResolvedValue({ error: 'agent not found' });
-    const closeAgent = vi
-      .fn()
-      .mockResolvedValue({ status: 'ok', closed: false });
-    publishFakeRpc({
-      'LLMService.chat_streaming': chatStreaming,
-      'LLMService.close_agent_context': closeAgent,
+      'ClaudeCodeService.chat_streaming': chatStreaming,
     });
     const p = mountPanel();
     await settle(p);
@@ -1830,7 +1473,46 @@ describe('ChatPanel stream-start error handling', () => {
     p._input = 'hi';
     await p._send();
     await settle(p);
-    expect(closeAgent).toHaveBeenCalledOnce();
-    expect(closeAgent.mock.calls[0]).toEqual([tabId]);
+    const tab = p._tabs.get(tabId);
+    expect(tab.streaming).toBe(false);
+    expect(tab.currentRequestId).toBeNull();
+    expect(tab.lastEditOutcome).toEqual({
+      status: 'error',
+      appliedCount: 0,
+      failureReason: 'The engine is not connected',
+    });
+    // Blocks are reset — the turn produced none, and a stale card left over
+    // from the previous turn would render under the error message.
+    expect(tab.turnBlocks.blocks).toEqual([]);
+  });
+
+  it('a turn already in flight says what to do about it', async () => {
+    // The one error message the handler rewrites. It fires when the user
+    // sends before a post-reconnect resume has adopted the running turn, and
+    // the useful half is the instruction, not the diagnosis.
+    const chatStreaming = vi.fn().mockResolvedValue({
+      error: 'A turn is already running (request req_1).',
+      reason: 'turn_in_progress',
+    });
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': chatStreaming,
+    });
+    const p = mountPanel();
+    await settle(p);
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      p._input = 'hi';
+      await p._send();
+      await settle(p);
+      expect(p.messages[1].content).toContain('already running');
+      expect(p.messages[1].content).toContain('Stop');
+      const warnings = toastListener.mock.calls
+        .map((c) => c[0].detail)
+        .filter((d) => d.type === 'warning');
+      expect(warnings.length).toBeGreaterThan(0);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
   });
 });

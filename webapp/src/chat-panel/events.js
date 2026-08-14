@@ -38,13 +38,33 @@
 
 import { normalizeMessageContent } from '../image-utils.js';
 import { SPEECH_STATE_EVENT } from '../speech-player.js';
+import { compactionSummary } from './block-render.js';
+import { resetTurnBlocks } from './blocks.js';
+import {
+  INITIAL_PERMISSION_MODE,
+  onRoleChanged,
+  probeModeAuthority,
+} from './permission-mode.js';
 import { onChatTabShortcut, onTabClose } from './tabs.js';
 import {
   onAgentsSpawned,
+  onEngineHealth,
+  onHookEvent,
+  onPermissionModeChanged,
+  onPermissionRequest,
+  onPermissionResolved,
+  onRateLimit,
+  onSessionStarted,
   onStreamChunk,
   onStreamComplete,
   onStreamRetry,
+  onSubagentEvent,
+  onSystemEvent,
+  onThinkingChunk,
+  onToolResult,
+  onToolUse,
   onUserMessage,
+  resumeStreamBlocks,
   startStreamTimerTick,
   stopRetryTick,
   stopStreamTimerTick,
@@ -71,6 +91,23 @@ export function bindEventHandlers(panel) {
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
   panel._onStreamRetry = (e) => onStreamRetry(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
+  // Claude Code engine channels. Every one is a distinct window event
+  // because the engine reports them as distinct pushes; folding them into
+  // one "engine-event" channel with a discriminator would only move the
+  // switch statement from the wiring table into the handler.
+  panel._onThinkingChunk = (e) => onThinkingChunk(panel, e);
+  panel._onToolUse = (e) => onToolUse(panel, e);
+  panel._onToolResult = (e) => onToolResult(panel, e);
+  panel._onSessionStarted = (e) => onSessionStarted(panel, e);
+  panel._onSubagentEvent = (e) => onSubagentEvent(panel, e);
+  panel._onHookEvent = (e) => onHookEvent(panel, e);
+  panel._onRateLimit = (e) => onRateLimit(panel, e);
+  panel._onEngineHealth = (e) => onEngineHealth(panel, e);
+  panel._onSystemEvent = (e) => onSystemEvent(panel, e);
+  panel._onPermissionRequest = (e) => onPermissionRequest(panel, e);
+  panel._onPermissionResolved = (e) => onPermissionResolved(panel, e);
+  panel._onPermissionModeChanged = (e) => onPermissionModeChanged(panel, e);
+  panel._onRoleChanged = (e) => onRoleChanged(panel, e);
   panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
   panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
   panel._onAgentClosed = (e) => onAgentClosed(panel, e);
@@ -126,90 +163,46 @@ export function onSpeechPlayerState(panel, event) {
  * Resume in-flight streams reported by
  * ``get_current_state.active_streams``.
  *
- * Each entry carries ``{request_id, agent_id,
- * accumulated_content}``. For each:
+ * Each entry is the engine's ``ActiveStream`` shape —
+ * ``{request_id, session_id, started_at, blocks}`` — where ``blocks`` is the
+ * turn's *block state*, one entry per block:
+ * ``{block_id, kind, seq, content, tool}``.
  *
- *   1. Resolve the target tab — main when
- *      ``agent_id`` is null, the matching agent
- *      tab otherwise. Agent tabs that don't yet
- *      exist (the user refreshed before
- *      ``list_live_agents`` rehydration completed)
- *      are skipped — the next tab-creation pass
- *      will not retroactively attach a stream id,
- *      but the chunks broadcast by the backend
- *      will accumulate server-side and the next
- *      state-loaded (e.g. via reconnect) picks
- *      them up.
- *   2. Set the tab's streaming flag, install the
- *      accumulated content as ``streamingContent``,
- *      and stamp ``currentRequestId`` so future
- *      stream-chunk and stream-complete events
- *      route here via :func:`findTabForRequest`.
+ * That it is state and not a chunk log is the whole design. A reconnecting
+ * client replays the current content of each block, in one pass, and is then
+ * exactly where a client that never disconnected would be. Replaying a chunk
+ * log would mean re-applying supersessions in order and hoping none were
+ * dropped, for the same end result.
  *
- * The backend's broadcast path delivers chunks to
- * every connected websocket for the duration of
- * the stream; the refreshed browser receives the
- * NEXT chunk normally, and the accumulated
- * content bridges the gap between resume and the
- * next chunk arrival (which may be tens of
- * seconds away for slow LLM calls).
+ * There is no ``agent_id`` in the payload, and never more than one entry: the
+ * engine runs one CLI session with one turn in flight, so the resumed turn is
+ * always the main tab's. Subagent work inside that turn arrives as blocks
+ * carrying their parent ``Task`` call's id and nests under its card — it is
+ * part of this turn, not a separate stream. (Phase 3's agent tabs are a
+ * frontend grouping of the same single stream, not concurrent streams.)
  *
- * Defensive against malformed entries — anything
- * missing a request_id or with non-string fields
- * is skipped silently. The contract with the
- * backend is "active_streams may be missing or
- * empty"; treat malformed entries the same way.
+ * The engine keeps broadcasting to every connected websocket for the
+ * remainder of the turn, so the refreshed browser gets the NEXT chunk
+ * normally; the replayed block state bridges the gap until it arrives, which
+ * for a long tool call can be tens of seconds.
+ *
+ * Defensive against malformed entries — anything missing a ``request_id``, or
+ * whose blocks aren't a list, is skipped silently. The contract is
+ * "active_streams may be missing or empty"; a malformed entry gets the same
+ * treatment.
  */
 export function resumeActiveStreams(panel, activeStreams) {
   if (!Array.isArray(activeStreams)) return;
   if (activeStreams.length === 0) return;
-  let activeChanged = false;
+  const tab = panel._tabs.get('main');
+  if (!tab) return;
+  let resumed = false;
   for (const entry of activeStreams) {
-    if (!entry || typeof entry !== 'object') continue;
-    const requestId = entry.request_id;
-    if (typeof requestId !== 'string' || !requestId) continue;
-    const agentId =
-      typeof entry.agent_id === 'string' && entry.agent_id
-        ? entry.agent_id
-        : null;
-    const content =
-      typeof entry.accumulated_content === 'string'
-        ? entry.accumulated_content
-        : '';
-    const tabId = agentId === null ? 'main' : agentId;
-    const tab = panel._tabs.get(tabId);
-    if (!tab) {
-      // Agent tab not yet rehydrated. The
-      // backend's broadcast continues; if the
-      // tab materialises later (via
-      // list_live_agents) future chunks land
-      // there but the bridge content is lost.
-      // Acceptable degradation for an edge
-      // case (agent tab present at refresh time,
-      // but list_live_agents hasn't returned
-      // yet when state-loaded fires).
-      continue;
-    }
-    tab.currentRequestId = requestId;
-    tab.streaming = true;
-    tab.streamingContent = content;
-    tab.streams.set(requestId, { content, sticky: true });
-    // Arm the run timer from resume time. The original
-    // send-time stamp is lost across the reconnect (the
-    // backend doesn't report when the stream began), so
-    // the resumed counter measures time-since-resume, not
-    // true turn duration. Better a live, slightly-short
-    // timer than none — and the frozen duration baked at
-    // completion will likewise reflect the visible span.
-    tab.streamStartedAt = Date.now();
-    if (tabId === panel._activeTabId) {
-      activeChanged = true;
-    }
+    if (resumeStreamBlocks(panel, tab, entry)) resumed = true;
   }
-  if (activeChanged) {
-    panel.requestUpdate();
-  }
-  // Kick the ticker if we armed any timer above.
+  if (!resumed) return;
+  if (panel._activeTabId === 'main') panel.requestUpdate();
+  // Kick the ticker — `resumeStreamBlocks` armed the run timer.
   startStreamTimerTick(panel);
 }
 
@@ -227,6 +220,30 @@ export function resumeActiveStreams(panel, activeStreams) {
  *   stream-chunk / stream-complete — server-push
  *     stream events, routed by request ID to the
  *     owning tab.
+ *
+ *   thinking-chunk / tool-use / tool-result /
+ *   subagent-event — the rest of the Claude Code
+ *     block stream. Same request-ID routing; each
+ *     folds into the owning tab's `turnBlocks`
+ *     (see blocks.js) rather than into prose.
+ *
+ *   session-started / engine-health / rate-limit /
+ *   system-event / hook-event — engine reports that
+ *     are not transcript content. Mostly stashed or
+ *     toasted; see the handlers in streaming.js for
+ *     which ones earn a toast and why the rest
+ *     deliberately don't.
+ *
+ *   permission-request / permission-resolved —
+ *     the gate. Session-wide, not turn-scoped:
+ *     every client sees the dialog, because the
+ *     turn is stalled and whoever is at a keyboard
+ *     should be able to answer.
+ *
+ *   permission-mode-changed / role-changed — the
+ *     safety posture and this client's authority
+ *     over it. The selector only ever moves on
+ *     these, never on its own click.
  *
  *   user-message — server broadcasts user
  *     messages to all clients; passive observers
@@ -262,6 +279,24 @@ export function attachEventListeners(panel) {
   window.addEventListener('stream-complete', panel._onStreamComplete);
   window.addEventListener('stream-retry', panel._onStreamRetry);
   window.addEventListener('user-message', panel._onUserMessage);
+  // Claude Code engine channels (see the block comment above).
+  window.addEventListener('thinking-chunk', panel._onThinkingChunk);
+  window.addEventListener('tool-use', panel._onToolUse);
+  window.addEventListener('tool-result', panel._onToolResult);
+  window.addEventListener('session-started', panel._onSessionStarted);
+  window.addEventListener('subagent-event', panel._onSubagentEvent);
+  window.addEventListener('hook-event', panel._onHookEvent);
+  window.addEventListener('rate-limit', panel._onRateLimit);
+  window.addEventListener('engine-health', panel._onEngineHealth);
+  window.addEventListener('system-event', panel._onSystemEvent);
+  window.addEventListener('permission-request', panel._onPermissionRequest);
+  window.addEventListener('permission-resolved', panel._onPermissionResolved);
+  window.addEventListener(
+    'permission-mode-changed', panel._onPermissionModeChanged,
+  );
+  // Collab authority can change mid-session (the host turns collab on or
+  // off), and with it whether this client may set the permission mode.
+  window.addEventListener('role-changed', panel._onRoleChanged);
   window.addEventListener('session-changed', panel._onSessionChanged);
   window.addEventListener('agents-spawned', panel._onAgentsSpawned);
   window.addEventListener(
@@ -328,10 +363,10 @@ export function attachEventListeners(panel) {
  *
  * Cancels any pending rAF or debounce timers
  * scoped to the panel itself (the per-tab
- * debounce timers held by `_fileSearchDebounceTimer`
- * and `_urlDetectDebounceTimer` get cleared too —
- * a brief delay between disconnect and re-attach
- * could otherwise produce a stale re-render).
+ * debounce timer held by `_fileSearchDebounceTimer`
+ * gets cleared too — a brief delay between
+ * disconnect and re-attach could otherwise produce
+ * a stale re-render).
  */
 export function detachEventListeners(panel) {
   document.removeEventListener('keydown', panel._onChatTabShortcutBound);
@@ -339,6 +374,23 @@ export function detachEventListeners(panel) {
   window.removeEventListener('stream-complete', panel._onStreamComplete);
   window.removeEventListener('stream-retry', panel._onStreamRetry);
   window.removeEventListener('user-message', panel._onUserMessage);
+  window.removeEventListener('thinking-chunk', panel._onThinkingChunk);
+  window.removeEventListener('tool-use', panel._onToolUse);
+  window.removeEventListener('tool-result', panel._onToolResult);
+  window.removeEventListener('session-started', panel._onSessionStarted);
+  window.removeEventListener('subagent-event', panel._onSubagentEvent);
+  window.removeEventListener('hook-event', panel._onHookEvent);
+  window.removeEventListener('rate-limit', panel._onRateLimit);
+  window.removeEventListener('engine-health', panel._onEngineHealth);
+  window.removeEventListener('system-event', panel._onSystemEvent);
+  window.removeEventListener('permission-request', panel._onPermissionRequest);
+  window.removeEventListener(
+    'permission-resolved', panel._onPermissionResolved,
+  );
+  window.removeEventListener(
+    'permission-mode-changed', panel._onPermissionModeChanged,
+  );
+  window.removeEventListener('role-changed', panel._onRoleChanged);
   window.removeEventListener('session-changed', panel._onSessionChanged);
   window.removeEventListener('agents-spawned', panel._onAgentsSpawned);
   window.removeEventListener(
@@ -395,10 +447,6 @@ export function detachEventListeners(panel) {
     clearTimeout(panel._fileSearchDebounceTimer);
     panel._fileSearchDebounceTimer = null;
   }
-  if (panel._urlDetectDebounceTimer != null) {
-    clearTimeout(panel._urlDetectDebounceTimer);
-    panel._urlDetectDebounceTimer = null;
-  }
   // Panel is unmounting — stop the retry ticker
   // (if any). Unlike the debounce timers above
   // this is a setInterval that would otherwise
@@ -424,12 +472,6 @@ export function detachEventListeners(panel) {
  * cancels any in-flight stream from the caller's
  * perspective (the backend's stream may still be
  * running but we're no longer interested).
- *
- * Clears URL chips because URLService.clear_fetched
- * runs server-side on new_session; we mirror that
- * on the client. Also wipes per-tab snapshots so
- * switching back to a tab that had chips from a
- * prior session doesn't resurrect them.
  */
 export function onSessionChanged(panel, event) {
   const data = event.detail || {};
@@ -483,15 +525,16 @@ export function onSessionChanged(panel, event) {
   panel._streamStartedAt = null;
   stopStreamTimerTick(panel);
   panel._autoScroll = true;
+  // A session swap abandons the turn in flight, so the block state it was
+  // accumulating is no longer anyone's. Reset every tab's, not just the
+  // active one — a stale half-turn left on a background tab would surface
+  // the moment the user switched to it.
+  for (const tab of panel._tabs.values()) {
+    resetTurnBlocks(tab.turnBlocks);
+  }
   // Seed input history from the loaded session's
   // user messages.
   seedInputHistory(panel, msgs);
-  // Clear URL chips — fresh session.
-  const chipsEl = panel.shadowRoot?.querySelector('ac-url-chips');
-  if (chipsEl) chipsEl.reset();
-  for (const tab of panel._tabs.values()) {
-    tab.urlChips = null;
-  }
 }
 
 /**
@@ -512,6 +555,13 @@ export function onSessionChanged(panel, event) {
  * possible), we skip the replace. The stream's
  * own completion will bring the UI back into
  * sync.
+ *
+ * Also guarded against an empty snapshot. `EngineState.messages`
+ * is `[]` until transcript mirroring lands in phase 5, so a
+ * `state-loaded` arriving after the user has said something
+ * would otherwise replace a live conversation with nothing.
+ * An empty snapshot is now always a no-op: absence of a
+ * transcript is not evidence there was no conversation.
  */
 export function onStateLoaded(panel, event) {
   const state = event.detail || {};
@@ -533,11 +583,8 @@ export function onStateLoaded(panel, event) {
   }
   if (wasStreaming) return;
   const msgs = Array.isArray(state.messages) ? state.messages : [];
-  // Only overwrite when we actually have
-  // something to restore. An empty snapshot
-  // during a fresh-install first-connect
-  // shouldn't clobber any optimistic local state.
-  if (msgs.length === 0 && panel.messages.length === 0) return;
+  // Only overwrite when we actually have something to restore.
+  if (msgs.length === 0) return;
   panel.messages = msgs.map((m) => {
     const normalized = normalizeMessageContent(m);
     const images = Array.isArray(m.images)
@@ -650,12 +697,36 @@ function seedIntoHistory(historyEl, msgs) {
  * stream-chunk / stream-complete but carry a
  * `stage` field identifying what's happening:
  *
+ *   - `compact_boundary` — the engine compacted
+ *     its own context mid-turn. Appends a divider
+ *     to the transcript carrying the before/after
+ *     token counts.
+ *
+ * The remaining stages belong to the native
+ * engine and are unreachable from the chat path
+ * now that turns run through `ClaudeCodeService`.
+ * They stay until phase 3 deletes `LLMService`
+ * with them:
+ *
  *   - `url_fetch` — URL fetch started mid-stream.
  *   - `url_ready` — URL fetch completed.
  *   - `compacting` — history compaction starting.
  *   - `compacted` — compaction done. Replace the
  *     message list with the compacted messages.
  *   - `compaction_error` — compaction failed.
+ *
+ * `compact_boundary` deliberately does NOT take
+ * the `compacted` branch. Compaction is the
+ * engine's, it happens to the engine's context,
+ * and the transcript on this page is not affected
+ * by it — what the divider says is "the agent's
+ * memory of everything above this line is now a
+ * summary", which is a fact about the model, not
+ * about the page. Replacing the message list
+ * would throw away the conversation the user is
+ * reading to reflect a change that never touched
+ * it. Per specs5/5-webapp/chat.md § Engine Event
+ * Routing.
  *
  * Request ID filtering: compaction runs AFTER
  * stream-complete has fired, so
@@ -687,6 +758,32 @@ export function onCompactionEvent(panel, event) {
     return;
   }
   switch (stage) {
+    case 'compact_boundary': {
+      // A divider, not a replacement. The engine broadcasts this to every
+      // connected client, and there is no optimistic local add to dedupe
+      // against, so each client appends exactly once — same arrangement as
+      // `commitResult`.
+      //
+      // `content` carries the plain-text form because three things downstream
+      // read messages without knowing about `compaction`: chat search, the copy
+      // button, and the history browser. The renderer keys off `compaction`
+      // and ignores `content`.
+      const summary = compactionSummary(payload);
+      panel.messages = [
+        ...panel.messages,
+        {
+          role: 'user',
+          content: summary.text,
+          system_event: true,
+          compaction: {
+            pre_tokens: summary.pre,
+            post_tokens: summary.post,
+            trigger: summary.trigger,
+          },
+        },
+      ];
+      return;
+    }
     case 'url_fetch': {
       const label = payload.url || 'URL';
       panel._emitToast(`Fetching ${label}…`, 'info');
@@ -976,28 +1073,52 @@ export function onAgentModeChanged(panel, event) {
 }
 
 /**
- * Hydrate mode + cross-ref from the backend
- * state snapshot. Subsequent updates flow
- * through the `mode-changed` broadcast.
+ * Hydrate engine state from ``ClaudeCodeService.get_current_state``.
+ *
+ * Called from ``onRpcReady``, which is also the reconnect path — the engine's
+ * session outlives the websocket, so a refreshed browser has to ask rather
+ * than assume. Four things come back and each is here for a reason:
+ *
+ *   ``permission_mode`` — the safety posture. Hydrating it is not cosmetic:
+ *     the selector renders on first paint with `INITIAL_PERMISSION_MODE`, and
+ *     a session actually sitting in `acceptEdits` would otherwise show as
+ *     "Ask" until the next broadcast, telling the user the opposite of what
+ *     the next edit will do.
+ *
+ *   ``active_streams`` — a turn in flight at reconnect. Replayed as block
+ *     state by :func:`resumeActiveStreams`.
+ *
+ *   ``pending_permissions`` — deliberately ignored here. The dialog hydrates
+ *     its own queue from the same call (see permission-dialog/), and a second
+ *     copy in the panel could only ever disagree with it.
+ *
+ *   ``engine_health`` — startup failures, credential and version warnings,
+ *     transcript mirror gaps. Stashed, not toasted (see `onEngineHealth`).
+ *
+ * Silent on failure. This runs on every connect, and a transient RPC error
+ * that resolves itself on the next broadcast doesn't deserve a toast — but a
+ * *missing* method does get logged, because that means the engine service
+ * isn't registered and nothing else will work either.
  */
-export async function loadModeState(panel) {
+export async function loadEngineState(panel) {
   if (!panel.rpcConnected) return;
+  let state;
   try {
-    const state = await panel.rpcExtract(
-      'LLMService.get_current_state',
-    );
-    if (state && typeof state === 'object') {
-      if (typeof state.mode === 'string') {
-        panel._mode = state.mode;
-      }
-      if (typeof state.cross_ref_enabled === 'boolean') {
-        panel._crossRefEnabled = state.cross_ref_enabled;
-      }
-    }
+    state = await panel.rpcExtract('ClaudeCodeService.get_current_state');
   } catch (err) {
-    // Silent — mode-changed broadcasts will
-    // catch us up.
+    console.error('[chat] ClaudeCodeService.get_current_state failed', err);
+    return;
   }
+  if (!state || typeof state !== 'object' || state.error) return;
+  if (typeof state.permission_mode === 'string' && state.permission_mode) {
+    panel._permissionMode = state.permission_mode;
+  } else if (!panel._permissionMode) {
+    panel._permissionMode = INITIAL_PERMISSION_MODE;
+  }
+  if (state.engine_health && typeof state.engine_health === 'object') {
+    panel._engineHealth = state.engine_health;
+  }
+  resumeActiveStreams(panel, state.active_streams);
 }
 
 /**

@@ -1235,7 +1235,7 @@ describe('FilesTab context-menu action dispatch', () => {
           sha: null,
         }),
         'Repo.rename_file': vi.fn().mockResolvedValue({}),
-        'LLMService.set_selected_files': setFiles,
+        'ClaudeCodeService.set_selected_files': setFiles,
       });
       const t = mountTab();
       await settle(t);
@@ -2276,7 +2276,7 @@ describe('FilesTab context-menu action dispatch', () => {
           sha: null,
         }),
         'LLMService.set_excluded_index_files': setExcluded,
-        'LLMService.set_selected_files': setSelected,
+        'ClaudeCodeService.set_selected_files': setSelected,
       });
       const t = mountTab();
       await settle(t);

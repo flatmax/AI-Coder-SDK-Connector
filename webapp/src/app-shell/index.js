@@ -36,6 +36,11 @@ import '../compaction-progress.js';
 import '../doc-index-progress.js';
 import '../cache-warmup-progress.js';
 import '../speech-controls.js';
+// Rendered last in the template and at the top of the z-order: a
+// permission request has stalled a turn, and it must not render
+// somewhere the user is not looking
+// (specs5/5-webapp/permission-dialog.md § Placement).
+import '../permission-dialog/index.js';
 
 import { APP_SHELL_STYLES } from './styles.js';
 import {
@@ -767,10 +772,23 @@ export class AppShell extends JRPCClient {
   // not found" errors to surface in logs rather than silently
   // vanishing.
 
-  streamChunk(requestId, content) {
-    // Phase 2: chat panel listens via window event.
+  /**
+   * A text block's partial content.
+   *
+   * The second argument is a chunk *dict* —
+   * `{block_id, seq, content, done}` — not a bare string. It is named
+   * `chunk` and forwarded under that key to match `thinkingChunk`, which
+   * carries the identical shape: the two differ only in which region of the
+   * turn they belong to, so they should not differ in how they arrive.
+   *
+   * `content` is cumulative within a block and never across a turn, and
+   * `seq` lets the consumer drop a chunk that arrives after a newer one
+   * (see `blocks.js`). Both facts are the block's, not ours — this method
+   * forwards and does not interpret.
+   */
+  streamChunk(requestId, chunk) {
     window.dispatchEvent(new CustomEvent('stream-chunk', {
-      detail: { requestId, content },
+      detail: { requestId, chunk },
     }));
     return true;
   }
@@ -844,9 +862,12 @@ export class AppShell extends JRPCClient {
    * can listen without coupling to AppShell. See
    * specs4/3-llm/streaming.md § Post-Response.
    */
-  postResponseComplete(requestId) {
+  postResponseComplete(requestId, data = null) {
+    // The Claude Code engine carries a payload here (reindexed files,
+    // refreshed context usage, disk warnings); the native engine sent
+    // the ID alone. Both arities work — `data` is null for the latter.
     window.dispatchEvent(new CustomEvent('post-response-complete', {
-      detail: { requestId },
+      detail: { requestId, data },
     }));
     return true;
   }
@@ -1185,6 +1206,123 @@ export class AppShell extends JRPCClient {
 
   roleChanged(data) {
     window.dispatchEvent(new CustomEvent('role-changed', { detail: data }));
+    return true;
+  }
+
+  // ---------------------------------------------------------------
+  // Claude Code engine callbacks
+  //
+  // Every one of these is a `ClaudeCodeService` server push, re-
+  // dispatched as a window event so the consuming component listens
+  // without coupling to AppShell. Arities come from
+  // specs-reference/3-engine/session.md § Service: AcApp — turn-scoped
+  // events take (request_id, payload); session-wide events take
+  // (payload) alone. Getting that wrong puts a payload where a
+  // consumer expects an ID, which is why the tests assert it.
+  // ---------------------------------------------------------------
+
+  /**
+   * A permission request. Session-wide: every client sees the dialog,
+   * not just the browser that started the turn — the turn is stalled
+   * and whoever is at a keyboard should be able to answer.
+   */
+  permissionRequest(data) {
+    window.dispatchEvent(new CustomEvent('permission-request', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * A permission request resolved — by this client, another window, the
+   * timeout, or shutdown. Closes the dialog everywhere with attribution.
+   */
+  permissionResolved(data) {
+    window.dispatchEvent(new CustomEvent('permission-resolved', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  permissionModeChanged(data) {
+    window.dispatchEvent(new CustomEvent('permission-mode-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /** A tool card: name, summarised input, pending state. */
+  toolUse(requestId, data) {
+    window.dispatchEvent(new CustomEvent('tool-use', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /** A tool result, attached to its card by `tool_use_id`. */
+  toolResult(requestId, data) {
+    window.dispatchEvent(new CustomEvent('tool-result', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /** A thinking block's partial content. Same chunk shape as streamChunk. */
+  thinkingChunk(requestId, chunk) {
+    window.dispatchEvent(new CustomEvent('thinking-chunk', {
+      detail: { requestId, chunk },
+    }));
+    return true;
+  }
+
+  /** The init banner: model, tool inventory, MCP health, session id. */
+  sessionStarted(requestId, data) {
+    window.dispatchEvent(new CustomEvent('session-started', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  subagentEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('subagent-event', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  hookEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('hook-event', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  rateLimit(requestId, data) {
+    window.dispatchEvent(new CustomEvent('rate-limit', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /**
+   * Engine lifecycle: startup failures, credential and version warnings,
+   * transcript mirror gaps. Session-wide.
+   */
+  engineHealth(data) {
+    window.dispatchEvent(new CustomEvent('engine-health', { detail: data }));
+    return true;
+  }
+
+  /**
+   * Anything the engine reports that is not a transcript block: a
+   * conversation reset, an unrecognised message type, an assistant-side
+   * error. Surfaced rather than swallowed, because a silently dropped
+   * message type is how a CLI upgrade breaks the UI invisibly.
+   */
+  systemEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('system-event', {
+      detail: { requestId, data },
+    }));
     return true;
   }
 

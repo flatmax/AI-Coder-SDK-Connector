@@ -108,14 +108,25 @@ transport — ~29,700 lines, untouched.
 
 | File | Why |
 |---|---|
-| `webapp/src/edit-blocks.js`, `edit-block-render.js` (+ tests) | Emoji edit-block parsing and rendering (CC-7). Replaced by tool-use cards and the permission diff. |
+| `webapp/src/edit-blocks.js` (+ tests) | Emoji edit-block parsing (CC-7). Replaced by tool-use cards and the permission diff. |
 | `webapp/src/agent-block-render.js` | `🟧🟧🟧 AGENT` block rendering (CC-8). |
 | `webapp/src/cache-warmup-progress.js` | Cache warmer progress bar. |
 | `webapp/src/compaction-progress.js` (+ test) | Our compaction toast. Replaced by a transcript divider driven by `SystemMessage(subtype="compact_boundary")`. |
-| `webapp/src/url-chips.js`, `url-helpers.js` (+ tests) | URL curation UI (CC-9). |
+| `webapp/src/url-chips.js` (+ test) | URL curation UI (CC-9). |
 | `webapp/src/token-hud.js` | Tier bars, N/threshold labels, stability bars. Rebuilt from scratch (CC-4). |
 | `webapp/src/context-tab.js` | Budget/Cache sub-views, rebuild button, tier groups. Rebuilt from scratch (CC-4). |
 | `webapp/src/chat-panel/urls.js` (+ test) | URL chip integration in the input area. |
+
+Two files an earlier draft of this table listed for deletion are **not** deletable, found while
+implementing phase 2:
+
+- **`edit-block-render.js` stays.** Its diff renderer is what draws the body of a tool card for `Edit`,
+  `MultiEdit`, `Write` and `NotebookEdit` — `chat-panel/block-render.js` imports it. The emoji *parsing*
+  goes with `edit-blocks.js`; the rendering is the thing the tool cards were supposed to replace it with,
+  and it already does the job.
+- **`url-helpers.js` stays, and has nothing to do with URL curation.** It is `main.js`'s WebSocket
+  port-and-URI parser. Deleting it breaks the transport bootstrap, which is a failure mode with no
+  visible connection to the URL-chip work the row grouped it with.
 
 ---
 
@@ -137,11 +148,12 @@ transport — ~29,700 lines, untouched.
 
 | File | Purpose |
 |---|---|
-| `webapp/src/permission-dialog.js` | The `can_use_tool` surface. Renders tool name, input, a Monaco diff for edit tools, and allow / deny / always-allow. |
-| `webapp/src/tool-card.js` | One collapsed card per tool call in the transcript, expandable to input and result. |
+| `webapp/src/permission-dialog/` | The `can_use_tool` surface. One module per concern: queue ordering, body renderers, the decision row, the Monaco diff, constants, styles. A single file was the plan; the queue, the settling interval and the diff editor's lifecycle each earned their own. |
+| `webapp/src/chat-panel/blocks.js` | The turn-block model: one block per `content_block`, tool status, todo state, tool paths. |
+| `webapp/src/chat-panel/block-render.js` | Templates for every block kind — text, thinking, tool cards (including the diff bodies, via `edit-block-render.js`), todo lists, subagent rows, the turn footer. Replaces the planned `tool-card.js` and `todo-list.js`, which were never separate components: a card and a checklist are two templates over the same block list, and splitting them would have meant three modules sharing one expansion map. |
+| `webapp/src/chat-panel/permission-mode.js` | The permission-mode control and its state. |
 | `webapp/src/context-usage-tab.js` | The rebuilt Context tab (CC-4). |
 | `webapp/src/usage-hud.js` | The rebuilt HUD: per-turn cost, per-model usage, context percentage, rate-limit state. |
-| `webapp/src/todo-list.js` | Renders Claude Code's `TodoWrite` state as a live checklist. |
 
 ## Frontend — KEEP unchanged
 

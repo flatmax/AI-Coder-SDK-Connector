@@ -66,7 +66,7 @@ describe('FilesTab review state', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
       'LLMService.end_review': endReview,
@@ -234,7 +234,7 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
       'LLMService.end_review': vi.fn().mockResolvedValue({
@@ -279,7 +279,7 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
       'LLMService.end_review': vi.fn().mockResolvedValue({
@@ -318,7 +318,7 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
       'LLMService.end_review': vi

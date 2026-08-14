@@ -23,13 +23,17 @@
 //                    reactive-accessor installer
 //   tabs.js        — tab strip rendering, spawn,
 //                    overflow menu, Alt+`
-//   streaming.js   — stream chunk/complete,
-//                    retry prompts, error
-//                    formatting + toasts
+//   blocks.js      — the Claude Code block model:
+//                    what a turn *is*
+//   block-render.js— what a turn *looks like*
+//   streaming.js   — every engine channel folded
+//                    into block state; turn
+//                    completion; toasts
+//   permission-mode.js — the safety-posture
+//                    selector and its authority
+//                    probe
 //   search.js      — message + file search
 //                    controllers
-//   urls.js        — URL detection, fetch, view
-//                    dialog
 //   input.js       — input handling, paste,
 //                    images, lightbox, speech,
 //                    snippets, file chips
@@ -37,8 +41,8 @@
 //                    helpers
 //   events.js      — connect/disconnect, all
 //                    window event listeners,
-//                    mode toggle, snippet load,
-//                    commit result
+//                    engine-state hydration,
+//                    snippet load, commit result
 //
 // Architectural contracts preserved here (the
 // modules cooperate to honour these — the
@@ -46,21 +50,36 @@
 //
 //   - **Streaming state keyed by request ID**
 //     (specs4/0-overview/implementation-guide.md
-//     D10): each tab has its own `_streams` Map
-//     and `_pendingChunks` Map; routing happens
-//     by request ID via `findTabForRequest`.
+//     D10): each tab has its own `_streams` Map;
+//     routing happens by request ID via
+//     `findTabForRequest`.
 //
-//   - **Chunks carry full accumulated content,
-//     not deltas**: `onStreamChunk` overwrites
-//     the pending slot rather than appending.
-//     Dropped chunks are harmless because each
-//     carries a superset of prior content.
+//   - **A turn is a list of blocks, not a string.**
+//     Text, thinking, tool calls, tool results and
+//     whole subagents interleave, and each block
+//     has its own identity (`{request_id}:b{n}`,
+//     or the SDK's `tool_use_id` for tools). The
+//     tab's `turnBlocks` object holds the turn in
+//     flight; completion freezes it onto the
+//     settled message and resets it.
 //
-//   - **Chunks coalesced per animation frame**:
-//     `_pendingChunks` holds the latest-seen
-//     content per request-id; the rAF callback
-//     reads it, clears the pending marker, and
-//     updates reactive state.
+//   - **Content is cumulative within a block and
+//     never across a turn.** A chunk replaces its
+//     block's content rather than appending, so a
+//     dropped chunk is harmless — the next one
+//     carries a superset. `seq` decides which of
+//     two chunks for the same block is newer;
+//     anything not newer is discarded.
+//
+//   - **Chunks coalesced per animation frame**: a
+//     pending map of block id → latest content is
+//     drained by one rAF callback, so the render
+//     rate is capped regardless of chunk rate.
+//
+//   - **The permission gate is never optimistic.**
+//     The mode selector moves when the engine says
+//     it moved, not when the user clicks. See
+//     permission-mode.js.
 //
 //   - **Per-tab state lives in `_tabs`, accessed
 //     via prototype-installed getter/setter
@@ -74,26 +93,31 @@ import { RpcMixin } from '../rpc-mixin.js';
 import { speechPlayer } from '../speech-player.js';
 // Side-effect imports — these modules register
 // custom elements (`<ac-history-browser>`,
-// `<ac-input-history>`, `<ac-speech-to-text>`,
-// `<ac-url-chips>`) that the render template uses.
-// Without these imports the elements would render
-// as unknown HTML.
+// `<ac-input-history>`, `<ac-speech-to-text>`)
+// that the render template uses. Without these
+// imports the elements would render as unknown
+// HTML.
+//
+// `<ac-url-chips>` used to be here. Phase 2 took the
+// chips off the input area — they fetched URLs into
+// the native engine's context, and Claude Code has
+// WebFetch. See rendering.js.
 import '../history-browser.js';
 import '../input-history.js';
 import '../speech-to-text.js';
-import '../url-chips.js';
 
 import {
   attachEventListeners,
   bindEventHandlers,
   detachEventListeners,
-  loadModeState,
+  loadEngineState,
   loadSnippets,
   onUpdated,
   rehydrateLiveAgents,
   switchMode,
   toggleCrossRef,
 } from './events.js';
+import { INITIAL_PERMISSION_MODE, probeModeAuthority } from './permission-mode.js';
 import {
   _AGENT_LABEL_MAX_LENGTH,
   _DRAWER_STORAGE_KEY,
@@ -112,9 +136,6 @@ import {
   _saveDrawerOpen,
   _saveReasoningEnabled,
   _saveSearchToggle,
-  buildAmbiguousRetryPrompt,
-  buildInContextMismatchRetryPrompt,
-  buildNotInContextRetryPrompt,
   deriveAgentTabLabel,
   generateRequestId,
   parseAgentTabId,
@@ -247,6 +268,31 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // at a time across all tabs.
     this._rafHandle = null;
 
+    // ---------------------------------------------------------
+    // Claude Code engine state
+    // ---------------------------------------------------------
+
+    // The engine's safety posture, and whether this client may change it.
+    // Both start at their most conservative honest value: the mode that asks
+    // about everything, and "we are probably the host" — see properties.js for
+    // why one of those defaults narrows and the other doesn't.
+    this._permissionMode = INITIAL_PERMISSION_MODE;
+    this._permissionModePending = false;
+    this._canSetPermissionMode = true;
+    this._sessionInfo = null;
+    this._engineHealth = null;
+
+    // Per-block expansion state: Map<block_id, boolean>. Not reactive — it is
+    // mutated in place, so a dirty-check on identity would never fire;
+    // `block-render.js` calls `requestUpdate()` after each toggle instead.
+    //
+    // One Map for the whole panel rather than one per tab, because block ids
+    // are already globally unique (`{request_id}:b{n}`, or the SDK's
+    // `tool_use_id`). That is also what makes expansion survive the turn
+    // settling: the Map outlives `turnBlocks`, so a thinking region the user
+    // opened stays open once the message is frozen into the list.
+    this._blockExpansion = new Map();
+
     // Bind handlers. tabs.js owns the overflow + Alt+`
     // closures; events.js owns window-event handlers;
     // input.js owns the speech-to-text + history
@@ -272,15 +318,64 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
+  // Subagent control
+  // ---------------------------------------------------------------
+
+  /**
+   * Kill one live subagent. Called by the Stop button on a subagent row
+   * (block-render.js, which invokes it as `panel._stopSubagent?.(row)`).
+   *
+   * A prototype method rather than a bound closure in the constructor because
+   * nothing detaches it — the render path reaches it through `panel`, so
+   * there is no listener identity to keep stable.
+   *
+   * Optimism is deliberately absent: the row keeps rendering as live until
+   * the engine reports `status: "killed"` through `subagentEvent`. `stop_task`
+   * returns `{status: "stopping"}`, not `stopped`, and a row that greyed out
+   * on the request would claim a subagent had stopped while its tools were
+   * still writing files.
+   */
+  async _stopSubagent(row) {
+    const taskId = row?.task_id;
+    if (typeof taskId !== 'string' || !taskId) return;
+    if (!this.rpcConnected) {
+      this._emitToast('Not connected to the server', 'warning');
+      return;
+    }
+    try {
+      const result = await this.rpcExtract(
+        'ClaudeCodeService.stop_task', taskId,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        this._emitToast(`Could not stop: ${result.error}`, 'warning');
+      }
+    } catch (err) {
+      this._emitToast(
+        `Could not stop the subagent: ${err?.message || err}`,
+        'error',
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------
   // Active-tab accessor
   // ---------------------------------------------------------------
   //
   // Special-cased here rather than in state.js because
   // `_activeTabId` is the KEY into `_tabs`, not a per-
   // tab field itself. The setter dispatches
-  // `active-tab-changed` on real transitions and
-  // snapshots / restores URL chip state across the
-  // switch.
+  // `active-tab-changed` on real transitions.
+  //
+  // It used to snapshot and restore URL chip state across
+  // the switch as well — a singleton `<ac-url-chips>`
+  // element showed the active tab's chips, so its `_chips`
+  // Map had to be swapped by hand. Phase 2 removed the
+  // chips, and with them the swap.
+  //
+  // Block state needs no equivalent: each tab owns its own
+  // `turnBlocks` object (state.js) and the renderer reads
+  // whichever tab is active, so there is no shared element
+  // holding one tab's data at a time.
 
   get _activeTabId() {
     return this._activeTabIdValue;
@@ -289,20 +384,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
   set _activeTabId(value) {
     const oldValue = this._activeTabIdValue;
     if (oldValue === value) return;
-    // Snapshot the leaving tab's URL chip state before
-    // flipping. The singleton ac-url-chips element
-    // currently shows oldValue's chips; once we flip,
-    // its `_chips` Map will belong to the new tab. If
-    // we don't snapshot first, the leaving tab's state
-    // is lost.
-    this._snapshotUrlChipsForTab(oldValue);
     this._activeTabIdValue = value;
     this.requestUpdate('_activeTabId', oldValue);
-    // Restore the entering tab's URL chip state. Runs
-    // after the property flip so the chip component
-    // (if it re-renders based on reactive state) sees
-    // the new tab's data, not a half-swapped mix.
-    this._restoreUrlChipsForTab(value);
     // Notify listeners of the transition. bubbles +
     // composed so the event crosses the shadow DOM
     // boundary.
@@ -316,40 +399,6 @@ export class ChatPanel extends RpcMixin(LitElement) {
         composed: true,
       }),
     );
-  }
-
-  /**
-   * Snapshot the leaving tab's URL chip Map. Called by
-   * the `_activeTabId` setter. Defensive — before any
-   * render the chip element doesn't exist in
-   * shadowRoot, in which case there's nothing to
-   * snapshot.
-   */
-  _snapshotUrlChipsForTab(tabId) {
-    if (typeof tabId !== 'string' || !tabId) return;
-    const tab = this._tabs.get(tabId);
-    if (!tab) return;
-    const chipsEl = this.shadowRoot?.querySelector('ac-url-chips');
-    if (!chipsEl || !chipsEl._chips) return;
-    tab.urlChips = new Map(chipsEl._chips);
-  }
-
-  /**
-   * Restore the entering tab's URL chip snapshot.
-   * Defers through `updateComplete` so the setter's
-   * `requestUpdate` cycle finishes first.
-   */
-  _restoreUrlChipsForTab(tabId) {
-    this.updateComplete.then(() => {
-      const chipsEl =
-        this.shadowRoot?.querySelector('ac-url-chips');
-      if (!chipsEl) return;
-      const tab = this._tabs.get(tabId);
-      if (!tab) return;
-      chipsEl._chips = tab.urlChips
-        ? new Map(tab.urlChips)
-        : new Map();
-    });
   }
 
   // ---------------------------------------------------------------
@@ -445,13 +494,21 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
-    // Fetch snippets + hydrate mode state once the
+    // Fetch snippets + hydrate engine state once the
     // proxy is published. RpcMixin defers this hook to
     // the next microtask so every sibling component
     // has received the proxy before any of them issues
     // requests — we're safe to call straight away.
     loadSnippets(this);
-    loadModeState(this);
+    // The engine's session outlives the websocket, so this is the reconnect
+    // path as much as the startup one: permission mode, engine health, and any
+    // turn still in flight all come from here.
+    loadEngineState(this);
+    // Whether this client may change the permission mode. Separate call
+    // because it asks the collab service, not the engine — and it must not be
+    // gated on the engine answering, or a participant would briefly see an
+    // enabled selector.
+    probeModeAuthority(this);
     // Rehydrate live agent tabs from the backend's
     // _agent_contexts registry. Per spec
     // specs4/5-webapp/agent-browser.md § Refresh and
@@ -582,7 +639,4 @@ export {
   _saveReasoningEnabled,
   _loadReasoningEffort,
   _saveReasoningEffort,
-  buildAmbiguousRetryPrompt,
-  buildInContextMismatchRetryPrompt,
-  buildNotInContextRetryPrompt,
 };

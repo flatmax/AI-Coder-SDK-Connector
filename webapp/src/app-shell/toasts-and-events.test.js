@@ -75,16 +75,23 @@ describe('AppShell events and toasts', () => {
 
   describe('server-push callbacks', () => {
     it('streamChunk dispatches window event', () => {
+      // `chunk`, not `content`: the engine's payload is a block-keyed
+      // object — `{block_id, seq, content, done}` — and calling the whole
+      // thing `content` when `content` is one of its fields read as if the
+      // shell were unwrapping it. It forwards it whole.
       const shell = mountShell();
       const listener = vi.fn();
       window.addEventListener('stream-chunk', listener);
-      shell.streamChunk('req-1', 'hello');
+      const chunk = {
+        block_id: '1736956800000-a1b2c3:b0',
+        seq: 0,
+        content: 'hello',
+        done: false,
+      };
+      shell.streamChunk('req-1', chunk);
       expect(listener).toHaveBeenCalledOnce();
       const event = listener.mock.calls[0][0];
-      expect(event.detail).toEqual({
-        requestId: 'req-1',
-        content: 'hello',
-      });
+      expect(event.detail).toEqual({ requestId: 'req-1', chunk });
       window.removeEventListener('stream-chunk', listener);
     });
 

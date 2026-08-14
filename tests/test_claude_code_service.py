@@ -186,6 +186,41 @@ class Recorder:
         return next(call for call in self.calls if call[0] == name)
 
 
+class FakeCollab:
+    """Stands in for ``CollabManager``: answers the authority questions."""
+
+    def __init__(self, *, is_localhost=True, raises=False, clients=None):
+        self._is_localhost = is_localhost
+        self._raises = raises
+        self._clients = clients if clients is not None else [{"is_localhost": True}]
+
+    def is_caller_localhost(self):
+        if self._raises:
+            raise RuntimeError("registry is confused")
+        return self._is_localhost
+
+    def get_connected_clients(self):
+        if self._raises:
+            raise RuntimeError("registry is confused")
+        return self._clients
+
+    def get_collab_role(self):
+        return {"role": "host", "client_id": "tab-1", "is_localhost": self._is_localhost}
+
+
+class FakePermissionContext:
+    """Stands in for ``ToolPermissionContext``."""
+
+    tool_use_id = "toolu_01"
+    suggestions = ()
+    agent_id = None
+    blocked_path = None
+    decision_reason = None
+    title = None
+    display_name = None
+    description = None
+
+
 @pytest.fixture
 def events():
     return Recorder()
@@ -252,16 +287,18 @@ class TestRpcSurface:
             "toggle_mcp_server",
             "get_server_info",
             "connect_engine",
-        ):
-            assert callable(getattr(service, name)), name
-
-    def test_phase_two_and_three_methods_are_absent(self, service):
-        """A stub that reported success would be worse than a missing method."""
-        for name in (
             "resolve_permission",
             "get_denied_read_files",
             "set_denied_read_files",
+        ):
+            assert callable(getattr(service, name)), name
+
+    def test_phase_five_methods_are_absent(self, service):
+        """A stub that reported success would be worse than a missing method."""
+        for name in (
             "history_list",
+            "history_load",
+            "history_delete",
         ):
             assert not hasattr(service, name), name
 
@@ -413,14 +450,14 @@ class TestChatStreaming:
 
     async def test_files_default_to_the_picker_selection(self, service, tmp_path):
         (tmp_path / "a.py").write_text("x")
-        service.set_selected_files(["a.py"])
+        await service.set_selected_files(["a.py"])
         await send(service)
         assert service.session.turns[0].files == ["a.py"]
 
     async def test_an_explicit_empty_list_means_no_files(self, service, tmp_path):
         """Distinct from omitting the argument, which means "use the picker"."""
         (tmp_path / "a.py").write_text("x")
-        service.set_selected_files(["a.py"])
+        await service.set_selected_files(["a.py"])
         await send(service, files=[])
         assert service.session.turns[0].files == []
 
@@ -612,6 +649,7 @@ class TestState:
             "doc_index_enriched",
             "review_state",
             "engine_health",
+            "doc_convert_available",
         }
 
     def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
@@ -640,33 +678,44 @@ class TestState:
 
 
 class TestSelectedFiles:
-    def test_existing_files_are_kept(self, service, tmp_path):
+    async def test_existing_files_are_kept(self, service, tmp_path):
         (tmp_path / "a.py").write_text("x")
-        assert service.set_selected_files(["a.py"]) == ["a.py"]
+        assert await service.set_selected_files(["a.py"]) == ["a.py"]
         assert service.get_selected_files() == ["a.py"]
 
-    def test_a_stale_selection_is_dropped(self, service):
+    async def test_a_stale_selection_is_dropped(self, service):
         """A deleted file must not frame a turn with a path that is gone."""
-        assert service.set_selected_files(["deleted.py"]) == []
+        assert await service.set_selected_files(["deleted.py"]) == []
 
-    def test_absolute_paths_are_accepted(self, service, tmp_path):
+    async def test_absolute_paths_are_accepted(self, service, tmp_path):
         target = tmp_path / "a.py"
         target.write_text("x")
-        assert service.set_selected_files([str(target)]) == [str(target)]
+        assert await service.set_selected_files([str(target)]) == [str(target)]
 
-    def test_junk_entries_are_dropped(self, service):
-        assert service.set_selected_files(["", None, 42]) == []
+    async def test_junk_entries_are_dropped(self, service):
+        assert await service.set_selected_files(["", None, 42]) == []
 
-    def test_none_clears_the_selection(self, service, tmp_path):
+    async def test_none_clears_the_selection(self, service, tmp_path):
         (tmp_path / "a.py").write_text("x")
-        service.set_selected_files(["a.py"])
-        assert service.set_selected_files(None) == []
+        await service.set_selected_files(["a.py"])
+        assert await service.set_selected_files(None) == []
 
-    def test_the_returned_list_is_a_copy(self, service, tmp_path):
+    async def test_the_returned_list_is_a_copy(self, service, tmp_path):
         (tmp_path / "a.py").write_text("x")
-        returned = service.set_selected_files(["a.py"])
+        returned = await service.set_selected_files(["a.py"])
         returned.append("b.py")
         assert service.get_selected_files() == ["a.py"]
+
+    async def test_the_new_selection_is_broadcast(self, service, tmp_path, events):
+        """Everyone sees the result immediately, per the collaboration spec.
+
+        Session-wide arity: the filtered list is the only argument. A
+        participant's picker drifting from the host's is the failure this
+        prevents.
+        """
+        (tmp_path / "a.py").write_text("x")
+        await service.set_selected_files(["a.py"])
+        assert events.call_of("filesChanged") == ("filesChanged", ["a.py"])
 
 
 # ---------------------------------------------------------------------------
@@ -750,11 +799,232 @@ class TestLiveControls:
 # ---------------------------------------------------------------------------
 
 
+class TestPermissionRpc:
+    """The service half of the gate: authority, and the settings file.
+
+    ``resolve_permission`` is the method that authorises arbitrary
+    ``Bash``. A remote participant able to call it would turn
+    collaboration mode into a remote-code-execution grant, so the
+    localhost gate here is the highest-stakes one in the app.
+    """
+
+    async def test_a_participant_cannot_resolve_a_permission(self, service, caplog):
+        service._collab = FakeCollab(is_localhost=False)
+        with caplog.at_level(logging.WARNING):
+            answer = await service.resolve_permission("perm-1", {"action": "allow"})
+        assert answer == {
+            "error": "restricted",
+            "reason": "Participants cannot perform this action",
+        }
+        assert "non-localhost" in caplog.text
+
+    async def test_a_participant_cannot_set_denied_reads(self, service):
+        service._collab = FakeCollab(is_localhost=False)
+        assert service.set_denied_read_files(["a"])["error"] == "restricted"
+
+    async def test_a_broken_collab_check_denies(self, service):
+        """Fail closed: an unanswerable authority question is not an allow."""
+        service._collab = FakeCollab(raises=True)
+        answer = await service.resolve_permission("perm-1", {"action": "allow"})
+        assert answer["error"] == "restricted"
+
+    async def test_localhost_reaches_the_broker(self, service):
+        service._collab = FakeCollab(is_localhost=True)
+        answer = await service.resolve_permission("perm-nope", {"action": "allow"})
+        assert answer["error"] == "unknown"
+
+    async def test_without_collab_the_caller_is_local(self, service):
+        answer = await service.resolve_permission("perm-nope", {"action": "allow"})
+        assert answer["error"] == "unknown"
+
+    def test_denied_reads_round_trip_through_settings(self, service, tmp_path):
+        assert service.get_denied_read_files() == []
+        answer = service.set_denied_read_files([".env", "secrets/**"])
+        assert answer["denied_read_files"] == [".env", "secrets/**"]
+        assert "next read of its settings sources" in answer["takes_effect"]
+        assert service.get_denied_read_files() == [".env", "secrets/**"]
+        assert (tmp_path / ".claude" / "settings.local.json").is_file()
+
+    def test_a_malformed_settings_file_is_reported_not_clobbered(self, service, tmp_path):
+        path = tmp_path / ".claude" / "settings.local.json"
+        path.parent.mkdir()
+        path.write_text("{ oops")
+        answer = service.set_denied_read_files(["a"])
+        assert "not valid JSON" in answer["error"]
+        assert path.read_text() == "{ oops"
+
+    def test_the_state_snapshot_carries_the_dialog_queue(self, service):
+        """A client that reloads mid-request must be able to re-render it."""
+        state = service.get_current_state()
+        assert state["pending_permissions"] == []
+        assert state["denied_read_files"] == []
+
+    def test_localhost_presence_needs_one_local_client(self, service):
+        service._collab = FakeCollab(clients=[{"is_localhost": False}])
+        assert service._localhost_available() is False
+        service._collab = FakeCollab(
+            clients=[{"is_localhost": False}, {"is_localhost": True}]
+        )
+        assert service._localhost_available() is True
+
+    def test_presence_without_collab_is_true(self, service):
+        assert service._localhost_available() is True
+
+    async def test_the_gate_is_wired_into_the_engine(self, tmp_path, events):
+        """Phase 2's whole point: no run reaches a tool without the callback."""
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        assert svc.session._can_use_tool == svc.permissions.can_use_tool
+
+
+# ---------------------------------------------------------------------------
+# Collaboration restrictions
+# ---------------------------------------------------------------------------
+#
+# The ``LLMService`` and ``Repo`` halves live in
+# ``test_collab_restrictions.py``, along with the dispatch-level test that
+# the gate can still see who is calling. This half is here because it needs
+# the fake engine.
+
+# Every mutating RPC, with arguments good enough to reach the gate. The
+# frontend moved onto this service in phase 2, and a gate that was on the
+# native method but not its replacement is a restriction silently dropped —
+# so the table is exhaustive rather than representative.
+GATED_METHODS: dict[str, tuple] = {
+    "connect_engine": (),
+    "shutdown": (),
+    "set_selected_files": (["a.py"],),
+    "chat_streaming": (REQUEST_ID, "hello"),
+    "cancel_streaming": (REQUEST_ID,),
+    "resolve_permission": ("perm-1", {"action": "allow"}),
+    "set_denied_read_files": ([".env"],),
+    "set_permission_mode": ("bypassPermissions",),
+    "set_model": ("claude-opus-5",),
+    "rewind_files": ("msg-uuid-1",),
+    "stop_task": ("task-1",),
+    "reconnect_mcp_server": ("ac-dc",),
+    "toggle_mcp_server": ("ac-dc", True),
+}
+
+# Deliberately reachable by a participant. Watching a turn is the point of
+# collaboration: a participant who can see less than the host cannot review
+# what the agent did (``specs5/4-features/collaboration.md`` § Read-Only).
+READ_ONLY_METHODS = {
+    "get_engine_health",
+    "get_current_state",
+    "get_selected_files",
+    "get_denied_read_files",
+    "get_context_usage",
+    "get_mcp_status",
+    "get_server_info",
+}
+
+
+class TestCollabRestrictions:
+    """Who may do what, once a remote participant is in the session."""
+
+    def test_every_rpc_is_classified(self):
+        """A new public method is a new RPC — jrpc-oo exposes them all.
+
+        ``ExposeClass`` publishes every method whose name lacks a leading
+        underscore, so adding one silently widens the RPC surface. This
+        assertion fails on the next addition and asks the only question
+        that matters: may a participant call it?
+        """
+        public = {
+            name
+            for name in dir(ClaudeCodeService)
+            if not name.startswith("_")
+            and callable(getattr(ClaudeCodeService, name, None))
+        }
+        assert public == set(GATED_METHODS) | READ_ONLY_METHODS
+
+    @pytest.mark.parametrize("method", sorted(GATED_METHODS))
+    async def test_a_participant_is_refused(self, service, method):
+        service._collab = FakeCollab(is_localhost=False)
+        answer = getattr(service, method)(*GATED_METHODS[method])
+        if asyncio.iscoroutine(answer):
+            answer = await answer
+        assert answer == {
+            "error": "restricted",
+            "reason": "Participants cannot perform this action",
+        }, method
+
+    @pytest.mark.parametrize("method", sorted(GATED_METHODS))
+    async def test_a_refusal_has_no_side_effect(self, service, method):
+        """Restricted calls "always return an error without side effects"."""
+        service._collab = FakeCollab(is_localhost=False)
+        answer = getattr(service, method)(*GATED_METHODS[method])
+        if asyncio.iscoroutine(answer):
+            await answer
+        assert service.session.connect_calls == []
+        assert service.session.disconnect_calls == 0
+        assert service.session.control_calls == []
+        assert service.session.turns == []
+        assert service.get_selected_files() == []
+        assert service.get_denied_read_files() == []
+        assert events_of(service) == []
+
+    @pytest.mark.parametrize("method", sorted(READ_ONLY_METHODS))
+    async def test_a_participant_may_watch(self, service, method):
+        service._collab = FakeCollab(is_localhost=False)
+        answer = getattr(service, method)()
+        if asyncio.iscoroutine(answer):
+            answer = await answer
+        if isinstance(answer, dict):
+            assert answer.get("error") != "restricted", method
+
+    @pytest.mark.parametrize("method", sorted(GATED_METHODS))
+    async def test_a_broken_collab_check_refuses(self, service, method):
+        """Fail closed. An unanswerable authority question is not an allow."""
+        service._collab = FakeCollab(raises=True)
+        answer = getattr(service, method)(*GATED_METHODS[method])
+        if asyncio.iscoroutine(answer):
+            answer = await answer
+        assert answer["error"] == "restricted", method
+
+    async def test_a_participant_cannot_probe_with_a_slash_command(self, service):
+        """The gate is ahead of the slash reply, so ``/context`` is not an
+        oracle for whether the caller is restricted."""
+        service._collab = FakeCollab(is_localhost=False)
+        answer = await service.chat_streaming(REQUEST_ID, "/context")
+        assert answer["error"] == "restricted"
+
+    async def test_the_host_still_works_with_a_participant_present(self, service):
+        """The gate asks about the caller, not about who else is connected."""
+        service._collab = FakeCollab(
+            is_localhost=True, clients=[{"is_localhost": True}, {"is_localhost": False}]
+        )
+        assert await send(service) == {"status": "started"}
+
+
+def events_of(service):
+    """The events a service emitted, for the no-side-effect assertions."""
+    callback = service._event_callback
+    return list(getattr(callback, "calls", []))
+
+
 class TestShutdown:
     async def test_shutdown_disconnects_the_engine(self, service):
         await service.connect_engine()
         await service.shutdown()
         assert service.session.disconnect_calls == 1
+
+    async def test_shutdown_denies_pending_permissions(self, service):
+        """A callback still waiting on a browser would never answer the CLI."""
+        broker = service.permissions
+        task = asyncio.create_task(
+            broker.can_use_tool("Bash", {"command": "ls"}, FakePermissionContext())
+        )
+        for _ in range(200):
+            if broker.pending():
+                break
+            await asyncio.sleep(0.002)
+        await service.shutdown()
+        result = await task
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "shut down" in result.message
 
     async def test_shutdown_cancels_a_turn_in_flight(self, service):
         release = asyncio.Event()

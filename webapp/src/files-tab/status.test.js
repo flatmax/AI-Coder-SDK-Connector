@@ -97,7 +97,7 @@ describe('FilesTab status data plumbing', () => {
       // Auto-select from Increment 4 notifies the server
       // when any files are changed. Stub it so the test
       // stays focused on status-array conversion.
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -242,7 +242,7 @@ describe('FilesTab status data plumbing', () => {
       // Auto-select from Increment 4 notifies the server
       // when the first load has changed files. Stub it
       // to keep this test focused on status refresh.
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });

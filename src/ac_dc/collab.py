@@ -31,7 +31,11 @@ Design points pinned here:
   server before each message dispatch so service methods can ask
   "who is calling me?" via :meth:`Collab.is_caller_localhost`.
   This means we replicate the base class's receive loop with an
-  extra assignment before ``remote.receive(message)``.
+  extra assignment before ``remote.receive(message)``. The caller
+  lives in a :class:`~contextvars.ContextVar` rather than a plain
+  attribute, because dispatching an ``async def`` method only
+  *schedules* it — its body, and therefore its localhost gate, runs
+  after the loop has cleared the caller again.
 
 - **Raw WebSocket messages before JRPC setup.** Pending clients
   receive JSON frames directly on the underlying WebSocket —
@@ -71,6 +75,7 @@ Design points pinned here:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import ipaddress
 import json
 import logging
@@ -86,6 +91,22 @@ if TYPE_CHECKING:
     import websockets.legacy.server
 
 logger = logging.getLogger(__name__)
+
+# Who is calling, for the duration of one dispatch. A ContextVar rather
+# than a plain attribute because an ``async def`` RPC method does not run
+# its body during dispatch: ``ExposeClass`` calls the method (producing a
+# coroutine), wraps it in ``asyncio.create_task``, and returns — so the
+# body runs on a later loop iteration, by which time the receive loop's
+# ``finally`` has already cleared the caller. A plain attribute is None by
+# then, and "no caller" means "trusted", so every localhost gate on every
+# async method silently passed for remote callers.
+#
+# ``create_task`` copies the current context at creation, so the task the
+# dispatch spawns inherits the value that was set for it, and the receive
+# loop's reset afterwards cannot reach into that copy.
+_current_caller_uuid: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "ac_dc_current_caller_uuid", default=None
+)
 
 
 # ---------------------------------------------------------------------------
@@ -569,13 +590,27 @@ class CollabServer(MaxSizeJRPCServer):
         )
         self._collab = collab if collab is not None else Collab()
         self._collab._server = self
-        # Current-caller tracking. Set by the admitted-client
-        # receive loop before each ``remote.receive(message)``
-        # dispatch; read by :meth:`Collab.is_caller_localhost`.
-        # Single-value because a running asyncio event loop
-        # dispatches one message at a time — no need for a
-        # thread-local or contextvar.
-        self.current_caller_uuid: Optional[str] = None
+        self.current_caller_uuid = None
+
+    @property
+    def current_caller_uuid(self) -> Optional[str]:
+        """Who is calling, for the duration of one dispatch.
+
+        Set by the admitted-client receive loop before each
+        ``remote.receive(message)``; read by
+        :meth:`Collab.is_caller_localhost` and
+        :meth:`Collab.get_collab_role`.
+
+        Attribute in name, :data:`_current_caller_uuid` underneath. The
+        indirection is what makes the gate work for ``async def`` RPC
+        methods — see the ContextVar's own comment. Kept as an attribute so
+        the receive loop and the tests read and write it the obvious way.
+        """
+        return _current_caller_uuid.get()
+
+    @current_caller_uuid.setter
+    def current_caller_uuid(self, value: Optional[str]) -> None:
+        _current_caller_uuid.set(value)
 
     @property
     def collab(self) -> Collab:

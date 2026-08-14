@@ -178,6 +178,9 @@ class TurnTranslator:
         self._streaming_message: dict[str, str] = {}
 
         self._tools: dict[str, _ToolCall] = {}
+        # tool_use_ids a permission dialog was shown for. Written by
+        # note_permission_prompt, read when the card is built.
+        self._gated: set[str] = set()
         self.user_message_id: str | None = None
 
     # ------------------------------------------------------------------
@@ -200,14 +203,29 @@ class TurnTranslator:
             )
             return []
 
-    def note_permission_prompt(self) -> None:
+    def note_permission_prompt(self, tool_use_id: str | None = None) -> None:
         """Record that a permission dialog was shown during this turn.
 
         Called by the permission layer rather than derived from a
         message, because a prompt is a thing AC-DC did, not a thing the
         engine reported. Feeds the click-through metric in R-12.
+
+        With a ``tool_use_id``, the tool card for that call is marked
+        ``gated`` in place, so a client that reconnects after the dialog
+        was answered still sees which calls were asked about. No event is
+        emitted: the card's own ``toolUse`` event has already gone out and
+        the live signal is the dialog itself.
         """
         self.stats.permission_prompts += 1
+        if not tool_use_id:
+            return
+        # Recorded either way: the control request can arrive before the
+        # assistant message that carries the card, in which case the card
+        # is born gated instead of being patched afterwards.
+        self._gated.add(tool_use_id)
+        block = self._blocks.get(tool_use_id)
+        if block is not None and block.tool is not None:
+            block.tool = {**block.tool, "gated": True}
 
     def rendered_blocks(self) -> list[dict[str, Any]]:
         """Replay payload for a client that reconnects mid-turn."""
@@ -734,13 +752,14 @@ class TurnTranslator:
         card = {
             "tool_use_id": tool_use_id,
             "name": name,
-            "server": _mcp_server_name(name),
+            "server": mcp_server_name(name),
             "input_summary": summarise_tool_input(tool_input),
             "input": tool_input or {},
             "status": "pending",
-            # Set by the permission layer when a dialog was shown for this
-            # call; no gate exists yet in this phase.
-            "gated": False,
+            # True when the permission layer showed a dialog for this call.
+            # Usually set by note_permission_prompt after the card exists;
+            # true here when the control request beat the message carrying it.
+            "gated": tool_use_id in self._gated,
             "agent_id": scope or None,
             "server_tool": server_tool,
         }
@@ -865,7 +884,7 @@ def _stream_kind(content_block_type: str) -> str:
     return "text"
 
 
-def _mcp_server_name(tool_name: str) -> str | None:
+def mcp_server_name(tool_name: str) -> str | None:
     """Extract the MCP server from an ``mcp__<server>__<tool>`` name."""
     if not tool_name.startswith("mcp__"):
         return None

@@ -14,9 +14,11 @@ Two rules govern everything here:
 - **Some options are never set, deliberately.** ``allowed_tools`` would
   approve calls before ``can_use_tool`` runs, silently ungating gated
   tools. ``agents`` would make subagent definitions AC-DC-only instead of
-  shared with the CLI. ``system_prompt`` would fork behaviour between
-  AC-DC and a terminal session in the same repo, in a file the user does
-  not know exists. See ``specs5/3-engine/session.md`` § Session Options.
+  shared with the CLI. See ``specs5/3-engine/session.md`` § Session
+  Options.
+- **``system_prompt`` is the exception that proves the null rule.** It
+  carries no text of ours, but it must be *set*: ``None`` means an empty
+  prompt, not the CLI's. See ``CLI_SYSTEM_PROMPT``.
 
 Governing spec: ``specs5/3-engine/session.md``.
 Reference: ``specs-reference/3-engine/session.md`` § Options assembly.
@@ -60,9 +62,24 @@ NEVER_SET = {
     "project settings where the user can see them",
     "agents": "subagent definitions come from .claude/agents/ so they are "
     "shared with the CLI rather than being AC-DC-only",
-    "system_prompt": "prompt customisation is CLAUDE.md's job; our own system "
-    "prompt would fork behaviour between AC-DC and the CLI in the same repo",
 }
+
+# The CLI's own system prompt, kept as the CLI's.
+#
+# Omitting ``system_prompt`` does **not** mean "use the default". The SDK
+# emits ``--system-prompt ""`` when it is ``None`` (verified in
+# ``_internal/transport/subprocess_cli.py``), which deletes the prompt
+# outright — including the dynamic sections that carry the working
+# directory, the git status and the platform. Observed consequence: asked
+# to edit ``greet.py`` in a repo at ``/tmp/ac-dc-live``, the agent tried to
+# read ``/home/flatmax/greet.py``, because nothing had told it where it was.
+#
+# The preset form with no ``append`` emits no flag at all, which leaves the
+# CLI's prompt exactly as a terminal session in the same repo would have
+# it. That is the point: prompt *customisation* is still CLAUDE.md's job
+# (our own prompt text would fork behaviour between AC-DC and the CLI in a
+# file the user does not know exists), and this sets no text of ours.
+CLI_SYSTEM_PROMPT: dict[str, str] = {"type": "preset", "preset": "claude_code"}
 
 
 def build_option_kwargs(
@@ -107,6 +124,9 @@ def build_option_kwargs(
     """
     kwargs: dict[str, Any] = {
         "cwd": str(repo_root),
+        # Not ours — the CLI's. See CLI_SYSTEM_PROMPT for why omitting this
+        # deletes the prompt instead of defaulting to it.
+        "system_prompt": dict(CLI_SYSTEM_PROMPT),
         # The posture a new session starts in. Live-switchable afterwards
         # via set_permission_mode() without a reconnect.
         "permission_mode": config.effective_permission_mode,

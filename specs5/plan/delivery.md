@@ -116,3 +116,227 @@ Not oversights; each is a later phase's scope:
   the split.
 - **Never `break` out of the message iterator.** Cancel means interrupt then drain to
   `ResultMessage`; breaking early leaves the CLI mid-turn and the next turn inherits the mess.
+
+---
+
+## Phase 2 — Chat on the new engine (2026-08-14)
+
+**Exit criterion:** *"A user can hold a full working conversation, including edits, entirely through
+Claude Code."* Met — see [Live verification](#live-verification-1).
+
+The plan's *permissions before edits* constraint held: no run at any point used
+`permission_mode: "bypassPermissions"`, and the write that satisfies "including edits" went through
+the browser dialog.
+
+### What landed
+
+**Backend.** One new module, plus the gate wired through the session:
+
+| Module | Lines | Role |
+|---|---|---|
+| `claude_code/permissions.py` | 1254 | `can_use_tool` gate: request classification, the pending-request registry, `derive_suggested_rules`, `build_answer_input`, deny/allow/always-allow resolution |
+| `claude_code/service.py` | 860 (+346) | `resolve_permission`, `set_denied_read_files`, permission events, `doc_convert_available` on `EngineState` |
+| `claude_code/session.py` | 812 (+21) | Passes the gate to `build_options`; permission-mode changes without a reconnect |
+| `claude_code/options.py` | 214 (+30) | The `system_prompt` preset fix (below) |
+| `claude_code/messages.py` | 979 (+31) | `compact_boundary`, subagent framing |
+
+`src/ac_dc/collab.py` (+51): the async permission gate runs on the SDK's task, not on an RPC task,
+so the caller-identity `ContextVar` was unset there and every async gate read as "not localhost".
+Fixed by propagating the context. **This retroactively enables every async gate on `LLMService` and
+`Repo`** — they had the same latent hole and were failing open. `test_collab_restrictions.py` grew
+from its previous size to 68 tests to pin it.
+
+`src/ac_dc/main.py` (+116): registers the permission plumbing, and kills the CLI child on shutdown
+(see [The orphan fix](#the-orphan-fix)).
+
+**Frontend.** `webapp/src/permission-dialog/` is new (4695 lines incl. tests):
+
+| Module | Lines | Role |
+|---|---|---|
+| `index.js` | 951 | `<ac-permission-dialog>` |
+| `bodies.js` | 282 | Per-tool request bodies |
+| `queue.js` | 272 | Serialises concurrent requests; one dialog at a time |
+| `styles.js` | 523 | |
+| `decisions.js` | 183 | Decision payload assembly |
+| `diff-editor.js` | 177 | The `Write` preview |
+| `constants.js` | 114 | |
+
+`webapp/src/chat-panel/` gained `blocks.js` (545), `block-render.js` (904) and `permission-mode.js`
+(276), and `streaming.js` was substantially rewritten (1582 lines changed) to consume the Claude
+Code event stream instead of the native one. `styles.js` (+825 net) carries the turn-block UI.
+
+`LLMService` and `src/ac_dc/llm/` are **untouched and still registered** — per the plan's rule that
+phases 1–3 are not interleaved. Nothing in the chat path reaches them.
+
+### Removed from the frontend
+
+Deleted outright, because the native engine's affordances have no Claude Code equivalent yet:
+
+| Deleted | Lines | Returns in |
+|---|---|---|
+| `chat-panel/urls.js` + `urls.test.js` | 283 + 722 | — |
+| `url-chips.js` + `url-chips.test.js` | 552 + 595 | — |
+| The three retry-prompt builders (in `helpers.js`, −88) | — | — |
+
+Also removed from the UI: the mode toggle and the ✨ and 📜 buttons (**phase 6**), the reasoning
+control (**phase 6**), and the URL chips. `<ac-history-browser>` is left mounted but **inert** —
+`history_list` does not exist on `ClaudeCodeService` yet (**phase 5**). `_reasoningEnabled` and
+`_reasoningEffort` are still declared on the chat panel but nothing reads them; the `viewer` framing
+value arrives from the engine and is not wired to anything. The CSS families for all of the above
+were deleted from `styles.js`.
+
+`enrichment_status`, `mode` and `cross_ref_enabled` go silent: they were native-engine state with no
+producer on this path. `doc_convert_available` was added to `EngineState` in their place
+(`service.py:99`, `:267`, `:291`) so the Files tab can still tell whether conversion is possible.
+
+### The `system_prompt` fix
+
+`build_option_kwargs` now sets `system_prompt={"type": "preset", "preset": "claude_code"}`.
+**Omitting it had been sending an empty prompt**, not the CLI's: the SDK emits `--system-prompt ""`
+for `None`, which strips the dynamic sections carrying the working directory, the git status and the
+platform. Observed: an agent asked to edit `greet.py` in a repo at `/tmp/ac-dc-live` reached for
+`/home/flatmax/greet.py`, because nothing had told it where it was. This is the one exception to
+`options.py`'s null-means-omit rule, and the reason is recorded next to it.
+
+### The orphan fix
+
+`main._signal_handler` exits via `os._exit` to avoid hanging on `_heavy_init`'s
+sentence-transformer load. That skips `atexit` — and the Claude Agent SDK's *only* orphan guard is
+an `atexit` hook (`subprocess_cli._kill_active_children`). Measured: **SIGINT during a streaming
+turn left the `claude` process running for a further ~38 seconds**, reparented to init, still
+holding the repo as its working directory.
+
+`main._kill_cli_children()` now signals the SDK's child registry before `os._exit`: SIGTERM, a
+0.25 s grace, then SIGKILL for anything left. SIGTERM alone stopped a mid-stream child in under
+0.3 s, so the escalation is for a wedged child rather than the normal path. Verified live:
+mid-stream SIGINT now takes server *and* child within 0.27 s, with no lingering `_bundled/claude`
+process and no zombie.
+
+Two things a reader will otherwise re-derive: liveness cannot be probed with `os.kill(pid, 0)`,
+because a signalled-but-unreaped child is a zombie that still answers it — hence `_child_exited`
+using `waitpid(WNOHANG)`, without which the grace period was served out in full every time. And the
+registry is private SDK surface, so an SDK that moves it costs us the fix but not the ability to
+exit.
+
+### Tests
+
+508 python tests across seven files, all offline:
+
+| File | Tests | What it pins |
+|---|---|---|
+| `test_claude_code_permissions.py` | 81 | Request classification, the pending registry, suggested-rule derivation, `build_answer_input`, resolution paths |
+| `test_claude_code_service.py` | 153 | The RPC surface incl. the 13 localhost gates, permission events, `doc_convert_available` |
+| `test_claude_code_session.py` | 83 | Gate wiring, permission-mode change without reconnect |
+| `test_claude_code_messages.py` | 77 | `compact_boundary`, subagent framing |
+| `test_collab_restrictions.py` | 68 | **The `ContextVar` fix** — async gates now see the real caller |
+| `test_claude_code_options.py` | 35 | The SDK-drift tripwire, plus the `system_prompt` preset |
+| `test_main_shutdown.py` | 11 | The orphan fix: polite-first, escalation, and the zombie regression |
+
+`test_main_shutdown.py` spawns real child processes rather than mocking `os.kill`, because the thing
+under test *is* signal delivery — a mock would pass whether or not the signal reached anything.
+
+Frontend, 496 tests across the modules this phase touched or created:
+
+| File | Tests |
+|---|---|
+| `chat-panel/block-render.test.js` | 128 |
+| `chat-panel/blocks.test.js` | 81 |
+| `permission-dialog/dialog.test.js` | 82 |
+| `chat-panel/streaming.test.js` | 64 |
+| `permission-dialog/queue.test.js` | 53 |
+| `chat-panel/events.test.js` | 50 |
+| `chat-panel/permission-mode.test.js` | 38 |
+
+Whole-suite state at the close of the phase: python **1 failed, 3872 passed**, webapp **89 files,
+3202 passed**. The one failure is below.
+
+**Phase 1's absence assertions are now partly deleted**, as phase 1's entry said they should be:
+`resolve_permission` and `set_denied_read_files` exist and are tested. `history_list` and
+`get_denied_read_files` are still asserted absent — phase 5 and the file-picker work respectively.
+
+One pre-existing failure in the full python run, untouched by this phase and unrelated to it:
+`test_doc_convert/test_libreoffice_pipeline.py::TestLibreOfficeDispatch::test_odp_routes_to_libreoffice_when_available`,
+which needs PyMuPDF (`import fitz` fails) that is not installed. `doc_convert/` is on the
+inventory's keep-unchanged list and this phase's diff touches none of it.
+
+### Live verification
+
+Against the real CLI (bundled 2.1.229, Bedrock) in a scratch repo, `permission_mode: "default"`
+throughout:
+
+- A full conversation streamed end to end: text, thinking, tool-use cards correlated to their
+  results, and the `ResultMessage` footer with duration, engine-turn count and cost.
+- **The dialog appears before the write.** *Deny* landed — no file was written, and the agent
+  adapted in the same turn. *Allow once* landed — the docstring reached disk (confirmed with
+  `git diff`), the log recorded `resolved as allow by localhost`, and the turn reached a full
+  footer.
+- Ctrl-C mid-stream leaves no orphaned `claude` process (above).
+- An `API Error: Output blocked by content filtering policy` on an unrelated prompt rendered
+  correctly rather than breaking the turn — `api error` badge on the assistant header, the message
+  inline, and the footer still populated.
+
+The compaction divider renders from `compact_boundary`, **client-side only**; it does not survive a
+reload. Persistence is phase 5's, with session history.
+
+Spec divergences found while implementing were written back into the specs per the plan's rule that
+the wheel wins: `specs5/5-webapp/permission-dialog.md`, `specs5/5-webapp/chat.md`,
+`specs5/4-features/collaboration.md`, `specs5/plan/sdk-surface.md`,
+`specs-reference/3-engine/permissions.md` and `specs-reference/3-engine/session.md`.
+
+### Two findings that need a decision, not a phase
+
+Both are recorded rather than fixed, because both change permission semantics and neither is safe to
+change on a guess:
+
+- **A derived always-allow rule over-grants.** `_derived_path_rule` says it scopes the rule to the
+  containing directory, but it emits `<dir>/**`, and the CLI's own grammar makes `**` recursive
+  (its error text: `Examples: ["Bash(npm run build)", "Edit(docs/**)", "Read(~/.zshrc)"]. Use * for
+  wildcards.`). For a file at the repo root the rule is therefore `Edit(**)` — **always-allow on one
+  root file grants writes to every file in the repo.** The current behaviour is pinned by
+  `test_claude_code_permissions.py::TestSuggestedRules::test_a_derived_write_rule_is_scoped_to_the_directory`,
+  whose name asserts the intent while its value asserts the subtree. Over-granting is unsafe and
+  quiet; under-granting is merely annoying, so the fix probably is `*` — but that needs the CLI's
+  single-`*` semantics confirmed first, and derived rules are only the *fallback* path (the CLI's own
+  `context.suggestions` are preferred), so this fires less often than it looks.
+- **The always-allow tooltip and a CLI suggestion disagree.** The first dialog's always-allow label
+  read `Read(//home/flatmax/**)` — note the double slash — with its destination rendered
+  "(this session only)", while the button's tooltip asserts "There is no invisible session-only
+  grant behind this button". That rule came from `context.suggestions` with `origin: "cli"`, so the
+  double slash is the CLI's formatting rather than ours; but either the tooltip is wrong or we
+  should stop accepting session-scoped CLI suggestions under a button that promises otherwise.
+
+### Deliberately not built
+
+- **No `Edit`/`MultiEdit` input editing in the dialog.** `Write` gets a diff preview the user can
+  edit; `Edit` and `MultiEdit` are shown read-only. Editing an `old_string`/`new_string` pair in a
+  textarea invites a no-longer-matching edit that fails after approval, which is a worse experience
+  than approving as-proposed and asking for a change.
+- **The `Write` preview is against the proposed content, not disk.** For a new file that is the same
+  thing; for an overwrite the dialog does not show what is being lost. Wants a real diff against the
+  file on disk.
+- **No rewind UI.** `rewind_files()` is on the service and nothing calls it.
+- **Subagent attribution is by id, not by name.** Nested tool calls carry the subagent's id; the UI
+  shows the id. Mapping it to the agent's name needs the definition lookup.
+- **Three `interact` affordances are unbuilt.** `build_answer_input` and multi-question rendering
+  landed; free-text-with-suggestions, question grouping, and the "ask again" path did not.
+- **The file tree does not refresh mid-turn after a write.** A written file shows `Modified +1` only
+  after a reload. Post-write re-indexing is phase 4 (hooks).
+- **No health-banner link target.** The banner renders and its link goes nowhere.
+- **Deferred by decision, not by omission:** the preset selector (CC-12), the subagent browser, the
+  Context tab and HUD (**phase 6**), the history browser and session management (**phase 5**), and
+  relabelling the file picker's "deny agent read" (CC-14).
+
+### For whoever picks up phase 3
+
+- **Phase 3 is the deletion.** `LLMService` and `src/ac_dc/llm/` are intact and registered; the
+  chat path does not reach them. The exit criterion for phase 2 is met, so the deletion is now
+  unblocked — do it in one commit, per the plan.
+- **`collab.py`'s `ContextVar` fix is load-bearing beyond this phase.** Every async gate on
+  `LLMService` and `Repo` depends on it now. Deleting `LLMService` must not take the fix with it.
+- **The permission gate runs on the SDK's task.** Anything it needs from request context has to be
+  propagated explicitly; nothing about the RPC call is ambient there.
+- **13 `ClaudeCodeService` methods are localhost-gated**: `connect_engine`, `shutdown`,
+  `set_selected_files`, `chat_streaming`, `cancel_streaming`, `resolve_permission`,
+  `set_denied_read_files`, `set_permission_mode`, `set_model`, `rewind_files`, `stop_task`,
+  `reconnect_mcp_server`, `toggle_mcp_server`. A new method that mutates engine state or spends
+  money belongs on that list, and `test_claude_code_service.py` should pin it.

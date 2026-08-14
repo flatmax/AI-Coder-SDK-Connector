@@ -311,7 +311,7 @@ describe('view-agents handler — read-only input gate', () => {
           messages: [{ role: 'user', content: 'q' }],
         },
       ]),
-      'LLMService.chat_streaming': started,
+      'ClaudeCodeService.chat_streaming': started,
     });
     const p = mountPanel();
     await settle(p);

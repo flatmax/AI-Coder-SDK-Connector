@@ -45,6 +45,7 @@
 //     that DO need a re-render also write a reactive
 //     field, which carries the requestUpdate.
 
+import { makeTurnBlocks } from './blocks.js';
 import {
   _loadDrawerOpen,
   _loadSearchToggle,
@@ -73,10 +74,7 @@ import {
  *                  fileSearchDebounceTimer,
  *                  fileSearchScrollPaused
  *   UI           — historyOpen, snippetDrawerOpen,
- *                  lightboxImage, urlViewDialog,
- *                  urlViewTab, snippets
- *   URL chips    — urlDetectDebounceTimer,
- *                  urlDetectGeneration, urlChips
+ *                  lightboxImage, snippets
  *   Misc         — autoScroll, suppressNextPaste,
  *                  activeMention
  *
@@ -100,6 +98,11 @@ export function makeTabState() {
     lastRequestId: null,
     streams: new Map(),
     pendingChunks: new Map(),
+    // Block state for the turn currently in flight. Owned by `blocks.js`,
+    // mutated in place so an in-flight rAF closure and the renderer always see
+    // the same object. Frozen onto the settled assistant message at
+    // completion, then reset — a tab never carries two turns' live blocks.
+    turnBlocks: makeTurnBlocks(),
     // Run-timer start stamp. Set to Date.now() the
     // moment a turn's stream is armed on this tab
     // (send, resume-after-reconnect, agent spawn /
@@ -140,20 +143,7 @@ export function makeTabState() {
     historyOpen: false,
     snippetDrawerOpen: _loadDrawerOpen(),
     lightboxImage: null,
-    urlViewDialog: null,
-    urlViewTab: 'content',
     snippets: [],
-    // URL chip detection
-    urlDetectDebounceTimer: null,
-    urlDetectGeneration: 0,
-    // URL chip state snapshot. Map<url, chipState>
-    // mirroring the shape ac-url-chips holds
-    // internally. The singleton ac-url-chips element
-    // in the DOM always shows the currently-active
-    // tab's state; on tab switch we snapshot the
-    // leaving tab's `_chips` into this slot and
-    // restore the entering tab's snapshot.
-    urlChips: null,
     // Misc non-reactive flags / state
     autoScroll: true,
     suppressNextPaste: false,
@@ -251,8 +241,6 @@ const REACTIVE_FIELDS = [
   ['_fileSearchResults', 'fileSearchResults'],
   ['_fileSearchLoading', 'fileSearchLoading'],
   ['_fileSearchFocusedIndex', 'fileSearchFocusedIndex'],
-  ['_urlViewDialog', 'urlViewDialog'],
-  ['_urlViewTab', 'urlViewTab'],
   ['_retryInfo', 'retryInfo'],
   // selectedFiles is pushed by the files-tab via
   // direct assignment; per-tab because agent tabs
@@ -273,6 +261,11 @@ const NON_REACTIVE_FIELDS = [
   ['_currentRequestId', 'currentRequestId'],
   ['_lastRequestId', 'lastRequestId'],
   ['_pendingChunks', 'pendingChunks'],
+  // Live block state. Non-reactive on purpose: the object is mutated in place
+  // and its identity never changes, so a reactive setter's dirty-check would
+  // never fire. `streaming.js` calls `requestUpdate()` directly after each
+  // fold, which schedules unconditionally.
+  ['_turnBlocks', 'turnBlocks'],
   // Run-timer start stamp. Non-reactive because the
   // live elapsed counter re-renders off the panel-
   // level 250ms ticker (see startStreamTimerTick in
@@ -285,8 +278,6 @@ const NON_REACTIVE_FIELDS = [
   ['_fileSearchGeneration', 'fileSearchGeneration'],
   ['_fileSearchDebounceTimer', 'fileSearchDebounceTimer'],
   ['_fileSearchScrollPaused', 'fileSearchScrollPaused'],
-  ['_urlDetectDebounceTimer', 'urlDetectDebounceTimer'],
-  ['_urlDetectGeneration', 'urlDetectGeneration'],
   ['_retryTickHandle', 'retryTickHandle'],
 ];
 

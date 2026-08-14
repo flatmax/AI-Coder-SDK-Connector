@@ -85,6 +85,7 @@ Restricted to localhost connections (non-localhost participants get an error):
 |---|---|
 | Turns | Chat streaming, commit-message turn, cancel streaming |
 | Permissions | **Resolve permission**, set permission mode |
+| Engine lifecycle | Connect the engine, shut the engine down |
 | Session management | New session, resume session (with or without fork), delete engine session |
 | Engine state | Set selected files, set denied-read files, set model, rewind files, stop a subagent task |
 | MCP control | Reconnect an MCP server, toggle an MCP server |
@@ -97,6 +98,12 @@ Restricted to localhost connections (non-localhost participants get an error):
 method in the inventory. `rewind_files` and `stop_task` are restricted for the ordinary reason: both
 change state the host is responsible for. MCP toggles are restricted because they change what tools
 exist for everyone.
+
+The engine-lifecycle pair is restricted because starting and stopping the `claude` subprocess is not a
+read: `shutdown` ends every other participant's view of the turn in progress, and `connect_engine`
+launches a process against the host's repository and the host's credentials. They are easy to overlook
+when auditing the surface — neither reads like a mutation of repository state, which is what the other
+rows have in common.
 ### Read-Only Operations (Available to All)
 - File content, file tree, search, engine state snapshot
 - Flat file list, LSP queries, doc outlines
@@ -112,6 +119,16 @@ cannot review what the agent did.
 - A per-message context identifier is set before each dispatch (inside the receive loop)
 - Service methods read the identifier and look up the client's localhost flag
 - When no collaboration instance is attached (single-user mode), callers are always treated as localhost
+
+**The identifier has to be a `ContextVar`, not an attribute.** An `async def` RPC method does not run its
+body during dispatch: the dispatcher calls the method, gets a coroutine, wraps it in
+`asyncio.create_task` and returns. The body runs a loop iteration later — by which time the receive
+loop's `finally` has already cleared the caller. Held as an attribute the identifier reads as `None` by
+then, and "no caller" means "trusted", so **every localhost gate on every async method passes for every
+remote caller**, silently and with no failing test unless a test awaits across the dispatch boundary.
+`create_task` copies the current context at creation, so a `ContextVar` set for the dispatch is inherited
+by the task and the receive loop's reset cannot reach into that copy. This is not a Claude Code concern:
+it applies to every async gate in the inventory, and the methods it was hiding predate the port.
 ### Restriction Response Shape
 - Restricted methods return a specific error shape rather than raising
 - Fields — error type (restricted), reason (human-readable)

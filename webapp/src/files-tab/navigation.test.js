@@ -61,7 +61,7 @@ describe('FilesTab file click → navigate-file', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue(['a.md']),
     });
@@ -123,7 +123,7 @@ describe('FilesTab file-mention-click handling', () => {
     const setFiles = vi.fn().mockResolvedValue(['a.md']);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);

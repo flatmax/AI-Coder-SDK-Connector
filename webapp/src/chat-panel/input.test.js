@@ -333,44 +333,47 @@ describe('ChatPanel edit block rendering', () => {
     ).toBe('+print("hello")');
   });
 
-  it('renders pending block during streaming', async () => {
+  // The three tests that used to live here streamed marker bytes and asserted
+  // the live card grew an edit-block card, then that `edit_results` on the
+  // completion payload stamped it applied. Neither happens now. Streamed text
+  // arrives as block-keyed chunks and renders as prose; an edit arrives as a
+  // `Write`/`Edit` tool card with its own result. The marker protocol survives
+  // only for stored messages, which is what the rest of this section covers —
+  // so these pin the boundary: markers in *streamed* text are just text.
+
+  it('a streamed text block renders in the live card', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
     await p._send();
     const reqId = started.mock.calls[0][0];
-    const partial = [
-      'Here is the change:',
-      '',
-      'src/foo.py',
-      EDIT_MARK,
-      'old line one',
-      'old line t',
-    ].join('\n');
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: partial,
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'Here is the change:',
+        done: false,
+      },
     });
     await settle(p);
     const streaming = p.shadowRoot.querySelector(
       '.message-card.streaming',
     );
     expect(streaming).toBeTruthy();
-    const card = streaming.querySelector('.edit-block-card');
-    expect(card).toBeTruthy();
-    expect(card.classList.contains('edit-status-pending')).toBe(true);
-    expect(
-      card.querySelector('.edit-pane-content').textContent,
-    ).toBe('-old line one\n-old line t');
-    expect(card.querySelectorAll('.diff-line.remove')).toHaveLength(2);
-    expect(card.querySelector('.diff-line.add')).toBeNull();
+    // The waiting line is replaced the moment there is something to show.
+    expect(streaming.querySelector('.turn-waiting')).toBeNull();
+    const text = streaming.querySelector('.block-text');
+    expect(text).toBeTruthy();
+    expect(text.textContent).toContain('Here is the change');
+    expect(text.dataset.blockId).toBe(`${reqId}:b0`);
   });
 
   it('streaming cursor appears after the body', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -378,7 +381,12 @@ describe('ChatPanel edit block rendering', () => {
     const reqId = started.mock.calls[0][0];
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: 'Working on it',
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'Working on it',
+        done: false,
+      },
     });
     await settle(p);
     const streaming = p.shadowRoot.querySelector(
@@ -387,11 +395,14 @@ describe('ChatPanel edit block rendering', () => {
     expect(streaming).toBeTruthy();
     const cursor = streaming.querySelector('.cursor');
     expect(cursor).toBeTruthy();
+    // After the body, whatever the last block turned out to be — the blink is
+    // the "still going" signal and has to be where the eye already is.
+    expect(streaming.lastElementChild).toBe(cursor);
   });
 
-  it('finalising a stream with editResults applies statuses', async () => {
+  it('marker bytes in a streamed block stay text', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -399,28 +410,74 @@ describe('ChatPanel edit block rendering', () => {
     const reqId = started.mock.calls[0][0];
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: simpleEditBlock,
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: simpleEditBlock,
+        done: true,
+      },
+    });
+    await settle(p);
+    const streaming = p.shadowRoot.querySelector(
+      '.message-card.streaming',
+    );
+    expect(streaming.querySelector('.edit-block-card')).toBeNull();
+    expect(streaming.querySelector('.block-text').textContent)
+      .toContain('EDIT');
+  });
+
+  it('an edit arrives as a tool card and survives the freeze', async () => {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    const reqId = started.mock.calls[0][0];
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_01',
+        name: 'Edit',
+        input: {
+          file_path: 'src/foo.py',
+          old_string: 'old line',
+          new_string: 'new line',
+        },
+      },
+    });
+    await settle(p);
+    const live = p.shadowRoot.querySelector(
+      '.message-card.streaming .tool-card',
+    );
+    expect(live).toBeTruthy();
+    expect(live.dataset.tool).toBe('Edit');
+    expect(live.classList.contains('tool-status-pending')).toBe(true);
+    pushEvent('tool-result', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_01',
+        status: 'ok',
+        files_modified: ['src/foo.py'],
+      },
     });
     pushEvent('stream-complete', {
       requestId: reqId,
-      result: {
-        response: simpleEditBlock,
-        edit_results: [
-          {
-            file: 'src/foo.py',
-            status: 'applied',
-            message: '',
-          },
-        ],
-      },
+      result: { response: 'Done.', files_modified: ['src/foo.py'] },
     });
     await settle(p);
     expect(
       p.shadowRoot.querySelector('.message-card.streaming'),
     ).toBeNull();
-    const card = p.shadowRoot.querySelector('.edit-block-card');
-    expect(card).toBeTruthy();
-    expect(card.classList.contains('edit-status-applied')).toBe(true);
+    // Same card, same place, now with its result — and no edit-block card,
+    // since the turn carries blocks rather than marker-bearing prose.
+    const settled = p.shadowRoot.querySelector('.role-assistant .tool-card');
+    expect(settled).toBeTruthy();
+    expect(settled.dataset.tool).toBe('Edit');
+    expect(settled.classList.contains('tool-status-ok')).toBe(true);
+    expect(
+      p.shadowRoot.querySelector('.edit-block-card'),
+    ).toBeNull();
   });
 
   it('user message with edit-block-shaped content renders as text', async () => {
@@ -519,7 +576,7 @@ describe('ChatPanel file mentions', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel({ repoFiles: ['src/foo.py'] });
     await settle(p);
     p._input = 'hi';
@@ -527,7 +584,12 @@ describe('ChatPanel file mentions', () => {
     const reqId = started.mock.calls[0][0];
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: 'editing src/foo.py now',
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'editing src/foo.py now',
+        done: false,
+      },
     });
     await settle(p);
     const streaming = p.shadowRoot.querySelector(
@@ -542,15 +604,25 @@ describe('ChatPanel file mentions', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel({ repoFiles: ['src/foo.py'] });
     await settle(p);
     p._input = 'hi';
     await p._send();
     const reqId = started.mock.calls[0][0];
+    // `done: true` and still no mention link: the streaming card supplies no
+    // mention candidates at all, so a finished block mid-turn is not a
+    // half-written path that might yet grow — it is prose the turn has not
+    // finished framing. Candidates arrive with the settled message, which is
+    // also where the paths the turn's tool calls touched get added.
     pushEvent('stream-chunk', {
       requestId: reqId,
-      content: 'editing src/foo.py now',
+      chunk: {
+        block_id: `${reqId}:b0`,
+        seq: 0,
+        content: 'editing src/foo.py now',
+        done: true,
+      },
     });
     await settle(p);
     expect(
@@ -712,7 +784,7 @@ describe('ChatPanel file mention clicks', () => {
 describe('ChatPanel send flow', () => {
   it('adds the user message optimistically on send', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -728,7 +800,7 @@ describe('ChatPanel send flow', () => {
 
   it('calls LLMService.chat_streaming with a request ID', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -746,7 +818,7 @@ describe('ChatPanel send flow', () => {
 
   it('clears the input after send', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -760,7 +832,7 @@ describe('ChatPanel send flow', () => {
 
   it('flips to streaming state after send', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -777,7 +849,7 @@ describe('ChatPanel send flow', () => {
 
   it('does nothing when input is empty', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     await p._send();
@@ -789,7 +861,7 @@ describe('ChatPanel send flow', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -807,7 +879,7 @@ describe('ChatPanel send flow', () => {
     const started = vi
       .fn()
       .mockRejectedValue(new Error('network down'));
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const consoleSpy = vi
@@ -833,7 +905,7 @@ describe('ChatPanel send flow', () => {
 describe('ChatPanel input handling', () => {
   it('Enter sends, Shift+Enter does not', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -858,7 +930,7 @@ describe('ChatPanel input handling', () => {
   it('Enter during IME composition does not send', async () => {
     // IME users press Enter to commit a composition.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
@@ -883,7 +955,7 @@ describe('ChatPanel input handling', () => {
 describe('ChatPanel input history — recording', () => {
   it('records message on send', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'my first prompt';
@@ -895,7 +967,7 @@ describe('ChatPanel input history — recording', () => {
 
   it('accumulates multiple sends', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'first';
@@ -925,7 +997,7 @@ describe('ChatPanel input history — recording', () => {
     const started = vi
       .fn()
       .mockRejectedValue(new Error('network boom'));
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const consoleSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
@@ -1133,7 +1205,7 @@ describe('ChatPanel input history — event handling', () => {
 
   it('Enter in overlay does not send message', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     const history = p.shadowRoot.querySelector('ac-input-history');
@@ -1491,7 +1563,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
       'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
-      'LLMService.chat_streaming': started,
+      'ClaudeCodeService.chat_streaming': started,
     });
     const p = mountPanel();
     await settle(p);
@@ -1510,7 +1582,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
       'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
-      'LLMService.chat_streaming': started,
+      'ClaudeCodeService.chat_streaming': started,
     });
     _saveDrawerOpen(true);
     const p = mountPanel();
@@ -1525,7 +1597,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
       'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
-      'LLMService.chat_streaming': started,
+      'ClaudeCodeService.chat_streaming': started,
     });
     const p = mountPanel();
     await settle(p);
@@ -1538,86 +1610,57 @@ describe('ChatPanel snippet drawer close-on-send', () => {
 });
 
 // ---------------------------------------------------------------------------
-// New session button
+// Session lifecycle — control removed, handler inert
 // ---------------------------------------------------------------------------
+//
+// The ✨ button called `LLMService.new_session`, which reset the native
+// engine's conversation. That is not the session the chat path talks to any
+// more: the CLI owns session identity, and a new one starts by reconnecting the
+// engine with no `resume` id. Clearing the native engine while Claude Code
+// carried the conversation would have looked like it worked and changed
+// nothing, so the button is gone until phase 5 rebuilds session management
+// against `ClaudeCodeService`.
+//
+// `_onNewSession` itself is left in place — inert, unreachable from the UI —
+// and the `session-changed` handler with it, because the broadcast plumbing is
+// what phase 5 reuses. These tests pin both halves: no affordance, machinery
+// intact and still guarded.
 
-describe('ChatPanel new-session button', () => {
-  it('renders the button', async () => {
+describe('ChatPanel new-session', () => {
+  it('the button is gone', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const btn = p.shadowRoot.querySelector('.new-session-button');
-    expect(btn).toBeTruthy();
-    const newSessionLabel =
-      `${btn.getAttribute('title') || ''} `
-      + `${btn.getAttribute('aria-label') || ''}`;
-    expect(newSessionLabel).toContain('New session');
+    expect(
+      p.shadowRoot.querySelector('.new-session-button'),
+    ).toBeNull();
   });
 
-  it('is disabled when RPC is not connected', async () => {
+  it('nothing in the action bar calls new_session', async () => {
+    // Stronger than the absence of one selector: no button anywhere in the
+    // panel reaches the RPC. A renamed-but-still-wired control would pass the
+    // test above and still clear the wrong engine's session.
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: 'sess_new' });
+    publishFakeRpc({ 'LLMService.new_session': newSession });
     const p = mountPanel();
     await settle(p);
-    const btn = p.shadowRoot.querySelector('.new-session-button');
-    expect(btn.disabled).toBe(true);
+    for (const btn of p.shadowRoot.querySelectorAll('button')) {
+      if (btn.disabled) continue;
+      btn.click();
+    }
+    await settle(p);
+    expect(newSession).not.toHaveBeenCalled();
   });
 
-  it('is enabled when RPC is connected and not streaming', async () => {
+  it('a session-changed broadcast still clears messages', async () => {
+    // Server-driven, so it survives the button's removal and is the path
+    // phase 5 will drive. Nothing local has to happen first.
     publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector('.new-session-button');
-    expect(btn.disabled).toBe(false);
-  });
-
-  it('is disabled during streaming', async () => {
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    const p = mountPanel();
-    await settle(p);
-    p._input = 'hi';
-    await p._send();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector('.new-session-button');
-    expect(btn.disabled).toBe(true);
-  });
-
-  it('calls LLMService.new_session on click', async () => {
-    const newSession = vi
-      .fn()
-      .mockResolvedValue({ session_id: 'sess_new' });
-    publishFakeRpc({ 'LLMService.new_session': newSession });
-    const p = mountPanel();
-    await settle(p);
-    p.shadowRoot.querySelector('.new-session-button').click();
-    await settle(p);
-    expect(newSession).toHaveBeenCalledOnce();
-  });
-
-  it('does not modify local message list directly on click', async () => {
-    const newSession = vi
-      .fn()
-      .mockResolvedValue({ session_id: 'sess_new' });
-    publishFakeRpc({ 'LLMService.new_session': newSession });
-    const p = mountPanel({
-      messages: [{ role: 'user', content: 'existing' }],
-    });
-    await settle(p);
-    p.shadowRoot.querySelector('.new-session-button').click();
-    await settle(p);
-    expect(p.messages).toHaveLength(1);
-    expect(p.messages[0].content).toBe('existing');
-  });
-
-  it('session-changed broadcast after click clears messages', async () => {
-    const newSession = vi
-      .fn()
-      .mockResolvedValue({ session_id: 'sess_new' });
-    publishFakeRpc({ 'LLMService.new_session': newSession });
     const p = mountPanel({
       messages: [{ role: 'user', content: 'before' }],
     });
-    await settle(p);
-    p.shadowRoot.querySelector('.new-session-button').click();
     await settle(p);
     pushEvent('session-changed', {
       session_id: 'sess_new',
@@ -1627,35 +1670,13 @@ describe('ChatPanel new-session button', () => {
     expect(p.messages).toEqual([]);
   });
 
-  it('RPC failure is logged but does not crash', async () => {
-    const newSession = vi
-      .fn()
-      .mockRejectedValue(new Error('server down'));
-    publishFakeRpc({ 'LLMService.new_session': newSession });
-    const consoleSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-    try {
-      const p = mountPanel({
-        messages: [{ role: 'user', content: 'existing' }],
-      });
-      await settle(p);
-      p.shadowRoot.querySelector('.new-session-button').click();
-      await settle(p);
-      expect(p.messages).toHaveLength(1);
-      expect(consoleSpy).toHaveBeenCalled();
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it('clicking while streaming is guarded at the method level', async () => {
+  it('the handler is still guarded against streaming', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     const newSession = vi
       .fn()
       .mockResolvedValue({ session_id: 'sess_new' });
     publishFakeRpc({
-      'LLMService.chat_streaming': started,
+      'ClaudeCodeService.chat_streaming': started,
       'LLMService.new_session': newSession,
     });
     const p = mountPanel();
@@ -1673,41 +1694,22 @@ describe('ChatPanel new-session button', () => {
 // ---------------------------------------------------------------------------
 
 describe('ChatPanel history browser', () => {
-  it('renders the History button', async () => {
+  // The 📜 button is gone with the ✨ one, and for the same reason: it browsed
+  // `LLMService`'s session store, which no longer holds the conversation the
+  // user is having. `<ac-history-browser>` stays mounted and closed —
+  // deleting it would mean rebuilding it in phase 5 rather than repointing it
+  // at the CLI's transcripts — so the tests below still drive its events.
+
+  it('the History button is gone', async () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const btn = p.shadowRoot.querySelector('.history-button');
-    expect(btn).toBeTruthy();
-    const historyLabel =
-      `${btn.getAttribute('title') || ''} `
-      + `${btn.getAttribute('aria-label') || ''}`;
-    expect(historyLabel).toContain('history');
+    expect(
+      p.shadowRoot.querySelector('.history-button'),
+    ).toBeNull();
   });
 
-  it('History button is disabled when RPC is disconnected', async () => {
-    const p = mountPanel();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector('.history-button');
-    expect(btn.disabled).toBe(true);
-  });
-
-  it('History button stays enabled during streaming', async () => {
-    // Opening the browser is read-only.
-    const started = vi
-      .fn()
-      .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
-    const p = mountPanel();
-    await settle(p);
-    p._input = 'hi';
-    await p._send();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector('.history-button');
-    expect(btn.disabled).toBe(false);
-  });
-
-  it('opens the modal on History button click', async () => {
+  it('the browser is mounted but nothing can open it', async () => {
     publishFakeRpc({
       'LLMService.history_list_sessions': vi
         .fn()
@@ -1720,8 +1722,27 @@ describe('ChatPanel history browser', () => {
     );
     expect(browser).toBeTruthy();
     expect(browser.open).toBe(false);
-    p.shadowRoot.querySelector('.history-button').click();
+    for (const btn of p.shadowRoot.querySelectorAll('button')) {
+      if (btn.disabled) continue;
+      btn.click();
+    }
     await settle(p);
+    expect(browser.open).toBe(false);
+  });
+
+  it('the handler still opens it, for phase 5 to rewire', async () => {
+    publishFakeRpc({
+      'LLMService.history_list_sessions': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._onOpenHistory();
+    await settle(p);
+    const browser = p.shadowRoot.querySelector(
+      'ac-history-browser',
+    );
     expect(browser.open).toBe(true);
   });
 
@@ -1803,7 +1824,7 @@ describe('ChatPanel history browser', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -2006,7 +2027,7 @@ describe('ChatPanel pending images', () => {
 describe('ChatPanel send with images', () => {
   it('passes pending images to chat_streaming RPC', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'look at this';
@@ -2021,7 +2042,7 @@ describe('ChatPanel send with images', () => {
 
   it('clears pending images after send', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -2033,7 +2054,7 @@ describe('ChatPanel send with images', () => {
 
   it('optimistic user message carries images', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'see';
@@ -2049,7 +2070,7 @@ describe('ChatPanel send with images', () => {
 
   it('image-only send is allowed (empty text + image)', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = '';
@@ -2076,7 +2097,7 @@ describe('ChatPanel send with images', () => {
 
   it('image is not added to input history (only text)', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = '';
@@ -2371,7 +2392,7 @@ describe('ChatPanel message action buttons', () => {
 
   it('toolbar is NOT rendered on streaming message', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';

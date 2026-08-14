@@ -88,7 +88,7 @@ describe('FilesTab initial state', () => {
       // that calls set_selected_files when any files are
       // changed. Stub it so the test stays focused on
       // status-data plumbing.
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });

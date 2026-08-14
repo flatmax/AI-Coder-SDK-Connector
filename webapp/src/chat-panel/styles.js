@@ -10,12 +10,14 @@
 //   - Host + tab strip + overflow menu
 //   - Messages area, scroll wrapper, file-search overlay
 //   - Message cards, role labels, search highlight
+//   - Compaction boundary divider
 //   - Finish-reason badges
 //   - Message action toolbars (copy / paste)
 //   - Markdown content (code blocks, copy buttons,
 //     headings, tables)
 //   - Streaming cursor
-//   - Input area, action bar, search bar, mode toggle
+//   - Input area, action bar, search bar,
+//     permission-mode selector
 //   - Snippet drawer
 //   - Send button column
 //   - Edit blocks (cards, diff lines, error messages)
@@ -23,6 +25,18 @@
 //   - File mentions, file summary chips
 //   - Pending images, message images
 //   - Lightbox overlay
+//   - Claude Code turn blocks (text, thinking, tool
+//     cards, plan, subagent rows, turn footer)
+//
+// Phase 2 deleted two families outright rather than
+// leaving them to rot: `.reasoning-control` (the 🧠
+// toggle and its effort badge — the CLI decides when to
+// think) and `.mode-toggle` / `.mode-segmented` /
+// `.crossref-btn` (the native engine's context modes).
+// Nothing renders either set. `.edit-block-card` and
+// `.edit-summary` stay: stored messages still carry
+// marker-protocol edits, and the history browser still
+// renders them.
 
 import { css } from 'lit';
 
@@ -576,6 +590,55 @@ export const STYLES = css`
       0 0 12px rgba(79, 195, 247, 0.15);
   }
 
+  /* Compaction boundary — a rule across the transcript with a
+   * label floated in the middle, not a card. It carries
+   * .message-card only for the search machinery (transition,
+   * highlight, data-msg-index scroll target), so the card's
+   * padding and chrome are undone here. Nothing about the
+   * conversation changed when this appeared; the styling says
+   * so by staying out of the way. */
+  .compaction-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.15rem 0;
+    border: 1px solid transparent;
+    background: none;
+    user-select: none;
+  }
+  .compaction-rule {
+    flex: 1;
+    height: 1px;
+    background: rgba(240, 246, 252, 0.12);
+  }
+  .compaction-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    letter-spacing: 0.03em;
+    color: var(--text-secondary, #8b949e);
+    opacity: 0.75;
+  }
+  .compaction-glyph {
+    font-size: 0.8rem;
+    opacity: 0.8;
+  }
+  .compaction-counts {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.68rem;
+    color: var(--text-secondary, #8b949e);
+  }
+  .compaction-trigger {
+    padding: 0.02rem 0.3rem;
+    border: 1px solid rgba(240, 246, 252, 0.14);
+    border-radius: 3px;
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
   .role-label {
     font-size: 0.75rem;
     font-weight: 600;
@@ -626,6 +689,20 @@ export const STYLES = css`
     color: #7ee787;
     border-color: rgba(126, 231, 135, 0.25);
     opacity: 0.6;
+  }
+  /* Grey variant for the reasons the *user* caused —
+   * aborted_streaming and aborted_tools. Neither is a
+   * fault, so amber would over-report; neither is a clean
+   * finish either, so the green variant would under-report.
+   * It stays fully opaque and sits next to the role label
+   * rather than in the footer, because an interrupted turn
+   * may have left a half-written edit on disk and that is
+   * worth noticing (block-render.js § terminalBadge). */
+  .finish-reason-badge.severity-neutral {
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-secondary, #8b949e);
+    border-color: rgba(240, 246, 252, 0.18);
+    opacity: 1;
   }
 
   /* Run-timer badge — how long the assistant ran for a
@@ -939,66 +1016,80 @@ export const STYLES = css`
       0 0 0 1px rgba(88, 166, 255, 0.55),
       0 0 8px rgba(88, 166, 255, 0.45);
   }
-  /* Reasoning control — the 🧠 toggle with the effort
-   * selector folded into it. The effort is shown as a small
-   * badge over the brain's corner; a transparent native
-   * <select> is overlaid on the whole control so clicking the
-   * badge opens the effort menu. Clicking the brain glyph
-   * itself still toggles reasoning (the button sits under the
-   * badge but the select covers it — see pointer rules below).
-   * This keeps the control to a single button's footprint
-   * instead of a button + a wide dropdown. */
-  .reasoning-control {
-    position: relative;
+  /* Permission-mode selector — the first control in the
+   * action bar and the only one that changes what the next
+   * tool call is allowed to do. Deliberately styled to read
+   * as a status indicator rather than a preference: the lock
+   * glyph carries the meaning at a glance, and the <select>
+   * is the affordance behind it.
+   *
+   * Never inside a .search-collapsible group (rendering.js),
+   * so nothing here needs to survive the search-bar collapse.
+   * The unsafe variant is amber-bordered and glows, because
+   * bypassPermissions is a mode a user should not be able to
+   * sit in without noticing. */
+  .permission-mode {
     display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+    flex-shrink: 0;
+    padding: 0.1rem 0.25rem 0.1rem 0.3rem;
+    border: 1px solid rgba(240, 246, 252, 0.15);
+    border-radius: 4px;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
   }
-  .reasoning-control .reasoning-toggle {
-    position: relative;
+  .permission-mode.unsafe {
+    border-color: rgba(210, 153, 34, 0.65);
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35),
+      0 0 8px rgba(210, 153, 34, 0.3);
   }
-  /* Effort badge — sits on the top-right of the brain glyph. */
-  .reasoning-effort-badge {
-    position: absolute;
-    top: -2px;
-    right: -3px;
-    font-size: 0.55rem;
-    font-weight: 700;
+  .permission-mode-glyph {
+    font-size: 0.75rem;
     line-height: 1;
-    letter-spacing: 0.02em;
-    padding: 1px 2px;
-    border-radius: 3px;
-    background: var(--accent-primary, #58a6ff);
-    color: var(--bg-primary, #0d1117);
-    pointer-events: none;
   }
-  /* The select overlays only the badge corner so the rest of
-   * the brain button stays clickable for toggling. It is fully
-   * transparent — the badge underneath is what the user sees. */
-  .reasoning-effort-select {
-    position: absolute;
-    top: -3px;
-    right: -4px;
-    width: 1.4rem;
-    height: 0.95rem;
-    margin: 0;
-    padding: 0;
-    border: none;
+  .permission-mode-select {
     background: transparent;
-    color: transparent;
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    font-family: inherit;
+    font-size: 0.75rem;
+    line-height: 1;
+    padding: 0.15rem 0;
     cursor: pointer;
-    opacity: 0;
-    appearance: none;
-    -webkit-appearance: none;
+    max-width: 7.5rem;
   }
-  .reasoning-effort-select:focus {
+  .permission-mode-select:focus {
     outline: none;
+    color: var(--text-primary, #c9d1d9);
   }
-  .reasoning-control:focus-within .reasoning-effort-badge {
-    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.85);
+  /* Read-only for participants, or disabled while a mode
+   * change is in flight. Dimmed rather than hidden — a
+   * participant still needs to see the posture they are
+   * working under. */
+  .permission-mode-select:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
   }
-  .reasoning-effort-select option {
+  .permission-mode.unsafe .permission-mode-select {
+    color: #d29922;
+  }
+  .permission-mode-select option {
     background: var(--bg-primary, #0d1117);
     color: var(--text-primary, #c9d1d9);
   }
+  /* The engine has not confirmed the new mode yet. Pulsing
+   * ellipsis, not a spinner: the wait is normally one round
+   * trip, and a spinner at this size reads as a fault. */
+  .permission-mode-pending {
+    font-size: 0.7rem;
+    color: var(--accent-primary, #58a6ff);
+    animation: permission-mode-pulse 1s ease-in-out infinite;
+  }
+  @keyframes permission-mode-pulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+
   /* Search bar — sits inside the action bar between the
    * snippet-drawer toggle and the session buttons. Flex-1
    * to take the middle space. Inline toggles live inside
@@ -1169,81 +1260,6 @@ export const STYLES = css`
     box-shadow:
       0 0 0 1px rgba(88, 166, 255, 0.55),
       0 0 8px rgba(88, 166, 255, 0.45);
-  }
-  /* Mode + cross-ref buttons — sit at the right end of
-   * the search bar. Compact icon-only presentation
-   * matches the search nav arrows. */
-  .mode-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-    flex-shrink: 0;
-  }
-  .mode-segmented {
-    display: inline-flex;
-    border: 1px solid rgba(240, 246, 252, 0.15);
-    border-radius: 4px;
-  }
-  .mode-segmented .mode-btn {
-    background: transparent;
-    border: none;
-    color: var(--text-secondary, #8b949e);
-    padding: 0.25rem 0.4rem;
-    font-size: 0.85rem;
-    line-height: 1;
-    cursor: pointer;
-    transition: background 120ms ease, color 120ms ease;
-  }
-  .mode-segmented .mode-btn:first-child {
-    border-radius: 3px 0 0 3px;
-  }
-  .mode-segmented .mode-btn:last-child {
-    border-radius: 0 3px 3px 0;
-  }
-  .mode-segmented .mode-btn.active {
-    border-radius: 3px;
-  }
-  .mode-segmented .mode-btn:hover:not([disabled]) {
-    background: rgba(240, 246, 252, 0.06);
-    color: var(--text-primary, #c9d1d9);
-  }
-  .mode-segmented .mode-btn.active {
-    background: rgba(88, 166, 255, 0.22);
-    color: var(--accent-primary, #58a6ff);
-    box-shadow:
-      0 0 0 1px rgba(88, 166, 255, 0.55),
-      0 0 8px rgba(88, 166, 255, 0.45);
-  }
-  .mode-segmented .mode-btn[disabled] {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-  .crossref-btn {
-    background: transparent;
-    border: 1px solid rgba(240, 246, 252, 0.15);
-    border-radius: 4px;
-    color: var(--text-secondary, #8b949e);
-    padding: 0.25rem 0.4rem;
-    font-size: 0.85rem;
-    line-height: 1;
-    cursor: pointer;
-    transition: background 120ms ease, color 120ms ease;
-  }
-  .crossref-btn:hover:not([disabled]) {
-    background: rgba(240, 246, 252, 0.06);
-    color: var(--text-primary, #c9d1d9);
-  }
-  .crossref-btn.active {
-    background: rgba(210, 153, 34, 0.22);
-    border-color: rgba(210, 153, 34, 0.65);
-    color: #d29922;
-    box-shadow:
-      0 0 0 1px rgba(210, 153, 34, 0.5),
-      0 0 8px rgba(210, 153, 34, 0.4);
-  }
-  .crossref-btn[disabled] {
-    opacity: 0.35;
-    cursor: not-allowed;
   }
   .snippet-drawer {
     display: flex;
@@ -2201,5 +2217,570 @@ export const STYLES = css`
   }
   .lightbox-button:hover {
     background: rgba(240, 246, 252, 0.08);
+  }
+
+  /* =================================================
+   * Claude Code turn blocks
+   * =================================================
+   *
+   * A turn is no longer a paragraph of prose with edit
+   * cards spliced into it. It is an ordered list of
+   * blocks — text, thinking, tool calls, a plan, whole
+   * subagents — and the live card and the settled card
+   * render the same list through the same code
+   * (block-render.js). These styles therefore have one
+   * hard requirement: nothing may move when a turn
+   * settles. A tool card mid-turn and the same card
+   * after its result lands are the same element in the
+   * same place, so every status variant changes colour
+   * and never size.
+   *
+   * The second requirement is that the default state be
+   * quiet. A turn can contain thirty tool calls; if each
+   * one drew as much attention as a paragraph the
+   * transcript would be unreadable. Headers are one line
+   * high, bodies are collapsed, and only failures and
+   * denials open themselves. */
+
+  .turn-blocks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  /* The gap between "request accepted" and the first
+   * chunk — the engine spawning the CLI, the CLI
+   * initialising. Real, and sometimes a second or two,
+   * so it gets a line rather than an empty card. */
+  .turn-waiting {
+    font-size: 0.8125rem;
+    color: var(--text-secondary, #8b949e);
+    font-style: italic;
+    opacity: 0.8;
+  }
+  /* Text blocks carry .md-content too, so the markdown
+   * rules already apply. This only manages the spacing
+   * between consecutive blocks: the first and last
+   * shed their margins so a turn does not start or end
+   * with dead space. */
+  .block-text > *:first-child {
+    margin-top: 0;
+  }
+  .block-text > *:last-child {
+    margin-bottom: 0;
+  }
+
+  /* --- Thinking regions ---------------------------
+   *
+   * Collapsed by default and visually recessive: this
+   * is the agent's reasoning, not its answer, and it is
+   * excluded from copy and read-aloud. The dashed border
+   * marks it as a different kind of content from the
+   * solid-bordered tool cards. */
+  .thinking-region {
+    border-left: 2px dashed rgba(240, 246, 252, 0.2);
+    padding-left: 0.5rem;
+  }
+  .thinking-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: transparent;
+    border: none;
+    padding: 0.1rem 0;
+    margin: 0;
+    color: var(--text-secondary, #8b949e);
+    font-family: inherit;
+    font-size: 0.75rem;
+    font-style: italic;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 120ms ease;
+  }
+  .thinking-toggle:hover {
+    opacity: 1;
+  }
+  .thinking-caret {
+    font-size: 0.65rem;
+    font-style: normal;
+  }
+  /* Preformatted, not markdown. Thinking is the model's
+   * internal draft: rendering it as rich text would
+   * dress up something that is deliberately unpolished,
+   * and a half-written code fence mid-stream would
+   * swallow the rest of the region. */
+  .thinking-body {
+    margin-top: 0.25rem;
+    padding: 0.4rem 0.5rem;
+    background: rgba(13, 17, 23, 0.4);
+    border-radius: 4px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--text-secondary, #8b949e);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 22rem;
+    overflow-y: auto;
+  }
+
+  /* --- Tool cards --------------------------------- */
+  .tool-card {
+    border: 1px solid rgba(240, 246, 252, 0.12);
+    border-radius: 6px;
+    background: rgba(13, 17, 23, 0.4);
+    overflow: hidden;
+    /* Border colour is the status channel, so it has to
+     * animate rather than jump when a result lands. */
+    transition: border-color 150ms ease;
+  }
+  .tool-card.tool-status-pending {
+    border-color: rgba(88, 166, 255, 0.3);
+  }
+  .tool-card.tool-status-awaiting {
+    border-color: rgba(210, 153, 34, 0.5);
+  }
+  .tool-card.tool-status-ok {
+    border-color: rgba(126, 231, 135, 0.25);
+  }
+  .tool-card.tool-status-error {
+    border-color: rgba(248, 81, 73, 0.45);
+  }
+  .tool-card.tool-status-denied {
+    border-color: rgba(210, 153, 34, 0.4);
+  }
+  /* One line, always. The summary truncates rather than
+   * wrapping so a card's height never depends on how
+   * long its arguments were — thirty calls in a turn
+   * means thirty identical rows. */
+  .tool-header {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    padding: 0.3rem 0.5rem;
+    background: transparent;
+    border: none;
+    color: var(--text-primary, #c9d1d9);
+    font-family: inherit;
+    font-size: 0.8125rem;
+    text-align: left;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .tool-header:hover {
+    background: rgba(240, 246, 252, 0.04);
+  }
+  .tool-dot {
+    flex-shrink: 0;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    font-size: 0.6rem;
+    line-height: 0.5rem;
+    text-align: center;
+  }
+  /* Only the awaiting dot carries a glyph (🔒), and it
+   * needs the room. The rest are bare dots. */
+  .tool-dot.status-awaiting {
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    font-size: 0.75rem;
+    line-height: 1;
+  }
+  .tool-dot.status-pending {
+    background: var(--accent-primary, #58a6ff);
+    animation: tool-dot-pulse 1.2s ease-in-out infinite;
+  }
+  .tool-dot.status-ok {
+    background: #7ee787;
+  }
+  .tool-dot.status-error {
+    background: #f85149;
+  }
+  .tool-dot.status-denied {
+    background: #d29922;
+  }
+  @keyframes tool-dot-pulse {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+  .tool-name {
+    flex-shrink: 0;
+    font-weight: 600;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.78125rem;
+  }
+  .tool-summary {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-secondary, #8b949e);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Which MCP server a call went to. Its own chip
+   * because "Edit" from a server and the built-in Edit
+   * are different tools with the same name. */
+  .tool-server-chip {
+    flex-shrink: 0;
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    background: rgba(163, 113, 247, 0.15);
+    color: #a371f7;
+    font-size: 0.65rem;
+    font-weight: 600;
+  }
+  /* This call went through a permission prompt. Kept on
+   * the card after the fact so the transcript records
+   * which calls were asked about, not just which were
+   * asked about right now. */
+  .tool-gated {
+    flex-shrink: 0;
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    background: rgba(210, 153, 34, 0.15);
+    color: #d29922;
+    font-size: 0.65rem;
+    font-weight: 600;
+  }
+  .tool-caret {
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    color: var(--text-secondary, #8b949e);
+  }
+  .tool-body {
+    border-top: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .tool-input {
+    margin: 0;
+    padding: 0.4rem 0.5rem;
+    background: transparent;
+    border: none;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--text-secondary, #8b949e);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 18rem;
+    overflow-y: auto;
+  }
+  .tool-result {
+    border-top: 1px solid rgba(240, 246, 252, 0.06);
+    background: rgba(13, 17, 23, 0.5);
+  }
+  .tool-result-error {
+    background: rgba(248, 81, 73, 0.07);
+  }
+  .tool-result-body {
+    margin: 0;
+    padding: 0.4rem 0.5rem;
+    background: transparent;
+    border: none;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 22rem;
+    overflow-y: auto;
+  }
+  .tool-result-error .tool-result-body {
+    color: #f85149;
+  }
+  .tool-result-empty {
+    padding: 0.4rem 0.5rem;
+    font-size: 0.75rem;
+    font-style: italic;
+    color: var(--text-secondary, #8b949e);
+    opacity: 0.7;
+  }
+  /* Says how much was withheld rather than offering to
+   * show it. The engine sends a preview only — the full
+   * text never leaves the server — so a "show all"
+   * button would expand to what is already on screen
+   * (block-render.js § renderToolResult). */
+  .tool-result-truncated {
+    padding: 0.25rem 0.5rem;
+    border-top: 1px dashed rgba(240, 246, 252, 0.12);
+    font-size: 0.7rem;
+    color: var(--text-secondary, #8b949e);
+    opacity: 0.85;
+  }
+  /* A denial replaces the input rather than sitting
+   * beside it: the call never ran, so its arguments are
+   * a proposal, and the reason the user gave is the part
+   * worth reading. */
+  .tool-body-denied {
+    padding: 0.4rem 0.5rem;
+    background: rgba(210, 153, 34, 0.07);
+  }
+  .tool-denial-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #d29922;
+    margin-bottom: 0.2rem;
+  }
+  .tool-denial-reason {
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--text-primary, #c9d1d9);
+    word-break: break-word;
+  }
+  .tool-footer {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0.25rem 0.5rem;
+    border-top: 1px solid rgba(240, 246, 252, 0.06);
+    background: rgba(22, 27, 34, 0.5);
+  }
+  .tool-duration {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary, #8b949e);
+  }
+  /* Clickable path — navigating to the diff is the whole
+   * point of listing it. */
+  .tool-file-chip {
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    background: rgba(88, 166, 255, 0.1);
+    color: var(--accent-primary, #58a6ff);
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.7rem;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .tool-file-chip:hover {
+    background: rgba(88, 166, 255, 0.2);
+    text-decoration: underline;
+  }
+
+  /* --- The plan (TodoWrite) -----------------------
+   *
+   * One list per turn, not one per call: blocks.js
+   * supersedes the earlier snapshots so a long turn
+   * shows its plan rather than a history of the plan. */
+  .todo-list {
+    border: 1px solid rgba(240, 246, 252, 0.12);
+    border-radius: 6px;
+    background: rgba(13, 17, 23, 0.4);
+    overflow: hidden;
+  }
+  .todo-list.live {
+    border-color: rgba(88, 166, 255, 0.3);
+  }
+  .todo-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    background: rgba(22, 27, 34, 0.6);
+    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .todo-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary, #8b949e);
+  }
+  .todo-count {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary, #8b949e);
+  }
+  .todo-items {
+    list-style: none;
+    margin: 0;
+    padding: 0.3rem 0.5rem;
+  }
+  .todo-item {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+  .todo-mark {
+    flex-shrink: 0;
+    font-size: 0.75rem;
+  }
+  .todo-completed {
+    color: var(--text-secondary, #8b949e);
+    opacity: 0.65;
+  }
+  .todo-completed .todo-text {
+    text-decoration: line-through;
+  }
+  .todo-in_progress {
+    color: var(--accent-primary, #58a6ff);
+  }
+  .todo-pending {
+    color: var(--text-secondary, #8b949e);
+  }
+
+  /* --- Subagent rows -----------------------------
+   *
+   * The replacement for the native engine's agent tabs.
+   * A subagent is internal to a turn — the agent called
+   * Task, there is nothing to send a message to — so it
+   * renders nested under the call that spawned it, with
+   * its own blocks indented beneath. Stop is the only
+   * write affordance. */
+  .subagent-row {
+    border: 1px solid rgba(163, 113, 247, 0.25);
+    border-radius: 6px;
+    background: rgba(163, 113, 247, 0.05);
+    overflow: hidden;
+  }
+  .subagent-row.live {
+    border-color: rgba(163, 113, 247, 0.5);
+  }
+  .subagent-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8125rem;
+  }
+  .subagent-dot {
+    flex-shrink: 0;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: rgba(163, 113, 247, 0.5);
+  }
+  .subagent-dot.spinning {
+    background: #a371f7;
+    animation: tool-dot-pulse 1.2s ease-in-out infinite;
+  }
+  .subagent-desc {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .subagent-type,
+  .subagent-status,
+  .subagent-tool,
+  .subagent-usage {
+    flex-shrink: 0;
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    background: rgba(240, 246, 252, 0.06);
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.65rem;
+    font-weight: 600;
+  }
+  .subagent-type {
+    background: rgba(163, 113, 247, 0.15);
+    color: #a371f7;
+  }
+  .subagent-tool {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-weight: 400;
+  }
+  .subagent-usage {
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+  }
+  .subagent-stop {
+    flex-shrink: 0;
+    padding: 0.05rem 0.35rem;
+    background: transparent;
+    border: 1px solid rgba(248, 81, 73, 0.4);
+    border-radius: 3px;
+    color: #f85149;
+    font-family: inherit;
+    font-size: 0.65rem;
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .subagent-stop:hover {
+    background: rgba(248, 81, 73, 0.12);
+  }
+  .subagent-summary {
+    padding: 0 0.5rem 0.35rem 1.4rem;
+    font-size: 0.78125rem;
+    line-height: 1.45;
+    color: var(--text-secondary, #8b949e);
+    word-break: break-word;
+  }
+  /* Indented and rule-marked so a subagent's tool calls
+   * are visibly not the main agent's. */
+  .subagent-blocks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-left: 0.9rem;
+    padding: 0 0.5rem 0.4rem 0.5rem;
+    border-left: 2px solid rgba(163, 113, 247, 0.25);
+  }
+
+  /* --- Turn footer -------------------------------
+   *
+   * Replaces the edit-summary banner. Files modified
+   * comes first: it is the answer to "what did that just
+   * do to my repo", and everything else on the line is
+   * context for it. */
+  .turn-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid rgba(240, 246, 252, 0.08);
+  }
+  .turn-files {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+  .turn-files-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary, #8b949e);
+  }
+  .turn-stats {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .turn-stat {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary, #8b949e);
+    opacity: 0.85;
+  }
+  .turn-usage {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+  }
+  /* Only ever rendered when the engine reported a real
+   * number — under subscription billing it reports null,
+   * and "$0.00" would read as "that was free" (R-6). */
+  .turn-cost {
+    color: #7ee787;
+    opacity: 1;
+  }
+  /* The turn did not make it into the repo-local
+   * transcript. Amber, because the conversation is fine
+   * and only the record is missing. */
+  .turn-mirror-gap {
+    font-size: 0.7rem;
+    color: #d29922;
   }
 `;

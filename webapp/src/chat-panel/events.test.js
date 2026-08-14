@@ -52,7 +52,7 @@ describe('ChatPanel session-changed event', () => {
     // session, the UI should move on — no leftover streaming
     // card, no leftover request ID.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -264,7 +264,7 @@ describe('ChatPanel compaction events — URL fetch stages', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = text;
     await panel._send();
@@ -351,7 +351,7 @@ describe('ChatPanel compaction events — compaction stages', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = text;
     await panel._send();
@@ -647,6 +647,205 @@ describe('ChatPanel compaction events — compaction stages', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Compaction events — compact_boundary (the Claude Code stage)
+// ---------------------------------------------------------------------------
+//
+// The one stage of this event the new engine actually sends. It reports that
+// the CLI compacted its own context; it does not hand us a rewritten
+// conversation. So the assertions here are as much about what does NOT happen
+// — no replacement, no toast — as about the divider that does appear.
+
+describe('ChatPanel compact_boundary', () => {
+  async function sendAndGetId(panel, text = 'hi') {
+    const started = vi
+      .fn()
+      .mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    await settle(panel);
+    panel._input = text;
+    await panel._send();
+    await settle(panel);
+    return started.mock.calls[0][0];
+  }
+
+  function boundary(reqId, payload = {}) {
+    pushEvent('compaction-event', {
+      requestId: reqId,
+      event: {
+        stage: 'compact_boundary',
+        pre_tokens: 168_200,
+        post_tokens: 21_400,
+        trigger: 'auto',
+        raw: {},
+        ...payload,
+      },
+    });
+  }
+
+  it('appends a divider with the before/after counts', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId);
+    await settle(p);
+    const divider = p.shadowRoot.querySelector('.compaction-divider');
+    expect(divider).toBeTruthy();
+    expect(divider.textContent).toContain('Context compacted');
+    expect(
+      divider.querySelector('.compaction-counts').textContent,
+    ).toBe('168.2k → 21.4k tokens');
+    // Two rules, one label — the label sits in the gap.
+    expect(divider.querySelectorAll('.compaction-rule')).toHaveLength(2);
+  });
+
+  it('leaves the transcript it interrupted alone', async () => {
+    // The whole point. The engine compacted its own context; the messages on
+    // this page are ours and are unaffected, so the user's question is still
+    // there afterwards with the divider added after it.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p, 'my original question');
+    expect(p.messages).toHaveLength(1);
+    boundary(reqId);
+    await settle(p);
+    expect(p.messages).toHaveLength(2);
+    expect(p.messages[0].content).toBe('my original question');
+    expect(p.messages[0].compaction).toBeUndefined();
+    expect(p.messages[1].compaction).toEqual({
+      pre_tokens: 168_200,
+      post_tokens: 21_400,
+      trigger: 'automatic',
+    });
+  });
+
+  it('says nothing in a toast', async () => {
+    // A boundary is a fact to record, not an interruption to announce. The
+    // `pre_compact` hook already toasted that compaction was coming.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    const toasts = vi.fn();
+    window.addEventListener('ac-toast', toasts);
+    try {
+      boundary(reqId);
+      await settle(p);
+      expect(toasts).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('ac-toast', toasts);
+    }
+  });
+
+  it('marks the boundary even with no counts to report', async () => {
+    // The subtype is untyped on the wire. A CLI that renames or drops the
+    // token fields still gets a divider — one that says compaction happened,
+    // not one that says `undefined → undefined`.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId, {
+      pre_tokens: null,
+      post_tokens: undefined,
+      trigger: null,
+    });
+    await settle(p);
+    const divider = p.shadowRoot.querySelector('.compaction-divider');
+    expect(divider).toBeTruthy();
+    expect(divider.textContent).toContain('Context compacted');
+    expect(divider.textContent).not.toContain('undefined');
+    expect(divider.querySelector('.compaction-counts')).toBeNull();
+    expect(divider.querySelector('.compaction-trigger')).toBeNull();
+  });
+
+  it('shows an unrecognised trigger verbatim', async () => {
+    // `auto` and `manual` get read-aloud labels; anything else is a fact about
+    // a CLI we do not fully know, and hiding it would make it undiagnosable.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId, { trigger: 'microcompact' });
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.compaction-trigger').textContent.trim(),
+    ).toBe('microcompact');
+  });
+
+  it('maps the two triggers the CLI names', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId, { trigger: 'manual' });
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.compaction-trigger').textContent.trim(),
+    ).toBe('manual');
+    expect(p.messages.at(-1).compaction.trigger).toBe('manual');
+  });
+
+  it('carries a plain-text form for search and copy', async () => {
+    // Chat search, the copy button and the history browser all read `content`
+    // and know nothing about `compaction`.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId);
+    await settle(p);
+    expect(p.messages.at(-1).content).toBe(
+      'Context compacted (automatic) — 168.2k → 21.4k tokens',
+    );
+    expect(p.messages.at(-1).system_event).toBe(true);
+  });
+
+  it('is a divider, not a message card with a body', async () => {
+    // No role label, no toolbar, no markdown body: nobody wrote it, so there
+    // is nothing to attribute, copy or reply to.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId);
+    await settle(p);
+    const divider = p.shadowRoot.querySelector('.compaction-divider');
+    expect(divider.querySelector('.role-label')).toBeNull();
+    expect(divider.querySelector('.message-toolbar')).toBeNull();
+    expect(divider.querySelector('.md-content')).toBeNull();
+    // Still a search target — the counts are the sort of thing you scroll
+    // back for.
+    expect(divider.classList.contains('message-card')).toBe(true);
+    expect(divider.dataset.msgIndex).toBe('1');
+  });
+
+  it('each boundary in a session gets its own divider', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId);
+    boundary(reqId, { pre_tokens: 90_000, post_tokens: 12_000 });
+    await settle(p);
+    const dividers = p.shadowRoot.querySelectorAll('.compaction-divider');
+    expect(dividers).toHaveLength(2);
+    expect(
+      dividers[1].querySelector('.compaction-counts').textContent,
+    ).toBe('90.0k → 12.0k tokens');
+  });
+
+  it('the streaming card it interrupted keeps streaming', async () => {
+    // Compaction happens mid-turn, so the divider lands above the live card
+    // and the turn carries on. The frozen turn is appended after the divider
+    // when it completes — the boundary is recorded where it happened relative
+    // to the messages that existed, which is the best a per-turn freeze can do.
+    const p = mountPanel();
+    const reqId = await sendAndGetId(p);
+    boundary(reqId);
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.message-card.streaming'),
+    ).toBeTruthy();
+    expect(p._currentRequestId).toBe(reqId);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'carried on' },
+    });
+    await settle(p);
+    expect(p.messages.map((m) => Boolean(m.compaction))).toEqual([
+      false,
+      true,
+      false,
+    ]);
+    expect(p.messages.at(-1).content).toBe('carried on');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Compaction events — request ID filtering
 // ---------------------------------------------------------------------------
 
@@ -655,7 +854,7 @@ describe('ChatPanel compaction events — request ID filtering', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(panel);
     panel._input = text;
     await panel._send();
@@ -695,7 +894,7 @@ describe('ChatPanel compaction events — request ID filtering', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
@@ -845,7 +1044,7 @@ describe('ChatPanel user-message event', () => {
   it('ignores echo when we are the sender', async () => {
     const p = mountPanel();
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     await settle(p);
     p._input = 'hello';
     await p._send();

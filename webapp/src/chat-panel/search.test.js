@@ -352,7 +352,7 @@ describe('ChatPanel message search — keyboard', () => {
 
   it('Enter does not send a chat message', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel({
       messages: [{ role: 'user', content: 'target' }],
     });

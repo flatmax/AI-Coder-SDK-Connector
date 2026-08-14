@@ -62,16 +62,19 @@ describe('ChatPanel per-tab state — structure', () => {
     expect(tab.fileSearchGeneration).toBe(0);
     expect(tab.fileSearchDebounceTimer).toBeNull();
     expect(tab.fileSearchScrollPaused).toBe(false);
+    // Blocks for the turn in flight
+    expect(tab.turnBlocks.blocks).toEqual([]);
+    expect(tab.turnBlocks.index).toBeInstanceOf(Map);
+    expect(tab.turnBlocks.pending).toBeInstanceOf(Map);
+    expect(tab.turnBlocks.subagents).toBeInstanceOf(Map);
     // UI
     expect(tab.historyOpen).toBe(false);
     expect(typeof tab.snippetDrawerOpen).toBe('boolean');
     expect(tab.lightboxImage).toBeNull();
-    expect(tab.urlViewDialog).toBeNull();
-    expect(tab.urlViewTab).toBe('content');
     expect(tab.snippets).toEqual([]);
-    // URL chip detection
-    expect(tab.urlDetectDebounceTimer).toBeNull();
-    expect(tab.urlDetectGeneration).toBe(0);
+    // The URL fields — urlViewDialog, urlViewTab, urlDetectDebounceTimer,
+    // urlDetectGeneration — went with the chips in phase 2. They tracked
+    // URLs fetched into the native engine's context; the CLI has WebFetch.
     // Misc
     expect(tab.autoScroll).toBe(true);
     expect(tab.suppressNextPaste).toBe(false);

@@ -165,31 +165,26 @@ describe('Search mode toggle', () => {
     expect(inputAfter.placeholder).toMatch(/files/i);
   });
 
-  it('session buttons hidden in file mode', async () => {
-    // New session / History buttons don't apply during
-    // file search — they'd clutter the action bar and
-    // their semantics are wrong (new session doesn't
-    // make sense mid-search).
+  it('the permission mode stays visible in file mode', async () => {
+    // This used to assert that the New session / History buttons hid
+    // themselves during file search. Phase 2 removed both — session
+    // lifecycle belongs to the CLI and returns in phase 5 — so what is
+    // worth pinning here is the opposite property: the one control that
+    // survived must NOT hide, because it describes what the next tool call
+    // will do and file-search mode does not change that.
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    // Before: session buttons visible.
     expect(
-      p.shadowRoot.querySelector('.new-session-button'),
-    ).toBeTruthy();
-    expect(
-      p.shadowRoot.querySelector('.history-button'),
+      p.shadowRoot.querySelector('.permission-mode-select'),
     ).toBeTruthy();
     // Switch to file mode.
     p.shadowRoot.querySelector('.search-mode-toggle').click();
     await settle(p);
-    // After: session buttons hidden.
+    expect(p._searchMode).toBe('file');
     expect(
-      p.shadowRoot.querySelector('.new-session-button'),
-    ).toBeNull();
-    expect(
-      p.shadowRoot.querySelector('.history-button'),
-    ).toBeNull();
+      p.shadowRoot.querySelector('.permission-mode-select'),
+    ).toBeTruthy();
   });
 
   it('dispatches file-search-changed on mode switch', async () => {
@@ -980,7 +975,7 @@ describe('Auto-exit on send', () => {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'LLMService.chat_streaming': started });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
     p._setSearchMode('file');

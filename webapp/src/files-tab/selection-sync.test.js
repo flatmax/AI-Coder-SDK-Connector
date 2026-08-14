@@ -32,7 +32,7 @@ describe('FilesTab selection sync — picker → server', () => {
     const setFiles = vi.fn().mockResolvedValue(['a.md']);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);
@@ -57,7 +57,7 @@ describe('FilesTab selection sync — picker → server', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue(['a.md']),
     });
@@ -83,7 +83,7 @@ describe('FilesTab selection sync — picker → server', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': vi.fn().mockResolvedValue({
+      'ClaudeCodeService.set_selected_files': vi.fn().mockResolvedValue({
         error: 'restricted',
         reason: 'Participants cannot change selection',
       }),
@@ -115,7 +115,7 @@ describe('FilesTab selection sync — picker → server', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockRejectedValue(new Error('network boom')),
     });
@@ -172,7 +172,7 @@ describe('FilesTab first-load auto-select', () => {
     const setFiles = vi.fn().mockResolvedValue(['a.md']);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);
@@ -212,7 +212,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.set_selected_files': vi.fn().mockResolvedValue([]),
     });
     const t = mountTab();
     await settle(t);
@@ -234,7 +234,7 @@ describe('FilesTab first-load auto-select', () => {
     const setFiles = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);
@@ -254,7 +254,7 @@ describe('FilesTab first-load auto-select', () => {
     const getTree = vi.fn().mockReturnValue(treePromise);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -301,7 +301,7 @@ describe('FilesTab first-load auto-select', () => {
     const setFiles = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     pushEvent('files-changed', { selectedFiles: ['m.md'] });
@@ -366,7 +366,7 @@ describe('FilesTab first-load auto-select', () => {
     const setFiles = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);
@@ -403,7 +403,7 @@ describe('FilesTab first-load auto-select', () => {
       'Repo.get_file_tree': vi
         .fn()
         .mockResolvedValue(fakeTreeResponse([])),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -457,7 +457,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -520,7 +520,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -553,7 +553,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -605,7 +605,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -676,7 +676,7 @@ describe('FilesTab first-load auto-select', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -733,7 +733,7 @@ describe('FilesTab selection sync — server → picker', () => {
       'Repo.get_file_tree': vi
         .fn()
         .mockResolvedValue(fakeTreeResponse([])),
-      'LLMService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_selected_files': setFiles,
     });
     const t = mountTab();
     await settle(t);

@@ -1,26 +1,25 @@
-// Action-bar tab-scoped visibility tests.
+// Action-bar contents and tab-scoped visibility.
 //
-// The chat panel's action bar carries several controls,
-// some of which only make sense on the main tab:
+// Phase 2 emptied most of this bar. The controls it used to gate per tab —
+// mode toggle (💻/📄), cross-reference toggle (🔀), new-session (✨), history
+// (📜) — all drove `LLMService`, and the chat path no longer reaches it. They
+// were removed rather than left inert in the commit that repointed the path,
+// because a control whose visible state does not describe what the engine will
+// do is exactly the failure the permission dialog exists to prevent.
 //
-//   - mode toggle (code/doc) — operates on main's
-//     ContextManager
-//   - cross-reference toggle — same
-//   - new-session button — resets main's session id
-//   - history button — browses main's session list
+// So this file now pins two things:
 //
-// Per the "Agents as first-class persistent entities" plan
-// (see IMPLEMENTATION_NOTES.md § Increment 1), these
-// controls are hidden on agent tabs to eliminate the
-// "clicked new session on an agent and nothing happened"
-// confusion. The mode toggle and cross-ref toggle were
-// already gated; this test file pins the new-session +
-// history gate that Increment 1 introduced.
+//   1. **The removed controls stay removed.** A test that only checked the new
+//      selector would pass just as well if someone re-added a dead ✨ button.
+//      The phase-5/6 return points are named in `rendering.js`; until then
+//      their absence is the contract.
 //
-// Reasoning toggle (🧠), snippet drawer button (✂️),
-// search bar, send button, and stop button are
-// deliberately NOT gated — they're useful or correctly
-// per-tab on every tab type.
+//   2. **The permission-mode selector is always reachable.** Every tab, every
+//      search mode. It is the one action-bar control that changes what the next
+//      tool call does, and a user who cannot see the current mode cannot know
+//      whether the next edit will ask.
+//
+// The snippet drawer button and search bar were never gated and still are not.
 
 import { describe, expect, it } from 'vitest';
 
@@ -31,278 +30,123 @@ import {
   _mounted,
 } from './test-helpers.js';
 
-describe('ChatPanel action bar — tab-scoped visibility', () => {
-  describe('on main tab', () => {
-    it('renders new-session button', async () => {
-      const panel = mountPanel();
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.new-session-button',
-      );
-      expect(btn).toBeTruthy();
-    });
+/** Controls phase 2 removed, with where each one comes back. */
+const REMOVED_CONTROLS = [
+  ['.mode-toggle', 'code/doc index switch — phase 6 Context tab'],
+  ['.crossref-btn', 'cross-reference toggle — phase 6 Context tab'],
+  ['.new-session-button', 'session lifecycle — phase 5'],
+  ['.history-button', 'history browser — phase 5'],
+  ['.reasoning-toggle', 'reasoning flags chat_streaming no longer takes'],
+  ['ac-url-chips', 'URL fetching — the CLI has WebFetch'],
+];
 
-    it('renders history button', async () => {
-      const panel = mountPanel();
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.history-button',
-      );
-      expect(btn).toBeTruthy();
-    });
+describe('ChatPanel action bar — what it carries', () => {
+  describe('controls phase 2 removed', () => {
+    for (const [selector, why] of REMOVED_CONTROLS) {
+      it(`does not render ${selector} (${why})`, async () => {
+        const panel = mountPanel();
+        await settle(panel);
+        expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
+      });
+    }
 
-    it('renders mode toggle (segmented code/doc)', async () => {
-      const panel = mountPanel();
-      await settle(panel);
-      const toggle = panel.shadowRoot.querySelector(
-        '.mode-toggle',
-      );
-      expect(toggle).toBeTruthy();
-    });
-
-    it('renders cross-reference toggle', async () => {
-      const panel = mountPanel();
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.crossref-btn',
-      );
-      expect(btn).toBeTruthy();
-    });
-  });
-
-  describe('on agent tab', () => {
-    it('hides new-session button', async () => {
+    it('does not render them on an agent tab either', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
       await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.new-session-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-
-    it('hides history button', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.history-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-
-    // Per Increment 4b: mode toggle is now shown on
-    // agent tabs and routes to per-agent RPCs. The
-    // toggle is the user-facing affordance for the
-    // per-agent mode switch capability.
-    it('shows mode toggle (segmented code/doc)', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      const toggle = panel.shadowRoot.querySelector(
-        '.mode-toggle',
-      );
-      expect(toggle).toBeTruthy();
-    });
-
-    it('shows cross-reference toggle', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.crossref-btn',
-      );
-      expect(btn).toBeTruthy();
-    });
-
-    it('still renders search bar', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      const bar = panel.shadowRoot.querySelector(
-        '.search-bar',
-      );
-      expect(bar).toBeTruthy();
-    });
-
-    it('still renders snippet drawer button', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.snippet-drawer-button',
-      );
-      expect(btn).toBeTruthy();
-    });
-  });
-
-  describe('on historical (read-only) agent tab', () => {
-    // Read-only tabs (per Increment D — historical-turn
-    // affordance) carry the same agent-id-shaped tab id
-    // and are also non-main, so they inherit the same
-    // hide rules for new-session and history.
-    it('hides new-session button', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'historical:t_123/agent-0', 'Agent 0');
-      panel._tabs.get('historical:t_123/agent-0').readOnly = true;
-      panel._activeTabId = 'historical:t_123/agent-0';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.new-session-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-
-    it('hides history button', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'historical:t_123/agent-0', 'Agent 0');
-      panel._tabs.get('historical:t_123/agent-0').readOnly = true;
-      panel._activeTabId = 'historical:t_123/agent-0';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.history-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-
-    // Mode toggle renders but every button is
-    // disabled. The user can see what mode the agent
-    // ran in without having a path to mutate state
-    // that no longer exists. Per Increment 4b
-    // rendering rule.
-    it('shows mode toggle but disables all buttons', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(
-        panel, 'historical:t_123/agent-0', 'Agent 0',
-      );
-      panel._tabs.get(
-        'historical:t_123/agent-0',
-      ).readOnly = true;
-      panel._activeTabId = 'historical:t_123/agent-0';
-      await settle(panel);
-      const toggle = panel.shadowRoot.querySelector(
-        '.mode-toggle',
-      );
-      expect(toggle).toBeTruthy();
-      const buttons = toggle.querySelectorAll('button');
-      for (const btn of buttons) {
-        expect(btn.disabled).toBe(true);
+      for (const [selector] of REMOVED_CONTROLS) {
+        expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
       }
     });
   });
 
-  describe('in file-search mode', () => {
-    // File-search mode hides new-session + history
-    // regardless of tab — pre-existing behaviour. This
-    // test pins the precondition so a future refactor
-    // can't accidentally remove the original gate while
-    // adding the new one.
-    it('hides new-session button on main tab', async () => {
+  describe('permission-mode selector', () => {
+    it('renders on the main tab', async () => {
       const panel = mountPanel();
-      panel._searchMode = 'file';
       await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.new-session-button',
-      );
-      expect(btn).toBeFalsy();
+      const group = panel.shadowRoot.querySelector('.permission-mode');
+      expect(group).toBeTruthy();
+      expect(group.querySelector('select.permission-mode-select')).toBeTruthy();
     });
 
-    it('hides history button on main tab', async () => {
-      const panel = mountPanel();
-      panel._searchMode = 'file';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.history-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-
-    it('hides new-session on agent tab too (compound gate)', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      panel._activeTabId = 'agent-0';
-      panel._searchMode = 'file';
-      await settle(panel);
-      const btn = panel.shadowRoot.querySelector(
-        '.new-session-button',
-      );
-      expect(btn).toBeFalsy();
-    });
-  });
-
-  describe('tab switching', () => {
-    it('shows buttons after switching from agent back to main', async () => {
+    it('renders on an agent tab', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
       await settle(panel);
       expect(
-        panel.shadowRoot.querySelector('.new-session-button'),
-      ).toBeFalsy();
+        panel.shadowRoot.querySelector('.permission-mode-select'),
+      ).toBeTruthy();
+    });
+
+    it('renders on a historical read-only tab', async () => {
+      const panel = mountPanel();
+      seedLabeledTab(panel, 'historical:t_123/agent-0', 'Agent 0');
+      panel._tabs.get('historical:t_123/agent-0').readOnly = true;
+      panel._activeTabId = 'historical:t_123/agent-0';
+      await settle(panel);
+      expect(
+        panel.shadowRoot.querySelector('.permission-mode-select'),
+      ).toBeTruthy();
+    });
+
+    it('survives file-search mode', async () => {
+      // The bar's other groups collapse when the search field expands, and
+      // the ✨/📜 pair used to disappear with them. The selector is
+      // deliberately outside every `.search-collapsible` group so expanding
+      // search cannot hide the safety posture.
+      const panel = mountPanel();
+      panel._searchMode = 'file';
+      await settle(panel);
+      const group = panel.shadowRoot.querySelector('.permission-mode');
+      expect(group).toBeTruthy();
+      expect(group.closest('.search-collapsible')).toBeNull();
+    });
+
+    it('is the first control in the bar', async () => {
+      const panel = mountPanel();
+      await settle(panel);
+      const bar = panel.shadowRoot.querySelector('.action-bar');
+      expect(bar.firstElementChild.classList.contains('permission-mode')).toBe(
+        true,
+      );
+    });
+
+    it('stays reachable across a tab switch', async () => {
+      const panel = mountPanel();
+      seedLabeledTab(panel, 'agent-0', 'Agent 0');
+      panel._activeTabId = 'agent-0';
+      await settle(panel);
+      expect(
+        panel.shadowRoot.querySelector('.permission-mode-select'),
+      ).toBeTruthy();
 
       panel._activeTabId = 'main';
       await settle(panel);
       expect(
-        panel.shadowRoot.querySelector('.new-session-button'),
+        panel.shadowRoot.querySelector('.permission-mode-select'),
       ).toBeTruthy();
-      expect(
-        panel.shadowRoot.querySelector('.history-button'),
-      ).toBeTruthy();
-    });
-
-    it('hides buttons after switching from main to agent', async () => {
-      const panel = mountPanel();
-      seedLabeledTab(panel, 'agent-0', 'Agent 0');
-      await settle(panel);
-      expect(
-        panel.shadowRoot.querySelector('.new-session-button'),
-      ).toBeTruthy();
-
-      panel._activeTabId = 'agent-0';
-      await settle(panel);
-      expect(
-        panel.shadowRoot.querySelector('.new-session-button'),
-      ).toBeFalsy();
-      expect(
-        panel.shadowRoot.querySelector('.history-button'),
-      ).toBeFalsy();
     });
   });
 
-  describe('reasoning toggle visibility (deliberately ungated)', () => {
-    // The reasoning toggle (🧠) is rendered on every
-    // tab when the experimental flag is on, gated only
-    // by _EXPERIMENTAL_ENABLED. Increment 1 deliberately
-    // leaves it alone — agents can benefit from
-    // reasoning the same way main does. Pinning here so
-    // a future "consistent gating" refactor doesn't
-    // accidentally hide it on agents.
-    it('renders on main tab if experimental enabled', async () => {
+  describe('controls that were never gated', () => {
+    it('renders the search bar on an agent tab', async () => {
       const panel = mountPanel();
-      await settle(panel);
-      // Reasoning toggle may or may not exist depending
-      // on the build's _EXPERIMENTAL_ENABLED flag. The
-      // contract is "if it renders on main, it also
-      // renders on agents" — assert symmetric behaviour.
-      const onMain = panel.shadowRoot.querySelector(
-        '.reasoning-toggle',
-      );
-
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
       await settle(panel);
-      const onAgent = panel.shadowRoot.querySelector(
-        '.reasoning-toggle',
-      );
+      expect(panel.shadowRoot.querySelector('.search-bar')).toBeTruthy();
+    });
 
-      // Either both render or neither does.
-      expect(!!onMain).toBe(!!onAgent);
+    it('renders the snippet drawer button on an agent tab', async () => {
+      const panel = mountPanel();
+      seedLabeledTab(panel, 'agent-0', 'Agent 0');
+      panel._activeTabId = 'agent-0';
+      await settle(panel);
+      expect(
+        panel.shadowRoot.querySelector('.snippet-drawer-button'),
+      ).toBeTruthy();
     });
   });
 });

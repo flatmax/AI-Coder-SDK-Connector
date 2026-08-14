@@ -250,6 +250,13 @@ export const PROPERTIES = {
    * ``ac-dc-reasoning-enabled``. Spec
    * ``specs4/7-future/reasoning.md`` § Recommended Shape
    * — Commit B.
+   *
+   * **Inert since phase 2.** `ClaudeCodeService.chat_streaming` takes no
+   * reasoning arguments — the CLI decides when to think — so nothing reads
+   * this any more, and the 🧠 control that wrote it is off the action bar (see
+   * rendering.js). Left declared because `helpers.js`'s persistence shims and
+   * the `input.js` handlers are still exported and tested; both go with the
+   * native engine in phase 3.
    */
   _reasoningEnabled: { type: Boolean, state: true },
   /**
@@ -261,19 +268,10 @@ export const PROPERTIES = {
    * doesn't recognise the value. Component-scoped like
    * ``_reasoningEnabled`` and persisted to localStorage under
    * ``ac-dc-reasoning-effort`` (default ``xhigh``).
+   *
+   * Inert since phase 2 for the same reason as `_reasoningEnabled`.
    */
   _reasoningEffort: { type: String, state: true },
-  /**
-   * URL content dialog state. When non-null, the content
-   * viewer overlay is open showing the URL's fetched
-   * content. Set by the `url-view-requested` handler,
-   * cleared by Escape or backdrop click.
-   */
-  _urlViewDialog: {
-    type: Object,
-    state: true,
-    noAccessor: true,
-  },
   /**
    * Current primary mode — 'code' or 'doc'. Component-
    * scoped (not per-tab) for now: the backend has one
@@ -291,14 +289,6 @@ export const PROPERTIES = {
    */
   _crossRefEnabled: { type: Boolean, state: true },
   /**
-   * Active tab within the URL view dialog. `'content'`
-   * shows title + body (summary/readme/content); `'symbols'`
-   * shows the symbol map. Only relevant when the fetched
-   * URL is a GitHub repo with a symbol map — generic URLs
-   * hide the tab bar since there's only one panel to show.
-   */
-  _urlViewTab: { type: String, state: true, noAccessor: true },
-  /**
    * Index of the message currently being read aloud via
    * the Web Speech synthesis API, or -1 when nothing is
    * speaking. Drives the 🔊/⏹ toggle state on each
@@ -309,4 +299,55 @@ export const PROPERTIES = {
    * and `speakMessage` in input.js.
    */
   _speakingMsgIndex: { type: Number, state: true },
+
+  // ---------------------------------------------------------------
+  // Claude Code engine state
+  // ---------------------------------------------------------------
+  //
+  // All five are component-scoped, and for the same reason: the engine has one
+  // session, one permission mode and one health state, shared by every tab.
+  // Making them per-tab would let two tabs disagree about whether the next edit
+  // will ask, which is precisely the confusion the selector exists to remove.
+
+  /**
+   * The engine's current permission mode — one of the values in
+   * `PERMISSION_MODES` (permission-mode.js), which mirror the engine's own
+   * tuple in `src/ac_dc/claude_code/session.py`.
+   *
+   * Only ever written from the engine's word: `sessionStarted`,
+   * `permissionModeChanged`, or the `get_current_state` hydration. Never
+   * optimistically from a click — see permission-mode.js for why a selector
+   * that runs ahead of the engine is worse than one that lags it.
+   */
+  _permissionMode: { type: String, state: true },
+  /**
+   * True while a `set_permission_mode` call is in flight. Disables the selector
+   * so two overlapping changes can't race, and shows a pending marker so the
+   * lag between click and flip reads as "waiting" rather than "ignored".
+   * Cleared by the `permissionModeChanged` broadcast on success, or by the
+   * call's own error path on failure.
+   */
+  _permissionModePending: { type: Boolean, state: true },
+  /**
+   * Whether this client is allowed to change the permission mode — false for a
+   * non-localhost collab participant, whom the engine rejects outright.
+   *
+   * Starts `true` and is narrowed by `probeModeAuthority` / the `role-changed`
+   * event. Optimistic on purpose: the engine holds the real gate
+   * (`ClaudeCodeService.set_permission_mode` is localhost-only), so being wrong
+   * here costs a rejected call and a toast, never an unauthorised change.
+   */
+  _canSetPermissionMode: { type: Boolean, state: true },
+  /**
+   * The `sessionStarted` payload — session id, model, cwd, tools, permission
+   * mode. Held for the header/HUD to read; phase 6 gives it a real home.
+   * Null before the first turn.
+   */
+  _sessionInfo: { type: Object, state: true },
+  /**
+   * Latest `engineHealth` payload. Stashed rather than toasted: engine health
+   * changes on reconnect and mid-turn, and a toast per transition would drown
+   * the ones that matter. Null until the engine reports.
+   */
+  _engineHealth: { type: Object, state: true },
 };

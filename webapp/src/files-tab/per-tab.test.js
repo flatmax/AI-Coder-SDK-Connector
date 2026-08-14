@@ -154,7 +154,7 @@ describe('FilesTab per-tab selection — structure', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue(['a.md']),
     });
@@ -269,7 +269,7 @@ describe('FilesTab active-tab-changed handler', () => {
       'Repo.get_file_tree': vi
         .fn()
         .mockResolvedValue(fakeTreeResponse([])),
-      'LLMService.set_selected_files': vi
+      'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -440,7 +440,7 @@ describe('FilesTab agent-aware RPC routing', () => {
             { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': setMain,
+      'ClaudeCodeService.set_selected_files': setMain,
       'LLMService.set_agent_selected_files': setAgent,
     });
     const t = mountTab();
@@ -475,7 +475,7 @@ describe('FilesTab agent-aware RPC routing', () => {
             { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': setMain,
+      'ClaudeCodeService.set_selected_files': setMain,
       'LLMService.set_agent_selected_files': setAgent,
     });
     const t = mountTab();
@@ -672,7 +672,7 @@ describe('FilesTab agent-aware RPC routing', () => {
             { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_selected_files': setMain,
+      'ClaudeCodeService.set_selected_files': setMain,
       'LLMService.set_agent_selected_files': setAgent,
     });
     const t = mountTab();

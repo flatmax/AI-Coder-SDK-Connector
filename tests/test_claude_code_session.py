@@ -659,6 +659,33 @@ class TestActiveStreams:
         await task
         assert engine.active_streams() == []
 
+    async def test_a_permission_prompt_attaches_to_the_turn_in_flight(self, engine):
+        """The broker knows nothing about turns; this is the whole bridge."""
+        reached = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause():
+            reached.set()
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [DEFAULT_MESSAGES[0], pause, DEFAULT_MESSAGES[2]]
+        task = asyncio.create_task(engine.run_turn(text_turn()))
+        await reached.wait()
+
+        assert engine.active_request_id == REQUEST_ID
+        assert engine.note_permission_prompt("toolu_1") == REQUEST_ID
+
+        release.set()
+        await task
+        assert engine.active_request_id is None
+
+    async def test_a_prompt_with_no_turn_is_not_an_error(self, engine):
+        """A control request can outlive its turn. Losing the attribution is
+        acceptable; raising into the SDK's callback is not."""
+        assert engine.active_request_id is None
+        assert engine.note_permission_prompt("toolu_1") is None
+
 
 # ---------------------------------------------------------------------------
 # Cancellation

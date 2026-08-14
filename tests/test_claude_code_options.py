@@ -245,12 +245,37 @@ class TestNeverSet:
         )
         assert key not in kwargs
 
-    def test_the_prohibited_set_is_the_three_from_the_spec(self):
-        assert set(NEVER_SET) == {"allowed_tools", "agents", "system_prompt"}
+    def test_the_prohibited_set_is_the_two_that_change_behaviour(self):
+        assert set(NEVER_SET) == {"allowed_tools", "agents"}
 
     def test_each_prohibition_records_a_reason(self):
         """So a future reader gets the argument, not a bare rule."""
         assert all(len(reason) > 40 for reason in NEVER_SET.values())
+
+    def test_the_system_prompt_is_the_clis_own_and_is_set(self, tmp_path):
+        """`None` is an *empty* prompt, not the CLI's.
+
+        The SDK emits `--system-prompt ""` for `None`, which strips the
+        dynamic sections carrying the working directory, the git status and
+        the platform. Observed: an agent asked to edit `greet.py` in a repo
+        at `/tmp/ac-dc-live` reached for `/home/flatmax/greet.py`, because
+        nothing had told it where it was. The preset form emits no flag,
+        leaving the CLI's own prompt in place.
+        """
+        kwargs = build_option_kwargs(
+            repo_root=tmp_path, config=EngineConfig(permission_mode="default")
+        )
+        assert kwargs["system_prompt"] == {"type": "preset", "preset": "claude_code"}
+        # No `append`: an appended string is prompt text of ours, which is
+        # the thing CLAUDE.md is for.
+        assert "append" not in kwargs["system_prompt"]
+
+    def test_the_system_prompt_default_is_not_shared_between_sessions(self, tmp_path):
+        config = EngineConfig(permission_mode="default")
+        first = build_option_kwargs(repo_root=tmp_path, config=config)
+        first["system_prompt"]["append"] = "leaked"
+        second = build_option_kwargs(repo_root=tmp_path, config=config)
+        assert "append" not in second["system_prompt"]
 
 
 # ---------------------------------------------------------------------------

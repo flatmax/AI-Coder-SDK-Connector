@@ -697,6 +697,27 @@ class TestToolCards:
         assert payload["status"] == "pending"
         assert payload["gated"] is False
 
+    def test_a_prompt_before_the_card_makes_the_card_born_gated(self, translator):
+        """The control request can arrive before the assistant message.
+
+        The SDK dispatches ``can_use_tool`` in a detached task, so ordering
+        against the message stream is not guaranteed. A card that only
+        learned it was gated by being patched afterwards would render
+        ungated in exactly this case.
+        """
+        translator.note_permission_prompt("toolu_1")
+        events = self._use(translator)
+        assert events[0].payload["gated"] is True
+
+    def test_a_prompt_after_the_card_patches_it(self, translator):
+        self._use(translator)
+        translator.note_permission_prompt("toolu_1")
+        assert translator._blocks["toolu_1"].tool["gated"] is True
+
+    def test_a_prompt_for_an_unseen_tool_does_not_gate_the_others(self, translator):
+        translator.note_permission_prompt("toolu_other")
+        assert self._use(translator)[0].payload["gated"] is False
+
     def test_mcp_tools_name_their_server(self, translator):
         events = self._use(translator, name="mcp__ac-dc__symbol_map", input={})
         assert events[0].payload["server"] == "ac-dc"

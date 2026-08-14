@@ -346,3 +346,58 @@ Both runs used `--permission-mode plan`, so nothing was written.
   a subscription login at `~/.claude/.credentials.json`; `detect_credentials()` reported
   `Amazon Bedrock (via CLAUDE_CODE_USE_BEDROCK)` and warned about the shadowed login. This is exactly
   the CC-11 pollution case, arriving from the ambient environment rather than from `llm.json`.
+
+---
+
+## Corrections found while implementing phase 2
+
+**Verified 2026-08-14** against 0.2.137 in the project venv and the bundled CLI 2.1.229 — the latter read
+directly (`strings` over `_bundled/claude`) where the Python surface does not describe the behaviour, as
+with `AskUserQuestion`'s answer plumbing. Same rule as phase 1: the wheel and the CLI win, and the spec
+was corrected rather than worked around.
+
+| Where | Said | Actually | Fixed in |
+|---|---|---|---|
+| `specs-reference/3-engine/permissions.md` § Dependency quirks | "The callback runs on the SDK's read loop", so a slow decision stalls the turn | It does not. `Query._read_messages` hands each `control_request` to `_spawn_control_request_handler` → `spawn_task` → `spawn_detached`, tracked in `_inflight_requests`. Concurrent permission requests are genuinely concurrent | that file |
+| `specs-reference/3-engine/permissions.md` § The callback signature | `ToolPermissionContext` has six fields | Nine in 0.2.137: `title`, `display_name` and `description` are the CLI's own prompt copy for the call, and are what a dialog should prefer over a summary of ours | that file |
+| `specs-reference/3-engine/permissions.md` § Return types | `PermissionRuleValue` importable from the package root | Not re-exported — `"PermissionRuleValue" in dir(claude_agent_sdk)` is `False`. Import the permission types from `claude_agent_sdk.types` | that file |
+| `specs-reference/3-engine/permissions.md` § `PermissionUpdate` | `destination: "session"` is how the file picker's deny-read rule is applied | There is **no runtime rule API** at all. A `PermissionUpdate` reaches the CLI only as `PermissionResultAllow.updated_permissions`, from inside a callback. The file picker's gesture happens outside any call, so the only mechanism is writing `.claude/settings.local.json` ourselves | that file |
+| `specs-reference/3-engine/session.md` § Denied reads | `set_denied_read_files` applies rules "through a `PermissionUpdate`" | It writes them into `.claude/settings.local.json` and returns `{denied_read_files, settings_file}`. Same root cause as the row above | that file |
+| `specs-reference/3-engine/permissions.md` § `QuestionPayload` | `AskUserQuestion` asks one question | It takes a **list** of 1–4, each with its own `header`, `options` (2–4) and `multiSelect` | that file, and `specs5/5-webapp/permission-dialog.md` |
+| `specs-reference/3-engine/permissions.md` § resolve_permission | Allowing an `AskUserQuestion` call answers it | It does not. The tool reads `answers` off its own input; allow it without that key and the model is told "The user did not answer the questions". Needs `updated_input={**input, "answers": {question text: label}}`, multi-select joined with `", "` | that file (new § Answering an `interact` request) |
+| `specs-reference/3-engine/permissions.md` § Decision mapping | "Allow with edited input" is offered for every write tool | `Edit` and `MultiEdit` cannot take one: their input is a list of `old_string` → `new_string` replacements and the editor works on whole-file content. Offered for `Bash`, `Write` and `NotebookEdit` only | that file, and `specs5/5-webapp/permission-dialog.md` |
+| `specs-reference/3-engine/permissions.md` § Classification map | `TodoWrite` unclassified | Classified `read`. It writes nothing on disk, and gating it would prompt several times per turn — the click-through trainer R-12 exists to prevent | that file |
+| `specs5/5-webapp/chat.md` § Thinking Regions | Thinking blocks carry a token count | No payload has one. `thinkingChunk` is `{block_id, seq, content, done}` and `usage` is a single total over text, tools and thinking together. The number would have to be invented | that file |
+| `specs5/5-webapp/chat.md` § Card Anatomy | A truncated tool result gets a "show all" | The engine sends only the preview; the untruncated text never leaves the server, so the button would expand to what it already showed. It names the full byte count instead | that file |
+| `specs5/5-webapp/chat.md` § Diff Rendering | A `Write` card diffs against the file on disk | The `toolUse` payload carries only the new content, and the panel has no read path that could fetch the old side without racing the write it is describing. It renders as an all-add diff; a real before/after belongs to the diff viewer | that file |
+| `specs5/5-webapp/chat.md` § Invariants | Every client's history is identical, including compaction boundaries | `SessionStore` is a phase-5 deliverable and nothing constructs one, so the `compact_boundary` divider is client-side only and does not survive a reload. The rest of the invariant holds | that file |
+| `specs5/4-features/collaboration.md` § Enforcement | A per-message caller attribute is enough | It must be a `ContextVar`. An `async def` method's body runs a loop iteration after dispatch, by which point the attribute is cleared — and "no caller" means "trusted", so every localhost gate on every async method passed for remote callers | that file |
+| `specs5/4-features/collaboration.md` § Localhost-Only | Lifecycle methods unlisted | `connect_engine` and `shutdown` are localhost-only. Neither reads like a mutation of repository state, which is why they were missed | that file |
+| `specs5/plan/inventory.md` § Frontend — DELETE | `edit-block-render.js` and `url-helpers.js` are deleted | `edit-block-render.js` draws the diff body of every write tool card; `url-helpers.js` is `main.js`'s WebSocket URI parser and has nothing to do with URL curation. Deleting either breaks phase 3 | that file |
+| `specs5/plan/inventory.md` § Frontend — NEW | `permission-dialog.js`, `tool-card.js`, `todo-list.js` | A `permission-dialog/` directory; and cards and checklists are templates in `chat-panel/block-render.js` over the block model in `chat-panel/blocks.js`, not components of their own | that file |
+
+### `AskUserQuestion`, read out of the CLI
+
+The Python surface says nothing about how an answer gets back to the tool, and getting it wrong is silent
+in both directions — the user sees an answered question, the agent hears "The user did not answer the
+questions". From the bundled binary's tool definition:
+
+- Input is `questions` (1–4; each `{question, header, options: 2–4 × {label, description, preview?},
+  multiSelect}`), plus `answers: Record<str, str>` — "User answers collected by the permission
+  component" — plus `annotations` and `metadata`.
+- `checkPermissions` returns `{behavior: "ask"}` **unconditionally**, which is the mechanism behind
+  "always gated by the SDK".
+- `call` destructures `{questions, answers = {}, annotations, response, afkTimeoutMs}` from that input.
+- The result string is built from `answers` keyed by question text; multi-select values are split on
+  `", "` and checked back against the option labels. An answer that is not a known label is still
+  delivered, prefixed with an instruction to read it carefully — that is the route the auto-provided
+  "Other" reply takes.
+- Question texts must be unique within a call and option labels unique within a question. The CLI
+  enforces this before the callback, so the payload does not re-check it.
+- There is an AFK path: the setting `askUserQuestionTimeout` (`60s` / `5m` / `10m` / `never`, default
+  `never`) auto-continues with whatever is selected, and the CLI tells the model "No response after Ns —
+  the user may be away from keyboard". Ours has its own 300 s decision timeout, so the two must not both
+  be configured to fire.
+
+Not built in phase 2, and additive: the freeform `response`, per-option `preview` (a block of
+model-authored HTML — not forwarded into the dialog's shadow DOM incidentally), and `annotations`.

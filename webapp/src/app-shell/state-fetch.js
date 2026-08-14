@@ -6,11 +6,31 @@
  * Fetch get_current_state and dispatch the state-loaded
  * event so child components (files tab, chat panel) can
  * restore their UI.
+ *
+ * The snapshot comes from `ClaudeCodeService` as of phase 2.
+ * It has to: `state-loaded` is where the chat panel restores
+ * its messages and re-attaches to a turn still in flight, and
+ * an `active_streams` entry from the native engine carries
+ * `accumulated_content` where the new one carries `blocks`.
+ * Two snapshot sources would mean the shell and the chat panel
+ * disagreeing about whether a turn is running.
+ *
+ * Four fields the native snapshot carried are simply absent
+ * from `EngineState`, and every read of them below is guarded
+ * rather than defaulted:
+ *
+ *   - `mode` / `cross_ref_enabled` — the native engine's
+ *     code/doc modes. CC-12 replaces the toggle with a preset
+ *     selector; until then the shell keeps its defaults.
+ *   - `enrichment_status` — the doc-index KeyBERT probe. Its
+ *     one-shot toast stays silent rather than firing wrongly.
+ *   - `excluded_index_files` — becomes `denied_read_files`
+ *     under CC-14, read by the picker, not here.
  */
 export async function fetchCurrentState(host) {
   if (!host.call) return;
   try {
-    const fn = host.call['LLMService.get_current_state'];
+    const fn = host.call['ClaudeCodeService.get_current_state'];
     if (typeof fn !== 'function') return;
     const raw = await fn();
     // Unwrap jrpc-oo envelope.
@@ -53,10 +73,13 @@ export async function fetchCurrentState(host) {
       host._reviewActive = false;
     }
     // Doc Convert availability — true when markitdown is
-    // importable on the server. Missing field (older
-    // backend) keeps the tab hidden, which is the safe
-    // degradation path.
-    host._docConvertAvailable = !!state.doc_convert_available;
+    // importable on the server. Guarded rather than coerced:
+    // `!!undefined` would hide the tab, and a snapshot that
+    // merely forgot to mention the probe is not the same fact
+    // as a server that can't convert.
+    if (typeof state.doc_convert_available === 'boolean') {
+      host._docConvertAvailable = state.doc_convert_available;
+    }
     // Enrichment status — show the one-shot toast if the
     // backend reports KeyBERT is unavailable. No-op for
     // other values. Older backends omit the field; in that

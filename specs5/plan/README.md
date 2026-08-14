@@ -7,6 +7,36 @@ The rest of `specs5/` describes the **target** state. This directory describes *
 there** and **why the shape is what it is**. When the conversion is finished, `plan/` becomes
 history and moves under `specs5/impl-history/`.
 
+## Where we are (2026-08-14)
+
+**Phases 0, 1 and 2 are done. Phase 3 — the rip-out — is next and is unblocked.**
+
+Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
+landed, what it deliberately left out, and what the next phase has to do first. The phase-2 entry
+is the one that matters for picking this up cold.
+
+The state phase 3 inherits:
+
+- **The chat path runs entirely on Claude Code.** A full working conversation, including a
+  permission-gated write, was verified live against the bundled CLI 2.1.229.
+- **`LLMService` and `src/ac_dc/llm/` are intact and still registered, and nothing in the chat path
+  reaches them.** That is deliberate, per the no-interleaving rule below. Phase 3 deletes them.
+- **Suites:** python 1 failed / 3872 passed; webapp 89 files / 3202 passed. The single failure is
+  pre-existing and unrelated — `test_odp_routes_to_libreoffice_when_available` needs PyMuPDF
+  (`import fitz`), which is not installed. `doc_convert/` is on the keep-unchanged list.
+
+**Two open findings are waiting on a decision, not on a phase.** Both change permission semantics,
+so neither was changed on a guess. They are written up in full at the end of the phase-2 entry in
+[`delivery.md`](delivery.md): a derived always-allow rule that over-grants (`Edit(**)` at the repo
+root grants the whole repo), and an always-allow tooltip that contradicts a session-scoped rule the
+CLI itself suggested. Settle these before phase 4 adds hooks, because a `PreToolUse` hook that
+returns a decision shadows `can_use_tool` entirely.
+
+**First thing to check on resuming:** whether the phase-2 work is committed. It was still in the
+working tree when the session ended — ~5k insertions across 56 tracked files, plus untracked
+`src/ac_dc/claude_code/permissions.py`, `webapp/src/permission-dialog/`, and the new
+`chat-panel/{blocks,block-render,permission-mode}.js` with their tests. `git status` answers it.
+
 ## The one-paragraph version
 
 AC⚡DC keeps its skin and loses its brain. The browser UI, the jrpc-oo transport, the git
@@ -61,7 +91,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 |---|---|---|
 | **0. Plan and specs** ✅ | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
 | **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
-| **2. Chat on the new engine** | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
+| **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
 | **3. Rip-out** | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
@@ -69,7 +99,14 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 
 Phases 1–3 are the risky ones and should not be interleaved: keep the native engine intact and
-reachable until phase 2's exit criterion is genuinely met, then delete in one commit.
+reachable until phase 2's exit criterion is genuinely met, then delete in one commit. Phase 2's
+criterion is now met, so the deletion is unblocked.
+
+Phase 3's footprint is wider than its row implies. As of the end of phase 2, `litellm` is reachable
+from ten files: `llm_service.py`, `llm/_commit.py`, `llm/_helpers.py`, `config.py`, `main.py`,
+`settings.py`, `token_counter.py`, `context_manager.py`, `history_compactor.py` and
+`logging_setup.py`. The last four are not obviously "engine" files, which is exactly why the exit
+criterion is a grep rather than a file list.
 
 A phase is recorded in [`delivery.md`](delivery.md) when its exit criterion is met — what landed,
 what was deliberately left out, and what the next phase has to do first.

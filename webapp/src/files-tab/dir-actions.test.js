@@ -103,7 +103,7 @@ describe('directory actions', () => {
       'Repo.unstage_files': unstage,
       'Repo.rename_directory': renameDir,
       'LLMService.set_excluded_index_files': setExcluded,
-      'LLMService.set_selected_files': setSelected,
+      'ClaudeCodeService.set_selected_files': setSelected,
     });
     const t = mountTab();
     await settle(t);

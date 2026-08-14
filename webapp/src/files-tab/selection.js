@@ -70,6 +70,19 @@ export function applySelection(host, newSelection, notifyServer) {
  * Without this dispatch, every selection change on
  * any tab would clobber the main tab's server-side
  * selection.
+ *
+ * The main path goes to `ClaudeCodeService` as of phase 2.
+ * It has to for one specific reason: `get_current_state`
+ * reports `selected_files` back, the shell hands that to
+ * `applySelection` on reconnect, and a service that never
+ * heard about the selection reports it as empty — which
+ * would clear the picker on every refresh.
+ *
+ * The agent path still goes to `LLMService`. It targets a
+ * `ConversationScope` that only exists there, and phase 3
+ * removes both the call and its caller — the agent tabs of
+ * the emoji spawn protocol are not the subagent tabs that
+ * replace them.
  */
 export async function sendSelectionToServer(host, files) {
   const agentTag = parseAgentTabId(host._activeTabId);
@@ -87,7 +100,7 @@ export async function sendSelectionToServer(host, files) {
       );
     } else {
       result = await host.rpcExtract(
-        'LLMService.set_selected_files',
+        'ClaudeCodeService.set_selected_files',
         files,
       );
     }

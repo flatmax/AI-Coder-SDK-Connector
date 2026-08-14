@@ -150,9 +150,15 @@ State:
 `get_denied_read_files` / `set_denied_read_files` replace the native engine's
 `get_excluded_index_files` / `set_excluded_index_files`. The rename is deliberate: nothing is excluded
 from an index any more, and a method whose name describes a subsystem that no longer exists is worse
-than a rename cost paid once. The setter writes `Read(path)` deny rules through a `PermissionUpdate`
-(see `specs-reference/3-engine/permissions.md`), so the state is a permission fact rather than an
-in-memory filter, and the CLI honours it in the same repo.
+than a rename cost paid once. The state is a permission fact rather than an in-memory filter, and the
+CLI honours it in the same repo.
+
+The setter writes `Read(path)` deny rules **into `.claude/settings.local.json` directly**, and returns
+`{denied_read_files: list[str], settings_file: str}`. An earlier draft said it writes them "through a
+`PermissionUpdate`"; there is no API to hand one to. `PermissionUpdate` only reaches the CLI as
+`PermissionResultAllow.updated_permissions` from inside a `can_use_tool` callback, and this call happens
+outside any tool call — see `specs-reference/3-engine/permissions.md` § There is no runtime rule API.
+The CLI reads the settings file itself, so the effect is the same and the mechanism is a file write.
 
 Turns:
 
@@ -221,6 +227,7 @@ EngineState:
     doc_index_enriched: bool
     review_state: ReviewState             // always present; check `active`
     engine_health: EngineHealth
+    doc_convert_available: bool           // server capability probe, not engine state
 
 ActiveStream:
     request_id: string
@@ -241,6 +248,12 @@ resumes applying chunks, which is the same re-attach mechanism as before at bloc
 
 `pending_permissions` lets a client that connects mid-prompt render the dialog immediately instead of
 waiting for a broadcast it already missed.
+
+`doc_convert_available` is the odd one out: a probe for whether `markitdown` imports on the server,
+which has nothing to do with the engine. It is here because this snapshot is the only one the shell
+fetches once the chat path leaves `LLMService`, and document conversion survives the conversion
+unchanged. The shell gates the Doc Convert tab on it, so an `EngineState` without it would silently
+retire a feature nothing in the plan retires. Absent field means unavailable.
 
 ### `EngineHealth`
 

@@ -186,5 +186,14 @@ export function renderTemplate(host) {
     <ac-speech-controls></ac-speech-controls>
 
     <ac-token-hud></ac-token-hud>
+
+    <!--
+      Last in the template and at z-index 9000: above the dialog panel,
+      above the startup overlay, above the toast layer. A permission
+      request during startup is possible when a session resumes into a
+      pending call, so "above the startup overlay" is not theoretical
+      (specs5/5-webapp/permission-dialog.md § Placement).
+    -->
+    <ac-permission-dialog></ac-permission-dialog>
   `;
 }

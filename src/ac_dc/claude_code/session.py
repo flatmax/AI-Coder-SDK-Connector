@@ -328,9 +328,30 @@ class EngineSession:
     def model(self) -> str | None:
         return self._model
 
+    @property
+    def active_request_id(self) -> str | None:
+        """The request ID of the turn in flight, if there is one."""
+        return self._active_turn.request_id if self._active_turn is not None else None
+
     def active_streams(self) -> list[dict[str, Any]]:
         """Replay payload for a client that connects mid-turn."""
         return [self._active_turn.to_dict()] if self._active_turn else []
+
+    def note_permission_prompt(self, tool_use_id: str | None = None) -> str | None:
+        """Record a permission prompt against the turn in flight.
+
+        The permission layer calls this once per request: it counts the
+        prompt for the turn footer's click-through metric, marks the tool
+        card as gated, and hands back the request ID so the dialog can be
+        attributed to a turn. Returns ``None`` when no turn is running,
+        which is a request raised outside a turn — legal, and rendered
+        without a turn attribution.
+        """
+        active = self._active_turn
+        if active is None:
+            return None
+        active.translator.note_permission_prompt(tool_use_id)
+        return active.request_id
 
     # ------------------------------------------------------------------
     # Lifecycle

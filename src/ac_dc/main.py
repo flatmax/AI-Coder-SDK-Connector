@@ -60,12 +60,104 @@ import atexit
 import logging
 import signal
 import sys
+import time
 import traceback
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Windows has no SIGKILL; there ``os.kill`` with SIGTERM calls
+# TerminateProcess, which is already the unignorable form — so
+# the escalation below has nothing to escalate to, and nothing
+# to wait for either (no ``os.WNOHANG``).
+_HARD_KILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+_WNOHANG = getattr(os, "WNOHANG", None)
+
+
+def _kill_cli_children(grace: float = 0.25) -> None:
+    """Kill every live Claude Code CLI subprocess, synchronously.
+
+    Called from the signal handler immediately before
+    ``os._exit``. The SDK tracks its children in a module-level
+    set and SIGTERMs them from an ``atexit`` hook — and
+    ``os._exit`` never runs ``atexit``, so that guard never fires
+    for us. This is the same job, done by hand.
+
+    Measured with no kill at all: SIGINT during a streaming turn
+    left the ``claude`` process running for a further ~38
+    seconds, reparented to init, still holding the repo as its
+    cwd. Measured with SIGTERM: a mid-stream child was gone in
+    under 0.3s. So SIGTERM is the whole mechanism in the normal
+    case, and the escalation below exists for a child that has
+    wedged — the case where doing what the SDK does (signal and
+    go) would leave exactly the orphan this function is for.
+
+    A blocking wait inside a signal handler is only acceptable
+    because the next statement is ``os._exit``: nothing else is
+    waiting on this thread, and in the normal case the wait ends
+    within one poll interval.
+    """
+    try:
+        from claude_agent_sdk._internal.transport import subprocess_cli
+
+        children = list(subprocess_cli._ACTIVE_CHILDREN)
+    except Exception as exc:
+        # Private SDK surface. An SDK that moves it leaves us
+        # with the old behaviour — a child that lingers until it
+        # notices stdin closed — rather than a server that will
+        # not exit.
+        logger.debug("Cannot reach the SDK child registry: %s", exc)
+        return
+
+    pending: set[int] = set()
+    for child in children:
+        try:
+            pid = child.pid
+        except Exception:
+            continue
+        pending.add(pid)
+        with suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    if not pending or _WNOHANG is None:
+        return
+
+    deadline = time.monotonic() + grace
+    while True:
+        pending = {pid for pid in pending if not _child_exited(pid)}
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    for pid in pending:
+        with suppress(OSError):
+            os.kill(pid, _HARD_KILL)
+
+
+def _child_exited(pid: int) -> bool:
+    """Whether child ``pid`` has exited, reaping it if it has.
+
+    ``os.kill(pid, 0)`` cannot answer this. A child we have
+    signalled but not waited for is a zombie, and a zombie still
+    answers signal 0 — so a liveness probe would report every
+    successfully killed child as alive and burn the whole grace
+    period before hard-killing a corpse.
+
+    The event loop is gone by the time this runs, so nothing is
+    reaping for us and ``Process.returncode`` never updates.
+    ``waitpid`` is the only thing left that can tell "exited"
+    from "still streaming".
+    """
+    try:
+        reaped, _status = os.waitpid(pid, _WNOHANG)
+    except ChildProcessError:
+        # Already reaped, or never ours to wait on.
+        return True
+    except OSError:
+        # Nothing further we could usefully do to it.
+        return True
+    return reaped == pid
 
 
 # ---------------------------------------------------------------------------
@@ -708,12 +800,16 @@ async def run(
         experimental=experimental,
     )
 
-    # Claude Code engine — conversion phase 1. Registered as a second
-    # service so the RPC surface (ClaudeCodeService.*) exists and can be
-    # exercised, while LLMService still serves the UI. The two do not
-    # share state and the native chat path is untouched; phase 2 wires
-    # permissions, phase 3 switches the frontend over
-    # (specs5/plan/README.md).
+    # Claude Code engine — the chat path as of conversion phase 2.
+    # LLMService is still constructed and still registered, because the
+    # indexes, the commit surface, the snippets, and the history browser
+    # hang off it and come across in later phases. Nothing in the chat
+    # panel calls it any more. Phase 3 deletes it (specs5/plan/README.md).
+    #
+    # The two do not share state — not even the selected-file set. Two
+    # services owning one selection would need a sync path, and the
+    # selection means different things to each: a context contract to
+    # LLMService, a hint to the agent (CC-14).
     #
     # The engine connects lazily — on the first turn or an explicit
     # ClaudeCodeService.connect_engine() call — deliberately. Connecting
@@ -858,6 +954,13 @@ async def run(
     # load running in the default executor. Vite gets a
     # SIGTERM via ``terminate()``; we don't wait for it,
     # vite shuts itself down once the parent dies.
+    #
+    # ``os._exit`` also skips ``atexit``, and the Claude Agent
+    # SDK's only orphan guard is an ``atexit`` hook — so the
+    # CLI child has to be killed here, explicitly. Measured
+    # without this: SIGINT during a streaming turn left the
+    # ``claude`` process running for a further ~38 seconds,
+    # reparented to init, still holding the repo as its cwd.
     def _signal_handler(sig: int, frame: Any) -> None:
         if vite_process is not None:
             try:
@@ -867,6 +970,7 @@ async def run(
                     vite_process.kill()
                 except Exception:
                     pass
+        _kill_cli_children()
         os._exit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)

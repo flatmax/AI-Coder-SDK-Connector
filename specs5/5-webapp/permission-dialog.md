@@ -49,10 +49,26 @@ clicks outside the dialog do nothing. Clicking the scrim is **not** a dismiss �
 the first words of the command, the MCP server name). Then the queue position when more than one request
 is pending, then the countdown to expiry.
 
-**Subagent attribution line** — rendered only when `agent_id` is non-null, naming the subagent by its
-description rather than its opaque id. A user must never have to guess whether the main agent or one of
-twelve subagents is asking, because "the agent wants to edit this" and "one of the parallel explorers
-wants to edit this" warrant different answers.
+The CLI sends its own copy for the call and it is preferred over anything we would compose:
+`display_name` ("Read file") is the tool label, and `title` ("Claude wants to read foo.txt") is the
+identifying line when the input has no path, command or server to name. Both are new to
+`ToolPermissionContext` in 0.2.137 and both may be null; our own `summary` is the fallback, not the
+default. The reason for the preference is that the terminal shows the same strings, and a user who runs
+both front ends should not see the same call described two ways.
+
+**Subagent attribution line** — rendered only when `agent_id` is non-null. It names the subagent by
+`agent_id`, which is the only identifier `permissionRequest` carries. Naming it by *description* — which
+an earlier draft of this section asked for, and which is what a user actually wants — needs a description
+in the payload, and neither `ToolPermissionContext` nor the tool input has one; the descriptions live in
+the `Task*Message` events the chat panel consumes to build its subagent rows. Closing that gap means the
+engine correlating `agent_id` against those rows and adding a field, which is subagent-browser work
+(phase 6), not dialog work. Until then the line says which subagent by id.
+
+What the line must not do is borrow `title`: `title` is the prompt sentence for *this call*, so using it
+here renders `requested by subagent "Claude wants to run npm test"`. A user must never have to guess
+whether the main agent or one of twelve subagents is asking, because "the agent wants to edit this" and
+"one of the parallel explorers wants to edit this" warrant different answers — but an id answers that
+question and a mislabelled sentence does not.
 
 **Body** — varies by `tool_class`; see below.
 
@@ -102,6 +118,27 @@ radio-style for single select, checkbox-style for multi. The decision row collap
 button plus Deny; "always allow" is not offered, because there is no rule that can answer a future
 question.
 
+The tool takes a **list** of questions (`input.questions`, each with its own `header`, `options` and
+`multiSelect`), not the single question an earlier draft assumed. The payload promotes the first to the
+top level and carries the whole list, so the body renders each question with its `header` as a section
+label and one control group per question, and "Answer" is disabled until every question has a selection.
+A dialog that rendered only the first would silently drop the rest of the agent's ask and answer a
+different question than the one it was given.
+
+**Allowing the call is not answering it.** `AskUserQuestion` reads its answers off its own input: the
+permission decision has to allow the call *with* an `answers` map merged into the input, keyed by
+question text. Allow it plainly and the tool result the agent receives is "The user did not answer the
+questions" — the user would see an answered question and the agent would hear silence, which is the
+worst of the available outcomes because nothing on either side looks broken. The dialog sends the
+selections as option indices (`PermissionDecision.answers`, one list per question) and the engine builds
+the map; see `specs-reference/3-engine/permissions.md` § Answering an `interact` request for why the
+mapping lives there and not in the browser.
+
+Three affordances the tool supports are **not built**: the freeform "Other" reply it offers alongside the
+options (`input.response`), the per-option `preview` its terminal UI renders for comparing mockups, and
+the per-answer notes (`input.annotations`). All three are additive — a call answered by option label is
+answered correctly without them — and they belong with the rest of the dialog's polish in phase 6.
+
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot
 show — the transcript records the denial instead.
@@ -145,9 +182,17 @@ Two consequences are stated in the control's tooltip rather than left to be disc
 
 ### Editing the input
 
-For `write`, the right-hand pane becomes editable on an explicit "edit proposed content" affordance; for
-`exec`, the command becomes an editable single-line field. Editing swaps Allow once for **Allow with
-edits** so the difference is unmistakable.
+For `Write` and `NotebookEdit`, the right-hand pane becomes editable on an explicit "edit proposed
+content" affordance; for `exec`, the command becomes an editable single-line field. Editing swaps Allow
+once for **Allow with edits** so the difference is unmistakable.
+
+**`Edit` and `MultiEdit` get no edit affordance.** Their input is a list of `old_string` → `new_string`
+replacements while the pane shows the resulting file, and there is no way back from an edited file to a
+set of replacements without guessing which one the user meant. A call that ran something other than what
+the dialog displayed would be a worse failure than the missing affordance — and it would break the
+"transcript records what actually ran" promise below, since we would not know what actually ran. For
+those two tools the answer is allow, or deny with a reason and let the agent redo it. This is narrower
+than an earlier draft of this section, which offered editing to all of `write`.
 
 An edited input is recorded in the transcript as the input that actually ran, alongside a marker that
 the user modified it. The agent's own record of the call is the SDK's, and it sees `updated_input` — but

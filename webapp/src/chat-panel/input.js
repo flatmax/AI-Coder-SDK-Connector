@@ -11,7 +11,8 @@
 //   - Pending-image strip + lightbox
 //   - Speech-to-text transcript insertion
 //   - Snippet drawer toggle + insertion
-//   - Reasoning toggle
+//   - Reasoning toggle (inert since phase 2 — see
+//     properties.js)
 //   - History browser open/close/load
 //   - New session
 //   - File mention detection (the `@filter` bridge
@@ -45,15 +46,12 @@ import {
   _saveReasoningEnabled,
   _saveReasoningEffort,
   _REASONING_EFFORT_LEVELS,
-  buildAmbiguousRetryPrompt,
-  buildInContextMismatchRetryPrompt,
-  buildNotInContextRetryPrompt,
   generateRequestId,
-  parseAgentTabId,
 } from './helpers.js';
-import { scheduleUrlDetection } from './urls.js';
+import { resetTurnBlocks } from './blocks.js';
 import {
   handleStreamStartError,
+  handleUnsupportedSlash,
   maybeStopStreamTimerTick,
   startStreamTimerTick,
 } from './streaming.js';
@@ -104,22 +102,32 @@ export function _saveDraft(value) {
 // ---------------------------------------------------------------
 
 /**
- * Send the composed message + pending images.
+ * Send the composed message + pending images to Claude Code.
  *
  * Drops the snippet drawer on send (auto-close —
  * users want vertical space back during streaming).
- * Clears detected URL chips per spec — fetched
- * and errored chips survive because they
- * represent committed work.
  *
- * Computes per-turn URL exclusion set from chips
- * whose include checkbox is unchecked. Chip stays
- * visible; only this turn's prompt omits its
- * content.
+ * `ClaudeCodeService.chat_streaming` takes five arguments —
+ * `(request_id, message, files, images, viewer)`. What the native
+ * engine's eight-argument form carried and this one does not:
  *
- * Routes through ``parseAgentTabId`` so agent tabs
- * pass their agent_tag to the backend and main
- * tabs pass null (untagged = main scope).
+ *   - `excluded_urls` — the URL-chip feature is gone (rendering.js).
+ *     The agent fetches what it wants with WebFetch.
+ *   - `agent_tag` — there is one CLI session and one turn in flight.
+ *     Subagent output is attributed by the `Task` call's
+ *     `tool_use_id`, not by routing a separate stream (blocks.js).
+ *   - `reasoning` / `effort` — the CLI decides when to think.
+ *
+ * `viewer` is passed null: it wants the file and selection range the
+ * user is looking at, which lives in the shell's viewers, not here.
+ * Wiring that gesture is phase 6's; sending a wrong answer now would
+ * be worse than sending none.
+ *
+ * A `/command` is not intercepted. The service answers built-ins that
+ * have an AC⚡DC equivalent synchronously with `{status: "unsupported"}`
+ * and lets custom commands from `.claude/commands/` through — so a
+ * mistyped command becomes a system note, never a question the agent
+ * tries to answer.
  */
 export async function send(panel) {
   const text = panel._input.trim();
@@ -198,6 +206,14 @@ export async function send(panel) {
   panel._pendingImages = [];
   panel._streaming = true;
   panel._streamingContent = '';
+  // Clear last turn's blocks before the first chunk of this one can
+  // arrive. Without this the streaming card would open showing the
+  // previous turn's tool cards and thinking region — content is
+  // cumulative within a block and never across a turn (blocks.js), and
+  // this is where "across a turn" is enforced on the send side.
+  // Reset the tab we're sending from, not the whole panel: a background
+  // tab's settled turn is history, not staleness.
+  if (activeTab) resetTurnBlocks(activeTab.turnBlocks);
   // Stamp the run-timer start the instant the prompt is
   // sent, and kick the panel-level ticker so the live
   // elapsed counter on the streaming card starts moving.
@@ -224,64 +240,47 @@ export async function send(panel) {
     panel._snippetDrawerOpen = false;
     _saveDrawerOpen(false);
   }
-  // Clear detected / fetching URL chips — fetched
-  // and errored chips survive because they
-  // represent work the user already committed to.
-  const chipsEl = panel.shadowRoot?.querySelector('ac-url-chips');
-  if (chipsEl) chipsEl.clearDetected();
-
   try {
-    // Compute per-turn URL exclusion set from the
-    // chip component. Every fetched chip whose
-    // include checkbox is unchecked ends up here.
-    const excludedUrls = [];
-    if (chipsEl && chipsEl._chips) {
-      for (const chip of chipsEl._chips.values()) {
-        if (chip.status === 'fetched' && chip.excluded) {
-          excludedUrls.push(chip.url);
-        }
-      }
-    }
-    // agent_tag (6th positional) routes the call
-    // to the agent's ConversationScope when the
-    // active tab is an agent. Null for the main
-    // tab — the backend's dispatcher treats null
-    // as "use the main conversation".
-    const agentTag = parseAgentTabId(panel._activeTabId);
     const result = await panel.rpcExtract(
-      'LLMService.chat_streaming',
+      'ClaudeCodeService.chat_streaming',
       requestId,
       text,
       Array.isArray(panel.selectedFiles)
         ? panel.selectedFiles
         : [],
       images,
-      excludedUrls,
-      agentTag,
-      // 7th arg — reasoning override. Boolean (not
-      // None) because the user's toggle is a
-      // deliberate choice; the config-default
-      // fallthrough only applies when a caller
-      // doesn't pass the field at all.
-      panel._reasoningEnabled,
-      // 8th arg — effort level for adaptive models.
-      // Backend defers to config when it doesn't
-      // recognise the value.
-      panel._reasoningEffort,
+      // viewer framing — see the docstring. Explicitly null rather
+      // than omitted so the positional arity is unambiguous when a
+      // later phase fills it in.
+      null,
     );
-    // Response is {status: "started"} on the
-    // happy path. Chunks and completion arrive
-    // via server-push events.
+    // `{status: "started"}` on the happy path. Everything after that
+    // arrives as server-push events keyed on `requestId`.
     //
-    // Error responses (synchronous rejections
-    // from the backend) don't become exceptions
-    // — they resolve the Promise with an error
-    // dict.
-    if (result && typeof result === 'object' && result.error) {
-      handleStreamStartError(
-        panel, requestId, result.error, agentTag,
-      );
-      return;
+    // Synchronous refusals resolve the Promise with a dict rather than
+    // rejecting, so both shapes are checked here. Two of them:
+    //
+    //   - `{error, reason}` — engine not ready, turn already in
+    //     flight, session lost. The turn never started.
+    //   - `{status: "unsupported", command, message, equivalent?}` —
+    //     a built-in slash command with an AC⚡DC equivalent. Also
+    //     never started, but it isn't an error and must not be
+    //     rendered as one.
+    if (result && typeof result === 'object') {
+      if (result.error) {
+        handleStreamStartError(panel, requestId, result.error);
+        return;
+      }
+      if (result.status === 'unsupported') {
+        // Roll the optimistic streaming state back first, then report.
+        // Order matters: `handleUnsupportedSlash` appends to
+        // `panel.messages`, and the streaming card renders below the
+        // list — leaving it up would put a spinner under the note
+        // saying nothing was sent.
+        rollbackUnstartedTurn(panel, requestId);
+        handleUnsupportedSlash(panel, result);
+        return;
+      }
     }
   } catch (err) {
     console.error('[chat] chat_streaming failed', err);
@@ -292,31 +291,49 @@ export async function send(panel) {
         content: `**Error:** ${err?.message || String(err)}`,
       },
     ];
-    panel._streaming = false;
-    panel._currentRequestId = null;
-    panel._streams.delete(requestId);
-    // The stream never started — clear the run timer so
-    // the ticker doesn't keep firing against a stamp that
-    // will never complete.
-    panel._streamStartedAt = null;
-    maybeStopStreamTimerTick(panel);
+    rollbackUnstartedTurn(panel, requestId);
   }
+}
+
+/**
+ * Undo the optimistic streaming state for a turn that never started.
+ *
+ * Both no-start paths need this: a transport rejection and an
+ * `{status: "unsupported"}` slash reply. Neither will ever produce a
+ * `streamComplete`, so nothing else is coming to clear the spinner or
+ * stop the run timer.
+ *
+ * The optimistic *user* message is deliberately left in place. The user
+ * did type it, and in the slash case the system note that follows only
+ * makes sense underneath it.
+ */
+function rollbackUnstartedTurn(panel, requestId) {
+  panel._streaming = false;
+  panel._streamingContent = '';
+  panel._currentRequestId = null;
+  panel._streams.delete(requestId);
+  panel._streamStartedAt = null;
+  maybeStopStreamTimerTick(panel);
 }
 
 /**
  * Cancel the active stream. Best-effort — the
  * server may have already finished, so the cancel
  * call is fire-and-forget. Local cleanup happens
- * either way (cancel response arrives as
- * streamComplete with cancelled=true; handled
- * uniformly in the streaming module).
+ * either way: the engine drains the interrupted turn
+ * to its result rather than dropping it, so a
+ * `streamComplete` still arrives — with
+ * `terminal_reason` of `aborted_streaming` or
+ * `aborted_tools`, handled uniformly in the streaming
+ * module. Skipping that drain is what would route
+ * this turn's tail into the next turn's UI.
  */
 export async function cancel(panel) {
   if (!panel._streaming || !panel._currentRequestId) return;
   if (!panel.rpcConnected) return;
   try {
     await panel.rpcExtract(
-      'LLMService.cancel_streaming',
+      'ClaudeCodeService.cancel_streaming',
       panel._currentRequestId,
     );
   } catch (err) {
@@ -334,6 +351,16 @@ export async function cancel(panel) {
 // ---------------------------------------------------------------
 // Session lifecycle
 // ---------------------------------------------------------------
+//
+// Unreachable from the UI since phase 2. The ✨ new-session and 📜
+// history buttons came off the action bar with the rest of the native
+// engine's controls (rendering.js), and `ClaudeCodeService` has no
+// `new_session` — session lifecycle over the CLI is phase 5, where
+// resume takes a session id rather than clearing one.
+//
+// The handlers stay because phase 5 wants exactly this shape back: a
+// call, then trust the broadcast. Repointing them at an RPC that does
+// not exist yet would be worse than leaving them plainly inert.
 
 /**
  * Start a new session. The server generates a new
@@ -386,11 +413,15 @@ export function toggleSnippetDrawer(panel) {
 }
 
 /**
- * Toggle extended-thinking / reasoning mode. The
- * flag is forwarded as the ``reasoning`` argument
- * to ``LLMService.chat_streaming`` on every send
- * while enabled. Persisted globally so the
- * choice survives reload.
+ * Toggle extended-thinking / reasoning mode.
+ *
+ * **Inert since phase 2**, and no longer reachable from the UI: the flag was
+ * forwarded as the ``reasoning`` argument to the native ``chat_streaming``,
+ * which ``ClaudeCodeService.chat_streaming`` does not take. Thinking depth is
+ * the CLI's to decide — we render the thinking blocks it sends and do not ask
+ * for them. Kept because the setting still round-trips to localStorage and
+ * deleting it would lose a user's stored preference for no gain; the toast
+ * would be a lie if anything called it, and nothing does.
  */
 export function toggleReasoning(panel) {
   panel._reasoningEnabled = !panel._reasoningEnabled;
@@ -404,12 +435,13 @@ export function toggleReasoning(panel) {
 }
 
 /**
- * Set the per-request reasoning effort level (adaptive
- * models). Forwarded as the ``effort`` argument to
- * ``LLMService.chat_streaming``; persisted globally. The
- * provider rejects a level the active model doesn't
- * advertise (e.g. xhigh/max on older models), surfaced as
- * an error toast on send.
+ * Set the per-request reasoning effort level (adaptive models).
+ *
+ * **Inert since phase 2** for the same reason as `toggleReasoning`: the
+ * ``effort`` argument does not exist on the new signature. Effort is a
+ * property of the CLI's own model configuration, set by
+ * ``ClaudeCodeService.set_model`` and the CLI's settings, not per request
+ * from here.
  */
 export function setReasoningEffort(panel, effort) {
   if (!_REASONING_EFFORT_LEVELS.includes(effort)) return;
@@ -462,8 +494,7 @@ export function insertSnippet(panel, snippet) {
 
 /**
  * Handle textarea `input` events. Updates state,
- * auto-resizes, and triggers @-mention detection
- * + URL detection.
+ * auto-resizes, and triggers @-mention detection.
  */
 export function onInputChange(panel, event) {
   panel._input = event.target.value;
@@ -481,8 +512,6 @@ export function onInputChange(panel, event) {
   // inside an @word sequence and dispatch
   // edge-triggered `filter-from-chat` events.
   updateMentionFilter(panel, ta);
-  // URL detection debounce.
-  scheduleUrlDetection(panel);
 }
 
 /**

@@ -1,184 +1,135 @@
 // Stream lifecycle handlers for the ChatPanel.
 //
-// Owns:
-//   - `onStreamChunk(panel, event)` — route chunks
-//     to their owning tab, schedule a coalesced
-//     re-render via rAF
-//   - `onStreamComplete(panel, event)` — finalize
-//     the streaming card into a settled assistant
-//     message, surface errors and finish-reason
-//     toasts, decide whether to spawn agent tabs
-//     for the result, populate retry prompts
-//   - `onUserMessage(panel, event)` — passive
-//     observer dedup against the optimistic local
-//     append in `_send`
-//   - `onAgentsSpawned(panel, event)` — pre-spawn
-//     agent tabs from the backend's
-//     `agentsSpawned` broadcast so child stream
-//     chunks have somewhere to land
-//   - `scheduleFlush(panel)` — rAF batching for
-//     pending chunks across all tabs
-//   - Retry-prompt builders + error formatting
-//     helpers used by the completion path
+// Every event the Claude Code engine emits for a turn lands here, gets routed
+// to the tab that owns the turn, and folds into that tab's block state. The
+// module owns *when* state changes; `blocks.js` owns what the change means and
+// `block-render.js` owns how it looks.
 //
-// Why functional with `panel` as a parameter:
-// matches the pattern established in tabs.js — the
-// chat-panel module is too large to fit on one
-// prototype, and Lit's reactive-property
-// machinery doesn't compose cleanly with multi-
-// class inheritance. Functional modules with
-// explicit `panel` parameters keep the
+// Handlers, roughly in the order a turn produces them:
+//
+//   - `onSessionStarted`  — the engine's `init`: model, cwd, tools, mode
+//   - `onStreamChunk`     — assistant text, block-keyed
+//   - `onThinkingChunk`   — reasoning, same routing, different kind
+//   - `onToolUse`         — a tool card
+//   - `onPermissionRequest` / `onPermissionResolved` — the amber lock and what
+//     came of it, matched to their card by `tool_use_id`
+//   - `onToolResult`      — the result, attached by `tool_use_id`
+//   - `onSubagentEvent`   — a `Task` row's description, status, usage
+//   - `onStreamComplete`  — freeze the blocks onto a settled message, footer
+//     and terminal-reason badge included
+//   - `onRateLimit`, `onEngineHealth`, `onSystemEvent`, `onHookEvent` — out of
+//     band, routed per specs5/5-webapp/chat.md § Engine Event Routing
+//
+// Why functional with `panel` as a parameter: matches the pattern established
+// in tabs.js — the chat-panel module is too large to fit on one prototype, and
+// Lit's reactive-property machinery doesn't compose cleanly with multi-class
+// inheritance. Functional modules with explicit `panel` parameters keep the
 // dependencies visible.
 //
 // Architectural contracts preserved here:
 //
-//   - Streaming state keyed by request ID. Each
-//     tab has its own `_streams` Map and
-//     `_pendingChunks` Map; this module routes
-//     by request ID via `findTabForRequest`.
+//   - Streaming state keyed by request ID. Each tab has its own `streams` Map
+//     and its own block state; this module routes by request ID via
+//     `findTabForRequest`.
 //
-//   - Chunks carry full accumulated content, not
-//     deltas. The chunk handler replaces the
-//     pending content; dropped or reordered
-//     chunks are harmless because each carries a
-//     superset of prior content.
+//   - Chunks are cumulative *within a block*, not across a turn. The old
+//     contract — every chunk carries the whole accumulated turn, so any one
+//     chunk could rebuild the view — is gone. A chunk can rebuild its block
+//     and nothing more, which is why `stageChunk` takes a block id and a `seq`
+//     rather than a string.
 //
-//   - Chunks coalesced per animation frame via
-//     `_pendingChunks`. Rapid-fire chunks (every
-//     few ms) don't trigger Lit re-renders faster
-//     than 60Hz. The synchronous write inside
-//     `onStreamChunk` is insurance against rAF
-//     starvation (tab backgrounded, panel briefly
-//     display:none); both paths read from the
-//     same pendingChunks entry so the rAF either
-//     finds it drained (no-op) or re-applies the
-//     same value (harmless).
+//   - Chunks coalesced per animation frame. Rapid-fire chunks (every few ms)
+//     don't trigger Lit re-renders faster than 60Hz. The synchronous drain
+//     inside `onStreamChunk` is insurance against rAF starvation (tab
+//     backgrounded, panel briefly display:none); both paths drain the same
+//     staging map, so whichever runs second finds it empty.
 
 import {
-  buildAmbiguousRetryPrompt,
-  buildInContextMismatchRetryPrompt,
-  buildNotInContextRetryPrompt,
-} from './helpers.js';
+  applyPermissionOutcome,
+  applyReplayBlocks,
+  applySubagentEvent,
+  applyToolResult,
+  applyToolUse,
+  collectFilesModified,
+  drainChunks,
+  freezeBlocks,
+  markAwaitingPermission,
+  resetTurnBlocks,
+  stageChunk,
+} from './blocks.js';
 import { findTabForRequest, spawnAgentTabs } from './tabs.js';
 
 // ---------------------------------------------------------------
-// Last-completion outcome (LED row state)
+// Turn outcome (LED row state)
 // ---------------------------------------------------------------
 
 /**
- * Derive the LED-row outcome for one stream completion.
+ * Derive the LED-row outcome for one completed turn.
  *
- * Inputs are the raw fields from the completion result:
+ * The old version read our own apply pipeline's `EditResult` list. There is no
+ * such list any more — the agent owns its edits and reports them as tool
+ * results — so the inputs are the engine's own verdict on the turn:
  *
- *   - ``error`` — string from ``result.error`` (truthy
- *     means the stream itself failed; the response card
- *     renders a typed error and the LED goes red).
- *   - ``errorInfo`` — classified error dict from
- *     ``result.error_info`` (provider message, error
- *     type, model). Used to build a human-readable
- *     failure reason when present.
- *   - ``editResults`` — array of EditResult dicts. Each
- *     carries ``status`` (``applied`` /
- *     ``already_applied`` / ``failed`` / ``skipped`` /
- *     ``not_in_context``) plus ``error_type`` and
- *     ``message`` for failures.
+ *   - `is_error` — the turn failed. Red, whatever else it managed first.
+ *   - `terminal_reason` — a turn that stopped for a bad reason (`max_turns`,
+ *     a refusal, an engine fault) is not clean even when `is_error` is false.
+ *   - `permission_denials` — not an error. A denied call is the permission
+ *     system working; the LED staying green is the honest signal.
  *
- * Returns the shape stored on ``tab.lastEditOutcome``:
+ * A cancelled turn is reported `clean`: the user stopped it deliberately and a
+ * red LED would read as a fault. `files.length` fills `appliedCount`, which
+ * the tooltip renders as "N edits applied" — with Claude Code that means "N
+ * files the turn modified", which is the same question the tooltip was always
+ * answering.
  *
- *   - ``status: 'clean'`` — no stream error AND no
- *     EditResult with status === 'failed'. The agent
- *     finished cleanly (zero edits, all-applied, or any
- *     mix of applied / already-applied / skipped /
- *     not-in-context).
- *   - ``status: 'error'`` — stream error OR at least one
- *     failed EditResult. The LED goes red.
- *
- * ``appliedCount`` counts EditResults with
- * ``status === 'applied'`` — the number of files the
- * agent successfully wrote on this turn. Surfaced in
- * the LED tooltip as ``completed (N edits applied)``.
- *
- * ``failureReason`` is null on clean outcomes; on
- * errors it's a short diagnostic suitable for the LED
- * tooltip:
- *
- *   - Stream error → the typed error label or
- *     provider message
- *   - Anchor not found / ambiguous → the first failed
- *     EditResult's message
- *
- * No try/catch — every input is already a plain JSON
- * value off the streamComplete payload.
+ * Returns the shape stored on `tab.lastEditOutcome`:
+ * `{status: 'clean'|'error', appliedCount, failureReason}`.
  */
-export function computeLastEditOutcome(
-  error, errorInfo, editResults,
-) {
-  const results = Array.isArray(editResults) ? editResults : [];
-  let appliedCount = 0;
-  let firstFailure = null;
-  for (const r of results) {
-    if (!r || typeof r !== 'object') continue;
-    if (r.status === 'applied') {
-      appliedCount += 1;
-    } else if (r.status === 'failed' && !firstFailure) {
-      firstFailure = r;
-    }
+export function computeTurnOutcome(result, files) {
+  const modified = Array.isArray(files) ? files : [];
+  const appliedCount = modified.length;
+  if (!result || typeof result !== 'object') {
+    return { status: 'clean', appliedCount, failureReason: null };
   }
-  if (error) {
-    // Stream-level error wins over edit failures —
-    // the response itself didn't complete, so any
-    // edit results are partial-at-best.
-    let reason;
-    if (
-      errorInfo
-      && typeof errorInfo === 'object'
-      && typeof errorInfo.message === 'string'
-      && errorInfo.message
-    ) {
-      reason = errorInfo.message;
-    } else {
-      reason = String(error);
-    }
+  if (result.cancelled) {
+    return { status: 'clean', appliedCount, failureReason: null };
+  }
+  if (result.is_error) {
     return {
       status: 'error',
       appliedCount,
-      failureReason: reason,
+      failureReason: engineErrorReason(result),
     };
   }
-  if (firstFailure) {
-    const message = typeof firstFailure.message === 'string'
-      ? firstFailure.message
-      : '';
-    const errType = typeof firstFailure.error_type === 'string'
-      ? firstFailure.error_type
-      : '';
-    const file = typeof firstFailure.file === 'string'
-      ? firstFailure.file
-      : '';
-    // Prefer the message when present (it's already
-    // human-readable); fall back to "<errorType> in
-    // <file>" so the tooltip is at least informative.
-    let reason;
-    if (message) {
-      reason = file ? `${file}: ${message}` : message;
-    } else if (errType) {
-      reason = file
-        ? `${errType} in ${file}`
-        : errType;
-    } else {
-      reason = 'edit failed';
-    }
+  const reason = result.terminal_reason;
+  if (typeof reason === 'string' && reason && reason !== 'completed') {
     return {
       status: 'error',
       appliedCount,
-      failureReason: reason,
+      failureReason: reason.replace(/_/g, ' '),
     };
   }
-  return {
-    status: 'clean',
-    appliedCount,
-    failureReason: null,
-  };
+  return { status: 'clean', appliedCount, failureReason: null };
+}
+
+/**
+ * A short diagnostic for a failed turn.
+ *
+ * `errors` is the CLI's own list and reads best when present. `api_error_status`
+ * is an HTTP status on a turn whose subtype is still "success" — the one case
+ * where the interesting fact is a number rather than a sentence.
+ */
+export function engineErrorReason(result) {
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  const first = errors.find((e) => typeof e === 'string' && e);
+  if (first) return first;
+  if (Number.isFinite(result?.api_error_status)) {
+    return `API error ${result.api_error_status}`;
+  }
+  if (typeof result?.subtype === 'string' && result.subtype) {
+    return result.subtype.replace(/_/g, ' ');
+  }
+  return 'the turn failed';
 }
 
 // ---------------------------------------------------------------
@@ -219,7 +170,7 @@ export function startStreamTimerTick(panel) {
       }
     }
     if (anyActive) {
-      panel.requestUpdate('_streamingContent');
+      panel.requestUpdate();
     } else {
       stopStreamTimerTick(panel);
     }
@@ -252,94 +203,372 @@ export function maybeStopStreamTimerTick(panel) {
 }
 
 // ---------------------------------------------------------------
-// Stream chunk routing
+// Routing
 // ---------------------------------------------------------------
 
 /**
- * Handle a `stream-chunk` window event.
+ * The tab that owns a request, including one whose turn has just finished.
  *
- * Routes by request ID. Drops unknown IDs —
- * collaboration broadcasts from other clients don't
- * belong to any of our tabs (passive stream
- * adoption is a separate feature, not yet wired).
+ * Post-turn housekeeping — a compaction boundary, a late system event, a
+ * permission resolution racing the result message — runs asynchronously after
+ * `streamComplete`, by which time `currentRequestId` is already null. The spec
+ * is explicit that the handler accepts both the current and the most recently
+ * completed request ID (specs5/5-webapp/chat.md § Engine Event Routing).
  *
- * Writes the chunk through both fast paths:
- *
- *   1. Pending slot — keyed by request ID; rAF
- *      drains this batch later.
- *   2. Synchronous reactive update — only when
- *      the chunk matches the tab's CURRENT
- *      streaming request AND the owning tab is
- *      the active tab. Inactive tabs accumulate
- *      silently.
+ * Returns `{tabId, tab, live}` or null. `live` distinguishes "this turn is
+ * still running" from "this is a straggler", which matters because a straggler
+ * must not restart the streaming card.
  */
-export function onStreamChunk(panel, event) {
-  const { requestId, content } = event.detail || {};
-  if (!requestId) return;
-  const ownerTabId = findTabForRequest(panel, requestId);
-  if (!ownerTabId) return;
-  const ownerTab = panel._tabs.get(ownerTabId);
-  if (!ownerTab) return;
-  // First chunk after a retry means the retry
-  // succeeded — clear the banner so the user sees
-  // content instead of a countdown.
-  if (ownerTab.retryInfo) {
-    clearRetryBanner(panel, ownerTab);
+export function findTabForRecentRequest(panel, requestId) {
+  if (!requestId) return null;
+  const liveId = findTabForRequest(panel, requestId);
+  if (liveId) {
+    const tab = panel._tabs.get(liveId);
+    return tab ? { tabId: liveId, tab, live: true } : null;
   }
-  // Full-content semantics — overwrite the pending
-  // slot, don't append.
-  const normalizedContent = content ?? '';
-  ownerTab.pendingChunks.set(requestId, normalizedContent);
-  // Apply synchronously in addition to scheduling
-  // the rAF coalesce. The rAF caps re-render rate
-  // for rapid chunks; the sync path is insurance
-  // against rAF starvation. Both paths read from
-  // the same pendingChunks entry so the rAF either
-  // finds it drained (no-op) or re-applies the same
-  // value (harmless).
-  if (
-    requestId === ownerTab.currentRequestId
-    && ownerTab.streaming
-  ) {
-    ownerTab.streamingContent = normalizedContent;
-    if (ownerTabId === panel._activeTabId) {
-      panel.requestUpdate('_streamingContent');
+  for (const [tabId, tab] of panel._tabs) {
+    if (tab.lastRequestId === requestId) {
+      return { tabId, tab, live: false };
     }
   }
-  scheduleFlush(panel);
+  return null;
 }
 
 /**
- * Schedule (or coalesce) a deferred drain of all
- * tabs' pending chunks. One rAF active at a time;
- * subsequent calls before the rAF fires are no-ops
- * (the existing rAF will see all the writes).
+ * Resolve the tab for a live turn event and note whether it is the active one.
+ * Returns null for a request no tab owns — a collaborator's stream reaching
+ * our panel, or an event for a turn we already tore down.
+ */
+function liveOwner(panel, requestId) {
+  if (!requestId) return null;
+  const tabId = findTabForRequest(panel, requestId);
+  if (!tabId) return null;
+  const tab = panel._tabs.get(tabId);
+  if (!tab) return null;
+  return { tabId, tab, active: tabId === panel._activeTabId };
+}
+
+/**
+ * Mark a tab's blocks dirty.
  *
- * Drains every tab — inactive tabs' pending slots
- * are written through to their state but don't
- * trigger requestUpdate (the active tab's render
- * doesn't depend on inactive tabs' streamingContent).
+ * Block state mutates in place — `blocks.js` patches the same records the
+ * renderer already holds, because that is what makes a chunk an O(1) update
+ * instead of a list rebuild. Lit cannot see an in-place mutation, so a bare
+ * `requestUpdate()` is the correct signal: it schedules unconditionally rather
+ * than diffing a property that never changed identity.
+ *
+ * Only the active tab repaints. A background tab's blocks are still updated;
+ * they render when the user switches to it.
+ */
+function markBlocksDirty(panel, owner) {
+  if (owner.active) panel.requestUpdate();
+}
+
+// ---------------------------------------------------------------
+// Text and thinking chunks
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `stream-chunk` window event: assistant text for one block.
+ *
+ * Payload is `{block_id, seq, content, done}` with content cumulative within
+ * the block. Staged rather than applied so a burst coalesces into one repaint
+ * per frame; a chunk whose `seq` is stale for its block is discarded by
+ * `stageChunk` and never reaches the renderer.
+ */
+export function onStreamChunk(panel, event) {
+  routeChunk(panel, event.detail || {}, 'text');
+}
+
+/**
+ * Handle a `thinking-chunk` window event.
+ *
+ * Same routing and the same block-keyed staging as text — the only difference
+ * is the kind, which decides whether the block renders as prose or as a
+ * collapsed thinking region.
+ */
+export function onThinkingChunk(panel, event) {
+  routeChunk(panel, event.detail || {}, 'thinking');
+}
+
+function routeChunk(panel, detail, kind) {
+  const requestId = detail.requestId;
+  // `chunk` is the block-keyed payload. `content` is accepted as an alias so a
+  // shell that still forwards the old positional name keeps working during the
+  // conversion rather than silently dropping every chunk.
+  const payload = detail.chunk ?? detail.content;
+  if (!requestId || !payload || typeof payload !== 'object') return;
+  const owner = liveOwner(panel, requestId);
+  if (!owner) return;
+  const { tab } = owner;
+  // First chunk after a retry means the retry succeeded — clear the banner so
+  // the user sees content instead of a countdown.
+  if (tab.retryInfo) clearRetryBanner(panel, tab);
+  if (!stageChunk(tab.turnBlocks, payload, kind)) return;
+  scheduleFlush(panel);
+  // Apply synchronously in addition to scheduling the rAF coalesce. The rAF
+  // caps re-render rate for rapid chunks; the sync path is insurance against
+  // rAF starvation (backgrounded tab, panel briefly display:none). Both drain
+  // the same staging map, so whichever runs second finds it empty.
+  if (requestId === tab.currentRequestId && tab.streaming) {
+    if (drainChunks(tab.turnBlocks)) markBlocksDirty(panel, owner);
+  }
+}
+
+/**
+ * Schedule (or coalesce) a deferred drain of every tab's staged chunks.
+ *
+ * One rAF active at a time; calls before it fires are no-ops, since the
+ * pending rAF will see every write made in the meantime. Drains all tabs —
+ * a background tab's blocks stay current without costing a repaint.
  */
 export function scheduleFlush(panel) {
   if (panel._rafHandle != null) return;
   panel._rafHandle = requestAnimationFrame(() => {
     panel._rafHandle = null;
     let activeChanged = false;
+    const activeTab = panel._tabs.get(panel._activeTabId);
     for (const tab of panel._tabs.values()) {
-      if (tab.pendingChunks.size === 0) continue;
-      for (const [requestId, content] of tab.pendingChunks) {
-        if (requestId !== tab.currentRequestId) continue;
-        tab.pendingChunks.delete(requestId);
-        tab.streamingContent = content;
-        if (tab === panel._tabs.get(panel._activeTabId)) {
-          activeChanged = true;
-        }
-      }
+      if (!drainChunks(tab.turnBlocks)) continue;
+      if (tab === activeTab) activeChanged = true;
     }
-    if (activeChanged) {
-      panel.requestUpdate('_streamingContent');
-    }
+    if (activeChanged) panel.requestUpdate();
   });
+}
+
+// ---------------------------------------------------------------
+// Tool cards
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `tool-use` window event: a tool card for the turn.
+ *
+ * Cards are keyed by the SDK's `tool_use_id` and appear in arrival order,
+ * interleaved with the text and thinking blocks around them.
+ */
+export function onToolUse(panel, event) {
+  const { requestId, data } = event.detail || {};
+  const owner = liveOwner(panel, requestId);
+  if (!owner || !data) return;
+  if (applyToolUse(owner.tab.turnBlocks, data)) markBlocksDirty(panel, owner);
+}
+
+/**
+ * Handle a `tool-result` window event.
+ *
+ * Attaches to its card by `tool_use_id`. A result for a card we never saw is
+ * dropped by `applyToolResult` rather than rendered headless.
+ */
+export function onToolResult(panel, event) {
+  const { requestId, data } = event.detail || {};
+  const owner = liveOwner(panel, requestId);
+  if (!owner || !data) return;
+  if (applyToolResult(owner.tab.turnBlocks, data)) markBlocksDirty(panel, owner);
+}
+
+// ---------------------------------------------------------------
+// Permission gating of tool cards
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `permission-request` window event.
+ *
+ * The dialog is its own component and owns the decision; this handler only
+ * marks the tool card amber so the transcript shows *why* the turn stopped
+ * moving. The payload carries `tool_use_id`, so no correlation table is needed.
+ *
+ * Session-wide rather than turn-scoped, so the request ID comes from the
+ * payload and may name a turn that has just finished — a permission request
+ * outliving its own `streamComplete` is possible when the engine is torn down
+ * mid-ask.
+ */
+export function onPermissionRequest(panel, event) {
+  const data = event.detail || {};
+  const toolUseId = data.tool_use_id;
+  if (!toolUseId) return;
+  const owner = findTabForRecentRequest(panel, data.request_id);
+  if (!owner) return;
+  if (markAwaitingPermission(owner.tab.turnBlocks, toolUseId)) {
+    if (owner.tabId === panel._activeTabId) panel.requestUpdate();
+  }
+}
+
+/**
+ * Handle a `permission-resolved` window event.
+ *
+ * Allow clears the lock and the call goes back to pending. Anything else — a
+ * denial, a timeout, a shutdown — records the reason on the card, because the
+ * agent was given that same reason and the transcript should show what it was
+ * told.
+ */
+export function onPermissionResolved(panel, event) {
+  const data = event.detail || {};
+  if (!data.tool_use_id) return;
+  const owner = findTabForRecentRequest(panel, data.request_id);
+  if (!owner) return;
+  if (applyPermissionOutcome(owner.tab.turnBlocks, data)) {
+    if (owner.tabId === panel._activeTabId) panel.requestUpdate();
+  }
+}
+
+/**
+ * Handle a `permission-mode-changed` broadcast.
+ *
+ * The selector flips here and only here. It never updates optimistically: the
+ * mode is engine state, a `set_permission_mode` call can be refused, and a
+ * selector showing `acceptEdits` while the engine is in `default` is a lie
+ * about what the next tool call will do
+ * (specs5/5-webapp/chat.md § Permission Mode Selector).
+ */
+export function onPermissionModeChanged(panel, event) {
+  const data = event.detail || {};
+  const mode = typeof data.mode === 'string' ? data.mode : null;
+  if (!mode) return;
+  panel._permissionMode = mode;
+  panel._permissionModePending = false;
+}
+
+// ---------------------------------------------------------------
+// Session and subagents
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `session-started` window event — the engine's `init` message.
+ *
+ * Carries the model, cwd, the tool and MCP inventories, the slash commands the
+ * CLI knows, and the permission mode the session actually started in. The mode
+ * is adopted here rather than assumed, so a session resumed into `acceptEdits`
+ * shows `acceptEdits`.
+ */
+export function onSessionStarted(panel, event) {
+  const { data } = event.detail || {};
+  if (!data || typeof data !== 'object') return;
+  panel._sessionInfo = data;
+  if (typeof data.permission_mode === 'string' && data.permission_mode) {
+    panel._permissionMode = data.permission_mode;
+  }
+  panel.requestUpdate();
+}
+
+/**
+ * Handle a `subagent-event` window event.
+ *
+ * Folds into the row for its task. Rows are patched, never replaced — fields
+ * arrive spread across four message types and a later event with fewer fields
+ * must not blank what an earlier one supplied.
+ */
+export function onSubagentEvent(panel, event) {
+  const { requestId, data } = event.detail || {};
+  const owner = liveOwner(panel, requestId);
+  if (!owner || !data) return;
+  if (applySubagentEvent(owner.tab.turnBlocks, data)) {
+    markBlocksDirty(panel, owner);
+  }
+}
+
+// ---------------------------------------------------------------
+// Out-of-band engine events
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `rate-limit` window event.
+ *
+ * Warning on `allowed_warning`, error on `rejected`, both naming when the
+ * limit resets — a rate-limit notice with no reset time tells the user they
+ * are blocked without telling them for how long, which is the least useful
+ * half of the message (specs5/5-webapp/chat.md § Engine Event Routing).
+ *
+ * `allowed` is the ordinary case and says nothing.
+ */
+export function onRateLimit(panel, event) {
+  const { data } = event.detail || {};
+  if (!data || typeof data !== 'object') return;
+  const status = data.status;
+  if (status !== 'allowed_warning' && status !== 'rejected') return;
+  const kind = typeof data.rate_limit_type === 'string' && data.rate_limit_type
+    ? `${data.rate_limit_type} limit`
+    : 'Rate limit';
+  const resets = formatResetTime(data.resets_at);
+  const when = resets ? ` — resets ${resets}` : '';
+  if (status === 'rejected') {
+    panel._emitToast(`⏱️ ${kind} reached${when}`, 'error');
+  } else {
+    panel._emitToast(`⏱️ Approaching the ${kind}${when}`, 'warning');
+  }
+}
+
+/**
+ * Unix seconds → a local wall-clock time.
+ *
+ * A clock time rather than a countdown: the toast does not tick, and "resets
+ * in 47 minutes" is wrong the moment the user looks away.
+ */
+export function formatResetTime(resetsAt) {
+  if (!Number.isFinite(resetsAt) || resetsAt <= 0) return '';
+  const date = new Date(resetsAt * 1000);
+  if (Number.isNaN(date.getTime())) return '';
+  return `at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+/**
+ * Handle an `engine-health` window event.
+ *
+ * No toast. A mirror gap means this turn did not reach the repo-local
+ * transcript, which is a standing condition rather than an interruption — the
+ * health banner owns saying so, and the affected turn's footer carries its own
+ * marker. Stashed on the panel so the banner has something to read when it
+ * lands.
+ */
+export function onEngineHealth(panel, event) {
+  const { data } = event.detail || {};
+  if (!data || typeof data !== 'object') return;
+  panel._engineHealth = data;
+}
+
+/**
+ * Handle a `system-event` window event.
+ *
+ * Almost all of these are diagnostics with no user-facing consequence. Two
+ * are not:
+ *
+ *   - `pre_compact` — the engine is about to compact its context, which looks
+ *     like a stall if unannounced. Transient local toast.
+ *   - `conversation_reset` — the engine dropped the conversation underneath
+ *     us. The user's next turn will start from nothing, so saying so is the
+ *     difference between a surprise and an explanation.
+ */
+export function onSystemEvent(panel, event) {
+  const { data } = event.detail || {};
+  const subtype = data?.subtype;
+  if (subtype === 'pre_compact') {
+    panel._emitToast('🗜️ Compacting the conversation…', 'info');
+    return;
+  }
+  if (subtype === 'conversation_reset') {
+    panel._emitToast('The engine reset the conversation', 'warning');
+  }
+}
+
+/**
+ * Handle a `hook-event` window event.
+ *
+ * Hooks are the user's own configuration running, and narrating each one would
+ * turn a configured workflow into a stream of notifications. Two cases earn a
+ * word: a `PreCompact` hook is the compaction warning arriving through the
+ * hook channel rather than the system one, and a hook that *blocked* something
+ * explains a tool call the user is about to see fail.
+ */
+export function onHookEvent(panel, event) {
+  const { data } = event.detail || {};
+  if (!data || typeof data !== 'object') return;
+  if (data.hook_event_name === 'PreCompact') {
+    panel._emitToast('🗜️ Compacting the conversation…', 'info');
+    return;
+  }
+  if (data.outcome === 'block' || data.outcome === 'blocked') {
+    const tool = data.tool_name ? ` ${data.tool_name}` : '';
+    panel._emitToast(`🪝 A hook blocked${tool}`, 'warning');
+  }
 }
 
 // ---------------------------------------------------------------
@@ -349,16 +578,13 @@ export function scheduleFlush(panel) {
 /**
  * Handle an `agents-spawned` window event.
  *
- * Fired by the backend right after the main LLM's
- * response is parsed and before child agent streams
- * begin. Creates agent tabs immediately so chunks
- * for the child request IDs route to their tabs as
- * they arrive, rather than being dropped while the
- * main stream is still finalizing.
+ * Dead on the Claude Code path: nothing emits `agentsSpawned`, because the
+ * engine's subagents are internal to a turn and surface as rows rather than
+ * tabs. Kept wired until the native engine is deleted in phase 3, so the
+ * phase-2 diff is about the new path rather than about removing the old one.
  *
- * Payload: ``{turn_id, parent_request_id,
- * agent_blocks}`` where ``agent_blocks`` is
- * ``[{id, task, agent_idx}, ...]``.
+ * Payload: ``{turn_id, parent_request_id, agent_blocks}`` where
+ * ``agent_blocks`` is ``[{id, task, agent_idx}, ...]``.
  */
 export function onAgentsSpawned(panel, event) {
   const detail = event.detail || {};
@@ -368,8 +594,6 @@ export function onAgentsSpawned(panel, event) {
   if (!Array.isArray(agent_blocks)) return;
   if (agent_blocks.length === 0) return;
   spawnAgentTabs(panel, turn_id, agent_blocks, parent_request_id);
-  // spawnAgentTabs armed each agent tab's run timer — kick
-  // the panel ticker so their live counters advance.
   startStreamTimerTick(panel);
 }
 
@@ -380,27 +604,17 @@ export function onAgentsSpawned(panel, event) {
 /**
  * Handle a `stream-complete` window event.
  *
- * Routes to the owning tab. Drains any pending
- * chunk synchronously (the backend may have sent
- * `complete` immediately after the last chunk and
- * the rAF hasn't fired yet). Moves the streaming
- * content into the tab's message list as a
- * settled assistant message.
+ * Freezes the turn: its blocks, its subagent rows, and the result summary the
+ * footer renders, all copied onto one settled assistant message so a later
+ * event cannot rewrite history the user has already read.
  *
- * Error responses surface as a dedicated error
- * message rather than assistant content, plus a
- * classified toast. Non-natural finish reasons
- * (length, content_filter, tool_calls) produce a
- * follow-up toast on top of the message badge.
+ * `content` is the engine's `response`, which is the concatenation of the
+ * turn's *text* blocks only. That matters beyond convenience — copy, paste and
+ * read-aloud all read `content`, and thinking is excluded structurally rather
+ * than by each of those remembering to filter it.
  *
- * Spawns agent tabs from `result.agent_blocks` for
- * MAIN-tab completions only — agent tabs can't
- * spawn children (parallel-agents tree depth = 1).
- *
- * Populates a retry prompt in the textarea when
- * the response had recoverable edit failures
- * (ambiguous anchor, in-context mismatch,
- * not-in-context auto-add).
+ * A turn that produced no blocks at all still appends a message when it
+ * errored: an empty transcript with a red LED gives the user nothing to read.
  */
 export function onStreamComplete(panel, event) {
   const { requestId, result } = event.detail || {};
@@ -411,236 +625,163 @@ export function onStreamComplete(panel, event) {
   if (!ownerTab) return;
   const ownerIsActive = ownerTabId === panel._activeTabId;
 
-  // Stream ended — clear any retry banner the tab
-  // was displaying. Handles both the success path
-  // (completion without a final retry) and the
-  // exhaustion path (error after retries gave up).
-  if (ownerTab.retryInfo) {
-    clearRetryBanner(panel, ownerTab);
-  }
+  // Stream ended — clear any retry banner the tab was displaying.
+  if (ownerTab.retryInfo) clearRetryBanner(panel, ownerTab);
 
-  // Flush any pending chunk synchronously so the
-  // final content is reflected before we move it
-  // into messages.
-  const pending = ownerTab.pendingChunks.get(requestId);
-  if (pending !== undefined) {
-    ownerTab.pendingChunks.delete(requestId);
-    if (requestId === ownerTab.currentRequestId) {
-      ownerTab.streamingContent = pending;
-      if (ownerIsActive) {
-        panel.requestUpdate('_streamingContent');
-      }
-    }
-  }
-
-  let wasOwnRequest = false;
   if (requestId === ownerTab.currentRequestId) {
-    wasOwnRequest = true;
-    const finalContent =
-      result?.response ?? ownerTab.streamingContent ?? '';
-    const error = result?.error;
-    const errorInfo = result?.error_info;
-    const editResults = Array.isArray(result?.edit_results)
-      ? result.edit_results
-      : undefined;
-    const finishReason = result?.finish_reason || '';
-    // Compute the last-completion outcome for this
-    // tab. Drives the LED row's green/red state per
-    // spec ``specs4/5-webapp/agent-browser.md`` §
-    // Status LEDs. Cyan flashing is driven separately
-    // by the live `streaming` flag.
-    const lastEditOutcome = computeLastEditOutcome(
-      error, errorInfo, editResults,
-    );
-    // Compose the assistant-card error body. Per
-    // specs-reference/3-llm/streaming.md, classified
-    // errors get a human-readable label + provider
-    // metadata; unclassified fall through to the
-    // legacy `**Error:** ...` format.
-    const errorBody = error
-      ? formatErrorBody(error, errorInfo)
-      : null;
-    // Thread turn_id and agent_blocks onto the
-    // in-memory record so the "View agents (N)"
-    // affordance in renderMessage (Increment D
-    // commit 3) can find them. Without this,
-    // the wire-level fields persisted by
-    // Increment A never reach the message shape
-    // Lit renders. Both fields are optional and
-    // only present on assistant messages from
-    // agentic turns.
-    const turnId = result?.turn_id;
-    const agentBlocks = Array.isArray(result?.agent_blocks)
-      ? result.agent_blocks
-      : null;
-    const turnIdField =
-      typeof turnId === 'string' && turnId
-        ? { turn_id: turnId }
-        : {};
-    const agentBlocksField =
-      agentBlocks && agentBlocks.length > 0
-        ? { agent_blocks: agentBlocks }
-        : {};
-    // Freeze the run duration onto the settled message.
-    // `streamStartedAt` was stamped when the turn was
-    // armed (send / resume / agent spawn); the elapsed
-    // span is how long the assistant ran for this turn.
-    // Both the success and error cards show it — an
-    // errored turn still consumed wall-clock the user
-    // may want to see. Guard against a missing stamp
-    // (defensive — a completion with no matching start,
-    // e.g. an adopted collaborator stream) by omitting
-    // the field rather than recording a bogus duration.
+    // Drain anything staged but not yet applied: the engine can send the
+    // result immediately after its last chunk, before the rAF fires.
+    drainChunks(ownerTab.turnBlocks);
+
+    const turn = ownerTab.turnBlocks;
+    const blocks = freezeBlocks(turn);
+    const subagents = [...turn.subagents.values()].map((row) => ({ ...row }));
+    // Union of the engine's own list and the one recovered from the blocks.
+    // The result message is authoritative when it arrives, but a turn that
+    // ended badly may carry tool results it never summarised.
+    const files = [...new Set([
+      ...(Array.isArray(result?.files_modified) ? result.files_modified : []),
+      ...collectFilesModified(blocks),
+    ])].filter((path) => typeof path === 'string' && path);
+
+    const content = typeof result?.response === 'string' ? result.response : '';
     const startedAt = ownerTab.streamStartedAt;
-    const durationField =
-      typeof startedAt === 'number'
-        ? { durationMs: Math.max(0, Date.now() - startedAt) }
-        : {};
-    ownerTab.messages = [
-      ...ownerTab.messages,
-      error
-        ? {
-            role: 'assistant',
-            content: errorBody,
-            ...durationField,
-            ...turnIdField,
-          }
-        : {
-            role: 'assistant',
-            content: finalContent,
-            editResults,
-            // Per specs-reference/5-webapp/chat.md §
-            // Finish-reason badge labels — every
-            // finish reason (including natural
-            // `stop` and `end_turn`) produces a
-            // badge. Natural reasons render muted;
-            // abnormal reasons render in amber/red.
-            ...(finishReason ? { finishReason } : {}),
-            ...durationField,
-            ...turnIdField,
-            ...agentBlocksField,
-          },
-    ];
-    if (ownerIsActive) {
-      panel.requestUpdate('messages');
+    const durationField = typeof startedAt === 'number'
+      ? { durationMs: Math.max(0, Date.now() - startedAt) }
+      : {};
+
+    // `user_message_id` identifies the turn for `rewind_files`. Stamped onto
+    // the user message that started it, because that is the card the undo
+    // affordance belongs on — "put the files back the way they were before I
+    // asked this".
+    if (typeof result?.user_message_id === 'string' && result.user_message_id) {
+      stampUserMessageId(ownerTab, result.user_message_id);
     }
-    if (error) {
-      emitTypedErrorToast(panel, errorInfo, error);
+
+    if (blocks.length > 0 || content || result?.is_error) {
+      ownerTab.messages = [
+        ...ownerTab.messages,
+        {
+          role: 'assistant',
+          content,
+          blocks,
+          subagents,
+          files,
+          turn: result && typeof result === 'object' ? { ...result } : {},
+          terminalReason: result?.terminal_reason ?? null,
+          ...durationField,
+        },
+      ];
     }
-    // Surface non-natural stops as a toast on top
-    // of the in-message badge. Cancelled streams
-    // and errors are already surfaced through their
-    // own channels.
-    if (!error && finishReason) {
-      maybeShowFinishReasonToast(panel, finishReason);
-    }
-    // Record the outcome for the LED row before
-    // resetting streaming state. The LED row reads
-    // this per tab via Map lookup; the requestUpdate
-    // calls below cover both the active-tab and
-    // inactive-tab render paths.
-    ownerTab.lastEditOutcome = lastEditOutcome;
-    // Reset streaming state on the owning tab.
+
+    if (result?.is_error) emitEngineErrorToast(panel, result);
+    if (result?.deferred_tool_use) emitDeferredToolToast(panel, result);
+
+    ownerTab.lastEditOutcome = computeTurnOutcome(result, files);
+    resetTurnBlocks(turn);
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';
     ownerTab.currentRequestId = null;
-    // Stop this tab's run timer (the frozen duration is
-    // already baked onto the message above). Stop the
-    // panel ticker too when no other tab is still
-    // running — the ticker self-stops on its next tick,
-    // but clearing eagerly here avoids one stray
-    // requestUpdate after the last stream ends.
     ownerTab.streamStartedAt = null;
     maybeStopStreamTimerTick(panel);
-    if (ownerIsActive) {
-      panel.requestUpdate('_streaming');
-    } else {
-      // Inactive tab — the active tab's reactive
-      // state didn't change, but the tab strip
-      // (which reads per-tab `streaming` directly
-      // from the Map) needs to re-render so the
-      // streaming indicator on this tab's button
-      // disappears.
-      panel.requestUpdate();
-    }
-    // Remember the completed request ID so
-    // post-completion events (compaction, late URL
-    // callbacks) can still be routed to this
-    // conversation. Overwritten by each new
-    // stream-complete the tab owns.
+    // Remember the completed request ID so post-turn housekeeping — a
+    // compaction boundary, a late permission resolution — still routes here.
     ownerTab.lastRequestId = requestId;
-
-    // Spawn agent tabs for valid agent blocks the
-    // backend surfaced. Only fires for MAIN-tab
-    // completions and not for cancelled / errored
-    // turns — the backend doesn't fan out for
-    // those, so opening tabs would be misleading.
-    if (
-      ownerTabId === 'main'
-      && !result.error
-      && !result.cancelled
-      && typeof result.turn_id === 'string'
-      && Array.isArray(result.agent_blocks)
-      && result.agent_blocks.length > 0
-    ) {
-      spawnAgentTabs(
-        panel,
-        result.turn_id,
-        result.agent_blocks,
-        requestId,
-      );
-      // The main tab's timer was just stopped above (its
-      // streamStartedAt cleared, maybeStopStreamTimerTick
-      // ran). The spawned agent tabs armed their own
-      // timers, so re-kick the ticker for their live
-      // counters.
-      startStreamTimerTick(panel);
-    }
+    panel.requestUpdate();
   }
 
   ownerTab.streams.delete(requestId);
+  if (!ownerIsActive) panel.requestUpdate();
+}
 
-  // Retry prompts only fire for our own requests
-  // on the active tab. If a prompt IS populated,
-  // the textarea is focused so the user can review
-  // and send immediately. Passive streams from
-  // collaborators don't get retry prompts.
-  if (wasOwnRequest && ownerIsActive && result && !result.error) {
-    maybePopulateRetryPrompt(panel, result);
+/**
+ * Stamp `user_message_id` onto the most recent user message in a tab.
+ *
+ * Walks backwards to the last user message rather than assuming it is the last
+ * message: by the time a result arrives the assistant message for the turn may
+ * already be appended, and on a collaborator's client the ordering is whatever
+ * the broadcasts delivered.
+ */
+function stampUserMessageId(tab, userMessageId) {
+  for (let i = tab.messages.length - 1; i >= 0; i -= 1) {
+    const message = tab.messages[i];
+    if (message?.role !== 'user') continue;
+    if (message.user_message_id) return;
+    tab.messages = [
+      ...tab.messages.slice(0, i),
+      { ...message, user_message_id: userMessageId },
+      ...tab.messages.slice(i + 1),
+    ];
+    return;
   }
 }
 
+/**
+ * Toast for a turn the engine reported as failed.
+ *
+ * One toast, naming what the engine said. There is no provider-error
+ * classifier on this path — the CLI owns the retry and the classification, and
+ * inventing a taxonomy on top of `errors[]` would put our guess in front of
+ * its answer.
+ */
+export function emitEngineErrorToast(panel, result) {
+  panel._emitToast(`❌ ${engineErrorReason(result)}`, 'error');
+}
+
+/**
+ * Toast for a turn that ended with a tool call deferred.
+ *
+ * The call did not run and will not run: the turn ended holding it. Silence
+ * here reads as a turn that simply chose not to act.
+ */
+export function emitDeferredToolToast(panel, result) {
+  const deferred = result?.deferred_tool_use;
+  const name = deferred && typeof deferred === 'object' && deferred.name
+    ? ` (${deferred.name})`
+    : '';
+  panel._emitToast(`⏸️ A tool call was deferred${name}`, 'warning');
+}
+
 // ---------------------------------------------------------------
-// Passive observer for user messages
+// Reconnect replay
+// ---------------------------------------------------------------
+
+/**
+ * Rebuild a tab's live turn from an `active_streams[]` entry.
+ *
+ * Replay is block state, not a chunk log — what the engine keeps is each
+ * block's latest content, so a user who refreshed mid-turn sees the turn as it
+ * stands rather than an empty card waiting for the next token. The next live
+ * chunk for a block is compared against the snapshot's `seq`, so replay does
+ * not reopen the door to stale chunks.
+ */
+export function resumeStreamBlocks(panel, tab, stream) {
+  if (!tab || !stream || typeof stream !== 'object') return false;
+  const requestId = stream.request_id;
+  if (typeof requestId !== 'string' || !requestId) return false;
+  applyReplayBlocks(tab.turnBlocks, stream.blocks);
+  tab.streaming = true;
+  tab.currentRequestId = requestId;
+  tab.streams.set(requestId, { sticky: true });
+  // The engine reports when the turn began; without it the elapsed counter
+  // would restart from the reconnect and under-report the run.
+  const startedAt = Number(stream.started_at);
+  tab.streamStartedAt = Number.isFinite(startedAt) && startedAt > 0
+    ? startedAt * 1000
+    : Date.now();
+  return true;
+}
+
+// ---------------------------------------------------------------
+// Retry banner (native-engine path; dead under Claude Code)
 // ---------------------------------------------------------------
 
 /**
  * Handle a `stream-retry` window event.
  *
- * Fired by the backend's retry wrapper before each
- * backoff sleep when a retryable LiteLLM error
- * (rate_limit, api_connection, service_unavailable,
- * timeout) is encountered during stream
- * establishment. Payload shape (from
- * `retry_litellm_completion`'s on_retry callback):
- *
- *   { requestId,
- *     info: { attempt, max_attempts, error_type,
- *             wait_seconds, message, provider,
- *             context } }
- *
- * User feedback: write a progress banner (attempt
- * number + live countdown bar) into the owning tab's
- * state so the UI can show exactly how long is left
- * before the next attempt. A 100ms ticker drives the
- * countdown re-render; it's torn down when any tab's
- * retry slot clears.
- *
- * Scoped to the owning tab — if the retry belongs
- * to a child agent stream, route state to that tab
- * so the banner shows next to the right transcript.
- * Collaborator broadcasts for streams we don't own
- * are dropped at the findTabForRequest gate.
+ * Nothing on the Claude Code path emits this — the CLI owns its own retries
+ * and reports rate limits through `rateLimit` instead. Left wired until the
+ * native engine is deleted in phase 3.
  */
 export function onStreamRetry(panel, event) {
   const detail = event.detail || {};
@@ -659,17 +800,8 @@ export function onStreamRetry(panel, event) {
     ? info.error_type
     : 'llm_error';
 
-  // Emit a warning toast naming the error type and the
-  // wait. The on-screen banner gives precise countdown
-  // feedback inside the chat surface; the toast is
-  // belt-and-braces so users with the chat scrolled
-  // away or in a different tab still notice the retry.
-  emitRetryToast(panel, {
-    attempt, maxAttempts, waitSeconds, errorType,
-  });
+  emitRetryToast(panel, { attempt, maxAttempts, waitSeconds, errorType });
 
-  // Stash banner state on the tab. The render path
-  // reads this on every tick to draw the progress bar.
   ownerTab.retryInfo = {
     attempt,
     maxAttempts,
@@ -680,25 +812,16 @@ export function onStreamRetry(panel, event) {
     context: typeof info.context === 'string' ? info.context : '',
     startedAt: Date.now(),
   };
-  // Ensure the banner appears immediately on the
-  // active tab (non-active tabs' state is stashed
-  // but not rendered until switched to).
   if (ownerTabId === panel._activeTabId) {
     panel.requestUpdate('_retryInfo');
   }
-  // Start the global tick if not already running.
   startRetryTick(panel);
 }
 
 /**
- * Emit a `warning`-severity toast describing a retry.
- * Shape per specs-reference/5-webapp/chat.md — names
- * the classified error type, the upcoming wait, and
- * the attempt number so users can set expectations.
- *
- * Wait formatting: long waits (>= 60 s) collapse to
- * minutes so the toast doesn't show "120 s"; short
- * waits stay in seconds for granularity.
+ * Emit a `warning`-severity toast describing a retry — the classified error
+ * type, the upcoming wait, and the attempt number. Long waits (>= 60 s)
+ * collapse to minutes so the toast doesn't show "120 s".
  */
 function emitRetryToast(panel, info) {
   const { attempt, maxAttempts, waitSeconds, errorType } = info;
@@ -706,13 +829,9 @@ function emitRetryToast(panel, info) {
   switch (errorType) {
     case 'rate_limit': label = 'Rate limited'; break;
     case 'api_connection': label = 'Connection failed'; break;
-    case 'service_unavailable':
-      label = 'Provider unavailable';
-      break;
+    case 'service_unavailable': label = 'Provider unavailable'; break;
     case 'timeout': label = 'Request timed out'; break;
-    case 'authentication':
-      label = 'Authentication failed';
-      break;
+    case 'authentication': label = 'Authentication failed'; break;
     default: label = 'LLM error'; break;
   }
   const waitText = waitSeconds >= 60
@@ -728,39 +847,23 @@ function emitRetryToast(panel, info) {
 }
 
 /**
- * Start the 100ms re-render ticker.
- *
- * One panel-level interval drives every active
- * retry banner. Cheap: each tick is a single
- * requestUpdate call. The render path pulls
- * current elapsed / remaining from
- * (Date.now() - startedAt) so the tick only needs
- * to fire dirty-check — it doesn't mutate state
- * itself.
- *
- * Idempotent — calling it while already running
- * is a no-op.
+ * Start the 100ms re-render ticker driving every active retry banner. Each
+ * tick is a single requestUpdate; the render path derives remaining time from
+ * `Date.now() - startedAt`, so the tick only kicks a dirty-check.
  */
 function startRetryTick(panel) {
   if (panel._retryTickInterval != null) return;
   panel._retryTickInterval = setInterval(() => {
-    // Drain any tabs whose banner has expired
-    // (elapsed >= waitSeconds + small grace). The
-    // backend fires either the next streamRetry,
-    // a streamChunk, or a streamComplete when the
-    // wait ends, but network jitter can delay those
-    // beyond the bar filling; hiding the stale
-    // "0s remaining" line keeps the UI honest.
+    // Drain tabs whose banner has expired. The next event usually clears it,
+    // but network jitter can delay that past the bar filling; hiding a stale
+    // "0s remaining" line keeps the UI honest. 2s grace so rapid successive
+    // retries don't blink the banner between clears and new events.
     let anyActive = false;
     const now = Date.now();
     for (const tab of panel._tabs.values()) {
       if (!tab.retryInfo) continue;
       const elapsedMs = now - tab.retryInfo.startedAt;
       const waitMs = tab.retryInfo.waitSeconds * 1000;
-      // 2s grace before we assume the wait slipped
-      // its deadline; without it, rapid successive
-      // retries would blink the banner between
-      // clears and new events.
       if (elapsedMs > waitMs + 2000) {
         tab.retryInfo = null;
         continue;
@@ -777,9 +880,8 @@ function startRetryTick(panel) {
 }
 
 /**
- * Stop the panel-level ticker. Called when every
- * tab's retryInfo has cleared, and on panel teardown
- * from events.js's detach path.
+ * Stop the panel-level ticker. Called when every tab's retryInfo has cleared,
+ * and on panel teardown from events.js's detach path.
  */
 export function stopRetryTick(panel) {
   if (panel._retryTickInterval != null) {
@@ -789,11 +891,8 @@ export function stopRetryTick(panel) {
 }
 
 /**
- * Clear an owning tab's retry banner. Called from
- * onStreamChunk (first chunk = retry succeeded) and
- * onStreamComplete (stream finished one way or
- * another). Stops the panel ticker if no tab still
- * has an active banner.
+ * Clear an owning tab's retry banner, stopping the panel ticker if no tab
+ * still has an active one.
  */
 function clearRetryBanner(panel, tab) {
   if (!tab || !tab.retryInfo) return;
@@ -806,110 +905,34 @@ function clearRetryBanner(panel, tab) {
   panel.requestUpdate('_retryInfo');
 }
 
+// ---------------------------------------------------------------
+// Passive observer for user messages
+// ---------------------------------------------------------------
+
 /**
  * Handle a `user-message` window event.
  *
- * The server broadcasts user messages to all
- * clients. If we are the sender, we've already
- * added it optimistically in `_send`, so we ignore
- * the echo. If we're a collaborator (no
- * in-flight request), add the message so it appears
- * before the streaming response arrives.
+ * The server broadcasts user messages to every client. If we are the sender we
+ * already added it optimistically in `send`, so the echo is ignored. If we are
+ * a collaborator (no in-flight request) the message is added so it appears
+ * before the streaming response arrives, with the same file hints the sender
+ * saw.
  */
 export function onUserMessage(panel, event) {
   if (panel._currentRequestId) return;
   const data = event.detail || {};
   const content = data.content ?? '';
   if (!content) return;
+  const files = Array.isArray(data.files) ? data.files : undefined;
   panel.messages = [
     ...panel.messages,
-    { role: 'user', content },
+    {
+      role: 'user',
+      content,
+      ...(files && files.length ? { files } : {}),
+      ...(data.request_id ? { request_id: data.request_id } : {}),
+    },
   ];
-}
-
-// ---------------------------------------------------------------
-// Retry prompt population
-// ---------------------------------------------------------------
-
-/**
- * After a stream completes, inspect the result for
- * conditions that warrant a retry prompt in the
- * textarea. The prompt is populated but NOT sent —
- * user reviews and decides.
- *
- * Three cases, in priority order (later cases win
- * if multiple apply):
- *
- *   1. In-context mismatch — edits with
- *      anchor_not_found on files that ARE in the
- *      current selection. LLM has stale content;
- *      ask it to re-read and retry.
- *   2. Ambiguous anchor — edits with
- *      ambiguous_anchor error. Specific LLM
- *      mistake (not enough context for a unique
- *      match); ask it to add more.
- *   3. Not-in-context — files_auto_added is
- *      non-empty. Those edits weren't attempted at
- *      all; the auto-add made the files available
- *      for the next turn.
- *
- * The ordering matches
- * specs-reference/3-llm/edit-protocol.md —
- * not-in-context runs last so it overwrites
- * earlier prompts. This is acceptable per spec:
- * "Note: may overwrite an earlier ambiguous-anchor
- * prompt if both are present in the same response."
- *
- * If the user has already typed something in the
- * textarea, we skip the population — don't
- * clobber their typing.
- */
-export function maybePopulateRetryPrompt(panel, result) {
-  if (!result || typeof result !== 'object') return;
-  // User typed between stream end and this
-  // callback — leave their input alone. Tiny
-  // window but the courtesy matters.
-  if (panel._input.trim() !== '') return;
-
-  const editResults = Array.isArray(result.edit_results)
-    ? result.edit_results
-    : [];
-  const filesAutoAdded = Array.isArray(result.files_auto_added)
-    ? result.files_auto_added
-    : [];
-
-  const selectedFiles = Array.isArray(panel.selectedFiles)
-    ? panel.selectedFiles
-    : [];
-  let prompt = null;
-  const mismatch = buildInContextMismatchRetryPrompt(
-    editResults,
-    selectedFiles,
-  );
-  if (mismatch) prompt = mismatch;
-  const ambiguous = buildAmbiguousRetryPrompt(editResults);
-  if (ambiguous) prompt = ambiguous;
-  const notInContext = buildNotInContextRetryPrompt(
-    filesAutoAdded,
-  );
-  if (notInContext) prompt = notInContext;
-
-  if (!prompt) return;
-  panel._input = prompt;
-  // Focus and size the textarea on the next tick so
-  // Lit has committed the value. Same pattern as
-  // _onHistorySelect.
-  panel.updateComplete.then(() => {
-    const ta = panel.shadowRoot?.querySelector('.input-textarea');
-    if (!ta) return;
-    ta.focus();
-    // Cursor at end so the user can continue typing
-    // (e.g. to add context) without having to click
-    // or arrow over first.
-    ta.setSelectionRange(prompt.length, prompt.length);
-    ta.style.height = 'auto';
-    ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
-  });
 }
 
 // ---------------------------------------------------------------
@@ -917,357 +940,86 @@ export function maybePopulateRetryPrompt(panel, result) {
 // ---------------------------------------------------------------
 
 /**
- * Handle a synchronous error response from
- * ``chat_streaming``. The backend resolves the
- * Promise with an error dict (not a rejection) for
- * gate failures — stale agent_tag, duplicate
- * stream, restricted caller, malformed payload.
+ * Handle a synchronous error response from ``chat_streaming``.
  *
- * Two distinct UX paths:
+ * The service resolves with an error dict rather than rejecting, for the gates
+ * it can check before launching: no engine, a turn already in flight, a
+ * non-localhost caller, an empty message. Appends the reason as an assistant
+ * message so the failure sits inline with the user message that caused it,
+ * clears streaming state, and leaves the tab open to retry.
  *
- * 1. ``agent not found`` — stale agent tab. The
- *    scope was closed server-side between tab
- *    creation and send. Close the tab locally,
- *    switch to main, toast the user. The tab's
- *    just-typed message is lost — acceptable
- *    because the scope itself is gone.
- *
- * 2. Everything else — append an error message to
- *    the current tab's message list so the user
- *    sees why the stream didn't start. Clear
- *    streaming state, keep the tab open. User can
- *    retry.
- *
- * Both paths clear request tracking so stream
- * events arriving for the failed request are
- * dropped.
- *
- * Owning-tab outcome write: ``send()`` flips
- * ``panel._streaming`` (the active-tab reactive
- * surface) but doesn't touch the per-tab
- * ``tab.streaming`` / ``tab.lastEditOutcome`` state
- * the LED row reads. Without writing those here,
- * a stream-start error on the main tab leaves the
- * LED at its prior outcome — green if a previous
- * turn succeeded — even though this turn failed.
- * Mirror the structure ``onStreamComplete`` uses:
- * find the owning tab (null agent_tag → main),
- * compute the error outcome, write it. The LED
- * row's next render then resolves to red.
+ * Owning-tab outcome write: ``send()`` flips ``panel._streaming`` (the
+ * active-tab reactive surface) but doesn't touch the per-tab ``tab.streaming``
+ * / ``tab.lastEditOutcome`` state the LED row reads. Without writing those
+ * here, a stream-start error leaves the LED at its prior outcome — green if a
+ * previous turn succeeded — even though this turn never started.
  */
-export function handleStreamStartError(
-  panel, requestId, errorMsg, agentTag,
-) {
+export function handleStreamStartError(panel, requestId, errorMsg) {
   panel._streaming = false;
   panel._streamingContent = '';
   panel._currentRequestId = null;
   panel._streams.delete(requestId);
-  // The stream failed to start — clear the active tab's
-  // run timer. The owning-tab branch below clears the
-  // per-tab stamp too (covers the agent-tab case where
-  // the owner isn't the active tab).
   panel._streamStartedAt = null;
 
-  // Resolve the owning tab. Per the flat-registry
-  // contract, ``agentTag`` is null for the main
-  // tab and the agent's id (== tab id) otherwise.
-  // Fall back to the active tab when the resolved
-  // id isn't registered (defensive — shouldn't
-  // happen because send() opens the stream against
-  // the active tab) so we still surface error
-  // outcome state somewhere visible.
-  const ownerTabId = agentTag === null ? 'main' : agentTag;
-  const ownerTab =
-    panel._tabs.get(ownerTabId)
-    || panel._tabs.get(panel._activeTabId);
+  const ownerTab = panel._tabs.get(panel._activeTabId);
   if (ownerTab) {
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';
     ownerTab.currentRequestId = null;
-    ownerTab.pendingChunks.delete(requestId);
     ownerTab.streams.delete(requestId);
     ownerTab.streamStartedAt = null;
-    // Error outcome shape matches what
-    // ``computeLastEditOutcome`` produces for the
-    // stream-error path so the LED row's
-    // green/red branch sees a uniform value.
+    resetTurnBlocks(ownerTab.turnBlocks);
     ownerTab.lastEditOutcome = {
       status: 'error',
       appliedCount: 0,
-      failureReason: errorMsg || 'stream failed to start',
+      failureReason: errorMsg || 'the turn failed to start',
     };
   }
-  // Stream-start failed on every path below (stale-agent
-  // close or generic error) — stop the run-timer ticker
-  // if no other tab is still running.
   maybeStopStreamTimerTick(panel);
 
-  const isStaleAgent =
-    errorMsg === 'agent not found' && agentTag !== null;
-  if (isStaleAgent) {
-    const staleTabId = panel._activeTabId;
-    // Remove the optimistic user message we added
-    // before sending — the scope is gone, so the
-    // message never landed anywhere useful.
-    if (
-      panel.messages.length > 0
-      && panel.messages[panel.messages.length - 1].role === 'user'
-    ) {
-      panel.messages = panel.messages.slice(0, -1);
-    }
-    // The component class binds `_onTabClose` so
-    // `tabs.onTabClose` fires with this panel. We
-    // can also import directly, but going through
-    // the panel's own handler keeps the close
-    // path uniform.
-    panel._onTabClose(staleTabId);
-    panel._emitToast(
-      'Agent tab closed — scope was no longer available',
-      'warning',
-    );
-    return;
-  }
-
-  // Generic error — append as an assistant message
-  // so it renders inline with the failed user
-  // message. Keeps the tab open for retry. Update
-  // the panel — the active tab's render now needs
-  // to reflect both the new message and the
-  // owner-tab outcome we just wrote (LED row
-  // re-renders on every panel update).
-  //
-  // Special case: the "Another stream is active"
-  // error fires when the user sends before the
-  // post-reconnect state-loaded handler has
-  // finished resuming the in-flight stream. Race
-  // window is narrow but real on slow connections.
-  // Augment the message with actionable guidance
-  // and emit a toast pointing at the cancel
-  // affordance.
+  // "A turn is already in flight" fires when the user sends before the
+  // post-reconnect resume has finished adopting the running turn. Narrow
+  // window, but real on a slow connection — and the useful thing to say is
+  // what to do about it, not just that it happened.
   let displayMsg = errorMsg;
-  if (
-    typeof errorMsg === 'string'
-    && errorMsg.startsWith('Another stream is active')
-  ) {
+  if (typeof errorMsg === 'string' && /already in flight|already running/i.test(errorMsg)) {
     displayMsg = (
       `${errorMsg}\n\n`
-      + 'A previous request is still running on the server. '
-      + 'Wait for it to complete (the tab will resume '
-      + 'streaming when the next chunk arrives), or use '
-      + '"New Session" to abandon it.'
+      + 'A previous turn is still running on the server. Wait for it to '
+      + 'finish — the panel picks it up when the next chunk arrives — or '
+      + 'interrupt it with Stop.'
     );
     panel._emitToast(
-      'Previous stream still running — wait or start a new session',
+      'A turn is still running — wait for it or press Stop',
       'warning',
     );
   }
   panel.messages = [
     ...panel.messages,
-    {
-      role: 'assistant',
-      content: `**Error:** ${displayMsg}`,
-    },
+    { role: 'assistant', content: `**Error:** ${displayMsg}` },
   ];
   panel.requestUpdate();
 }
 
-// ---------------------------------------------------------------
-// Error formatting + toasts
-// ---------------------------------------------------------------
-
 /**
- * Format the assistant-card body for an error
- * result.
+ * Report a slash command the engine has no meaning for.
  *
- * Classified errors (`errorInfo` present) get a
- * human-readable label + provider metadata.
- * Unclassified errors fall through to the legacy
- * plain `**Error:** ...` format.
+ * `chat_streaming` refuses these rather than sending them as prose — a
+ * `/compact` typed at the box must not reach the model as the word "/compact"
+ * (specs5/5-webapp/chat.md § Invariants). The equivalent, when the service
+ * names one, is the actionable half of the message.
  */
-export function formatErrorBody(error, errorInfo) {
-  if (!errorInfo || typeof errorInfo !== 'object') {
-    return `**Error:** ${error}`;
-  }
-  const label = errorTypeLabel(errorInfo.error_type);
-  const parts = [`**Error:** ${label}`];
-  // Provider message goes on its own line so long
-  // tracebacks don't collide with the label. Fall
-  // back to the raw error string if the
-  // classifier didn't capture a message.
-  const msg = errorInfo.message || error;
-  if (msg) parts.push(msg);
-  // Metadata line — provider and model when
-  // known. Skipped when both are null
-  // (self-hosted / local models).
-  const provider = errorInfo.provider;
-  const model = errorInfo.model;
-  if (provider || model) {
-    const metaParts = [];
-    if (provider) metaParts.push(`provider: ${provider}`);
-    if (model) metaParts.push(`model: ${model}`);
-    parts.push(`*(${metaParts.join(', ')})*`);
-  }
-  return parts.join('\n\n');
-}
-
-/**
- * Human-readable label for each classified error
- * type. Kept separate from the toast dispatcher so
- * both consumers (assistant card, toast) use one
- * source of truth. Unknown types fall back to "LLM
- * error".
- */
-export function errorTypeLabel(errorType) {
-  switch (errorType) {
-    case 'context_window_exceeded':
-      return 'Context window exceeded';
-    case 'rate_limit':
-      return 'Rate limit exceeded';
-    case 'authentication':
-      return 'Authentication failed';
-    case 'not_found':
-      return 'Model not found';
-    case 'bad_request':
-      return 'Invalid request';
-    case 'api_connection':
-      return 'Connection failed';
-    case 'service_unavailable':
-      return 'Service unavailable';
-    case 'timeout':
-      return 'Request timed out';
-    default:
-      return 'LLM error';
-  }
-}
-
-/**
- * Emit a toast for a classified LLM error. The
- * backend's `_classify_litellm_error` maps LiteLLM
- * exception types to nine distinct `error_type`
- * values; this dispatcher picks the right icon,
- * message, and severity for each.
- */
-export function emitTypedErrorToast(panel, errorInfo, fallbackMessage) {
-  if (!errorInfo || typeof errorInfo !== 'object') {
-    panel._emitToast(
-      `❌ ${fallbackMessage || 'LLM error'}`,
-      'error',
-    );
-    return;
-  }
-  const errorType = errorInfo.error_type;
-  const providerMsg = errorInfo.message || fallbackMessage || '';
-  let icon;
-  let label;
-  let type;
-  switch (errorType) {
-    case 'context_window_exceeded':
-      icon = '📏';
-      label = 'Context too large — compact or remove files';
-      type = 'error';
-      break;
-    case 'rate_limit': {
-      icon = '⏱️';
-      type = 'warning';
-      // Retry-After is float seconds when the
-      // provider populated the header. Render as
-      // "retry in N s" or "retry in N min" so the
-      // user knows roughly when to try again.
-      const retryAfter = errorInfo.retry_after;
-      if (typeof retryAfter === 'number' && retryAfter > 0) {
-        const seconds = Math.round(retryAfter);
-        const when =
-          seconds >= 60
-            ? `${Math.round(seconds / 60)} min`
-            : `${seconds} s`;
-        label = `Rate limited — retry in ${when}`;
-      } else {
-        label = 'Rate limited — wait and retry';
-      }
-      break;
-    }
-    case 'authentication':
-      icon = '🔑';
-      label = 'Authentication failed — check LLM config';
-      type = 'error';
-      break;
-    case 'not_found': {
-      icon = '❓';
-      type = 'error';
-      const model = errorInfo.model;
-      label = model
-        ? `Model not found: ${model}`
-        : 'Model not found — check LLM config';
-      break;
-    }
-    case 'bad_request':
-      icon = '⚠️';
-      label = `Invalid request: ${providerMsg}`;
-      type = 'error';
-      break;
-    case 'api_connection':
-      icon = '🌐';
-      label = 'Connection failed — check network / proxy';
-      type = 'warning';
-      break;
-    case 'service_unavailable':
-      icon = '🔧';
-      label = 'Provider unavailable — retry later';
-      type = 'warning';
-      break;
-    case 'timeout':
-      icon = '⏱️';
-      label = 'Request timed out';
-      type = 'warning';
-      break;
-    default:
-      // Includes 'llm_error' and any future
-      // backend classifications we haven't learned
-      // about.
-      icon = '❌';
-      label = providerMsg || 'LLM error';
-      type = 'error';
-      break;
-  }
-  panel._emitToast(`${icon} ${label}`, type);
-}
-
-/**
- * Emit a toast for non-natural finish reasons.
- * Natural stops (`stop`, `end_turn`) produce
- * nothing.
- *
- * Per specs-reference/3-llm/streaming.md § Finish
- * Reason — `length` and `content_filter` are
- * `error` severity ("response incomplete");
- * `tool_calls` / `function_call` are `warning`
- * (the provider wanted something we don't support
- * yet, but the response itself isn't broken);
- * anything else is `warning` with the raw reason
- * surfaced.
- */
-export function maybeShowFinishReasonToast(panel, reason) {
-  if (!reason || reason === 'stop' || reason === 'end_turn') {
-    return;
-  }
-  let message;
-  let type = 'warning';
-  switch (reason) {
-    case 'length':
-      message = '⚠️ Response truncated — hit max_tokens';
-      type = 'error';
-      break;
-    case 'content_filter':
-      message = '⚠️ Response blocked by content filter';
-      type = 'error';
-      break;
-    case 'tool_calls':
-    case 'function_call':
-      message = `⚠️ Model requested a ${reason} (not supported)`;
-      break;
-    default:
-      message = `⚠️ Stopped: ${reason}`;
-      break;
-  }
-  panel._emitToast(message, type);
+export function handleUnsupportedSlash(panel, result) {
+  const command = typeof result?.command === 'string' ? result.command : '';
+  const message = typeof result?.message === 'string' && result.message
+    ? result.message
+    : `${command || 'That command'} isn't supported here.`;
+  const equivalent = typeof result?.equivalent === 'string' && result.equivalent
+    ? `\n\nUse ${result.equivalent} instead.`
+    : '';
+  panel.messages = [
+    ...panel.messages,
+    { role: 'system', content: `${message}${equivalent}` },
+  ];
+  panel._emitToast(message, 'warning');
 }

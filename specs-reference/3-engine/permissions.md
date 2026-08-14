@@ -67,7 +67,22 @@ Arguments: tool name, tool input, context.
 | `agent_id` | `str \| None` | Non-null when the call originates inside a subagent. The dialog must say which subagent is asking. |
 | `blocked_path` | `str \| None` | The path that triggered the request, e.g. a `Bash` command reaching outside allowed directories. |
 | `decision_reason` | `str \| None` | Why the request was raised — carries a `PreToolUse` hook's `permissionDecisionReason` when one asked. |
+| `title` | `str \| None` | The CLI's own full prompt sentence, e.g. `Claude wants to read foo.txt`. **Prefer this over a summary of our own** where present: it is what the terminal would show, so the two front ends agree. |
+| `display_name` | `str \| None` | Short noun phrase for the action, e.g. `Read file`. Suitable for a button label or a compact row. |
+| `description` | `str \| None` | Human-readable subtitle for the dialog. |
 | `signal` | `Any \| None` | Reserved for abort-signal support; unused. |
+
+The last three were absent from an earlier draft of this table. They are the CLI's own copy for the
+call, they are exactly what a permission dialog needs, and reconstructing a sentence from tool name and
+input when the CLI already sent one is how the browser and the terminal end up describing the same call
+differently. All three are carried through to `permissionRequest` verbatim, `None` included; the
+dialog falls back to its own summary only when they are absent.
+
+`PermissionRuleValue`, `PermissionUpdate`, `ToolPermissionContext`, `PermissionResultAllow` and
+`PermissionResultDeny` are importable from `claude_agent_sdk.types`. Only some are re-exported from the
+package root — `PermissionRuleValue` is **not** (`"PermissionRuleValue" in dir(claude_agent_sdk)` is
+`False` in 0.2.137) — so import the permission types from `claude_agent_sdk.types` as a set rather than
+discovering the split one `ImportError` at a time.
 
 ### Return types
 
@@ -81,7 +96,7 @@ Mapping from user decision:
 | Decision | Returned |
 |---|---|
 | Allow once | `PermissionResultAllow()` |
-| Allow with edited input | `PermissionResultAllow(updated_input=<edited dict>)` |
+| Allow with edited input | `PermissionResultAllow(updated_input=<edited dict>)` — offered for `Bash`, `Write` and `NotebookEdit` only, see below |
 | Always allow | `PermissionResultAllow(updated_permissions=[PermissionUpdate(...)])` |
 | Deny | `PermissionResultDeny(message=<reason>, interrupt=False)` |
 | Deny and stop the turn | `PermissionResultDeny(message=<reason>, interrupt=True)` |
@@ -91,6 +106,14 @@ Mapping from user decision:
 as the default deny — a denial the agent can adapt to is more useful than a stopped turn.
 
 `message` is never empty: the agent receives it and a blank denial produces a blind retry.
+
+**`updated_input` is not offered for `Edit` or `MultiEdit`.** Their input is a list of
+`old_string` → `new_string` replacements, and the dialog's editor works on the file's proposed content;
+turning an edited full-file result back into replacements means guessing which replacement the user
+meant. A call that then ran something other than what the dialog showed is a worse outcome than having
+no edit affordance at all, so those tools get allow-or-deny and the reason box. The tools whose input
+carries the whole file — `Write` (`content`) and `NotebookEdit` (`new_source`) — accept an edit
+faithfully, and `Bash` accepts an edited `command` string.
 
 ### `PermissionUpdate` for "always allow"
 
@@ -109,10 +132,29 @@ PermissionUpdate(
 - `destination` ∈ `userSettings`, `projectSettings`, `localSettings`, `session`. Default for "always
   allow" is `projectSettings` (`.claude/settings.json`, committed and shared with the CLI).
   `session` is never used for "always allow" — an invisible in-memory grant is exactly what the parent
-  spec forbids — but is the correct destination for the file picker's deny-read rule when the user
-  wants it for this session only.
+  spec forbids.
 - `to_dict()` emits camelCase (`toolName`, `ruleContent`); the dataclass is what we pass, the dict is
   what goes on the wire.
+
+### There is no runtime rule API
+
+A `PermissionUpdate` reaches the CLI **only** as `PermissionResultAllow.updated_permissions`, returned
+from inside a `can_use_tool` callback. `ClaudeSDKClient` in 0.2.137 exposes `connect`, `disconnect`,
+`query`, `receive_messages`, `receive_response`, `interrupt`, `set_model`, `set_permission_mode`,
+`stop_task`, `rewind_files`, `get_context_usage`, `get_server_info`, `get_mcp_status`,
+`reconnect_mcp_server` and `toggle_mcp_server` — and nothing that adds, removes or lists permission
+rules. The consequences are load-bearing and an earlier draft of this file assumed otherwise:
+
+- **The file picker's deny-read gesture has no `session` path.** It happens outside any tool call, so
+  there is no callback return value to attach a `session`-scoped rule to. The only mechanism that
+  reaches the CLI is writing the rule into `.claude/settings.local.json` ourselves, which the CLI reads
+  on its own. `set_denied_read_files` is therefore a file writer, not an SDK call, and the "this session
+  only" option in `specs5/5-webapp/file-picker.md` § Denial Scope Prompt has to be honest about what it
+  means: AC⚡DC drops the rule from its own list at session end and rewrites the file, rather than the
+  engine forgetting anything.
+- **A rule written mid-session is not retroactive** to a call already in flight, and nothing can query
+  the CLI for the rules currently in force. The dialog's "always allow" therefore reports what it
+  *wrote*, never what the engine now believes.
 
 The file picker's third checkbox state writes:
 
@@ -137,10 +179,14 @@ PermissionRequestPayload:
     tool_use_id: string
     agent_id: string | null
     tool_class: "read" | "write" | "exec" | "delegate" | "interact" | "mcp"
+    gated_by_default: bool             // whether this class is gated in `default` mode
     input: object                      // full tool input, verbatim
-    summary: string                    // one-line human summary
+    summary: string                    // one-line human summary, ours
     blocked_path: string | null
     decision_reason: string | null
+    title: string | null               // the CLI's own prompt sentence; preferred over `summary`
+    display_name: string | null        // the CLI's short noun phrase for the action
+    description: string | null         // the CLI's subtitle
     suggested_rules: list[SuggestedRule]
     diff: DiffPayload | null           // present for tool_class == "write"
     command: CommandPayload | null     // present for tool_class == "exec"
@@ -167,19 +213,45 @@ DiffPayload:
     deletions: integer
 
 CommandPayload:
-    command: string
+    command: string                    // capped at 4 000 chars
+    truncated: bool                    // true ⇒ `command` was cut; full text is in `input`
     cwd: string
     description: string | null         // the agent's own description of the call
     flags: list[string]                // e.g. ["writes", "network", "deletes"] — heuristic, advisory
 
 QuestionPayload:
+    question: string                   // the first question, promoted for the dialog's headline
+    options: list[{label: string, description: string | null}]
+    multi_select: bool
+    questions: list[Question]          // every question, in order
+
+Question:
     question: string
+    header: string | null              // AskUserQuestion's short chip label
     options: list[{label: string, description: string | null}]
     multi_select: bool
 ```
 
 `flags` is a display hint derived from the command text. It is explicitly advisory: it must never gate
 anything, because a heuristic that gates would be either bypassable or wrong.
+
+`truncated` is what makes the 4 000-char cap non-silent: the dialog reads it to offer a full-text
+expander over the verbatim `input`, which is never truncated.
+
+`AskUserQuestion` takes a **list** of questions (`input.questions`, each with its own `header`,
+`options` and `multiSelect`), not the single question an earlier draft of this block described. The
+first is promoted to the top-level fields so a dialog that renders one question is still correct, and
+the whole list travels in `questions` so a dialog that renders all of them can. Option entries are
+normalised: the tool permits a bare string as well as `{label, description}`, and both arrive as
+`{label, description}`. A payload with no question at all is `null` rather than an empty shell.
+
+The CLI's own bounds are 1–4 questions and 2–4 options each, question texts unique within a call and
+option labels unique within a question. The payload does not enforce them — a call that violated them
+would have been rejected before reaching `can_use_tool`, and a dialog that refused to render an
+out-of-bounds call would fail closed on the one tool class the user cannot route around. An option's
+third field, `preview`, is **not** carried: it is a block of HTML the terminal renders for comparing
+mockups side by side, and forwarding untrusted model-authored HTML into the dialog's shadow DOM is not
+something to do incidentally. See `specs5/5-webapp/permission-dialog.md` § `interact`.
 
 ### `resolve_permission(permission_id, decision)` — browser → server
 
@@ -188,7 +260,8 @@ PermissionDecision:
     action: "allow" | "allow_always" | "deny" | "deny_interrupt"
     reason: string | null              // required for deny actions
     rule_index: integer | null         // index into suggested_rules, for allow_always
-    updated_input: object | null       // when the user edited the input
+    updated_input: object | null       // when the user edited the input; Bash/Write/NotebookEdit only
+    answers: list[list[integer]] | null  // interact only: chosen option indices, one list per question
 ```
 
 Returns:
@@ -199,6 +272,48 @@ Returns:
 | `{error: "restricted", reason: str}` | Caller is not localhost — the standard restricted shape, see `specs-reference/1-foundation/rpc-inventory.md` § Restricted error shape |
 | `{error: "unknown", reason: str}` | No such `permission_id` |
 | `{error: "already_resolved", resolved_by: str}` | Another localhost client won the race, or it timed out |
+
+### Answering an `interact` request
+
+Allowing an `AskUserQuestion` call is not the same as answering it. The tool reads its answers off its
+own input, so the answer has to travel as an `updated_input`:
+
+```python
+PermissionResultAllow(updated_input={**tool_input, "answers": {"Which branch?": "dev5"}})
+```
+
+Verified against the bundled CLI 2.1.229, whose tool definition is:
+
+- Input: `questions` (1–4, each `{question, header, options: 2–4 × {label, description, preview?},
+  multiSelect}`), plus `answers: Record<str, str>` — described in the CLI as "User answers collected by
+  the permission component" — plus `annotations` and `metadata`.
+- `checkPermissions` returns `{behavior: "ask"}` unconditionally, which is why this class is gated in
+  every mode.
+- The tool's `call` destructures `{questions, answers = {}, annotations, response, afkTimeoutMs}` from
+  that input and returns them as its result.
+- The result the model sees is built from `answers` by question text. **With no `answers` key the model is
+  told "The user did not answer the questions"** — so a dialog that collects a selection and then allows
+  the call plainly shows the user an answered question and hands the agent silence. An answer that is not
+  one of the option labels is delivered too, prefixed with an instruction to read it carefully, which is
+  how the tool's auto-provided "Other" reply reaches the model.
+
+Three rules the CLI enforces that the map has to respect:
+
+- **The key is the question text**, exactly as the tool was called with it — not a normalisation of ours.
+  `build_question_payload` fills a missing question text from `header`; `build_answer_input` therefore
+  keys off the verbatim `tool_input["questions"][i]["question"]` and only falls back to the normalised
+  text.
+- **Multi-select is one string joined with `", "`.** The CLI splits on exactly that separator to check the
+  parts back against the option labels.
+- **A question with no key is a question the user declined**, which is a legitimate state — an empty
+  answer counts as covered. So a partial answer set is deliverable, and the browser's rule that "Answer"
+  waits for every question is a UI choice, not a protocol requirement.
+
+The mapping from indices to labels lives on the engine side for two reasons. The engine already holds the
+verbatim tool input, so the key it writes cannot drift from what the tool was called with; and
+`updated_input` being present on a decision is what marks a call as user-modified in the transcript.
+Answering a question the agent asked is not modifying the call it made, so the browser sends
+`answers` — option indices — and never builds the patch itself.
 
 ### `permissionResolved(data)` — server → browser (broadcast)
 
@@ -222,7 +337,7 @@ config surface — a user who wants a different posture writes a rule.
 
 | Class | Tools | Gated by default |
 |---|---|---|
-| `read` | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `NotebookRead`, `mcp__ac-dc__*` | No |
+| `read` | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `NotebookRead`, `TodoWrite`, `mcp__ac-dc__*` | No |
 | `write` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | Yes |
 | `exec` | `Bash`, `BashOutput`, `KillShell` | Yes |
 | `delegate` | `Task` | No |
@@ -257,8 +372,22 @@ interaction-required tools (`AskUserQuestion`, MCP tools flagged as requiring in
 organisation-`ask` connector tools) are **denied without invoking the callback** — so a UI that only
 learns about those tools through the callback will show nothing at all in that mode.
 
-### The callback runs on the SDK's read loop
+### The callback does **not** run on the SDK's read loop
 
-A slow `can_use_tool` blocks message delivery for the session. The implementation must not do blocking
-I/O inline: the diff's file read happens in an executor, and the wait for the browser is a plain
-`asyncio` future keyed by `permission_id`.
+An earlier draft of this file said a slow `can_use_tool` blocks message delivery for the session. It
+does not. `Query._read_messages` dispatches a `control_request` through
+`_spawn_control_request_handler`, which spawns each handler as its own detached child task
+(`spawn_task` → `spawn_detached`, tracked in `_inflight_requests` so `close()` can cancel it). The read
+loop returns to reading immediately, so a five-minute permission decision does not stall the turn's
+remaining messages, and two permission requests raised by parallel tool calls are genuinely concurrent
+rather than serialised behind each other.
+
+What still matters, and what the implementation still does:
+
+- **Blocking I/O inline blocks the whole event loop**, not just the read loop — one thread serves the
+  SDK, the WebSocket, and every other session. The diff's file read goes through
+  `run_in_executor` for that reason: a 2 MiB synchronous read would stall the very socket that has to
+  deliver the dialog asking about it.
+- **The wait for the browser is a plain `asyncio` future** keyed by `permission_id`, never a poll.
+- **Cancellation is real.** The handler task is cancelled on `close()`, so a pending permission does not
+  outlive its session; the future must be resolved (deny) on that path rather than left pending.

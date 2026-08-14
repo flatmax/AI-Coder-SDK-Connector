@@ -833,3 +833,161 @@ class TestLLMServiceCollabFailClosed:
 
 # asyncio import for async restriction tests.
 import asyncio  # noqa: E402
+
+
+# =============================================================
+# The gate under real dispatch
+# =============================================================
+#
+# Every test above pins ``is_caller_localhost`` with a stub, which
+# proves the guard is *in* the method but says nothing about whether
+# it can still see who called. That distinction hid a real hole:
+#
+#   ``ExposeClass`` calls the RPC method, and for an ``async def`` that
+#   only builds a coroutine — the body has not run. The wrapper hands it
+#   to ``asyncio.create_task`` and returns; the receive loop's ``finally``
+#   then clears the caller. The gate therefore ran with no caller
+#   recorded, and "no caller" means "trusted, in-process", so every
+#   localhost gate on every async method passed for remote callers.
+#
+# These tests drive the real ``ExposeClass`` wrapper against the real
+# ``CollabServer`` and ``Collab``, in the receive loop's shape, so the
+# assertion is about dispatch rather than about a stub.
+
+from jrpc_oo.ExposeClass import ExposeClass  # noqa: E402
+
+from ac_dc.collab import Collab, CollabServer  # noqa: E402
+
+
+class _GatedService:
+    """One sync and one async gated method, guard written the house way."""
+
+    def __init__(self, collab: Any) -> None:
+        self._collab = collab
+        self.wrote = False
+
+    def _check_localhost_only(self) -> dict[str, Any] | None:
+        if self._collab is None:
+            return None
+        if self._collab.is_caller_localhost():
+            return None
+        return {
+            "error": "restricted",
+            "reason": "Participants cannot perform this action",
+        }
+
+    def sync_mutate(self) -> dict[str, Any]:
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        self.wrote = True
+        return {"status": "ok"}
+
+    async def async_mutate(self) -> dict[str, Any]:
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        self.wrote = True
+        return {"status": "ok"}
+
+
+@pytest.fixture
+def remote_dispatch() -> Any:
+    """A dispatcher that calls exposed methods as a remote participant.
+
+    Mirrors ``CollabServer._run_admitted_connection``: set the caller,
+    dispatch synchronously, clear the caller in a ``finally``, then let
+    the loop run whatever the dispatch scheduled.
+    """
+
+    async def dispatch(service: _GatedService, method: str) -> Any:
+        fns = ExposeClass().expose_all_fns(service, "Svc")
+        answers: list[Any] = []
+        server = service._collab._server
+        server.current_caller_uuid = "uuid-of-a-remote-participant"
+        try:
+            fns[f"Svc.{method}"](
+                {"args": []}, lambda err, res: answers.append(res)
+            )
+        finally:
+            server.current_caller_uuid = None
+        # The receive loop's next ``async for`` yields here; that is when
+        # a scheduled coroutine actually gets to run.
+        for _ in range(10):
+            if answers:
+                break
+            await asyncio.sleep(0)
+        return answers[0] if answers else None
+
+    return dispatch
+
+
+@pytest.fixture
+def participant_service() -> _GatedService:
+    """A gated service whose only registered client is non-localhost."""
+    collab = Collab()
+    CollabServer(port=0, collab=collab)
+    client = collab._register_client(
+        client_id="c1",
+        ip="10.0.0.9",
+        role="participant",
+        websocket=None,
+    )
+    client.is_localhost = False
+    collab._attach_remote_uuid("c1", "uuid-of-a-remote-participant")
+    return _GatedService(collab)
+
+
+class TestGateUnderRealDispatch:
+    """The caller must still be visible when the method body runs."""
+
+    async def test_sync_method_rejects_the_participant(
+        self, participant_service: _GatedService, remote_dispatch: Any
+    ) -> None:
+        answer = await remote_dispatch(participant_service, "sync_mutate")
+        _assert_restricted(answer)
+        assert participant_service.wrote is False
+
+    async def test_async_method_rejects_the_participant(
+        self, participant_service: _GatedService, remote_dispatch: Any
+    ) -> None:
+        """The regression. An async gate used to run after the receive
+        loop had cleared the caller, and let the side effect through."""
+        answer = await remote_dispatch(participant_service, "async_mutate")
+        _assert_restricted(answer)
+        assert participant_service.wrote is False
+
+    async def test_a_localhost_caller_still_gets_through(
+        self, participant_service: _GatedService, remote_dispatch: Any
+    ) -> None:
+        """Guard against over-correcting into denying everyone."""
+        collab = participant_service._collab
+        collab._clients["c1"].is_localhost = True
+        answer = await remote_dispatch(participant_service, "async_mutate")
+        assert answer == {"status": "ok"}
+        assert participant_service.wrote is True
+
+    async def test_an_in_process_call_is_trusted(
+        self, participant_service: _GatedService
+    ) -> None:
+        """No RPC caller behind the call — a teardown hook, a background
+        task, a test. These are local Python and must not be gated."""
+        assert await participant_service.async_mutate() == {"status": "ok"}
+
+    async def test_the_caller_survives_an_await_inside_the_method(
+        self, participant_service: _GatedService, remote_dispatch: Any
+    ) -> None:
+        """A gate placed after an await still sees the participant.
+
+        Not how the house guard is written — it goes first — but the
+        contextvar makes the identity last the whole call rather than
+        only the first statement, and that property is worth pinning.
+        """
+
+        async def late_gate() -> dict[str, Any]:
+            await asyncio.sleep(0)
+            restricted = participant_service._check_localhost_only()
+            return restricted if restricted is not None else {"status": "ok"}
+
+        participant_service.async_mutate = late_gate  # type: ignore[method-assign]
+        _assert_restricted(await remote_dispatch(participant_service, "async_mutate"))
