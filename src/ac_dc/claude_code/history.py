@@ -497,6 +497,40 @@ def _first_prompt(messages: list[SessionMessage]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Deletion
+# ---------------------------------------------------------------------------
+
+
+async def delete_session(
+    store: SessionStore,
+    session_id: str,
+    directory: str,
+) -> None:
+    """Remove one session's transcript, its sidecar and its subagents.
+
+    That cascade is entirely the store's (``RepoSessionStore.delete``): a
+    subagent transcript whose parent is gone is unreachable through every
+    RPC we expose, and a summary sidecar without a transcript would put a
+    row in the session list that cannot be opened. Missing is not an
+    error, so deleting twice is the same as deleting once.
+
+    What is deliberately *not* here is the rest of the cascade — the
+    session's events and its index rows. Those two files are the service's,
+    and neither is derived from this one, so the RPC coordinates all three
+    rather than letting one collaborator reach into the others
+    (``specs5/3-engine/history.md`` § One Store, One Index, One Events Log).
+    """
+    from claude_agent_sdk import project_key_for_directory
+
+    await store.delete(
+        {
+            "project_key": project_key_for_directory(directory),
+            "session_id": session_id,
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 

@@ -321,16 +321,34 @@ History — the whole set is renamed off the native engine's names, because none
 | `history_list` | `limit?: int` | `list[SessionSummary]` (above) |
 | `history_load` | `session_id: str` | `list[MessageDict]` — built at read time from parsed entries, interleaved with that session's `events.jsonl` records. Image blocks carry pointers, not data URIs |
 | `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, entry_uuid, role, content_preview, timestamp}]` |
-| `history_delete` | `session_id: str` | `{status: str}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts and its events; the images in those entries go with them |
+| `history_delete` | `session_id: str` | `{session_id, status: "deleted"}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts, its events and its index rows; the images in those entries go with them. `{error, reason: "session_live"}` for the session on screen |
 | `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
 
 A pointer carries `(session_id, entry_uuid, block)` and no subpath, so `history_image` looks in the main
 transcript first and then in that session's subagent transcripts. Widening every pointer with a subpath
 would change what the browser stores for each image in order to save a read that only happens on a miss.
 
+`history_delete` runs the cascade in a fixed order — transcript, then events, then index rows — so that a
+crash between steps leaves either something unreachable (events for a session no listing offers) or
+something self-healing (the next index refresh purges a session the store no longer lists). Deleting the
+transcript last would instead leave a browsable session whose events had silently gone. Missing is not
+an error: a row deleted twice, or deleted by another client first, is a browser that already has what it
+asked for. Every client is told via a `sessionDeleted` broadcast, because the list they hold just became
+wrong and the server is the only one that knows.
+
+The session on screen is refused rather than deleted, with `reason: "session_live"`. The store is a
+*live* mirror, so the CLI keeps appending to whatever session it is attached to and the transcript would
+come straight back — and the next connect would resume an ID with nothing behind it. `new_session` first
+makes it deletable. "On screen" is the same answer `_visible_session_id` gives the browser and
+`_resume_attachment` gives the engine, which is what stops a delete from being legal for one and fatal
+for the other.
+
+No `events.jsonl` record is written for a deletion. It would be filed against the session that was just
+deleted, which is the one thing deleting a session's events exists to prevent.
+
 `history_list`, `history_load` and `history_delete` are the names phase 1 chose and
-`test_phase_five_methods_are_absent` has asserted absent ever since; `history_search` keeps its name
-because there was nothing wrong with it, and `history_image` is new.
+`test_phase_five_methods_are_absent` asserted absent until phase 5 landed them; `history_search` keeps
+its name because there was nothing wrong with it, and `history_image` is new.
 
 Renaming rather than keeping the native names is the loud option, and the right one here: every payload
 changed, so a browser still calling `history_list_sessions` should fail with a method-not-found at the

@@ -37,6 +37,18 @@ to a subprocess that parses its own union, so a record we invented would surface
 which presents as context loss, much later, in a session the user cares about. That is why our own
 events are a separate file rather than namespaced entries.
 
+**Deleting a session is one operation across all three.** The store takes the transcript with its summary
+sidecar and its subagent transcripts — and with them the pasted images, which live in the entries and
+nowhere else. The events log drops that session's records, because an archived commit outliving the
+session it describes renders in the browser as history for a session that no longer exists. The index
+forgets it. In that order, so that a crash between steps leaves either something unreachable or something
+self-healing; the reverse order leaves a browsable session whose events have silently gone.
+
+**The session on screen is not deletable.** The store is a live mirror, so the CLI keeps appending to
+whatever session it is attached to: the transcript would come straight back, and the next connect would
+resume an ID with nothing behind it. That is refused rather than half-done, and starting a new session
+first makes it deletable.
+
 ## `SessionStore`
 
 AC⚡DC implements the SDK's `SessionStore` protocol so a copy of the engine transcript lands inside
@@ -225,6 +237,8 @@ read them.
 - The `SessionStore` implementation passes the SDK's conformance suite.
 - All six protocol methods exist, because the SDK probes the optional four by attribute presence.
 - The store appends and deletes; it never rewrites an existing record.
+- Deleting a session takes its events and its index rows with it, and the session the engine is attached
+  to — or would attach to next — is never deletable.
 - A gap in the mirrored engine transcript is always surfaced to the user; it is never tolerated
   silently, because a silent gap turns into a failed resume much later.
 - Every record in `events.jsonl` carries both a session ID and the request ID of its turn; for

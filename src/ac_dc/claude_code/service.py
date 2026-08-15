@@ -27,9 +27,9 @@ hook that keeps it honest after the agent writes.
 
 Since phase 5 it owns history too: the transcript mirror, the events log
 the transcript could never hold, reading a past session back for the
-browser — its images and its subagents included — and choosing which
-session the engine attaches to. Still absent, landing later in the same
-phase: search, delete and the derived index.
+browser — its images and its subagents included — searching and deleting
+them, the index that keeps both cheap, and choosing which session the
+engine attaches to.
 
 **The engine connects lazily**, on the first turn or an explicit
 ``connect_engine()`` call, so a launch that never chats never pays for a
@@ -1651,6 +1651,75 @@ class ClaudeCodeService:
         except Exception as exc:
             logger.exception("history_search failed")
             return {"error": f"Could not search the session history: {exc}"}
+
+    async def history_delete(self, session_id: str) -> dict[str, Any]:
+        """Delete one past session and everything derived from it.
+        **Localhost only.**
+
+        Three files, one operation. The store takes the transcript with its
+        summary sidecar and its subagent transcripts — and with them the
+        pasted images, which live in the entries and nowhere else. The
+        events log drops that session's records, because an archived commit
+        that outlived the session it describes would render in the browser
+        as history for a session that no longer exists. The derived index
+        forgets it, which costs nothing to be wrong about but would
+        otherwise keep answering searches with a session ID that resolves
+        to nothing.
+
+        In that order, so that a crash between steps leaves the smallest
+        lie: what survives a half-done delete is unreachable (no listing
+        offers it) or self-healing (the next index refresh purges a session
+        the store no longer lists). Deleting the transcript last would
+        instead leave a browsable session whose events had silently gone.
+
+        Gated because this destroys history every client can see, and
+        because a participant who could delete the record of a turn could
+        delete the evidence of what they were invited to review.
+
+        The session on screen is refused rather than deleted. The store is
+        a *live* mirror: the CLI keeps appending to the session it is
+        attached to, so the transcript would come straight back — and the
+        next connect would resume an ID with nothing behind it. Starting a
+        new session first makes it deletable, which is one click and is
+        honest about what is happening.
+
+        Missing is not an error. A row deleted twice, or deleted by another
+        client first, is a browser that already has what it asked for.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not session_id:
+            return {"error": "A session ID is required", "reason": "no_session_id"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+        if session_id == await self._visible_session_id():
+            return {
+                "error": "That is the current conversation. Start a new session first.",
+                "reason": "session_live",
+            }
+
+        from ac_dc.claude_code import history
+
+        try:
+            await history.delete_session(
+                self.session_store, session_id, str(self._repo_root)
+            )
+            if self.events_log is not None:
+                await self.events_log.delete_session(session_id)
+            if self.history_index is not None:
+                await self.history_index.forget(session_id)
+        except Exception as exc:
+            logger.exception("history_delete failed for %s", session_id)
+            return {"error": f"Could not delete session {session_id}: {exc}"}
+
+        # No `events.jsonl` record for the deletion: it would be filed
+        # against the session that was just deleted, which is the one thing
+        # `EventsLog.delete_session` exists to prevent.
+        await self._broadcast(
+            Event("sessionDeleted", {"session_id": session_id}, turn_scoped=False)
+        )
+        return {"session_id": session_id, "status": "deleted"}
 
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int

@@ -477,10 +477,20 @@ class TestRpcSurface:
         ):
             assert callable(getattr(service, name)), name
 
-    def test_phase_five_methods_are_absent(self, service):
-        """A stub that reported success would be worse than a missing method."""
-        for name in ("history_delete",):
-            assert not hasattr(service, name), name
+    def test_the_phase_five_methods_have_landed(self, service):
+        """Asserted absent since phase 1, on the reasoning that a stub
+        reporting success would be worse than a missing method. This is the
+        phase they exist in."""
+        for name in (
+            "history_list",
+            "history_load",
+            "history_search",
+            "history_delete",
+            "history_image",
+            "new_session",
+            "resume_session",
+        ):
+            assert callable(getattr(service, name, None)), name
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1106,9 @@ GATED_METHODS: dict[str, tuple] = {
     # discards the context every client is looking at.
     "new_session": (),
     "resume_session": ("sess-1",),
+    # Destroys history every client can see — including the record of a turn
+    # a participant might be there to review.
+    "history_delete": ("sess-1",),
     # Git writes to the host's tree, and the review arrangement moves every
     # file in it. Same restriction the native methods carried.
     "commit_all": (),
@@ -2138,6 +2151,129 @@ class TestSubagentTranscripts:
 
         wired.session_store.list_subkeys = boom
         assert "error" in await wired.list_subagent_transcripts(session_id)
+
+
+class TestDeletingASession:
+    """One operation over three files, and the one session it will not touch."""
+
+    @pytest.fixture
+    def old(self):
+        return "88888888-8888-4888-8888-888888888888"
+
+    @pytest.fixture
+    def live(self):
+        return "99999999-9999-4999-8999-999999999999"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, old, live):
+        """A past session with everything hanging off it, plus a live one."""
+        from ac_dc.claude_code.events_log import commit_content
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        await seed_transcript(svc, old, prompt="the old conversation")
+        await seed_subagent(svc, old, "a1")
+        await svc._record_event(
+            "commit", commit_content("abc1234", "fix: it"), session_id=old
+        )
+        await seed_transcript(svc, live, prompt="the live one")
+        await svc._record_event(
+            "commit", commit_content("def5678", "fix: more"), session_id=live
+        )
+        # The engine is attached elsewhere, because the session on screen is
+        # the one delete refuses.
+        svc.session.session_id = live
+        return svc
+
+    async def test_the_transcript_its_sidecar_and_its_subagents_all_go(
+        self, wired, old
+    ):
+        assert await wired.history_delete(old) == {
+            "session_id": old,
+            "status": "deleted",
+        }
+        assert [s["session_id"] for s in await wired.history_list()] != [old]
+        assert "error" in await wired.history_load(old)
+        assert await wired.list_subagent_transcripts(old) == []
+
+    async def test_the_sessions_events_go_with_it(self, wired, old, live):
+        """An archived commit outliving its session would render as history
+        for a session that no longer exists."""
+        assert await wired.events_log.load(old)
+        await wired.history_delete(old)
+        assert await wired.events_log.load(old) == []
+        assert len(await wired.events_log.load(live)) == 1
+
+    async def test_the_index_forgets_it(self, wired, old):
+        """A warm index that kept answering would name a session that
+        resolves to nothing."""
+        assert [r["session_id"] for r in await wired.history_search("old")] == [old]
+        await wired.history_delete(old)
+        assert old not in wired.history_index._sessions
+        assert await wired.history_search("old") == []
+
+    async def test_the_other_session_is_untouched(self, wired, old, live):
+        await wired.history_delete(old)
+        listed = await wired.history_list()
+        assert [s["session_id"] for s in listed] == [live]
+        messages = await wired.history_load(live)
+        assert any(m.get("content") == "the live one" for m in messages)
+        assert any(m.get("event") == "commit" for m in messages)
+
+    async def test_the_current_conversation_is_refused(self, wired, live):
+        """The mirror is live: the CLI would write the transcript straight
+        back, and the next connect would resume an empty ID."""
+        answer = await wired.history_delete(live)
+        assert answer["reason"] == "session_live"
+        assert await wired.history_load(live)
+
+    async def test_the_session_the_next_connect_would_resume_is_refused(
+        self, wired, old, live
+    ):
+        """Nothing is attached yet, so "on screen" is whatever auto-resume
+        will pick up — deleting that is the same rug-pull one restart later."""
+        wired.session.session_id = None
+        answer = await wired.history_delete(live)
+        assert answer["reason"] == "session_live"
+        # And the older one is still deletable while that is true.
+        assert (await wired.history_delete(old))["status"] == "deleted"
+
+    async def test_every_client_is_told(self, wired, old):
+        await wired.history_delete(old)
+        deleted = [c for c in events_of(wired) if c[0] == "sessionDeleted"]
+        assert deleted == [("sessionDeleted", {"session_id": old})]
+
+    async def test_deleting_twice_is_not_an_error(self, wired, old):
+        assert (await wired.history_delete(old))["status"] == "deleted"
+        assert (await wired.history_delete(old))["status"] == "deleted"
+
+    async def test_a_session_id_is_required(self, wired):
+        assert "error" in await wired.history_delete("")
+
+    async def test_without_a_repo_it_says_why(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert "error" in await svc.history_delete("whatever")
+
+    async def test_a_failed_delete_leaves_the_events_alone(self, wired, old):
+        """The transcript goes first, so a delete that could not start has
+        not already thrown the session's events away."""
+
+        async def boom(*args, **kwargs):
+            raise OSError("disk is read-only")
+
+        wired.session_store.delete = boom
+        assert "error" in await wired.history_delete(old)
+        assert len(await wired.events_log.load(old)) == 1
+        assert events_of(wired) == []
 
 
 class TestSessionLifecycle:
