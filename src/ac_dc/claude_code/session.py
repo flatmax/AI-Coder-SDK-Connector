@@ -427,10 +427,16 @@ class EngineSession:
             self._session_lost = False
             self.health.connected = True
             self.health.last_error = None
-            if resume:
+            if resume and not fork_session:
                 # The init message will report the resumed ID; recording it
                 # now means get_current_state() is right before the first
                 # turn rather than only after it.
+                #
+                # Not for a fork: that mints a *new* session ID, which only
+                # the init message knows. Recording the origin here would
+                # name the wrong session in `get_current_state()` and, worse,
+                # point a restart's auto-resume at the session the user
+                # forked away from.
                 self._last_session_id = resume
             logger.info(
                 "Claude Code session connected (cwd=%s, permission_mode=%s%s)",
@@ -438,6 +444,26 @@ class EngineSession:
                 self._permission_mode,
                 f", resume={resume}" if resume else "",
             )
+
+    async def reset(self) -> None:
+        """Disconnect and forget which session this was.
+
+        What "New Session" needs, and the reason it is not just
+        :meth:`disconnect`: a disconnect keeps ``session_id`` so a lost
+        session can be resumed, which is the opposite of what starting a
+        fresh one means. Leaving the old ID in place would have
+        ``get_current_state()`` name the abandoned session until the first
+        turn of the new one replaced it.
+
+        The next :meth:`connect` decides what to attach to; this only
+        clears the ground.
+        """
+        await self.disconnect()
+        self._last_session_id = None
+        # A fresh session is not a lost one. Leaving this set would have
+        # `admit` refuse the first turn of the session we just made room
+        # for, telling the user to start a new session they just started.
+        self._session_lost = False
 
     async def disconnect(self) -> None:
         """Shut the session down as part of graceful shutdown."""

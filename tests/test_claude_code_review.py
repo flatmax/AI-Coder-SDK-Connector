@@ -174,7 +174,7 @@ class TestBeforeEntry:
         assert "pre_change_symbol_map" not in service.get_review_state()
 
     async def test_the_state_snapshot_carries_the_review(self, service):
-        assert service.get_current_state()["review_state"]["active"] is False
+        assert (await service.get_current_state())["review_state"]["active"] is False
 
     async def test_the_commit_graph_reaches_the_repo(self, service):
         graph = service.get_commit_graph(limit=10)
@@ -328,7 +328,7 @@ class TestPosture:
             "prefer_permission_mode",
             ("plan",),
         ) in service.session.control_calls
-        assert service.get_current_state()["permission_mode"] == "plan"
+        assert (await service.get_current_state())["permission_mode"] == "plan"
 
     async def test_exit_restores_the_mode_entry_found(self, service, feature_tip):
         service.session.ready = True

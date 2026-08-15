@@ -75,8 +75,13 @@ class FakeSession:
         self.model = None
 
         self.connect_calls: list[str | None] = []
+        # `(resume, fork_session)` per connect. Separate from
+        # `connect_calls` so the many tests that only care what was
+        # resumed keep reading the simpler list.
+        self.connect_args: list[tuple[str | None, bool]] = []
         self.connect_error: BaseException | None = None
         self.disconnect_calls = 0
+        self.reset_calls = 0
         self.turns: list[object] = []
         self.admit_error: BaseException | None = None
         self.control_calls: list[tuple[str, tuple]] = []
@@ -94,14 +99,25 @@ class FakeSession:
 
     async def connect(self, resume=None, fork_session=False):
         self.connect_calls.append(resume)
+        self.connect_args.append((resume, fork_session))
         if self.connect_error is not None:
             raise self.connect_error
         self.ready = True
         self.health.connected = True
+        # What the real session does: a plain resume knows its ID up front,
+        # a fork's is minted by the CLI and stays unknown until its first
+        # turn's init message.
+        if resume and not fork_session:
+            self.session_id = resume
 
     async def disconnect(self):
         self.disconnect_calls += 1
         self.ready = False
+
+    async def reset(self):
+        self.reset_calls += 1
+        await self.disconnect()
+        self.session_id = None
 
     def admit(self, request_id):
         if self.admit_error is not None:
@@ -283,6 +299,47 @@ async def send(service, message="hello", **kwargs):
     answer = await service.chat_streaming(REQUEST_ID, message, **kwargs)
     await finish_turns(service)
     return answer
+
+
+async def seed_transcript(service, session_id, prompt="fix the parser", reply="done"):
+    """Put one CLI-shaped exchange in the store, the way the mirror would.
+
+    Entry shape copied from a real `sdk-py` transcript: camelCase keys,
+    ``uuid``/``parentUuid`` chaining, per-message ``usage``. Written through
+    the production store so the SDK's own parsers read it back.
+    """
+    await service.session_store.append(
+        {
+            "project_key": service._session_project_key(),
+            "session_id": session_id,
+        },
+        [
+            {
+                "type": "user",
+                "uuid": f"{session_id}-u1",
+                "parentUuid": None,
+                "timestamp": "2026-08-16T00:00:00.000Z",
+                "sessionId": session_id,
+                "cwd": str(service._repo_root),
+                "message": {"role": "user", "content": prompt},
+            },
+            {
+                "type": "assistant",
+                "uuid": f"{session_id}-a1",
+                "parentUuid": f"{session_id}-u1",
+                "timestamp": "2026-08-16T00:00:02.000Z",
+                "sessionId": session_id,
+                "cwd": str(service._repo_root),
+                "message": {
+                    "id": f"msg_{session_id}",
+                    "role": "assistant",
+                    "model": "claude-opus-5",
+                    "content": [{"type": "text", "text": reply}],
+                    "usage": {"input_tokens": 40, "output_tokens": 9},
+                },
+            },
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -652,8 +709,8 @@ class TestCancel:
 
 
 class TestState:
-    def test_current_state_has_every_key_the_frontend_reads(self, service):
-        state = service.get_current_state()
+    async def test_current_state_has_every_key_the_frontend_reads(self, service):
+        state = await service.get_current_state()
         assert set(state) == {
             "messages",
             "selected_files",
@@ -676,29 +733,29 @@ class TestState:
             "doc_convert_available",
         }
 
-    def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
-        state = service.get_current_state()
+    async def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
+        state = await service.get_current_state()
         assert state["engine_ready"] is False
         assert state["streaming_active"] is False
         assert state["session_id"] is None
         assert state["permission_mode"] == "default"
 
-    def test_later_phase_keys_are_present_but_empty(self, service):
+    async def test_later_phase_keys_are_present_but_empty(self, service):
         """So the frontend contract does not change when they populate."""
-        state = service.get_current_state()
+        state = await service.get_current_state()
         assert state["messages"] == []
         assert state["denied_read_files"] == []
         assert state["pending_permissions"] == []
 
-    def test_the_repo_name_comes_from_the_root(self, tmp_path, events):
+    async def test_the_repo_name_comes_from_the_root(self, tmp_path, events):
         root = tmp_path / "my-project"
         root.mkdir()
         svc = ClaudeCodeService(FakeConfig(root), event_callback=events)
-        assert svc.get_current_state()["repo_name"] == "my-project"
+        assert (await svc.get_current_state())["repo_name"] == "my-project"
 
-    def test_it_falls_back_to_cwd_without_a_repo_root(self, events):
+    async def test_it_falls_back_to_cwd_without_a_repo_root(self, events):
         svc = ClaudeCodeService(FakeConfig(None), event_callback=events)
-        assert svc.get_current_state()["repo_name"] == Path.cwd().name
+        assert (await svc.get_current_state())["repo_name"] == Path.cwd().name
 
 
 class TestSelectedFiles:
@@ -877,9 +934,9 @@ class TestPermissionRpc:
         assert "not valid JSON" in answer["error"]
         assert path.read_text() == "{ oops"
 
-    def test_the_state_snapshot_carries_the_dialog_queue(self, service):
+    async def test_the_state_snapshot_carries_the_dialog_queue(self, service):
         """A client that reloads mid-request must be able to re-render it."""
-        state = service.get_current_state()
+        state = await service.get_current_state()
         assert state["pending_permissions"] == []
         assert state["denied_read_files"] == []
 
@@ -933,6 +990,11 @@ GATED_METHODS: dict[str, tuple] = {
     # participant could point the agent at a file of their choosing on
     # somebody else's turn.
     "set_viewer_state": ("src/a.py",),
+    # Which conversation the host's engine is attached to. A participant
+    # switching it would decide for everyone, and abandoning a session
+    # discards the context every client is looking at.
+    "new_session": (),
+    "resume_session": ("sess-1",),
     # Git writes to the host's tree, and the review arrangement moves every
     # file in it. Same restriction the native methods carried.
     "commit_all": (),
@@ -1236,38 +1298,7 @@ class TestHistoryRpcs:
         )
         svc.session = FakeSession()
         svc.session.session_id = session_id
-        await svc.session_store.append(
-            {
-                "project_key": svc._session_project_key(),
-                "session_id": session_id,
-            },
-            [
-                {
-                    "type": "user",
-                    "uuid": "u1",
-                    "parentUuid": None,
-                    "timestamp": "2026-08-16T00:00:00.000Z",
-                    "sessionId": session_id,
-                    "cwd": str(repo),
-                    "message": {"role": "user", "content": "fix the parser"},
-                },
-                {
-                    "type": "assistant",
-                    "uuid": "a1",
-                    "parentUuid": "u1",
-                    "timestamp": "2026-08-16T00:00:02.000Z",
-                    "sessionId": session_id,
-                    "cwd": str(repo),
-                    "message": {
-                        "id": "msg_1",
-                        "role": "assistant",
-                        "model": "claude-opus-5",
-                        "content": [{"type": "text", "text": "done"}],
-                        "usage": {"input_tokens": 40, "output_tokens": 9},
-                    },
-                },
-            ],
-        )
+        await seed_transcript(svc, session_id)
         return svc
 
     async def test_a_stored_session_is_listed(self, wired, session_id):
@@ -1357,6 +1388,232 @@ class TestHistoryRpcs:
 
     def test_the_log_points_at_the_repo(self, wired, tmp_path):
         assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
+
+
+class TestSessionLifecycle:
+    """New, resume, fork — and the restart that is meant to be invisible."""
+
+    @pytest.fixture
+    def old(self):
+        return "11111111-1111-4111-8111-111111111111"
+
+    @pytest.fixture
+    def newer(self):
+        return "22222222-2222-4222-8222-222222222222"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, old, newer):
+        """Two stored sessions, `newer` mirrored last, and a cold engine."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        await seed_transcript(svc, old, prompt="the older question")
+        await seed_transcript(svc, newer, prompt="the newer question")
+        events.calls.clear()
+        return svc
+
+    # -- Restart -----------------------------------------------------
+
+    async def test_a_restart_resumes_the_most_recent_session(self, wired, newer):
+        """The phase's exit criterion: restarting resumes the previous
+        conversation, with no pointer file to say which one it was."""
+        await wired.connect_engine()
+        assert wired.session.connect_args == [(newer, False)]
+
+    async def test_the_first_turn_resumes_it_too(self, wired, newer):
+        """Auto-resume has to live in the lazy connect, not in a startup
+        step: the connect a user actually triggers is the first turn's."""
+        await send(wired)
+        assert wired.session.connect_args[0] == (newer, False)
+
+    async def test_the_snapshot_shows_the_session_a_restart_will_resume(
+        self, wired
+    ):
+        """Otherwise the model has context the user cannot see."""
+        state = await wired.get_current_state()
+        assert [m["content"] for m in state["messages"] if m["role"] == "user"] == [
+            "the newer question"
+        ]
+
+    async def test_the_snapshot_reads_no_engine_into_existence(self, wired):
+        """A read, not a resume (``specs5/6-deployment/startup.md`` § Phase 1):
+        the many launches that never chat must not spawn a CLI."""
+        await wired.get_current_state()
+        assert wired.session.connect_calls == []
+
+    async def test_a_live_session_wins_over_the_store(self, wired, old):
+        wired.session.session_id = old
+        state = await wired.get_current_state()
+        assert [m["content"] for m in state["messages"] if m["role"] == "user"] == [
+            "the older question"
+        ]
+
+    async def test_a_storeless_service_still_snapshots(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert (await svc.get_current_state())["messages"] == []
+
+    async def test_an_unreadable_session_snapshots_empty_not_broken(
+        self, wired, caplog
+    ):
+        """Every other field is still worth painting."""
+
+        async def boom(*args, **kwargs):
+            raise OSError("disk is gone")
+
+        wired.session.session_id = "33333333-3333-4333-8333-333333333333"
+        wired.session_store.load = boom
+        with caplog.at_level(logging.WARNING):
+            state = await wired.get_current_state()
+        assert state["messages"] == []
+        assert "for the state snapshot" in caplog.text
+        assert state["engine_health"]["cli_version"] == "2.1.229"
+
+    # -- New ---------------------------------------------------------
+
+    async def test_new_session_abandons_the_old_one(self, wired):
+        answer = await wired.new_session()
+        assert answer == {"session_id": None, "status": "new"}
+        assert wired.session.reset_calls == 1
+        assert wired.session.session_id is None
+
+    async def test_new_session_does_not_connect(self, wired):
+        """A new session that never gets a turn should cost nothing."""
+        await wired.new_session()
+        assert wired.session.connect_calls == []
+
+    async def test_the_next_turn_after_new_starts_blank(self, wired):
+        await wired.new_session()
+        await send(wired)
+        assert wired.session.connect_args == [(None, False)]
+
+    async def test_new_session_empties_the_snapshot(self, wired):
+        """The store still holds the old sessions; none of them is this one."""
+        await wired.new_session()
+        assert (await wired.get_current_state())["messages"] == []
+
+    async def test_new_session_tells_every_client(self, wired, events):
+        await wired.new_session()
+        changed = [c for c in events.calls if c[0] == "sessionChanged"]
+        assert changed[0][1] == {
+            "session_id": None,
+            "messages": [],
+            "action": "new",
+        }
+
+    async def test_new_session_waits_for_the_turn_to_finish(self, wired):
+        wired.session.streaming_active = True
+        answer = await wired.new_session()
+        assert answer["reason"] == "turn_in_progress"
+        assert wired.session.reset_calls == 0
+
+    # -- Resume ------------------------------------------------------
+
+    async def test_resume_attaches_the_engine_to_that_session(self, wired, old):
+        answer = await wired.resume_session(old)
+        assert answer == {"session_id": old}
+        assert wired.session.connect_args == [(old, False)]
+
+    async def test_a_pending_request_beats_the_auto_resume_default(self, wired, old):
+        """Why the request is held rather than passed: the choice is made
+        inside the connect lock, so a first turn arriving alongside the click
+        connects to what the user asked for and not to the newest session."""
+        wired._resume_request = (old, False)
+        await send(wired)
+        assert wired.session.connect_args == [(old, False)]
+
+    async def test_a_resumed_session_survives_being_lost(self, wired, old):
+        """Auto-resume comes back on after the request is consumed, so a
+        session lost mid-conversation reattaches to itself rather than
+        silently continuing as a blank one."""
+        await wired.resume_session(old)
+        assert wired._resume_request is None
+        wired.session.ready = False
+        await wired.connect_engine()
+        assert wired.session.connect_args[-1] == (old, False)
+
+    async def test_resume_broadcasts_the_rendered_transcript(
+        self, wired, events, old
+    ):
+        await wired.resume_session(old)
+        changed = [c for c in events.calls if c[0] == "sessionChanged"][0][1]
+        assert changed["session_id"] == old
+        assert changed["action"] == "resumed"
+        assert changed["forked_from"] is None
+        assert [m["content"] for m in changed["messages"] if m["role"] == "user"] == [
+            "the older question"
+        ]
+
+    async def test_resume_is_recorded_in_the_session_it_names(self, wired, old):
+        await wired.resume_session(old)
+        records = await wired.events_log.load(old)
+        assert [r["event"] for r in records] == ["session_switch"]
+        assert old in records[0]["content"]
+
+    async def test_an_unreadable_session_is_not_resumed(self, wired):
+        """Browsable but not resumable — the CLI would fail the connect and
+        the user would be looking at an engine that will not start."""
+        answer = await wired.resume_session("44444444-4444-4444-8444-444444444444")
+        assert answer["reason"] == "not_resumable"
+        assert wired.session.connect_calls == []
+
+    async def test_resume_needs_a_session_id(self, wired):
+        assert (await wired.resume_session(""))["reason"] == "no_session_id"
+
+    async def test_resume_waits_for_the_turn_to_finish(self, wired, old):
+        wired.session.streaming_active = True
+        answer = await wired.resume_session(old)
+        assert answer["reason"] == "turn_in_progress"
+        assert wired.session.connect_calls == []
+
+    async def test_a_failed_connect_is_reported_not_swallowed(self, wired, old):
+        wired.session.connect_error = EngineStartupError("no CLI")
+        answer = await wired.resume_session(old)
+        assert answer["reason"] == "startup_failed"
+        assert "no CLI" in answer["error"]
+
+    # -- Fork --------------------------------------------------------
+
+    async def test_a_fork_leaves_the_original_alone(self, wired, old):
+        answer = await wired.resume_session(old, fork=True)
+        assert answer["forked_from"] == old
+        assert wired.session.connect_args == [(old, True)]
+
+    async def test_a_fork_cannot_name_itself_yet(self, wired, old):
+        """The CLI mints the ID and only reports it in the first turn's init
+        message, so there is nothing honest to put here."""
+        answer = await wired.resume_session(old, fork=True)
+        assert answer["session_id"] is None
+
+    async def test_a_fork_is_recorded_against_the_origin(self, wired, old):
+        """Where the user actually was. The fork has no ID to file it under,
+        and dropping the record would lose the branch entirely."""
+        await wired.resume_session(old, fork=True)
+        records = await wired.events_log.load(old)
+        assert records[0]["payload"] == {
+            "action": "forked",
+            # Unknowable until the fork's first turn, and null rather than
+            # the origin's ID: naming the origin here would claim the branch
+            # is the session it came from.
+            "session_id": None,
+            "forked_from": old,
+        }
+
+    async def test_a_fork_broadcasts_the_copied_transcript(self, wired, events, old):
+        await wired.resume_session(old, fork=True)
+        changed = [c for c in events.calls if c[0] == "sessionChanged"][0][1]
+        assert changed["action"] == "forked"
+        assert changed["forked_from"] == old
+        assert [m["content"] for m in changed["messages"] if m["role"] == "user"] == [
+            "the older question"
+        ]
 
 
 class TestIndexReadiness:

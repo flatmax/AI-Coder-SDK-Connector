@@ -436,6 +436,27 @@ class TestConnect:
         assert session.session_id == "prev-session"
         assert FakeClient.instances[-1].options.resume == "prev-session"
 
+    async def test_a_fork_does_not_claim_the_origins_id(self, tmp_path):
+        """A fork mints a *new* ID that only the init message knows. Recording
+        the origin would name the wrong session and point a restart's
+        auto-resume at the one the user forked away from."""
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect(resume="prev-session", fork_session=True)
+        assert session.session_id is None
+        assert FakeClient.instances[-1].options.fork_session is True
+
+    async def test_reset_forgets_which_session_this_was(self, engine):
+        """Unlike disconnect, which keeps the ID so a lost session can be
+        resumed — the opposite of what starting a fresh one means."""
+        engine._last_session_id = "prev-session"
+        engine._session_lost = True
+        await engine.reset()
+        assert engine.session_id is None
+        assert engine.connected is False
+        # A fresh session is not a lost one; `admit` must not refuse its
+        # first turn.
+        assert engine._session_lost is False
+
     async def test_the_connect_timeout_is_the_documented_sixty_seconds(self):
         """The bundled binary's cold first exec is the slow case."""
         assert CONNECT_TIMEOUT == 60.0

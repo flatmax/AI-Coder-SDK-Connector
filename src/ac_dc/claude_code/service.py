@@ -25,10 +25,11 @@ McpBridge` the session is handed as an MCP server, and the
 :class:`~ac_dc.claude_code.hooks.Reindexer` behind the ``PostToolUse``
 hook that keeps it honest after the agent writes.
 
-Scope note — chat runs on this service and the permission gate is live.
-Deliberately absent, landing in a later phase with the subsystem it
-belongs to: transcript mirroring, ``history_*`` and image persistence, all
-phase 5.
+Since phase 5 it owns history too: the transcript mirror, the events log
+the transcript could never hold, reading a past session back for the
+browser, and choosing which session the engine attaches to. Still absent,
+landing later in the same phase: search, delete, image rehydration,
+subagent transcripts and the derived index.
 
 **The engine connects lazily**, on the first turn or an explicit
 ``connect_engine()`` call, so a launch that never chats never pays for a
@@ -53,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from ac_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
+from ac_dc.claude_code.events_log import session_switch_content
 from ac_dc.claude_code.health import EngineStartupError
 from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers
 from ac_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
@@ -242,6 +244,18 @@ class ClaudeCodeService:
         # clients sending at once cannot spawn two CLI subprocesses.
         self._connect_lock = asyncio.Lock()
         self._connect_error: str | None = None
+        # What the next connect should attach to, when `resume_session` has
+        # asked for something specific: (session_id, fork). Held rather than
+        # passed so the decision is made *inside* the connect lock — a
+        # concurrent first turn would otherwise connect without it and get a
+        # blank session where the user asked for their old one.
+        self._resume_request: tuple[str, bool] | None = None
+        # Whether a connect nobody gave a target for should continue the
+        # previous conversation. True at startup, because a server restart is
+        # meant to be invisible (``specs5/plan/README.md`` phase 5: "restarting
+        # the server resumes the previous conversation with context intact").
+        # `new_session` is the one thing that clears it.
+        self._auto_resume = True
         self._turn_tasks: set[asyncio.Task[Any]] = set()
         # One commit at a time. The button stays disabled until the
         # commitResult broadcast arrives, and two overlapping runs would
@@ -299,6 +313,7 @@ class ClaudeCodeService:
         *,
         request_id: str | None = None,
         payload: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> None:
         """Append one operational event to this session's history.
 
@@ -309,13 +324,18 @@ class ClaudeCodeService:
 
         Silent when there is no session yet: the log drops those itself,
         because a record with no session has no transcript to appear in.
+
+        ``session_id`` overrides which session the record belongs to, for
+        the one caller whose event is *about* a session other than the live
+        one: forking, where the new session has no ID yet and the record
+        belongs in the transcript the user forked away from.
         """
         if self.events_log is None:
             return
         try:
             await self.events_log.append(
                 event,
-                session_id=self.session.session_id,
+                session_id=session_id or self.session.session_id,
                 content=content,
                 request_id=request_id,
                 payload=payload,
@@ -465,8 +485,9 @@ class ClaudeCodeService:
         async with self._connect_lock:
             if self.session.ready:
                 return {"status": "ready", "health": self.session.health.to_dict()}
+            attach, fork = await self._resume_attachment(resume)
             try:
-                await self.session.connect(resume=resume)
+                await self.session.connect(resume=attach, fork_session=fork)
             except EngineStartupError as exc:
                 self._connect_error = str(exc)
                 logger.error("Claude Code engine failed to start: %s", exc)
@@ -475,10 +496,62 @@ class ClaudeCodeService:
                 )
                 return {"error": str(exc), "reason": "startup_failed"}
             self._connect_error = None
+            # Consumed: a request is for one connect. Auto-resume comes back
+            # on, so a session lost mid-conversation reattaches to itself
+            # rather than silently continuing as a blank one.
+            self._resume_request = None
+            self._auto_resume = True
             await self._broadcast(
                 Event("engineHealth", self.session.health.to_dict(), turn_scoped=False)
             )
             return {"status": "ready", "health": self.session.health.to_dict()}
+
+    async def _resume_attachment(self, requested: str | None) -> tuple[str | None, bool]:
+        """Which session the imminent connect attaches to, and whether to fork.
+
+        Called with the connect lock held, which is the point: the choice
+        has to be made where a concurrent first turn cannot connect around
+        it. Four cases, in order of how explicit the ask was:
+
+        1. An ID passed to ``connect_engine`` — an explicit caller wins.
+        2. A pending ``resume_session`` request, carrying its fork flag.
+        3. Auto-resume: the session we already had this process, else the
+           most recent in the store. This is what makes a restart
+           invisible.
+        4. Nothing, after ``new_session`` — a blank session is the ask.
+
+        Cases 3 and 4 are :meth:`_visible_session_id`, deliberately: the
+        session the engine attaches to and the session the browser is shown
+        have to be the same one, and two functions answering that
+        separately is how they come to disagree.
+        """
+        if requested:
+            return requested, False
+        if self._resume_request is not None:
+            return self._resume_request
+        return await self._visible_session_id(), False
+
+    async def _most_recent_session_id(self) -> str | None:
+        """The newest session in the store, or ``None`` if there is none.
+
+        No stored pointer to the "current" session: the store already sorts
+        by ``last_modified``, and a pointer file is one more thing that can
+        disagree with the transcripts it names.
+        """
+        if self.session_store is None:
+            return None
+        try:
+            from claude_agent_sdk import list_sessions_from_store
+
+            recent = await list_sessions_from_store(
+                self.session_store, str(self._repo_root), limit=1
+            )
+        except Exception:
+            # Never fatal. Failing to find the previous conversation costs
+            # continuity; refusing to start costs the user everything.
+            logger.exception("Could not work out which session to resume")
+            return None
+        return recent[0].session_id if recent else None
 
     async def shutdown(self) -> dict[str, Any] | None:
         """Disconnect the engine as part of graceful shutdown.
@@ -516,12 +589,26 @@ class ClaudeCodeService:
             health["last_error"] = self._connect_error
         return health
 
-    def get_current_state(self) -> dict[str, Any]:
+    async def get_current_state(self) -> dict[str, Any]:
         """Everything a freshly connected browser needs to render.
 
-        ``messages`` is empty until the mirrored transcript lands in phase
-        5; the key is present so the frontend contract does not change
-        when it starts being populated.
+        ``messages`` is the current session's transcript, rendered from the
+        mirror. Read here, on demand, rather than pre-loaded by a startup
+        step as an earlier draft of ``specs5/6-deployment/startup.md`` had
+        it: the guarantee that step wanted — "previous messages to the first
+        browser connection" — holds by construction this way, and there is
+        no second copy of the conversation to go stale. It is a **read, not a
+        resume**: no engine is started to answer this.
+
+        Before the first connect the session shown is the one the next
+        connect will auto-resume, which is what makes a server restart
+        invisible: the model gets its context back from ``resume`` and the
+        user gets the matching transcript on first paint.
+
+        Note the frontend contract: a browser that reconnects *during* a
+        turn takes the live turn from ``active_streams`` and ignores
+        ``messages`` entirely (``onStateLoaded``'s ``wasStreaming``
+        early-return), so the two can never double-render the same blocks.
 
         ``pending_permissions`` is how a client that connects while a
         dialog is open gets the dialog: the request was broadcast before it
@@ -541,7 +628,7 @@ class ClaudeCodeService:
         off ``LLMService``, so the probe comes with it.
         """
         return {
-            "messages": [],
+            "messages": await self._current_messages(),
             "selected_files": list(self._selected_files),
             "denied_read_files": self.get_denied_read_files(),
             "session_id": self.session.session_id,
@@ -558,6 +645,51 @@ class ClaudeCodeService:
             "engine_health": self.get_engine_health(),
             "doc_convert_available": _doc_convert_available(),
         }
+
+    async def _current_messages(self) -> list[dict[str, Any]]:
+        """The rendered transcript of the session the browser is looking at.
+
+        Underscored: ``ExposeClass`` publishes every public method, and a
+        browser that wants a specific session's messages asks
+        ``history_load`` for it by ID.
+
+        An unreadable transcript renders as an empty conversation rather
+        than a failed snapshot. Every other field here — health, review
+        state, pending permissions — is still worth painting, and a browser
+        that cannot get a snapshot cannot show the user anything at all.
+        """
+        session_id = await self._visible_session_id()
+        if not session_id:
+            return []
+        loaded = await self.history_load(session_id)
+        if isinstance(loaded, dict):
+            logger.warning(
+                "Could not render session %s for the state snapshot: %s",
+                session_id,
+                loaded.get("error"),
+            )
+            return []
+        return loaded
+
+    async def _visible_session_id(self) -> str | None:
+        """Which session's transcript the browser should be shown.
+
+        The one we are attached to, or — before the engine has ever
+        connected — the one the next connect will attach to. Those are the
+        same conversation, so showing the second before it is live is not a
+        guess; ``_resume_attachment`` makes the same choice from the same
+        three sources.
+
+        ``None`` after ``new_session``, which is the one case where the next
+        turn starts a conversation that does not exist yet.
+        """
+        if self.session.session_id:
+            return self.session.session_id
+        if self._resume_request is not None:
+            return self._resume_request[0]
+        if not self._auto_resume:
+            return None
+        return await self._most_recent_session_id()
 
     def get_selected_files(self) -> list[str]:
         return list(self._selected_files)
@@ -1230,6 +1362,137 @@ class ClaudeCodeService:
             Event("navigateFile", {"path": path}, turn_scoped=False)
         )
         return {"status": "ok", "path": path}
+
+    # ------------------------------------------------------------------
+    # Sessions — new, resume, fork
+    # ------------------------------------------------------------------
+
+    async def new_session(self) -> dict[str, Any]:
+        """Abandon the current conversation and start a blank one.
+        **Localhost only.**
+
+        Gated: this discards the context every client is looking at, and
+        spends the host's engine. Refused while a turn is running rather
+        than interrupting one — the user can cancel first, and pulling the
+        session out from under a live turn loses its tail.
+
+        The engine is *not* reconnected here. The next turn connects with
+        no resume, which is exactly what a new session is, and a launch
+        that never chats never pays for a CLI subprocess (the same
+        lazy-connect bargain the rest of the service makes).
+
+        ``session_id`` is **null**, and cannot be otherwise: the CLI mints
+        the ID and only reports it in the init message of the first turn.
+        The spec's `{session_id: str}` described the native engine, which
+        minted its own. The browser learns the real ID from the
+        ``sessionStarted`` event that turn emits.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if self.session.streaming_active:
+            return {
+                "error": "A turn is still running",
+                "reason": "turn_in_progress",
+            }
+
+        await self.permissions.cancel_all()
+        await self.session.reset()
+        # No target, and no store lookup either: the user asked for blank.
+        self._resume_request = None
+        self._auto_resume = False
+        await self._broadcast(
+            Event(
+                "sessionChanged",
+                {"session_id": None, "messages": [], "action": "new"},
+                turn_scoped=False,
+            )
+        )
+        return {"session_id": None, "status": "new"}
+
+    async def resume_session(
+        self, session_id: str, fork: bool = False
+    ) -> dict[str, Any]:
+        """Attach the engine to a past session, or to a copy of one.
+        **Localhost only.**
+
+        Resumption is never a replay: the mirrored transcript is handed to
+        the CLI, which rebuilds its own context from it. AC-DC does not read
+        it back into a prompt — that is the mechanism that used to produce
+        sessions looking right in the UI while the model's view had
+        diverged (``specs5/3-engine/history.md`` § Resume, Fork, and New).
+        What we render is a *record* of the session; what the model gets is
+        the session.
+
+        ``fork=True`` copies it: the original is left untouched, which makes
+        forking the safe way to revisit an old conversation. The new ID is
+        minted by the CLI, so the response carries ``forked_from`` and a
+        null ``session_id`` until the first turn reports the real one.
+
+        Gated for the reason ``connect_engine`` is: a participant choosing
+        which conversation the host's engine attaches to would be deciding
+        for everyone.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not session_id:
+            return {"error": "A session ID is required", "reason": "no_session_id"}
+        if self.session.streaming_active:
+            return {
+                "error": "A turn is still running",
+                "reason": "turn_in_progress",
+            }
+
+        messages = await self.history_load(session_id)
+        if isinstance(messages, dict):
+            # Browsable but not resumable: deleted, unreadable, or from
+            # before the conversion. Reported rather than attempted — the
+            # CLI would fail the connect and the user would be looking at an
+            # engine that will not start.
+            return {
+                "error": messages.get("error", "That session cannot be read"),
+                "reason": "not_resumable",
+            }
+
+        await self.permissions.cancel_all()
+        self._resume_request = (session_id, bool(fork))
+        await self.session.reset()
+        outcome = await self.connect_engine()
+        if "error" in outcome:
+            return {"error": outcome["error"], "reason": outcome["reason"]}
+
+        action = "forked" if fork else "resumed"
+        resumed_id = self.session.session_id
+        payload: dict[str, Any] = {"action": action, "session_id": resumed_id}
+        if fork:
+            payload["forked_from"] = session_id
+        # Filed against the session named, not the live one. For a resume
+        # they are the same session. For a fork the live one has no ID yet,
+        # so the record goes where the user actually was: the origin's
+        # transcript, which now shows that a branch was taken from here.
+        await self._record_event(
+            "session_switch",
+            session_switch_content(action, session_id),
+            payload=payload,
+            session_id=session_id,
+        )
+        await self._broadcast(
+            Event(
+                "sessionChanged",
+                {
+                    "session_id": resumed_id,
+                    "messages": messages,
+                    "action": action,
+                    "forked_from": session_id if fork else None,
+                },
+                turn_scoped=False,
+            )
+        )
+        answer: dict[str, Any] = {"session_id": resumed_id}
+        if fork:
+            answer["forked_from"] = session_id
+        return answer
 
     # ------------------------------------------------------------------
     # History

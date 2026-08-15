@@ -17,11 +17,17 @@ The startup sequence is split into two phases to give the user early feedback. T
    - **No environment writing.** Nothing in this phase sets `os.environ`. The CLI resolves its own credentials, and a config that appeared to inject them would silently redirect billing away from the account the user authenticated (see [`../../specs-reference/1-foundation/configuration.md`](../../specs-reference/1-foundation/configuration.md) § The environment must not be written).
 4. Start webapp server — bundled static server (default), Vite dev, or Vite preview
 5. Construct the engine service with a deferred-init flag — no symbol index yet, and **no SDK client**
-6. **Load the last session's transcript from `.ac-dc4/`** — a disk read, before starting the WebSocket server, so `get_current_state` returns previous messages to the first browser connection
-7. Register services with the RPC server and start the WebSocket server
-8. Open browser (unless `--no-browser` flag passed) — user sees startup overlay immediately
+6. Register services with the RPC server and start the WebSocket server
+7. Open browser (unless `--no-browser` flag passed) — user sees startup overlay immediately
 
-Step 6 is a read, not a resume. Restoring the transcript makes the browser show the conversation; the
+**There is no transcript-loading step.** An earlier draft had one here — a disk read before the
+WebSocket server started, so `get_current_state` could return previous messages to the first browser
+connection. `get_current_state` reads the transcript itself, on demand, which delivers the same
+guarantee without an ordering requirement between a startup step and the first RPC, and without a
+second copy of the conversation on the service that can go stale. The startup sequence therefore says
+nothing about sessions at all.
+
+That read is a read, not a resume. Showing the transcript makes the browser show the conversation; the
 engine has no session until one is needed. Resuming is a `ClaudeSDKClient` connect with `resume`, and
 doing it eagerly at startup would spawn a `claude` subprocess for every launch — including the many where
 the user opens AC⚡DC to read a diff and never sends a message. See

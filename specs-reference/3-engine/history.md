@@ -155,7 +155,7 @@ time.
 | `review_start` / `review_end` | `{base, head, files: list[string]}` |
 | `preset_switch` | `{from, to}` |
 | `permission_mode` | `{from, to, source: "user" \| "engine"}` |
-| `session_switch` | `{action: "resumed" \| "forked", session_id, forked_from?}` |
+| `session_switch` | `{action: "resumed" \| "forked", session_id, forked_from?}` — `session_id` is the session now live, so it is **null for a fork** (see *RPC surface*); the record's own `session_id` field is the session switched away from, which for a resume is the same session |
 | `files_written_by_file_tools` | `{paths: list[string]}` |
 
 **The `files_written_by_file_tools` name is binding**, per
@@ -262,7 +262,7 @@ index is cold:
 | `preview` | string | First ~100 chars of the first user message |
 | `first_role` | string | |
 | `resumable` | bool | The store holds loadable entries for this ID and it is a valid UUID. False ⇒ browsable, labelled non-resumable |
-| `total_cost_usd` | float \| null | Sum over the session's result entries; null when every one has a null cost |
+| `total_cost_usd` | float \| null | **Always null.** There are no result entries to sum (see *Browse rendering*), and the field is kept only because the session row reads it |
 
 `engine_session` is gone: with one store, a session that exists is an engine session. What used to
 distinguish them — a browsable record with no transcript behind it — can now only arise from a deleted
@@ -287,11 +287,25 @@ Sessions:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `new_session` | — | `{session_id: str}` |
-| `resume_session` | `session_id: str, fork?: bool` | `{session_id: str, forked_from?: str}` or `{error: str, reason: str}` |
+| `new_session` | — | `{session_id: null, status: "new"}` |
+| `resume_session` | `session_id: str, fork?: bool` | `{session_id: str \| null, forked_from?: str}` or `{error: str, reason: str}` |
 
 `resume_session` with `fork: true` issues a **new** session ID and leaves the original untouched;
-the response carries both so the UI can label the fork.
+the response carries `forked_from` so the UI can label the fork.
+
+**A new session's ID is not knowable when the call returns.** The CLI mints it and reports it in the
+init message of the first turn; `ClaudeSDKClient` exposes no accessor for it before then. So
+`new_session` returns a null `session_id` (with `status` to distinguish success from the error shape),
+and so does a forked `resume_session`. A plain resume knows its ID, because it passed it in. The
+browser learns a minted ID from the `sessionStarted` event the first turn emits — which is also why
+`new_session` does not connect the engine: there is nothing to gain by connecting early and a CLI
+subprocess to pay for.
+
+Both are **localhost-only**, and both refuse while a turn is running (`reason: "turn_in_progress"`)
+rather than interrupting it: pulling the session out from under a live turn loses its tail, and the
+user can cancel first. `resume_session` verifies the transcript renders before attaching, so a session
+that is browsable but not resumable returns `reason: "not_resumable"` instead of leaving the user in
+front of an engine that will not start.
 
 There is no `list_engine_sessions` and no `delete_engine_session`. Under two stores those were the
 store-side listing and deletion, while `history_list_sessions` and a browser-side delete covered the
