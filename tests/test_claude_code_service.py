@@ -321,11 +321,7 @@ class TestRpcSurface:
 
     def test_phase_five_methods_are_absent(self, service):
         """A stub that reported success would be worse than a missing method."""
-        for name in (
-            "history_list",
-            "history_load",
-            "history_delete",
-        ):
+        for name in ("history_delete",):
             assert not hasattr(service, name), name
 
 
@@ -974,6 +970,11 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     # (specs5/4-features/collaboration.md § File Navigation Sync) — pointing
     # everyone at a file is a participant's to do.
     "navigate_file": ("a.py",),
+    # Reading past sessions changes nothing, and a participant who cannot
+    # see what the agent already did cannot review the work they were
+    # invited to look at. `history_delete` is the localhost-only one.
+    "history_list": (),
+    "history_load": ("sess-1",),
 }
 
 
@@ -1208,6 +1209,154 @@ class TestSessionStoreWiring:
         assert wired._session_project_key() == project_key_for_directory(
             str(wired._repo_root)
         )
+
+
+class TestHistoryRpcs:
+    """A real store, a real transcript, and the two read RPCs over it.
+
+    The point of phase 5: "restarting the server resumes the previous
+    conversation with context intact" (``specs5/plan/README.md``). These go
+    through the production store and the SDK's own parsers rather than a
+    fake, because the parsers are exactly what a hand-rolled fixture would
+    stop testing.
+    """
+
+    @pytest.fixture
+    def session_id(self):
+        import uuid
+
+        return str(uuid.uuid4())
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, session_id):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        svc.session.session_id = session_id
+        await svc.session_store.append(
+            {
+                "project_key": svc._session_project_key(),
+                "session_id": session_id,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": "u1",
+                    "parentUuid": None,
+                    "timestamp": "2026-08-16T00:00:00.000Z",
+                    "sessionId": session_id,
+                    "cwd": str(repo),
+                    "message": {"role": "user", "content": "fix the parser"},
+                },
+                {
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "parentUuid": "u1",
+                    "timestamp": "2026-08-16T00:00:02.000Z",
+                    "sessionId": session_id,
+                    "cwd": str(repo),
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "model": "claude-opus-5",
+                        "content": [{"type": "text", "text": "done"}],
+                        "usage": {"input_tokens": 40, "output_tokens": 9},
+                    },
+                },
+            ],
+        )
+        return svc
+
+    async def test_a_stored_session_is_listed(self, wired, session_id):
+        listed = await wired.history_list()
+        assert [s["session_id"] for s in listed] == [session_id]
+        assert listed[0]["preview"] == "fix the parser"
+        assert listed[0]["resumable"] is True
+
+    async def test_a_stored_session_loads_as_renderable_messages(
+        self, wired, session_id
+    ):
+        messages = await wired.history_load(session_id)
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == "fix the parser"
+        assert messages[1]["turn"]["model_usage"] == {
+            "claude-opus-5": {"input_tokens": 40, "output_tokens": 9}
+        }
+        # Prompt at :00, reply at :02 — the wait the user actually had.
+        assert messages[1]["turn"]["duration_ms"] == 2000
+
+    async def test_this_session_events_are_interleaved(self, wired, session_id):
+        """The half of a browsed transcript the engine never wrote."""
+        from ac_dc.claude_code.events_log import commit_content
+
+        await wired._record_event("commit", commit_content("abc1234", "fix: it"))
+        messages = await wired.history_load(session_id)
+        commits = [m for m in messages if m.get("event") == "commit"]
+        assert len(commits) == 1
+        assert commits[0]["system_event"] is True
+
+    async def test_an_event_with_no_session_does_not_reach_disk(self, wired):
+        wired.session.session_id = None
+        await wired._record_event("reset", "gone")
+        assert wired.events_log.dropped_without_session == 1
+
+    async def test_an_unknown_session_is_an_error_not_an_empty_list(self, wired):
+        """Empty would render as a session that happened and said nothing."""
+        answer = await wired.history_load("00000000-0000-4000-8000-000000000000")
+        assert "error" in answer
+
+    async def test_no_session_id_is_refused(self, wired):
+        assert "error" in await wired.history_load("")
+
+    async def test_a_read_failure_is_reported_not_swallowed(self, wired, session_id):
+        async def boom(*args, **kwargs):
+            raise OSError("disk is gone")
+
+        wired.session_store.list_session_summaries = boom
+        wired.session_store.list_sessions = boom
+        answer = await wired.history_list()
+        assert "error" in answer
+
+    async def test_without_a_repo_listing_is_empty_and_loading_says_why(
+        self, tmp_path, events
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert svc.events_log is None
+        assert await svc.history_list() == []
+        assert "error" in await svc.history_load("whatever")
+
+    async def test_recording_an_event_without_a_log_is_a_no_op(
+        self, tmp_path, events
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        svc.session.session_id = "s1"
+        await svc._record_event("reset", "nowhere to write this")
+
+    async def test_a_log_failure_does_not_fail_the_action_it_records(self, wired):
+        """The commit already happened; raising here would fail a completed
+        action over a missing history line."""
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("log is wedged")
+
+        wired.events_log.append = boom
+        await wired._record_event("commit", "already done")
+
+    def test_the_log_points_at_the_repo(self, wired, tmp_path):
+        assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
 
 
 class TestIndexReadiness:

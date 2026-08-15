@@ -791,7 +791,7 @@ class TurnTranslator:
             )
             duration_ms = 0
 
-        text = _result_text(content)
+        text = flatten_tool_result(content)
         preview, truncated = truncate_tool_result(text)
         files = _files_modified(call, is_error)
         for path in files:
@@ -919,8 +919,13 @@ def truncate_tool_result(text: str) -> tuple[str, bool]:
     return text, truncated
 
 
-def _result_text(content: Any) -> str:
-    """Flatten a tool result's content to text for previewing."""
+def flatten_tool_result(content: Any) -> str:
+    """Flatten a tool result's content to text for previewing.
+
+    Public because history rendering flattens the same shape read back off
+    disk. Two implementations of this would show a user a different preview
+    for a live result and for the same result reopened tomorrow.
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -938,19 +943,30 @@ def _result_text(content: Any) -> str:
     return str(content)
 
 
-def _files_modified(call: _ToolCall | None, is_error: bool) -> list[str]:
-    """Paths a successful tool call changed, from the call's own input.
+def files_written_by(tool_name: str, tool_input: dict[str, Any] | None) -> list[str]:
+    """Paths a tool call writes, deduced from the call's own input.
 
-    Attribution from the input is a stopgap: the ``PostToolUse`` hook
-    reports what was actually written and supersedes this once it lands.
+    The one home for the tool-name → path-key table. History rendering has
+    to attribute files the same way the live path does, and the narrow name
+    is the honest one: this sees only the four file tools, so a file changed
+    by ``Bash`` is not in the answer (CC-18).
+
+    Attribution from the *input* is itself a stopgap — the ``PostToolUse``
+    hook reports what was actually written and supersedes this once it
+    lands — but it must be the same stopgap in both directions.
     """
+    key = _FILE_WRITING_TOOLS.get(tool_name)
+    if key is None or not tool_input:
+        return []
+    path = tool_input.get(key)
+    return [path] if isinstance(path, str) and path else []
+
+
+def _files_modified(call: _ToolCall | None, is_error: bool) -> list[str]:
+    """:func:`files_written_by` for a live call, which may have failed."""
     if call is None or is_error:
         return []
-    key = _FILE_WRITING_TOOLS.get(call.name)
-    if key is None:
-        return []
-    path = call.input.get(key)
-    return [path] if isinstance(path, str) and path else []
+    return files_written_by(call.name, call.input)
 
 
 def _block_fields(block: Any) -> dict[str, Any]:

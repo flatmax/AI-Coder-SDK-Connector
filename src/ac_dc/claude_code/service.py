@@ -171,6 +171,12 @@ class ClaudeCodeService:
         # expires it, which is days later and looks like data loss rather
         # than a missing argument. Still injectable, for tests.
         self.session_store = session_store or self._build_session_store()
+        # The events the transcript never holds — commits, resets, mode
+        # switches. Built the same way as the store and for the same reason:
+        # a path derived from config, not a collaborator injected by the
+        # startup path. `None` without a repo, where there is nowhere to
+        # write and nothing to browse.
+        self.events_log = self._build_events_log()
         # The permission gate. Constructed before the session because the
         # session is built *around* its callback: attaching it afterwards
         # would need a reconnect, and a session running without it would
@@ -270,6 +276,52 @@ class ClaudeCodeService:
         from ac_dc.claude_code.session_store import RepoSessionStore
 
         return RepoSessionStore(Path(ac_dc_dir) / "sessions")
+
+    def _build_events_log(self) -> Any:
+        """``.ac-dc4/events.jsonl``, or ``None`` without a repo.
+
+        Nothing derives this file, so nothing can rebuild it — but its
+        absence costs only the operational lines in a browsed transcript,
+        never a session. So a repoless run logs a note and carries on
+        rather than failing to start.
+        """
+        ac_dc_dir = getattr(self._config, "ac_dc_dir", None)
+        if ac_dc_dir is None:
+            return None
+        from ac_dc.claude_code.events_log import EventsLog
+
+        return EventsLog(Path(ac_dc_dir) / "events.jsonl")
+
+    async def _record_event(
+        self,
+        event: str,
+        content: str,
+        *,
+        request_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one operational event to this session's history.
+
+        Every failure path here is a no-op on purpose. The caller is a
+        commit, a reset or a mode switch that has **already happened**;
+        raising from the record of it would fail a completed action, and
+        the log counts its own losses (``EventsLog.write_failures``).
+
+        Silent when there is no session yet: the log drops those itself,
+        because a record with no session has no transcript to appear in.
+        """
+        if self.events_log is None:
+            return
+        try:
+            await self.events_log.append(
+                event,
+                session_id=self.session.session_id,
+                content=content,
+                request_id=request_id,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Could not record a %r event", event)
 
     def _session_project_key(self) -> str:
         """The store's project key for this repo.
@@ -1178,6 +1230,91 @@ class ClaudeCodeService:
             Event("navigateFile", {"path": path}, turn_scoped=False)
         )
         return {"status": "ok", "path": path}
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+
+    async def history_list(
+        self, limit: int = 50
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Past sessions for this repo, most recently modified first.
+
+        A bare list on success and ``{"error": ...}`` on failure, the union
+        the RPC table specifies (``specs-reference/3-engine/history.md``
+        § RPC surface). An empty list would conflate "no history yet" with
+        "could not read it", and only the second is worth a user's time.
+
+        Unrestricted. Reading what the agent did is the reviewing half of
+        collaboration, and a participant who cannot see the history cannot
+        review the work they were invited to look at
+        (``specs5/4-features/collaboration.md`` § Read-Only).
+
+        ``limit`` bounds the real work: the listing itself is one batch read
+        of the summary sidecars, but an exact ``message_count`` costs one
+        parse per session listed.
+        """
+        if self.session_store is None:
+            return []
+
+        from ac_dc.claude_code import history
+
+        try:
+            return await history.list_sessions(
+                self.session_store, str(self._repo_root), limit=max(0, int(limit))
+            )
+        except Exception as exc:
+            logger.exception("history_list failed")
+            return {"error": f"Could not read the session history: {exc}"}
+
+    async def history_load(
+        self, session_id: str
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """One past session's messages, rendered for the browser.
+
+        **Read-only, and deliberately not a resume.** This reads a
+        transcript; ``resume_session`` is what puts the engine back into
+        one. Keeping them apart means browsing history cannot disturb a
+        turn that is running.
+
+        Rendered here, at read time, from the stored entries — so a
+        rendering fix reaches every session anyone has ever had, rather
+        than only the ones recorded after it shipped.
+        """
+        if not session_id:
+            return {"error": "A session ID is required"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from ac_dc.claude_code import history
+
+        events: list[dict[str, Any]] = []
+        if self.events_log is not None:
+            try:
+                events = await self.events_log.load(session_id)
+            except Exception:
+                # The conversation is the point; the operational lines are
+                # a garnish on it. Losing them must not lose the session.
+                logger.exception("Could not read events for %s", session_id)
+
+        try:
+            messages = await history.load_session(
+                self.session_store,
+                session_id,
+                str(self._repo_root),
+                events=events,
+            )
+        except Exception as exc:
+            logger.exception("history_load failed for %s", session_id)
+            return {"error": f"Could not read session {session_id}: {exc}"}
+
+        if not messages:
+            # An empty transcript is never stored, so nothing to render
+            # means the session is gone or unparseable — not that it
+            # happened and said nothing. An empty list would render as the
+            # latter, which is a lie the user cannot act on.
+            return {"error": f"Session {session_id} has no readable transcript"}
+        return messages
 
     # ------------------------------------------------------------------
     # Git — commit, reset, review

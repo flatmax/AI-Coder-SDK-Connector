@@ -93,7 +93,16 @@ Rendering happens at read time, not write time:
 - Tool calls are summarised for display when the card is built — name, input summary, status, duration.
   A full `Read` result of a 2000-line file has no browse value, but summarising it *into storage* would
   be a second version of the truth; summarising it into a card is just rendering.
-- Turn results — cost, usage, duration, terminal reason — likewise come from the result entry.
+- Turn footers are **reconstructed**, not read. The transcript holds no result entry — verified against
+  real CLI-written transcripts, and structurally guaranteed: the store is a mirror of the CLI's own
+  transcript writes, so it receives exactly the entries the CLI writes and nothing else. So usage comes
+  from each assistant message's own `usage` field, deduplicated by `message.id` (the CLI writes one
+  entry per content block and repeats `usage` on every one of them) and summed per model; tool-call
+  counts from the `tool_use` blocks; duration from the timestamp span between the prompt and the turn's
+  last entry. **Cost and terminal reason are unavailable and are reported as absent** rather than
+  guessed — a browsed turn shows no cost figure and no terminal badge. Cost is derived by the CLI from a
+  pricing table we do not have and is null under subscription billing anyway; a "completed" badge on no
+  evidence would be worse than no badge.
 - Our own operational events come from `events.jsonl` and are interleaved by session ID and request ID.
 
 A line that fails to parse is skipped with a warning: a partial write from a crash must not make a

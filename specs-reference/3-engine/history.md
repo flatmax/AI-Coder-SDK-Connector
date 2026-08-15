@@ -195,8 +195,27 @@ from parsed entries:
 |---|---|
 | User text, assistant text, thinking | `get_session_messages_from_store()` on the session's entries |
 | Tool card — name, input summary, status, duration, `agent_id` | The `tool_use` / `tool_result` entries; summaries are built for the card, never stored |
-| Turn footer — usage, cost, `num_turns`, `terminal_reason`, `is_error` | The transcript's own result entry, which is why a reopened session shows the same footer it showed live |
+| Turn footer — usage, `num_turns`, `duration_ms` | Reconstructed. **There is no result entry in the transcript** (see below) |
+| Turn footer — `total_cost_usd`, `terminal_reason` | Unavailable. Reported as absent, so a browsed turn shows no cost figure and no terminal badge |
 | System-event cards | `events.jsonl` |
+
+**No result entry.** The store is a mirror written *after* the CLI's own transcript write — the SDK's
+`transcript_mirror_batcher` coalesces `transcript_mirror` frames and calls `store.append()` with exactly
+the entries the CLI wrote. The CLI does not write a result entry, verified against real transcripts, so
+the store cannot hold one. A reopened turn's footer is therefore rebuilt from what is there:
+
+- **usage** — each assistant message's own `usage`, deduplicated by `message.id` and summed per model.
+  The dedup is load-bearing: the CLI writes **one entry per content block** and repeats the whole
+  `usage` object on every entry it split a message into, so summing entries multiplies a turn's tokens
+  by its block count.
+- **`num_turns`** — distinct assistant `message.id`s in the turn.
+- **`duration_ms`** — the timestamp span from the prompt entry to the turn's last entry, which is the
+  wall clock the user waited through. Per-tool durations are the span from the `tool_use` entry to its
+  `tool_result` entry.
+- **`total_cost_usd`** — absent. The CLI derives it from a pricing table we do not have, and it is null
+  under subscription billing regardless. `$0.00` would be a claim; nothing is the truth.
+- **`terminal_reason`** — absent. Nothing in the transcript records why a turn ended, and a "completed"
+  badge on no evidence is worse than no badge.
 
 ### System-event content templates
 
