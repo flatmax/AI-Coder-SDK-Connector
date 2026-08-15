@@ -1139,6 +1139,7 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "history_list": (),
     "history_load": ("sess-1",),
     "history_image": ("sess-1", "sess-1-u1", 0),
+    "history_search": ("parser",),
     "list_subagent_transcripts": (),
     "get_subagent_transcript": ("a1",),
 }
@@ -1492,6 +1493,381 @@ class TestHistoryRpcs:
 
     def test_the_log_points_at_the_repo(self, wired, tmp_path):
         assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
+
+
+class TestSearch:
+    """The same rows whether the index is warm, cold or corrupt."""
+
+    @pytest.fixture
+    def old(self):
+        return "55555555-5555-4555-8555-555555555555"
+
+    @pytest.fixture
+    def newer(self):
+        return "66666666-6666-4666-8666-666666666666"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, old, newer):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        await seed_transcript(
+            svc, old, prompt="the parser is broken", reply="fixed the parser"
+        )
+        await seed_transcript(
+            svc, newer, prompt="rename the widget", reply="renamed it"
+        )
+        return svc
+
+    async def test_a_hit_carries_where_it_was_and_why_it_matched(self, wired, old):
+        rows = await wired.history_search("parser")
+        assert {r["session_id"] for r in rows} == {old}
+        assert {r["role"] for r in rows} == {"user", "assistant"}
+        user = next(r for r in rows if r["role"] == "user")
+        assert user["entry_uuid"] == f"{old}-u1"
+        assert user["content_preview"] == "the parser is broken"
+        assert user["timestamp"] == "2026-08-16T00:00:00.000Z"
+
+    async def test_the_newest_session_comes_first(self, wired, old, newer):
+        rows = await wired.history_search("the")
+        assert [r["session_id"] for r in rows][0] == newer
+        assert old in {r["session_id"] for r in rows}
+
+    async def test_a_cold_index_answers_the_same_as_a_warm_one(self, wired):
+        """The invariant the whole arrangement exists for: an index is a
+        speed-up, so deleting it must not change an answer."""
+        warm = await wired.history_search("parser")
+        assert wired.history_index.path.exists()
+        wired.history_index.path.unlink()
+        wired.history_index._loaded = False
+        wired.history_index._postings = {}
+        wired.history_index._sessions = {}
+        assert await wired.history_search("parser") == warm
+
+    async def test_no_index_at_all_answers_the_same(self, wired):
+        warm = await wired.history_search("parser")
+        wired.history_index = None
+        assert await wired.history_search("parser") == warm
+
+    async def test_a_corrupt_index_is_discarded_not_trusted(self, wired):
+        expected = await wired.history_search("parser")
+        wired.history_index.path.write_text("{not json", encoding="utf-8")
+        wired.history_index._loaded = False
+        assert await wired.history_search("parser") == expected
+
+    async def test_a_word_internal_match_is_found_either_way(self, wired):
+        """A term index that only matched whole words would answer
+        differently from the fallback scan."""
+        with_index = await wired.history_search("arser")
+        wired.history_index = None
+        assert with_index == await wired.history_search("arser")
+        assert with_index != []
+
+    async def test_a_query_of_punctuation_falls_back_to_the_scan(self, wired):
+        """Nothing tokenises, so there is nothing to look up — and the
+        answer still has to be right."""
+        rows = await wired.history_search("!!")
+        assert rows == []
+
+    async def test_the_role_filter_narrows_to_one_side(self, wired):
+        rows = await wired.history_search("parser", role="assistant")
+        assert [r["role"] for r in rows] == ["assistant"]
+        assert rows[0]["content_preview"] == "fixed the parser"
+
+    async def test_an_unknown_role_is_refused_rather_than_silently_empty(self, wired):
+        answer = await wired.history_search("parser", role="robot")
+        assert "error" in answer
+
+    async def test_a_tool_call_is_searchable_by_its_input(self, wired, newer):
+        """What these searches are usually for: a path, a command, a pattern
+        the agent used. All of it is in the input."""
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": newer,
+            },
+            [
+                {
+                    "type": "assistant",
+                    "uuid": f"{newer}-a2",
+                    "parentUuid": f"{newer}-a1",
+                    "timestamp": "2026-08-16T00:00:05.000Z",
+                    "message": {
+                        "id": f"msg_{newer}_2",
+                        "role": "assistant",
+                        "model": "claude-opus-5",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "ruff check src/ac_dc"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        rows = await wired.history_search("ruff check")
+        assert [r["role"] for r in rows] == ["tool"]
+        assert "ruff check src/ac_dc" in rows[0]["content_preview"]
+
+    async def test_a_tool_result_is_never_searched(self, wired, newer):
+        """The transcript holds results verbatim because it must; searching
+        them would return file contents, which is what ``Grep`` is for."""
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": newer,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": f"{newer}-r1",
+                    "parentUuid": f"{newer}-a1",
+                    "timestamp": "2026-08-16T00:00:06.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": "a distinctive haystack string",
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        assert await wired.history_search("distinctive haystack") == []
+
+    async def test_the_framing_is_not_searchable(self, wired, newer):
+        """The context block is ours, not the user's, and a search for a
+        file we injected would hit every prompt."""
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": newer,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": f"{newer}-u2",
+                    "parentUuid": f"{newer}-a1",
+                    "timestamp": "2026-08-16T00:00:07.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": (
+                            "<ac-dc-ui-context>selected: zzzunique.py"
+                            "</ac-dc-ui-context>\nwhat does it do?"
+                        ),
+                    },
+                }
+            ],
+        )
+        assert await wired.history_search("zzzunique") == []
+        assert len(await wired.history_search("what does it do")) == 1
+
+    async def test_the_limit_caps_the_rows(self, wired):
+        assert len(await wired.history_search("the", limit=1)) == 1
+
+    async def test_an_empty_query_is_not_an_error(self, wired):
+        assert await wired.history_search("") == []
+
+    async def test_without_a_store_there_is_nothing_to_search(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert svc.history_index is None
+        assert await svc.history_search("anything") == []
+
+    async def test_a_search_failure_is_reported_not_swallowed(self, wired):
+        async def boom(*args, **kwargs):
+            raise OSError("disk is gone")
+
+        wired.session_store.list_sessions = boom
+        assert "error" in await wired.history_search("parser")
+
+
+class TestTheDerivedIndex:
+    """It caches and it narrows; it never becomes the answer."""
+
+    @pytest.fixture
+    def session_id(self):
+        return "77777777-7777-4777-8777-777777777777"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, session_id):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        await seed_transcript(svc, session_id, prompt="index me")
+        return svc
+
+    def test_it_lands_under_the_project_key(self, wired, tmp_path):
+        assert wired.history_index.path.parent == (
+            tmp_path / "repo" / ".ac-dc4" / "index"
+        )
+        assert wired.history_index.path.name.endswith(".json")
+
+    async def test_the_session_list_is_cached_by_mtime(self, wired, session_id):
+        """A listing that reparsed every session would grow with history."""
+        first = await wired.history_list()
+        parses = []
+        import claude_agent_sdk
+
+        original = claude_agent_sdk.get_session_messages_from_store
+
+        async def counting(*args, **kwargs):
+            parses.append(args[1])
+            return await original(*args, **kwargs)
+
+        claude_agent_sdk.get_session_messages_from_store = counting
+        try:
+            assert await wired.history_list() == first
+        finally:
+            claude_agent_sdk.get_session_messages_from_store = original
+        assert parses == []
+
+    async def test_a_changed_session_is_reparsed(self, wired, session_id):
+        before = await wired.history_list()
+        assert before[0]["message_count"] == 2
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": session_id,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": f"{session_id}-u2",
+                    "parentUuid": f"{session_id}-a1",
+                    "timestamp": "2026-08-16T00:00:09.000Z",
+                    "message": {"role": "user", "content": "and again"},
+                }
+            ],
+        )
+        after = await wired.history_list()
+        assert after[0]["message_count"] == 3
+
+    async def test_a_grown_session_is_indexed_from_where_it_stopped(
+        self, wired, session_id
+    ):
+        """Transcripts are append-only, so a turn costs indexing one turn."""
+        await wired.history_search("index")
+        assert wired.history_index._sessions[session_id]["entries"] == 2
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": session_id,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": f"{session_id}-u2",
+                    "parentUuid": f"{session_id}-a1",
+                    "timestamp": "2026-08-16T00:00:09.000Z",
+                    "message": {"role": "user", "content": "a second question"},
+                }
+            ],
+        )
+        rows = await wired.history_search("second question")
+        assert [r["entry_uuid"] for r in rows] == [f"{session_id}-u2"]
+        assert wired.history_index._sessions[session_id]["entries"] == 3
+
+    async def test_an_oversized_text_makes_its_session_always_scanned(
+        self, wired, session_id
+    ):
+        """A truncated term list would make a real hit findable only after
+        someone deleted the index."""
+        from ac_dc.claude_code.history_index import _TEXT_CAP
+
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": session_id,
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": f"{session_id}-big",
+                    "parentUuid": f"{session_id}-a1",
+                    "timestamp": "2026-08-16T00:00:10.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": "x" * (_TEXT_CAP + 1) + " needle",
+                    },
+                }
+            ],
+        )
+        rows = await wired.history_search("needle")
+        assert [r["entry_uuid"] for r in rows] == [f"{session_id}-big"]
+        assert wired.history_index._sessions[session_id]["scan"] is True
+
+    async def test_a_deleted_session_leaves_no_postings(self, wired, session_id):
+        await wired.history_search("index")
+        assert wired.history_index._postings
+        await wired.session_store.delete(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": session_id,
+            }
+        )
+        await wired.history_index.refresh()
+        assert wired.history_index._postings == {}
+        assert wired.history_index._sessions == {}
+
+    async def test_forgetting_a_session_is_persisted(self, wired, session_id):
+        await wired.history_search("index")
+        await wired.history_index.forget(session_id)
+        assert wired.history_index._sessions == {}
+        import json
+
+        saved = json.loads(wired.history_index.path.read_text())
+        assert saved["sessions"] == {}
+        assert saved["postings"] == {}
+
+    async def test_forgetting_a_session_it_never_saw_writes_nothing(self, wired):
+        await wired.history_index.forget("no-such-session")
+        assert not wired.history_index.path.exists()
+
+    async def test_an_index_from_another_version_is_discarded(self, wired):
+        import json
+
+        wired.history_index.path.parent.mkdir(parents=True, exist_ok=True)
+        wired.history_index.path.write_text(
+            json.dumps({"version": 99, "sessions": {"x": {}}, "postings": {"y": []}}),
+            encoding="utf-8",
+        )
+        rows = await wired.history_search("index me")
+        assert len(rows) == 1
+        assert "x" not in wired.history_index._sessions
+
+    async def test_a_session_it_could_not_read_is_scanned_not_skipped(
+        self, wired, session_id
+    ):
+        original = wired.session_store.load
+        calls = {"n": 0}
+
+        async def flaky(key):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient")
+            return await original(key)
+
+        wired.session_store.load = flaky
+        rows = await wired.history_search("index me")
+        assert [r["session_id"] for r in rows] == [session_id]
+        assert wired.history_index._sessions[session_id]["scan"] is True
 
 
 class TestImagesAreFetchedOneAtATime:

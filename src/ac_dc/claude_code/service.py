@@ -179,6 +179,9 @@ class ClaudeCodeService:
         # startup path. `None` without a repo, where there is nowhere to
         # write and nothing to browse.
         self.events_log = self._build_events_log()
+        # Derived from the store, so it is built with it and `None` for the
+        # same reason: nothing to derive from without a repo.
+        self.history_index = self._build_history_index()
         # The permission gate. Constructed before the session because the
         # session is built *around* its callback: attaching it afterwards
         # would need a reconnect, and a session running without it would
@@ -305,6 +308,28 @@ class ClaudeCodeService:
         from ac_dc.claude_code.events_log import EventsLog
 
         return EventsLog(Path(ac_dc_dir) / "events.jsonl")
+
+    def _build_history_index(self) -> Any:
+        """``.ac-dc4/index/<project_key>.json``, or ``None`` without a store.
+
+        Unlike the events log, losing this file costs nothing but time: it
+        is derived from the transcripts, rebuilt on the next search, and
+        deleting it is a supported operation
+        (``specs5/3-engine/history.md`` § The Derived Index). Per
+        ``project_key``, because two worktrees of one repo have two session
+        directories and an index that mixed them would answer for the wrong
+        one.
+        """
+        ac_dc_dir = getattr(self._config, "ac_dc_dir", None)
+        if ac_dc_dir is None or self.session_store is None:
+            return None
+        from ac_dc.claude_code.history_index import HistoryIndex
+
+        return HistoryIndex(
+            Path(ac_dc_dir) / "index" / f"{self._session_project_key()}.json",
+            self.session_store,
+            str(self._repo_root),
+        )
 
     async def _record_event(
         self,
@@ -1524,7 +1549,10 @@ class ClaudeCodeService:
 
         try:
             return await history.list_sessions(
-                self.session_store, str(self._repo_root), limit=max(0, int(limit))
+                self.session_store,
+                str(self._repo_root),
+                limit=max(0, int(limit)),
+                index=self.history_index,
             )
         except Exception as exc:
             logger.exception("history_list failed")
@@ -1578,6 +1606,51 @@ class ClaudeCodeService:
             # latter, which is a lie the user cannot act on.
             return {"error": f"Session {session_id} has no readable transcript"}
         return messages
+
+    async def history_search(
+        self, query: str, role: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Substring search across every stored session.
+
+        Newest first, capped — the native engine's ordering and its default
+        of 50, kept so a habit formed before the conversion still works.
+
+        ``role`` narrows to ``"user"``, ``"assistant"`` or ``"tool"``. That
+        third value is new: a tool call is neither the user's words nor the
+        model's prose, and the searches this serves best — for a path, a
+        command, a pattern the agent used — are all tool calls. Tool
+        *results* are not searched at all; that is what ``Grep`` is for.
+
+        Served from the derived index when it is warm and by scanning the
+        transcripts when it is not, and both answer the same rows: the index
+        narrows which sessions to read, and every hit is confirmed against
+        the transcript text.
+        """
+        if not query:
+            # Not an error: an empty search box is a user who has not
+            # searched yet, and an error toast for typing nothing would be
+            # noise.
+            return []
+        if self.session_store is None:
+            return []
+
+        from ac_dc.claude_code.history_index import ROLES, SEARCH_LIMIT, search
+
+        if role and role not in ROLES:
+            return {"error": f"Unknown role {role!r}; expected one of {sorted(ROLES)}"}
+
+        try:
+            return await search(
+                self.session_store,
+                str(self._repo_root),
+                query,
+                index=self.history_index,
+                role=role or None,
+                limit=max(1, int(limit)) if limit else SEARCH_LIMIT,
+            )
+        except Exception as exc:
+            logger.exception("history_search failed")
+            return {"error": f"Could not search the session history: {exc}"}
 
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int

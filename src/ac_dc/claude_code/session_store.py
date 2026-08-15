@@ -272,6 +272,13 @@ class RepoSessionStore:
 
         Subagent transcripts are excluded: they live one directory deeper,
         so the shape of the layout does the excluding.
+
+        Each row carries a ``size`` alongside the two fields the protocol
+        asks for. The SDK reads ``session_id`` and ``mtime`` and ignores the
+        rest; what needs the extra field is the derived index, whose
+        staleness check must not miss an append that landed in the same
+        millisecond as the last one it saw. Transcripts only grow, so the
+        byte count settles that where a timestamp cannot.
         """
         _safe_component(project_key, "project_key")
         loop = asyncio.get_running_loop()
@@ -506,13 +513,15 @@ class RepoSessionStore:
             try:
                 if not entry.is_file():
                     continue
-                mtime = int(entry.stat().st_mtime * 1000)
+                stat = entry.stat()
+                mtime = int(stat.st_mtime * 1000)
             except OSError:
                 continue
             results.append(
                 {
                     "session_id": entry.name[: -len(_JSONL_SUFFIX)],
                     "mtime": mtime,
+                    "size": stat.st_size,
                 }
             )
         # Order is unspecified by the protocol — the SDK sorts by mtime

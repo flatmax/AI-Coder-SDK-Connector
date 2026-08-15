@@ -132,6 +132,7 @@ async def list_sessions(
     directory: str,
     *,
     limit: int | None = None,
+    index: Any = None,
 ) -> list[dict[str, Any]]:
     """The session list, most recently modified first.
 
@@ -141,10 +142,14 @@ async def list_sessions(
     is one parse per listed session, and is what makes ``message_count``
     exact; ``limit`` is therefore the bound on the work this does.
 
-    The derived index will cache the second call's answers
-    (``specs5/3-engine/history.md`` § The Derived Index). Until it exists
-    this recomputes them, which the spec sanctions: a cold index is a
-    performance problem, never a correctness one.
+    The derived index caches the *finished row*, keyed by the transcript's
+    mtime, so the second call happens only for sessions that changed — in
+    practice the one being talked in. What is cached is the parser's own
+    answer rather than a second way of counting messages, because a cache
+    that recomputed the count its own way would be a second number for one
+    fact (``specs5/3-engine/history.md`` § The Derived Index). Without an
+    index every row is recomputed, which the spec sanctions: a cold index
+    is a performance problem, never a correctness one.
     """
     from claude_agent_sdk import (
         get_session_messages_from_store,
@@ -152,8 +157,14 @@ async def list_sessions(
     )
 
     infos = await list_sessions_from_store(store, directory, limit=limit)
+    cache = await index.cached_summaries() if index is not None else {}
     summaries: list[dict[str, Any]] = []
+    computed = False
     for info in infos:
+        cached = cache.get(info.session_id)
+        if cached is not None:
+            summaries.append(cached)
+            continue
         try:
             messages = await get_session_messages_from_store(
                 store, info.session_id, directory
@@ -161,7 +172,13 @@ async def list_sessions(
         except OSError:
             logger.warning("Could not read session %s while listing", info.session_id)
             messages = []
-        summaries.append(summarise_session(info, messages))
+        summary = summarise_session(info, messages)
+        summaries.append(summary)
+        if index is not None:
+            await index.remember_summary(info.session_id, summary)
+            computed = True
+    if computed:
+        await index.save()
     return summaries
 
 
