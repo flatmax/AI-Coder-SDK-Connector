@@ -349,3 +349,35 @@ after every turn, and `get_context_usage` exists as an RPC. What is missing is o
 Context tab that lists what `get_context_usage()` reports. Phase 6 upgrades them into the
 visualisation [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md) describes,
 starting from a working panel and a gate that can already be checked against `/context`.
+
+---
+
+## CC-18 — Index freshness after `Bash` is an open choice, and the record must not pre-empt it
+
+Phase 4's `PostToolUse` re-index watches `Write`, `Edit`, `MultiEdit` and `NotebookEdit`. A `sed -i`,
+a `git checkout`, a formatter or an `npm install` run through `Bash` changes files no index hears
+about until the next full build ([`delivery.md`](delivery.md#deviations-from-inventorymd-1) calls this
+phase 4's largest known hole). **How that is closed is not decided.** The candidates:
+
+| Option | Cost |
+|---|---|
+| Filesystem watcher | A new subsystem: cross-platform behaviour, debouncing, gitignore-awareness, and a thrash risk on build directories. |
+| Parse `Bash` input for touched paths | Rejected at implementation time — tool input is not reliably parseable into "which files did this touch". |
+| Re-index after every `Bash` call | Re-indexes after every `ls`. |
+| Nothing, stated in the spec | Honest and free; leaves the agent's own `Read` as the only fresh view. |
+
+"Nothing, documented" is a legitimate outcome, which is precisely why it must be chosen rather than
+inherited. The implementation is its own phase (phase 8) and is sequenced *after* phase 5: it does not
+block history, and phase 5 is what reveals whether the durable record wants a watcher at all.
+
+**What is binding now is the naming.** Both candidate sources for a "what changed this turn" record
+share the `Bash` blind spot — `take_reindexed()` because the hook never fires, and
+`result['files_modified']` because `messages.py:62` gates it on the same four-tool
+`_FILE_WRITING_TOOLS` map, its own docstring calling input-attribution "a stopgap". So any persisted
+field **must be named for what it actually contains** (`files_written_by_file_tools` or equivalent),
+never `files_changed`.
+
+**Why it matters:** a wrong live broadcast dies at reload. A wrong field written into `.ac-dc4/` is
+what the history browser and full-text search then show, permanently, and correcting it means
+migrating transcripts users have already accumulated. The cheap moment to be accurate about scope is
+before the first one is written — phase 5, before CC-18's implementation exists.

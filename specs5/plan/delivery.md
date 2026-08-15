@@ -1030,8 +1030,10 @@ Two facts from the live runs worth knowing:
   the agent grep its way around a repo will not know why.
 - **No token-cost display for the tool inventory.** `mcp-bridge.md` also wants server health and the
   `ac-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
-  the panel does not mention them. Phase 6 territory, and it inherits phase 3's gap that neither
-  context panel has a unit test. The banner above is the same missing surface seen from the other side.
+  the panel does not mention them. Phase 6 territory. The banner above is the same missing surface seen
+  from the other side. It also inherited phase 3's gap that neither context panel has a unit test —
+  that half has since been pulled forward to sit ahead of phase 5, because phase 5 adds *session load*
+  as a second refresh trigger into panels nobody has watched work.
 - **No `symbol_map` in the Context tab's cost breakdown.** Same reason.
 - **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8, unchanged from
   phase 3.
@@ -1050,6 +1052,19 @@ Two facts from the live runs worth knowing:
   "files changed this turn" record that survives a reload, `take_reindexed()` is the honest source for
   the index half and `result['files_modified']` for the CLI's half. They disagree by design: the first
   is repo-relative and filtered to files an index cares about, the second is absolute and everything.
+- **Neither of those two is "files changed", and the persisted field must not say it is** —
+  [`decisions.md#cc-18`](decisions.md). Where they disagree is documented above; where they *agree* is
+  the trap: both miss `Bash`. `take_reindexed()` misses it because the hook never fires for `Bash`, and
+  `result['files_modified']` misses it because `messages.py:62` gates `_files_modified` on the same
+  four-tool `_FILE_WRITING_TOOLS` map — whose docstring already calls input-attribution "a stopgap".
+  Name the field for what it holds (`files_written_by_file_tools` or equivalent). A wrong live
+  broadcast dies at reload; a wrong field in `.ac-dc4/` is what the history browser and full-text
+  search show until someone migrates every transcript users have accumulated. Phase 8 may later make
+  the narrow name obsolete — that is a cheap problem, and the reverse is not.
+- **Before you start, the two context panels need tests and one live run.** They refresh on *a turn
+  runs* and *a session loads*, and you are building session loading. See the README's status section;
+  this is deliberately not phase-5 scope, it is phase 3 work that phase 5 would otherwise inherit the
+  blame for.
 - **Nothing in the config layer may write `os.environ`**, and **hooks must never return a
   `permissionDecision`.** The second is new with this phase and is the sharper of the two: a
   `PostToolUse` hook returning one shadows `can_use_tool` entirely, ungating every gated tool with no

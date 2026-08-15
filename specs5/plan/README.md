@@ -11,6 +11,14 @@ history and moves under `specs5/impl-history/`.
 
 **Phases 0 through 4 are done. Phase 5 — history and sessions — is next and is unblocked.**
 
+**One thing goes before phase 5, and it is not a phase.** `context-usage-tab.js` and `usage-hud.js`
+have no unit tests and have never been run against a live CLI (below). They refresh on two events:
+*a turn runs* and *a session loads* — and phase 5 is the phase that introduces session loading. Adding
+a second firing path into an untested panel means the first person to resume a conversation cannot
+tell whether phase 5 broke the breakdown or whether it was ever right. Close it first: unit tests for
+both panels, and one live run. Phase 6 then stays what it should be — confirm the numbers match
+`/context`, and add the `ac-dc` tool inventory with its token cost.
+
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
 landed, what it deliberately left out, and what the next phase has to do first. The phase-4 entry
 is the one that matters for picking this up cold.
@@ -46,8 +54,10 @@ The state phase 5 inherits:
 - **Two panels were replaced, not vacated** — [`decisions.md#cc-17`](decisions.md).
   `context-usage-tab.js` and `usage-hud.js` (1215 lines, replacing 3605) read
   `ClaudeCodeService.get_context_usage`, a pass-through of the breakdown the CLI's own `/context`
-  prints. **Neither has been exercised against a running CLI, and neither has a unit test** — the
-  first thing worth closing, ahead of its formal home in phase 6.
+  prints. **Neither has been exercised against a running CLI, and neither has a unit test** — the only
+  coverage is backend pass-through in `test_claude_code_session.py`. Close it before phase 5, per the
+  note above; the permission dialog's capacity bar is a third reader of the same RPC, so the blast
+  radius is wider than the two panels.
 - **The file picker's third checkbox state writes a real `Read` deny rule** to
   `.claude/settings.local.json` (CC-14), and says "deny agent read" rather than "exclude from
   index". The L0-invalidation dialog is gone with the cache it asked about; its one honest job —
@@ -57,7 +67,9 @@ The state phase 5 inherits:
   `DocIndexBuilder.note_file_written` now has two callers, `Repo.write_file` for the user's edits and
   the `PostToolUse` re-index for the agent's. **What still escapes is `Bash`** — a `sed -i` or a
   `git checkout` changes files no index hears about until the next full build. Phase 4's largest known
-  hole; see [`delivery.md`](delivery.md#deviations-from-inventorymd-1).
+  hole; see [`delivery.md`](delivery.md#deviations-from-inventorymd-1). It is now phase 8 with the
+  choice left open ([`decisions.md#cc-18`](decisions.md)), and the half that binds phase 5 is naming:
+  no persisted field may call itself `files_changed`.
 - **Some surfaces are mounted and inert, deliberately.** The code/doc mode toggle and the agent tab
   strip have no emitter for the pushes that drive them; their replacements are the preset selector
   (CC-12) and the subagent browser (CC-8), both deferred by decision. They are annotated where they
@@ -133,8 +145,9 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
-| **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17) but are unverified against a live engine and untested. This phase is now *confirm and finish* rather than *build*. | The Context tab shows the same numbers as `/context` in the CLI, live. |
+| **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17), and their tests and first live run are pulled forward ahead of phase 5 (see status, above). What is left here is *upgrade*: the designed visualisation, plus MCP server health and the `ac-dc` tool inventory with its token cost — and the bridge-failure banner, which is the same missing surface seen from the other side. | The Context tab shows the same numbers as `/context` in the CLI, live, and names the `ac-dc` tools it is paying for. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
+| **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
 
 Phases 1–3 were the risky ones and were not interleaved: the native engine stayed intact and
 reachable until phase 2's exit criterion was genuinely met, and the deletion then landed in one
