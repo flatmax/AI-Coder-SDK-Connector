@@ -93,32 +93,82 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 /**
- * A `ContextUsageResponse` shaped like the CLI's own `/context` output:
- * live categories summing to `totalTokens`, one deferred category, and a
- * `maxTokens` already reduced by the autocompact buffer.
+ * A `ContextUsageResponse` shaped like a real one.
+ *
+ * This fixture used to assume hex `color` values and a `maxTokens`
+ * already reduced by the autocompact buffer. Neither is true, both
+ * suites passed anyway, and the tab shipped drawing transparent bar
+ * segments and shares like "Free space — 692.0%". The shape below is
+ * the live payload's, verified by the three identities asserted in
+ * context-usage.test.js:
+ *
+ *   content categories  sum to `totalTokens`
+ *   Free space        = `autoCompactThreshold` - `totalTokens`
+ *   Autocompact buffer = `maxTokens` - `autoCompactThreshold`
+ *
+ * Keep them holding when editing token counts, or `partitionCategories`
+ * stops verifying and the bar silently falls back to one segment.
  */
 function usageFixture(overrides = {}) {
   return {
     categories: [
-      { name: 'System prompt', tokens: 3200, color: '#4a9eff' },
-      { name: 'System tools', tokens: 11500, color: '#8b5cf6' },
-      { name: 'MCP tools', tokens: 4800, color: '#22c55e' },
-      { name: 'Messages', tokens: 42000, color: '#f59e0b' },
+      { name: 'System prompt', tokens: 3200, color: 'promptBorder' },
+      { name: 'System tools', tokens: 11500, color: 'inactive' },
+      { name: 'MCP tools', tokens: 4800, color: 'claude' },
+      {
+        name: 'Messages',
+        tokens: 42000,
+        color: 'purple_FOR_SUBAGENTS_ONLY',
+      },
       {
         name: 'Deferred tools',
         tokens: 9000,
-        color: '#6b7280',
+        color: 'inactive',
         isDeferred: true,
       },
+      { name: 'Autocompact buffer', tokens: 33000, color: 'inactive' },
+      { name: 'Free space', tokens: 105500, color: 'promptBorder' },
     ],
     totalTokens: 61500,
-    maxTokens: 172000,
+    maxTokens: 200000,
     rawMaxTokens: 200000,
-    percentage: 35.8,
+    autoCompactThreshold: 167000,
+    percentage: 30.8,
     model: 'claude-opus-4-6',
     isAutoCompactEnabled: true,
     ...overrides,
   };
+}
+
+/**
+ * A consistent payload at a given fill level.
+ *
+ * Rebuilds the structural categories so the identities above keep
+ * holding — overriding `totalTokens` on `usageFixture` alone would
+ * leave "Free space" describing a different window and quietly switch
+ * the bar to its unsegmented fallback.
+ */
+function usageAt(totalTokens, overrides = {}) {
+  const max = 200000;
+  const threshold = 167000;
+  return usageFixture({
+    categories: [
+      {
+        name: 'Messages',
+        tokens: totalTokens,
+        color: 'purple_FOR_SUBAGENTS_ONLY',
+      },
+      { name: 'Autocompact buffer', tokens: max - threshold, color: 'inactive' },
+      {
+        name: 'Free space',
+        tokens: Math.max(0, threshold - totalTokens),
+        color: 'promptBorder',
+      },
+    ],
+    totalTokens,
+    percentage: Math.round((totalTokens / max) * 1000) / 10,
+    ...overrides,
+  });
 }
 
 function rows(el, section) {
@@ -396,10 +446,10 @@ describe('ContextUsageTab headline', () => {
     const el = mountTab();
     await settle(el);
     expect(el.shadowRoot.querySelector('.pct').textContent.trim()).toBe(
-      '35.8%',
+      '30.8%',
     );
     expect(el.shadowRoot.querySelector('.of').textContent).toContain(
-      '61,500 / 172,000 tokens',
+      '61,500 / 200,000 tokens',
     );
   });
 
@@ -409,9 +459,9 @@ describe('ContextUsageTab headline', () => {
     publishUsage(usage);
     const el = mountTab();
     await settle(el);
-    // 61500 / 172000 = 35.755…
+    // 61500 / 200000 = 30.75
     expect(el.shadowRoot.querySelector('.pct').textContent.trim()).toBe(
-      '35.8%',
+      '30.8%',
     );
   });
 
@@ -424,23 +474,37 @@ describe('ContextUsageTab headline', () => {
     );
   });
 
+  // The bands are measured against the autocompact threshold, not the
+  // raw window. Driving them off the engine's `percentage` is what made
+  // the red band unreachable: a compact fires at 83.5% of the window,
+  // so a payload never reported 90% before the pause it was warning
+  // about had already happened.
+
   it('colours the headline green below the amber band', async () => {
-    publishUsage(usageFixture({ percentage: 40 }));
+    publishUsage(usageAt(61500));
     const el = mountTab();
     await settle(el);
     expect(el.shadowRoot.querySelector('.pct').style.color).toContain('126');
   });
 
-  it('colours the headline amber between 75 and 90 percent', async () => {
-    publishUsage(usageFixture({ percentage: 80 }));
+  it('colours the headline amber between 75 and 90 percent of the limit', async () => {
+    // 140000 / 167000 = 83.8% — amber, while the engine's own figure
+    // for the same payload is a green-looking 70% of the window.
+    publishUsage(usageAt(140000));
     const el = mountTab();
     await settle(el);
-    const rgb = el.shadowRoot.querySelector('.pct').style.color;
-    expect(rgb).toBe('rgb(210, 153, 34)');
+    expect(el.shadowRoot.querySelector('.pct').textContent.trim()).toBe(
+      '70.0%',
+    );
+    expect(el.shadowRoot.querySelector('.pct').style.color).toBe(
+      'rgb(210, 153, 34)',
+    );
   });
 
-  it('colours the headline red above 90 percent', async () => {
-    publishUsage(usageFixture({ percentage: 96 }));
+  it('colours the headline red above 90 percent of the limit', async () => {
+    // 160000 / 167000 = 95.8%. A compact is one turn away and the
+    // headline says 80% of the window.
+    publishUsage(usageAt(160000));
     const el = mountTab();
     await settle(el);
     expect(el.shadowRoot.querySelector('.pct').style.color).toBe(
@@ -448,23 +512,49 @@ describe('ContextUsageTab headline', () => {
     );
   });
 
-  it('names the autocompact headroom when max is below the raw window', async () => {
+  it('names the compaction threshold and the room left', async () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
     const note = el.shadowRoot.querySelector('.note');
-    expect(note.textContent).toContain('28,000 tokens');
-    expect(note.textContent).toContain('200,000-token window');
+    // 61500 / 167000 = 36.8%
+    expect(note.textContent).toContain('36.8%');
+    expect(note.textContent).toContain('167,000 tokens');
+    expect(note.textContent).toContain('105,500 tokens of');
+    expect(note.textContent).toContain('33,000');
   });
 
-  it('omits the headroom note when the window is not reduced', async () => {
-    publishUsage(usageFixture({ rawMaxTokens: 172000 }));
+  it('colours the compaction note by its own figure', async () => {
+    publishUsage(usageAt(160000));
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.note').style.color).toBe(
+      'rgb(248, 81, 73)',
+    );
+  });
+
+  it('omits the compaction note when the engine reports no threshold', async () => {
+    const usage = usageFixture();
+    delete usage.autoCompactThreshold;
+    publishUsage(usage);
     const el = mountTab();
     await settle(el);
     const notes = [...el.shadowRoot.querySelectorAll('.note')].map(
       (n) => n.textContent,
     );
-    expect(notes.some((t) => t.includes('headroom'))).toBe(false);
+    expect(notes.some((t) => t.includes('autocompact'))).toBe(false);
+  });
+
+  it('omits the compaction note when autocompact is off', async () => {
+    // The warning takes its place — there is no threshold to count
+    // down to when nothing intervenes.
+    publishUsage(usageFixture({ isAutoCompactEnabled: false }));
+    const el = mountTab();
+    await settle(el);
+    const notes = [...el.shadowRoot.querySelectorAll('.note')].map(
+      (n) => n.textContent,
+    );
+    expect(notes.some((t) => t.includes('way to an autocompact'))).toBe(false);
   });
 
   it('warns when autocompact is disabled', async () => {
@@ -514,8 +604,8 @@ describe('ContextUsageTab bar', () => {
     const segs = [...el.shadowRoot.querySelectorAll('.bar .bar-seg')];
     expect(segs).toHaveLength(4);
     expect(segs[0].title).toBe('System prompt: 3.2K');
-    // 42000 / 172000 = 24.4%
-    expect(segs[3].style.width.startsWith('24.4')).toBe(true);
+    // 42000 / 200000 = 21%
+    expect(segs[3].style.width.startsWith('21')).toBe(true);
   });
 
   it('excludes deferred categories from the fill', async () => {
@@ -528,12 +618,53 @@ describe('ContextUsageTab bar', () => {
     expect(titles.some((t) => t.includes('Deferred tools'))).toBe(false);
   });
 
-  it('uses the engine colour verbatim so it matches the terminal', async () => {
+  it('resolves the engine theme token to a CSS colour', async () => {
+    // `color` carries a token name — 'promptBorder' here — not CSS.
+    // Pushing it into the style attribute verbatim, as this did,
+    // yielded a transparent segment.
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
     const seg = el.shadowRoot.querySelector('.bar-seg');
-    expect(seg.style.background).toBe('rgb(74, 158, 255)');
+    expect(seg.style.background).toBe('rgb(88, 166, 255)');
+  });
+
+  it('excludes free space and the autocompact buffer from the fill', async () => {
+    // The engine's categories tile the whole window. Segmenting by all
+    // of them drew a permanently full bar, 73% of it "Free space".
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const segs = [...el.shadowRoot.querySelectorAll('.bar-seg')];
+    const titles = segs.map((s) => s.title);
+    expect(titles.some((t) => t.includes('Free space'))).toBe(false);
+    expect(titles.some((t) => t.includes('Autocompact buffer'))).toBe(false);
+    const width = segs.reduce(
+      (sum, s) => sum + parseFloat(s.style.width),
+      0,
+    );
+    // 61500 / 200000 — the fill matches the tokens in use.
+    expect(width).toBeCloseTo(30.75, 2);
+  });
+
+  it('falls back to one segment when the categories do not add up', async () => {
+    // The engine renaming "Free space" would leave the split unable to
+    // tell room from content. A plain bar is wrong-looking; a segmented
+    // one would be wrong.
+    publishUsage(
+      usageFixture({
+        categories: [
+          { name: 'Messages', tokens: 42000, color: 'warning' },
+          { name: 'Headroom', tokens: 105500, color: 'promptBorder' },
+        ],
+        percentage: 50,
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    const segs = [...el.shadowRoot.querySelectorAll('.bar-seg')];
+    expect(segs).toHaveLength(1);
+    expect(segs[0].style.width).toBe('50%');
   });
 
   it('falls back to a neutral colour for an uncoloured category', async () => {
@@ -579,21 +710,65 @@ describe('ContextUsageTab categories', () => {
     const el = mountTab();
     await settle(el);
     const names = rows(el, 'Categories').map((r) => r[0]);
-    expect(names[0]).toContain('Messages');
-    expect(names[1]).toContain('System tools');
-    expect(names[2]).toContain('Deferred tools');
-    expect(names[3]).toContain('MCP tools');
-    expect(names[4]).toContain('System prompt');
+    // Free space and the autocompact buffer are listed — the table is
+    // the whole window's breakdown, unlike the bar, which is the fill.
+    expect(names[0]).toContain('Free space');
+    expect(names[1]).toContain('Messages');
+    expect(names[2]).toContain('Autocompact buffer');
+    expect(names[3]).toContain('System tools');
+    expect(names[4]).toContain('Deferred tools');
+    expect(names[5]).toContain('MCP tools');
+    expect(names[6]).toContain('System prompt');
   });
 
-  it('shows each category share of the total', async () => {
+  it('shows each category share of the window', async () => {
+    // Against `maxTokens`, not `totalTokens`. The engine's rows include
+    // the room left, so the tokens-in-use denominator produced shares
+    // over 100% — "Free space — 692.0%" on a live payload.
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
-    const messages = rows(el, 'Categories')[0];
+    const messages = rows(el, 'Categories').find((r) =>
+      r[0].includes('Messages'),
+    );
     expect(messages[1]).toBe('42.0K');
-    // 42000 / 61500 = 68.3%
-    expect(messages[2]).toBe('68.3%');
+    // 42000 / 200000 = 21.0%
+    expect(messages[2]).toBe('21.0%');
+  });
+
+  it('keeps every share at or below 100 percent', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    for (const row of rows(el, 'Categories')) {
+      expect(parseFloat(row[2])).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it('does not repeat a marker the engine already put in the name', async () => {
+    // Live rows are named "System tools (deferred)" AND flagged
+    // `isDeferred`, which rendered as "... (deferred) (deferred)".
+    publishUsage(
+      usageFixture({
+        categories: [
+          { name: 'Messages', tokens: 61500, color: 'warning' },
+          {
+            name: 'MCP tools (deferred)',
+            tokens: 9182,
+            color: 'inactive',
+            isDeferred: true,
+          },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    const row = [
+      ...sectionFor(el, 'Categories').querySelectorAll('tr.deferred'),
+    ][0];
+    expect(row.textContent).toContain('MCP tools (deferred)');
+    expect(row.textContent).not.toContain('(deferred) (deferred)');
+    expect(row.querySelector('.note')).toBeNull();
   });
 
   it('marks a deferred category and says why', async () => {
@@ -610,11 +785,11 @@ describe('ContextUsageTab categories', () => {
     );
   });
 
-  it('shows an em dash for a share the total cannot support', async () => {
+  it('shows an em dash for a share the window cannot support', async () => {
     publishUsage(
       usageFixture({
-        totalTokens: 0,
-        categories: [{ name: 'Messages', tokens: 10, color: '#fff' }],
+        maxTokens: 0,
+        categories: [{ name: 'Messages', tokens: 10, color: 'warning' }],
       }),
     );
     const el = mountTab();
@@ -631,12 +806,32 @@ describe('ContextUsageTab categories', () => {
     );
   });
 
-  it('renders a swatch coloured by the engine', async () => {
+  it('renders a swatch resolved from the engine theme token', async () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
-    const swatch = sectionFor(el, 'Categories').querySelector('.swatch');
-    expect(swatch.style.background).toBe('rgb(245, 158, 11)');
+    const messages = [
+      ...sectionFor(el, 'Categories').querySelectorAll('tbody tr'),
+    ].find((tr) => tr.textContent.includes('Messages'));
+    // 'purple_FOR_SUBAGENTS_ONLY' — a token name, unusable as CSS.
+    expect(messages.querySelector('.swatch').style.background).toBe(
+      'rgb(188, 140, 255)',
+    );
+  });
+
+  it('leaves no swatch without a background', async () => {
+    // The shipped defect: every swatch and every bar segment was
+    // transparent, because a theme token is not a CSS colour.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const swatches = [
+      ...sectionFor(el, 'Categories').querySelectorAll('.swatch'),
+    ];
+    expect(swatches.length).toBeGreaterThan(0);
+    for (const s of swatches) {
+      expect(s.style.background).toMatch(/^rgb/);
+    }
   });
 });
 
@@ -734,14 +929,35 @@ describe('ContextUsageTab MCP tools', () => {
     },
   ];
 
-  it('totals only the tools whose schemas are loaded', async () => {
+  it('reports the tool count, loaded tokens, and deferred tokens', async () => {
+    // The heading read "MCP tools — 0 loaded" on a live payload, where
+    // every tool is deferred until first use. Directly above a table of
+    // 35 tools, that parses as "no tools" rather than "no tokens".
     publishUsage(usageFixture({ mcpTools: tools }));
     const el = mountTab();
     await settle(el);
-    // 900 + 700, excluding the 600 that is not in the window.
-    expect(sectionFor(el, 'MCP tools').querySelector('h3').textContent).toContain(
-      '1.6K loaded',
-    );
+    const heading = sectionFor(el, 'MCP tools')
+      .querySelector('h3')
+      .textContent.replace(/\s+/g, ' ')
+      .trim();
+    // 900 + 700 in the window, the 600 that is not counted separately.
+    expect(heading).toContain('3 tools');
+    expect(heading).toContain('1.6K tokens loaded');
+    expect(heading).toContain('600 deferred');
+  });
+
+  it('omits the deferred clause when every tool is loaded', async () => {
+    publishUsage(usageFixture({
+      mcpTools: [{ name: 'symbol_map', serverName: 'ac-dc', tokens: 900 }],
+    }));
+    const el = mountTab();
+    await settle(el);
+    const heading = sectionFor(el, 'MCP tools')
+      .querySelector('h3')
+      .textContent.replace(/\s+/g, ' ')
+      .trim();
+    expect(heading).toContain('1 tool,');
+    expect(heading).not.toContain('deferred');
   });
 
   it('lists every tool, loaded or not', async () => {

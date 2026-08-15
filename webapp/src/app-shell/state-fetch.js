@@ -2,6 +2,16 @@
 // pull authoritative state snapshots from the backend and
 // hydrate the host's reactive properties.
 
+import { withRpcTimeout } from '../rpc.js';
+
+/**
+ * Deadline for the context-usage fetch. Matches the Context tab and
+ * the usage HUD, and sits above the SDK's own 60s control-request
+ * deadline on purpose — see context-usage-tab.js for the reasoning
+ * and the measured latencies.
+ */
+const CONTEXT_USAGE_TIMEOUT_MS = 90000;
+
 /**
  * Fetch get_current_state and dispatch the state-loaded
  * event so child components (files tab, chat panel) can
@@ -146,11 +156,12 @@ export function onContextUsageRefresh(host) {
  * Replaces the `get_history_status` fetch this used to make.
  * That method merged AC⚡DC's own token budget with its own
  * compaction threshold — two numbers this app computed about a
- * prompt it assembled. The engine now owns both, and reports
- * them together: `percentage` against `maxTokens`, where
- * `maxTokens` is already reduced by the autocompact buffer. So
- * the bar filling means a compact is imminent, which is exactly
- * what the old bar was trying to say.
+ * prompt it assembled. The engine now owns both and reports them
+ * together: `totalTokens` against `autoCompactThreshold` is the
+ * ratio the bar draws, so the bar filling means a compact is
+ * imminent, which is exactly what the old bar was trying to say.
+ * (`maxTokens` is the model's raw window and is the wrong
+ * denominator for that question — see context-usage.js.)
  *
  * Guarded against overlapping fetches — this one crosses into
  * the CLI subprocess as a control request, so a burst of events
@@ -172,9 +183,15 @@ export async function fetchContextUsage(host) {
     // callables whose typeof is not necessarily
     // 'function', so guarding on typeof was rejecting
     // valid calls and silently leaving the bar empty.
-    const raw = await host.call[
-      'ClaudeCodeService.get_context_usage'
-    ]();
+    // Bounded: a reply dropped by a reconnecting socket would leave
+    // `_contextUsageFetchInFlight` set, since the `finally` below never
+    // runs, and the bar would stop updating for the rest of the
+    // session. See withRpcTimeout in rpc.js.
+    const raw = await withRpcTimeout(
+      host.call['ClaudeCodeService.get_context_usage'](),
+      CONTEXT_USAGE_TIMEOUT_MS,
+      'get_context_usage',
+    );
     // Unwrap single-key envelope the same way
     // _fetchCurrentState does. jrpc-oo returns
     // { ClassName: { ... } } for method calls.

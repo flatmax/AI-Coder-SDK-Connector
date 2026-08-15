@@ -15,9 +15,10 @@
 // Three facts, in the order a user asks for them after a turn lands:
 //
 //   1. Context — how much room is left before a compact. `percentage`
-//      and `maxTokens` come from the engine; `maxTokens` is already
-//      reduced by the autocompact buffer, so the bar reaching 100% is
-//      the real trigger point rather than the model's raw window.
+//      and `maxTokens` come from the engine, but `maxTokens` is the
+//      model's raw window: the compaction point is `autoCompactThreshold`,
+//      a separate field some 16% below it. See context-usage.js, which
+//      owns that arithmetic for all three views that render this payload.
 //   2. Cost — what this turn cost. Null under subscription billing, and
 //      rendered as "included" rather than "$0.00" in that case: a turn
 //      on a Max plan did not cost nothing, it cost nothing *extra*.
@@ -32,20 +33,29 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
+import { withRpcTimeout } from './rpc.js';
+import {
+  bandColor as _contextColor,
+  categoryColor,
+  compactionLimit,
+  compactionPercent,
+  partitionCategories,
+  warningPercent,
+  windowPercent,
+} from './context-usage.js';
 
 /** Auto-hide delay (ms). Matches the old HUD. */
 const _AUTO_HIDE_MS = 8000;
 /** Fade-out duration (ms). Matches the CSS transition below. */
 const _FADE_MS = 800;
-
 /**
- * Fallback colour for a context category the engine didn't colour.
- *
- * The engine sends a `color` per category and we use it verbatim, so
- * the bar segments match what `/context` draws in the terminal. A user
- * running both should not have to learn two colour languages.
+ * Deadline for the context fetch. Set above the SDK's own 60s
+ * control-request deadline on purpose — see context-usage-tab.js for
+ * the reasoning and the measured latencies. This is not a fast call:
+ * the guard it protects is held for seconds on every turn, which is
+ * why the guard needed a release path at all.
  */
-const _UNCOLOURED = '#6e7681';
+const _FETCH_TIMEOUT_MS = 90000;
 
 function _fmtTokens(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '0';
@@ -66,13 +76,6 @@ function _fmtCost(usd) {
   if (usd === 0) return '$0';
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(2)}`;
-}
-
-/** Green ≤75%, amber 75-90%, red >90%. Same bands as the dialog bar. */
-function _contextColor(pct) {
-  if (pct > 90) return '#f85149';
-  if (pct > 75) return '#d29922';
-  return '#7ee787';
 }
 
 export class UsageHud extends RpcMixin(LitElement) {
@@ -362,8 +365,13 @@ export class UsageHud extends RpcMixin(LitElement) {
     if (!this.rpcConnected) return;
     this._fetchInFlight = true;
     try {
-      const res = await this.rpcExtract(
-        'ClaudeCodeService.get_context_usage',
+      // Bounded: a reply dropped by a reconnecting socket would
+      // otherwise leave `_fetchInFlight` set forever and blank this
+      // section for the rest of the session. See withRpcTimeout.
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_context_usage'),
+        _FETCH_TIMEOUT_MS,
+        'get_context_usage',
       );
       if (res && res.error) {
         this._contextError = String(res.error);
@@ -475,20 +483,22 @@ export class UsageHud extends RpcMixin(LitElement) {
 
     const total = Number(ctx.totalTokens) || 0;
     const max = Number(ctx.maxTokens) || 0;
-    const pct = Number.isFinite(Number(ctx.percentage))
-      ? Number(ctx.percentage)
-      : (max > 0 ? (total / max) * 100 : 0);
-    const clamped = Math.max(0, Math.min(100, pct));
+    const clamped = windowPercent(ctx);
+    // The warning colour goes on the compaction-relative figure, not
+    // the engine's headline percentage — see context-usage.js. In 300px
+    // there is no room to show both numbers, and the one worth
+    // colouring is the one that predicts the pause.
+    const warnPct = warningPercent(ctx);
     // Segment the bar by category so the answer to "what is filling
     // this up?" is visible without opening the Context tab. Deferred
     // categories are excluded from the fill — they are tokens the
-    // engine has budgeted but not yet loaded.
-    const cats = Array.isArray(ctx.categories) ? ctx.categories : [];
-    const live = cats.filter((c) => !c.isDeferred && Number(c.tokens) > 0);
-    const segments = max > 0
-      ? live.map((c) => ({
+    // engine has budgeted but not yet loaded — and so are the
+    // structural rows, which are the room left rather than content.
+    const { content, deferred, verified } = partitionCategories(ctx);
+    const segments = verified && max > 0
+      ? content.map((c) => ({
           name: c.name,
-          color: c.color || _UNCOLOURED,
+          color: categoryColor(c.color),
           width: (Number(c.tokens) / max) * 100,
           tokens: Number(c.tokens),
         }))
@@ -498,7 +508,7 @@ export class UsageHud extends RpcMixin(LitElement) {
       <div>
         <div class="row">
           <span class="label">Context</span>
-          <span class="value" style="color: ${_contextColor(clamped)}">
+          <span class="value" style="color: ${_contextColor(warnPct)}">
             ${clamped.toFixed(0)}% · ${_fmtTokens(total)}/${_fmtTokens(max)}
           </span>
         </div>
@@ -519,23 +529,21 @@ export class UsageHud extends RpcMixin(LitElement) {
             : html`
                 <div
                   class="bar-seg"
-                  style="width: ${clamped}%; background: ${_contextColor(clamped)};"
+                  style="width: ${clamped}%; background: ${_contextColor(warnPct)};"
                 ></div>
               `}
         </div>
-        ${live.length > 0 ? html`
+        ${content.length > 0 ? html`
           <div class="cats">
-            ${cats
-              .filter((c) => Number(c.tokens) > 0)
-              .map((c) => html`
-                <span class="cat ${c.isDeferred ? 'deferred' : ''}">
-                  <span
-                    class="swatch"
-                    style="background: ${c.color || _UNCOLOURED}"
-                  ></span>
-                  ${c.name} ${_fmtTokens(Number(c.tokens))}
-                </span>
-              `)}
+            ${[...content, ...deferred].map((c) => html`
+              <span class="cat ${c.isDeferred ? 'deferred' : ''}">
+                <span
+                  class="swatch"
+                  style="background: ${categoryColor(c.color)}"
+                ></span>
+                ${c.name} ${_fmtTokens(Number(c.tokens))}
+              </span>
+            `)}
           </div>
         ` : ''}
       </div>
@@ -545,21 +553,27 @@ export class UsageHud extends RpcMixin(LitElement) {
   /**
    * Tooltip for the context bar.
    *
-   * Names the autocompact buffer explicitly when there is one. Without
-   * it, "155K/172K" next to a model advertised as 200K looks like a
-   * bug rather than a deliberately reserved margin.
+   * Carries the compaction figure the 300px row has no space for, so
+   * the number driving the bar's colour is readable somewhere.
+   *
+   * This used to name the autocompact reserve only when
+   * `rawMaxTokens > maxTokens`, which is never: the engine reports both
+   * as the model's full window and keeps the reserve in
+   * `autoCompactThreshold`. The branch was dead, so the one thing the
+   * tooltip existed to explain was the one thing it never said.
    */
   _contextTitle(ctx, total, max) {
-    const raw = Number(ctx.rawMaxTokens) || 0;
     const parts = [`${total.toLocaleString()} of ${max.toLocaleString()} tokens`];
-    if (raw > max) {
-      parts.push(
-        `${(raw - max).toLocaleString()} reserved as autocompact headroom `
-        + `(model window ${raw.toLocaleString()})`,
-      );
-    }
+    const limit = compactionLimit(ctx);
+    const toLimit = compactionPercent(ctx);
     if (ctx.isAutoCompactEnabled === false) {
       parts.push('Autocompact is off — the turn will fail at the limit.');
+    } else if (toLimit != null && limit > 0 && limit < max) {
+      parts.push(
+        `${toLimit.toFixed(0)}% of the way to an autocompact at `
+        + `${limit.toLocaleString()} tokens `
+        + `(${Math.max(0, limit - total).toLocaleString()} left)`,
+      );
     }
     return parts.join(' · ');
   }

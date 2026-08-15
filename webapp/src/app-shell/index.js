@@ -196,9 +196,10 @@ export class AppShell extends JRPCClient {
      * Null before the first fetch. Refreshed on stream-complete,
      * session-changed, and compaction events.
      *
-     * `maxTokens` already excludes the autocompact buffer, so a
-     * full bar means a compact is imminent — the same warning the
+     * A full bar means a compact is imminent — the same warning the
      * old `_historyStatus` bar gave, from the party that decides it.
+     * The threshold is `autoCompactThreshold`, not `maxTokens`;
+     * context-usage.js derives it.
      */
     _contextUsage: { type: Object, state: true },
   };

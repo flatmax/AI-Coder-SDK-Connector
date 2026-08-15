@@ -8,6 +8,12 @@
 import { html } from 'lit';
 
 import { RESIZE_RIGHT, RESIZE_BOTTOM, RESIZE_CORNER } from './constants.js';
+import {
+  bandColor,
+  compactionLimit,
+  warningPercent,
+  windowPercent,
+} from '../context-usage.js';
 
 /**
  * Context-capacity bar — a thin strip at the dialog bottom
@@ -17,9 +23,15 @@ import { RESIZE_RIGHT, RESIZE_BOTTOM, RESIZE_CORNER } from './constants.js';
  * `get_context_usage`. The bar means the same thing it always
  * did — how close we are to a compaction — but the threshold is
  * now the engine's rather than one AC⚡DC configured for a
- * prompt it assembled. `maxTokens` already excludes the
- * autocompact buffer, so 100% here is the trigger point, not the
- * model's ceiling.
+ * prompt it assembled.
+ *
+ * The bar fills toward the autocompact threshold, not the model's
+ * ceiling, so 100% here means a compact is due. It was written
+ * against `maxTokens` on the belief that the engine had already
+ * subtracted the reserve; it has not — see context-usage.js. The
+ * bar therefore stopped short: at the moment of compaction it
+ * showed 84% in green, which is the one reading it exists to
+ * rule out.
  *
  * Visibility rules:
  *
@@ -46,40 +58,29 @@ export function renderContextBar(host) {
   const max = Number(usage.maxTokens) || 0;
   if (max <= 0) return null;
   const tokens = Number(usage.totalTokens) || 0;
-  // Engine-computed percentage is preferred when present; fall
-  // back to a local ratio if a future payload omits it. Capped
-  // at 100 for display — rendering widths beyond 100% would
-  // trigger horizontal overflow on the bar container.
-  const rawPct = usage.percentage != null
-    ? Number(usage.percentage)
-    : (tokens / max) * 100;
-  const pct = Math.max(0, Math.min(100, rawPct || 0));
-  // Colour picker — same thresholds as _pctColor in
-  // context-usage-tab.js / usage-hud.js. Keeping the logic
-  // inline here avoids an import just for three values.
-  let color;
-  if (pct > 90) {
-    color = '#f85149';
-  } else if (pct > 75) {
-    color = '#d29922';
-  } else {
-    color = '#7ee787';
-  }
-  const rawMax = Number(usage.rawMaxTokens) || 0;
+  const limit = compactionLimit(usage);
+  // Capped at 100 for display — rendering widths beyond 100% would
+  // trigger horizontal overflow on the bar container. A context past
+  // the threshold pins the bar rather than bursting it.
+  const pct = Math.max(0, Math.min(100, warningPercent(usage)));
+  const color = bandColor(pct);
+  // The tooltip carries the engine's own window figure alongside,
+  // because that is the number `/context` prints and the two
+  // disagreeing without explanation would look like a bug.
   const parts = [
     `Context: ${tokens.toLocaleString()} / ${max.toLocaleString()} `
-    + `tokens (${pct.toFixed(1)}%)`,
+    + `tokens (${windowPercent(usage).toFixed(1)}% of the window)`,
   ];
-  if (rawMax > max) {
-    // Naming the reserve keeps the number honest: a user who
-    // knows the model's window is 200K should be told why the
-    // bar is full at 172K rather than left to assume a bug.
-    parts.push(
-      `${(rawMax - max).toLocaleString()} reserved for autocompact`,
-    );
-  }
   if (usage.isAutoCompactEnabled === false) {
     parts.push('autocompact off — the turn fails at the limit');
+  } else if (limit > 0 && limit < max) {
+    // Naming the reserve keeps the number honest: a user who knows
+    // the model's window is 200K should be told why the bar is full
+    // at 167K rather than left to assume a bug.
+    parts.push(
+      `autocompact at ${limit.toLocaleString()} (${pct.toFixed(0)}% there, `
+      + `${(max - limit).toLocaleString()} reserved for the summary)`,
+    );
   }
   return html`
     <div class="compaction-bar" title=${parts.join(' · ')}>

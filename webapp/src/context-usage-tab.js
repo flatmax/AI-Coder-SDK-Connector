@@ -26,9 +26,34 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
+import { withRpcTimeout } from './rpc.js';
+import {
+  bandColor as _pctColor,
+  categoryColor,
+  compactionLimit,
+  compactionPercent,
+  partitionCategories,
+  warningPercent,
+  windowPercent,
+} from './context-usage.js';
 
-/** Fallback for a category the engine sent without a colour. */
-const _UNCOLOURED = '#6e7681';
+/**
+ * Deadline for a breakdown fetch. Without one, a reply dropped by a
+ * reconnecting socket leaves `_loading` set — which both blocks every
+ * later refresh and disables the Refresh button that would retry.
+ *
+ * Deliberately *above* the SDK's own 60s control-request deadline, not
+ * below it. `ClaudeCodeService.get_context_usage` catches that timeout
+ * and answers `{error}`, so the backend always replies; a shorter
+ * deadline here would pre-empt a reply that is on its way and stack a
+ * retry onto a subprocess already struggling to answer the first. This
+ * call is slow — measured live at 3-5s warm, 14s on the first fetch
+ * after an idle session, and past 60s often enough to log eight
+ * `Control request timeout: get_context_usage` failures in one
+ * half-hour run. So the only case left for this deadline is the one it
+ * was written for: no reply is coming at all.
+ */
+const _FETCH_TIMEOUT_MS = 90000;
 
 function _fmtTokens(n) {
   const v = Number(n);
@@ -36,13 +61,6 @@ function _fmtTokens(n) {
   if (v < 1000) return String(Math.round(v));
   if (v < 1_000_000) return `${(v / 1000).toFixed(1)}K`;
   return `${(v / 1_000_000).toFixed(2)}M`;
-}
-
-/** Green ≤75%, amber 75-90%, red >90%. Same bands as the HUD. */
-function _pctColor(pct) {
-  if (pct > 90) return '#f85149';
-  if (pct > 75) return '#d29922';
-  return '#7ee787';
 }
 
 export class ContextUsageTab extends RpcMixin(LitElement) {
@@ -291,8 +309,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (!this.rpcConnected) return;
     this._loading = true;
     try {
-      const res = await this.rpcExtract(
-        'ClaudeCodeService.get_context_usage',
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_context_usage'),
+        _FETCH_TIMEOUT_MS,
+        'get_context_usage',
       );
       if (res && res.error) {
         this._error = String(res.error);
@@ -390,22 +410,44 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * The headline reports two percentages against two denominators,
+   * both labelled, because there is no single honest one.
+   *
+   * The big number is the engine's own, against the raw window, so
+   * this view and `/context` cannot disagree. On its own it is
+   * reassuring to the point of useless — it reads 78% when a compact
+   * is one turn away — so the line beneath it measures the same tokens
+   * against `autoCompactThreshold`, which is where the session
+   * actually gives out.
+   *
+   * The big number is deliberately *coloured* by that second figure
+   * rather than by itself: the warning has to land on the thing being
+   * looked at. A green 70% above an amber "83.8% of the way to an
+   * autocompact" is a mixed signal, and the green wins. So the digits
+   * stay in parity with `/context` while the colour tracks the event
+   * the user cares about, and the note spells out which is which.
+   */
   _renderHeadline() {
     const u = this._usage;
     const total = Number(u.totalTokens) || 0;
     const max = Number(u.maxTokens) || 0;
-    const raw = Number(u.rawMaxTokens) || 0;
-    const pct = Number.isFinite(Number(u.percentage))
-      ? Number(u.percentage)
-      : (max > 0 ? (total / max) * 100 : 0);
-    const clamped = Math.max(0, Math.min(100, pct));
-    const cats = Array.isArray(u.categories) ? u.categories : [];
-    const live = cats.filter((c) => !c.isDeferred && Number(c.tokens) > 0);
+    const clamped = windowPercent(u);
+    const warnPct = warningPercent(u);
+    const limit = compactionLimit(u);
+    const toLimit = compactionPercent(u);
+    const autoCompacts = u.isAutoCompactEnabled !== false;
+    // Segment the fill by what is actually in the window. The engine's
+    // `categories` also contains "Free space" and "Autocompact
+    // buffer", which together make up the rest of the window — segment
+    // by all of them and the bar is permanently 100% full.
+    const { content, verified } = partitionCategories(u);
+    const segmented = verified && content.length > 0 && max > 0;
 
     return html`
       <section>
         <div class="headline">
-          <span class="pct" style="color: ${_pctColor(clamped)}">
+          <span class="pct" style="color: ${_pctColor(warnPct)}">
             ${clamped.toFixed(1)}%
           </span>
           <span class="of">
@@ -413,12 +455,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           </span>
         </div>
         <div class="bar">
-          ${live.length > 0 && max > 0
-            ? live.map((c) => html`
+          ${segmented
+            ? content.map((c) => html`
                 <div
                   class="bar-seg"
                   style="width: ${(Number(c.tokens) / max) * 100}%;
-                         background: ${c.color || _UNCOLOURED};"
+                         background: ${categoryColor(c.color)};"
                   title="${c.name}: ${_fmtTokens(c.tokens)}"
                 ></div>
               `)
@@ -427,15 +469,17 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                 style="width: ${clamped}%; background: ${_pctColor(clamped)};"
               ></div>`}
         </div>
-        ${raw > max ? html`
-          <p class="note">
-            ${(raw - max).toLocaleString()} tokens of the model's
-            ${raw.toLocaleString()}-token window are held back as
-            autocompact headroom, so the bar fills to 100% before the
-            model's own limit.
+        ${toLimit != null && autoCompacts && limit < max ? html`
+          <p class="note" style="color: ${_pctColor(toLimit)}">
+            ${toLimit.toFixed(1)}% of the way to an autocompact, which
+            triggers at ${limit.toLocaleString()} tokens —
+            ${Math.max(0, limit - total).toLocaleString()} tokens of
+            room left. The remaining
+            ${(max - limit).toLocaleString()} are reserved for the
+            summary.
           </p>
         ` : ''}
-        ${u.isAutoCompactEnabled === false ? html`
+        ${!autoCompacts ? html`
           <p class="warn">
             Autocompact is off for this session. Reaching the limit
             fails the turn rather than summarising the history.
@@ -460,7 +504,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
         <p class="empty">The engine reported no categories.</p>
       </section>`;
     }
-    const total = Number(this._usage.totalTokens) || 0;
+    // Share is against the window, not against `totalTokens`. The
+    // engine's rows include the room left over, so dividing by the
+    // tokens in use rendered "Free space — 692.0%".
+    const max = Number(this._usage.maxTokens) || 0;
     return html`
       <section>
         <h3>Categories</h3>
@@ -469,7 +516,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
             <tr>
               <th>Category</th>
               <th class="num">Tokens</th>
-              <th class="num">Share</th>
+              <th class="num">Share of window</th>
             </tr>
           </thead>
           <tbody>
@@ -478,8 +525,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                 <td>
                   <span
                     class="swatch"
-                    style="background: ${c.color || _UNCOLOURED}"
+                    style="background: ${categoryColor(c.color)}"
                   ></span>${c.name}${c.isDeferred
+                    && !/\(deferred\)/i.test(String(c.name ?? ''))
+                    // The engine names some rows "System tools
+                    // (deferred)" and also flags them, which rendered
+                    // as "System tools (deferred) (deferred)".
                     ? html` <span
                         class="note"
                         title="Budgeted by the engine but not loaded into the window yet"
@@ -488,8 +539,8 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                 </td>
                 <td class="num">${_fmtTokens(c.tokens)}</td>
                 <td class="num">
-                  ${total > 0
-                    ? `${((Number(c.tokens) / total) * 100).toFixed(1)}%`
+                  ${max > 0
+                    ? `${((Number(c.tokens) / max) * 100).toFixed(1)}%`
                     : '—'}
                 </td>
               </tr>
@@ -550,9 +601,23 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (tools.length === 0) return '';
     const loaded = tools.filter((t) => t.isLoaded !== false);
     const total = loaded.reduce((sum, t) => sum + (Number(t.tokens) || 0), 0);
+    // Deferred tools are the normal case, not the exception — the
+    // engine loads a tool's schema on first use. The old heading said
+    // "MCP tools — 0 loaded", which reads as "no tools" when it meant
+    // "no tokens", directly above a table of 35 of them. Both figures
+    // are named, with units.
+    const deferredTokens = tools
+      .filter((t) => t.isLoaded === false)
+      .reduce((sum, t) => sum + (Number(t.tokens) || 0), 0);
     return html`
       <section>
-        <h3>MCP tools — ${_fmtTokens(total)} loaded</h3>
+        <h3>
+          MCP tools — ${tools.length}
+          ${tools.length === 1 ? 'tool' : 'tools'},
+          ${_fmtTokens(total)} tokens loaded${deferredTokens > 0
+            ? html`, ${_fmtTokens(deferredTokens)} deferred`
+            : ''}
+        </h3>
         <table>
           <thead>
             <tr>

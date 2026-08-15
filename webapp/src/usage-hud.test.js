@@ -71,27 +71,64 @@ afterEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/**
+ * A `ContextUsageResponse` shaped like a real one — theme-token
+ * colours, `maxTokens` equal to `rawMaxTokens`, and the structural
+ * categories the engine really sends.
+ *
+ * The previous fixture used hex colours and a `maxTokens` reduced by
+ * the autocompact buffer. Both were invented, this suite passed on
+ * them, and the HUD shipped with transparent bar segments. See the
+ * identity assertions in context-usage.test.js.
+ */
 function usageFixture(overrides = {}) {
   return {
     categories: [
-      { name: 'System prompt', tokens: 3200, color: '#4a9eff' },
-      { name: 'Messages', tokens: 42000, color: '#f59e0b' },
+      { name: 'System prompt', tokens: 3200, color: 'promptBorder' },
+      { name: 'Messages', tokens: 42000, color: 'purple_FOR_SUBAGENTS_ONLY' },
       {
         name: 'Deferred tools',
         tokens: 9000,
-        color: '#6b7280',
+        color: 'inactive',
         isDeferred: true,
       },
-      { name: 'Empty', tokens: 0, color: '#000000' },
+      { name: 'Empty', tokens: 0, color: 'claude' },
+      { name: 'Autocompact buffer', tokens: 33000, color: 'inactive' },
+      { name: 'Free space', tokens: 121800, color: 'promptBorder' },
     ],
     totalTokens: 45200,
-    maxTokens: 172000,
+    maxTokens: 200000,
     rawMaxTokens: 200000,
-    percentage: 26.3,
+    autoCompactThreshold: 167000,
+    percentage: 22.6,
     model: 'claude-opus-4-6',
     isAutoCompactEnabled: true,
     ...overrides,
   };
+}
+
+/** As `usageFixture`, at a given fill, keeping the identities intact. */
+function usageAt(totalTokens, overrides = {}) {
+  const max = 200000;
+  const threshold = 167000;
+  return usageFixture({
+    categories: [
+      {
+        name: 'Messages',
+        tokens: totalTokens,
+        color: 'purple_FOR_SUBAGENTS_ONLY',
+      },
+      { name: 'Autocompact buffer', tokens: max - threshold, color: 'inactive' },
+      {
+        name: 'Free space',
+        tokens: Math.max(0, threshold - totalTokens),
+        color: 'promptBorder',
+      },
+    ],
+    totalTokens,
+    percentage: Math.round((totalTokens / max) * 1000) / 10,
+    ...overrides,
+  });
 }
 
 /** A `streamComplete` result, field-for-field as `messages.py` builds it. */
@@ -513,13 +550,13 @@ describe('UsageHud context section', () => {
   it('shows the percentage and abbreviated totals', async () => {
     const el = await show();
     const value = contextRow(el).querySelector('.value').textContent.trim();
-    expect(value).toBe('26% · 45.2K/172.0K');
+    expect(value).toBe('23% · 45.2K/200.0K');
   });
 
   it('rounds the percentage to a whole number in the overlay', async () => {
-    const el = await show(usageFixture({ percentage: 26.7 }));
+    const el = await show(usageFixture({ percentage: 22.7 }));
     expect(contextRow(el).querySelector('.value').textContent).toContain(
-      '27%',
+      '23%',
     );
   });
 
@@ -527,9 +564,9 @@ describe('UsageHud context section', () => {
     const usage = usageFixture();
     delete usage.percentage;
     const el = await show(usage);
-    // 45200 / 172000 = 26.3%
+    // 45200 / 200000 = 22.6%
     expect(contextRow(el).querySelector('.value').textContent).toContain(
-      '26%',
+      '23%',
     );
   });
 
@@ -540,15 +577,36 @@ describe('UsageHud context section', () => {
     );
   });
 
-  it('colours the figure red past 90 percent', async () => {
-    const el = await show(usageFixture({ percentage: 94 }));
+  // The HUD has no room to print two percentages, so it prints the
+  // engine's and colours it by the compaction-relative one. Driving the
+  // colour off the printed figure left the red band unreachable: a
+  // compact fires at 83.5% of the window.
+
+  it('colours the figure red past 90 percent of the compaction limit', async () => {
+    // 160000 / 167000 = 95.8%, while the printed figure is 80%.
+    const el = await show(usageAt(160000));
+    expect(contextRow(el).querySelector('.value').textContent).toContain(
+      '80%',
+    );
     expect(contextRow(el).querySelector('.value').style.color).toBe(
       'rgb(248, 81, 73)',
     );
   });
 
-  it('colours the figure amber in the 75-90 band', async () => {
-    const el = await show(usageFixture({ percentage: 82 }));
+  it('colours the figure amber in the 75-90 band of the limit', async () => {
+    // 140000 / 167000 = 83.8%.
+    const el = await show(usageAt(140000));
+    expect(contextRow(el).querySelector('.value').style.color).toBe(
+      'rgb(210, 153, 34)',
+    );
+  });
+
+  it('falls back to the engine figure when no threshold is reported', async () => {
+    // Without a distinct threshold the two denominators agree, so the
+    // engine's own rounding wins rather than a recomputed ratio.
+    const usage = usageAt(160000);
+    delete usage.autoCompactThreshold;
+    const el = await show(usage);
     expect(contextRow(el).querySelector('.value').style.color).toBe(
       'rgb(210, 153, 34)',
     );
@@ -639,11 +697,29 @@ describe('UsageHud context bar', () => {
     expect(titles.some((t) => t.includes('Empty'))).toBe(false);
   });
 
-  it('sizes segments against the effective maximum', async () => {
+  it('sizes segments against the window', async () => {
     const el = await show();
     const segs = [...el.shadowRoot.querySelectorAll('.bar-seg')];
-    // 42000 / 172000 = 24.4%
-    expect(segs[1].style.width.startsWith('24.4')).toBe(true);
+    // 42000 / 200000 = 21%
+    expect(segs[1].style.width.startsWith('21')).toBe(true);
+  });
+
+  it('excludes free space and the autocompact buffer from the fill', async () => {
+    const el = await show();
+    const segs = [...el.shadowRoot.querySelectorAll('.bar-seg')];
+    const titles = segs.map((s) => s.title);
+    expect(titles.some((t) => t.includes('Free space'))).toBe(false);
+    expect(titles.some((t) => t.includes('Autocompact buffer'))).toBe(false);
+    // 45200 / 200000 — the fill is the tokens in use, not the window.
+    const width = segs.reduce((sum, s) => sum + parseFloat(s.style.width), 0);
+    expect(width).toBeCloseTo(22.6, 1);
+  });
+
+  it('resolves segment colours from the engine theme tokens', async () => {
+    const el = await show();
+    const segs = [...el.shadowRoot.querySelectorAll('.bar-seg')];
+    expect(segs[0].style.background).toBe('rgb(88, 166, 255)');
+    expect(segs[1].style.background).toBe('rgb(188, 140, 255)');
   });
 
   it('falls back to one solid segment without categories', async () => {
@@ -656,22 +732,28 @@ describe('UsageHud context bar', () => {
   it('describes the fill for screen readers', async () => {
     const el = await show();
     expect(el.shadowRoot.querySelector('.bar').getAttribute('aria-label')).toBe(
-      'Context 26 percent used',
+      'Context 23 percent used',
     );
   });
 
-  it('names the autocompact headroom in the tooltip', async () => {
+  it('names the compaction threshold in the tooltip', async () => {
+    // This clause used to be gated on `rawMaxTokens > maxTokens`, which
+    // never holds, so the tooltip's whole purpose went unrendered.
     const el = await show();
     const title = el.shadowRoot.querySelector('.bar').title;
-    expect(title).toContain('45,200 of 172,000 tokens');
-    expect(title).toContain('28,000 reserved as autocompact headroom');
-    expect(title).toContain('model window 200,000');
+    expect(title).toContain('45,200 of 200,000 tokens');
+    // 45200 / 167000 = 27%, with 121,800 left.
+    expect(title).toContain('27% of the way to an autocompact');
+    expect(title).toContain('167,000 tokens');
+    expect(title).toContain('121,800 left');
   });
 
-  it('omits the headroom clause when there is none', async () => {
-    const el = await show(usageFixture({ rawMaxTokens: 172000 }));
+  it('omits the compaction clause when no threshold is reported', async () => {
+    const usage = usageFixture();
+    delete usage.autoCompactThreshold;
+    const el = await show(usage);
     expect(el.shadowRoot.querySelector('.bar').title).not.toContain(
-      'headroom',
+      'autocompact',
     );
   });
 
@@ -682,14 +764,28 @@ describe('UsageHud context bar', () => {
     );
   });
 
-  it('lists categories with their own colours', async () => {
+  it('lists categories with their colours resolved', async () => {
     const el = await show();
     const chips = [...el.shadowRoot.querySelectorAll('.cat')];
+    // Content and deferred rows; the structural rows and the
+    // zero-token row are dropped.
     expect(chips).toHaveLength(3);
     expect(chips[0].textContent.trim()).toBe('System prompt 3.2K');
     expect(chips[0].querySelector('.swatch').style.background).toBe(
-      'rgb(74, 158, 255)',
+      'rgb(88, 166, 255)',
     );
+    for (const chip of chips) {
+      expect(chip.querySelector('.swatch').style.background).toMatch(/^rgb/);
+    }
+  });
+
+  it('keeps free space out of the legend', async () => {
+    // In 300px the legend is a glance, not a ledger. "Free space
+    // 121.8K" is both the largest chip and the least useful.
+    const el = await show();
+    const text = el.shadowRoot.querySelector('.cats').textContent;
+    expect(text).not.toContain('Free space');
+    expect(text).not.toContain('Autocompact buffer');
   });
 
   it('keeps deferred categories in the legend but marks them', async () => {

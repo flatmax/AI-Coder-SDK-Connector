@@ -522,9 +522,19 @@ full is the context* at exactly the moment the CLI started making that decision 
 
 Both read `ClaudeCodeService.get_context_usage`, which is a pass-through of the breakdown the CLI's
 own `/context` prints — so the tab and that command cannot disagree. The category colours come from
-the engine and are used verbatim, so a user running both does not have to learn two colour
-languages. `maxTokens` arrives already reduced by the autocompact buffer, so the bar reaching 100%
-is the real trigger point rather than the model's raw window.
+the engine, so a user running both does not have to learn two colour languages; `categories[].color`
+carries the CLI's *theme token names* (`claude`, `promptBorder`, `inactive`, `warning`) rather than
+CSS, and `context-usage.js` maps them.
+
+`maxTokens` is the model's raw window — it equals `rawMaxTokens`, and the autocompact buffer is
+*not* subtracted from it. The compaction point is `autoCompactThreshold`, a separate field (167,000
+against a 200,000 window on Sonnet). The bar therefore fills toward the threshold, not `maxTokens`,
+so 100% is the real trigger point; `compactionLimit()` and `warningPercent()` own that arithmetic
+for all three views that render this payload. The payload was written against the opposite belief,
+and the live run corrected it: the ratios are provable from three identities the engine maintains —
+the content categories sum to `totalTokens`, `Free space` is `autoCompactThreshold − totalTokens`,
+and `Autocompact buffer` is `maxTokens − autoCompactThreshold`. The structural rows are room left
+rather than content, so the bar excludes them and checks the sum before segmenting.
 
 Two absences in them are deliberate. There is **no refresh loop** — the breakdown only moves when a
 turn runs or a session loads, so it refreshes on those events plus a button; polling would spend
