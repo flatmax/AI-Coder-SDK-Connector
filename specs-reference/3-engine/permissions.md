@@ -278,7 +278,7 @@ PermissionRequestPayload:
     server: string | null              // MCP server name for mcp__* tools
     tool_use_id: string
     agent_id: string | null
-    tool_class: "read" | "write" | "exec" | "delegate" | "interact" | "mcp"
+    tool_class: "read" | "write" | "exec" | "delegate" | "interact" | "plan" | "mcp"
     gated_by_default: bool             // whether this class is gated in `default` mode
     input: object                      // full tool input, verbatim
     summary: string                    // one-line human summary, ours
@@ -292,6 +292,7 @@ PermissionRequestPayload:
     diff: DiffPayload | null           // present for tool_class == "write"
     command: CommandPayload | null     // present for tool_class == "exec"
     question: QuestionPayload | null   // present for tool_class == "interact"
+    plan: PlanPayload | null           // present for tool_class == "plan"
     expires_at: string                 // ISO 8601 UTC; drives the dialog countdown
     localhost_available: bool          // false ⇒ dialog explains the short timeout
 
@@ -338,6 +339,11 @@ Question:
     header: string | null              // AskUserQuestion's short chip label
     options: list[{label: string, description: string | null}]
     multi_select: bool
+
+PlanPayload:
+    plan: string                       // the whole plan, markdown, never truncated
+    headline: string                   // its first line of prose, `#` stripped, capped at 120
+    file_path: string | null           // planFilePath, when the CLI names the file it read
 ```
 
 `flags` is a display hint derived from the command text. It is explicitly advisory: it must never gate
@@ -369,8 +375,16 @@ PermissionDecision:
     reason: string | null              // required for deny actions
     rule_index: integer | null         // index into suggested_rules, for allow_always
     updated_input: object | null       // when the user edited the input; Bash/Write/NotebookEdit only
-    answers: list[list[integer]] | null  // interact only: chosen option indices, one list per question
+    answers: list[Answer] | null       // interact only: one entry per question, in order
+
+Answer:
+    options: list[integer]             // chosen option indices
+    text: string                       // the freeform reply, "" when the user typed none
 ```
+
+An `Answer` may also arrive as a bare `list[integer]`, which is the shape the browser sent before the
+freeform reply existed. It is read as `{options: […], text: ""}`, so a client mid-upgrade still answers
+correctly rather than having its selections dropped.
 
 `allow_mode` carries **no mode name**. The engine applies the mode from `suggested_mode` on the
 request it built; a decision that could name its own mode could name `bypassPermissions`.
@@ -408,6 +422,17 @@ Verified against the bundled CLI 2.1.229, whose tool definition is:
   one of the option labels is delivered too, prefixed with an instruction to read it carefully, which is
   how the tool's auto-provided "Other" reply reaches the model.
 
+**`response` must stay unset.** The result mapping tests it *before* it looks at `answers` — an
+`else if (response?.trim())` branch yielding `The user responded: …` that pre-empts the answers branch
+entirely — so a decision that set `response` for the freeform reply would report that reply and silently
+discard every option the user picked alongside it, on every other question in the call too. The terminal
+itself never sets it; the field exists for a caller that has nothing but prose. AC⚡DC therefore routes
+the freeform reply through `answers[<question text>]` like any other answer, and
+`test_no_response_key_is_ever_written` pins it. Nor is the reply a distinct kind of answer to the CLI:
+the tool's own schema instructs the model not to write an "Other" option *because the front end provides
+one*, so prose in the answers map is the intended path, and the "read this carefully" prefix above is the
+CLI's own handling of it.
+
 Three rules the CLI enforces that the map has to respect:
 
 - **The key is the question text**, exactly as the tool was called with it — not a normalisation of ours.
@@ -416,6 +441,10 @@ Three rules the CLI enforces that the map has to respect:
   text.
 - **Multi-select is one string joined with `", "`.** The CLI splits on exactly that separator to check the
   parts back against the option labels.
+- **A freeform reply is combined by the same rules.** For a single-select question it *replaces* the label,
+  because "Other" is one of the choices in a radio group rather than an addition to it; for a multi-select
+  it is one more item in the joined list. Both fall out of the split-and-check above: an item that matches
+  no label is passed through as prose.
 - **A question with no key is a question the user declined**, which is a legitimate state — an empty
   answer counts as covered. So a partial answer set is deliverable, and the browser's rule that "Answer"
   waits for every question is a UI choice, not a protocol requirement.
@@ -424,7 +453,23 @@ The mapping from indices to labels lives on the engine side for two reasons. The
 verbatim tool input, so the key it writes cannot drift from what the tool was called with; and
 `updated_input` being present on a decision is what marks a call as user-modified in the transcript.
 Answering a question the agent asked is not modifying the call it made, so the browser sends
-`answers` — option indices — and never builds the patch itself.
+`answers` — indices and typed text — and never builds the patch itself.
+
+### `ExitPlanMode` — approving a plan
+
+Verified against the bundled CLI 2.1.229:
+
+- Input: `plan` (markdown) plus `planFilePath`. **`plan` is optional in the schema** — the CLI's own comment says it is "injected by `normalizeToolInput` from disk", `planFilePath` naming the file — so a call with no plan text is a real case rather than a malformed one, and the payload is `null` for it.
+- The plan travels whole. Unlike `CommandPayload.command` there is no cap: what is being approved *is* the text, so a truncation would be an approval of something unread. The 4 000-char cap applied to this tool for exactly as long as `classify_tool` had no entry for it and it fell through to `exec`.
+- `headline` is the first non-blank line with leading `#` stripped and a 120-char cap, used for the dialog header and the screen-reader announcement. It is a convenience, not a summary: the body renders the whole plan regardless.
+- No `PermissionUpdate` is derived. A standing `allow` for `ExitPlanMode` would approve every later plan sight-unseen, which is the one thing the dialog exists to prevent, and the CLI does not suggest one either.
+
+**Approving a plan changes the permission mode silently.** The CLI's own handler sets the session mode to
+`prePlanMode ?? "default"` when `ExitPlanMode` is approved, and emits nothing on the stream to say so —
+the same silence the `note_mode` callback exists to cover for `setMode` suggestions. An engine that does
+not account for it leaves every client's mode selector claiming `plan` while writes are in fact being
+gated as `default`. Not yet handled: the target mode is whatever the session was in before plan mode, and
+the SDK does not expose `prePlanMode`, so the engine would be guessing rather than reporting.
 
 ### `permissionResolved(data)` — server → browser (broadcast)
 
@@ -461,11 +506,18 @@ config surface — a user who wants a different posture writes a rule.
 | `exec` | `Bash`, `BashOutput`, `KillShell` | Yes |
 | `delegate` | `Task` | No |
 | `interact` | `AskUserQuestion` | Always, by the SDK |
+| `plan` | `ExitPlanMode` | Yes |
 | `mcp` | any `mcp__*` tool from a server other than `ac-dc` | Yes |
 
 An unrecognised tool name classifies as `mcp` when it matches `mcp__*` and as `exec` otherwise —
 unknown-and-gated is the safe default, and a new built-in tool appearing in a CLI upgrade must not
 arrive ungated.
+
+Safe is not the same as honest, though, and `ExitPlanMode` is the demonstration: it was missing from this
+map, so it arrived gated — correctly — as an `exec` call, and the dialog asked the user to approve a
+"command" that was a truncated markdown essay. The fallthrough buys time to add a class; it does not
+substitute for adding one. A built-in tool whose dialog reads as a different kind of act than it is
+belongs in this map before it ships.
 
 ## Dependency quirks
 

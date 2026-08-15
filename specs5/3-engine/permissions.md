@@ -52,7 +52,8 @@ documented failure mode of every permission UI.
 | **File mutation** | `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | Gated | Path, and the proposed change as a **rendered Monaco diff** — the same viewer used everywhere else in the app |
 | **Execution** | `Bash`, `BashOutput`, `KillShell` | Gated | The exact command, the working directory, and a note when it appears to write, network, or delete |
 | **Delegation** | `Task` | Displayed, not gated | Subagent type and prompt summary |
-| **Interaction** | `AskUserQuestion` | Always gated by the SDK | The question and its options, rendered as real choices |
+| **Interaction** | `AskUserQuestion` | Always gated by the SDK | The question and its options, rendered as real choices, each with a freeform reply |
+| **Plan** | `ExitPlanMode` | Gated | The proposed plan, **rendered as markdown and never truncated** |
 | **MCP (third-party)** | Anything from a non-`ac-dc` MCP server | Gated | Server name, tool name, full input |
 
 Read-only calls being ungated by default is a deliberate trade. The alternative — gating reads —

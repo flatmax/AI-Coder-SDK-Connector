@@ -56,6 +56,7 @@ export function renderDecisions(host, payload) {
   const primaryRule = describeRule(rules[host._ruleIndex] || rules[0]);
   const mode = describeMode(payload);
   const interact = payload.tool_class === 'interact';
+  const plan = payload.tool_class === 'plan';
 
   return html`
     <div class="decisions">
@@ -189,12 +190,17 @@ export function renderDecisions(host, payload) {
         class="decision ${edited ? 'edited' : 'primary'}"
         data-decision="allow"
         ?disabled=${settling
-          || (interact && !answersComplete(payload, host._answers))}
+          || (interact
+            && !answersComplete(payload, host._answers, host._answerTexts))}
         @click=${() => host._decide('allow')}
       >
         ${interact
           ? 'Answer'
-          : edited ? 'Allow with edits' : 'Allow once'}
+          : plan
+            // Not "Allow once": what is being approved is the plan, and the
+            // next thing that happens is the agent starting on it.
+            ? 'Approve plan'
+            : edited ? 'Allow with edits' : 'Allow once'}
       </button>
     </div>
 

@@ -10,8 +10,14 @@
 // handlers; none of them own state.
 
 import { html } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
-import { CLASS_LABELS, FLAG_TOOLTIPS } from './constants.js';
+import { renderMarkdown } from '../markdown.js';
+import {
+  CLASS_LABELS,
+  FLAG_TOOLTIPS,
+  OTHER_ANSWER_PLACEHOLDER,
+} from './constants.js';
 import { interactQuestions } from './queue.js';
 
 const NO_SELECTION = new Set();
@@ -147,6 +153,47 @@ export function renderExecBody(host, payload) {
 }
 
 /**
+ * `plan` — the plan, rendered.
+ *
+ * `ExitPlanMode` asks the user to approve a plan written as markdown, so
+ * the body renders it as markdown. Before this renderer existed the tool
+ * fell through `classify_tool`'s unknown-name path to `exec` and the plan
+ * arrived as a summarised blob truncated at 4000 characters — a body that
+ * asked for approval of something it was not showing, which is the
+ * fallback the write renderer's comment forbids for the same reason.
+ *
+ * Markdown here is the same trust call the chat panel makes: the content
+ * is the model's, `marked` escapes HTML by default, and the alternative
+ * is a wall of `##` and `-` for the one artefact the user has to read
+ * carefully.
+ */
+export function renderPlanBody(host, payload) {
+  const plan = payload.plan;
+  if (!plan?.plan) {
+    return html`
+      <div class="not-shown">
+        <div>This call carries no plan text.</div>
+        <div>
+          The CLI injects the plan from disk, so an absent one usually
+          means the file could not be read. The verbatim input is below —
+          read it before approving.
+        </div>
+      </div>
+    `;
+  }
+  return html`
+    <span class="label">proposed plan</span>
+    <div class="plan markdown">${unsafeHTML(renderMarkdown(plan.plan))}</div>
+    ${plan.file_path
+      ? html`
+          <span class="label">saved at</span>
+          <div class="cwd">${plan.file_path}</div>
+        `
+      : null}
+  `;
+}
+
+/**
  * `interact` — real choices.
  *
  * The options are selectable controls, not a JSON dump of a question the
@@ -154,6 +201,17 @@ export function renderExecBody(host, payload) {
  * is rendered, each with its own control group, because the agent is
  * waiting on all of them and a dialog that shows the first alone leaves
  * the rest silently unanswered.
+ *
+ * Each question also gets a freeform reply, because the terminal's own
+ * question UI always does — the tool tells the model not to write an
+ * "Other" option because the front end provides it. Without one, a user
+ * whose answer is none of the options has to deny the call and start
+ * again in prose.
+ *
+ * It is a plain field rather than an "Other" radio: typing an answer and
+ * picking an option are mutually exclusive for a single-select question,
+ * and one control that clears the other says so without a third state
+ * that can be checked-but-empty.
  */
 export function renderInteractBody(host, payload) {
   const questions = interactQuestions(payload);
@@ -164,6 +222,7 @@ export function renderInteractBody(host, payload) {
     ${questions.map((question, questionIndex) => {
       const multi = question.multi_select;
       const chosen = host._answers.get(questionIndex) || NO_SELECTION;
+      const typed = host._answerTexts.get(questionIndex) || '';
       return html`
         <div class="question-group">
           ${question.header
@@ -193,6 +252,26 @@ export function renderInteractBody(host, payload) {
               </label>
             `)}
           </div>
+          <input
+            class="other-answer"
+            data-question=${questionIndex}
+            .value=${typed}
+            placeholder=${OTHER_ANSWER_PLACEHOLDER}
+            aria-label="your own answer to: ${question.question}"
+            spellcheck="true"
+            @input=${(event) =>
+              host._onAnswerTextInput(questionIndex, event, multi)}
+          />
+          ${typed.trim() && !multi
+            ? html`<span class="other-note">
+                Sent instead of the options above.
+              </span>`
+            : null}
+          ${typed.trim() && multi
+            ? html`<span class="other-note">
+                Sent alongside anything ticked above.
+              </span>`
+            : null}
         </div>
       `;
     })}
@@ -270,6 +349,7 @@ export function renderBody(host, payload) {
   switch (payload.tool_class) {
     case 'write': return renderWriteBody(host, payload);
     case 'exec': return renderExecBody(host, payload);
+    case 'plan': return renderPlanBody(host, payload);
     case 'interact': return renderInteractBody(host, payload);
     case 'mcp': return renderMcpBody(host, payload);
     case 'read':

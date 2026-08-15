@@ -100,6 +100,7 @@ _WRITE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
 _EXEC_TOOLS = frozenset({"Bash", "BashOutput", "KillShell"})
 _DELEGATE_TOOLS = frozenset({"Task"})
 _INTERACT_TOOLS = frozenset({"AskUserQuestion"})
+_PLAN_TOOLS = frozenset({"ExitPlanMode"})
 
 TOOL_CLASSES: dict[str, str] = {
     **{name: "read" for name in _READ_TOOLS},
@@ -107,6 +108,7 @@ TOOL_CLASSES: dict[str, str] = {
     **{name: "exec" for name in _EXEC_TOOLS},
     **{name: "delegate" for name in _DELEGATE_TOOLS},
     **{name: "interact" for name in _INTERACT_TOOLS},
+    **{name: "plan" for name in _PLAN_TOOLS},
 }
 
 # The CLI's default posture per class, for the dialog's own copy. We do not
@@ -117,6 +119,7 @@ GATED_BY_DEFAULT: dict[str, bool] = {
     "exec": True,
     "delegate": False,
     "interact": True,
+    "plan": True,
     "mcp": True,
 }
 
@@ -412,6 +415,46 @@ def build_command_payload(
     }
 
 
+def plan_headline(plan: Any, limit: int = 120) -> str:
+    """The plan's first line of prose, for the header and announcements.
+
+    Leading ``#`` are stripped so a plan that opens with a markdown heading
+    reads as a title rather than as syntax.
+    """
+    if not isinstance(plan, str):
+        return ""
+    for line in plan.splitlines():
+        text = line.strip().lstrip("#").strip()
+        if text:
+            return text if len(text) <= limit else text[: limit - 1] + "…"
+    return ""
+
+
+def build_plan_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
+    """``PlanPayload`` for ``ExitPlanMode``.
+
+    Sent whole and **never truncated**, unlike a command: the plan is the
+    artefact the user is being asked to approve, and a plan with its tail
+    cut off is a plan approved unread. ``COMMAND_DISPLAY_CHARS`` exists
+    because a 40 KB shell command is pathological; a long plan is ordinary.
+
+    ``plan`` is optional in the CLI's own schema — "injected by
+    ``normalizeToolInput`` from disk", with ``planFilePath`` naming the file
+    it came from (observed in the bundled CLI 2.1.229). So an absent plan is
+    a real case, and it returns ``None`` rather than an empty string, which
+    the dialog would render as an empty body over an Approve button.
+    """
+    plan = tool_input.get("plan")
+    if not isinstance(plan, str) or not plan.strip():
+        return None
+    path = tool_input.get("planFilePath") or tool_input.get("plan_file_path")
+    return {
+        "plan": plan,
+        "headline": plan_headline(plan),
+        "file_path": path if isinstance(path, str) and path else None,
+    }
+
+
 def build_question_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
     """``QuestionPayload`` for ``AskUserQuestion``.
 
@@ -462,6 +505,27 @@ def build_question_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _split_selection(chosen: Any) -> tuple[list[int], str]:
+    """One question's answer, as ``(option indices, freeform reply)``.
+
+    Two accepted shapes, because the freeform reply arrived after the
+    indices did: a bare list is indices alone, and a mapping carries both.
+    """
+    if isinstance(chosen, dict):
+        raw = chosen.get("options")
+        reply = chosen.get("text")
+    elif isinstance(chosen, list):
+        raw, reply = chosen, None
+    else:
+        return [], ""
+    indices = [
+        position
+        for position in (raw if isinstance(raw, list) else [])
+        if isinstance(position, int) and not isinstance(position, bool)
+    ]
+    return indices, reply.strip() if isinstance(reply, str) else ""
+
+
 def build_answer_input(
     tool_input: dict[str, Any],
     question: dict[str, Any] | None,
@@ -480,11 +544,28 @@ def build_answer_input(
     that collected a selection and then allowed the call plainly would show
     the user an answered question and hand the agent silence.
 
-    ``selections`` is one list of option indices per question, in the order
-    the payload's ``questions`` list carries them. A short list, a missing
-    entry or an out-of-range index is dropped rather than guessed at: an
-    unanswered question reads to the CLI as one the user declined, which is
-    at least true.
+    ``selections`` is one entry per question, in the order the payload's
+    ``questions`` list carries them: either a list of option indices, or a
+    mapping ``{"options": [...], "text": "..."}`` when the user typed their
+    own reply. A short list, a missing entry or an out-of-range index is
+    dropped rather than guessed at: an unanswered question reads to the CLI
+    as one the user declined, which is at least true.
+
+    **The freeform reply is an ordinary answer string, not a field of its
+    own.** The tool's schema does have a top-level ``response``, but the
+    terminal never sets it, and the CLI's result mapping reads it *instead
+    of* the answers map ("The user responded: …" pre-empts the per-question
+    branch entirely) — so routing "Other" through ``response`` would
+    silently discard every option the user had also picked. Verified against
+    the bundled CLI 2.1.229; recorded in
+    ``specs-reference/3-engine/permissions.md`` § Answering an ``interact``
+    request.
+
+    A reply that is not an option label is accepted by the CLI: it fails the
+    every-answer-is-a-label check, which switches its own framing to "Read
+    the answers carefully — they may request clarification, changes, or that
+    you not proceed". That is the correct reading of a freeform answer, so
+    the check failing here is the feature rather than a defect.
     """
     questions = (question or {}).get("questions") or []
     if not questions or not isinstance(selections, list):
@@ -501,24 +582,28 @@ def build_answer_input(
     for index, entry in enumerate(questions):
         if index >= len(selections):
             break
-        chosen = selections[index]
-        if not isinstance(chosen, list):
-            continue
+        chosen, reply = _split_selection(selections[index])
         options = entry.get("options") or []
         labels = [
             str(options[position].get("label", ""))
             for position in chosen
-            if isinstance(position, int)
-            and not isinstance(position, bool)
-            and 0 <= position < len(options)
+            if 0 <= position < len(options)
         ]
+        # Single-select: the reply *replaces* the labels, because "Other" is
+        # one of the choices in a radio group rather than an addition to it.
+        # Multi-select: it is one more item in the joined list, which is how
+        # the terminal's own Other row behaves alongside checked options.
+        if reply:
+            parts = [reply] if not entry.get("multi_select") else [*labels, reply]
+        else:
+            parts = labels
         raw_entry = raw_questions[index] if index < len(raw_questions) else None
         text = raw_entry.get("question") if isinstance(raw_entry, dict) else None
         if not isinstance(text, str) or not text:
             text = entry.get("question")
-        if not labels or not isinstance(text, str) or not text:
+        if not parts or not isinstance(text, str) or not text:
             continue
-        answers[text] = ", ".join(labels)
+        answers[text] = ", ".join(parts)
 
     if not answers:
         return None
@@ -751,9 +836,11 @@ def derive_suggested_rules(
             # Named for the tool the CLI checks, not the tool that asked, so
             # the label states the rule that will actually be written.
             rules.append(_suggested_rule(rule_tool, content))
-    # Deliberately nothing for `mcp`, `delegate`, or `interact`: the only
-    # rule we could derive for them is a bare tool grant, and AC-DC never
-    # writes one (specs5/3-engine/permissions.md § Decisions).
+    # Deliberately nothing for `mcp`, `delegate`, `interact` or `plan`: the
+    # only rule we could derive for them is a bare tool grant, and AC-DC never
+    # writes one (specs5/3-engine/permissions.md § Decisions). For `plan` a
+    # standing grant would be worse than useless — it would approve every
+    # future plan sight-unseen, which is the one thing the dialog is for.
     if rules:
         rules.append(_shared_variant(rules[0]))
     return rules
@@ -844,6 +931,10 @@ def summarise_request(tool_name: str, tool_input: dict[str, Any], tool_class: st
             single = " ".join(command.split())
             capped = single if len(single) <= 120 else single[:119] + "…"
             return f"{tool_name}: {capped}"
+    if tool_class == "plan":
+        headline = plan_headline(tool_input.get("plan"))
+        if headline:
+            return f"{tool_name}: {headline}"
     summary = summarise_tool_input(tool_input)
     return f"{tool_name} {summary}".strip()
 
@@ -1337,6 +1428,9 @@ class PermissionBroker:
             ),
             "question": (
                 build_question_payload(tool_input) if tool_class == "interact" else None
+            ),
+            "plan": (
+                build_plan_payload(tool_input) if tool_class == "plan" else None
             ),
             "expires_at": _iso(expires_at),
             "localhost_available": localhost,

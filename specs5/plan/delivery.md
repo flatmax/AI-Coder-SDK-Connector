@@ -747,3 +747,55 @@ both held nothing but stale `__pycache__` after their contents were deleted.
   `history_delete` are still asserted absent by `test_phase_five_methods_are_absent`, on phase 1's
   reasoning that a stub reporting success would be worse than a missing method. Delete that test as
   you build them, not before.
+
+---
+
+## Interlude — the two dialogs the terminal has and the browser did not (2026-08-15)
+
+Not a phase. Two gaps found while answering "can this repo build itself yet?", both in the permission
+dialog, both cheap enough to close before phase 4 rather than after. The question mattered because
+self-hosting makes the permission dialog the only way to work: a gap the terminal covers is a gap that
+stops the session.
+
+### `ExitPlanMode` is now a class of its own
+
+`classify_tool` had no entry for it, so it took the unknown-name fallthrough to `exec`. The consequence
+was not a missing dialog but a wrong one: the plan arrived through `CommandPayload`, summarised, capped
+at 4 000 characters, under the heading "command", with focus moved to Deny whenever the prose happened
+to contain the word "delete". A dialog asking for approval of something it is not showing.
+
+- `plan` is a `tool_class`, gated by default; `PlanPayload` carries `plan`, `headline` and `file_path`.
+- The plan renders as markdown, whole, scrolled rather than truncated. `plan` is optional in the CLI's schema — injected from disk — so the no-plan case has its own body, and `planFilePath` is shown when present.
+- The primary button says "Approve plan"; the header shows the plan's first line rather than `ExitPlanMode`'s title, which is identical for every such call; deny prefills "Keep planning".
+- No suggested rule is derived. A standing grant here approves every future plan unread.
+
+### `AskUserQuestion` gained the reply the terminal always offers
+
+The tool's schema tells the model *not* to write an "Other" option, on the grounds that the front end
+provides one. Ours did not, so a user whose answer was none of the offered options had to deny the call
+and start again in prose. Each question now has a text field: typing clears a single-select selection and
+is sent instead of it, a multi-select sends it alongside what is ticked, and a typed reply counts as that
+question's answer for the "Answer" button.
+
+`PermissionDecision.answers` is now `[{options, text}]` per question. Bare index lists are still read, so
+a browser mid-upgrade does not lose its selections.
+
+### One spec correction, made in code first
+
+`specs5/5-webapp/permission-dialog.md` said the freeform reply travels as `input.response`. Implementing
+that literally would have silently discarded every option the user picked: the CLI's result mapping tests
+`response` *before* it reads the answers map, and returns "The user responded: …" instead of it. The
+reply goes through `answers[<question text>]` like any other answer. Both specs now record the verified
+semantics; `test_no_response_key_is_ever_written` pins the behaviour.
+
+### Tests
+
+- `tests/test_claude_code_permissions.py` — `TestPlanPayload` (8), `TestFreeformAnswers` (7), plus the classification and summary cases. 134 in the file, all passing; 2 568 in the suite.
+- `webapp/src/permission-dialog/dialog.test.js` — `describe('a plan')` (8) and `describe('a question the options do not answer')` (7). `queue.test.js` gained 6. 3 184 in the webapp suite, all passing.
+
+### Deliberately not built
+
+- **The permission mode goes stale after an approved plan.** The CLI sets its own mode to `prePlanMode ?? "default"` and announces nothing, so the mode selector goes on saying `plan`. Same class of lie `note_mode` fixed for `setMode` suggestions, but the target mode is whatever preceded plan mode and the SDK does not expose it — the engine would be guessing. Recorded in `specs-reference/3-engine/permissions.md` § `ExitPlanMode`.
+- **The transcript tool card for `ExitPlanMode` is still generic.** The dialog was the blocking gap; the card is a read of history.
+- **No "chat about this" on the dialog.** Denying with a reason is the available path, and it works — the agent reads the reason — but it costs a turn where the terminal would let the user just talk.
+- **`preview` and `annotations` on `AskUserQuestion` remain unbuilt.** Phase 6, unchanged.

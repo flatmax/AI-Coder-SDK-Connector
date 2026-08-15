@@ -153,6 +153,17 @@ describe('defaultFocusTarget', () => {
     })).toBe('allow');
   });
 
+  it('lands on Allow for a plan, whatever prose it contains', () => {
+    // The `exec` dialog this replaced ran the command heuristics over the
+    // plan's *prose*, so a plan that said "delete the old file" moved
+    // focus to Deny. A plan is a proposal, and every edit it leads to is
+    // still gated on its own.
+    expect(defaultFocusTarget({
+      tool_class: 'plan',
+      command: { flags: ['deletes'] },
+    })).toBe('allow');
+  });
+
   it('fails safe with no payload', () => {
     expect(defaultFocusTarget(null)).toBe('deny');
   });
@@ -260,6 +271,13 @@ describe('arrivalAnnouncement', () => {
     })).toBe('permission request: question, Which branch?');
   });
 
+  it('reads the plan headline rather than reciting the plan', () => {
+    expect(arrivalAnnouncement({
+      tool_class: 'plan',
+      plan: { plan: '# Add the widget\n\nlots of detail', headline: 'Add the widget' },
+    })).toBe('permission request: plan, Add the widget');
+  });
+
   it('falls back to the summary when nothing more specific is present', () => {
     expect(arrivalAnnouncement({
       tool_class: 'mcp',
@@ -309,6 +327,16 @@ describe('headerTarget', () => {
       .toBe('ac-dc › search');
   });
 
+  it('prefers the plan headline over the CLI title', () => {
+    // `ExitPlanMode`'s title says the mode is being left, which is true of
+    // every such call. The plan's first line says *which* plan this is.
+    expect(headerTarget({
+      tool_class: 'plan',
+      plan: { headline: 'Add the widget' },
+      title: 'Claude wants to exit plan mode',
+    })).toBe('Add the widget');
+  });
+
   it('uses the CLI title when it has one', () => {
     // What the terminal would show for the same call.
     expect(headerTarget({ title: 'Run the tests', tool_name: 'Bash' }))
@@ -335,6 +363,10 @@ describe('defaultDenyReason', () => {
       .toBe('Do not run this command.');
     expect(defaultDenyReason({ tool_class: 'interact' }))
       .toBe('Do not ask; carry on with what you have.');
+    // Denying a plan is not "do not do this" — it is "keep planning",
+    // which is where the agent already was.
+    expect(defaultDenyReason({ tool_class: 'plan' }))
+      .toBe('Keep planning — do not start on this yet.');
   });
 
   it('is never empty, so a denial is never reasonless', () => {
@@ -561,6 +593,36 @@ describe('answersComplete', () => {
       payload,
       new Map([[0, new Set([1])], [1, new Set()]]),
     )).toBe(false);
+  });
+
+  it('counts a typed reply as a whole answer', () => {
+    // The reply is sent as the answer string for its question, so a
+    // question answered in prose is answered. Requiring an option
+    // alongside would disable the button on a complete set.
+    expect(answersComplete(
+      payload,
+      new Map([[0, new Set([1])]]),
+      new Map([[1, 'neither of those']]),
+    )).toBe(true);
+    expect(answersComplete(
+      payload,
+      new Map(),
+      new Map([[0, 'one'], [1, 'two']]),
+    )).toBe(true);
+  });
+
+  it('does not count whitespace as a reply', () => {
+    expect(answersComplete(
+      payload,
+      new Map([[0, new Set([1])]]),
+      new Map([[1, '   \n']]),
+    )).toBe(false);
+  });
+
+  it('works without a text map at all', () => {
+    // The caller passes it, but the function is exported and tested on its
+    // own, and an absent map must not read as an answered question.
+    expect(answersComplete(payload, new Map([[0, new Set([1])]]))).toBe(false);
   });
 
   it('is never complete when there is nothing to answer', () => {

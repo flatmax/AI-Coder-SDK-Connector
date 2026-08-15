@@ -97,6 +97,8 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     _commandDraft: { type: String, state: true },
     /** `interact` answers: question index → chosen option indices. */
     _answers: { type: Object, state: true },
+    /** `interact` freeform replies: question index → typed answer. */
+    _answerTexts: { type: Object, state: true },
     /** Live-region text: arrival announcement or countdown milestone. */
     _announcement: { type: String, state: true },
   };
@@ -120,6 +122,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._editingCommand = false;
     this._commandDraft = '';
     this._answers = new Map();
+    this._answerTexts = new Map();
     this._announcement = '';
 
     /** Monotonic arrival counter — two requests can share a millisecond. */
@@ -301,6 +304,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._editingCommand = false;
     this._commandDraft = payload?.command?.command ?? '';
     this._answers = new Map();
+    this._answerTexts = new Map();
     if (!payload) {
       this._settleUntil = 0;
       return;
@@ -646,6 +650,34 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const answers = new Map(this._answers);
     answers.set(questionIndex, next);
     this._answers = answers;
+    // Picking an option on a single-select question clears a reply typed
+    // into its Other field. The two are alternatives there, and leaving
+    // stale text behind would send the text and drop the click.
+    if (!multi && event.target.checked && this._answerTexts.get(questionIndex)) {
+      const texts = new Map(this._answerTexts);
+      texts.set(questionIndex, '');
+      this._answerTexts = texts;
+    }
+  }
+
+  /**
+   * The freeform reply to one question.
+   *
+   * The mirror of `_onOptionToggle`: on a single-select question typing
+   * clears the radio selection, because the engine sends the typed reply
+   * *instead of* the labels there and a checked radio would show the user
+   * an answer that is not the one being sent.
+   */
+  _onAnswerTextInput(questionIndex, event, multi) {
+    const value = event.target.value ?? '';
+    const texts = new Map(this._answerTexts);
+    texts.set(questionIndex, value);
+    this._answerTexts = texts;
+    if (!multi && value.trim() && this._answers.get(questionIndex)?.size) {
+      const answers = new Map(this._answers);
+      answers.set(questionIndex, new Set());
+      this._answers = answers;
+    }
   }
 
   /**
@@ -669,23 +701,27 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   }
 
   /**
-   * The `interact` answers as option indices, one entry per question.
+   * The `interact` answers, one entry per question.
    *
-   * Indices rather than labels, and a field of their own rather than
-   * `updated_input`: the engine owns the mapping into the `answers` shape
-   * `AskUserQuestion` reads, and `updated_input` being present is what
-   * marks a call as user-modified in the transcript. Answering a question
-   * the agent asked is not modifying the call it made.
+   * Indices and the typed reply, not labels, and a field of their own
+   * rather than `updated_input`: the engine owns the mapping into the
+   * `answers` shape `AskUserQuestion` reads, and `updated_input` being
+   * present is what marks a call as user-modified in the transcript.
+   * Answering a question the agent asked is not modifying the call it made.
    *
-   * @returns {Array<Array<number>>|null} null when nothing was chosen
+   * @returns {Array<{options: Array<number>, text: string}>|null} null when
+   *   the user chose and typed nothing at all
    */
-  _answerIndices() {
+  _answerSelections() {
     const questions = interactQuestions(this.current);
     if (!questions.length) return null;
-    const answers = questions.map(
-      (_question, index) => [...(this._answers.get(index) || [])].sort((a, b) => a - b),
-    );
-    return answers.some((chosen) => chosen.length) ? answers : null;
+    const answers = questions.map((_question, index) => ({
+      options: [...(this._answers.get(index) || [])].sort((a, b) => a - b),
+      text: (this._answerTexts.get(index) || '').trim(),
+    }));
+    return answers.some((answer) => answer.options.length || answer.text)
+      ? answers
+      : null;
   }
 
   // ------------------------------------------------------------------
@@ -761,7 +797,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       const updated = this._updatedInput();
       if (updated) decision.updated_input = updated;
       if (payload.tool_class === 'interact') {
-        const answers = this._answerIndices();
+        const answers = this._answerSelections();
         if (answers) decision.answers = answers;
       }
     }

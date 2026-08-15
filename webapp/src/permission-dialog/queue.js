@@ -71,6 +71,11 @@ export function defaultFocusTarget(payload) {
   if (!payload) return 'deny';
   if (payload.tool_class === 'mcp') return 'deny';
   if (payload.tool_class === 'interact') return 'allow';
+  // A plan is a proposal, and approving one still leaves every edit it
+  // leads to gated. The dialog it replaced was `exec`, whose focus moved
+  // to Deny on a `deletes` flag matched against a plan's *prose* — a
+  // heuristic aimed at commands, misfiring on an essay.
+  if (payload.tool_class === 'plan') return 'allow';
   const flags = payload.command?.flags;
   if (Array.isArray(flags) && flags.some((flag) => RISKY_FLAGS.includes(flag))) {
     return 'deny';
@@ -153,6 +158,8 @@ export function arrivalAnnouncement(payload) {
     parts.push(payload.command.command.slice(0, 200));
   } else if (payload.question?.question) {
     parts.push(payload.question.question);
+  } else if (payload.plan?.headline) {
+    parts.push(payload.plan.headline);
   } else if (payload.summary) {
     parts.push(payload.summary);
   }
@@ -178,6 +185,9 @@ export function headerTarget(payload) {
     return single.length > 90 ? `${single.slice(0, 89)}…` : single;
   }
   if (payload.server) return `${payload.server} › ${payload.tool_name}`;
+  // Before `title`: the header already shows the tool name, and the plan's
+  // own first line says which plan this is where `ExitPlanMode` cannot.
+  if (payload.plan?.headline) return payload.plan.headline;
   if (payload.title) return payload.title;
   return payload.summary || payload.tool_name || '';
 }
@@ -295,19 +305,28 @@ export function interactQuestions(payload) {
 }
 
 /**
- * Whether every question has at least one option selected.
+ * Whether every question has an answer — an option, or a typed reply.
  *
  * The agent is waiting on all of them: an answer map missing a key reads
  * to the CLI as a question the user declined to answer, so "Answer"
  * stays disabled until the set is complete rather than sending a partial
  * reply the agent cannot tell from a refusal.
  *
+ * A typed reply counts. It is a whole answer on its own — the engine sends
+ * it as the answer string for that question — so requiring an option
+ * alongside it would disable the button on a question the user has in fact
+ * answered.
+ *
  * @param {object|null} payload
  * @param {Map<number, Set<number>>} answers — question index → chosen options
+ * @param {Map<number, string>} [texts] — question index → typed reply
  * @returns {boolean}
  */
-export function answersComplete(payload, answers) {
+export function answersComplete(payload, answers, texts) {
   const questions = interactQuestions(payload);
   if (!questions.length) return false;
-  return questions.every((_question, index) => (answers.get(index)?.size ?? 0) > 0);
+  return questions.every((_question, index) => (
+    (answers.get(index)?.size ?? 0) > 0
+    || !!texts?.get(index)?.trim()
+  ));
 }

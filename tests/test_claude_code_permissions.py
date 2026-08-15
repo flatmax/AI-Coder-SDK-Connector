@@ -31,11 +31,13 @@ from ac_dc.claude_code.permissions import (
     build_answer_input,
     build_command_payload,
     build_diff_payload,
+    build_plan_payload,
     build_question_payload,
     classify_tool,
     command_flags,
     derive_suggested_mode,
     derive_suggested_rules,
+    plan_headline,
     read_denied_read_files,
     summarise_request,
     write_denied_read_files,
@@ -135,12 +137,23 @@ class TestClassification:
             ("KillShell", "exec"),
             ("Task", "delegate"),
             ("AskUserQuestion", "interact"),
+            ("ExitPlanMode", "plan"),
             ("mcp__playwright__click", "mcp"),
             ("mcp__ac-dc__repo_map", "read"),
         ],
     )
     def test_known_tools(self, tool_name, expected):
         assert classify_tool(tool_name) == expected
+
+    def test_a_plan_is_not_a_shell_command(self):
+        """The regression this class exists to pin for ``plan``.
+
+        ``ExitPlanMode`` used to fall through the unknown-name path to
+        ``exec``, so the dialog asking the user to approve a plan rendered
+        it through ``build_command_payload`` — summarised, truncated at
+        ``COMMAND_DISPLAY_CHARS``, and captioned "command".
+        """
+        assert classify_tool("ExitPlanMode") != "exec"
 
     def test_an_unknown_tool_gets_the_most_cautious_dialog(self):
         """A built-in added in a CLI upgrade must not arrive under-described."""
@@ -303,6 +316,65 @@ class TestQuestionPayload:
 
 
 # ---------------------------------------------------------------------------
+# Plans
+# ---------------------------------------------------------------------------
+
+
+class TestPlanPayload:
+    """``ExitPlanMode`` carries the plan the user is approving.
+
+    Input shape observed in the bundled CLI: ``plan`` is optional and
+    "injected by ``normalizeToolInput`` from disk", with ``planFilePath``
+    naming the file.
+    """
+
+    PLAN = "## Add the widget\n\n- step one\n- step two\n"
+
+    def test_the_plan_travels_whole(self):
+        payload = build_plan_payload({"plan": self.PLAN})
+        assert payload["plan"] == self.PLAN
+        assert payload["file_path"] is None
+
+    def test_a_long_plan_is_not_truncated(self):
+        # Deliberately unlike a command: the plan is the artefact being
+        # approved, and a truncated one is a plan approved unread.
+        long_plan = "# Title\n\n" + ("detail line\n" * 5000)
+        payload = build_plan_payload({"plan": long_plan})
+        assert payload["plan"] == long_plan
+        assert "truncated" not in payload
+
+    def test_the_headline_is_the_first_line_without_its_hashes(self):
+        payload = build_plan_payload({"plan": self.PLAN})
+        assert payload["headline"] == "Add the widget"
+
+    def test_the_headline_skips_leading_blank_lines(self):
+        assert plan_headline("\n\n   \nReal title\nmore") == "Real title"
+
+    def test_a_long_headline_is_capped(self):
+        headline = plan_headline("x" * 400)
+        assert len(headline) == 120
+        assert headline.endswith("…")
+
+    def test_the_plan_file_path_is_carried_when_the_cli_names_one(self):
+        payload = build_plan_payload(
+            {"plan": self.PLAN, "planFilePath": "/tmp/plan-1.md"}
+        )
+        assert payload["file_path"] == "/tmp/plan-1.md"
+
+    def test_no_plan_text_is_none_rather_than_an_empty_body(self):
+        # `plan` is optional in the CLI's schema, so this is a real case.
+        # An empty string would render as a blank body over an Approve
+        # button, which asks for approval of nothing.
+        assert build_plan_payload({}) is None
+        assert build_plan_payload({"plan": "   \n"}) is None
+        assert build_plan_payload({"plan": 42}) is None
+
+    def test_the_headline_of_a_missing_plan_is_empty(self):
+        assert plan_headline(None) == ""
+        assert plan_headline("") == ""
+
+
+# ---------------------------------------------------------------------------
 # Answers
 # ---------------------------------------------------------------------------
 
@@ -377,6 +449,73 @@ class TestAnswerInput:
         assert build_answer_input(self.INPUT, self.question(), None) is None
         assert build_answer_input(self.INPUT, None, [[0]]) is None
         assert build_answer_input(self.INPUT, self.question(), [True, "x"]) is None
+
+
+class TestFreeformAnswers:
+    """The "Other" reply the terminal always offers.
+
+    The tool's own schema tells the model there should be no "Other" option
+    because the front end provides one, so a reply that is not an option
+    label is an ordinary answer — not a separate field. The CLI's
+    ``response`` key is deliberately *not* used: its result mapping reads
+    ``response`` instead of the answers map, so routing "Other" through it
+    would discard every option the user also picked.
+    """
+
+    INPUT = TestAnswerInput.INPUT
+
+    def question(self):
+        return build_question_payload(self.INPUT)
+
+    def test_a_typed_reply_is_the_answer(self):
+        updated = build_answer_input(
+            self.INPUT,
+            self.question(),
+            [{"options": [], "text": "a branch you have not listed"}, [0]],
+        )
+        assert updated["answers"]["Which branch?"] == "a branch you have not listed"
+
+    def test_no_response_key_is_ever_written(self):
+        # The bug this rules out: `response` pre-empts the answers map in
+        # the CLI's own result mapping ("The user responded: …"), so a
+        # freeform reply sent that way silently drops the other answers.
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"text": "something else"}, [1]]
+        )
+        assert "response" not in updated
+        assert updated["answers"]["Which files?"] == "b"
+
+    def test_on_a_single_select_the_reply_replaces_the_labels(self):
+        # "Other" is one of the choices in a radio group, not an addition
+        # to it: sending both would answer the question twice.
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"options": [0], "text": "neither"}, [0]]
+        )
+        assert updated["answers"]["Which branch?"] == "neither"
+
+    def test_on_a_multi_select_the_reply_joins_the_ticked_options(self):
+        updated = build_answer_input(
+            self.INPUT, self.question(), [[0], {"options": [0, 2], "text": "and d"}]
+        )
+        assert updated["answers"]["Which files?"] == "a, c, and d"
+
+    def test_whitespace_only_is_not_an_answer(self):
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"options": [], "text": "   \n"}, [1]]
+        )
+        assert "Which branch?" not in updated["answers"]
+
+    def test_the_index_only_shape_still_works(self):
+        # The browser sent bare index lists before the reply existed, and a
+        # payload from a client mid-upgrade still has to answer correctly.
+        updated = build_answer_input(self.INPUT, self.question(), [[1], [0]])
+        assert updated["answers"] == {"Which branch?": "dev5", "Which files?": "a"}
+
+    def test_a_malformed_reply_is_dropped_not_stringified(self):
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"text": {"nested": 1}}, [0]]
+        )
+        assert "Which branch?" not in updated["answers"]
 
 
 # ---------------------------------------------------------------------------
@@ -1237,3 +1376,11 @@ class TestSummaries:
         summary = summarise_request("Bash", {"command": "x" * 300}, "exec")
         assert len(summary) <= 130
         assert summary.endswith("…")
+
+    def test_a_plan_leads_with_its_first_line(self):
+        # Before `plan` was a class of its own this fell through to `exec`
+        # and summarised the plan as though it were a command line.
+        summary = summarise_request(
+            "ExitPlanMode", {"plan": "# Add the widget\n\nstep one\n"}, "plan"
+        )
+        assert summary == "ExitPlanMode: Add the widget"

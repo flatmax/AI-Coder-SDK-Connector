@@ -299,6 +299,81 @@ export const PERMISSION_DIALOG_STYLES = css`
   .option .option-label { color: #e6edf3; }
   .option .option-description { color: #8b949e; font-size: 12px; }
 
+  .other-answer {
+    margin-top: 8px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    color: #e6edf3;
+    background: #0d1117;
+    border: 1px dashed #30363d;
+    border-radius: 6px;
+  }
+
+  .other-answer:focus {
+    outline: none;
+    border-style: solid;
+    border-color: #58a6ff;
+  }
+
+  .other-note {
+    display: block;
+    margin-top: 4px;
+    color: #8b949e;
+    font-size: 11px;
+  }
+
+  /* plan */
+
+  .plan {
+    max-height: 52vh;
+    overflow: auto;
+    padding: 12px 14px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #0d1117;
+    color: #e6edf3;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .plan h1, .plan h2, .plan h3, .plan h4 {
+    margin: 14px 0 6px;
+    line-height: 1.3;
+  }
+
+  .plan h1 { font-size: 17px; }
+  .plan h2 { font-size: 15px; }
+  .plan h3, .plan h4 { font-size: 14px; }
+  .plan > :first-child { margin-top: 0; }
+  .plan p, .plan ul, .plan ol { margin: 0 0 10px; }
+  .plan ul, .plan ol { padding-left: 22px; }
+  .plan li { margin: 3px 0; }
+  .plan code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    background: #161b22;
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .plan pre {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 10px 12px;
+    overflow: auto;
+  }
+  .plan pre code { background: none; padding: 0; }
+  .plan a { color: #58a6ff; }
+  .plan table { border-collapse: collapse; margin: 0 0 10px; }
+  .plan th, .plan td {
+    border: 1px solid #30363d;
+    padding: 4px 8px;
+    text-align: left;
+  }
+
   /* ---------------- detail strip ---------------- */
 
   .detail-strip {

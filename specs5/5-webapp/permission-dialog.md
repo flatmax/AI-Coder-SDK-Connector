@@ -111,6 +111,31 @@ decision covers the call as a whole, because the tool call is atomic.
 - `flags` (`writes`, `network`, `deletes`) as advisory chips with a tooltip explaining they are heuristics. They shift the default focus (see below) and nothing else. A chip that gated anything would be either bypassable or wrong.
 - Commands over the display cap are truncated with a full-text expander, never silently.
 
+### `plan` — the artefact being approved
+
+`ExitPlanMode` asks the user to approve a plan written as markdown, so the body renders it as markdown:
+headings, lists, code blocks, tables. The same trust call the chat panel makes — the content is the
+model's, `marked` escapes HTML by default — and the alternative is a wall of `##` and `-` for the one
+artefact in the whole dialog the user has to read carefully.
+
+- **The plan is never truncated.** Unlike a command, the plan *is* the thing being approved; a plan elided at a display cap is a plan approved unread. It scrolls within the body instead.
+- **The header shows the plan's own first line**, hashes stripped, in preference to the CLI's `title` — which says the mode is being left, and says it identically for every such call.
+- **The primary button reads "Approve plan"**, not "Allow once". What is being approved is a proposal, and what happens next is the agent starting on it.
+- **Default focus is Allow**, unconditionally. A plan is a proposal and every edit it leads to is gated on its own. The `exec` dialog this replaced ran the command flag heuristics over the plan's *prose*, so a plan containing the word "delete" moved focus to Deny.
+- **No "always allow".** A standing grant for `ExitPlanMode` would approve every later plan sight-unseen, which is the one thing this dialog is for. The engine declines to derive the rule (§ Suggested rules) and the control is therefore absent.
+- **Deny means "keep planning"**, and the prefilled reason says so, because that is where the agent already was.
+- `plan` is optional in the CLI's own schema — it is injected from disk by `normalizeToolInput`, with `planFilePath` naming the file — so a call carrying no plan text is a real case. The body says the plan could not be read and points at the verbatim input, rather than rendering a blank pane above an Approve button. Where `planFilePath` is present it is shown, so the user can go and read the file.
+
+This class was added late: `classify_tool` had no entry for `ExitPlanMode`, so it fell through the
+unknown-name path to `exec` and the plan arrived as a summarised blob truncated at 4 000 characters,
+inside a body captioned "command". A dialog asking for approval of something it is not showing is the
+same failure the `write` renderer's fallback rule forbids.
+
+One known gap: when a plan is approved the CLI switches its own permission mode to `prePlanMode ?? default`
+**without announcing it on the stream**, so AC⚡DC's mode selector goes on claiming `plan`. Same class of
+lie the `note_mode` callback fixed for the other mode transitions; it needs the engine to learn the target
+mode rather than guess it, so it is recorded here and not patched.
+
 ### `interact` — real choices
 
 `AskUserQuestion` renders its question as prose and its options as actual selectable controls —
@@ -130,14 +155,31 @@ permission decision has to allow the call *with* an `answers` map merged into th
 question text. Allow it plainly and the tool result the agent receives is "The user did not answer the
 questions" — the user would see an answered question and the agent would hear silence, which is the
 worst of the available outcomes because nothing on either side looks broken. The dialog sends the
-selections as option indices (`PermissionDecision.answers`, one list per question) and the engine builds
-the map; see `specs-reference/3-engine/permissions.md` § Answering an `interact` request for why the
-mapping lives there and not in the browser.
+selections as `PermissionDecision.answers`, one entry per question — `{options: [<index>, …], text:
+"<typed reply>"}` — and the engine builds the map; see
+`specs-reference/3-engine/permissions.md` § Answering an `interact` request for why the mapping lives
+there and not in the browser.
 
-Three affordances the tool supports are **not built**: the freeform "Other" reply it offers alongside the
-options (`input.response`), the per-option `preview` its terminal UI renders for comparing mockups, and
-the per-answer notes (`input.annotations`). All three are additive — a call answered by option label is
-answered correctly without them — and they belong with the rest of the dialog's polish in phase 6.
+**The freeform reply is one of the answers, not a separate field.** Each question gets a plain text field
+below its options, because the terminal always offers one: the tool's own schema tells the model *not* to
+write an "Other" option, on the grounds that the front end provides it. Without one, a user whose answer
+is none of the offered options has to deny the call and start again in prose. A typed reply is a complete
+answer on its own, so it satisfies the "every question answered" rule above.
+
+It is a field rather than an "Other" radio because typing and picking are mutually exclusive for a
+single-select question: typing clears the selection, picking clears the text, and the field's note says
+which way round it will be sent. For a multi-select the reply is one more item in the joined list.
+
+An earlier draft of this section said the reply travels as `input.response`. It must not. The CLI's own
+result mapping reads `response` *instead of* the answers map — `else if (response?.trim())` precedes the
+answers branch — so a call that set both would report the typed reply and silently discard every option
+the user also picked. The reply goes into `answers[<question text>]` like any other answer, and
+`test_no_response_key_is_ever_written` pins it.
+
+Two affordances the tool supports remain **not built**: the per-option `preview` its terminal UI renders
+for comparing mockups, and the per-answer notes (`input.annotations`). Both are additive — a call
+answered by option label or by prose is answered correctly without them — and they belong with the rest
+of the dialog's polish in phase 6.
 
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot

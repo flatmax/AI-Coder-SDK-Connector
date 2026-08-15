@@ -292,6 +292,40 @@ function writePayload(over = {}) {
   };
 }
 
+const PLAN_TEXT = [
+  '## Add the widget',
+  '',
+  '- move `src/old.js` aside',
+  '- write the new one',
+  '',
+  '```js',
+  'const widget = 1;',
+  '```',
+].join('\n');
+
+function planPayload(over = {}) {
+  return {
+    permission_id: 'perm_plan',
+    tool_use_id: 'toolu_plan',
+    request_id: 'req_1',
+    tool_name: 'ExitPlanMode',
+    display_name: 'ExitPlanMode',
+    tool_class: 'plan',
+    gated_by_default: true,
+    summary: 'ExitPlanMode: Add the widget',
+    input: { plan: PLAN_TEXT },
+    plan: {
+      plan: PLAN_TEXT,
+      headline: 'Add the widget',
+      file_path: null,
+    },
+    suggested_rules: [],
+    expires_at: expiresIn(300),
+    localhost_available: true,
+    ...over,
+  };
+}
+
 function interactPayload(over = {}) {
   return {
     permission_id: 'perm_ask',
@@ -1553,6 +1587,104 @@ describe('a command', () => {
 });
 
 // ---------------------------------------------------------------------------
+// plan — the artefact being approved
+// ---------------------------------------------------------------------------
+
+describe('a plan', () => {
+  it('renders the plan as markdown, not as a command line', async () => {
+    // Before `plan` was a class of its own this fell through to `exec`,
+    // and the plan arrived summarised and truncated inside a `<pre>` that
+    // asked for approval of something it was not showing.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload());
+
+    const body = el.shadowRoot.querySelector('.plan');
+    expect(body).not.toBeNull();
+    expect(body.querySelector('h2').textContent).toContain('Add the widget');
+    expect(body.querySelectorAll('li')).toHaveLength(2);
+    expect(body.querySelector('pre code').textContent).toContain('const widget');
+    expect(el.shadowRoot.querySelector('pre.command')).toBeNull();
+  });
+
+  it('shows the whole plan, however long', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    const long = `# Title\n\n${'detail line\n\n'.repeat(400)}`;
+    await ask(el, planPayload({
+      input: { plan: long },
+      plan: { plan: long, headline: 'Title', file_path: null },
+    }));
+
+    const paragraphs = el.shadowRoot.querySelectorAll('.plan p');
+    expect(paragraphs).toHaveLength(400);
+  });
+
+  it('names the file the CLI read the plan from', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload({
+      plan: { plan: PLAN_TEXT, headline: 'Add the widget', file_path: '/tmp/plan-1.md' },
+    }));
+    expect(el.shadowRoot.textContent).toContain('/tmp/plan-1.md');
+  });
+
+  it('says so plainly when the call carries no plan', async () => {
+    // `plan` is optional in the CLI's own schema — it is injected from
+    // disk — so an absent one is a real case, and a blank body over an
+    // Approve button asks for approval of nothing.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload({ input: {}, plan: null }));
+
+    const shown = el.shadowRoot.querySelector('.not-shown');
+    expect(shown.textContent).toContain('no plan text');
+    expect(el.shadowRoot.querySelector('.plan')).toBeNull();
+  });
+
+  it('labels the primary action for what it does', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload());
+    // Not "Allow once": what is approved is the plan, and what happens
+    // next is the agent starting on it.
+    expect(decision(el, 'allow').textContent.trim()).toBe('Approve plan');
+  });
+
+  it('identifies itself by the plan\'s own first line', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload({ title: 'Claude wants to exit plan mode' }));
+    expect(el.shadowRoot.querySelector('.target').textContent)
+      .toContain('Add the widget');
+  });
+
+  it('focuses Approve, because a proposal is not an action', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload());
+    expect(el.shadowRoot.activeElement).toBe(decision(el, 'allow'));
+  });
+
+  it('offers no standing grant for future plans', async () => {
+    // A rule allowing `ExitPlanMode` would approve every later plan
+    // unread, which is the one thing this dialog is for.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, planPayload());
+    expect(decision(el, 'allow-always')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // interact — real choices
 // ---------------------------------------------------------------------------
 
@@ -1599,8 +1731,10 @@ describe('a question', () => {
     decision(el, 'allow').click();
     await settle(el);
 
+    // One entry per question: the options ticked, plus whatever was typed
+    // into that question's own reply field.
     expect(lastResolve().args[1]).toEqual({
-      action: 'allow', answers: [[1]],
+      action: 'allow', answers: [{ options: [1], text: '' }],
     });
   });
 
@@ -1620,7 +1754,7 @@ describe('a question', () => {
 
     decision(el, 'allow').click();
     await settle(el);
-    expect(lastResolve().args[1].answers).toEqual([[1]]);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '' }]);
   });
 
   it('lets a multi-select take several', async () => {
@@ -1650,7 +1784,7 @@ describe('a question', () => {
 
     decision(el, 'allow').click();
     await settle(el);
-    expect(lastResolve().args[1].answers).toEqual([[0, 2]]);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [0, 2], text: '' }]);
   });
 
   it('renders every question the call asked, not just the first', async () => {
@@ -1731,7 +1865,10 @@ describe('a question', () => {
     decision(el, 'allow').click();
     await settle(el);
     // One entry per question, in the order the call asked them.
-    expect(lastResolve().args[1].answers).toEqual([[1], [0]]);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [1], text: '' },
+      { options: [0], text: '' },
+    ]);
   });
 
   it('keeps each radio group to its own question', async () => {
@@ -1755,6 +1892,167 @@ describe('a question', () => {
     const names = [...el.shadowRoot.querySelectorAll('.options input')]
       .map((input) => input.name);
     expect(new Set(names).size).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interact — the freeform reply
+// ---------------------------------------------------------------------------
+
+describe('a question the options do not answer', () => {
+  /** Type into one question's freeform field. */
+  async function typeReply(el, group, text) {
+    const field = el.shadowRoot
+      .querySelector(`.other-answer[data-question="${group}"]`);
+    field.value = text;
+    field.dispatchEvent(new Event('input'));
+    await settle(el);
+    return field;
+  }
+
+  async function choose(el, group, index) {
+    const input = el.shadowRoot
+      .querySelector(`.options[data-question="${group}"]`)
+      .querySelectorAll('input')[index];
+    input.checked = true;
+    input.dispatchEvent(new Event('change'));
+    await settle(el);
+    return input;
+  }
+
+  const twoQuestions = {
+    question: 'Which branch?',
+    multi_select: false,
+    options: [{ label: 'main' }, { label: 'dev5' }],
+    questions: [
+      {
+        question: 'Which branch?',
+        multi_select: false,
+        options: [{ label: 'main' }, { label: 'dev5' }],
+      },
+      {
+        question: 'Which files?',
+        multi_select: true,
+        options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }],
+      },
+    ],
+  };
+
+  it('offers a reply field per question', async () => {
+    // The terminal always offers one, because the tool tells the model not
+    // to write an "Other" option — the front end is expected to provide it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload({ question: twoQuestions }));
+
+    const fields = [...el.shadowRoot.querySelectorAll('.other-answer')];
+    expect(fields).toHaveLength(2);
+    expect(fields[1].getAttribute('aria-label')).toContain('Which files?');
+  });
+
+  it('is answered by the typed reply alone', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    expect(decision(el, 'allow').disabled).toBe(true);
+    await typeReply(el, 0, 'a branch you have not listed');
+    expect(decision(el, 'allow').disabled).toBe(false);
+
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [], text: 'a branch you have not listed' },
+    ]);
+  });
+
+  it('does not count whitespace as an answer', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    await typeReply(el, 0, '   ');
+    expect(decision(el, 'allow').disabled).toBe(true);
+  });
+
+  it('replaces a single-select option when the user types instead', async () => {
+    // "Other" is one of the choices in a radio group, not an addition to
+    // it. Sending both would answer the question twice.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    const option = await choose(el, 0, 1);
+    await typeReply(el, 0, 'neither');
+    expect(option.checked).toBe(false);
+    expect(el.shadowRoot.querySelector('.other-note').textContent)
+      .toContain('instead of the options');
+
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [], text: 'neither' },
+    ]);
+  });
+
+  it('clears the typed reply when a single-select option is picked', async () => {
+    // The exclusion has to hold both ways round, or the last control the
+    // user touched is not the one that gets sent.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    const field = await typeReply(el, 0, 'neither');
+    await choose(el, 0, 0);
+    expect(field.value).toBe('');
+
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [0], text: '' },
+    ]);
+  });
+
+  it('adds to a multi-select rather than replacing it', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload({ question: twoQuestions }));
+
+    await choose(el, 0, 0);
+    const ticked = await choose(el, 1, 2);
+    await typeReply(el, 1, 'and d');
+    expect(ticked.checked).toBe(true);
+    expect(el.shadowRoot.querySelector('.other-note').textContent)
+      .toContain('alongside anything ticked');
+
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [0], text: '' },
+      { options: [2], text: 'and d' },
+    ]);
+  });
+
+  it('forgets what was typed when the next request arrives', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+    await typeReply(el, 0, 'something');
+    decision(el, 'allow').click();
+    await settle(el);
+
+    await ask(el, interactPayload({
+      permission_id: 'perm_ask_2', tool_use_id: 'toolu_ask_2',
+    }));
+    expect(el.shadowRoot.querySelector('.other-answer').value).toBe('');
+    expect(decision(el, 'allow').disabled).toBe(true);
   });
 });
 

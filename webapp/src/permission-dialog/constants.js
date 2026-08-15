@@ -47,6 +47,7 @@ export const CLASS_GLYPHS = {
   read: '◎',
   delegate: '⚇',
   interact: '?',
+  plan: '☰',
   mcp: '⚙',
 };
 
@@ -57,6 +58,7 @@ export const CLASS_LABELS = {
   read: 'read',
   delegate: 'subagent',
   interact: 'question',
+  plan: 'plan',
   mcp: 'MCP tool',
 };
 
@@ -71,8 +73,23 @@ export const DEFAULT_DENY_REASONS = {
   read: 'Do not read this path.',
   delegate: 'Do not start this subagent.',
   interact: 'Do not ask; carry on with what you have.',
+  // Denying a plan is "keep planning", not "stop": the tool the user is
+  // refusing is the *exit* from plan mode, so a reason that reads as a
+  // refusal of the work would send the agent the wrong correction.
+  plan: 'Keep planning — do not start on this yet.',
   mcp: 'Do not use this tool.',
 };
+
+/**
+ * Placeholder for the freeform reply on a question.
+ *
+ * The terminal always offers an "Other" row alongside the options — the
+ * tool's own schema tells the model "There should be no 'Other' option,
+ * that will be provided automatically" — so a dialog without one is
+ * missing a control the agent is counting on
+ * (permission-dialog.md § interact).
+ */
+export const OTHER_ANSWER_PLACEHOLDER = 'Other — type your own answer';
 
 /** The reason Escape sends. Named in the spec, so it is a constant. */
 export const ESCAPE_DENY_REASON = 'dismissed by the user';
