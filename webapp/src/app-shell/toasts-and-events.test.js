@@ -136,12 +136,76 @@ describe('AppShell events and toasts', () => {
   });
 
   describe('tab switching', () => {
+    // `onTabVisible` is fired on a microtask after the render
+    // that moves `.active`, so tests have to let both settle.
+    async function settleSwitch(shell) {
+      await shell.updateComplete;
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
     it('changes activeTab via _switchTab', () => {
       const shell = mountShell();
       shell._switchTab('context');
       expect(shell.activeTab).toBe('context');
       shell._switchTab('settings');
       expect(shell.activeTab).toBe('settings');
+    });
+
+    it('tells the revealed tab that it is on screen', async () => {
+      // The context tab refuses to refetch while hidden — a
+      // breakdown costs a control request to the CLI — and marks
+      // itself stale instead. It cannot see the class change that
+      // reveals it, so the shell has to say so or the stale badge
+      // never clears.
+      const shell = mountShell();
+      await shell.updateComplete;
+      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const spy = vi.spyOn(tab, 'onTabVisible');
+      shell._switchTab('context');
+      await settleSwitch(shell);
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not tell a tab it is visible when it is being hidden', async () => {
+      const shell = mountShell();
+      shell._switchTab('context');
+      await settleSwitch(shell);
+      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const spy = vi.spyOn(tab, 'onTabVisible');
+      shell._switchTab('settings');
+      await settleSwitch(shell);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('no-ops for a tab with no visibility hook', async () => {
+      const shell = mountShell();
+      shell._switchTab('files');
+      await settleSwitch(shell);
+      expect(shell.activeTab).toBe('files');
+    });
+
+    it('clears the context tab stale badge on the way in', async () => {
+      // End to end: a turn completes while the tab is hidden, the
+      // tab marks itself stale, and switching to it refreshes.
+      const shell = mountShell();
+      await shell.updateComplete;
+      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const refresh = vi
+        .spyOn(tab, '_refresh')
+        .mockImplementation(async () => {});
+      window.dispatchEvent(
+        new CustomEvent('stream-complete', {
+          detail: { requestId: 'r1', result: { response: 'ok' } },
+        }),
+      );
+      await settleSwitch(shell);
+      expect(tab._stale).toBe(true);
+      refresh.mockClear();
+      shell._switchTab('context');
+      await settleSwitch(shell);
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(tab._stale).toBe(false);
     });
   });
 

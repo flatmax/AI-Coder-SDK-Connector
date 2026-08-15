@@ -1240,12 +1240,39 @@ export class AppShell extends JRPCClient {
 
   _switchTab(tab) {
     this.activeTab = tab;
+    this._notifyTabVisible();
     try {
       localStorage.setItem('ac-dc-active-tab', tab);
     } catch (_) {
       // localStorage can throw in private-browsing modes or
       // when quota is exhausted. Persistence is best-effort.
     }
+  }
+
+  /**
+   * Tell the newly-revealed tab that it is on screen.
+   *
+   * A tab whose data costs a control request to the CLI —
+   * `ac-context-usage-tab` is the one today — refuses to
+   * refetch while hidden and marks itself stale instead. It
+   * cannot see the class change that reveals it, so without
+   * this call the badge stays lit until the user presses
+   * Refresh: `onTabVisible` existed with no caller.
+   *
+   * Deliberately generic. Any tab that grows the hook gets
+   * it; tabs without one are untouched.
+   *
+   * @private
+   */
+  _notifyTabVisible() {
+    // After the render that moves `.active`, so the query
+    // finds the tab that is now visible rather than the one
+    // leaving.
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector('.tab-panel.active');
+      const view = panel?.firstElementChild;
+      if (typeof view?.onTabVisible === 'function') view.onTabVisible();
+    });
   }
 
   _onRequestDialogTab(event) {
