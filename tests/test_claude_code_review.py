@@ -298,6 +298,69 @@ class TestLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# What entry and exit leave in `events.jsonl`
+# ---------------------------------------------------------------------------
+
+
+class TestTheHistoryRecord:
+    """A review is ours, so the engine's transcript never mentions one.
+
+    Without these records a browsed conversation shows the agent going
+    read-only and back with no explanation
+    (``specs5/3-engine/history.md`` § One Store, One Index, One Events Log).
+    """
+
+    @pytest.fixture
+    def service(self, service):
+        service.session.session_id = "22222222-2222-4222-8222-222222222222"
+        return service
+
+    async def records(self, service, event: str) -> list[dict]:
+        loaded = await service.events_log.load(service.session.session_id)
+        return [record for record in loaded if record["event"] == event]
+
+    async def test_entry_records_the_base_the_head_and_the_files(
+        self, service, feature_tip
+    ):
+        await service.start_review("feature", feature_tip)
+        (record,) = await self.records(service, "review_start")
+        assert record["payload"]["head"] == "feature"
+        assert record["payload"]["base"] == feature_tip
+        assert record["payload"]["files"] == ["new.py"]
+        assert "Review started" in record["content"]
+
+    async def test_exit_records_the_review_that_just_ended(
+        self, service, feature_tip
+    ):
+        """Exit clears the state, so the record is assembled from what was
+        read before it — otherwise it names a review with no branch."""
+        await service.start_review("feature", feature_tip)
+        await service.end_review()
+        (record,) = await self.records(service, "review_end")
+        assert record["payload"]["head"] == "feature"
+        assert record["payload"]["base"] == feature_tip
+        assert record["payload"]["files"] == ["new.py"]
+
+    async def test_a_refused_entry_records_nothing(self, service, repo_dir):
+        (repo_dir / "new.md").write_text("content")
+        run_git(repo_dir, "add", "new.md")
+        await service.start_review("main", "HEAD")
+        assert await self.records(service, "review_start") == []
+
+    async def test_a_refused_exit_records_nothing(self, service):
+        await service.end_review()
+        assert await self.records(service, "review_end") == []
+
+    async def test_only_the_paths_are_archived(self, service, feature_tip):
+        """Not the per-file line counts: those are recomputed from git on
+        every read, and a frozen copy would drift out of agreement with the
+        diff the browser renders beside it."""
+        await service.start_review("feature", feature_tip)
+        (record,) = await self.records(service, "review_start")
+        assert all(isinstance(path, str) for path in record["payload"]["files"])
+
+
+# ---------------------------------------------------------------------------
 # The read-only posture
 # ---------------------------------------------------------------------------
 
@@ -397,7 +460,7 @@ class TestRefusalsDuringReview:
 
     async def test_reset_is_refused(self, service, feature_tip, repo_dir):
         await service.start_review("feature", feature_tip)
-        answer = service.reset_to_head()
+        answer = await service.reset_to_head()
         assert "review" in answer["error"].lower()
         # The reviewed content is still on disk.
         assert (repo_dir / "new.py").exists()

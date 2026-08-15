@@ -54,7 +54,12 @@ from pathlib import Path
 from typing import Any
 
 from ac_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
-from ac_dc.claude_code.events_log import session_switch_content
+from ac_dc.claude_code.events_log import (
+    permission_mode_content,
+    review_end_content,
+    review_start_content,
+    session_switch_content,
+)
 from ac_dc.claude_code.health import EngineStartupError
 from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers
 from ac_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
@@ -107,6 +112,23 @@ SLASH_EQUIVALENTS: dict[str, str | None] = {
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _review_file_paths(changed_files: Any) -> list[str]:
+    """Just the paths out of a review's changed-file dicts.
+
+    The events log records which files a review covered, not their diff
+    stats: the stats are recomputed from git whenever anyone asks, and
+    archiving them would freeze numbers that the record cannot keep true.
+    Tolerant of a malformed entry because this runs after the review has
+    already started or ended.
+    """
+    paths: list[str] = []
+    for entry in changed_files or []:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if path:
+            paths.append(str(path))
+    return paths
 
 
 def _doc_convert_available() -> bool:
@@ -1017,10 +1039,22 @@ class ClaudeCodeService:
         It updates what the session reports and broadcasts the same event
         the mode selector already listens for, attributed to the dialog so
         the mode does not appear to have changed itself.
+
+        Archived with ``source: "engine"``, which is the whole reason the
+        field exists: "accept edits from now on" checked in a permission
+        dialog changes the posture for every later tool call, and a history
+        that showed only the user's own switches would leave the change
+        that mattered unexplained.
         """
+        previous = self.session.permission_mode
         note = getattr(self.session, "note_permission_mode", None)
         if note is not None:
             note(mode)
+        await self._record_event(
+            "permission_mode",
+            permission_mode_content(mode),
+            payload={"from": previous, "to": mode, "source": "engine"},
+        )
         await self._broadcast(
             Event(
                 "permissionModeChanged",
@@ -1112,6 +1146,9 @@ class ClaudeCodeService:
                 mode,
             )
             return restricted
+        # Read before the switch: the record says what the posture moved
+        # *from*, and afterwards the session only knows where it landed.
+        previous = self.session.permission_mode
         try:
             applied = await self.session.set_permission_mode(mode)
         except ValueError as exc:
@@ -1121,6 +1158,11 @@ class ClaudeCodeService:
         except Exception as exc:
             logger.exception("set_permission_mode(%r) failed", mode)
             return {"error": f"Could not change the permission mode: {exc}"}
+        await self._record_event(
+            "permission_mode",
+            permission_mode_content(applied),
+            payload={"from": previous, "to": applied, "source": "user"},
+        )
         await self._broadcast(
             Event("permissionModeChanged", {"mode": applied, "by": "user"}, turn_scoped=False)
         )
@@ -1836,11 +1878,15 @@ class ClaudeCodeService:
 
         return await commit_all(self)
 
-    def reset_to_head(self) -> dict[str, Any]:
-        """Discard every uncommitted change. **Localhost only.**"""
+    async def reset_to_head(self) -> dict[str, Any]:
+        """Discard every uncommitted change. **Localhost only.**
+
+        A coroutine since phase 5: it records the files it destroyed before
+        destroying them, and that record is the only trace they leave.
+        """
         from ac_dc.claude_code.commit import reset_to_head
 
-        return reset_to_head(self)
+        return await reset_to_head(self)
 
     def check_review_ready(self) -> dict[str, Any]:
         """Whether the tree is clean enough to enter a review."""
@@ -1860,13 +1906,45 @@ class ClaudeCodeService:
 
         Async because entry switches the engine's permission posture to
         ``plan``, which is a control request to the CLI.
+
+        The history record is made here rather than inside ``ReviewMode``:
+        that class owns the git arrangement and knows nothing about
+        sessions, and giving it a second collaborator to reach the events
+        log through would be plumbing for one line.
         """
-        return await self.review.start(branch, base_commit)
+        result = await self.review.start(branch, base_commit)
+        if "error" not in result:
+            await self._record_event(
+                "review_start",
+                review_start_content(base_commit, branch),
+                payload={
+                    "base": base_commit,
+                    "head": branch,
+                    "files": _review_file_paths(result.get("changed_files")),
+                },
+            )
+        return result
 
     async def end_review(self) -> dict[str, Any]:
         """Leave review mode, restoring git state and posture.
-        **Localhost only.**"""
-        return await self.review.end()
+        **Localhost only.**
+
+        The state is read before the exit, because exiting clears it and the
+        record is about the review that just ended.
+        """
+        before = self.review.state()
+        result = await self.review.end()
+        if "error" not in result:
+            await self._record_event(
+                "review_end",
+                review_end_content(),
+                payload={
+                    "base": before.get("base_commit"),
+                    "head": before.get("branch"),
+                    "files": _review_file_paths(before.get("changed_files")),
+                },
+            )
+        return result
 
     def get_review_state(self) -> dict[str, Any]:
         """The current review, or the inactive shape."""

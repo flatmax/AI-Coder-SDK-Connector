@@ -153,6 +153,15 @@ class FakeSession:
         self.permission_mode = mode
         return mode
 
+    def note_permission_mode(self, mode):
+        """The CLI moved the mode itself; record where it landed.
+
+        No control call, like the real session: the change already
+        happened on the permission result that carried it.
+        """
+        self.control_calls.append(("note_permission_mode", (mode,)))
+        self.permission_mode = mode
+
     def prefer_permission_mode(self, mode):
         from ac_dc.claude_code.engine_config import PERMISSION_MODES
 
@@ -1506,6 +1515,65 @@ class TestHistoryRpcs:
 
     def test_the_log_points_at_the_repo(self, wired, tmp_path):
         assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
+
+
+class TestTheModeSwitchRecord:
+    """Who moved the permission posture, and from where.
+
+    The posture governs every later tool call, so a browsed session that
+    shows the agent editing files without asking has to say where the
+    permission came from. ``source`` distinguishes the two producers: the
+    selector, and "accept edits from now on" checked in a permission
+    dialog — which is the one a reader would otherwise have no record of.
+    """
+
+    @pytest.fixture
+    def service(self, service):
+        service.session.session_id = "33333333-3333-4333-8333-333333333333"
+        return service
+
+    async def records(self, service) -> list[dict]:
+        loaded = await service.events_log.load(service.session.session_id)
+        return [r for r in loaded if r["event"] == "permission_mode"]
+
+    async def test_the_users_own_switch_records_both_ends(self, service):
+        await service.set_permission_mode("plan")
+        (record,) = await self.records(service)
+        assert record["payload"] == {
+            "from": "default",
+            "to": "plan",
+            "source": "user",
+        }
+        assert record["content"] == "Permission mode set to **plan**."
+
+    async def test_a_refused_switch_records_nothing(self, service):
+        service._collab = FakeCollab(is_localhost=False)
+        await service.set_permission_mode("bypassPermissions")
+        assert await self.records(service) == []
+
+    async def test_a_failed_switch_records_nothing(self, service):
+        service.session.control_error = RuntimeError("no response")
+        await service.set_permission_mode("plan")
+        assert await self.records(service) == []
+
+    async def test_a_mode_the_dialog_moved_is_attributed_to_the_engine(
+        self, service
+    ):
+        await service._note_permission_mode("acceptEdits")
+        (record,) = await self.records(service)
+        assert record["payload"] == {
+            "from": "default",
+            "to": "acceptEdits",
+            "source": "engine",
+        }
+
+    async def test_the_previous_mode_is_read_before_the_switch(self, service):
+        """Both producers apply the mode to the session, so a record built
+        afterwards would report ``from`` and ``to`` as the same mode."""
+        await service.set_permission_mode("plan")
+        await service._note_permission_mode("acceptEdits")
+        moves = [(r["payload"]["from"], r["payload"]["to"]) for r in await self.records(service)]
+        assert moves == [("default", "plan"), ("plan", "acceptEdits")]
 
 
 class TestSearch:

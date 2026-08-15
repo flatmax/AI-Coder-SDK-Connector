@@ -22,7 +22,13 @@ Three entry points:
   task and reports through ``commitResult``.
 - :func:`commit_all_background` — the pipeline: stage, generate, commit,
   broadcast.
-- :func:`reset_to_head` — synchronous, no model call.
+- :func:`reset_to_head` — no model call, and the one write here that
+  destroys work rather than recording it.
+
+Both leave a line in ``.ac-dc4/events.jsonl``. Neither belongs in the
+engine's transcript — the CLI never hears about a commit — so this is the
+half of history AC⚡DC owns, interleaved back into the browsed conversation
+by timestamp (``specs5/3-engine/history.md``).
 
 Governing spec: ``specs5/3-engine/session.md``; the message prompt itself
 is ``config/commit.md``, unchanged.
@@ -34,6 +40,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ac_dc.claude_code.events_log import commit_content, reset_content
 from ac_dc.claude_code.messages import Event
 
 if TYPE_CHECKING:
@@ -99,6 +106,12 @@ async def commit_all_background(service: ClaudeCodeService) -> None:
     assert repo is not None
     try:
         repo.stage_all()
+        # Which files the commit will contain, read while they are still
+        # staged — after the commit the index is clean and the answer is
+        # gone. The reader is named for the review because that is what it
+        # was written for; what it actually reports is `git diff --cached`,
+        # which is this commit.
+        staged = [str(entry.get("path") or "") for entry in _staged_files(repo)]
         diff = repo.get_staged_diff()
         if not diff.strip():
             await service._broadcast(
@@ -148,13 +161,23 @@ async def commit_all_background(service: ClaudeCodeService) -> None:
             return
 
         result = repo.commit(message)
-        event_text = (
-            f"**Committed** `{result['sha'][:7]}`\n\n"
-            f"```\n{result['message']}\n```"
+        event_text = commit_content(result["sha"][:7], result["message"])
+        # The archive, not the transcript. A commit is ours: the engine's
+        # transcript never hears about one, so it goes in `events.jsonl` and
+        # the browser interleaves it back by timestamp
+        # (``specs5/3-engine/history.md`` § One Store, One Index, One Events
+        # Log). One wording for both the live toast and the archived line —
+        # `commit_content` — because a user comparing the two is entitled to
+        # find the same sentence.
+        await service._record_event(
+            "commit",
+            event_text,
+            payload={
+                "sha": result["sha"],
+                "message": result["message"],
+                "files": staged,
+            },
         )
-        # Broadcast only. The transcript this belongs in is the engine's,
-        # and we do not write to it — mirroring lands in phase 5
-        # (specs5/plan/README.md), at which point this event joins it.
         await service._broadcast(
             Event(
                 "commitResult",
@@ -289,11 +312,19 @@ def _strip_fence(message: str) -> str:
     return message
 
 
-def reset_to_head(service: ClaudeCodeService) -> dict[str, Any]:
+async def reset_to_head(service: ClaudeCodeService) -> dict[str, Any]:
     """Discard every uncommitted change. **Localhost only.**
 
-    Synchronous — no model call. Broadcasts ``filesModified`` because
-    every modified, staged and untracked file changes state at once.
+    No model call, so the git work is over as soon as it returns.
+    Broadcasts ``filesModified`` because every modified, staged and
+    untracked file changes state at once.
+
+    Awaits one thing: the record of what it destroyed. This is the only
+    action in AC⚡DC that throws away work with no way back, so the list of
+    files goes into ``events.jsonl`` *before* the reset — afterwards there
+    is nothing left to ask. Recording it inline rather than as a
+    fire-and-forget task means the answer is on disk before the caller is
+    told the reset happened.
     """
     restricted = service._check_localhost_only()
     if restricted is not None:
@@ -309,13 +340,48 @@ def reset_to_head(service: ClaudeCodeService) -> dict[str, Any]:
                 "first."
             )
         }
+    doomed = _files_a_reset_discards(service._repo)
     try:
         service._repo.reset_hard()
     except Exception as exc:
         return {"error": str(exc)}
 
-    event_text = (
-        "**Reset to HEAD** — all uncommitted changes have been discarded."
+    event_text = reset_content()
+    await service._record_event(
+        "reset", event_text, payload={"to": "HEAD", "files": doomed}
     )
     service._broadcast_soon(Event("filesModified", [], turn_scoped=False))
     return {"status": "ok", "system_event_message": event_text}
+
+
+def _staged_files(repo: Any) -> list[dict[str, Any]]:
+    """The staged file list, or empty if git would not say.
+
+    Never raises: a commit that succeeded must not be reported as failed
+    over the file list in its history record.
+    """
+    try:
+        return list(repo.get_review_changed_files())
+    except Exception:
+        logger.warning("Could not list the staged files for the commit record")
+        return []
+
+
+def _files_a_reset_discards(repo: Any) -> list[str]:
+    """What ``git reset --hard HEAD`` is about to throw away.
+
+    Modified, staged and deleted — **not** untracked, which a hard reset
+    leaves alone. Naming untracked files as discarded would be a permanent
+    record of a deletion that never happened, and this record is the only
+    trace the work leaves.
+    """
+    try:
+        status = repo.get_file_tree()
+    except Exception:
+        logger.warning("Could not list what the reset discards")
+        return []
+    files: set[str] = set()
+    for key in ("modified", "staged", "deleted"):
+        entries = status.get(key) or []
+        files.update(str(path) for path in entries)
+    return sorted(files)

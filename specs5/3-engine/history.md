@@ -24,7 +24,7 @@ impose a record shape, so a second writer buys a second shape that can disagree 
 |---|---|---|---|
 | Owner | Claude Code / SDK, stored by us | AC⚡DC | AC⚡DC |
 | Location | `.ac-dc4/sessions/` via our `SessionStore` | `.ac-dc4/` | `.ac-dc4/events.jsonl` |
-| Contents | The session record the SDK resumes from — the CLI's own transcript format, opaque to us, stored verbatim | Search terms, session summaries, request ID ↔ session mapping | Our operational events: commit, reset, review entry and exit, preset switch, permission-mode change |
+| Contents | The session record the SDK resumes from — the CLI's own transcript format, opaque to us, stored verbatim | Search terms, session summaries, request ID ↔ session mapping | Our operational events: commit, reset, review entry and exit, session resume and fork, permission-mode change, preset switch |
 | Derived from | Nothing — it is the source | The transcript, entirely | Nothing — the transcript never held these |
 | If deleted | The session is unresumable | Rebuilt on next start | Those events are gone; no session breaks |
 | Compaction | Engine-owned, automatic | N/A | Never — it is an archive |
@@ -36,6 +36,26 @@ not inherit someone else's.
 to a subprocess that parses its own union, so a record we invented would surface as a resume failure —
 which presents as context loss, much later, in a session the user cares about. That is why our own
 events are a separate file rather than namespaced entries.
+
+**Each event is written by whoever performed it, at the moment it happens.** The alternative — one
+observer deriving events from state changes it notices — cannot see what the change destroyed, and
+that is the interesting half. A commit's record names the files it contained, read while they are
+still staged; a reset's names the files it discarded, read before they are gone. So the ordering is
+part of the record rather than an implementation detail, and the reset's is written *before* the caller
+is told the reset succeeded: it is the only surviving trace of that work, and a fire-and-forget task
+that lost a race would lose the work silently.
+
+**An event that does not appear in the log is not visible anywhere.** The engine's transcript never
+mentions a commit, a reset, a review, or a mode switch, so a session browsed without these records
+shows an agent that went read-only and came back for no reason, or one that edited files without ever
+asking. This is also why the permission-mode record names its `source`: "accept edits from now on"
+checked in a permission dialog changes the posture for every later tool call, and it is the change a
+reader is least likely to be able to account for.
+
+**Nothing is archived that the transcript already states.** Compaction boundaries arrive as
+`SystemMessage(subtype="compact_boundary")` and render from there. Written files are `Write`/`Edit`
+tool calls the turn footer already reconstructs its file list from. A second account of either is a
+second thing to keep true.
 
 **Deleting a session is one operation across all three.** The store takes the transcript with its summary
 sidecar and its subagent transcripts — and with them the pasted images, which live in the entries and
@@ -243,6 +263,11 @@ read them.
   silently, because a silent gap turns into a failed resume much later.
 - Every record in `events.jsonl` carries both a session ID and the request ID of its turn; for
   transcript entries that correlation is a lookup in the derived index.
+- An operational event is recorded by the action that performed it, and an action that failed records
+  nothing. What a write destroyed or contained is read before the write, and a reset's record is on disk
+  before the reset is reported as done.
+- Nothing reaches `events.jsonl` that the transcript already states — no compaction boundaries, no
+  written-file lists.
 - A malformed line in any of the three files is skipped on load and never makes a session unreadable.
 - Sessions without a surviving engine transcript are browsable and labelled non-resumable; clicking
   them never produces an error.

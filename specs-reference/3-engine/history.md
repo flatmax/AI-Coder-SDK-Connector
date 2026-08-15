@@ -164,6 +164,22 @@ result message's `files_modified` — see only `Write`, `Edit`, `MultiEdit` and 
 changed by `Bash` is absent from this record. A field called `files_changed` would be a durable claim
 this system cannot make.
 
+Six of the eight discriminators have a writer: `commit` and `reset` from the git menu, `review_start`
+and `review_end` from review entry and exit, `permission_mode` from both the mode selector
+(`source: "user"`) and a permission dialog's "from now on" (`source: "engine"`), and `session_switch`
+from resume and fork. The other two are reserved rather than written. `preset_switch` waits on the
+preset selector ([CC-12](../../specs5/plan/decisions.md#cc-12)); `files_written_by_file_tools` has no
+writer because every write is a tool call the transcript already holds, and the turn footer
+reconstructs the list from those calls at read time — archiving it would be a second account of
+something the transcript states. Both remain valid `event` values so a reader stays forward-compatible
+and the format does not move when a writer appears.
+
+The file-list payloads are read **before** the write they describe. A commit's `files` is `git diff
+--cached` while the index still holds it; a reset's is the modified, staged and deleted set before the
+reset, and deliberately **not** the untracked files, which a hard reset leaves on disk. For the reset
+that record is the only surviving trace of the work, so it is written before the caller is told the
+reset happened rather than as a fire-and-forget task.
+
 There is no `image_refs` field, no `images` count, no `files`, and no `turn_id`: images live in the
 transcript entry that carried them, the framing's selected-file list is part of the user message the
 engine received, and the request ID replaced `turn_id`.

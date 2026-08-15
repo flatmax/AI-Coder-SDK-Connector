@@ -25,6 +25,17 @@ transcript as ``SystemMessage(subtype="compact_boundary")`` and render
 from there. A record we wrote would be a second account of something the
 transcript already states.
 
+Two of the types below have no writer, for two different reasons.
+``preset_switch`` has no producer because the preset selector is deferred
+([CC-12](../../../specs5/plan/decisions.md#cc-12)) — the type stays in the
+domain so the file format does not move when the selector lands.
+``files_written_by_file_tools`` has none because it would be that same
+second account: every write is a ``Write``/``Edit``/``MultiEdit``/
+``NotebookEdit`` call in the transcript, and the browser's turn footer
+already reconstructs the list from those calls at read time
+(:mod:`ac_dc.claude_code.history`). Both remain valid ``event`` values, so
+a record either one appears in stays renderable.
+
 Governing spec: ``specs5/3-engine/history.md``.
 Schema: ``specs-reference/3-engine/history.md`` § Events log.
 """

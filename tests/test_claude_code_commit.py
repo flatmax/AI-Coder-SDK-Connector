@@ -49,7 +49,7 @@ DIFF = "diff --git a/x.py b/x.py\n+++ b/x.py\n+print('hi')\n"
 
 
 class FakeRepo:
-    """The four git calls this module makes, and nothing else."""
+    """The six git calls this module makes, and nothing else."""
 
     def __init__(self, root: Path, diff: str = DIFF):
         self.root = root
@@ -59,12 +59,33 @@ class FakeRepo:
         self.resets = 0
         self.commit_error: BaseException | None = None
         self.reset_error: BaseException | None = None
+        # What the two history records read. Both are asked *before* the
+        # write lands, so a fake that answered afterwards would hide the
+        # ordering the records depend on.
+        self.staged_files: list[dict] = [{"path": "x.py"}]
+        self.file_tree: dict = {
+            "modified": ["x.py"],
+            "staged": ["y.py"],
+            "deleted": ["z.py"],
+            "untracked": ["scratch.py"],
+        }
+        self.status_error: BaseException | None = None
 
     def stage_all(self):
         self.stage_calls += 1
 
     def get_staged_diff(self):
         return self.diff
+
+    def get_review_changed_files(self):
+        if self.status_error is not None:
+            raise self.status_error
+        return list(self.staged_files)
+
+    def get_file_tree(self):
+        if self.status_error is not None:
+            raise self.status_error
+        return dict(self.file_tree)
 
     def commit(self, message):
         if self.commit_error is not None:
@@ -76,6 +97,7 @@ class FakeRepo:
         if self.reset_error is not None:
             raise self.reset_error
         self.resets += 1
+        self.file_tree = {"modified": [], "staged": [], "deleted": [], "untracked": []}
 
 
 class FakeQuery:
@@ -174,7 +196,7 @@ class TestGates:
 
     async def test_a_participant_may_not_reset(self, service, repo):
         service._collab = FakeCollab(is_localhost=False)
-        assert service.reset_to_head()["error"] == "restricted"
+        assert (await service.reset_to_head())["error"] == "restricted"
         assert repo.resets == 0
 
     async def test_no_repo_is_an_error_not_a_crash(self, tmp_path, events):
@@ -183,7 +205,7 @@ class TestGates:
         )
         svc.session = FakeSession()
         assert "repository" in (await svc.commit_all())["error"].lower()
-        assert "repository" in svc.reset_to_head()["error"].lower()
+        assert "repository" in (await svc.reset_to_head())["error"].lower()
 
     async def test_a_second_commit_is_refused_while_one_runs(self, service):
         service._committing = True
@@ -194,7 +216,7 @@ class TestGates:
         commit_answer = await service.commit_all()
         assert "review" in commit_answer["error"].lower()
         assert "merge-base" in commit_answer["error"]
-        reset_answer = service.reset_to_head()
+        reset_answer = await service.reset_to_head()
         assert "review" in reset_answer["error"].lower()
         assert repo.commits == [] and repo.resets == 0
 
@@ -429,7 +451,7 @@ class TestStripFence:
 
 class TestReset:
     async def test_it_discards_and_tells_everyone(self, service, repo, events):
-        answer = service.reset_to_head()
+        answer = await service.reset_to_head()
         assert answer["status"] == "ok"
         assert "Reset to HEAD" in answer["system_event_message"]
         assert repo.resets == 1
@@ -439,7 +461,108 @@ class TestReset:
 
     async def test_a_git_failure_is_returned(self, service, repo, events):
         repo.reset_error = RuntimeError("index.lock exists")
-        answer = service.reset_to_head()
+        answer = await service.reset_to_head()
         assert "index.lock" in answer["error"]
         await finish_turns(service)
         assert "filesModified" not in events.names()
+
+
+# ---------------------------------------------------------------------------
+# What each one leaves in `events.jsonl`
+# ---------------------------------------------------------------------------
+
+
+class TestTheHistoryRecord:
+    """Neither write appears in the engine's transcript.
+
+    The CLI never hears about a commit or a reset, so if these do not reach
+    ``.ac-dc4/events.jsonl`` they are absent from browsed history entirely —
+    and for the reset that record is the *only* surviving trace of the work
+    it destroyed (``specs5/3-engine/history.md`` § One Store, One Index, One
+    Events Log).
+    """
+
+    @pytest.fixture
+    def service(self, service):
+        # A record with no session is dropped by design, so these tests
+        # need the engine to have connected at least once.
+        service.session.session_id = "11111111-1111-4111-8111-111111111111"
+        return service
+
+    async def records(self, service, event: str) -> list[dict]:
+        loaded = await service.events_log.load(service.session.session_id)
+        return [record for record in loaded if record["event"] == event]
+
+    async def test_a_commit_records_its_sha_message_and_files(
+        self, service, repo, sdk_query
+    ):
+        await commit(service)
+        (record,) = await self.records(service, "commit")
+        assert record["payload"]["sha"] == "0123456789abcdef0123"
+        assert record["payload"]["message"] == "feat: add x"
+        assert record["payload"]["files"] == ["x.py"]
+
+    async def test_the_toast_and_the_archive_say_the_same_sentence(
+        self, service, events, sdk_query
+    ):
+        """A user comparing the two is entitled to find one wording."""
+        await commit(service)
+        (record,) = await self.records(service, "commit")
+        toast = events.payload_of("commitResult")
+        assert record["content"] == toast["system_event_message"]
+        assert "`0123456`" in record["content"]
+
+    async def test_a_failed_commit_records_nothing(self, service, repo, sdk_query):
+        repo.commit_error = RuntimeError("hook rejected it")
+        await commit(service)
+        assert await self.records(service, "commit") == []
+
+    async def test_a_reset_records_what_it_destroyed(self, service, repo):
+        await service.reset_to_head()
+        (record,) = await self.records(service, "reset")
+        assert record["payload"]["to"] == "HEAD"
+        assert record["payload"]["files"] == ["x.py", "y.py", "z.py"]
+
+    async def test_the_files_are_read_before_they_are_gone(self, service, repo):
+        """The fake clears its status on reset, as git does.
+
+        So an empty list here would mean the record was assembled after the
+        reset, when there is nothing left to ask — which is the one ordering
+        bug this record cannot survive.
+        """
+        await service.reset_to_head()
+        (record,) = await self.records(service, "reset")
+        assert record["payload"]["files"]
+
+    async def test_untracked_files_are_not_called_discarded(self, service, repo):
+        """``git reset --hard`` leaves them alone, and this record is permanent."""
+        await service.reset_to_head()
+        (record,) = await self.records(service, "reset")
+        assert "scratch.py" not in record["payload"]["files"]
+
+    async def test_a_failed_reset_records_nothing(self, service, repo):
+        repo.reset_error = RuntimeError("index.lock exists")
+        await service.reset_to_head()
+        assert await self.records(service, "reset") == []
+
+    async def test_the_record_lands_before_the_caller_is_told(self, service, repo):
+        """Not a fire-and-forget task: the only trace of destroyed work is
+        on disk by the time ``reset_to_head`` returns."""
+        answer = await service.reset_to_head()
+        assert answer["status"] == "ok"
+        assert await self.records(service, "reset")
+
+    async def test_a_status_git_will_not_answer_does_not_fail_the_write(
+        self, service, repo, sdk_query
+    ):
+        """The file list is decoration on a record of something that
+        happened; losing it must not report a successful write as failed."""
+        repo.status_error = RuntimeError("git is confused")
+        await commit(service)
+        reset = await service.reset_to_head()
+        (commit_record,) = await self.records(service, "commit")
+        assert commit_record["payload"]["files"] == []
+        assert repo.commits == ["feat: add x"]
+        assert reset["status"] == "ok"
+        (reset_record,) = await self.records(service, "reset")
+        assert reset_record["payload"]["files"] == []
