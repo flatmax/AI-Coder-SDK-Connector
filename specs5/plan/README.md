@@ -9,10 +9,10 @@ history and moves under `specs5/impl-history/`.
 
 ## Where we are (2026-08-15)
 
-**Phases 0 through 3 are done. Phase 4 — the indexes as MCP tools — is next and is unblocked.**
+**Phases 0 through 4 are done. Phase 5 — history and sessions — is next and is unblocked.**
 
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
-landed, what it deliberately left out, and what the next phase has to do first. The phase-3 entry
+landed, what it deliberately left out, and what the next phase has to do first. The phase-4 entry
 is the one that matters for picking this up cold.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
@@ -21,14 +21,24 @@ pipeline, the history compactor, URL fetching and the `🟧🟧🟧 AGENT` facto
 lines, plus 52 test files and five dependencies (`litellm`, `tiktoken`, `boto3`, `tenacity`,
 `trafilatura`). `grep -rn -i litellm src/` and the same over `webapp/src/` both return nothing.
 
-The state phase 4 inherits:
+**The indexes are back, as tools rather than as prompt text** (CC-6). An in-process MCP server named
+`ac-dc` exposes six read-only tools — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`,
+`review_state`, `ui_state` — sharing the browser's own index objects. A `PostToolUse` hook re-indexes
+what the agent writes, and every index-reading tool flushes that queue before it answers, so a file
+written this turn is a file the map describes. Verified live: the agent answered a "which module holds
+the permission gate" question from `symbol_map` alone, summarised `specs5/plan/` from `doc_outline`
+without opening a file, and read back a function it had just written.
 
-- **The indexes now have exactly one consumer.** Prompt assembly is deleted, so the symbol and doc
-  indexes are read only by the browser. That was the plan's stated reason for ordering the MCP
-  bridge after the rip-out, and the reason now holds in fact.
-- **Suites are green, and smaller:** python **2550 passed, 75 skipped** (was 3897 passed); webapp
-  **88 files / 3163 passed** (was 89 / 3215). The drop is deleted tests for deleted code — a
-  shrinking denominator, not improving coverage.
+The state phase 5 inherits:
+
+- **Suites are green:** python **2687 passed, 75 skipped**; webapp **88 files / 3185 passed**.
+- **`Reindexer` is the only thing that knows what the agent wrote.** `take_reindexed()` is
+  repo-relative and filtered to files an index cares about; `result['files_modified']` is absolute and
+  everything. If the transcript wants a durable "files changed this turn", those are the two sources,
+  and they disagree by design.
+- **Our own MCP tools are ungated in `can_use_tool`**, by an early return before any dialog is built.
+  `classify_tool` returning `"read"` was never enough — it shapes a dialog, it does not skip one — and
+  in `acceptEdits` the agent stalled on a prompt for every `symbol_map` call.
 - **Four features moved out of the engine rather than dying with it**: commit
   (`claude_code/commit.py`), review (`claude_code/review.py`), the post-write doc-index builder
   (`doc_index/background.py`), and the LSP / snippets / git RPC surface, which folded into
@@ -42,10 +52,12 @@ The state phase 4 inherits:
   `.claude/settings.local.json` (CC-14), and says "deny agent read" rather than "exclude from
   index". The L0-invalidation dialog is gone with the cache it asked about; its one honest job —
   the change is not instant — is a once-per-session toast built from the RPC's own `takes_effect`.
-- **Two things wait on the same missing hook.** The file tree does not refresh after the *agent*
-  writes, and the doc index does not learn about those writes either. `Repo`'s post-write callback
-  covers `Repo.write_file` — the user's edits — but the CLI's `Write` and `Edit` go to disk
-  directly. Wiring the post-tool-call hook in phase 4 closes both.
+- **The two things that waited on the post-tool-call hook are closed.** The file tree refreshes after
+  the agent writes (`filesModified`, session-wide), and the doc index learns about those writes:
+  `DocIndexBuilder.note_file_written` now has two callers, `Repo.write_file` for the user's edits and
+  the `PostToolUse` re-index for the agent's. **What still escapes is `Bash`** — a `sed -i` or a
+  `git checkout` changes files no index hears about until the next full build. Phase 4's largest known
+  hole; see [`delivery.md`](delivery.md#deviations-from-inventorymd-1).
 - **Some surfaces are mounted and inert, deliberately.** The code/doc mode toggle and the agent tab
   strip have no emitter for the pushes that drive them; their replacements are the preset selector
   (CC-12) and the subagent browser (CC-8), both deferred by decision. They are annotated where they
@@ -119,7 +131,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
-| **4. Restore the indexes as tools** | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
+| **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
 | **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17) but are unverified against a live engine and untested. This phase is now *confirm and finish* rather than *build*. | The Context tab shows the same numbers as `/context` in the CLI, live. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
@@ -143,9 +155,11 @@ what was deliberately left out, and what the next phase has to do first.
   "bypassPermissions"` as a shortcut. The permission dialog is the feature; a build that writes
   files without asking will train users to distrust the tool, and retrofitting the dialog after
   people have muscle memory for silent edits is worse than building it first.
-- **Indexes after the rip-out, not before.** The indexes currently have two consumers (prompt
-  assembly and the browser). Deleting the prompt-assembly consumer first means the MCP bridge is
-  written against one clear consumer instead of two competing ones.
+- **Indexes after the rip-out, not before.** *Satisfied in phase 4.* The indexes had two consumers
+  (prompt assembly and the browser); deleting the prompt-assembly one first meant the MCP bridge was
+  written against one clear consumer instead of two competing ones. It paid off in a way worth
+  recording: the bridge takes provider *callables* rather than index objects, which only reads as
+  obviously right once the browser is the sole other reader of the same objects.
 - **`SessionStore` before history-browser work.** The store determines the on-disk shape; the
   browser reads it. Building the browser first bakes in assumptions about a format we have not
   chosen yet.

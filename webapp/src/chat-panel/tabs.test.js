@@ -1121,7 +1121,11 @@ describe('ChatPanel tab tooltip enrichment', () => {
     );
   });
 
-  it('cross-ref mode strings render verbatim in tooltip', async () => {
+  it('an archived +xref mode string renders verbatim', async () => {
+    // The cross-reference axis was retired in phase 4, so no
+    // client can produce this any more — but a rehydrated tab
+    // from an older session still carries it, and a tooltip
+    // that swallowed it would leave the user guessing.
     const p = mountPanel();
     await settle(p);
     seedLabeledTabWithMode(

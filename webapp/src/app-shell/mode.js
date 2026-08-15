@@ -1,18 +1,25 @@
 // Mode-switching helpers extracted from app-shell.js. Manages
-// primary mode (code/doc) and the cross-reference overlay
-// toggle, both of which lived on the backend authoritatively
-// and propagated via mode-changed broadcasts.
+// primary mode (code/doc), which lived on the backend
+// authoritatively and propagated via mode-changed broadcasts.
 //
-// Both RPCs went with the native engine in conversion phase
-// 3, and no template calls `_switchMode` / `_toggleCrossRef`
-// any more — the toggles came out of the action bar in phase
-// 2. What survives is the shape: `switchMode` guards on the
-// method being absent and returns, so nothing here can fire
-// at a service that is gone. The mode toggle's replacement
-// is the preset selector (CC-12), which is deferred by
-// decision — see specs5/plan/delivery.md. `onModeChanged`
-// below is dormant for the same reason: nothing broadcasts
-// `modeChanged` any more.
+// The RPC went with the native engine in conversion phase 3,
+// and no template calls `_switchMode` any more — the toggle
+// came out of the action bar in phase 2. What survives is the
+// shape: `switchMode` guards on the method being absent and
+// returns, so nothing here can fire at a service that is gone.
+// The mode toggle's replacement is the preset selector
+// (CC-12), which is deferred by decision — see
+// specs5/plan/delivery.md. `onModeChanged` below is dormant
+// for the same reason: nothing broadcasts `modeChanged` any
+// more.
+//
+// **The cross-reference overlay is gone**, retired in phase 4
+// rather than kept dormant like the mode axis. It had no
+// replacement to wait for: it chose which index fed the native
+// engine's prompt, and both indexes are now permanently
+// available to the agent as MCP tools, so there is nothing
+// left to switch on or off (specs5/5-webapp/shell.md § Preset
+// and Permission Controls).
 
 /**
  * Handle mode-changed broadcasts. Fires for our own
@@ -20,27 +27,14 @@
  * — collaborators follow the server's authoritative
  * mode.
  *
- * Payload shape (per specs4/4-features/collaboration.md):
- *   { mode: 'code' | 'doc', cross_ref_enabled?: bool }
- * Cross-ref flag is only present on cross-ref toggle
- * events; mode-only switches omit it and we leave the
- * UI state alone (backend resets it to false on mode
- * switch, but the follow-up broadcast carries the new
- * mode value — the reset is implicit).
+ * Payload shape: ``{ mode: 'code' | 'doc' }``. The
+ * ``cross_ref_enabled`` field the native engine also sent is
+ * ignored — see the note at the top of this file.
  */
 export function onModeChanged(host, event) {
   const detail = event.detail || {};
   if (typeof detail.mode === 'string') {
-    if (detail.mode !== host._mode) {
-      // Mode actually changed — cross-ref resets per
-      // spec. Backend does the reset; we mirror it so
-      // the UI stays in sync without an extra RPC.
-      host._mode = detail.mode;
-      host._crossRefEnabled = false;
-    }
-  }
-  if (typeof detail.cross_ref_enabled === 'boolean') {
-    host._crossRefEnabled = detail.cross_ref_enabled;
+    host._mode = detail.mode;
   }
   // Enrichment status may piggyback on modeChanged — the
   // backend broadcasts when it flips to "unavailable" so
@@ -97,47 +91,4 @@ export async function switchMode(host, mode) {
   }
 }
 
-/**
- * Toggle cross-reference mode. The backend holds
- * authoritative state; we fire the RPC and let the
- * mode-changed broadcast flip _crossRefEnabled.
- */
-export async function toggleCrossRef(host) {
-  if (!host.call) return;
-  if (!host._isLocalhost) return;
-  const fn = host.call['LLMService.set_cross_reference'];
-  if (typeof fn !== 'function') return;
-  const next = !host._crossRefEnabled;
-  try {
-    const result = await fn(next);
-    let payload = result;
-    if (result && typeof result === 'object' && !Array.isArray(result)) {
-      const keys = Object.keys(result);
-      if (keys.length === 1) {
-        const inner = result[keys[0]];
-        if (inner && typeof inner === 'object') payload = inner;
-      }
-    }
-    if (payload && payload.error) {
-      const reason = payload.reason || payload.error;
-      host._showToast(
-        `Cross-reference toggle failed: ${reason}`,
-        'warning',
-      );
-      return;
-    }
-    if (next) {
-      host._showToast(
-        'Cross-reference enabled — both indexes active',
-        'info',
-      );
-    } else {
-      host._showToast('Cross-reference disabled', 'info');
-    }
-  } catch (err) {
-    host._showToast(
-      `Cross-reference toggle failed: ${err?.message || 'RPC error'}`,
-      'error',
-    );
-  }
-}
+// `toggleCrossRef` stood here until conversion phase 4.

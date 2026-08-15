@@ -1105,9 +1105,9 @@ export const STYLES = css`
     min-width: 0;
   }
   /* When the search bar has focus, hide the
-   * surrounding action-bar buttons (mode +
-   * cross-ref toggle on the left, new-session +
-   * history on the right) so the search bar
+   * surrounding action-bar buttons (preset selector
+   * on the left, session buttons on the right) so
+   * the search bar
    * itself — input, mode toggle, count, prev/next
    * — can claim the whole row.
    *

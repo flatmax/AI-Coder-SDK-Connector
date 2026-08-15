@@ -378,7 +378,7 @@ export function renderTabStrip(panel) {
           // Tooltip carries the agent's mode so users
           // can disambiguate at a glance — two agents
           // tasked with similar prose differ only in
-          // mode + cross-ref state. Main tab uses its
+          // their mode. Main tab uses its
           // bare label (mode is reflected in the
           // action-bar toggle). Historical tabs append
           // a hint that they're archive-only.
@@ -584,8 +584,7 @@ export function renderOverflowMenu(panel, tabs) {
  *
  * Each entry shape::
  *
- *     {id, mode, cross_reference_enabled, model,
- *      turn_id, agent_idx}
+ *     {id, mode, model, turn_id, agent_idx}
  *
  * We do NOT seed an initial user message (unlike
  * ``spawnAgentTabs`` which seeds the task text). The

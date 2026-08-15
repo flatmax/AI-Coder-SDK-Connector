@@ -401,3 +401,22 @@ questions". From the bundled binary's tool definition:
 
 Not built in phase 2, and additive: the freeform `response`, per-option `preview` (a block of
 model-authored HTML — not forwarded into the dialog's shadow DOM incidentally), and `annotations`.
+
+---
+
+## Corrections found while implementing phase 4
+
+**Verified 2026-08-15** against 0.2.137 and the bundled CLI 2.1.229, in live runs of
+`scripts/bridge_smoke.py`. Same rule as before: the wheel and the CLI win.
+
+| Where | Said / assumed | Actually |
+|---|---|---|
+| `get_mcp_status()` (§ Client, above) — "MCP server health surface" | The place to check whether our server registered | **An in-process SDK server does not appear in it.** A live run listed only the user's `chrome-devtools` from settings while all six `mcp__ac-dc__*` tools were being called successfully in the same turn. It reports *configured* stdio/http servers. What proves an SDK server registered is the model calling one of its tools |
+| `specs5/3-engine/permissions.md` § classification table | `ac-dc` tools are ungated because they classify as read-only | Classification only shapes a dialog. The CLI raises a permission request for MCP tools in `acceptEdits` and `default` — not in `plan` — so they must be allowed in `can_use_tool` explicitly. Corrected in that file |
+| `specs5/3-engine/mcp-bridge.md` § Tools | The tool names are what the model sees | It sees them prefixed: `mcp__ac-dc__<tool>`. And when the inventory is deferred it reaches them through `ToolSearch` first — all three live runs showed `ToolSearch{query: "select:mcp__ac-dc__file_symbols"}` before the call. A tool whose *name* is not guessable from the task will not be found that way, which is an argument for plain names over clever ones |
+
+### `ToolAnnotations(readOnlyHint=True)` buys nothing at the gate
+
+Worth stating because it looks like it should. The annotation is advisory metadata for the model and
+for UI; it does not affect whether the CLI raises a permission request. Two read-only tools, one
+built-in and one on an SDK server, get opposite treatment in `acceptEdits`.

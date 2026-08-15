@@ -4,8 +4,8 @@
 //
 // 1. Structural extraction — builds doc outlines from markdown
 //    and SVG files. Fast (< 1 second for reasonable repos) but
-//    worth showing so the user knows doc mode / cross-reference
-//    isn't yet available.
+//    worth showing so the user knows the outline tools the
+//    agent calls aren't answerable yet.
 //
 // 2. Keyword enrichment — runs KeyBERT on each outline. Slow
 //    (can take minutes on large repos). Per-file progress

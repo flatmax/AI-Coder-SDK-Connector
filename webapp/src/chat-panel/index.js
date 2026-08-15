@@ -115,7 +115,6 @@ import {
   onUpdated,
   rehydrateLiveAgents,
   switchMode,
-  toggleCrossRef,
 } from './events.js';
 import { INITIAL_PERMISSION_MODE, probeModeAuthority } from './permission-mode.js';
 import {
@@ -225,11 +224,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._committing = false;
     this.reviewActive = false;
 
-    // Mode + cross-ref state. Hydrated from
-    // get_current_state on RPC ready and kept in sync
-    // via the `mode-changed` window event.
+    // Mode state. Hydrated from get_current_state on RPC
+    // ready and kept in sync via the `mode-changed` window
+    // event — both dormant since phase 3, the preset selector
+    // that replaces this is CC-12. The cross-reference half
+    // of this pair went in phase 4: both indexes are always
+    // available to the agent as tools, so there is nothing to
+    // switch.
     this._mode = 'code';
-    this._crossRefEnabled = false;
 
     // Text-to-speech: index of the message currently
     // being read aloud, or -1 when idle. Single global
@@ -286,7 +288,6 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Bound mode helpers — the search bar's render path
     // calls these via `panel._switchMode(mode)` etc.
     this._switchMode = (mode) => switchMode(this, mode);
-    this._toggleCrossRef = () => toggleCrossRef(this);
     // Bound tab-close — used by streaming.js's stale-
     // agent recovery path (it calls `panel._onTabClose`
     // when the backend reports `agent not found`).

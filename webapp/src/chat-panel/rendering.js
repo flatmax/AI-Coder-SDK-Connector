@@ -1181,8 +1181,9 @@ export function renderStreamingMessage(panel) {
  * Render the search bar — input box with mode
  * toggle, three search-option toggles
  * (ignoreCase, regex, wholeWord), match counter,
- * navigation arrows, and (in main tab only) the
- * mode + cross-ref toggle group at the right.
+ * and navigation arrows. The mode + cross-ref
+ * toggle group that sat at the right went in
+ * conversion phases 2 and 4.
  *
  * Counter and nav handlers are mode-dependent:
  * file mode shows "N in F files" + uses the

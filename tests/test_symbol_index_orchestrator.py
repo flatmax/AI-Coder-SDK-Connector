@@ -679,3 +679,234 @@ class TestSnapshotDiscipline:
 
         after = set(index._all_symbols.keys())
         assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Incremental re-index — reindex_files
+# ---------------------------------------------------------------------------
+
+
+class TestReindexFiles:
+    """The post-write path behind the MCP bridge.
+
+    The interesting cases are all about the graph *around* the
+    file that changed: a re-parse that leaves the resolver, the
+    call sites, or the reference index describing the previous
+    version is worse than no index at all, because it answers
+    confidently.
+    """
+
+    def test_it_picks_up_a_new_symbol(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The plain case: the file's own symbols are current after."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        _write(repo_dir / "a.py", "def foo(): pass\ndef added(): pass\n")
+
+        assert index.reindex_files(["a.py"]) == ["a.py"]
+        assert "added" in index.get_symbol_map()
+
+    def test_a_brand_new_file_joins_the_index(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The agent's Write creates files; index_repo never saw them."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        _write(repo_dir / "b.py", "def bar(): pass\n")
+
+        assert index.reindex_files(["b.py"]) == ["b.py"]
+        assert index.get_indexed_files() == ["a.py", "b.py"]
+
+    def test_a_new_file_resolves_its_own_imports(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The resolver only resolves within the file set it knows, so a
+        file it has never heard of would resolve nothing until the next
+        full build — this is why reindex_files widens that set first."""
+        _write(repo_dir / "lib.py", "def helper(): pass\n")
+        index.index_repo(["lib.py"])
+        _write(
+            repo_dir / "app.py",
+            "from lib import helper\n\ndef run():\n    helper()\n",
+        )
+
+        index.reindex_files(["app.py"])
+        assert index.files_importing("lib.py") == ["app.py"]
+
+    def test_an_edit_updates_what_other_files_point_at(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The caller of a renamed function was not re-parsed, so its call
+        sites have to be re-resolved across the whole index."""
+        _write(repo_dir / "lib.py", "def helper(): pass\n")
+        _write(
+            repo_dir / "app.py",
+            "from lib import helper\n\ndef run():\n    helper()\n",
+        )
+        index.index_repo(["lib.py", "app.py"])
+        assert index.find_reference_sites("helper")
+
+        _write(repo_dir / "lib.py", "def renamed(): pass\n")
+        index.reindex_files(["lib.py"])
+        # The edge is gone rather than left pointing at a symbol that no
+        # longer exists, which is what a partial rebuild would leave.
+        assert index.find_definitions("helper") == []
+
+    def test_a_deleted_file_drops_out(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """A write can be a delete; the caller learns from the return
+        value which of its paths produced symbols."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        _write(repo_dir / "b.py", "def bar(): pass\n")
+        index.index_repo(["a.py", "b.py"])
+        (repo_dir / "b.py").unlink()
+
+        assert index.reindex_files(["b.py"]) == []
+        assert index.get_indexed_files() == ["a.py"]
+
+    def test_files_of_no_interest_are_skipped(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """A README write must not cost two whole-index passes."""
+        _write(repo_dir / "README.md", "# hi\n")
+        assert index.reindex_files(["README.md"]) == []
+        assert index.reindex_files([]) == []
+
+    def test_it_is_idempotent(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """Twice in a row is the debounce racing itself; the second call
+        must not duplicate symbols or reference edges."""
+        _write(repo_dir / "lib.py", "def helper(): pass\n")
+        _write(
+            repo_dir / "app.py",
+            "from lib import helper\n\ndef run():\n    helper()\n",
+        )
+        index.index_repo(["lib.py", "app.py"])
+
+        index.reindex_files(["app.py"])
+        once = (index.get_symbol_map(), index.find_reference_sites("helper"))
+        index.reindex_files(["app.py"])
+        assert (index.get_symbol_map(), index.find_reference_sites("helper")) == once
+
+
+# ---------------------------------------------------------------------------
+# Path and name queries the bridge asks
+# ---------------------------------------------------------------------------
+
+
+class TestResolveIndexedPath:
+    """Does the index know this file, and what does it call it?"""
+
+    def test_it_returns_the_canonical_key(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """A caller holding a path handed to it by an agent must not have
+        to normalise paths itself and then disagree with us."""
+        _write(repo_dir / "pkg" / "a.py", "def foo(): pass\n")
+        index.index_repo(["pkg/a.py"])
+
+        assert index.resolve_indexed_path("pkg/a.py") == "pkg/a.py"
+        assert index.resolve_indexed_path("./pkg/a.py") == "pkg/a.py"
+        assert index.resolve_indexed_path(repo_dir / "pkg" / "a.py") == "pkg/a.py"
+
+    def test_it_tidies_a_path_a_model_typed(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """Answering "not indexed" for a path plainly in the index reads
+        as a broken index, not as a spelling quibble."""
+        _write(repo_dir / "pkg" / "a.py", "def foo(): pass\n")
+        index.index_repo(["pkg/a.py"])
+        assert index.resolve_indexed_path("pkg/../pkg/a.py") == "pkg/a.py"
+
+    def test_a_dotted_directory_is_not_mistaken_for_a_relative_path(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """A leading dot is a real directory name; only `..` leaves."""
+        _write(repo_dir / ".tools" / "a.py", "def foo(): pass\n")
+        index.index_repo([".tools/a.py"])
+        assert index.resolve_indexed_path(".tools/a.py") == ".tools/a.py"
+        assert index.resolve_indexed_path("./.tools/a.py") == ".tools/a.py"
+
+    def test_an_unindexed_path_is_none_not_an_error(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The caller reports it as unknown, one path among several."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        assert index.resolve_indexed_path("nope.py") is None
+        assert index.resolve_indexed_path("") is None
+        assert index.resolve_indexed_path("..") is None
+
+    def test_a_path_outside_the_repo_is_none(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """Not a spelling variant of anything we hold."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        assert index.resolve_indexed_path("/etc/passwd") is None
+        assert index.resolve_indexed_path("../outside/a.py") is None
+
+
+class TestNameQueries:
+    """find_definitions / find_reference_sites / files_importing.
+
+    Name-based rather than position-based on purpose: the caller
+    is an agent holding a name it read in a diff, not a cursor in
+    an editor.
+    """
+
+    @pytest.fixture
+    def populated(self, index: SymbolIndex, repo_dir: Path) -> SymbolIndex:
+        _write(
+            repo_dir / "lib.py",
+            "class Thing:\n"
+            "    def build(self): pass\n"
+            "\n"
+            "def build(): pass\n",
+        )
+        _write(
+            repo_dir / "app.py",
+            "from lib import build\n\ndef run():\n    build()\n",
+        )
+        index.index_repo(["lib.py", "app.py"])
+        return index
+
+    def test_definitions_carry_their_container(
+        self, populated: SymbolIndex
+    ) -> None:
+        """The one fact that tells six same-named `build` methods apart."""
+        found = populated.find_definitions("build")
+        containers = {(d["file"], d["container"]) for d in found}
+        assert ("lib.py", "Thing") in containers
+        assert ("lib.py", None) in containers
+
+    def test_lines_are_one_indexed(self, populated: SymbolIndex) -> None:
+        """Ranges are stored 0-indexed; every consumer shows the number to
+        a reader, so the +1 belongs in the index rather than in each."""
+        method = [
+            d for d in populated.find_definitions("build")
+            if d["container"] == "Thing"
+        ][0]
+        assert method["line"] == 2
+
+    def test_an_unknown_name_finds_nothing(self, populated: SymbolIndex) -> None:
+        assert populated.find_definitions("no_such_name") == []
+        assert populated.find_reference_sites("no_such_name") == []
+
+    def test_reference_sites_are_file_and_line(
+        self, populated: SymbolIndex
+    ) -> None:
+        sites = populated.find_reference_sites("build")
+        assert sites
+        assert all(
+            isinstance(f, str) and isinstance(line, int) for f, line in sites
+        )
+
+    def test_files_importing_names_the_importers(
+        self, populated: SymbolIndex
+    ) -> None:
+        assert populated.files_importing("lib.py") == ["app.py"]
+        assert populated.files_importing("app.py") == []

@@ -62,6 +62,26 @@ the authority the user granted by opening it. Users who want reads gated set a d
 project settings; the file picker's third checkbox state writes exactly such a rule (see
 [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract)).
 
+**"Ungated" is two different mechanisms, and only one of them is ours.** `Read`, `Glob`, `Grep`,
+`WebFetch`, `WebSearch` and `Task` are ungated because the CLI never raises a permission request for
+them — `can_use_tool` is not called at all, so nothing in this app decides anything. The `ac-dc`
+index tools it *does* ask about: in `plan` mode it allows them itself, but in `acceptEdits` and
+`default` it asks, and an unanswered ask is a denial. So `can_use_tool` early-returns
+`PermissionResultAllow()` for any `mcp__ac-dc__*` tool, before a payload is built or a request is
+broadcast, and without recording a prompt against the turn.
+
+`classify_tool` returning `"read"` for those tools is *not* what ungates them — it only shapes a
+dialog's wording, and by the time it is consulted the request already exists. The distinction is
+worth stating because getting it wrong is invisible in `plan` mode and produces a dialog per
+`symbol_map` call everywhere else, which is the click-through failure arriving through prompts that
+should never have existed. Pinned by `TestOurOwnToolsAreUngated`, including the case that keeps it
+narrow: `mcp__ac-dc-plus__*` is somebody else's server and is still gated.
+
+The allow is safe because the tools are read-only by construction — closures over index objects this
+process already holds, on an in-process server with no third party who could change its tool list.
+It does not extend to a third-party MCP server that happens to be read-only; those stay gated,
+because their inventory is outside our control.
+
 ### The diff is the feature
 
 For file mutations, the dialog fetches the current file content and renders the proposed result as a

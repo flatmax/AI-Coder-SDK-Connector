@@ -94,6 +94,11 @@ class DocIndexBuilder:
         self.ready = False
         self.building = False
         self.enriched = False
+        # Set when a build gave up. What it buys is one distinction the
+        # ``doc_outline`` tool has to make: "wait and retry" and "this will
+        # never work, use Grep" look identical through `ready` alone, and
+        # an agent that retries a permanent failure burns turns on it.
+        self.failed = False
         # Tristate, because a single boolean cannot tell "KeyBERT is not
         # installed" from "still working" — the frontend shows a one-shot
         # install hint for the first and a progress bar for the second.
@@ -167,6 +172,9 @@ class DocIndexBuilder:
         if self.building:
             return
         self.building = True
+        # Cleared on entry, not only set on failure: a forced rebuild after
+        # a failed one deserves to be judged on its own outcome.
+        self.failed = False
         try:
             doc_files = self._eligible_files()
             total = len(doc_files)
@@ -200,6 +208,7 @@ class DocIndexBuilder:
             loop.create_task(self.run_enrichment(), name="doc-index-enrich")
         except Exception as exc:
             logger.exception("Doc index: build failed: %s", exc)
+            self.failed = True
             await self._emit(
                 "doc_index_error", f"Documentation indexing failed: {exc}", 0
             )
@@ -365,16 +374,15 @@ class DocIndexBuilder:
     # Post-write hook
     # ------------------------------------------------------------------
 
-    def note_file_written(self, rel_path: str) -> None:
-        """Re-extract one file after a write. Wired to ``Repo``.
+    def note_file_written(self, rel_path: str) -> bool:
+        """Re-extract one file after a write. Returns True if it did.
 
-        Fires for every successful write, create and rename **through
-        Repo** — which means the user's edits in the viewer and the SVG
-        editor, not the agent's. The CLI's own ``Write`` and ``Edit``
-        tools write straight to disk and never touch this layer; those
-        are the post-tool-call re-index's job, which lands with the MCP
-        bridge in phase 4. Until then a document the agent edits keeps a
-        stale outline until the next full build.
+        Two callers, one per kind of writer. ``Repo``'s post-write
+        callback covers the user's edits — the viewer, the SVG editor —
+        and the ``PostToolUse`` re-index
+        (:mod:`ac_dc.claude_code.hooks`) covers the agent's, because the
+        CLI's ``Write`` and ``Edit`` go straight to disk and never pass
+        through the repo layer.
 
         Interesting paths get their cache entry dropped, a fresh
         structural outline, and a place in the enrichment queue.
@@ -383,16 +391,21 @@ class DocIndexBuilder:
         on" — is gone with the modes it referred to. What remains is the
         extension check, which is the real question.
 
+        The return value is what lets the re-index report *which* of the
+        agent's writes refreshed an index, without the caller having to
+        ask us which extensions we care about — the answer lives here and
+        would go stale anywhere else. ``Repo`` ignores it.
+
         Never raises.
         """
         try:
             extension = self._doc_index._extension_of(rel_path)
             if extension not in self._doc_index._extractors:
-                return
+                return False
             if not self.ready:
                 # Mid-build. index_repo will reach this file anyway, and
                 # re-extracting underneath it would race.
-                return
+                return False
             self._doc_index.invalidate_file(rel_path)
             keyword_model = (
                 self._enricher.model_name if self._enricher is not None else None
@@ -401,9 +414,12 @@ class DocIndexBuilder:
                 rel_path, keyword_model=keyword_model
             )
             if outline is None or self._enricher is None:
-                return
+                # A file that failed to extract counts as re-indexed
+                # either way: its stale outline is gone, which is the part
+                # a caller reporting freshness cares about.
+                return True
             if not self._doc_index.needs_enrichment(outline):
-                return
+                return True
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -412,14 +428,16 @@ class DocIndexBuilder:
                     "next full build",
                     rel_path,
                 )
-                return
+                return True
             loop.create_task(
                 self._enrich_written_file(rel_path), name="doc-index-reenrich"
             )
+            return True
         except Exception as exc:
             logger.warning(
                 "Doc-file post-write hook failed for %s: %s", rel_path, exc
             )
+            return False
 
     async def _enrich_written_file(self, rel_path: str) -> None:
         """Enrich one just-written file on the worker thread."""

@@ -32,8 +32,8 @@ import {
 
 /** Controls phase 2 removed, with where each one comes back. */
 const REMOVED_CONTROLS = [
-  ['.mode-toggle', 'code/doc index switch — phase 6 Context tab'],
-  ['.crossref-btn', 'cross-reference toggle — phase 6 Context tab'],
+  ['.mode-toggle', 'code/doc index switch — the preset selector, CC-12'],
+  ['.crossref-btn', 'cross-reference toggle — never; retired in phase 4'],
   ['.new-session-button', 'session lifecycle — phase 5'],
   ['.history-button', 'history browser — phase 5'],
   ['.reasoning-toggle', 'reasoning flags chat_streaming no longer takes'],

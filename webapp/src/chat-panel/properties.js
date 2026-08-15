@@ -18,7 +18,7 @@
 // Component-scoped reactive properties (those that
 // don't move with the active tab — `repoFiles`,
 // `reviewActive`, `_committing`, `_mode`,
-// `_crossRefEnabled`, `_tabStripOverflowOpen`)
+// `_tabStripOverflowOpen`)
 // use Lit's default accessor path and don't carry
 // `noAccessor: true`.
 
@@ -248,18 +248,17 @@ export const PROPERTIES = {
    * Current primary mode — 'code' or 'doc'. Component-
    * scoped (not per-tab) for now: the backend has one
    * authoritative mode and every tab follows it. When
-   * backend gains per-agent mode, this and
-   * `_crossRefEnabled` move into `_makeTabState()` and
-   * the read/write paths thread through agent_tag.
-   * Defaults to 'code' to match the backend.
+   * backend gains per-agent mode, this moves into
+   * `_makeTabState()` and the read/write paths thread
+   * through agent_tag. Defaults to 'code' to match the
+   * backend.
+   *
+   * `_crossRefEnabled` sat beside it until conversion phase
+   * 4. Both indexes are permanently available to the agent as
+   * MCP tools now, so the overlay it toggled has nothing left
+   * to overlay (specs5/5-webapp/chat.md § Preset Selector).
    */
   _mode: { type: String, state: true },
-  /**
-   * Cross-reference overlay toggle. Resets to false on
-   * every mode switch per specs4/3-llm/modes.md. Same
-   * scoping rationale as `_mode`.
-   */
-  _crossRefEnabled: { type: Boolean, state: true },
   /**
    * Index of the message currently being read aloud via
    * the Web Speech synthesis API, or -1 when nothing is

@@ -19,14 +19,16 @@ symbol index's LSP surface, the doc index's background build, review mode,
 and the two git writes the user performs by hand. They are grouped in their
 own sections below and share nothing with the turn path except this class.
 
-Scope note — chat runs on this service and the permission gate is live.
-Deliberately absent, each landing in a later phase with the subsystem it
-belongs to:
+Since phase 4 those indexes face the agent as well as the browser. This
+class owns both halves of that: the :class:`~ac_dc.claude_code.mcp_server.
+McpBridge` the session is handed as an MCP server, and the
+:class:`~ac_dc.claude_code.hooks.Reindexer` behind the ``PostToolUse``
+hook that keeps it honest after the agent writes.
 
-- Transcript mirroring, ``history_*``, image persistence — phase 5.
-- ``files_reindexed`` in ``postResponseComplete`` — phase 4, with the MCP
-  bridge. Reported empty until then rather than omitted, so the frontend
-  contract does not change when it starts being populated.
+Scope note — chat runs on this service and the permission gate is live.
+Deliberately absent, landing in a later phase with the subsystem it
+belongs to: transcript mirroring, ``history_*`` and image persistence, all
+phase 5.
 
 **The engine connects lazily**, on the first turn or an explicit
 ``connect_engine()`` call, so a launch that never chats never pays for a
@@ -52,6 +54,8 @@ from typing import Any
 
 from ac_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
 from ac_dc.claude_code.health import EngineStartupError
+from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers
+from ac_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
 from ac_dc.claude_code.messages import Event
 from ac_dc.claude_code.permissions import (
     PermissionBroker,
@@ -169,13 +173,55 @@ class ClaudeCodeService:
             note_mode=self._note_permission_mode,
             localhost_available=self._localhost_available,
         )
+        # AC-DC's own indexes. These are not engine state and did not come
+        # from the native engine — they back the symbol/outline tools the
+        # CLI has no equivalent of, so they outlive it (specs5/plan/
+        # inventory.md § Backend — KEEP). Attached by the startup path
+        # because both are built after the RPC server is already serving.
+        #
+        # Constructed here, ahead of the session, because the session is
+        # built *around* them: the MCP bridge and the post-write re-index
+        # are constructor arguments to it, for the same reason the
+        # permission gate is.
+        self.symbol_index: Any = None
+        # Three states, not two. "Absent" and "still building" and "built"
+        # are different answers to a tool call, and a lone `is None` check
+        # cannot tell the middle one from either edge — a half-built index
+        # answers queries happily, with half the repo missing.
+        self._symbol_index_ready = False
+        self._symbol_index_failed = False
+        self.doc_builder = self._build_doc_builder()
+
+        self.reindexer = Reindexer(
+            symbol_index=self._live_symbol_index,
+            doc_builder=self.doc_builder,
+            broadcast=self._broadcast,
+            repo_root=self._repo_root,
+        )
+        self.mcp_bridge = McpBridge(
+            symbol_index=self._live_symbol_index,
+            symbol_index_ready=lambda: self._symbol_index_ready,
+            doc_index=self._live_doc_index,
+            doc_index_ready=lambda: self.doc_builder.ready,
+            review_state=self.get_review_state,
+            ui_state=self._ui_state_snapshot,
+            flush=self.reindexer.flush,
+        )
+        hooks, mcp_servers = self._build_bridge_wiring()
+
         self.session = EngineSession(
             self._repo_root,
             self.engine_config,
             can_use_tool=self.permissions.can_use_tool,
+            hooks=hooks,
+            mcp_servers=mcp_servers,
         )
 
         self._selected_files: list[str] = []
+        # Last-known viewer state, pushed by the browser on navigation.
+        # Held on the service rather than passed per turn because a tool
+        # call can ask for it mid-turn, long after the prompt was composed.
+        self._viewer_state: dict[str, Any] | None = None
         # Serialises connect attempts from concurrent first turns, so two
         # clients sending at once cannot spawn two CLI subprocesses.
         self._connect_lock = asyncio.Lock()
@@ -185,14 +231,6 @@ class ClaudeCodeService:
         # commitResult broadcast arrives, and two overlapping runs would
         # stage each other's half-finished work.
         self._committing = False
-
-        # AC-DC's own indexes. These are not engine state and did not come
-        # from the native engine — they back the symbol/outline tools the
-        # CLI has no equivalent of, so they outlive it (specs5/plan/
-        # inventory.md § Backend — KEEP). Attached by the startup path
-        # because both are built after the RPC server is already serving.
-        self.symbol_index: Any = None
-        self.doc_builder = self._build_doc_builder()
 
         self.review = ReviewMode(
             repo=repo,
@@ -238,6 +276,68 @@ class ClaudeCodeService:
             repo=self._repo,
             progress=self._send_startup_progress,
         )
+
+    def _build_bridge_wiring(self) -> tuple[Any, Any]:
+        """The ``hooks`` and ``mcp_servers`` the session is built with.
+
+        Degrades to ``(None, None)``: without the bridge the agent loses
+        the symbol map and the outline tools and keeps every built-in, and
+        without the hook the file tree needs a manual refresh. Both are
+        worth losing to keep a session that starts. Refusing to construct
+        would trade a missing feature for a dead editor.
+        """
+        try:
+            hooks = build_hook_matchers(self.reindexer, self._broadcast)
+        except Exception as exc:
+            logger.warning(
+                "Post-write re-index hook unavailable; the file tree and the "
+                "indexes will not follow the agent's writes: %s",
+                exc,
+            )
+            hooks = None
+        try:
+            mcp_servers = {SERVER_NAME: self.mcp_bridge.build_server()}
+        except Exception as exc:
+            logger.warning(
+                "The ac-dc MCP bridge failed to build; the agent will fall "
+                "back to Glob/Grep/Read for repo structure: %s",
+                exc,
+            )
+            mcp_servers = None
+        return hooks, mcp_servers
+
+    def _live_symbol_index(self) -> Any:
+        """The symbol index the bridge and the re-index should read.
+
+        None once construction or the initial walk has failed, rather than
+        the partially-built index that is sitting right there. A map that
+        silently omits half the repo is read as "these files have no
+        symbols", and the agent does not go back to check — so the honest
+        answer is to report the index as unavailable and let it use Grep.
+        """
+        if self._symbol_index_failed:
+            return None
+        return self.symbol_index
+
+    def _live_doc_index(self) -> Any:
+        """The doc index, or None when its build failed outright."""
+        if getattr(self.doc_builder, "failed", False):
+            return None
+        return self.doc_builder.doc_index
+
+    def _ui_state_snapshot(self) -> dict[str, Any]:
+        """What the user is pointing at, for the ``ui_state`` tool.
+
+        Paths and modes only — never file content. The agent reads files
+        with its own tools; this answers the one question those cannot
+        (``specs5/plan/decisions.md`` CC-14).
+        """
+        return {
+            "selected_files": list(self._selected_files),
+            "viewer": dict(self._viewer_state) if self._viewer_state else None,
+            "review_state": self.get_review_state(),
+            "permission_mode": self.session.permission_mode,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -449,7 +549,13 @@ class ClaudeCodeService:
             message=message,
             files=list(files) if files is not None else list(self._selected_files),
             images=list(images or []),
-            viewer=ViewerFraming.from_dict(viewer),
+            # The browser may send the viewer with the turn; when it does
+            # not, the last `set_viewer_state` push stands in. Same fact,
+            # two arrival paths — and the push is the one that keeps
+            # working when the turn comes from somewhere else.
+            viewer=ViewerFraming.from_dict(
+                viewer if viewer is not None else self._viewer_state
+            ),
         )
 
         try:
@@ -549,7 +655,18 @@ class ClaudeCodeService:
         Always fires after ``streamComplete`` for the same turn, and always
         fires — the Context tab and the file tree wait on it for consistent
         derived state, so a skipped event leaves them stale indefinitely.
+
+        The re-index is flushed first so ``files_reindexed`` is the whole
+        turn's list rather than whatever the debounce happened to have
+        finished by the time the last message arrived.
         """
+        try:
+            await self.reindexer.flush()
+        except Exception as exc:
+            # A stale index is not a reason to withhold the turn footer.
+            logger.debug("Post-turn re-index flush failed: %s", exc)
+        files_reindexed = self.reindexer.take_reindexed()
+
         context_usage: dict[str, Any] | None = None
         if self.session.ready:
             try:
@@ -561,7 +678,7 @@ class ClaudeCodeService:
             Event(
                 "postResponseComplete",
                 {
-                    "files_reindexed": [],
+                    "files_reindexed": files_reindexed,
                     "context_usage": context_usage,
                     "disk_warning": None,
                 },
@@ -896,6 +1013,59 @@ class ClaudeCodeService:
         """
         self.symbol_index = symbol_index
         self.review.symbol_index = symbol_index
+        self._symbol_index_failed = symbol_index is None
+
+    def _mark_symbol_index_ready(self) -> None:
+        """The repo walk finished; the map now describes the whole repo.
+
+        Separate from :meth:`_attach_symbol_index` because the gap between
+        the two is minutes on a large repo, and Monaco wants the index as
+        soon as it exists — a hover that resolves for half the repo is
+        useful, a *map* that covers half the repo is misleading.
+        """
+        self._symbol_index_ready = True
+        self._symbol_index_failed = False
+
+    def _mark_symbol_index_failed(self) -> None:
+        """The walk did not finish. Report unavailable rather than partial.
+
+        Also clears ready, so a failure part-way through a *rebuild* stops
+        the tools claiming completeness they had a moment ago.
+        """
+        self._symbol_index_ready = False
+        self._symbol_index_failed = True
+
+    def set_viewer_state(
+        self,
+        path: str | None = None,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        """Record what the caller has open in their viewer.
+        **Localhost only.**
+
+        Feeds the turn framing and the ``ui_state`` tool. A falsy ``path``
+        clears it, which is what closing the pane should mean rather than
+        leaving the agent pointed at a file nobody is looking at.
+
+        Gated because it is an input to the prompt: a non-localhost
+        participant could otherwise put a path of their choosing in front
+        of the model on somebody else's turn. It is a small lever, and it
+        is still a lever on what the agent reads.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not path or not isinstance(path, str):
+            self._viewer_state = None
+            return {"status": "cleared"}
+        state: dict[str, Any] = {"path": path}
+        if isinstance(start_line, int):
+            state["start_line"] = start_line
+        if isinstance(end_line, int):
+            state["end_line"] = end_line
+        self._viewer_state = state
+        return {"status": "ok", **state}
 
     def _schedule_doc_index_build(self) -> None:
         """Start the doc-index build in the background. Idempotent.

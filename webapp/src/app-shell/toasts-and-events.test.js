@@ -180,7 +180,6 @@ describe('AppShell events and toasts', () => {
       shell._onModeChanged({
         detail: {
           mode: 'code',
-          cross_ref_enabled: false,
           enrichment_status: 'unavailable',
         },
       });
@@ -196,7 +195,6 @@ describe('AppShell events and toasts', () => {
         shell._onModeChanged({
           detail: {
             mode: 'code',
-            cross_ref_enabled: false,
             enrichment_status: status,
           },
         });
@@ -209,7 +207,7 @@ describe('AppShell events and toasts', () => {
       // must silently pass — no toast, no exception.
       const shell = mountShell();
       shell._onModeChanged({
-        detail: { mode: 'code', cross_ref_enabled: false },
+        detail: { mode: 'code' },
       });
       expect(shell.toasts.length).toBe(0);
     });
@@ -265,24 +263,30 @@ describe('AppShell events and toasts', () => {
 
     it('preserves other modeChanged side effects', () => {
       // The enrichment-status check must not interfere with
-      // mode and cross-ref handling. A single event carrying
-      // all three fields should update mode state AND fire
-      // the toast.
+      // mode handling. A single event carrying both fields
+      // should update mode state AND fire the toast.
       const shell = mountShell();
       shell._mode = 'code';
-      shell._crossRefEnabled = false;
       shell._onModeChanged({
         detail: {
           mode: 'doc',
-          cross_ref_enabled: true,
           enrichment_status: 'unavailable',
         },
       });
       expect(shell._mode).toBe('doc');
-      // cross_ref_enabled resets to false on mode change,
-      // then gets set from the payload's value.
-      expect(shell._crossRefEnabled).toBe(true);
       expect(shell.toasts.length).toBe(1);
+    });
+
+    it('ignores a cross_ref_enabled field it is sent', () => {
+      // Retired in conversion phase 4 — both indexes are
+      // always available as tools. A payload from an older
+      // backend must not resurrect the state it named.
+      const shell = mountShell();
+      shell._onModeChanged({
+        detail: { mode: 'doc', cross_ref_enabled: true },
+      });
+      expect(shell._mode).toBe('doc');
+      expect(shell._crossRefEnabled).toBeUndefined();
     });
 
     it('survives localStorage errors on read', () => {

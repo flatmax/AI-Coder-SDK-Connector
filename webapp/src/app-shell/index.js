@@ -76,7 +76,7 @@ import {
 import {
   fetchCurrentState, fetchContextUsage, onContextUsageRefresh,
 } from './state-fetch.js';
-import { onModeChanged, switchMode, toggleCrossRef } from './mode.js';
+import { onModeChanged, switchMode } from './mode.js';
 import {
   onGitAction, onCommitResultHeader, onReviewStateChanged,
   onStreamChunkHeader, onStreamCompleteHeader,
@@ -143,13 +143,6 @@ export class AppShell extends JRPCClient {
      * backend's default.
      */
     _mode: { type: String, state: true },
-    /**
-     * Cross-reference overlay toggle. Resets to false on
-     * every mode switch per specs4/3-llm/modes.md. When
-     * true, the other index's blocks participate in tier
-     * assembly alongside the primary.
-     */
-    _crossRefEnabled: { type: Boolean, state: true },
     /**
      * Whether the current caller is localhost. Non-localhost
      * participants cannot initiate mode switches per
@@ -268,7 +261,6 @@ export class AppShell extends JRPCClient {
     // once the backend snapshot arrives, and kept in sync
     // via mode-changed window events.
     this._mode = 'code';
-    this._crossRefEnabled = false;
     // Assume localhost until the backend tells us
     // otherwise. A future collab probe could flip this;
     // for now single-user mode is always localhost.
@@ -486,9 +478,9 @@ export class AppShell extends JRPCClient {
     window.addEventListener('beforeunload', this._onBeforeUnload);
     window.addEventListener('resize', this._onWindowResize);
     // mode-changed fires when any client (including us)
-    // successfully switches modes or toggles cross-ref.
-    // Spec is explicit: all clients follow the server's
-    // authoritative mode via this broadcast.
+    // successfully switches modes. Spec is explicit: all
+    // clients follow the server's authoritative mode via this
+    // broadcast. Dormant since phase 3 — nothing emits it.
     window.addEventListener('mode-changed', this._onModeChanged);
     // commit-result broadcasts via the server to all
     // clients; we use it here to clear the in-flight
@@ -988,10 +980,10 @@ export class AppShell extends JRPCClient {
 
   agentModeChanged(data) {
     // Per-agent mode change broadcast (Increment 4a).
-    // Carries {agent_id, mode, cross_reference_enabled}.
-    // Re-dispatched as a window event so the chat
-    // panel's `_onAgentModeChanged` handler updates
-    // `_tabModes` and re-renders the toggle.
+    // Carries {agent_id, mode, ...}. Re-dispatched as a
+    // window event so the chat panel's
+    // `_onAgentModeChanged` handler updates `_tabModes`,
+    // which the agent tab strip reads for its tooltips.
     window.dispatchEvent(
       new CustomEvent('agent-mode-changed', { detail: data }),
     );
@@ -1436,10 +1428,6 @@ export class AppShell extends JRPCClient {
 
   async _switchMode(mode) {
     return switchMode(this, mode);
-  }
-
-  async _toggleCrossRef() {
-    return toggleCrossRef(this);
   }
 
   _onGitAction(event) {

@@ -14,8 +14,7 @@
 //     streaming state, seeds input history
 //   - Compaction events (URL fetch progress,
 //     history compaction)
-//   - Mode + cross-ref toggles (RPC calls +
-//     broadcast sync)
+//   - Mode toggles (RPC calls + broadcast sync)
 //   - Commit result handler (appends system event
 //     to the conversation)
 //   - Snippet loading + reload on mode/review
@@ -784,8 +783,13 @@ export function onCompactionEvent(panel, event) {
 }
 
 // ---------------------------------------------------------------
-// Mode + cross-ref + snippets
+// Mode + snippets
 // ---------------------------------------------------------------
+//
+// The cross-reference toggle and its two RPC helpers stood here
+// until conversion phase 4. Both indexes are always available
+// to the agent as MCP tools, so there is nothing to switch on —
+// specs5/5-webapp/chat.md § Preset Selector.
 
 /**
  * Mode or review state changed — snippets are
@@ -799,22 +803,15 @@ export function onModeOrReviewChanged(panel) {
 }
 
 /**
- * Sync mode/cross-ref state from the broadcast.
- * Fires for our own switches and for
- * collaborators'. Backend resets cross-ref on
- * mode change; we mirror that locally so the UI
- * doesn't lag the broadcast.
+ * Sync mode state from the broadcast. Fires for
+ * our own switches and for collaborators'. The
+ * ``cross_ref_enabled`` field the native engine
+ * also sent is ignored — see the note above.
  */
 export function onModeChanged(panel, event) {
   const detail = event.detail || {};
   if (typeof detail.mode === 'string') {
-    if (detail.mode !== panel._mode) {
-      panel._mode = detail.mode;
-      panel._crossRefEnabled = false;
-    }
-  }
-  if (typeof detail.cross_ref_enabled === 'boolean') {
-    panel._crossRefEnabled = detail.cross_ref_enabled;
+    panel._mode = detail.mode;
   }
 }
 
@@ -869,28 +866,22 @@ async function _switchMainMode(panel, mode) {
 /**
  * Per-agent mode switch.
  *
- * Sends the combined mode string (cross-ref
- * suffix preserved) so the backend's single
- * ``switch_agent_mode`` RPC sees both axes in
- * one call. Reads the agent's current xref
- * state from ``_tabModes`` to compute the new
- * combined string — flipping primary axis to
- * ``code`` while xref is on yields
- * ``code+xref``, not ``code``.
+ * No-op when the new mode equals the current —
+ * saves a needless RPC and matches the backend's
+ * no-op short-circuit.
  *
- * No-op when the new combined mode equals the
- * current — saves a needless RPC and matches
- * the backend's no-op short-circuit.
+ * A ``+xref`` suffix on a mode read out of
+ * ``_tabModes`` is dropped rather than preserved:
+ * the axis it named was retired in phase 4, and
+ * only an archived tab entry can still carry it.
  */
 async function _switchAgentMode(panel, mode) {
   const agentId = panel._activeTabId;
   const current = panel._tabModes?.get(agentId) || 'code';
-  const xref = current.endsWith('+xref');
-  const combined = xref ? `${mode}+xref` : mode;
-  if (combined === current) return;
+  if (mode === current) return;
   try {
     const result = await panel.rpcExtract(
-      'LLMService.switch_agent_mode', agentId, combined,
+      'LLMService.switch_agent_mode', agentId, mode,
     );
     if (result && typeof result === 'object' && result.error) {
       const reason = result.reason || result.error;
@@ -908,75 +899,15 @@ async function _switchAgentMode(panel, mode) {
 }
 
 /**
- * Toggle cross-reference.
- *
- * Same routing pattern as :func:`switchMode`:
- * main targets ``LLMService.set_cross_reference``,
- * agent tabs target
- * ``LLMService.set_agent_cross_reference``.
- */
-export async function toggleCrossRef(panel) {
-  if (!panel.rpcConnected) return;
-  if (panel._activeTabId === 'main') {
-    return _toggleMainCrossRef(panel);
-  }
-  return _toggleAgentCrossRef(panel);
-}
-
-async function _toggleMainCrossRef(panel) {
-  const next = !panel._crossRefEnabled;
-  try {
-    const result = await panel.rpcExtract(
-      'LLMService.set_cross_reference', next,
-    );
-    if (result && typeof result === 'object' && result.error) {
-      const reason = result.reason || result.error;
-      panel._emitToast(
-        `Cross-reference toggle failed: ${reason}`,
-        'warning',
-      );
-    }
-  } catch (err) {
-    panel._emitToast(
-      `Cross-reference toggle failed: ${err?.message || 'RPC error'}`,
-      'error',
-    );
-  }
-}
-
-async function _toggleAgentCrossRef(panel) {
-  const agentId = panel._activeTabId;
-  const current = panel._tabModes?.get(agentId) || 'code';
-  const next = !current.endsWith('+xref');
-  try {
-    const result = await panel.rpcExtract(
-      'LLMService.set_agent_cross_reference', agentId, next,
-    );
-    if (result && typeof result === 'object' && result.error) {
-      const reason = result.reason || result.error;
-      panel._emitToast(
-        `Agent cross-reference toggle failed: ${reason}`,
-        'warning',
-      );
-    }
-  } catch (err) {
-    panel._emitToast(
-      `Agent cross-reference toggle failed: ${err?.message || 'RPC error'}`,
-      'error',
-    );
-  }
-}
-
-/**
  * Handle ``agent-mode-changed`` window events.
  *
  * Updates ``_tabModes`` for the affected agent
  * and forces a re-render so the toggle reflects
  * the new state. Detail shape is
- * ``{agent_id, mode, cross_reference_enabled}``;
- * we only need the first two — the boolean is
- * already encoded in the mode string's
- * ``+xref`` suffix.
+ * ``{agent_id, mode, ...}``; only the first two
+ * fields are read. Dormant since phase 3 —
+ * nothing broadcasts this any more, and the shape
+ * is kept for CC-8 rather than half-deleted.
  *
  * Defensive against unknown agent ids — a stale
  * broadcast for an agent the user just closed

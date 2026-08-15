@@ -19,9 +19,11 @@
  * from `EngineState`, and every read of them below is guarded
  * rather than defaulted:
  *
- *   - `mode` / `cross_ref_enabled` — the native engine's
- *     code/doc modes. CC-12 replaces the toggle with a preset
- *     selector; until then the shell keeps its defaults.
+ *   - `mode` — the native engine's code/doc modes. CC-12
+ *     replaces the toggle with a preset selector; until then
+ *     the shell keeps its default. `cross_ref_enabled` came
+ *     in the same snapshot and is not read at all any more:
+ *     the toggle it fed was retired in phase 4.
  *   - `enrichment_status` — the doc-index KeyBERT probe. Its
  *     one-shot toast stays silent rather than firing wrongly.
  *   - `excluded_index_files` — becomes `denied_read_files`
@@ -51,14 +53,13 @@ export async function fetchCurrentState(host) {
       document.title = state.repo_name;
     }
     host._initComplete = !!state.init_complete;
-    // Hydrate mode state from the snapshot. Defaults
-    // cover older backends that don't report these
-    // fields yet.
+    // Hydrate mode state from the snapshot. Guarded because
+    // `ClaudeCodeService.get_current_state` does not report a
+    // mode at all — the preset that replaces it is browser
+    // state (CC-12). The `cross_ref_enabled` half of this
+    // hydration went in phase 4 with the toggle it fed.
     if (typeof state.mode === 'string') {
       host._mode = state.mode;
-    }
-    if (typeof state.cross_ref_enabled === 'boolean') {
-      host._crossRefEnabled = state.cross_ref_enabled;
     }
     // Review state — the snapshot carries a `review_state`
     // object with `active: bool` (matching the

@@ -799,3 +799,265 @@ semantics; `test_no_response_key_is_ever_written` pins the behaviour.
 - **The transcript tool card for `ExitPlanMode` is still generic.** The dialog was the blocking gap; the card is a read of history.
 - **No "chat about this" on the dialog.** Denying with a reason is the available path, and it works — the agent reads the reason — but it costs a turn where the terminal would let the user just talk.
 - **`preview` and `annotations` on `AskUserQuestion` remain unbuilt.** Phase 6, unchanged.
+
+---
+
+## Phase 4 — The indexes as MCP tools (2026-08-15)
+
+**Exit criterion:** *"Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition
+still work in Monaco."* Met for the tools — see [Live verification](#live-verification-2). **The Monaco
+half is proven by tests only**, for the reason below.
+
+This is CC-6 built: the symbol and document indexes reach the agent as tools it decides to call, not as
+text prepended to a prompt. The difference is not packaging. Prompt injection paid for the index on
+every turn whether or not the turn was about code; a tool is paid for when asked, and the agent's choice
+to call it is visible in the transcript as a tool card.
+
+### What landed
+
+Two new modules, both in `src/ac_dc/claude_code/`:
+
+| File | Lines | What it is |
+|---|---|---|
+| `mcp_server.py` | 734 | `McpBridge` — the six tools, their schemas, and their rendering |
+| `hooks.py` | 383 | `Reindexer` and `build_hook_matchers` — the `PostToolUse` re-index |
+
+**`McpBridge` takes callables, not indexes.** Every provider is a zero-argument callable
+(`symbol_index`, `symbol_index_ready`, `doc_index`, `doc_index_ready`, `review_state`, `ui_state`,
+`flush`) resolved at call time. The indexes it reads are built minutes after the session connects and
+are replaced wholesale on a rebuild, so a bridge holding references would answer from the object that
+existed at wiring time. It also means the tools and the browser read *the same* index objects — an SDK
+in-process server, not a subprocess with a second copy.
+
+The six tools, all annotated `readOnlyHint=True`:
+
+| Tool | Answers |
+|---|---|
+| `symbol_map` | The compressed repo map, optionally under a `path_prefix` |
+| `file_symbols` | Symbols for named paths, with line numbers |
+| `find_references` | Definition and referrers for a name |
+| `doc_outline` | Headings, keywords, line counts and link targets for documents |
+| `review_state` | Whether a review is in progress, and over what |
+| `ui_state` | Selected files, the open viewer, permission mode |
+
+The last two are why the bridge exists as more than an index shim: the agent can now ask what the human
+is looking at. `ui_state` returns a copy, not the service's own dicts —
+`test_the_snapshot_does_not_alias_the_service_state` pins that, because a tool handing out a live
+reference lets a schema change in the browser mutate service state.
+
+**Chunking is by path, not offset.** A map of this repo does not fit in one tool result, so both map
+tools return a chunk plus a continuation cursor, and the cursor is a *path*. An offset would be
+invalidated by the re-index that the next call may trigger; a path still names a file. `exclude_files`
+for the next call is computed against the whole index rather than the chunk — the bug that version one
+had, and the one the live run surfaced honestly: the agent reported "the map came back chunked,
+`session.py` is in a chunk I have not seen" instead of concluding the file did not exist.
+
+**Freshness is a flush, not a hope.** `Reindexer` debounces the `PostToolUse` writes it sees, and every
+index-reading tool calls `flush()` *before* it answers. So the agent that writes a file and immediately
+asks for its symbols gets the file it just wrote. `MAX_FLUSH_ROUNDS = 2` bounds a write storm; an
+`asyncio.Lock` serialises drains and is the thing `flush()` joins on.
+
+**Three-state readiness, plus a failure flag.** `absent` / `building` / `built` on the service
+(`_mark_symbol_index_ready`, `_mark_symbol_index_failed`, called from `main.py`'s heavy init), and
+`DocIndexBuilder.failed` for the doc half. A partially built index answers Monaco's hovers and is
+withheld from the map tools, which report it unavailable and point at `Grep`. A hover that resolves for
+half the repo is useful; a map that covers half the repo is a lie with no marker on it. The `failed`
+flag exists because "wait and retry" and "this will never work" are indistinguishable through `ready`
+alone, and an agent that retries a permanent failure spends turns on it.
+
+**The agent's writes now reach the doc index.** `DocIndexBuilder.note_file_written` gained a `bool`
+return and a second caller. Phase 3 left it wired to `Repo.write_file` only — the user's edits — with a
+comment saying the agent's writes were phase 4's job. They are now the `PostToolUse` path, calling the
+same method, so the decision about which extensions matter stays in one place. The return value is what
+lets the re-index report *which* writes refreshed an index without the caller having to know that.
+
+**`SymbolIndex.resolve_indexed_path` learned to take the paths an agent types.** The CLI reports writes
+as absolute paths; the index is keyed relative. It now accepts absolute paths under the repo root,
+`./`-prefixed and `..`-containing relative paths, and refuses anything that escapes the root —
+`/etc/passwd` and `../outside/a.py` return `None`, while `.github/workflows/x.py` resolves, because a
+leading dot is a real directory and only `..` leaves.
+
+### The gate had to learn about our own tools
+
+`specs5/3-engine/permissions.md` puts the `ac-dc` index tools in the read-only row: *displayed, not
+gated*. That was implemented as `classify_tool` returning `"read"` for them — which shapes a dialog's
+wording and does not skip one. `Read`, `Glob` and `Grep` are ungated because the **CLI** never asks
+about them. Our MCP tools it does ask about, in `acceptEdits` and `default` though not in `plan`.
+
+So `can_use_tool` now early-returns `PermissionResultAllow()` for `mcp__ac-dc__*`, with no dialog, no
+broadcast, and no prompt recorded on the turn — a prompt nobody saw must not inflate the turn footer's
+tally. Without it the agent stalls on a dialog for every `symbol_map` call, and answering those is
+click-through training, which is R-12 in `risks.md` becoming true through a mechanism the risk register
+did not anticipate: not fatigue from real prompts, but noise from prompts that should not exist.
+
+`allowed_tools` was **not** used for this, which would have been the obvious fix. Setting it in options
+is forbidden — it replaces the CLI's own resolution of the user's settings — so the allow lives in our
+gate, where the reason for it is readable.
+
+### Retired: the cross-reference toggle
+
+The only frontend control deleted rather than left dormant. It chose which index fed the native
+engine's prompt; both indexes are now permanently available as tools, so there is nothing left to
+switch. `toggleCrossRef`, `_crossRefEnabled`, `_toggleMainCrossRef`, `_toggleAgentCrossRef`, the
+`+xref` mode-string composition, and the `cross_ref_enabled` snapshot hydration are all gone, each site
+carrying a one-line tombstone naming the phase.
+
+**The mode axis stayed.** `_mode`, `_tabModes`, `onModeChanged` and `onAgentModeChanged` are still
+mounted and still inert, waiting for CC-12's preset selector and CC-8's `Task` tab strip. The rule that
+decided each case: remove a receiver only when its consumer is going too, because removing a receiver
+while leaving the consumer mounted moves the break instead of fixing it. The cross-reference toggle had
+no consumer left; the mode axis has one arriving.
+
+Two tests pin the retirement as a *behaviour* rather than an absence: `toasts-and-events.test.js`
+asserts the shell ignores a `cross_ref_enabled` field it is sent, and `tabs.test.js` asserts an
+archived `+xref` mode string still renders verbatim, since old transcripts contain them.
+
+### Tests
+
+| File | Tests | Note |
+|---|---|---|
+| `test_claude_code_mcp_server.py` | 42 | new — schemas, rendering, chunking, readiness, flush ordering |
+| `test_claude_code_hooks.py` | 28 | new — debounce, drain, hook shape, degradation |
+| `test_claude_code_service.py` | 202 | +`TestBridgeWiring`, `TestIndexReadiness`, `TestUiStateSnapshot`, `TestReindexReporting` |
+| `test_symbol_index_orchestrator.py` | 53 | +`TestReindexFiles`, `TestResolveIndexedPath`, `TestNameQueries` |
+| `test_claude_code_permissions.py` | 139 | +`TestOurOwnToolsAreUngated` (6) |
+
+**2 687 passing, 75 skipped** in the backend suite; **3 185 passing** across 88 files in the webapp.
+
+Two of those tests exist because a red test turned out to be a real defect rather than a bad assertion:
+
+- **`test_a_flush_does_not_abandon_the_batch_a_drain_is_holding`.** `flush()` cancelled the debounce
+  timer, and the drain was awaited *inside* that timer's task — so cancelling it aborted a rebuild that
+  had already taken its batch off the queue. `flush()` then returned believing the index was fresh,
+  over an index missing those files, with `_pending` already cleared. Silent, and exactly the failure
+  the flush exists to prevent. Fixed by spawning the drain as a task of its own (`_spawn_drain`), so
+  the timer only ever sleeps.
+- **`test_the_debounced_path_survives_a_broken_drain`.** Nobody awaits a debounced drain, so nobody
+  would see it raise. `_drain_quietly` logs and keeps the reindexer usable.
+
+**The bridge's fake index records what it was asked for, not just what it returned.**
+`FakeSymbolIndex._render` appends every `exclude_files` set it receives, and
+`test_it_excludes_against_the_whole_index_not_the_scope` asserts on that list
+(`symbols.exclusions[-1] == {"src/b.py", "webapp/c.js"}`). That is what caught the scoping bug: the
+rendered output of a scoped map looks correct whether the exclusion set was computed against the whole
+index or against the chunk, and only the *argument* distinguishes them. Asserting on the return value
+alone would have passed. The real-index coverage lives next door in `test_symbol_index_orchestrator.py`,
+where `TestReindexFiles` builds a tree under `tmp_path` and re-indexes it.
+
+### Live verification
+
+`scripts/bridge_smoke.py` — new, alongside `engine_smoke.py`, in `scripts/` for the same reasons: it
+costs tokens and needs a login. It builds the symbol index the way `main.py` does (resolver seeded
+before per-file indexing, then call-site resolution, then the reference graph — get that order wrong
+and every import resolves to `None`), wires the real `PermissionBroker`, the real hook matchers, and
+the bridge, then runs one turn.
+
+Four runs against CLI 2.1.229. Three pass; the fourth is the one that found the gate bug, and it ran
+first as a failure:
+
+- **`--no-docs`** (352 files indexed of 447): the model called `mcp__ac-dc__symbol_map` with
+  `{'path_prefix': 'src/ac_dc/claude_code'}` and named `permissions.py` as the module holding the
+  permission gate, from the map alone. It also reported the chunk boundary rather than treating an
+  unseen file as absent.
+- **`--tool doc_outline`**: summarised all seven documents in `specs5/plan/` — their headings,
+  keywords, line counts and outbound links — without opening a file. It read the phase table well
+  enough to state that three phases were logged complete and phase 4 handed off.
+- **`--write`, first attempt — failed.** The hook half worked: `files_reindexed` came back
+  `['scratch_bridge_smoke.py']`. But the tool call itself was refused — *"Claude requested permissions
+  to use mcp__ac-dc__file_symbols, but you haven't granted it yet"* — and the agent said so plainly
+  instead of guessing, which is the only reason it was legible. Two bugs behind one symptom: the gate
+  did not ungate our tools, and the script passed no `can_use_tool` at all, so the *CLI* was answering
+  and the script would have logged a real denial as a model choice. Both fixed; the script now wires
+  the real `PermissionBroker` and fails loudly if one of our tools opens a dialog.
+- **`--write`, after the fix**: `Write` → `PostToolUse` → debounced re-index → `flush()` →
+  `file_symbols` reporting `f smoke_marker:1()` for a file that did not exist when the index was built.
+  `files_reindexed` came back as `['scratch_bridge_smoke.py']`, resolved from the absolute path the CLI
+  reported. The whole freshness chain, end to end, in one turn — and no dialog.
+
+**The Monaco half of the exit criterion is not live-verified.** `lsp_get_hover`, `lsp_get_definition`
+and `lsp_get_references` needed no re-pointing — phase 3 re-homed them onto `ClaudeCodeService` reading
+`self.symbol_index` directly, and they deliberately bypass the readiness gate the map tools respect, so
+a partial index still answers hovers. That is tested but not clicked. **Open the app and hover a
+symbol before trusting this phase.**
+
+Two facts from the live runs worth knowing:
+
+- **`get_mcp_status` does not list an in-process SDK server.** It reported only the user's
+  `chrome-devtools` while our six tools were being called successfully in the same turn. The smoke
+  script's status line is context, not the registration check its comment used to claim; what proves
+  registration is a `mcp__ac-dc__*` call happening at all.
+- **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.** R-10's
+  tripwire, working: the environment redirects the CLI to a gateway while
+  `~/.claude/.credentials.json` exists. Worth knowing before reading a cost number from any run here.
+
+### Deviations from `inventory.md`
+
+- **`hooks.py` subscribes to one event of the seven the inventory lists.** `inventory.md:100` names
+  `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `Stop`, `SubagentStart` and
+  `SubagentStop` as "handlers that drive UI broadcasts and re-indexing". Only `PostToolUse` shipped,
+  because it is the only one this phase needs and every extra subscription is a place a hook can shadow
+  `can_use_tool` or slow a tool call down. `PreToolUse` is *deliberately* unsubscribed —
+  `test_pretooluse_is_not_subscribed_at_all` pins that, since a `PreToolUse` handler is the one that can
+  return a `permissionDecision` and silently replace the gate. The other five are UI broadcasts the
+  message pump already covers or phase-5/6 work.
+- **Bash-driven writes are not re-indexed.** The hook watches `Write`, `Edit`, `MultiEdit` and
+  `NotebookEdit`. A `sed -i` or a `git checkout` through `Bash` changes files the index will not hear
+  about until the next full build. Hooking `Bash` would mean re-indexing after every `ls`, and the tool
+  input is not reliably parseable into "which files did this touch" — the alternatives are a filesystem
+  watcher or nothing, and nothing is what shipped. **This is the phase's largest known hole.**
+- **The frontend cross-reference toggle has no inventory row of its own.** `inventory.md:142` says only
+  "`app-shell/mode.js` — mode toggle becomes a preset selector (CC-12)", and cross-reference appears
+  only in the two backend DELETE rows (`llm/_rpc_state.py:41`, `llm/_stability.py:42`) that went in
+  phase 3. So the frontend half was left implicit, and reading the inventory alone would have you
+  adapt it alongside the mode toggle. It was deleted instead — see above.
+- **`messages.py`'s per-card `files_modified` inference is unchanged.** The re-index reports
+  `files_reindexed` on the turn footer as a separate fact. Two sources for "what changed" sounds like
+  one too many, but they answer different questions — the card attributes a write to a tool call, the
+  footer says which of those writes refreshed an index — and collapsing them would lose the
+  attribution.
+
+### Deliberately not built
+
+- **No `Bash` write detection.** Above.
+- **No banner when the bridge fails to start.** `mcp-bridge.md` § Availability says the session
+  continues without it "and a banner reports the loss — otherwise the agent simply appears inexplicably
+  worse at repo-wide questions", which is exactly right and is exactly what is missing. What shipped is
+  degradation without announcement: if `build_server()` raises, the session connects with
+  `mcp_servers=None`, the hooks stay wired, and a log line says the agent will fall back to
+  Glob/Grep/Read. Nothing reaches the browser. Two service tests pin the degradation itself
+  (`McpBridge.build_server` raising leaves hooks intact; `build_hook_matchers` raising leaves servers
+  intact), so the failure is survivable and silent rather than fatal and silent — but a user watching
+  the agent grep its way around a repo will not know why.
+- **No token-cost display for the tool inventory.** `mcp-bridge.md` also wants server health and the
+  `ac-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
+  the panel does not mention them. Phase 6 territory, and it inherits phase 3's gap that neither
+  context panel has a unit test. The banner above is the same missing surface seen from the other side.
+- **No `symbol_map` in the Context tab's cost breakdown.** Same reason.
+- **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8, unchanged from
+  phase 3.
+- **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged since phase 2.
+
+### For whoever picks up phase 5
+
+- **Phase 5 is history, and `test_phase_five_methods_are_absent` is still there.** `history_list`,
+  `history_load` and `history_delete` are asserted absent on phase 1's reasoning that a stub reporting
+  success is worse than a missing method. Delete that test as you build them, not before.
+- **The transcript is where three phase-3 deviations converge.** Review entry and exit, a mode change
+  during review, and a permission-mode change all claim to be "recorded in the transcript as a system
+  event" in the specs, and all three only broadcast live. Phase 3 listed them together so you would
+  find all three rather than one.
+- **`Reindexer` is the only thing that knows what the agent wrote.** If the transcript wants a
+  "files changed this turn" record that survives a reload, `take_reindexed()` is the honest source for
+  the index half and `result['files_modified']` for the CLI's half. They disagree by design: the first
+  is repo-relative and filtered to files an index cares about, the second is absolute and everything.
+- **Nothing in the config layer may write `os.environ`**, and **hooks must never return a
+  `permissionDecision`.** The second is new with this phase and is the sharper of the two: a
+  `PostToolUse` hook returning one shadows `can_use_tool` entirely, ungating every gated tool with no
+  error anywhere. `build_hook_matchers` returns observation only, and
+  `test_claude_code_hooks.py` pins that the returned dict never carries a decision.
+- **`can_use_tool` now has an early return before any dialog is built.** Anything you add to the front
+  of that method runs after it for `mcp__ac-dc__*` calls and before it for everything else. If a future
+  server is added to the bridge, it is ungated by the same line — which is correct only as long as
+  every tool on it is genuinely read-only and in-process.
+- **`collab.py`'s `ContextVar` fix and its five `TestGateUnderRealDispatch` tests survive**, unchanged
+  and still load-bearing.

@@ -892,6 +892,72 @@ class TestSuggestedMode:
 # ---------------------------------------------------------------------------
 
 
+class TestOurOwnToolsAreUngated:
+    """``specs5/3-engine/permissions.md`` puts the ``ac-dc`` index tools in
+    the read-only row: *displayed, not gated*.
+
+    ``Read``/``Glob``/``Grep`` get that for free because the CLI never asks
+    about them. Our MCP tools it *does* ask about — in ``acceptEdits`` and
+    ``default``, though not in ``plan``, which is why a plan-mode smoke run
+    looked fine and ``scripts/bridge_smoke.py --write`` came back
+    "you haven't granted it yet". `classify_tool` returning "read" only
+    shapes a dialog; it does not skip one.
+    """
+
+    async def test_our_own_tool_is_allowed_with_no_dialog(self, broker, events):
+        result = await broker.can_use_tool(
+            "mcp__ac-dc__symbol_map", {"path_prefix": "src"}, FakeContext()
+        )
+        assert type(result).__name__ == "PermissionResultAllow"
+        assert events.named("permissionRequest") == []
+        assert broker.pending() == []
+
+    async def test_the_allow_asks_for_nothing_extra(self, broker):
+        """No rule to write and no input to rewrite.
+
+        An ``updated_permissions`` here would persist a settings rule for a
+        tool nobody was asked about, and an ``updated_input`` would rewrite
+        a call we did not inspect.
+        """
+        result = await broker.can_use_tool("mcp__ac-dc__ui_state", {}, FakeContext())
+        assert result.updated_permissions is None
+        assert result.updated_input is None
+
+    async def test_it_does_not_record_a_prompt_on_the_turn(self, tmp_path, events):
+        """The turn footer counts permission prompts. A prompt that never
+        reached anyone must not be counted, or every ``symbol_map`` call
+        inflates the tally."""
+        noted: list[str | None] = []
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            note_prompt=lambda tool_use_id: noted.append(tool_use_id) or "req-1",
+            decision_timeout=5.0,
+        )
+        await broker.can_use_tool("mcp__ac-dc__doc_outline", {}, FakeContext())
+        assert noted == []
+
+    async def test_a_third_party_mcp_tool_still_asks(self, broker, events):
+        """The contrast that keeps the check narrow: only *our* server."""
+        task = await ask(broker, tool_name="mcp__playwright__click", tool_input={})
+        assert events.only("permissionRequest")["tool_name"] == "mcp__playwright__click"
+        await broker.resolve(
+            events.only("permissionRequest")["permission_id"], {"action": "deny"}
+        )
+        await task
+
+    async def test_a_lookalike_server_still_asks(self, broker, events):
+        """``ac-dc-plus`` is somebody else's server, not a prefix of ours."""
+        task = await ask(broker, tool_name="mcp__ac-dc-plus__anything", tool_input={})
+        assert events.only("permissionRequest")["tool_name"].startswith(
+            "mcp__ac-dc-plus__"
+        )
+        await broker.resolve(
+            events.only("permissionRequest")["permission_id"], {"action": "deny"}
+        )
+        await task
+
+
 class TestCanUseTool:
     async def test_an_allow_reaches_the_sdk(self, broker, events):
         task = await ask(broker)

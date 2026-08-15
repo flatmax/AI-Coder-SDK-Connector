@@ -1150,7 +1150,32 @@ class PermissionBroker:
         payload building would look to the user like the tool broke. Every
         failure path below is therefore a deny with a reason instead.
         """
-        from claude_agent_sdk import PermissionResultDeny
+        from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+        if mcp_server_name(tool_name) == AC_DC_MCP_SERVER:
+            # Our own in-process index tools: allowed here, with no dialog and
+            # no broadcast. `specs5/3-engine/permissions.md` puts them in the
+            # read-only row — "displayed, not gated" — and the tool card is
+            # what displays them.
+            #
+            # This early return is load-bearing, not an optimisation.
+            # `classify_tool` returning "read" only shapes a dialog's wording;
+            # it does not skip one. `Read`/`Glob`/`Grep` are ungated because
+            # the *CLI* never asks about them, and in `plan` mode it does not
+            # ask about these either — but in `acceptEdits` and `default` it
+            # does, so without this the agent would stall on a dialog for
+            # every `symbol_map` call, and answering it would be pure
+            # click-through training (risks.md R-12). Found by running
+            # `scripts/bridge_smoke.py --write`, where the call came back
+            # "you haven't granted it yet".
+            #
+            # Safe because the tools are read-only by construction: they are
+            # closures over index objects this process already holds, they
+            # touch no filesystem path the browser is not already showing,
+            # and the server is in-process, so there is no third party whose
+            # tool list could change under us.
+            logger.debug("Allowing our own tool %s without a dialog", tool_name)
+            return PermissionResultAllow()
 
         tool_input = tool_input if isinstance(tool_input, dict) else {}
         tool_use_id = getattr(context, "tool_use_id", None) or ""

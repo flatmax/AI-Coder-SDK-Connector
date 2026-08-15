@@ -485,8 +485,18 @@ async def _heavy_init(
                     list(symbol_index._all_symbols.values())
                 )
             )
+            # The map now covers the whole repo, which is what the
+            # `symbol_map` / `file_symbols` / `find_references` tools wait
+            # for. Monaco has been resolving hovers since step 2 — a
+            # partial index is fine for a hover and misleading as a map.
+            claude_code_service._mark_symbol_index_ready()
         except Exception as exc:
             logger.warning("Repository indexing failed: %s", exc)
+            # Deliberately not "still building": the partial index that is
+            # sitting right there would answer a map query with a repo
+            # that is missing files, and nothing in the answer would say
+            # so. The tools report it unavailable and point at Grep.
+            claude_code_service._mark_symbol_index_failed()
 
     # Step 4: Schedule the doc-index background build. It has to
     # be started from the event loop thread — the builder calls
@@ -830,12 +840,13 @@ async def run(
     # invalidate the doc-index cache entry, re-extract the outline
     # and schedule keyword enrichment.
     #
-    # This now covers one of the two write paths it used to. The
-    # user's edits — the viewer, the SVG editor — still go through
-    # Repo.write_file. The agent's do not: the CLI's Write and Edit
-    # tools write to disk directly, and re-indexing after those is
-    # the post-tool-call pass that lands with the MCP bridge in
-    # phase 4 (specs5/plan/README.md).
+    # This is one of the two write paths, and the only one that comes
+    # through Repo: the user's edits, from the viewer and the SVG
+    # editor. The agent's writes bypass this layer entirely — the
+    # CLI's Write and Edit go to disk directly — and are picked up by
+    # the PostToolUse re-index instead, which calls the same
+    # note_file_written from claude_code/hooks.py. Two callers, one
+    # decision about which extensions matter.
     repo._post_write_callback = claude_code_service.doc_builder.note_file_written
 
     await server.start()

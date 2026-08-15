@@ -136,8 +136,18 @@ flushed synchronously before any `ac-dc` index-reading tool returns. See
 - Index build is deferred at startup. Tools called before their index is ready return an explicit
   "index still building, retry shortly" result rather than an empty one. An empty result reads as "the
   repo has no symbols", which sends the agent down a wrong path it will not revisit.
-- Tools are read-only, so they need no permission gating and are displayed but not gated (see
-  [permissions.md](permissions.md)).
+- **A build that failed says so, and does not say "retry".** Three states — absent, building, built —
+  plus a failure flag, because "wait a moment" and "this will never work, use `Grep`" are
+  indistinguishable through a single ready boolean, and an agent that retries a permanent failure
+  spends turns on it.
+- **A partially built index answers Monaco and not the map tools.** The LSP paths
+  (`lsp_get_hover`, `lsp_get_definition`, `lsp_get_references`) read the index object directly, so a
+  hover resolves as soon as the file it names has been walked. The map tools wait for the whole repo:
+  a hover that works for half the repo is useful, a map that covers half the repo is a lie with no
+  marker on it.
+- Tools are read-only and are displayed but not gated — but that posture is **implemented by an
+  explicit allow in `can_use_tool`**, not inherited from being read-only. The CLI asks about MCP
+  tools. See [permissions.md](permissions.md) for why the distinction matters.
 - Server health, and the `ac-dc` tool inventory with its token cost, appear in the Context tab like
   any third-party server.
 

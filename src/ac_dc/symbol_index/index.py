@@ -45,6 +45,8 @@ Governing spec: ``specs4/2-indexing/symbol-index.md``.
 from __future__ import annotations
 
 import logging
+import posixpath
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,7 +69,7 @@ from ac_dc.symbol_index.parser import (
 from ac_dc.symbol_index.reference_index import ReferenceIndex
 
 if TYPE_CHECKING:
-    from ac_dc.symbol_index.models import FileSymbols
+    from ac_dc.symbol_index.models import FileSymbols, Symbol
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +424,85 @@ class SymbolIndex:
                         if cs.target_symbol is None:
                             cs.target_symbol = cs.name
 
+    def reindex_files(
+        self, paths: Iterable[str | Path]
+    ) -> list[str]:
+        """Re-index some files after a write, keeping the graph coherent.
+
+        The incremental counterpart to :meth:`index_repo`,
+        for the case where a handful of known files changed
+        on disk and the rest did not: the post-tool-call
+        re-index behind the MCP bridge, one write at a time.
+
+        Returns the normalised paths that ended up in the
+        index. A path that vanished from disk is dropped
+        instead, and does not appear in the return value —
+        the caller learns which of its writes produced
+        symbols and which were deletions.
+
+        Three things happen beyond the per-file parse, and
+        each closes a way the graph would otherwise lie
+        about a *new* file:
+
+        1. The resolver's file set grows to include the
+           paths. A file it has never heard of resolves no
+           imports, so a brand-new module's own imports —
+           and every import *of* it — would come back
+           unresolved.
+        2. Call sites are re-resolved across the whole
+           index, not just these files. A new function
+           changes what other files' calls point at, and
+           those files were not re-parsed.
+        3. The reference graph is rebuilt from scratch,
+           because ``ReferenceIndex`` holds no incremental
+           update path and a partial rebuild would leave
+           edges pointing at symbols that no longer exist.
+
+        Steps 2 and 3 are whole-index passes, which is why
+        the caller debounces rather than calling this once
+        per keystroke. They are pure in-memory walks over
+        already-parsed symbols — seconds only on a repo of
+        many thousands of files, where the alternative is a
+        reference graph that quietly disagrees with the
+        symbol table it was built from.
+        """
+        normalised = [
+            rel for rel in (
+                self._normalise_rel_path(p) for p in paths
+            ) if rel
+        ]
+        if not normalised:
+            return []
+
+        interesting = [
+            rel for rel in normalised
+            if language_for_file(rel) is not None
+        ]
+        if not interesting:
+            return []
+
+        # Step 1 — widen the resolver's view before parsing,
+        # so a new file's imports resolve on this pass rather
+        # than on the next full build.
+        self._resolver.set_files(
+            self._resolver.files | set(interesting)
+        )
+
+        indexed: list[str] = []
+        for rel in interesting:
+            # index_file already handles the missing-file
+            # case by dropping the entry and returning None,
+            # so a delete needs no separate branch.
+            if self.index_file(rel) is not None:
+                indexed.append(rel)
+
+        # Steps 2 and 3 — the same order index_repo uses,
+        # and for the same reason: the graph is built from
+        # resolved call sites, so resolution comes first.
+        self._resolve_call_sites()
+        self._ref_index.build(list(self._all_symbols.values()))
+        return indexed
+
     # ------------------------------------------------------------------
     # Invalidation
     # ------------------------------------------------------------------
@@ -640,6 +721,121 @@ class SymbolIndex:
         chunks this list gets the same partition every call.
         """
         return sorted(self._all_symbols.keys())
+
+    def resolve_indexed_path(self, path: str | Path) -> str | None:
+        """The canonical key for ``path``, or None when it isn't indexed.
+
+        A caller holding a path it was handed — by an agent, by a
+        user — needs two answers at once: does the index know this
+        file, and what exact string does the map call it? Returning
+        the key rather than a bool saves that caller from
+        normalising paths itself and then disagreeing with us about
+        what ``./src/x.py`` means.
+
+        Deliberately more forgiving than
+        :meth:`_normalise_rel_path`, which is the *dict-key*
+        convention and is fed paths this codebase produced. This
+        one is fed paths a language model typed: an absolute path
+        (which is the form the CLI reports writes in), a
+        ``./``-prefixed one, a ``src/../src/x.py``. Each of those
+        names a file the index holds, and answering "not indexed"
+        to a path that is plainly in the index reads as a broken
+        index rather than as a spelling quibble.
+
+        A path outside the repo is still None. It is not a
+        spelling variant of anything we hold.
+        """
+        rel = self._normalise_rel_path(path)
+        if rel in self._all_symbols:
+            return rel
+
+        # Absoluteness has to be judged before normalisation, which
+        # strips the leading slash that carried it.
+        raw = str(path).replace("\\", "/")
+        if raw.startswith("/"):
+            if self.repo_root is None:
+                return None
+            try:
+                rel = Path(raw).relative_to(self.repo_root).as_posix()
+            except ValueError:
+                return None
+
+        tidied = posixpath.normpath(rel).strip("/")
+        if not tidied or tidied in (".", "..") or tidied.startswith("../"):
+            # Nothing inside the repo. Note the precision: a leading
+            # dot is fine — ``.github/workflows/x.py`` is a real file —
+            # it is only ``..`` that leaves.
+            return None
+        return tidied if tidied in self._all_symbols else None
+
+    # ------------------------------------------------------------------
+    # Name-based queries
+    # ------------------------------------------------------------------
+
+    def find_definitions(self, name: str) -> list[dict[str, object]]:
+        """Every definition of ``name``, as ``{file, line, kind, container}``.
+
+        Name-based rather than position-based, because the caller
+        behind this is an agent holding a name it read in a diff,
+        not a cursor in an editor. :meth:`lsp_get_definition`
+        starts from a position and is the browser's path; both
+        read the same symbol table.
+
+        Lines are 1-indexed. ``range`` is stored 0-indexed
+        (tree-sitter convention) and every consumer of this
+        method shows the number to a reader, so the ``+1``
+        belongs here rather than in each of them.
+
+        ``container`` is the enclosing symbol's name for a
+        method or nested function, None at the top level — the
+        one fact that distinguishes six same-named ``build``
+        methods from each other.
+        """
+        matches: list[dict[str, object]] = []
+        for rel in sorted(self._all_symbols):
+            for sym in self._all_symbols[rel].symbols:
+                self._collect_named(sym, name, rel, None, matches)
+        return matches
+
+    def _collect_named(
+        self,
+        sym: "Symbol",
+        name: str,
+        rel: str,
+        container: str | None,
+        out: list[dict[str, object]],
+    ) -> None:
+        """Depth-first walk collecting matches, carrying the parent name.
+
+        ``FileSymbols.all_symbols_flat`` would be shorter but
+        drops the parent link, which is the part a caller
+        disambiguating a common method name needs most.
+        """
+        if sym.name == name:
+            out.append({
+                "file": rel,
+                "line": sym.range[0] + 1,
+                "kind": sym.kind or "symbol",
+                "container": container,
+            })
+        for child in sym.children:
+            self._collect_named(child, name, rel, sym.name, out)
+
+    def find_reference_sites(self, name: str) -> list[tuple[str, int]]:
+        """``(file, line)`` for every resolved reference to ``name``.
+
+        Resolved call sites only: the graph records an edge when
+        the import resolver could name the target file. That
+        restriction is the whole point — a text search for the
+        name over-matches on common words and misses aliased
+        imports, and this does neither.
+        """
+        return self._ref_index.references_to_symbol(name)
+
+    def files_importing(self, path: str | Path) -> list[str]:
+        """Files with an import or call edge into ``path``, sorted."""
+        rel = self._normalise_rel_path(path)
+        return sorted(self._ref_index.files_referencing(rel))
 
     # ------------------------------------------------------------------
     # LSP queries

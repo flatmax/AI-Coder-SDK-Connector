@@ -923,6 +923,11 @@ GATED_METHODS: dict[str, tuple] = {
     "stop_task": ("task-1",),
     "reconnect_mcp_server": ("ac-dc",),
     "toggle_mcp_server": ("ac-dc", True),
+    # Writes nothing, and is still a lever on the prompt: the viewer path
+    # goes into the turn framing and into the `ui_state` tool, so a
+    # participant could point the agent at a file of their choosing on
+    # somebody else's turn.
+    "set_viewer_state": ("src/a.py",),
     # Git writes to the host's tree, and the review arrangement moves every
     # file in it. Same restriction the native methods carried.
     "commit_all": (),
@@ -1045,6 +1050,235 @@ def events_of(service):
     """The events a service emitted, for the no-side-effect assertions."""
     callback = service._event_callback
     return list(getattr(callback, "calls", []))
+
+
+# ---------------------------------------------------------------------------
+# The bridge and the hook, as the session receives them — phase 4
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeWiring:
+    """The indexes reach the agent, or the session says why it could not.
+
+    Both are constructor arguments to the session, like the permission
+    gate, because attaching either afterwards would need a reconnect.
+    """
+
+    @pytest.fixture
+    def wired(self, tmp_path, events):
+        """A service with its real session object, so the wiring is visible."""
+        return ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+
+    def test_the_server_is_registered_under_its_own_name(self, wired):
+        """`mcp__ac-dc__symbol_map` is the name the CLI and the permission
+        classifier both spell out, so the key is interface."""
+        from ac_dc.claude_code.mcp_server import SERVER_NAME
+
+        assert list(wired.session._mcp_servers) == [SERVER_NAME]
+        assert SERVER_NAME == "ac-dc"
+
+    def test_the_post_write_hook_is_the_only_subscription(self, wired):
+        assert list(wired.session._hooks) == ["PostToolUse"]
+
+    def test_the_bridge_and_the_reindex_share_one_flush(self, wired):
+        """A tool that flushed a different queue than the hook fills would
+        answer from the pre-write index while reporting itself fresh."""
+        assert wired.mcp_bridge._flush == wired.reindexer.flush
+
+    def test_a_bridge_that_will_not_build_still_leaves_a_session(
+        self, tmp_path, events, monkeypatch, caplog
+    ):
+        """Without the bridge the agent loses two tools and keeps every
+        built-in; refusing to construct would trade that for a dead editor."""
+        from ac_dc.claude_code import mcp_server as mcp_module
+
+        def boom(self):
+            raise RuntimeError("no sdk")
+
+        monkeypatch.setattr(mcp_module.McpBridge, "build_server", boom)
+        with caplog.at_level(logging.WARNING):
+            svc = ClaudeCodeService(
+                FakeConfig(tmp_path),
+                event_callback=events,
+                engine_config=EngineConfig(),
+            )
+        assert svc.session is not None
+        assert svc.session._mcp_servers is None
+        # And the hook half is unaffected: one failure is not the other's.
+        assert list(svc.session._hooks) == ["PostToolUse"]
+        assert "fall back to Glob/Grep/Read" in caplog.text
+
+    def test_a_hook_that_will_not_build_still_leaves_a_session(
+        self, tmp_path, events, monkeypatch, caplog
+    ):
+        from ac_dc.claude_code import service as service_module
+
+        def boom(reindexer, broadcast=None):
+            raise RuntimeError("no sdk")
+
+        monkeypatch.setattr(service_module, "build_hook_matchers", boom)
+        with caplog.at_level(logging.WARNING):
+            svc = ClaudeCodeService(
+                FakeConfig(tmp_path),
+                event_callback=events,
+                engine_config=EngineConfig(),
+            )
+        assert svc.session._hooks is None
+        assert svc.session._mcp_servers is not None
+        assert "will not follow the agent's writes" in caplog.text
+
+
+class TestIndexReadiness:
+    """Absent, building, built — three answers, not two.
+
+    A half-built map reads as "these files have no symbols" and the agent
+    does not go back to check, so the middle state has to be its own.
+    """
+
+    def test_before_the_walk_the_index_is_not_ready(self, service):
+        assert service._symbol_index_ready is False
+        assert service._live_symbol_index() is None
+
+    def test_a_partial_index_is_not_offered_as_a_map(self, service):
+        """Monaco keeps using it for hovers; the map does not claim it."""
+        service._attach_symbol_index(object())
+        assert service._symbol_index_ready is False
+        assert service._live_symbol_index() is not None
+
+    def test_the_walk_finishing_makes_it_ready(self, service):
+        service._attach_symbol_index(object())
+        service._mark_symbol_index_ready()
+        assert service._symbol_index_ready is True
+
+    def test_a_failed_walk_reports_unavailable_not_partial(self, service):
+        """The partially-built index is sitting right there, and serving it
+        would be a confident lie about the repo."""
+        service._attach_symbol_index(object())
+        service._mark_symbol_index_failed()
+        assert service._live_symbol_index() is None
+        assert service._symbol_index_ready is False
+
+    def test_a_failure_during_a_rebuild_withdraws_readiness(self, service):
+        service._attach_symbol_index(object())
+        service._mark_symbol_index_ready()
+        service._mark_symbol_index_failed()
+        assert service._symbol_index_ready is False
+
+    def test_a_detached_index_counts_as_failed(self, service):
+        service._attach_symbol_index(None)
+        assert service._live_symbol_index() is None
+
+    def test_a_failed_doc_build_is_withheld_too(self, service):
+        assert service._live_doc_index() is service.doc_builder.doc_index
+        service.doc_builder.failed = True
+        assert service._live_doc_index() is None
+
+
+class TestUiStateSnapshot:
+    """What the `ui_state` tool answers with: paths and modes, never content."""
+
+    def test_it_carries_the_four_facts_the_agent_cannot_read_itself(
+        self, service
+    ):
+        snapshot = service._ui_state_snapshot()
+        assert set(snapshot) == {
+            "selected_files",
+            "viewer",
+            "review_state",
+            "permission_mode",
+        }
+
+    async def test_the_picker_selection_shows_up(self, service, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        await service.set_selected_files(["a.py"])
+        assert service._ui_state_snapshot()["selected_files"] == ["a.py"]
+
+    def test_the_viewer_is_none_until_a_browser_says_otherwise(self, service):
+        assert service._ui_state_snapshot()["viewer"] is None
+
+    def test_a_viewer_push_reaches_the_snapshot(self, service):
+        service.set_viewer_state("src/a.py", 10, 40)
+        assert service._ui_state_snapshot()["viewer"] == {
+            "path": "src/a.py",
+            "start_line": 10,
+            "end_line": 40,
+        }
+
+    def test_closing_the_pane_clears_it(self, service):
+        """Rather than leaving the agent pointed at a file nobody is on."""
+        service.set_viewer_state("src/a.py")
+        assert service.set_viewer_state(None) == {"status": "cleared"}
+        assert service._ui_state_snapshot()["viewer"] is None
+
+    def test_junk_line_numbers_are_dropped_not_echoed(self, service):
+        answer = service.set_viewer_state("src/a.py", "ten", None)
+        assert answer == {"status": "ok", "path": "src/a.py"}
+
+    def test_the_snapshot_does_not_alias_the_service_state(self, service):
+        """The tool serialises it; a caller mutating the copy must not
+        rewrite what the next turn is framed with."""
+        service.set_viewer_state("src/a.py")
+        snapshot = service._ui_state_snapshot()
+        snapshot["viewer"]["path"] = "elsewhere.py"
+        snapshot["selected_files"].append("b.py")
+        assert service._viewer_state == {"path": "src/a.py"}
+        assert service._selected_files == []
+
+    async def test_the_last_push_frames_a_turn_that_sends_no_viewer(
+        self, service
+    ):
+        """The browser pushes on navigation; a turn sent from elsewhere
+        should still know where the user is looking."""
+        service.set_viewer_state("src/a.py", 3, 9)
+        await send(service)
+        turn = service.session.turns[0]
+        assert turn.viewer is not None
+        assert turn.viewer.path == "src/a.py"
+
+    async def test_an_explicit_viewer_payload_still_wins(self, service):
+        service.set_viewer_state("stale.py")
+        await send(service, viewer={"path": "fresh.py"})
+        assert service.session.turns[0].viewer.path == "fresh.py"
+
+
+class TestReindexReporting:
+    """`files_reindexed` in the turn footer: the frontend's only evidence
+    that the agent's edits reached the indexes."""
+
+    async def test_the_footer_names_what_was_refreshed(
+        self, service, tmp_path, events
+    ):
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        service.reindexer._reindexed.add("a.py")
+        await send(service)
+        assert events.payload_of("postResponseComplete")["files_reindexed"] == [
+            "a.py"
+        ]
+
+    async def test_the_tally_does_not_repeat_on_the_next_turn(
+        self, service, events
+    ):
+        service.reindexer._reindexed.add("a.py")
+        await send(service)
+        events.calls.clear()
+        await send(service)
+        assert events.payload_of("postResponseComplete")["files_reindexed"] == []
+
+    async def test_a_flush_that_fails_does_not_fail_the_turn(
+        self, service, events, caplog
+    ):
+        """The turn is over and the answer is already on screen; a stale
+        index is not worth an error card."""
+
+        async def boom():
+            raise RuntimeError("index is wedged")
+
+        service.reindexer.flush = boom
+        with caplog.at_level(logging.DEBUG):
+            await send(service)
+        assert "postResponseComplete" in events.names()
 
 
 class TestShutdown:
