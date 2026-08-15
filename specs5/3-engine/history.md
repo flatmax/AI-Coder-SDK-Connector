@@ -104,6 +104,10 @@ Rendering happens at read time, not write time:
   pricing table we do not have and is null under subscription billing anyway; a "completed" badge on no
   evidence would be worse than no badge.
 - Our own operational events come from `events.jsonl` and are interleaved by session ID and request ID.
+- **Image blocks are rendered as pointers, never as bytes.** Entries hold pasted images verbatim as
+  base64, so a loaded session that inlined them would send megabytes to every client on every open and
+  again on every reconnect. A pointer names the session, the entry uuid and the block index, and
+  `history_image` resolves one when the user actually looks at it.
 
 A line that fails to parse is skipped with a warning: a partial write from a crash must not make a
 session unreadable. This applies to all three files.
@@ -186,6 +190,16 @@ opens a subagent tab.
 The native engine's `agent_idx`-versus-`id` two-namespace problem, the `agent_blocks` field, and the
 cross-turn reconstruction algorithm are all deleted: SDK agent IDs are stable, so there is nothing to
 reconstruct.
+
+A subagent tab is rendered the same way the main transcript is, from the same code, so what the RPC
+returns is a message list rather than the store's own entries. The session's operational events are not
+interleaved into it: an event belongs to the session, and filing a commit under whichever subagent was
+running at the time would say something that is not true. What the listing can offer alongside each
+agent ID depends on how the session reached the store — the CLI's `agent-<id>.meta.json` sidecar
+(`agentType`, `description`, `toolUseId`) reaches a live mirror as a synthetic `agent_metadata` entry
+but is absent from the transcript it imports from disk, so those fields are reported when present and
+omitted when not. The prompt the subagent was given is always available, and is the same information a
+description summarises. See [`../../specs-reference/3-engine/history.md`](../../specs-reference/3-engine/history.md) § Subagents.
 
 Disk-usage monitoring carries over unchanged in mechanism — a one-shot warning when the session
 directory crosses a threshold, dismissible, never blocking. Only the measured path moves.

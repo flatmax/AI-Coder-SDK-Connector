@@ -27,9 +27,9 @@ hook that keeps it honest after the agent writes.
 
 Since phase 5 it owns history too: the transcript mirror, the events log
 the transcript could never hold, reading a past session back for the
-browser, and choosing which session the engine attaches to. Still absent,
-landing later in the same phase: search, delete, image rehydration,
-subagent transcripts and the derived index.
+browser — its images and its subagents included — and choosing which
+session the engine attaches to. Still absent, landing later in the same
+phase: search, delete and the derived index.
 
 **The engine connects lazily**, on the first turn or an explicit
 ``connect_engine()`` call, so a launch that never chats never pays for a
@@ -1577,6 +1577,110 @@ class ClaudeCodeService:
             # happened and said nothing. An empty list would render as the
             # latter, which is a lie the user cannot act on.
             return {"error": f"Session {session_id} has no readable transcript"}
+        return messages
+
+    async def history_image(
+        self, session_id: str, entry_uuid: str, block: int
+    ) -> dict[str, Any]:
+        """One image out of a past prompt, as a data URI.
+
+        The other half of the pointers ``history_load`` renders in place of
+        image bytes. Pulling them one at a time is what keeps opening a
+        screenshot-heavy session from costing megabytes per client per
+        reconnect (``specs5/3-engine/history.md`` § What the Browser Reads).
+
+        Unrestricted, like the rest of reading history: an image the agent
+        was shown is part of what a reviewer needs to see.
+        """
+        if not session_id:
+            return {"error": "A session ID is required"}
+        if not entry_uuid:
+            return {"error": "A message ID is required"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from ac_dc.claude_code import history
+
+        try:
+            data_uri = await history.load_image(
+                self.session_store,
+                session_id,
+                str(self._repo_root),
+                entry_uuid=entry_uuid,
+                block=int(block),
+            )
+        except history.ImageUnavailable as exc:
+            return {"error": str(exc)}
+        except Exception as exc:
+            logger.exception("history_image failed for %s", session_id)
+            return {"error": f"Could not read that image: {exc}"}
+        return {"data_uri": data_uri}
+
+    async def list_subagent_transcripts(
+        self, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """The subagents a session spawned, one row per transcript.
+
+        Defaults to the session on screen, so the common call — "what did
+        this conversation delegate?" — needs no argument and cannot name a
+        different session than the one being read.
+
+        Keyed by the CLI's agent ID throughout. The native engine's
+        positional ``agent_idx`` has no successor: nothing in the storage
+        layout or the live protocol is positional, and inventing an index
+        here would need an ordering to be maintained somewhere.
+        """
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return []
+        if self.session_store is None:
+            return []
+
+        from ac_dc.claude_code import history
+
+        try:
+            return await history.list_subagents(
+                self.session_store, target, str(self._repo_root)
+            )
+        except Exception as exc:
+            logger.exception("list_subagent_transcripts failed for %s", target)
+            return {"error": f"Could not read the subagent transcripts: {exc}"}
+
+    async def get_subagent_transcript(
+        self, agent_id: str, session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """One subagent's conversation, rendered like any other.
+
+        The reference table says this returns raw ``SessionStoreEntry``
+        values; it returns rendered messages instead, because a subagent tab
+        draws through the same panel code as the main transcript and raw
+        entries would put the CLI's internal union in the frontend. Recorded
+        as a divergence in ``specs5/plan/delivery.md``.
+        """
+        if not agent_id:
+            return {"error": "An agent ID is required"}
+        target = session_id or await self._visible_session_id()
+        if not target:
+            return {"error": "No session to read subagents from"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from ac_dc.claude_code import history
+
+        try:
+            messages = await history.load_subagent(
+                self.session_store, target, str(self._repo_root), agent_id=agent_id
+            )
+        except Exception as exc:
+            logger.exception("get_subagent_transcript failed for %s", agent_id)
+            return {"error": f"Could not read subagent {agent_id}: {exc}"}
+
+        if not messages:
+            # Same reasoning as ``history_load``: a subagent that ran wrote
+            # entries, so nothing to render means the transcript is gone or
+            # was never mirrored, which is worth saying rather than drawing
+            # as an empty conversation.
+            return {"error": f"Subagent {agent_id} has no readable transcript"}
         return messages
 
     # ------------------------------------------------------------------

@@ -67,6 +67,15 @@ _FRAMING_OPEN = "<ac-dc-ui-context>"
 _FRAMING_CLOSE = "</ac-dc-ui-context>"
 
 
+class ImageUnavailable(Exception):
+    """No image at that pointer, with a reason the user can act on.
+
+    Raised rather than returned because every caller answers a browser and
+    turns it into the same ``{"error": ...}`` shape; a sentinel return would
+    make the reason optional to check.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Reading
 # ---------------------------------------------------------------------------
@@ -185,6 +194,289 @@ def summarise_session(
         "resumable": bool(messages),
         "total_cost_usd": None,
     }
+
+
+async def load_image(
+    store: SessionStore,
+    session_id: str,
+    directory: str,
+    *,
+    entry_uuid: str,
+    block: int,
+) -> str:
+    """One image block's bytes, as a data URI the browser can display.
+
+    The counterpart to the pointers :func:`_user_message` renders instead of
+    the bytes. A session with a handful of screenshots is megabytes of
+    base64; sending it to every client on every history load — and again on
+    every reconnect — would make opening a session cost more than having the
+    conversation did.
+
+    Read from the raw entries rather than through the SDK's parser: the
+    parser's job is the conversation, and this is a byte lookup by uuid and
+    block index. Both come from a pointer we rendered, so a miss means the
+    session was deleted or rewritten under the browser, not that the caller
+    guessed.
+    """
+    from claude_agent_sdk import project_key_for_directory
+
+    key = {
+        "project_key": project_key_for_directory(directory),
+        "session_id": session_id,
+    }
+    entry = await _find_entry(store, key, entry_uuid)
+    if entry is None:
+        raise ImageUnavailable("That message is no longer in the transcript")
+    content = (entry.get("message") or {}).get("content")
+    if not isinstance(content, list) or not 0 <= block < len(content):
+        raise ImageUnavailable("That message no longer has that block")
+    return _data_uri(content[block])
+
+
+async def _find_entry(
+    store: SessionStore, key: dict[str, Any], entry_uuid: str
+) -> dict[str, Any] | None:
+    """The entry a rendered pointer addresses, wherever under the session it is.
+
+    The main transcript first, then the subagent transcripts. A pointer
+    carries only ``(session_id, entry_uuid, block)`` — the shape the RPC
+    documents — so an image inside a subagent's prompt has to be findable
+    without one, and the alternative of widening every pointer with a subpath
+    would change the browser's contract to save a read that only happens on
+    a miss.
+    """
+    try:
+        entries = await store.load(key) or []
+    except OSError as exc:
+        raise ImageUnavailable(
+            f"Could not read session {key.get('session_id')}"
+        ) from exc
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("uuid") == entry_uuid:
+            return entry
+
+    try:
+        subkeys = await store.list_subkeys(key)
+    except OSError:
+        return None
+    for subpath in sorted(subkeys):
+        if _agent_id_of(subpath) is None:
+            continue
+        try:
+            sub_entries = await store.load({**key, "subpath": subpath}) or []
+        except OSError:
+            continue
+        for entry in sub_entries:
+            if isinstance(entry, dict) and entry.get("uuid") == entry_uuid:
+                return entry
+    return None
+
+
+def _data_uri(block: Any) -> str:
+    """An image block as something an ``<img src>`` accepts."""
+    if not isinstance(block, dict) or block.get("type") != "image":
+        raise ImageUnavailable("That block is not an image")
+    source = block.get("source") or {}
+    kind = source.get("type")
+    if kind == "base64":
+        media_type = source.get("media_type") or "image/png"
+        data = source.get("data")
+        if not isinstance(data, str) or not data:
+            raise ImageUnavailable("That image has no data")
+        return f"data:{media_type};base64,{data}"
+    if kind == "url":
+        # Not something AC-DC writes — it pastes base64 — but the API
+        # accepts URL sources, so the CLI can have written one. Handing the
+        # URL back is the same one-line answer for the browser.
+        url = source.get("url")
+        if isinstance(url, str) and url:
+            return url
+    raise ImageUnavailable(f"Unsupported image source {kind!r}")
+
+
+async def list_subagents(
+    store: SessionStore, session_id: str, directory: str
+) -> list[dict[str, Any]]:
+    """The subagent transcripts a session produced, one row per tab.
+
+    Keyed by SDK agent ID, which is both identity and storage routing: the
+    native engine's positional ``agent_idx`` has no counterpart here and no
+    positional index appears in any path or record.
+
+    ``description`` and ``task_id`` are optional in the reference shape and
+    optional here for a storage reason: they live in the CLI's
+    ``agent-<id>.meta.json`` sidecar, which never appears in the ``.jsonl``
+    the CLI writes to disk. The CLI does send it to a *live* mirror as a
+    synthetic ``agent_metadata`` entry inside the subagent's own frame — so a
+    session we mirrored has them, and a session imported from disk does not.
+    They are therefore reported when present and omitted when not, rather
+    than being declared unavailable. ``preview`` is always there: the opening
+    words of the prompt the subagent was given, which is what a description
+    summarises anyway.
+
+    The subpaths come from one ``list_subkeys`` read rather than from
+    ``list_subagents_from_store``, which applies the same naming rule and
+    then discards the subpath it derived the ID from. Nested workflow
+    subagents (``subagents/workflows/<run>/agent-<id>``) are therefore
+    listed with the path they actually live at.
+    """
+    from claude_agent_sdk import (
+        get_subagent_messages_from_store,
+        project_key_for_directory,
+    )
+
+    key = {
+        "project_key": project_key_for_directory(directory),
+        "session_id": session_id,
+    }
+    subagents: list[dict[str, Any]] = []
+    for subpath in sorted(await store.list_subkeys(key)):
+        agent_id = _agent_id_of(subpath)
+        if agent_id is None:
+            continue
+        # Two reads per subagent: the parser's, and ours for the metadata
+        # entry it filters out. Parsing the entries we already hold would
+        # need the SDK's private entries-to-messages function, and reaching
+        # into internals to save a read is the trade this module refuses
+        # everywhere else. The derived index will cache the listing outright.
+        messages = await get_subagent_messages_from_store(
+            store, session_id, agent_id, directory
+        )
+        entries = await _load_subagent_entries(store, key, subpath, agent_id)
+        row: dict[str, Any] = {
+            "agent_id": agent_id,
+            "subpath": subpath,
+            "message_count": len(messages),
+            "preview": _first_prompt(messages)[:PREVIEW_CHARS],
+        }
+        metadata = _subagent_metadata(entries)
+        if metadata.get("description"):
+            row["description"] = metadata["description"]
+        if metadata.get("toolUseId"):
+            row["task_id"] = metadata["toolUseId"]
+        if metadata.get("agentType"):
+            row["agent_type"] = metadata["agentType"]
+        subagents.append(row)
+    return subagents
+
+
+async def load_subagent(
+    store: SessionStore, session_id: str, directory: str, *, agent_id: str
+) -> list[dict[str, Any]]:
+    """One subagent's transcript, rendered like any other conversation.
+
+    Rendered rather than raw, which the reference shape
+    (``list[SessionStoreEntry]``) does not say: a subagent tab draws through
+    the same panel code as the main transcript, and handing the browser raw
+    entries would put the CLI's internal discriminated union in the
+    frontend — the thing every other read path here exists to keep out of
+    it. Recorded in ``specs5/plan/delivery.md``.
+
+    No events are interleaved: ``events.jsonl`` records belong to the
+    session, and attributing a commit to whichever subagent happened to be
+    running would invent a fact.
+    """
+    from claude_agent_sdk import (
+        get_subagent_messages_from_store,
+        project_key_for_directory,
+    )
+
+    messages = await get_subagent_messages_from_store(
+        store, session_id, agent_id, directory
+    )
+    if not messages:
+        return []
+    key = {
+        "project_key": project_key_for_directory(directory),
+        "session_id": session_id,
+    }
+    subpath = await _subagent_subpath(store, key, agent_id)
+    entries = (
+        await _load_subagent_entries(store, key, subpath, agent_id)
+        if subpath
+        else []
+    )
+    return render_messages(messages, entries, [], session_id=session_id)
+
+
+async def _subagent_subpath(
+    store: SessionStore, key: dict[str, Any], agent_id: str
+) -> str | None:
+    """Where a subagent's transcript actually lives under its session.
+
+    Not ``f"subagents/agent-{agent_id}"``: a subagent spawned inside a
+    workflow is stored at ``subagents/workflows/<runId>/agent-<id>``, and
+    guessing the flat path would silently read nothing for exactly those.
+    """
+    try:
+        subkeys = await store.list_subkeys(key)
+    except OSError:
+        logger.warning("Could not list subagents of %s", key.get("session_id"))
+        return None
+    for subpath in sorted(subkeys):
+        if _agent_id_of(subpath) == agent_id:
+            return subpath
+    return None
+
+
+async def _load_subagent_entries(
+    store: SessionStore, key: dict[str, Any], subpath: str, agent_id: str
+) -> list[dict[str, Any]]:
+    """A subagent's raw entries — for timestamps and the metadata entry.
+
+    The same two facts the parser drops that :func:`load_session` re-reads
+    for, plus the ``agent_metadata`` entry the parser filters out by design.
+    """
+    try:
+        return await store.load({**key, "subpath": subpath}) or []
+    except OSError:
+        logger.warning("Could not read subagent %s", agent_id)
+        return []
+
+
+def _subagent_metadata(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """The mirrored ``.meta.json`` sidecar, if the CLI sent one.
+
+    Last one wins, matching the SDK's own rule when it writes the sidecar
+    back out in ``materialize_resume_session``.
+    """
+    metadata: dict[str, Any] = {}
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("type") == "agent_metadata":
+            metadata = entry
+    return metadata
+
+
+def _agent_id_of(subpath: str) -> str | None:
+    """The agent ID a subagent subpath addresses, or ``None`` if it is not one.
+
+    The rule the SDK applies in ``list_subagents_from_store``: under
+    ``subagents/``, the last component is ``agent-<id>``.
+    """
+    if not subpath.startswith("subagents/"):
+        return None
+    name = subpath.rsplit("/", 1)[-1]
+    if not name.startswith("agent-"):
+        return None
+    return name[len("agent-") :] or None
+
+
+def _first_prompt(messages: list[SessionMessage]) -> str:
+    """The first human-authored text in a conversation, for a preview."""
+    for message in messages:
+        body = getattr(message, "message", None) or {}
+        if body.get("role") != "user":
+            continue
+        content = body.get("content")
+        if isinstance(content, str):
+            return strip_framing(content).strip()
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = strip_framing(str(block.get("text") or "")).strip()
+                    if text:
+                        return text
+    return ""
 
 
 # ---------------------------------------------------------------------------

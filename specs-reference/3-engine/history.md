@@ -324,6 +324,10 @@ History — the whole set is renamed off the native engine's names, because none
 | `history_delete` | `session_id: str` | `{status: str}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts and its events; the images in those entries go with them |
 | `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
 
+A pointer carries `(session_id, entry_uuid, block)` and no subpath, so `history_image` looks in the main
+transcript first and then in that session's subagent transcripts. Widening every pointer with a subpath
+would change what the browser stores for each image in order to save a read that only happens on a miss.
+
 `history_list`, `history_load` and `history_delete` are the names phase 1 chose and
 `test_phase_five_methods_are_absent` has asserted absent ever since; `history_search` keeps its name
 because there was nothing wrong with it, and `history_image` is new.
@@ -341,8 +345,22 @@ Subagents:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `list_subagent_transcripts` | `session_id?: str` | `list[{agent_id, subpath, task_id?, description?}]` |
-| `get_subagent_transcript` | `agent_id: str, session_id?: str` | `list[SessionStoreEntry]` or `{error: str}` |
+| `list_subagent_transcripts` | `session_id?: str` | `list[{agent_id, subpath, message_count, preview, task_id?, description?, agent_type?}]` |
+| `get_subagent_transcript` | `agent_id: str, session_id?: str` | `list[MessageDict]` or `{error: str}` |
+
+`get_subagent_transcript` returns **rendered messages, not raw entries.** A subagent tab draws through
+the same panel code as the main transcript, so handing the browser `SessionStoreEntry` values would put
+the CLI's internal discriminated union in the frontend — the thing every other read path here exists to
+keep out of it. That session's `events.jsonl` records are *not* interleaved: an event belongs to the
+session, and attributing a commit to whichever subagent happened to be running would invent a fact.
+
+`preview` and `message_count` are always present; the three optional fields depend on how the session
+reached the store. `task_id` (the CLI's `toolUseId`), `description` and `agent_type` live in the
+`agent-<id>.meta.json` sidecar, which never appears in the `.jsonl` the CLI writes to disk — but the CLI
+does send it to a *live* mirror as a synthetic `agent_metadata` entry inside the subagent's own frame.
+So a session we mirrored has them and a session imported from disk does not, which is why they are
+optional rather than guaranteed. `preview` — the opening words of the prompt the subagent was given —
+covers the gap, since that is what a description summarises anyway.
 
 `session_id` defaults to the active session. Deleted RPCs: `get_turn_archive`, `get_agent_history`,
 `close_agent_context`, `set_agent_selected_files`, `load_session_into_context`,

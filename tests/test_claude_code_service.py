@@ -342,6 +342,107 @@ async def seed_transcript(service, session_id, prompt="fix the parser", reply="d
     )
 
 
+async def seed_image(service, session_id, *, source=None, tag="img"):
+    """A prompt carrying an image block, the way a pasted screenshot lands.
+
+    Returns the entry uuid, which is half of the pointer ``history_load``
+    renders in place of the bytes.
+    """
+    entry_uuid = f"{session_id}-{tag}"
+    await service.session_store.append(
+        {
+            "project_key": service._session_project_key(),
+            "session_id": session_id,
+        },
+        [
+            {
+                "type": "user",
+                "uuid": entry_uuid,
+                "parentUuid": f"{session_id}-a1",
+                "timestamp": "2026-08-16T00:00:04.000Z",
+                "sessionId": session_id,
+                "cwd": str(service._repo_root),
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look at this"},
+                        {
+                            "type": "image",
+                            "source": source
+                            or {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aGk=",
+                            },
+                        },
+                    ],
+                },
+            }
+        ],
+    )
+    return entry_uuid
+
+
+async def seed_subagent(
+    service,
+    session_id,
+    agent_id,
+    *,
+    prompt="check the tests",
+    reply="they pass",
+    subpath=None,
+    metadata=None,
+):
+    """A subagent transcript under a session, the way the mirror routes one.
+
+    ``subpath`` defaults to the flat ``subagents/agent-<id>``; passing the
+    nested ``subagents/workflows/<run>/agent-<id>`` form is how a workflow's
+    subagent is stored. ``metadata`` is the ``.meta.json`` sidecar, which
+    reaches a live mirror as a synthetic ``agent_metadata`` entry and never
+    appears in the on-disk transcript.
+    """
+    entries = [
+        {
+            "type": "user",
+            "uuid": f"{agent_id}-u1",
+            "parentUuid": None,
+            "timestamp": "2026-08-16T00:01:00.000Z",
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "isSidechain": True,
+            "cwd": str(service._repo_root),
+            "message": {"role": "user", "content": prompt},
+        },
+        {
+            "type": "assistant",
+            "uuid": f"{agent_id}-a1",
+            "parentUuid": f"{agent_id}-u1",
+            "timestamp": "2026-08-16T00:01:03.000Z",
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "isSidechain": True,
+            "cwd": str(service._repo_root),
+            "message": {
+                "id": f"msg_{agent_id}",
+                "role": "assistant",
+                "model": "claude-opus-5",
+                "content": [{"type": "text", "text": reply}],
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+            },
+        },
+    ]
+    if metadata is not None:
+        entries.append({"type": "agent_metadata", **metadata})
+    await service.session_store.append(
+        {
+            "project_key": service._session_project_key(),
+            "session_id": session_id,
+            "subpath": subpath or f"subagents/agent-{agent_id}",
+        },
+        entries,
+    )
+
+
 # ---------------------------------------------------------------------------
 # The RPC surface itself
 # ---------------------------------------------------------------------------
@@ -1037,6 +1138,9 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     # invited to look at. `history_delete` is the localhost-only one.
     "history_list": (),
     "history_load": ("sess-1",),
+    "history_image": ("sess-1", "sess-1-u1", 0),
+    "list_subagent_transcripts": (),
+    "get_subagent_transcript": ("a1",),
 }
 
 
@@ -1388,6 +1492,276 @@ class TestHistoryRpcs:
 
     def test_the_log_points_at_the_repo(self, wired, tmp_path):
         assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
+
+
+class TestImagesAreFetchedOneAtATime:
+    """``history_load`` renders pointers; ``history_image`` resolves one."""
+
+    @pytest.fixture
+    def session_id(self):
+        return "33333333-3333-4333-8333-333333333333"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, session_id):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        svc.session.session_id = session_id
+        await seed_transcript(svc, session_id)
+        return svc
+
+    async def test_a_rendered_pointer_resolves_to_the_bytes(self, wired, session_id):
+        """The round trip: what the browser is handed is what it can fetch."""
+        await seed_image(wired, session_id)
+        messages = await wired.history_load(session_id)
+        pointer = next(m for m in messages if m.get("image_refs"))["image_refs"][0]
+        assert pointer["media_type"] == "image/png"
+        answer = await wired.history_image(
+            pointer["session_id"], pointer["entry_uuid"], pointer["block"]
+        )
+        assert answer == {"data_uri": "data:image/png;base64,aGk="}
+
+    async def test_a_url_source_is_handed_back_as_the_url(self, wired, session_id):
+        uuid = await seed_image(
+            wired,
+            session_id,
+            source={"type": "url", "url": "https://example.test/a.png"},
+        )
+        answer = await wired.history_image(session_id, uuid, 1)
+        assert answer == {"data_uri": "https://example.test/a.png"}
+
+    async def test_an_image_in_a_subagents_prompt_is_found(self, wired, session_id):
+        """A pointer carries no subpath, so the search cannot stop at the
+        main transcript or subagent images would be unfetchable."""
+        await wired.session_store.append(
+            {
+                "project_key": wired._session_project_key(),
+                "session_id": session_id,
+                "subpath": "subagents/agent-a1",
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": "a1-u1",
+                    "parentUuid": None,
+                    "timestamp": "2026-08-16T00:01:00.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/webp",
+                                    "data": "d2VicA==",
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        answer = await wired.history_image(session_id, "a1-u1", 0)
+        assert answer == {"data_uri": "data:image/webp;base64,d2VicA=="}
+
+    async def test_a_block_that_is_not_an_image_says_so(self, wired, session_id):
+        uuid = await seed_image(wired, session_id)
+        answer = await wired.history_image(session_id, uuid, 0)
+        assert answer["error"] == "That block is not an image"
+
+    async def test_a_block_past_the_end_is_an_error_not_a_crash(
+        self, wired, session_id
+    ):
+        uuid = await seed_image(wired, session_id)
+        assert "error" in await wired.history_image(session_id, uuid, 7)
+
+    async def test_a_vanished_entry_is_reported(self, wired, session_id):
+        answer = await wired.history_image(session_id, "no-such-uuid", 0)
+        assert "no longer in the transcript" in answer["error"]
+
+    async def test_an_image_with_no_data_is_an_error(self, wired, session_id):
+        uuid = await seed_image(
+            wired,
+            session_id,
+            source={"type": "base64", "media_type": "image/png", "data": ""},
+        )
+        assert "error" in await wired.history_image(session_id, uuid, 1)
+
+    async def test_the_arguments_are_required(self, wired, session_id):
+        assert "error" in await wired.history_image("", "u1", 0)
+        assert "error" in await wired.history_image(session_id, "", 0)
+
+    async def test_without_a_repo_it_says_why(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert "error" in await svc.history_image("s1", "u1", 0)
+
+
+class TestSubagentTranscripts:
+    """The transcripts a session's delegated work wrote, read back."""
+
+    @pytest.fixture
+    def session_id(self):
+        return "44444444-4444-4444-8444-444444444444"
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, session_id):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        svc.session.session_id = session_id
+        await seed_transcript(svc, session_id)
+        return svc
+
+    async def test_a_subagent_is_listed_with_what_it_was_asked(
+        self, wired, session_id
+    ):
+        await seed_subagent(wired, session_id, "a1", prompt="check the tests")
+        listed = await wired.list_subagent_transcripts(session_id)
+        assert listed == [
+            {
+                "agent_id": "a1",
+                "subpath": "subagents/agent-a1",
+                "message_count": 2,
+                "preview": "check the tests",
+            }
+        ]
+
+    async def test_the_mirrored_sidecar_supplies_the_description(
+        self, wired, session_id
+    ):
+        """The CLI sends ``.meta.json`` to a live mirror as an
+        ``agent_metadata`` entry, so a session we mirrored has the fields the
+        reference shape lists as optional."""
+        await seed_subagent(
+            wired,
+            session_id,
+            "a1",
+            metadata={
+                "agentType": "general-purpose",
+                "description": "Check latest test run",
+                "toolUseId": "toolu_123",
+                "spawnDepth": 1,
+            },
+        )
+        row = (await wired.list_subagent_transcripts(session_id))[0]
+        assert row["description"] == "Check latest test run"
+        assert row["task_id"] == "toolu_123"
+        assert row["agent_type"] == "general-purpose"
+        # The metadata entry is not a message.
+        assert row["message_count"] == 2
+
+    async def test_a_session_without_the_sidecar_omits_those_fields(
+        self, wired, session_id
+    ):
+        """An imported session has no ``agent_metadata`` entry, and a made-up
+        description would read as the CLI's own."""
+        await seed_subagent(wired, session_id, "a1")
+        row = (await wired.list_subagent_transcripts(session_id))[0]
+        assert "description" not in row
+        assert "task_id" not in row
+
+    async def test_a_workflow_subagent_is_listed_at_its_real_path(
+        self, wired, session_id
+    ):
+        await seed_subagent(
+            wired,
+            session_id,
+            "a2",
+            subpath="subagents/workflows/wf_run1/agent-a2",
+        )
+        listed = await wired.list_subagent_transcripts(session_id)
+        assert listed[0]["subpath"] == "subagents/workflows/wf_run1/agent-a2"
+        assert listed[0]["agent_id"] == "a2"
+
+    async def test_a_workflow_subagent_loads_from_its_nested_path(
+        self, wired, session_id
+    ):
+        """Guessing the flat path would read nothing for exactly these."""
+        await seed_subagent(
+            wired,
+            session_id,
+            "a2",
+            subpath="subagents/workflows/wf_run1/agent-a2",
+            reply="the nested one",
+        )
+        messages = await wired.get_subagent_transcript("a2", session_id)
+        assert messages[1]["blocks"][0]["content"] == "the nested one"
+
+    async def test_the_transcript_comes_back_rendered_not_raw(
+        self, wired, session_id
+    ):
+        """Rendered messages rather than the reference shape's raw entries —
+        the subagent tab draws through the same panel code."""
+        await seed_subagent(wired, session_id, "a1")
+        messages = await wired.get_subagent_transcript("a1", session_id)
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[0]["content"] == "check the tests"
+        assert messages[0]["timestamp"] == "2026-08-16T00:01:00.000Z"
+        assert messages[1]["turn"]["duration_ms"] == 3000
+
+    async def test_the_sessions_events_are_not_attributed_to_a_subagent(
+        self, wired, session_id
+    ):
+        """``events.jsonl`` records belong to the session; interleaving them
+        here would credit a commit to whichever subagent was running."""
+        from ac_dc.claude_code.events_log import commit_content
+
+        await wired._record_event("commit", commit_content("abc1234", "fix: it"))
+        await seed_subagent(wired, session_id, "a1")
+        messages = await wired.get_subagent_transcript("a1", session_id)
+        assert [m for m in messages if m.get("event")] == []
+
+    async def test_the_default_is_the_session_on_screen(self, wired, session_id):
+        """The common question is "what did *this* conversation delegate?"."""
+        await seed_subagent(wired, session_id, "a1")
+        assert await wired.list_subagent_transcripts() == (
+            await wired.list_subagent_transcripts(session_id)
+        )
+        assert await wired.get_subagent_transcript("a1") == (
+            await wired.get_subagent_transcript("a1", session_id)
+        )
+
+    async def test_a_session_with_no_subagents_lists_nothing(self, wired):
+        assert await wired.list_subagent_transcripts() == []
+
+    async def test_an_unknown_agent_is_an_error_not_an_empty_conversation(
+        self, wired, session_id
+    ):
+        answer = await wired.get_subagent_transcript("nope", session_id)
+        assert "error" in answer
+
+    async def test_an_agent_id_is_required(self, wired):
+        assert "error" in await wired.get_subagent_transcript("")
+
+    async def test_with_no_session_at_all_there_is_nothing_to_list(
+        self, tmp_path, events
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo), event_callback=events, engine_config=EngineConfig()
+        )
+        svc.session = FakeSession()
+        assert await svc.list_subagent_transcripts() == []
+        assert "error" in await svc.get_subagent_transcript("a1")
+
+    async def test_a_read_failure_is_reported_not_swallowed(self, wired, session_id):
+        async def boom(*args, **kwargs):
+            raise OSError("disk is gone")
+
+        wired.session_store.list_subkeys = boom
+        assert "error" in await wired.list_subagent_transcripts(session_id)
 
 
 class TestSessionLifecycle:
