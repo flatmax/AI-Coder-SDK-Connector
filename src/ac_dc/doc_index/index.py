@@ -5,9 +5,11 @@ with a file list (or let it walk the repo itself) and then query
 via :meth:`get_doc_map`, :meth:`get_file_doc_block`, or
 :meth:`get_signature_hash`.
 Mirrors :class:`ac_dc.symbol_index.index.SymbolIndex` —
-deliberately similar shape so callers (the LLM service's tier
-builder, the streaming handler's stability update pass) dispatch
-between them via a simple mode check.
+deliberately similar shape so a caller holding either one can
+ask it the same questions. The two shared base classes
+(:mod:`ac_dc.base_cache`, :mod:`ac_dc.base_formatter`) depend on
+that symmetry, and so will the MCP bridge's ``symbol_map`` and
+``doc_outline`` tools (``specs5/3-engine/mcp-bridge.md``).
 Design notes pinned by the test suite and spec:
 - **Per-file pipeline** — mtime check → extract → resolve
   link paths against repo file set → store. Cached files
@@ -48,7 +50,7 @@ Design notes pinned by the test suite and spec:
   None from :meth:`index_file` without error. New format
   support (SVG in 2.8.3) is an entry in the registry plus
   a new extractor class, no orchestrator changes.
-- **Two formatters** — one instance for tier assembly
+- **Two formatters** — one instance for map rendering
   (no line numbers; 2.8.1 doesn't emit line numbers yet),
   one reserved for future LSP-style consumers. Currently
   only the first is built; the second will land when doc-
@@ -158,7 +160,7 @@ class DocIndex:
         self._extractors: dict[str, BaseDocExtractor] = {
             ext: cls() for ext, cls in EXTRACTORS.items()
         }
-        # Formatter for tier assembly — no line numbers.
+        # Formatter for map rendering — no line numbers.
         # 2.8.1 doesn't surface line numbers in the compact
         # format; if a future LSP-style consumer needs them,
         # a second formatter variant can be added.
@@ -275,10 +277,10 @@ class DocIndex:
         cached = self._cache.get(rel, mtime, keyword_model=keyword_model)
         if cached is not None:
             # Cache hit — identity preserved for callers that
-            # hold references (the stability tracker's content
-            # hash relies on structural hash, not object
-            # identity, but reusing the cached object reduces
-            # memory churn).
+            # hold references. Nothing depends on object
+            # identity (change detection goes through the
+            # structural hash), but reusing the cached object
+            # reduces memory churn.
             self._all_outlines[rel] = cached
             return cached
         return self._parse_and_store(
@@ -490,9 +492,9 @@ class DocIndex:
         exclude_files: set[str] | None = None,
     ) -> str:
         """Render the full doc map with legend.
-        Consumed by the tier assembler's L0 block. Empty when
-        no outlines are indexed so callers can concatenate
-        the output without extra conditionals.
+        The whole-repo answer behind the ``doc_outline`` tool.
+        Empty when no outlines are indexed, so callers can
+        concatenate the output without extra conditionals.
         """
         if not self._all_outlines:
             return ""
@@ -502,19 +504,19 @@ class DocIndex:
         )
     def get_legend(self) -> str:
         """Return just the legend block.
-        Matches :class:`SymbolIndex.get_legend` — useful when
-        the tier assembler wants the legend cached separately
-        from file blocks (so the legend stabilises in L0 while
-        file blocks cascade).
+        Matches :class:`SymbolIndex.get_legend` — useful when a
+        caller renders file blocks in pieces (chunked tool
+        output, one directory at a time) and wants the decoder
+        key exactly once rather than per chunk.
         """
         return self._formatter.get_legend(self._all_outlines.keys())
     def get_file_doc_block(self, path: str | Path) -> str | None:
         """Render the compact block for a single file.
         Returns None for files not in the index — matches the
-        symbol index's behaviour so the stability tracker can
-        probe for a block without crashing on deleted files.
-        Output omits the legend (callers composing into a
-        cached tier render the legend separately).
+        symbol index's behaviour so a caller can probe for a
+        block without crashing on a deleted file. Output omits
+        the legend; callers composing several blocks render it
+        once themselves.
         """
         rel = self._normalise_rel_path(path)
         if rel not in self._all_outlines:
@@ -534,9 +536,9 @@ class DocIndex:
     def get_signature_hash(self, path: str | Path) -> str | None:
         """Return the structural hash for a file, or None.
         Thin wrapper over :meth:`DocCache.get_signature_hash`.
-        The stability tracker uses this to distinguish
-        whitespace-only edits (mtime bump, same hash → no
-        demote) from structural changes (new hash → demote).
+        Lets a caller distinguish a whitespace-only edit (mtime
+        bumped, same hash) from a structural change (new hash)
+        without re-rendering the block.
         """
         rel = self._normalise_rel_path(path)
         return self._cache.get_signature_hash(rel)

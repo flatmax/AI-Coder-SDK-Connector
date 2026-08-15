@@ -37,8 +37,15 @@ export const CTX_ACTION_DELETE = 'delete';
 // Menu items for file rows. Rendered in declaration
 // order; groups separated by null entries which render
 // as horizontal rules. The `showWhen` function gates
-// conditional items (include vs exclude shown based on
+// conditional items (allow vs deny shown based on
 // current state).
+//
+// The action ids stay `exclude` / `include` — they are
+// the third checkbox state's name throughout the picker
+// and its tests. The labels say what the state now does:
+// deny the agent `Read` on the path, per
+// specs5/plan/decisions.md CC-14. Nothing is excluded
+// from an index any more; there is no index.
 export const _CONTEXT_MENU_FILE_ITEMS = [
   { action: CTX_ACTION_STAGE, label: 'Stage', icon: '➕' },
   { action: CTX_ACTION_UNSTAGE, label: 'Unstage', icon: '➖' },
@@ -64,13 +71,13 @@ export const _CONTEXT_MENU_FILE_ITEMS = [
   null,
   {
     action: CTX_ACTION_EXCLUDE,
-    label: 'Exclude from index',
+    label: 'Deny agent read',
     icon: '✕',
     showWhen: (ctx) => !ctx.isExcluded,
   },
   {
     action: CTX_ACTION_INCLUDE,
-    label: 'Include in index',
+    label: 'Allow agent read',
     icon: '✓',
     showWhen: (ctx) => ctx.isExcluded,
   },
@@ -135,13 +142,13 @@ export const _CONTEXT_MENU_DIR_ITEMS = [
   null,
   {
     action: CTX_ACTION_EXCLUDE_ALL,
-    label: 'Exclude all from index',
+    label: 'Deny agent read on all',
     icon: '✕',
     showWhen: (ctx) => !ctx.allExcluded,
   },
   {
     action: CTX_ACTION_INCLUDE_ALL,
-    label: 'Include all in index',
+    label: 'Allow agent read on all',
     icon: '✓',
     showWhen: (ctx) => ctx.someExcluded,
   },

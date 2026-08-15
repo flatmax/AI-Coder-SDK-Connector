@@ -369,10 +369,15 @@ class BranchesMixin:
             if sha_probe.returncode == 0
             else ""
         )
-        # Fire the post-write callback with an empty path — the
-        # whole working tree may have changed, so every index
-        # should re-scan on its own schedule. An empty path is
-        # the LLMService callback's signal for "refresh
-        # everything".
+        # Fire the post-write callback with an empty path. The
+        # whole working tree may have changed, so the signal is
+        # "refresh everything" rather than "this file changed".
+        # Today's callback (``DocIndexBuilder.note_file_written``)
+        # ignores it: an empty path has no extension it recognises,
+        # so outlines stay as they were until the next full build.
+        # That is the same gap the agent's own writes have, and it
+        # closes with the post-tool-call re-index in phase 4
+        # (``specs5/plan/README.md``). Kept firing so the signal
+        # exists for that listener to pick up.
         self._fire_post_write("")
         return {"status": "ok", "branch": name, "sha": sha}

@@ -2,35 +2,38 @@
 
 The Settings service exposes a narrow, whitelisted surface for reading
 and writing user-editable config files. It's registered alongside
-:class:`Repo` and :class:`LLMService` via ``server.add_class(settings)``
-so the browser can call ``Settings.get_config_content(...)`` etc.
+:class:`Repo` and :class:`ClaudeCodeService` via
+``server.add_class(settings)`` so the browser can call
+``Settings.get_config_content(...)`` etc.
 
-Scope pinned by specs4/1-foundation/configuration.md#settings-service
-and specs4/1-foundation/rpc-inventory.md:
+Scope pinned by specs5/1-foundation/configuration.md#settings-service
+and specs5/1-foundation/rpc-inventory.md:
 
 - **Whitelisted config types only.** The :data:`CONFIG_TYPES` map in
-  :mod:`ac_dc.config` is the authoritative allow-list. Callers pass
-  a type key (``"litellm"``, ``"system"``, etc.); the service maps
-  that to a real filename and reads / writes inside the user config
-  directory. Arbitrary paths are rejected — a caller that asks for
-  ``"commit"`` (loaded internally but not exposed for UI editing)
-  gets an error, not the file content.
+  :mod:`ac_dc.config` is the authoritative allow-list — three entries
+  now (``"engine"``, ``"app"``, ``"snippets"``), down from eight.
+  Callers pass a type key; the service maps that to a real filename and
+  reads / writes inside the user config directory. Arbitrary paths are
+  rejected — a caller that asks for ``"commit"`` (loaded internally but
+  not exposed for UI editing) gets an error, not the file content.
 
-- **Reload is type-aware.** Editing ``llm.json`` re-applies env vars
-  and rebinds the model name; editing ``app.json`` invalidates the
-  compaction / doc-index / url-cache caches. Markdown prompts are
-  read fresh on every request (no cache to invalidate), so save is
-  sufficient — no reload RPC needed for prompt edits. Snippets are
-  the same — loaded on demand.
+- **Reload is type-aware, and narrower than it looks.** Editing
+  ``app.json`` invalidates the doc-convert / doc-index caches, and
+  nothing in it reaches the engine, so the new values apply on the next
+  use. ``snippets.json`` is loaded on demand — no cache to invalidate.
+  ``engine.json`` has **no reload RPC at all**: session options are
+  assembled once, at connect time, so most of that file only takes
+  effect on a new session and a reload call would be a lie. The
+  Settings tab says so and offers a restart instead.
 
-- **Localhost-only for writes and reloads.** Specs4's collaboration
-  policy treats config edits as mutation-class operations. Read
-  methods (``get_config_content``, ``get_config_info``,
-  ``get_snippets``, ``get_review_snippets``) are always allowed;
-  write and reload methods check :meth:`_check_localhost_only` and
-  return the restricted-error shape when a non-localhost
-  participant calls them. Matches the pattern established in
-  :class:`Repo` and :class:`LLMService` in Layer 4.4.2.
+- **Localhost-only for writes and reloads.** The collaboration policy
+  treats config edits as mutation-class operations. Read methods
+  (``get_config_content``, ``get_config_info``, ``get_snippets``,
+  ``get_review_snippets``) are always allowed; write and reload methods
+  check :meth:`_check_localhost_only` and return the restricted-error
+  shape when a non-localhost participant calls them. Matches the
+  pattern established in :class:`Repo` and
+  :class:`ClaudeCodeService`.
 
 - **No caller-side file discovery.** The browser asks for a config
   type; the service maps it to the disk path. Arbitrary paths
@@ -57,22 +60,23 @@ Design notes:
   JSON at the write boundary would force users into a third-party
   editor to fix syntax errors.
 
-- **Reload is a separate RPC, not implicit on save.** Specs4 says
+- **Reload is a separate RPC, not implicit on save.** The spec says
   "For reloadable configs, save automatically triggers the
   corresponding reload RPC" — but the frontend controls that
-  dispatch, not the service. The service exposes `reload_llm_config`
-  and `reload_app_config` as distinct calls so the UI can decide
-  (e.g., after a save succeeded AND passed JSON validation). A
-  separate Reload button is also available for the user-edited-on-
-  disk case.
+  dispatch, not the service. The service exposes `reload_app_config`
+  as a distinct call so the UI can decide (e.g., after a save
+  succeeded AND passed JSON validation). A separate Reload button is
+  also available for the user-edited-on-disk case.
 
-- **`get_config_info` returns a snapshot.** Model names, smaller
-  model names, config dir path. Used by the Settings tab's info
-  banner. Returns a dict rather than individual fields so the
-  browser can render the whole banner from one RPC call.
+- **`get_config_info` returns a snapshot.** Just the config directory
+  now: the model names it used to carry described the native engine's
+  two-model setup, and the model in force is the engine's own — it
+  comes from ``ClaudeCodeService.get_current_state()``, live, rather
+  than from a config file the CLI may have overridden. Still a dict so
+  the browser can render the whole banner from one RPC call.
 
-Governing spec: ``specs4/1-foundation/configuration.md#settings-service``.
-Restriction pattern: ``specs4/1-foundation/communication-layer.md#restricted-operations``.
+Governing spec: ``specs5/1-foundation/configuration.md#settings-service``.
+Restriction pattern: ``specs5/1-foundation/rpc-transport.md``.
 """
 
 from __future__ import annotations
@@ -94,16 +98,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # Which config types cause a reload call into ConfigManager on save.
-# Markdown prompts are read fresh on every request via the prompt
-# helpers (get_system_prompt etc.), so no reload is needed — edits
-# take effect on the next LLM request. Snippets are the same —
-# loaded on demand.
 #
-# "litellm" → reload_llm_config (also re-applies env vars)
-# "app"     → reload_app_config (invalidates compaction/doc-index caches)
-# Everything else → no reload needed.
+# "app"      → reload_app_config (invalidates the doc-convert and
+#              doc-index caches)
+# "snippets" → no reload needed; loaded on demand
+# "engine"   → deliberately NOT reloadable. The session's options are
+#              built once at connect time, so a reload would clear a
+#              cache nobody reads and report success for a change that
+#              hasn't happened. A new session is the honest answer.
 
-_RELOADABLE_TYPES = frozenset({"litellm", "app"})
+_RELOADABLE_TYPES = frozenset({"app"})
 
 
 class Settings:
@@ -120,11 +124,7 @@ class Settings:
     collab reference (for localhost checks).
     """
 
-    def __init__(
-        self,
-        config: "ConfigManager",
-        llm_service: "Any | None" = None,
-    ) -> None:
+    def __init__(self, config: "ConfigManager") -> None:
         """Construct against an existing ConfigManager.
 
         Parameters
@@ -133,26 +133,19 @@ class Settings:
             The central config manager. Settings never replaces
             the instance; saves write to disk and then (optionally)
             ask the config manager to reload.
-        llm_service:
-            Optional :class:`LLMService` reference. When provided,
-            :meth:`reload_app_config` calls
-            :meth:`LLMService.refresh_system_prompt` after the
-            config reload succeeds, so app-config changes that
-            affect prompt composition (notably the
-            ``agents.enabled`` toggle) take effect on the next
-            LLM request rather than waiting for the next mode
-            switch or session restart. When None, config reload
-            still works — the prompt refresh just doesn't fire,
-            matching the pre-commit-3 behaviour. Tests that
-            construct Settings without an LLM service continue
-            to pass unchanged.
+
+        The optional ``llm_service`` parameter is gone. It existed so
+        that saving ``app.json`` could ask the native engine to
+        re-assemble its system prompt — the ``agents.enabled`` toggle
+        changed the prompt, and the context manager had cached it.
+        There is no prompt to re-assemble now, and nothing in
+        ``app.json`` reaches the engine at all.
         """
         self._config = config
-        self._llm_service = llm_service
         # Collaboration reference — set by main.py when collab mode
         # is active, None otherwise. When None, every caller is
         # treated as localhost. Matches the pattern on Repo and
-        # LLMService.
+        # ClaudeCodeService.
         self._collab: Any = None
 
     # ------------------------------------------------------------------
@@ -163,9 +156,9 @@ class Settings:
         """Return a restricted-error dict when the caller is non-localhost.
 
         Same contract as :meth:`Repo._check_localhost_only` and
-        :meth:`LLMService._check_localhost_only` — returns None for
-        allowed callers (no collab attached, or localhost), returns
-        the specs4-mandated shape otherwise. Fails closed on collab
+        :meth:`ClaudeCodeService._check_localhost_only` — returns None
+        for allowed callers (no collab attached, or localhost), returns
+        the mandated shape otherwise. Fails closed on collab
         check exceptions — better to deny a legitimate call than to
         let an unauthenticated caller mutate config.
         """
@@ -255,22 +248,23 @@ class Settings:
     def get_config_info(self) -> dict[str, Any]:
         """Return a snapshot of current config state for the UI banner.
 
-        Used by the Settings tab's info banner to show which model
-        is currently configured and where the config files live.
+        Used by the Settings tab's info banner to show where the config
+        files live. The two model names it used to carry are gone: they
+        described the native engine's primary/smaller pair, and the
+        model actually in force belongs to the engine, which reports it
+        live through ``ClaudeCodeService.get_current_state()``. Reading
+        it from a config file here would go stale the moment the user
+        switched model mid-session.
         """
-        return {
-            "model": self._config.model,
-            "smaller_model": self._config.smaller_model,
-            "config_dir": str(self._config.config_dir),
-        }
+        return {"config_dir": str(self._config.config_dir)}
 
     def get_snippets(self) -> list[dict[str, str]]:
         """Return code-mode snippets.
 
-        Layer 4.3 adds review snippets and doc-mode dispatch via
-        :meth:`LLMService.get_snippets`. The Settings-level helper
-        is a simpler direct access to the code snippets, used by
-        the snippet editor in the Settings UI.
+        :meth:`ClaudeCodeService.get_snippets` is the mode-aware
+        version the chat panel uses. This Settings-level helper is a
+        simpler direct access to the code snippets, used by the snippet
+        editor in the Settings UI.
         """
         return self._config.get_snippets("code")
 
@@ -341,51 +335,18 @@ class Settings:
                 result["warning"] = f"JSON parse error: {exc}"
         return result
 
-    def reload_llm_config(self) -> dict[str, Any]:
-        """Re-read ``llm.json`` and re-apply env vars.
-
-        Called by the Settings UI after a successful save of
-        ``llm.json``. Hot-reloaded values take effect on the next
-        LLM request without restart — matches specs4's promise of
-        "Editing llm.json and calling reload_llm_config reflects
-        changes."
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        try:
-            self._config.reload_llm_config()
-        except Exception as exc:
-            logger.warning(
-                "LLM config reload failed: %s", exc
-            )
-            return {"error": f"Reload failed: {exc}"}
-        return {"status": "ok"}
-
     def reload_app_config(self) -> dict[str, Any]:
-        """Re-read ``app.json`` and refresh the system prompt.
+        """Re-read ``app.json``.
 
         Called by the Settings UI after a successful save of
-        ``app.json``. Downstream consumers (compactor, doc index,
-        URL cache config) read values through accessor methods, so
+        ``app.json``. Downstream consumers (the document converter, the
+        doc index) read values through accessor methods, so
         hot-reloaded values take effect on the next access.
 
-        Also asks the LLM service (if wired) to refresh its
-        context manager's system prompt. This covers the
-        ``agents.enabled`` toggle — flipping it changes
-        whether the agentic appendix is appended during
-        prompt assembly, but the context manager caches the
-        assembled prompt. Without the refresh, the toggle
-        would only take effect on the next mode switch or
-        session restart — a confusing UX where the Settings
-        tab says "agents on" but the LLM doesn't see the
-        appendix for several turns.
-
-        The refresh is best-effort: a failing refresh logs a
-        warning but doesn't propagate an error back to the
-        caller. The config reload itself already succeeded;
-        the next mode switch or session restart will pick up
-        the new prompt state.
+        There is no prompt to refresh afterwards, and nothing in
+        ``app.json`` reaches the engine's session options — so unlike
+        ``engine.json``, this reload really does apply everything the
+        user just saved.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -397,17 +358,6 @@ class Settings:
                 "App config reload failed: %s", exc
             )
             return {"error": f"Reload failed: {exc}"}
-        # Refresh the system prompt so app-config changes
-        # that affect prompt composition take effect
-        # immediately. Best-effort — a failure here doesn't
-        # invalidate the config reload.
-        if self._llm_service is not None:
-            try:
-                self._llm_service.refresh_system_prompt()
-            except Exception as exc:
-                logger.warning(
-                    "System prompt refresh failed: %s", exc
-                )
         return {"status": "ok"}
 
     # ------------------------------------------------------------------

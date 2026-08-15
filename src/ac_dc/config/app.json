@@ -1,15 +1,4 @@
 {
-  "url_cache": {
-    "path": null,
-    "ttl_hours": 24
-  },
-  "history_compaction": {
-    "enabled": true,
-    "compaction_trigger_tokens": 24000,
-    "verbatim_window_tokens": 4000,
-    "summary_budget_tokens": 500,
-    "min_verbatim_exchanges": 2
-  },
   "doc_convert": {
     "enabled": true,
     "extensions": [".docx", ".pdf", ".pptx", ".xlsx", ".csv", ".rtf", ".odt", ".odp"],
@@ -25,26 +14,5 @@
     "keywords_diversity": 0.5,
     "keywords_tfidf_fallback_chars": 150,
     "keywords_max_doc_freq": 0.6
-  },
-  "agents": {
-    "enabled": false
-  },
-  "reasoning": {
-    "budget_tokens": 10000,
-    "effort": "xhigh",
-    "first_chunk_timeout_seconds": 1200,
-    "request_timeout_seconds": 1200
-  },
-  "cache_warmup": {
-    "enabled": false,
-    "interval_seconds": 240
-  },
-  "cache_tiering": {
-    "flux_threshold": 1.0,
-    "membranes": [
-      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 3, "pick_mode": "oldest", "admission_only": true},
-      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest", "admission_only": false},
-      {"P": 1.616399379428934e-06, "V_T": 98952.34312610888, "n_admit": 0, "pick_mode": "smallest", "admission_only": false}
-    ]
   }
 }

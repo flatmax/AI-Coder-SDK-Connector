@@ -386,9 +386,9 @@ describe('FilesTab active-tab-changed handler', () => {
       'Repo.get_file_tree': vi
         .fn()
         .mockResolvedValue(fakeTreeResponse([])),
-      'LLMService.set_agent_excluded_index_files': vi
+      'ClaudeCodeService.set_denied_read_files': vi
         .fn()
-        .mockResolvedValue([]),
+        .mockResolvedValue({ denied_read_files: [] }),
     });
     const t = mountTab();
     await settle(t);
@@ -412,9 +412,10 @@ describe('FilesTab active-tab-changed handler', () => {
 // set_selected_files. parseAgentTabId from the chat panel
 // splits the active tab ID into [turn_id, agent_idx]; the
 // tab ID format {turn_id}/agent-{NN} is the load-bearing
-// contract. Symmetric rule for exclusion: agent tabs hit
-// set_agent_excluded_index_files, main hits
-// set_excluded_index_files.
+// contract. Exclusion is NOT symmetric any more: the third
+// checkbox state writes a `Read` deny rule (CC-14), and a
+// deny rule is repo-wide. Every tab hits the one
+// ClaudeCodeService.set_denied_read_files.
 
 describe('FilesTab agent-aware RPC routing', () => {
   /**
@@ -499,10 +500,17 @@ describe('FilesTab agent-aware RPC routing', () => {
     expect(setMain).not.toHaveBeenCalled();
   });
 
-  it('agent tab exclusion routes to set_agent_excluded_index_files', async () => {
-    // Same flat-identity contract as selection — the
-    // exclusion RPC takes (agent_id, files).
-    const setMainExcl = vi.fn().mockResolvedValue([]);
+  it('agent-tab read denial does NOT route per-agent', async () => {
+    // Selection is per-tab; read denial is not. A deny rule
+    // lands in the settings sources every SDK subagent
+    // inherits, so a per-agent variant would be a promise
+    // the permission layer cannot keep. The one thing this
+    // test has to pin is that an agent tab does not look for
+    // an agent-scoped RPC: if it did, the tick would fail
+    // silently against a service that no longer exists.
+    const setDenied = vi
+      .fn()
+      .mockResolvedValue({ denied_read_files: ['a.py'] });
     const setAgentExcl = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
       'Repo.get_file_tree': vi
@@ -512,16 +520,11 @@ describe('FilesTab agent-aware RPC routing', () => {
             { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': setMainExcl,
+      'ClaudeCodeService.set_denied_read_files': setDenied,
       'LLMService.set_agent_excluded_index_files': setAgentExcl,
     });
     const t = mountTab();
     await settle(t);
-    // Agent tabs share the orchestrator's L0; the
-    // dialog is main-tab-only. Set pref to 'never'
-    // so the exclusion-changed event applies straight
-    // through to the agent RPC.
-    t._l0ExcludePref = 'never';
     fireActiveTabChanged('backend-auth');
     await settle(t);
     const picker = t.shadowRoot.querySelector('ac-file-picker');
@@ -533,15 +536,15 @@ describe('FilesTab agent-aware RPC routing', () => {
       }),
     );
     await settle(t);
-    expect(setAgentExcl).toHaveBeenCalledOnce();
-    expect(setAgentExcl.mock.calls[0][0]).toBe('backend-auth');
-    expect(setAgentExcl.mock.calls[0][1]).toEqual(['a.py']);
-    expect(setMainExcl).not.toHaveBeenCalled();
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0]).toEqual(['a.py']);
+    expect(setAgentExcl).not.toHaveBeenCalled();
   });
 
-  it('main tab exclusion still calls set_excluded_index_files', async () => {
-    const setMainExcl = vi.fn().mockResolvedValue([]);
-    const setAgentExcl = vi.fn().mockResolvedValue([]);
+  it('main tab read denial calls set_denied_read_files', async () => {
+    const setDenied = vi
+      .fn()
+      .mockResolvedValue({ denied_read_files: ['a.py'] });
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -550,12 +553,10 @@ describe('FilesTab agent-aware RPC routing', () => {
             { name: 'a.py', path: 'a.py', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': setMainExcl,
-      'LLMService.set_agent_excluded_index_files': setAgentExcl,
+      'ClaudeCodeService.set_denied_read_files': setDenied,
     });
     const t = mountTab();
     await settle(t);
-    t._l0ExcludePref = 'never';
     // Stay on main.
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
@@ -566,8 +567,7 @@ describe('FilesTab agent-aware RPC routing', () => {
       }),
     );
     await settle(t);
-    expect(setMainExcl).toHaveBeenCalledOnce();
-    expect(setAgentExcl).not.toHaveBeenCalled();
+    expect(setDenied).toHaveBeenCalledOnce();
   });
 
   it('agent-not-found response emits warning toast', async () => {

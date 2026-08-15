@@ -1,7 +1,18 @@
 // Mode-switching helpers extracted from app-shell.js. Manages
 // primary mode (code/doc) and the cross-reference overlay
-// toggle, both of which live on the backend authoritatively
-// and propagate via mode-changed broadcasts.
+// toggle, both of which lived on the backend authoritatively
+// and propagated via mode-changed broadcasts.
+//
+// Both RPCs went with the native engine in conversion phase
+// 3, and no template calls `_switchMode` / `_toggleCrossRef`
+// any more — the toggles came out of the action bar in phase
+// 2. What survives is the shape: `switchMode` guards on the
+// method being absent and returns, so nothing here can fire
+// at a service that is gone. The mode toggle's replacement
+// is the preset selector (CC-12), which is deferred by
+// decision — see specs5/plan/delivery.md. `onModeChanged`
+// below is dormant for the same reason: nothing broadcasts
+// `modeChanged` any more.
 
 /**
  * Handle mode-changed broadcasts. Fires for our own

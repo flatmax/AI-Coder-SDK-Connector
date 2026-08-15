@@ -1480,8 +1480,9 @@ describe('ChatPanel close-tab backend wiring', () => {
 // There is no agent_tag any more, and nothing for it to route to. One CLI
 // session holds one turn; a `Task` call's subagent output is attributed by its
 // `tool_use_id` (blocks.js), not by opening a second stream. `chat_streaming`
-// takes five arguments — `(request_id, message, files, images, viewer)` — and
-// the two reasoning arguments went with it (the CLI decides when to think).
+// takes five arguments — `(request_id, message, files, images, viewer)`. The
+// two reasoning arguments went with it (the CLI decides when to think), and
+// phase 3 deleted the state and handlers behind them.
 //
 // What survives is the part that was never about the tag: a send reads the
 // *active* tab. Its file selection goes out, its state records the turn. That
@@ -1520,22 +1521,6 @@ describe('ChatPanel send path', () => {
     // viewer framing — explicitly null rather than omitted, so the arity
     // stays unambiguous for the phase that fills it in.
     expect(args[4]).toBeNull();
-  });
-
-  it('the reasoning controls do not reach the wire', async () => {
-    // `_reasoningEnabled` / `_reasoningEffort` are declared but inert since
-    // phase 2. Setting them must not grow the argument list — a 6th or 7th
-    // argument would be dropped on the floor, so nothing else would complain.
-    const started = vi.fn().mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
-    const p = mountPanel();
-    await settle(p);
-    p._reasoningEnabled = true;
-    p._reasoningEffort = 'minimal';
-    p._input = 'hello';
-    await p._send();
-    await settle(p);
-    expect(started.mock.calls[0]).toHaveLength(5);
   });
 
   it('the selection list comes from the active tab', async () => {

@@ -256,11 +256,21 @@ describe('ChatPanel multimodal session-changed', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Compaction events — URL fetch stages
+// Compaction events — the retired native-engine stages
 // ---------------------------------------------------------------------------
+//
+// Five stages used to arrive on this channel and are now handled by nobody:
+// `url_fetch` / `url_ready` from URL curation (CC-9), and `compacting` /
+// `compacted` / `compaction_error` from a compaction this app ran over a
+// history it owned. The suites that covered them went with them in conversion
+// phase 3. What replaces those suites is this one, because the dangerous case
+// is not that the branches are gone — it is a stale or replayed broadcast
+// finding them still there. `compacted` in particular carried a whole
+// replacement message list: honouring one would swap the transcript the user
+// is reading for a summary written by an engine that no longer exists.
 
-describe('ChatPanel compaction events — URL fetch stages', () => {
-  async function sendAndGetId(panel, text = 'hi') {
+describe('ChatPanel compaction events — retired stages', () => {
+  async function sendAndComplete(panel, text = 'hi') {
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
@@ -269,128 +279,41 @@ describe('ChatPanel compaction events — URL fetch stages', () => {
     panel._input = text;
     await panel._send();
     await settle(panel);
-    return started.mock.calls[0][0];
-  }
-
-  it('url_fetch emits info toast with display name', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'url_fetch',
-          url: 'github.com/owner/repo',
-        },
-      });
-      await settle(p);
-      expect(toasts).toHaveBeenCalledOnce();
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.type).toBe('info');
-      expect(detail.message).toContain('github.com/owner/repo');
-      expect(detail.message).toMatch(/fetching/i);
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('url_ready emits success toast', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'url_ready',
-          url: 'example.com/docs/foo',
-        },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.type).toBe('success');
-      expect(detail.message).toContain('example.com/docs/foo');
-      expect(detail.message).toMatch(/fetched/i);
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('url_fetch falls back to generic label when url missing', async () => {
-    // Defensive — the backend should always include a
-    // display name, but if a future version forgets, we
-    // show "URL" rather than "undefined" or crashing.
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: { stage: 'url_fetch' },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.message).toContain('URL');
-      expect(detail.message).not.toContain('undefined');
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Compaction events — compaction stages
-// ---------------------------------------------------------------------------
-
-describe('ChatPanel compaction events — compaction stages', () => {
-  async function sendAndGetId(panel, text = 'hi') {
-    const started = vi
-      .fn()
-      .mockResolvedValue({ status: 'started' });
-    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
-    await settle(panel);
-    panel._input = text;
-    await panel._send();
-    await settle(panel);
-    return started.mock.calls[0][0];
-  }
-
-  it('compacting emits info toast', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: { stage: 'compacting' },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.type).toBe('info');
-      expect(detail.message).toMatch(/compacting/i);
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('compacted replaces messages with compacted list', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p, 'original question');
+    const reqId = started.mock.calls[0][0];
     pushEvent('stream-complete', {
       requestId: reqId,
       result: { response: 'original answer' },
     });
-    await settle(p);
+    await settle(panel);
+    return reqId;
+  }
+
+  it('ignores every retired stage — no toast, no transcript change', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndComplete(p, 'original question');
+    const before = [...p.messages];
+    const toasts = vi.fn();
+    window.addEventListener('ac-toast', toasts);
+    try {
+      for (const event of [
+        { stage: 'url_fetch', url: 'github.com/owner/repo' },
+        { stage: 'url_ready', url: 'github.com/owner/repo' },
+        { stage: 'compacting' },
+        { stage: 'compaction_error', error: 'boom' },
+      ]) {
+        pushEvent('compaction-event', { requestId: reqId, event });
+        await settle(p);
+      }
+      expect(toasts).not.toHaveBeenCalled();
+      expect(p.messages).toEqual(before);
+    } finally {
+      window.removeEventListener('ac-toast', toasts);
+    }
+  });
+
+  it('will not swap the transcript for a `compacted` payload', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndComplete(p, 'original question');
     expect(p.messages).toHaveLength(2);
     pushEvent('compaction-event', {
       requestId: reqId,
@@ -398,251 +321,15 @@ describe('ChatPanel compaction events — compaction stages', () => {
         stage: 'compacted',
         case: 'summarize',
         messages: [
-          {
-            role: 'user',
-            content: '[History Summary]\nbrief recap',
-          },
-          {
-            role: 'assistant',
-            content: 'Ok, I understand.',
-          },
+          { role: 'user', content: '[History Summary]\nbrief recap' },
+          { role: 'assistant', content: 'Ok, I understand.' },
         ],
       },
     });
     await settle(p);
     expect(p.messages).toHaveLength(2);
-    expect(p.messages[0].content).toContain('History Summary');
-    expect(p.messages[1].content).toContain('understand');
-  });
-
-  it('compacted emits success toast with case-specific wording', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'compacted',
-          case: 'truncate',
-          messages: [],
-        },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.type).toBe('success');
-      expect(detail.message).toMatch(/truncat/i);
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('compacted with summarize case has distinct wording', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'compacted',
-          case: 'summarize',
-          messages: [],
-        },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.message).toMatch(/summar/i);
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('compacted without messages field does not crash', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'kept message' },
-    });
-    await settle(p);
-    const preMessages = p.messages.length;
-    pushEvent('compaction-event', {
-      requestId: reqId,
-      event: { stage: 'compacted', case: 'none' },
-    });
-    await settle(p);
-    expect(p.messages).toHaveLength(preMessages);
-  });
-
-  it('compacted normalises multimodal content in replacement', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    pushEvent('compaction-event', {
-      requestId: reqId,
-      event: {
-        stage: 'compacted',
-        case: 'summarize',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: 'look' },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: 'data:image/png;base64,PRESERVED',
-                },
-              },
-            ],
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p.messages).toHaveLength(1);
-    expect(p.messages[0].content).toBe('look');
-    expect(p.messages[0].images).toEqual([
-      'data:image/png;base64,PRESERVED',
-    ]);
-  });
-
-  it('compacted preserves system_event flag', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    pushEvent('compaction-event', {
-      requestId: reqId,
-      event: {
-        stage: 'compacted',
-        case: 'truncate',
-        messages: [
-          {
-            role: 'user',
-            content: 'Committed abc',
-            system_event: true,
-          },
-          { role: 'user', content: 'regular' },
-        ],
-      },
-    });
-    await settle(p);
-    expect(p.messages[0].system_event).toBe(true);
-    expect(p.messages[1].system_event).toBeUndefined();
-  });
-
-  it('compacted preserves turn_id and agent_blocks', async () => {
-    // Compaction's truncate case keeps the
-    // verbatim window unchanged — including any
-    // agentic-turn metadata. The summarize case
-    // synthesises new summary messages without
-    // turn_id (correct — they didn't come from a
-    // turn). Both shapes round-trip cleanly here.
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    pushEvent('compaction-event', {
-      requestId: reqId,
-      event: {
-        stage: 'compacted',
-        case: 'truncate',
-        messages: [
-          { role: 'user', content: 'pre-A record' },
-          {
-            role: 'user',
-            content: 'spawn',
-            turn_id: 'turn_late',
-          },
-          {
-            role: 'assistant',
-            content: 'delegated',
-            turn_id: 'turn_late',
-            agent_blocks: [
-              { id: 'a0', agent_idx: 0 },
-            ],
-          },
-        ],
-      },
-    });
-    await settle(p);
-    expect('turn_id' in p.messages[0]).toBe(false);
-    expect(p.messages[1].turn_id).toBe('turn_late');
-    expect(p.messages[2].turn_id).toBe('turn_late');
-    expect(p.messages[2].agent_blocks).toEqual([
-      { id: 'a0', agent_idx: 0 },
-    ]);
-  });
-
-  it('compaction_error emits error toast with backend detail', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p);
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'ok' },
-    });
-    await settle(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'compaction_error',
-          error: 'detector LLM returned malformed JSON',
-        },
-      });
-      await settle(p);
-      const detail = toasts.mock.calls[0][0].detail;
-      expect(detail.type).toBe('error');
-      expect(detail.message).toContain('detector LLM');
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
-  });
-
-  it('compaction_error does not modify messages', async () => {
-    const p = mountPanel();
-    const reqId = await sendAndGetId(p, 'keep me');
-    pushEvent('stream-complete', {
-      requestId: reqId,
-      result: { response: 'and me' },
-    });
-    await settle(p);
-    const before = p.messages.map((m) => m.content);
-    pushEvent('compaction-event', {
-      requestId: reqId,
-      event: {
-        stage: 'compaction_error',
-        error: 'boom',
-      },
-    });
-    await settle(p);
-    expect(p.messages.map((m) => m.content)).toEqual(before);
+    expect(p.messages[0].content).toContain('original question');
+    expect(p.messages[1].content).toContain('original answer');
   });
 });
 
@@ -868,29 +555,38 @@ describe('ChatPanel compaction events — request ID filtering', () => {
     return reqId;
   }
 
+  // The filter is now exercised through the only stage that
+  // survives, so "accepted" means a divider was appended
+  // rather than a toast fired.
+  function boundary(reqId) {
+    pushEvent('compaction-event', {
+      ...(reqId ? { requestId: reqId } : {}),
+      event: {
+        stage: 'compact_boundary',
+        pre_tokens: 168_200,
+        post_tokens: 21_400,
+        trigger: 'auto',
+      },
+    });
+  }
+
   it('accepts events for the most recently completed request', async () => {
-    // Common case — stream completes, compaction event
-    // arrives after. `_currentRequestId` is null by then,
-    // but `_lastRequestId` matches.
+    // Common case — the CLI compacts after the turn ends, so
+    // `_currentRequestId` is null by the time the boundary
+    // lands and only `_lastRequestId` can match. This is the
+    // normal path, not an edge case.
     const p = mountPanel();
     const reqId = await sendAndCompleteStream(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: { stage: 'compacting' },
-      });
-      await settle(p);
-      expect(toasts).toHaveBeenCalledOnce();
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
+    const before = p.messages.length;
+    boundary(reqId);
+    await settle(p);
+    expect(p.messages.length).toBe(before + 1);
+    expect(p.messages.at(-1).compaction).toBeTruthy();
   });
 
   it('accepts events for the current streaming request', async () => {
-    // Rare but possible — a compaction event arrives
-    // mid-stream. `_currentRequestId` matches.
+    // Rare but possible — a boundary arrives mid-stream.
+    // `_currentRequestId` matches.
     const started = vi
       .fn()
       .mockResolvedValue({ status: 'started' });
@@ -901,56 +597,28 @@ describe('ChatPanel compaction events — request ID filtering', () => {
     await p._send();
     await settle(p);
     const reqId = started.mock.calls[0][0];
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: reqId,
-        event: {
-          stage: 'url_fetch',
-          url: 'github.com/x/y',
-        },
-      });
-      await settle(p);
-      expect(toasts).toHaveBeenCalledOnce();
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
+    const before = p.messages.length;
+    boundary(reqId);
+    await settle(p);
+    expect(p.messages.length).toBe(before + 1);
   });
 
   it('drops events for unknown request IDs', async () => {
     const p = mountPanel();
     await sendAndCompleteStream(p);
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        requestId: 'random-unknown-id',
-        event: { stage: 'compacting' },
-      });
-      await settle(p);
-      expect(toasts).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
+    const before = p.messages.length;
+    boundary('random-unknown-id');
+    await settle(p);
+    expect(p.messages.length).toBe(before);
   });
 
   it('accepts events without a requestId (progress broadcasts)', async () => {
     const p = mountPanel();
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        event: {
-          stage: 'url_fetch',
-          url: 'server-initiated',
-        },
-      });
-      await settle(p);
-      expect(toasts).toHaveBeenCalledOnce();
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
+    await settle(p);
+    const before = p.messages.length;
+    boundary(null);
+    await settle(p);
+    expect(p.messages.length).toBe(before + 1);
   });
 });
 
@@ -1007,17 +675,18 @@ describe('ChatPanel compaction events — defensive', () => {
       pushEvent('compaction-event', detail);
       await settle(p);
     }
-    const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
-    try {
-      pushEvent('compaction-event', {
-        event: { stage: 'url_fetch', url: 'test' },
-      });
-      await settle(p);
-      expect(toasts).toHaveBeenCalledOnce();
-    } finally {
-      window.removeEventListener('ac-toast', toasts);
-    }
+    // Still live afterwards — a swallowed exception would
+    // leave the handler wired but inert.
+    const before = p.messages.length;
+    pushEvent('compaction-event', {
+      event: {
+        stage: 'compact_boundary',
+        pre_tokens: 1000,
+        post_tokens: 200,
+      },
+    });
+    await settle(p);
+    expect(p.messages.length).toBe(before + 1);
   });
 
   it('event with missing stage field is ignored', async () => {

@@ -46,12 +46,13 @@ Design points pinned by the test suite:
 
 - **Bidirectional-only clustering.** Connected components are
   built from mutual links (A → B AND B → A). One-way links
-  don't cluster — matches the code-side rationale that weak
-  signals would pollute tier placement more than they'd help.
+  don't cluster — matches the code-side rationale that a weak
+  signal makes for a cluster nobody would recognise.
 
 - **Image links participate.** A :class:`DocLink` with
   ``is_image=True`` creates edges the same way regular links
-  do. Lets doc → SVG pairs cluster together in the tier map.
+  do. Lets a document and the diagram it embeds land in the
+  same cluster.
 
 - **Rebuild is fully idempotent.** :meth:`build` clears all
   internal state before processing. Orchestrator calls it after
@@ -135,10 +136,9 @@ class DocReferenceIndex:
     then query. :meth:`build` is idempotent — the orchestrator
     calls it after every re-index pass.
 
-    Queries are cheap — all the heavy work happens during build.
-    The stability tracker calls :meth:`file_ref_count` and
-    :meth:`connected_components` once per initialization, so
-    caching here would be overkill.
+    Queries are cheap — all the heavy work happens during
+    build — so nothing here memoises. Callers ask a handful of
+    times per index pass, not per render.
     """
 
     def __init__(self) -> None:
@@ -381,7 +381,9 @@ class DocReferenceIndex:
         one source and once from another returns 3. Zero for
         isolated files or paths not in the index.
 
-        Consumed by stability tracker's L0-seed ranking.
+        The formatter reports this per heading, and it is how
+        "which documents does everything point at?" gets
+        answered without a second traversal.
         """
         incoming = self._incoming.get(path)
         if not incoming:
@@ -432,9 +434,9 @@ class DocReferenceIndex:
         """Return connected components via union-find on bidirectional edges.
 
         Isolated files (no bidirectional edges) appear as
-        singleton components. Matches the code-side contract so
-        the stability tracker's clustering pass treats both
-        indexes uniformly.
+        singleton components. Matches the code-side contract
+        (:meth:`ac_dc.symbol_index.reference_index.ReferenceIndex.connected_components`)
+        so a caller can treat both indexes uniformly.
 
         One-way edges don't cluster — per specs4 the weak
         signal would hurt more than it helps.

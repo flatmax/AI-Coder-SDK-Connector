@@ -6,18 +6,26 @@ Phase 1 (fast, < 1 second):
   - Validate git repo
   - Find available ports
   - Initialize lightweight services (ConfigManager, Repo, Settings, DocConvert)
-  - Create LLMService with deferred_init=True
-  - Restore last session BEFORE starting WebSocket server
+  - Create ClaudeCodeService — the engine adapter, cold: no CLI process
+    is spawned until the first turn
   - Register services with JRPCServer, start it
   - Open browser
 
 Phase 2 (background, non-blocking):
   - Initialize SymbolIndex via run_in_executor
-  - Complete deferred LLM init (wire symbol index)
+  - Hand the index to ClaudeCodeService
   - Index repository in batches
   - Build reference index
-  - Initialize stability tracker
+  - Schedule the doc-index build
   - Signal ready
+
+Phase 2 is shorter than it was. Two steps went with the native engine:
+the deferred-init call that wired a token counter and context manager
+around the symbol index, and the stability-tracker pass that turned the
+repository into four cache tiers. The CLI reads what it needs when it
+needs it, so the indexes are built here purely for AC⚡DC's own use —
+Monaco's hovers and go-to-definition, the file tree, and (from phase 4)
+the MCP tools the agent can call.
 
 Governing spec: specs4/6-deployment/startup.md
 """
@@ -383,7 +391,7 @@ async def _send_progress(
 
 
 async def _heavy_init(
-    llm_service: Any,
+    claude_code_service: Any,
     repo: Any,
     config: Any,
     event_callback: Any,
@@ -411,29 +419,16 @@ async def _heavy_init(
         logger.warning("Symbol index construction failed: %s", exc)
         symbol_index = None
 
-    # Step 2: Complete deferred init
+    # Step 2: Hand the index to the engine adapter, so Monaco's
+    # hovers and go-to-definition start resolving. Cheap and
+    # synchronous — two attribute assignments — so no executor.
     await _send_progress(event_callback, "session_restore",
                          "Completing initialization...", 30)
     if symbol_index is not None:
         try:
-            await loop.run_in_executor(
-                None, lambda: llm_service.complete_deferred_init(symbol_index)
-            )
+            claude_code_service._attach_symbol_index(symbol_index)
         except Exception as exc:
-            logger.warning("Deferred init failed: %s", exc)
-
-    # Step 2b: Schedule the doc index background build. Split
-    # from complete_deferred_init because that method runs in
-    # an executor thread (step 2 wraps it in run_in_executor),
-    # where asyncio.get_event_loop() returns a fresh dead loop
-    # rather than the main one. We're back on the event loop
-    # thread now, so schedule_doc_index_build can safely call
-    # asyncio.get_running_loop() and ensure_future against the
-    # real loop.
-    try:
-        llm_service.schedule_doc_index_build()
-    except Exception as exc:
-        logger.warning("Doc index build scheduling failed: %s", exc)
+            logger.warning("Attaching the symbol index failed: %s", exc)
 
     # Step 3: Index repository in batches
     if symbol_index is not None and repo is not None:
@@ -493,15 +488,17 @@ async def _heavy_init(
         except Exception as exc:
             logger.warning("Repository indexing failed: %s", exc)
 
-    # Step 4: Initialize stability tracker
-    await _send_progress(event_callback, "stability",
-                         "Building cache tiers...", 80)
+    # Step 4: Schedule the doc-index background build. It has to
+    # be started from the event loop thread — the builder calls
+    # asyncio.get_running_loop() and ensure_future, and in an
+    # executor thread the former would hand back a fresh dead
+    # loop. It reports its own progress from here on (the
+    # doc_index and doc_enrichment_* stages), and the enrichment
+    # pass may run for minutes after "Ready".
     try:
-        await loop.run_in_executor(
-            None, llm_service._try_initialize_stability
-        )
+        claude_code_service._schedule_doc_index_build()
     except Exception as exc:
-        logger.warning("Stability init failed: %s", exc)
+        logger.warning("Doc index build scheduling failed: %s", exc)
 
     # Step 5: Signal ready
     await _send_progress(event_callback, "ready", "Ready", 100)
@@ -640,19 +637,16 @@ async def run(
 
     # Step 3: Initialize lightweight services
     config = ConfigManager(repo_root=repo_path)
-    # Export the env vars declared in llm.json into the
-    # process environment now, before any litellm completion
-    # is constructed. Without this, providers that read env
-    # at client-construction time (notably bedrock via boto3)
-    # pick up the shell's AWS_REGION / AWS_PROFILE rather
-    # than the values the user configured in the UI — and
-    # the first turn fails until the user saves llm.json
-    # (which triggers ConfigManager.reload_llm_config and
-    # finally exports the env). Calling apply_llm_env here
-    # rather than inside ConfigManager.__init__ keeps
-    # construction side-effect-free for tests and other
-    # non-runtime consumers.
-    config.apply_llm_env()
+    # Nothing is exported into the process environment here, and
+    # that is deliberate. The old `config.apply_llm_env()` call
+    # pushed llm.json's `env` block into os.environ so provider
+    # SDKs would pick up the user's credentials. The `claude` CLI
+    # resolves its own — a subscription login, ANTHROPIC_API_KEY,
+    # or a cloud provider profile — and injecting anything here
+    # would silently change which account a turn bills to. What
+    # the CLI resolved is read back and reported in engine health
+    # instead. See specs5/1-foundation/configuration.md § No
+    # credentials, and no environment export.
     settings = Settings(config)
     # DocConvert is constructed later (after event_callback is
     # defined) so progress events can flow to the browser.
@@ -761,15 +755,15 @@ async def run(
             return
         _start_static_server(webapp_dist, webapp_port, bind_host)
 
-    # Step 5: Create LLMService with deferred init
-    from ac_dc.llm_service import LLMService
-    from ac_dc.history_store import HistoryStore
-
-    # Create history store in the per-repo working dir.
-    # Use the config-managed path so the name (.ac-dc4) is
-    # defined in exactly one place (config._AC_DC_DIR).
-    ac_dc_dir = config.ac_dc_dir or (repo_path / ".ac-dc4")
-    history_store = HistoryStore(ac_dc_dir)
+    # Step 5: Create the engine adapter.
+    #
+    # No HistoryStore is constructed here yet. It used to be built
+    # in this step and handed to LLMService, which mirrored every
+    # turn into it. `history_store.py` survives the rip-out intact
+    # and phase 5 wires it back in as the SDK's SessionStore, at
+    # which point the transcript mirror and the history browser
+    # come back with it. Constructing it now would be a store
+    # nothing writes to.
 
     # Event callback — will be wired after the server starts
     event_callback_ref: list[Any] = [None]
@@ -790,48 +784,20 @@ async def run(
         config, repo=repo, event_callback=event_callback,
     )
 
-    llm_service = LLMService(
-        config=config,
-        repo=repo,
-        symbol_index=None,
-        event_callback=event_callback,
-        history_store=history_store,
-        deferred_init=True,
-        experimental=experimental,
-    )
-
-    # Claude Code engine — the chat path as of conversion phase 2.
-    # LLMService is still constructed and still registered, because the
-    # indexes, the commit surface, the snippets, and the history browser
-    # hang off it and come across in later phases. Nothing in the chat
-    # panel calls it any more. Phase 3 deletes it (specs5/plan/README.md).
-    #
-    # The two do not share state — not even the selected-file set. Two
-    # services owning one selection would need a sync path, and the
-    # selection means different things to each: a context contract to
-    # LLMService, a hint to the agent (CC-14).
+    # Claude Code engine — the whole conversation, as of phase 3.
+    # This is the only chat service now; LLMService and src/ac_dc/llm/
+    # are deleted.
     #
     # The engine connects lazily — on the first turn or an explicit
     # ClaudeCodeService.connect_engine() call — deliberately. Connecting
-    # here would add a second `claude` subprocess (~295 MB) to every
-    # startup for a service nothing is calling yet.
+    # here would add a `claude` subprocess (~295 MB) to every startup,
+    # including the ones where the user only wanted to read a diff.
     from ac_dc.claude_code import ClaudeCodeService
     claude_code_service = ClaudeCodeService(
         config, repo=repo, event_callback=event_callback,
     )
 
-    # Wire the LLMService reference into Settings so
-    # reload_app_config can refresh the system prompt when
-    # app-config changes affect prompt composition (notably
-    # the agents.enabled toggle). Done post-construction
-    # because Settings is built before LLMService; matches
-    # the pattern used for _collab on every service.
-    settings._llm_service = llm_service
-
-    # Step 6: Restore last session BEFORE starting the server
-    # (already done in LLMService.__init__ via _restore_last_session)
-
-    # Step 7: Register services with RPC server and start
+    # Step 6: Register services with RPC server and start
     if collab:
         from ac_dc.collab import Collab, CollabServer
         collab_instance = Collab()
@@ -842,7 +808,6 @@ async def run(
         )
         server.add_service(collab_instance)
         # Wire collab to all services
-        llm_service._collab = collab_instance
         repo._collab = collab_instance
         settings._collab = collab_instance
         doc_convert._collab = collab_instance
@@ -855,31 +820,33 @@ async def run(
         )
 
     server.add_service(repo)
-    server.add_service(llm_service)
     server.add_service(settings)
     server.add_service(doc_convert)
     server.add_service(claude_code_service)
 
     # Wire the post-write callback — every successful file
-    # write/create/rename on Repo triggers
-    # LLMService._on_doc_file_written, which decides (based
-    # on extension, mode, and cross-ref state) whether to
-    # invalidate the doc-index cache entry, re-extract the
-    # outline, and schedule keyword enrichment. Matches the
-    # specs4/2-indexing/document-index.md § Triggers contract
-    # for "LLM edits" and "user edits in viewer" — both paths
-    # go through Repo.write_file, so one hook covers both.
-    repo._post_write_callback = llm_service._on_doc_file_written
+    # write/create/rename on Repo triggers the doc builder's
+    # note_file_written, which decides (on extension) whether to
+    # invalidate the doc-index cache entry, re-extract the outline
+    # and schedule keyword enrichment.
+    #
+    # This now covers one of the two write paths it used to. The
+    # user's edits — the viewer, the SVG editor — still go through
+    # Repo.write_file. The agent's do not: the CLI's Write and Edit
+    # tools write to disk directly, and re-indexing after those is
+    # the post-tool-call pass that lands with the MCP bridge in
+    # phase 4 (specs5/plan/README.md).
+    repo._post_write_callback = claude_code_service.doc_builder.note_file_written
 
     await server.start()
     logger.info("WebSocket server started on ws://%s:%d", bind_host, server_port)
 
     # Wire the event callback now that the server is up.
-    # The LLM service's event_callback dispatches to
-    # AcApp.{event_name}(...) on all connected browsers.
-    # jrpc-oo injects get_call() onto instances registered via
-    # add_class, so llm_service.get_call() is available after
-    # server.add_service(llm_service) above.
+    # It dispatches to AcApp.{event_name}(...) on all connected
+    # browsers. jrpc-oo injects get_call() onto instances
+    # registered via add_class, so claude_code_service.get_call()
+    # is available after server.add_service(claude_code_service)
+    # above.
     def _make_real_callback() -> Any:
         async def _cb(event_name: str, *args: Any) -> None:
             # Try both get_call() (method form) and .call
@@ -887,9 +854,9 @@ async def run(
             # varies by version.
             call = None
             try:
-                call = llm_service.get_call()
+                call = claude_code_service.get_call()
             except AttributeError:
-                call = getattr(llm_service, "call", None)
+                call = getattr(claude_code_service, "call", None)
             if call is None:
                 logger.warning(
                     "Event callback: no call proxy available for %s",
@@ -919,16 +886,19 @@ async def run(
         return _cb
 
     event_callback_ref[0] = _make_real_callback()
-    logger.info("Event callback wired (llm_service=%s)", type(llm_service).__name__)
+    logger.info(
+        "Event callback wired (service=%s)",
+        type(claude_code_service).__name__,
+    )
     # Log what jrpc-oo has injected so we can diagnose which
     # form of the call proxy is available.
     logger.info(
-        "llm_service attributes: get_call=%s call=%s",
-        hasattr(llm_service, "get_call"),
-        hasattr(llm_service, "call"),
+        "claude_code_service attributes: get_call=%s call=%s",
+        hasattr(claude_code_service, "get_call"),
+        hasattr(claude_code_service, "call"),
     )
 
-    # Step 8: Open browser
+    # Step 7: Open browser
     url = f"http://localhost:{webapp_port}/?port={server_port}"
     if experimental:
         # Enables UI affordances flagged `locked: true` — e.g.
@@ -944,7 +914,7 @@ async def run(
 
     # Launch Phase 2 as a background task
     asyncio.ensure_future(
-        _heavy_init(llm_service, repo, config, event_callback)
+        _heavy_init(claude_code_service, repo, config, event_callback)
     )
 
     # Keep the server running. On Ctrl-C / SIGTERM we exit

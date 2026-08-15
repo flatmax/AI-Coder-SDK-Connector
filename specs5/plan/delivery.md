@@ -405,6 +405,11 @@ which file gets written and deserves its own decision.
   Context tab and HUD (**phase 6**), the history browser and session management (**phase 5**), and
   relabelling the file picker's "deny agent read" (CC-14).
 
+> **Two of those came forward into phase 3**, and its entry says why. The Context tab and HUD were
+> replaced rather than vacated (CC-17), because a three-phase gap in "how full is the context" is not
+> a neutral wait. CC-14 landed as wiring *and* labels together, because a read-denial behind a label
+> saying "exclude from index" is a dishonest control — worse than either half of the job alone.
+
 ### For whoever picks up phase 3
 
 - **Phase 3 is the deletion.** `LLMService` and `src/ac_dc/llm/` are intact and registered; the
@@ -419,3 +424,326 @@ which file gets written and deserves its own decision.
   `set_denied_read_files`, `set_permission_mode`, `set_model`, `rewind_files`, `stop_task`,
   `reconnect_mcp_server`, `toggle_mcp_server`. A new method that mutates engine state or spends
   money belongs on that list, and `test_claude_code_service.py` should pin it.
+
+> **17 as of phase 3**, and the four new ones do not look gated from `service.py`: `commit_all`,
+> `reset_to_head`, `start_review` and `end_review` delegate, so their `_check_localhost_only()` sits
+> in `claude_code/commit.py` and `claude_code/review.py`.
+
+---
+
+## Phase 3 — The rip-out (2026-08-15)
+
+**Exit criterion:** *"`grep -r litellm src/` is empty; test suite green."* Met on both counts:
+`grep -rn -i litellm src/` and the same over `webapp/src/` return nothing, and both suites pass —
+python **2550 passed, 75 skipped**; webapp **88 files, 3163 passed**.
+
+One commit, per the plan's no-interleaving rule: 189 files, **+6228 / −69527**.
+
+**The suite is green and smaller.** Python went 3897 → 2550 tests, because 52 test files and 33,350
+lines of them tested code that no longer exists. That is a shrinking denominator, not improving
+coverage, and it is the honest reading of the number.
+
+### What went
+
+37 Python modules, 25,371 lines:
+
+| Deleted | Lines | What it was |
+|---|---|---|
+| `llm_service.py` | 2043 | The RPC face of the native engine |
+| `llm/` (20 modules) | 13,704 | Streaming, prompt assembly, the cache warmer, breakdown, agents, the RPC mixins |
+| `stability_tracker.py` + `cache_membrane.py` | 1977 | Four-tier cache assignment and its flux controller |
+| `context_manager.py` | 1393 | The central session state holder |
+| `edit_protocol.py` + `edit_pipeline.py` | 1640 | The emoji edit protocol and its applier |
+| `url_service/` (7 modules) | 2840 | URL detection, fetching, extraction, summarising, cache |
+| `history_compactor.py` | 658 | LLM-driven compaction |
+| `token_counter.py` | 578 | The `tiktoken` wrapper |
+| `file_context.py` | 279 | Per-file context assembly |
+| `agent_factory.py` | 259 | The `🟧🟧🟧 AGENT` spawn protocol |
+
+Seven config files, 569 lines: `system.md`, `system_doc.md`, `system_agentic_appendix.md`,
+`system_reminder.md`, `compaction.md`, `review.md` and `llm.json`. Five were prompts this app composed
+and sent; there is no longer a prompt to compose. **`review.md` has no successor at all** (CC-13) —
+the review no longer describes itself to a model. A review is an *arrangement of the repository* (disk at
+the branch tip, HEAD at the merge-base, everything staged), and the agent reaches the pre-change state
+the way a human reviewer does, with `git show` / `git diff` / `git log`. `commit.md` is the one prompt
+file that stayed (+12/−10): it is a message *format*, handed to the agent per commit rather than
+installed as a system prompt, and `config.py` keeps it out of the editable-file whitelist for that
+reason.
+
+`config.py` lost 896 lines and gained 55: the provider table, the model catalogue, the tier budgets,
+the cache-warmup knobs and the prompt-file loaders all described the deleted engine. **Nothing in the
+config layer writes `os.environ`.** The `claude` CLI resolves its own credentials, and injecting a
+key or a region silently changes which account a turn bills to — that is left as a deliberate
+absence, not an oversight.
+
+Five dependencies left `pyproject.toml` with it: `litellm`, `tiktoken`, `boto3`, `tenacity` and
+`trafilatura`. The reason each one was there is recorded in the comment that replaced them.
+
+`src/ac_dc/__init__.py` now re-exports nothing but `__version__`. It used to hoist the four engine
+types that were constructed everywhere; all four are gone, and the surviving subsystems are reached
+by module path, which keeps `import ac_dc` free of transitive cost.
+
+### What survived by moving
+
+Four pieces of `llm/` were not engine machinery — they were features that happened to live inside the
+engine, and each is re-pointed at the CLI:
+
+| New home | Lines | Was |
+|---|---|---|
+| `claude_code/commit.py` | 321 | `llm/_commit.py` — generate a commit message, stage, commit, reset |
+| `claude_code/review.py` | 410 | `llm/_review.py` — branch review: checkout, diff, posture, teardown |
+| `doc_index/background.py` | 464 | `llm/_doc_index_background.py` — the post-write doc-index builder |
+| `claude_code/service.py` (+294) | — | The LSP RPC surface, `get_snippets`, `navigate_file`, and the git/review RPCs from `llm_service.py` and `llm/_rpc_lifecycle.py` |
+
+Two things about the review move are load-bearing. Review entry switches the engine's permission
+posture to `plan`, which is a control request — so `start_review` is now async where its predecessor
+was not. And a review can be entered on a **cold** engine, before the CLI process exists, where
+there is no client to send a control request to. `EngineSession.prefer_permission_mode` handles that
+case: it sets the posture a *future* `connect` starts in, and `build_option_kwargs` grew a
+`permission_mode` parameter so the session passes its **current** mode rather than `engine.json`'s.
+Without it, connecting would have silently reverted a posture the user had already asked for.
+
+`get_snippets` returns two sets now, `review` and `code`. The `doc` set went with the modes: there is
+no longer a state in which documents are the only thing the agent can see, so a document-specific
+snippet list has nothing to key off.
+
+### The panels were replaced, not vacated
+
+[`decisions.md#cc-17`](decisions.md), rebuilding what CC-4 specified — the HUD and the Context tab
+were the two surfaces most completely made of deleted numbers, and the plan's phase table originally
+left them for phase 6. `inventory.md:155-156` had already named both replacement files.
+Deleting them and shipping a gap for three phases would have removed the app's only answer to *how
+full is the context* at exactly the moment the CLI started making that decision on the user's behalf.
+
+| Deleted | Lines | Replacement | Lines |
+|---|---|---|---|
+| `context-tab.js` | 2360 | `context-usage-tab.js` | 629 |
+| `token-hud.js` | 1245 | `usage-hud.js` | 586 |
+
+Both read `ClaudeCodeService.get_context_usage`, which is a pass-through of the breakdown the CLI's
+own `/context` prints — so the tab and that command cannot disagree. The category colours come from
+the engine and are used verbatim, so a user running both does not have to learn two colour
+languages. `maxTokens` arrives already reduced by the autocompact buffer, so the bar reaching 100%
+is the real trigger point rather than the model's raw window.
+
+Two absences in them are deliberate. There is **no refresh loop** — the breakdown only moves when a
+turn runs or a session loads, so it refreshes on those events plus a button; polling would spend
+control requests watching a number that cannot change on its own. And there is **no "rebuild cache"
+button**, because the cache is the CLI's and there is no request to rebuild it; a button that quietly
+did nothing would be worse than no button.
+
+**Cost renders as "included", never as `$0.00`.** `total_cost_usd` is null under subscription
+billing. A turn on a Max plan did not cost nothing — it cost nothing *extra*, and the two are not the
+same claim. The model is read from the turn rather than from a config default, because `set_model`
+can change it mid-session and a subagent may have used a different one.
+
+The dialog's capacity bar was re-based from `get_history_status` (gone) onto `get_context_usage` for
+the same reason.
+
+### The file picker's third state now means something (CC-14)
+
+The three-state checkbox's third position used to mean *keep this file out of the structural index*.
+There is no index in the prompt to keep it out of, so per [`decisions.md`](decisions.md) § CC-14 it
+now writes a real `Read` deny rule to `.claude/settings.local.json` via
+`ClaudeCodeService.set_denied_read_files`.
+
+**This was listed under phase 2's "Deliberately not built" as deferred by decision**, framed as
+labelling work. It is done here instead, and the reading is worth stating because a later reader will
+find the two in conflict: wiring a read-denial *behind a label that says "exclude from index"* is a
+dishonest control — worse than either half of the job alone. `inventory.md:144` puts CC-14 in the
+phase-3 ADAPT table and `specs5/5-webapp/file-picker.md:5` states the end state outright, so the
+deferral is read as a record of what phase 2 didn't do rather than a prohibition on phase 3. Wiring
+and labels landed together.
+
+- **The picker's user-facing words are "deny agent read"**; the internal vocabulary stays `excluded` /
+  `_excludedFiles` / `exclusion-changed`. That is the name of a *tree state* — the third position of
+  a checkbox — shared with the picker, its event contract and a dozen tests. What changed is what the
+  state means to the backend, and that lives in one function.
+- **One repo-wide RPC, no per-tab dispatch.** The agent-tab branch (`set_agent_excluded_index_files`)
+  was dropped rather than re-pointed: a deny rule lands in settings sources that every SDK subagent
+  inherits, so a per-agent variant would be a promise the permission layer cannot keep.
+- **The list is authoritative, not additive**, which is what makes un-denying work without a second
+  method.
+- **The L0-invalidation dialog is gone** — with its three-way localStorage preference, its CSS and
+  its 20 tests. Excluding a file used to rewrite a ~100K-token cache prefix, so a dialog asking the
+  user whether to pay for that now was honest work. Both halves of the trade are gone: this app
+  builds no aggregate map, and the CLI's prompt cache is the CLI's. Its one surviving job — telling
+  the user the change is not instant — is now a `takes_effect` toast shown **once per session**, plus
+  the checkbox tooltip. The RPC returns that string; the frontend does not assume it.
+- **A remote collaborator's tick is refused and says so.** `set_denied_read_files` is localhost-only
+  (CC-15) and the `error: 'restricted'` path surfaces a toast, because otherwise the checkbox lies.
+
+### Frontend surfaces deleted
+
+Beyond the two replaced panels:
+
+| Deleted | Lines | Why |
+|---|---|---|
+| `compaction-progress.js` + test | 758 | The CLI compacts itself and reports one `compact_boundary`. A progress bar over someone else's compaction would be an animation, not a measurement — the transcript divider is the replacement |
+| `cache-warmup-progress.js` | 322 | There is no cache to warm, and the four `cacheWarmup*` receivers went with it |
+
+Also removed: the **retry banner** (the successor is the `rateLimit` push, which reports the CLI's own
+limit rather than our retry loop); the **reasoning toggle and effort selector** — the `minimal` level
+the selector offered is not in the SDK's `EffortLevel` vocabulary, so it was offering a value that
+could not be sent; five native `compactionEvent` stages (`url_fetch`, `url_ready`, `compacting`,
+`compacted`, `compaction_error`), whose handler now hardens its `default` because *acting* on a stale
+`compacted` would replace the transcript the user is reading with a summary from an engine that is
+gone; the whole `binaryFilesSkipped` receiver, since nothing assembles a prompt from ticked files any
+more so a tick cannot silently fail; and `settings-tab.js`'s config-card grid, cut from eight
+cards to three (`engine`, `app`, `snippets`) with the model rows removed from its banner.
+
+`engine.json` is **editable but not reloadable**, and the card says so: session options are read when
+the CLI subprocess starts, so a reload would report success while the running engine kept its
+original model and posture. `app.json` does reload, because that one takes.
+
+The banner names no model even if a stale backend volunteers one. `engine.json`'s value is a
+*request*; the engine can answer on a different model (a rate-limit fallback, a mid-session
+`set_model`), and the model actually used is reported per turn by the HUD.
+
+### Dormant, annotated, not deleted
+
+Five push receivers have no emitter after this phase — `modeChanged`, `agentModeChanged`,
+`agentsSpawned`, `agentsRehydrated`, `agentClosed` — and so do the surfaces that consume them: the
+code/doc mode toggle and the agent tab strip. They are **kept and commented, not tombstoned**,
+because their replacements are deferred *by decision*: the preset selector is CC-12 and the subagent
+browser is CC-8. Deleting a receiver while leaving its tab strip mounted moves the break rather than
+fixing it.
+
+The consequence is worth knowing when reading that code: an agent tab can only be created by an
+`agentsSpawned` push, nothing emits one, so `parseAgentTabId` cannot return a tag outside the tests
+and every `LLMService` call inside the strip is unreachable rather than broken. `app-shell/mode.js`'s
+`switchMode` guards on the method being absent and returns.
+
+`selection.js` carried a phase-3 promise that could not be kept — "phase 3 removes both the call and
+its caller". The call site stays with the dormant strip it belongs to, and the comment now says why
+instead of predicting a deletion that didn't happen. The sibling promise in `events.js` — "they stay
+until phase 3 deletes `LLMService`" — was honoured.
+
+`LLMService` call sites in still-live code were left in place with the phase that owns each: phase 4
+(`set_cross_reference`, `set_agent_cross_reference`), phase 5 (`history_list_sessions`,
+`history_get_session`, `history_search`, `get_turn_archive`, `load_session_into_context`,
+`new_session`), CC-8 (`close_agent_context`, `set_agent_selected_files`, `list_live_agents`,
+`get_agent_history`, `switch_agent_mode`) and CC-12 (`switch_mode`).
+
+### Tests
+
+Three new backend files, 104 tests, covering the three re-homed modules:
+
+| File | Tests |
+|---|---|
+| `test_doc_index_background.py` | 43 |
+| `test_claude_code_review.py` | 33 |
+| `test_claude_code_commit.py` | 28 |
+
+`test_claude_code_service.py` grew to 175 (+59/−17) for the absorbed RPC surface.
+`test_config.py` (−478 net) and `test_settings.py` (−103 net) shed the provider, model-catalogue and
+prompt-file cases.
+
+**`test_collab_restrictions.py` went 68 → 34 tests, and the fix it exists to protect survived.**
+Half its cases pinned `LLMService`'s gates. What matters is that `TestGateUnderRealDispatch` — the
+five tests pinning phase 2's `ContextVar` fix, including "the caller survives an `await` inside the
+method" — is independent of `LLMService` and is intact. Phase 2's note that the fix is load-bearing
+beyond that phase was the reason to check.
+
+Frontend: `exclusion.test.js` 18 (the 20 L0-dialog tests replaced by 11 read-denial ones),
+`events.test.js` 39, `per-tab.test.js` 25, `settings-tab.test.js` 18.
+
+**Neither new panel has a unit test.** `context-tab.js` and `token-hud.js` had none either, so this
+is an inherited gap rather than a new one, but it is a gap: the two files are 1215 lines with only
+the service-level tests for `get_context_usage` behind them.
+
+### Live verification — not done for this phase
+
+This was a deletion, verified by two suites and a grep. **The replacement panels have not been
+exercised against a running CLI**, so their rendering of a real `ContextUsageResponse` — the category
+list, the colours, the "included" cost path under subscription billing — is unproven outside the
+service-level pass-through tests. Phase 6's exit criterion ("the Context tab shows the same numbers
+as `/context` in the CLI, live") is the check that closes this, and it is worth doing sooner than
+that.
+
+Two empty package directories were removed by hand (`src/ac_dc/llm/`, `src/ac_dc/url_service/`);
+both held nothing but stale `__pycache__` after their contents were deleted.
+
+### Deviations from `inventory.md`
+
+- **The review orchestration landed at `claude_code/review.py`, not `repo/review.py`.**
+  `repo/review.py` already existed as the git-mechanics mixin, and the orchestration needs the
+  engine — permission posture, prompt streaming, index rebuild. Splitting them keeps the mixin
+  free of the engine; `repo/review.py`'s docstring now points at the orchestrator.
+- **The specs' "recorded in the transcript as a system event" is not implemented, for any of the
+  three things that claim it** — review entry and exit (`4-features/code-review.md:273`), a mode
+  change during review (`:295`), and a permission-mode change (`4-features/collaboration.md:247`).
+  All three broadcast live (`reviewStarted` / `reviewEnded`, `permissionModeChanged`) and vanish
+  on reload, exactly as phase 2's compaction divider does. There is no transcript to write to until
+  phase 5, so the deviation is one of ordering rather than of design; it is listed here so phase 5
+  finds the three claims rather than one of them.
+- **The two TeX RPCs were deleted, not re-homed**, against `inventory.md:76` ("navigate, TeX,
+  snippets survive"). `LLMService.is_tex_preview_available` / `compile_tex_preview` were thin
+  duplicates of `repo/tex_preview.py`, and the frontend already called `Repo.*` — so re-homing them
+  onto `ClaudeCodeService` would have created a second name for a working RPC. `navigate_file` and
+  `get_snippets` did survive onto the service, because they have no `Repo` equivalent.
+- **`context_usage.py` was not created**, against `inventory.md:103`, which lists it as a new backend
+  module doing "fetch, shaping, and caching for the Context tab". `ClaudeCodeService.get_context_usage`
+  has existed since phase 1 and is already a pass-through; shaping happens in the two components, and
+  caching would put a stale number in front of the user for no gain, since the call is one control
+  request against a value that only moves when a turn runs.
+- **`Repo.get_files_by_directory` and `get_directory_mtime` were deleted**, not kept: their only
+  caller was the engine's per-directory prompt assembly.
+- **The empty-path post-write signal is a no-op until phase 4.** `Repo`'s post-write callback is now
+  `DocIndexBuilder.note_file_written`, which covers *one* of the two write paths it used to. The
+  user's edits go through `Repo.write_file`; the agent's do not — the CLI's `Write` and `Edit` write
+  to disk directly, and re-indexing after those is the post-tool-call hook that lands with the MCP
+  bridge in phase 4. This is stated in `main.py` at the wiring site so it isn't rediscovered as a
+  bug.
+- **`edit-blocks.js`, `edit-block-render.js`, `agent-block-render.js` and the prose render path were
+  kept**, against the inventory's DELETE. They are the decoders for archived transcripts: a session
+  saved before the conversion contains emoji edit blocks and `🟧🟧🟧 AGENT` framing, and deleting the
+  renderers turns old history into garbage on screen. They are archive decoders now, not a live path,
+  and they revisit with phase 5.
+- **Retired config files are ignored, not deleted** — a deliberate choice the inventory did not
+  specify. The upgrade iterator walks the *union* of the managed and user file sets, so a user
+  upgrading in place keeps their `system.md` and `llm.json` on disk. That text may be customised
+  prompt work; deleting it would be irreversible and pointless, since nothing reads the file either
+  way. The cost is a few kilobytes. What was **not** built is the notice: nothing tells such a user
+  the files are now inert.
+- **The permission-rule destination default flipped to `localSettings` before this phase, not in
+  it** — CC-16 landed as its own commit, as the note under phase 2 records.
+- **`prefer_permission_mode` and `build_option_kwargs(permission_mode=…)` are new seams** the
+  inventory did not anticipate; the cold-engine review-entry case above is why.
+- **`engine` is a new config type** in the settings whitelist, replacing `llm`.
+- **Doc-index enrichment for CLI-tool writes is deferred to phase 4** (same cause as the no-op
+  signal above).
+
+### Deliberately not built
+
+- **No live verification of the new panels** — see above. This is the one that should be closed first.
+- **No unit tests for `usage-hud.js` / `context-usage-tab.js`.**
+- **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8.
+- **No upgrade notice for a stale `llm.json` or `system.md`.** They are left on disk and ignored.
+- **The doc index still misses the agent's writes.** Phase 4.
+- **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged from phase 2.
+
+### For whoever picks up phase 4
+
+- **Phase 4 is the MCP bridge, and it inherits one clear consumer.** The plan's ordering constraint
+  ("indexes after the rip-out, not before") is now satisfied: prompt assembly is gone, so the symbol
+  and doc indexes have exactly one consumer — the browser — and the bridge is written against that
+  instead of two competing ones.
+- **Two things are waiting on the post-tool-call hook**, and they are the same thing: the file tree
+  does not refresh after the agent writes, and the doc index does not learn about it. Both are the
+  callback in `main.py` covering only `Repo.write_file`. Wire the hook once and both close.
+- **17 RPCs are localhost-gated now, not 13, and four of them do not look it.** `commit_all`,
+  `reset_to_head`, `start_review` and `end_review` delegate, so the `_check_localhost_only()` call is
+  in `claude_code/commit.py` and `claude_code/review.py` rather than in `service.py`. A grep of
+  `service.py` alone will read them as ungated. They are pinned by
+  `test_claude_code_commit.py` and `test_claude_code_review.py`.
+- **`collab.py`'s `ContextVar` fix survived the deletion**, as phase 2's note required. Its five
+  tests are `TestGateUnderRealDispatch` in `test_collab_restrictions.py`; that file lost half its
+  cases with `LLMService` and those five are the ones that must not go.
+- **Nothing in the config layer may write `os.environ`.** The CLI resolves its own credentials, and
+  an injected key or region silently changes which account a turn bills to.
+- **Phase 1's absence assertions are now phase 5's alone.** `get_denied_read_files` and
+  `set_denied_read_files` both exist and are tested; `history_list`, `history_load` and
+  `history_delete` are still asserted absent by `test_phase_five_methods_are_absent`, on phase 1's
+  reasoning that a stub reporting success would be worse than a missing method. Delete that test as
+  you build them, not before.

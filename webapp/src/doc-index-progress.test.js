@@ -1,8 +1,8 @@
 // Tests for DocIndexProgress overlay.
 //
-// Mirrors compaction-progress.test.js — fake timers for
-// deterministic timing, no rAF / no settle() helper (per D15
-// in IMPLEMENTATION_NOTES.md — fake timers break jsdom's rAF).
+// Fake timers for deterministic timing, no rAF / no settle()
+// helper (per D15 in IMPLEMENTATION_NOTES.md — fake timers
+// break jsdom's rAF).
 
 import {
   afterEach, beforeEach, describe, expect, it, vi,

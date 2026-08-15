@@ -23,7 +23,7 @@ export function onGitAction(host, event) {
 /**
  * Handle commit_all completion on the shell side.
  *
- * `LLMService.commit_all` returns `{status: "started"}`
+ * `ClaudeCodeService.commit_all` returns `{status: "started"}`
  * synchronously, so the real outcome — success OR error —
  * only arrives here, via the broadcast `commit-result`
  * window event. The synchronous error branch in `onCommit`
@@ -165,7 +165,7 @@ export async function onCopyDiff(host) {
 }
 
 /**
- * Start a commit via LLMService.commit_all. The server
+ * Start a commit via ClaudeCodeService.commit_all. The server
  * does staging → diff → LLM-generated message → commit
  * as a background task and broadcasts commit-result
  * when done. We just set _committing=true to disable
@@ -180,7 +180,7 @@ export async function onCommit(host) {
   if (host._committing || host._reviewActive) return;
   if (host._streaming) return;
   if (!host._isLocalhost) return;
-  const fn = host.call['LLMService.commit_all'];
+  const fn = host.call['ClaudeCodeService.commit_all'];
   if (typeof fn !== 'function') {
     host._showToast('Commit not available', 'warning');
     return;
@@ -266,7 +266,7 @@ export async function onResetToHead(host) {
     'Reset working tree to HEAD?\n\nAll uncommitted changes (staged and unstaged) will be discarded. This cannot be undone.',
   );
   if (!confirmed) return;
-  const fn = host.call['LLMService.reset_to_head'];
+  const fn = host.call['ClaudeCodeService.reset_to_head'];
   if (typeof fn !== 'function') {
     host._showToast('Reset not available', 'warning');
     return;

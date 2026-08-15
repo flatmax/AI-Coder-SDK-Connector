@@ -106,82 +106,16 @@ export const _EXPERIMENTAL_ENABLED = (() => {
 /** localStorage key for the snippet drawer's open/closed state. */
 export const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
 
-/** localStorage key for the reasoning / extended-thinking toggle. */
-export const _REASONING_STORAGE_KEY = 'ac-dc-reasoning-enabled';
-
-export function _loadReasoningEnabled() {
-  try {
-    return localStorage.getItem(_REASONING_STORAGE_KEY) === 'true';
-  } catch (_) {
-    return false;
-  }
-}
-
-export function _saveReasoningEnabled(enabled) {
-  try {
-    localStorage.setItem(
-      _REASONING_STORAGE_KEY,
-      enabled ? 'true' : 'false',
-    );
-  } catch (_) {
-    // Best-effort persistence.
-  }
-}
-
-/** localStorage key for the reasoning effort level. */
-export const _REASONING_EFFORT_STORAGE_KEY = 'ac-dc-reasoning-effort';
-
-/**
- * Effort levels offered in the dropdown — mirrors LiteLLM's
- * ``reasoning_effort`` vocabulary. The per-model ceiling
- * (xhigh/max only on models that advertise them, e.g. Opus
- * 4.8) is enforced by the provider, which rejects an
- * unsupported level with an error surfaced as a toast.
- */
-export const _REASONING_EFFORT_LEVELS = [
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-];
-
-/**
- * Compact labels for the effort badge overlaid on the 🧠
- * toggle. The dropdown still lists the full level names; only
- * the badge (limited corner real estate) uses these.
- */
-export const _REASONING_EFFORT_ABBREV = {
-  minimal: 'MIN',
-  low: 'LO',
-  medium: 'MED',
-  high: 'HI',
-  xhigh: 'XH',
-  max: 'MAX',
-};
-
-const _DEFAULT_REASONING_EFFORT = 'xhigh';
-
-export function _loadReasoningEffort() {
-  try {
-    const stored = localStorage.getItem(_REASONING_EFFORT_STORAGE_KEY);
-    if (_REASONING_EFFORT_LEVELS.includes(stored)) {
-      return stored;
-    }
-  } catch (_) {
-    // Fall through to default.
-  }
-  return _DEFAULT_REASONING_EFFORT;
-}
-
-export function _saveReasoningEffort(effort) {
-  try {
-    localStorage.setItem(_REASONING_EFFORT_STORAGE_KEY, effort);
-  } catch (_) {
-    // Best-effort persistence.
-  }
-}
+// The reasoning toggle's and effort selector's localStorage shims stood here
+// until conversion phase 3. Both fed arguments to the native
+// ``chat_streaming`` — ``reasoning`` and ``effort`` — that
+// ``ClaudeCodeService.chat_streaming`` does not take: thinking depth is the
+// CLI's to decide, and effort is set once in ``engine.json`` and consumed when
+// the subprocess starts. The level list was also wrong for the new engine, on
+// top of being unsent — it offered ``minimal``, which is not in the SDK's
+// vocabulary (``low``/``medium``/``high``/``xhigh``/``max``), so a user's
+// stored preference could not have been honoured even if something forwarded
+// it.
 
 export function _loadDrawerOpen() {
   try {

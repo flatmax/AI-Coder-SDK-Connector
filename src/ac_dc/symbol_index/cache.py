@@ -18,11 +18,11 @@ Design points:
   rather than the rendered compact format. The formatted
   output changes when path aliases or exclude-files sets
   change between requests — using it as the hash source would
-  cause spurious demotions in the stability tracker.
+  report a structural change on every one of those.
 
 - **Deterministic hashing.** Same symbol data → same hash, every
-  run. The stability tracker relies on this to detect genuine
-  structural changes.
+  run. Callers rely on this to tell a genuine structural change
+  from a re-index that found the same code.
 
 Governing spec: ``specs4/2-indexing/symbol-index.md#caching``.
 """
@@ -45,8 +45,7 @@ class SymbolCache(BaseCache[FileSymbols]):
     - ``put(path, mtime, file_symbols)`` stores, computing a
       signature hash from the symbol structure.
     - ``invalidate(path)`` / ``clear()`` drop entries.
-    - ``get_signature_hash(path)`` exposes the structural hash
-      for the stability tracker.
+    - ``get_signature_hash(path)`` exposes the structural hash.
 
     No disk persistence — ``_persist`` and ``_remove_persisted``
     inherit the base class's no-op defaults. The cache is
@@ -60,7 +59,7 @@ class SymbolCache(BaseCache[FileSymbols]):
     def _compute_signature_hash(self, value: FileSymbols) -> str:
         """SHA-256 hex digest of the file's structural signature.
 
-        The hash covers what the stability tracker cares about:
+        The hash covers structure and only structure:
 
         - Top-level symbol names, kinds, and parameter signatures
         - Nested children (methods on a class, nested functions)
@@ -75,7 +74,7 @@ class SymbolCache(BaseCache[FileSymbols]):
         - File path — baked into the cache key already.
         - Call sites — implementation detail of a symbol body;
           a refactor that moves code between methods shouldn't
-          trip the stability tracker just because call-site
+          read as a structural change just because call-site
           positions shifted.
 
         The digest is lowercase hex, 64 characters. Callers
@@ -87,8 +86,8 @@ class SymbolCache(BaseCache[FileSymbols]):
         # Imports — module names in source order. Aliases and
         # from-import names are intentionally excluded: adding an
         # alias to an existing import doesn't change the
-        # structural topology, which is what the stability
-        # tracker cares about.
+        # structural topology, which is the only thing the
+        # signature is meant to track.
         for imp in value.imports:
             parts.append(f"i:{imp.module}")
 

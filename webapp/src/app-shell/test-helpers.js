@@ -146,7 +146,7 @@ export function tick() {
  * every test to install matching stubs.
  */
 export function installAppShellTestSetup() {
-  let _origFetchHistoryStatus;
+  let _origFetchContextUsage;
   let _origFilesTabLoadTree;
   let _origSettingsLoadInfo;
   let _origContextRefresh;
@@ -155,8 +155,8 @@ export function installAppShellTestSetup() {
     SharedRpc.reset();
     vi.useRealTimers();
     localStorage.clear();
-    _origFetchHistoryStatus = AppShell.prototype._fetchHistoryStatus;
-    AppShell.prototype._fetchHistoryStatus = function () {};
+    _origFetchContextUsage = AppShell.prototype._fetchContextUsage;
+    AppShell.prototype._fetchContextUsage = function () {};
     // Child tabs all live in separate modules. Import
     // them lazily so the test file doesn't need an
     // explicit import — they're already loaded
@@ -165,14 +165,14 @@ export function installAppShellTestSetup() {
       await import('../files-tab/index.js');
     const { SettingsTab } =
       await import('../settings-tab.js');
-    const { ContextTab } =
-      await import('../context-tab.js');
+    const { ContextUsageTab } =
+      await import('../context-usage-tab.js');
     _origFilesTabLoadTree = FilesTab.prototype._loadFileTree;
     _origSettingsLoadInfo = SettingsTab.prototype._loadInfo;
-    _origContextRefresh = ContextTab.prototype._refresh;
+    _origContextRefresh = ContextUsageTab.prototype._refresh;
     FilesTab.prototype._loadFileTree = async function () {};
     SettingsTab.prototype._loadInfo = async function () {};
-    ContextTab.prototype._refresh = async function () {};
+    ContextUsageTab.prototype._refresh = async function () {};
   });
 
   afterEach(async () => {
@@ -183,16 +183,16 @@ export function installAppShellTestSetup() {
       }
     }
     SharedRpc.reset();
-    AppShell.prototype._fetchHistoryStatus = _origFetchHistoryStatus;
+    AppShell.prototype._fetchContextUsage = _origFetchContextUsage;
     const { FilesTab } =
       await import('../files-tab/index.js');
     const { SettingsTab } =
       await import('../settings-tab.js');
-    const { ContextTab } =
-      await import('../context-tab.js');
+    const { ContextUsageTab } =
+      await import('../context-usage-tab.js');
     FilesTab.prototype._loadFileTree = _origFilesTabLoadTree;
     SettingsTab.prototype._loadInfo = _origSettingsLoadInfo;
-    ContextTab.prototype._refresh = _origContextRefresh;
+    ContextUsageTab.prototype._refresh = _origContextRefresh;
   });
 }
 

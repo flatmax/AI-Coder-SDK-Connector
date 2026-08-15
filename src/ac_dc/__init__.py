@@ -1,7 +1,17 @@
 """AC-DC — AI Coder - DeCoder.
 
-AI-assisted code editing with a browser UI, stability-based prompt caching,
-and document-mode support.
+A browser UI over Claude Code: the repository layer, both indexes,
+document conversion and collaboration are AC⚡DC's; the conversation is
+the Claude Code CLI's, driven through the Claude Agent SDK.
+
+The package root deliberately re-exports nothing but the version. It used
+to hoist the native engine's central types — the token counter, the
+context manager, the stability tracker, the history compactor — because
+they were constructed everywhere. All four are gone with the engine, and
+the surviving subsystems are reached by their own module paths
+(``ac_dc.repo``, ``ac_dc.symbol_index``, ``ac_dc.doc_index``,
+``ac_dc.claude_code``), which keeps importing this package free of any
+transitive cost.
 """
 
 from pathlib import Path
@@ -24,50 +34,3 @@ def _read_version() -> str:
 __version__ = _read_version()
 
 __all__ = ["__version__"]
-
-
-# Token counter — cheap re-export so callers can write
-# ``from ac_dc import TokenCounter`` rather than knowing the
-# submodule path. The class is lightweight and has no heavy
-# imports at module load (tiktoken is loaded lazily inside the
-# constructor), so pulling it into ``__init__`` costs nothing
-# for callers that don't use it.
-from ac_dc.token_counter import TokenCounter  # noqa: E402
-
-# Context manager — the central state holder for an LLM session.
-# Same rationale as TokenCounter: cheap import, commonly used,
-# reads more naturally as ``from ac_dc import ContextManager``.
-from ac_dc.context_manager import ContextManager, Mode  # noqa: E402
-
-# Stability tracker — cache tier assignment. Lightweight import;
-# commonly constructed at startup and attached to the context
-# manager.
-from ac_dc.stability_tracker import (  # noqa: E402
-    StabilityTracker,
-    Tier,
-    TrackedItem,
-)
-
-# History compactor — summarises or truncates old history to
-# keep the conversation within a token budget. Construct with
-# a config manager, token counter, and an optional detector
-# callable (injected by the streaming handler to make the
-# actual LLM call).
-from ac_dc.history_compactor import (  # noqa: E402
-    CompactionResult,
-    HistoryCompactor,
-    TopicBoundary,
-)
-
-__all__ = [
-    "__version__",
-    "CompactionResult",
-    "ContextManager",
-    "HistoryCompactor",
-    "Mode",
-    "StabilityTracker",
-    "Tier",
-    "TokenCounter",
-    "TopicBoundary",
-    "TrackedItem",
-]

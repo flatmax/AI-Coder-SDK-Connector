@@ -47,10 +47,12 @@ Design notes pinned here:
   cache; this module just holds the name as state for
   construction.
 
-- **No global singleton.** Each :class:`LLMService` constructs
-  its own enricher. Parallel-agent mode (Layer 7) wants one
-  per agent so the D10 "per-context-manager scoping"
-  contract holds uniformly.
+- **No global singleton.** The service constructs one enricher
+  alongside the doc index it feeds
+  (:meth:`ac_dc.claude_code.service.ClaudeCodeService._build_doc_builder`).
+  Per-instance rather than module-level so the D10
+  "per-context-manager scoping" contract holds if a second
+  index is ever built beside the first.
 """
 
 from __future__ import annotations

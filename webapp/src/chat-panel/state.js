@@ -182,29 +182,6 @@ export function makeTabState() {
     // continue the conversation. Live tabs default to
     // false; only historical tabs flip this to true.
     readOnly: false,
-    // Retry progress banner state. Populated by
-    // onStreamRetry when the backend's retry wrapper
-    // emits a streamRetry event (rate-limit, api
-    // connection, service unavailable, timeout).
-    // Cleared when a chunk arrives (stream succeeded
-    // on retry) or stream completes.
-    //
-    // Shape when active:
-    //   {
-    //     attempt: 1-indexed current attempt,
-    //     maxAttempts, errorType, message, provider,
-    //     context, waitSeconds: float backoff duration,
-    //     startedAt: Date.now() at event receipt,
-    //   }
-    //
-    // Per-tab because multiple agent tabs can be
-    // retrying concurrently and each needs its own
-    // countdown.
-    retryInfo: null,
-    // Non-reactive handle for the 100ms setInterval
-    // that drives the countdown's re-render. Managed
-    // by startRetryTick / stopRetryTick in streaming.js.
-    retryTickHandle: null,
   };
 }
 
@@ -241,7 +218,6 @@ const REACTIVE_FIELDS = [
   ['_fileSearchResults', 'fileSearchResults'],
   ['_fileSearchLoading', 'fileSearchLoading'],
   ['_fileSearchFocusedIndex', 'fileSearchFocusedIndex'],
-  ['_retryInfo', 'retryInfo'],
   // selectedFiles is pushed by the files-tab via
   // direct assignment; per-tab because agent tabs
   // will get their own selection. Reactive because
@@ -269,8 +245,7 @@ const NON_REACTIVE_FIELDS = [
   // Run-timer start stamp. Non-reactive because the
   // live elapsed counter re-renders off the panel-
   // level 250ms ticker (see startStreamTimerTick in
-  // streaming.js), not off a per-write requestUpdate —
-  // mirrors the retryInfo / retryTickHandle pairing.
+  // streaming.js), not off a per-write requestUpdate.
   ['_streamStartedAt', 'streamStartedAt'],
   ['_autoScroll', 'autoScroll'],
   ['_suppressNextPaste', 'suppressNextPaste'],
@@ -278,7 +253,6 @@ const NON_REACTIVE_FIELDS = [
   ['_fileSearchGeneration', 'fileSearchGeneration'],
   ['_fileSearchDebounceTimer', 'fileSearchDebounceTimer'],
   ['_fileSearchScrollPaused', 'fileSearchScrollPaused'],
-  ['_retryTickHandle', 'retryTickHandle'],
 ];
 
 /**

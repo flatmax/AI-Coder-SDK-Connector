@@ -2,7 +2,7 @@
 // commit-result handler, which is the ONLY place the
 // server-driven commit pipeline's errors reach the user.
 //
-// `LLMService.commit_all` returns `{status: "started"}`
+// `ClaudeCodeService.commit_all` returns `{status: "started"}`
 // synchronously and the real outcome arrives later as a
 // broadcast `commit-result` event. The chat panel's handler
 // deliberately stays silent on errors and relies on the

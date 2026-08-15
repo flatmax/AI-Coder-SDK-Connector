@@ -60,7 +60,7 @@ describe('DiffViewer LSP integration', () => {
     });
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => ''),
-      'LLMService.lsp_get_hover': hoverFn,
+      'ClaudeCodeService.lsp_get_hover': hoverFn,
     });
     const el = mountViewer();
     await settle(el);
@@ -83,7 +83,7 @@ describe('DiffViewer LSP integration', () => {
     });
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => ''),
-      'LLMService.lsp_get_hover': hoverFn,
+      'ClaudeCodeService.lsp_get_hover': hoverFn,
     });
     const el = mountViewer();
     await settle(el);
@@ -132,7 +132,7 @@ describe('DiffViewer LSP integration', () => {
     });
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => ''),
-      'LLMService.lsp_get_definition': defFn,
+      'ClaudeCodeService.lsp_get_definition': defFn,
     });
     const el = mountViewer();
     await settle(el);
@@ -152,7 +152,7 @@ describe('DiffViewer LSP integration', () => {
   it('references provider returns empty for null result', async () => {
     setFakeRpc({
       'Repo.get_file_content': vi.fn(async () => ''),
-      'LLMService.lsp_get_references': vi.fn(async () => null),
+      'ClaudeCodeService.lsp_get_references': vi.fn(async () => null),
     });
     const el = mountViewer();
     await settle(el);

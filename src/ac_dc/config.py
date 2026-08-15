@@ -6,13 +6,23 @@ Single class :class:`ConfigManager` owns:
   platform-specific user directory).
 - Version-aware upgrade — bundled managed files get overwritten on
   upgrade (with a timestamped backup); user files are never touched.
-- Cached but hot-reloadable access to the LLM config, app config,
-  snippets, and the prompt markdown files.
-- Model-aware cache-target computation (min cacheable tokens vary by
-  Claude family).
+- Cached but hot-reloadable access to the app config, the snippets and
+  the one remaining prompt (the commit-message one-shot's).
 - Per-repo ``.ac-dc4/`` working directory creation and gitignore wiring.
 
-Governing specs: ``specs4/1-foundation/configuration.md`` and
+Most of what this module used to hold went with the native engine. The
+conversation's system prompt, its document and review variants, the
+per-turn reminder, the compaction prompt, every provider knob (models,
+timeouts, retries, cache minimums, credential env vars) and the tiering
+parameters all described an engine AC⚡DC no longer runs — the CLI owns
+its own prompt, its own model selection and its own context management.
+What is left is what AC⚡DC still decides for itself: how it converts
+documents, how it indexes them, which snippets the composer offers, and
+how it asks a throwaway session for a commit message. The engine's own
+handful of settings live in ``engine.json``, read by
+:class:`ac_dc.claude_code.engine_config.EngineConfig` rather than here.
+
+Governing specs: ``specs5/1-foundation/configuration.md`` and
 ``specs4/6-deployment/packaging.md``.
 """
 
@@ -27,8 +37,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ac_dc.token_counter import _min_cacheable_for
-
 logger = logging.getLogger(__name__)
 
 
@@ -37,30 +45,31 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # Managed files — safe to overwrite on upgrade. The bundled copy is
-# the source of truth; user customisations to these should live in
-# system_extra.md (for prompt additions) or be applied via git patches
-# to the source tree.
+# the source of truth; user customisations to these should be applied
+# via git patches to the source tree.
 #
 # User files — expected to be user-edited. Created from the bundle on
 # first install, then never touched. Upgrading the app never clobbers
-# the user's API keys or custom extra prompt.
+# the user's engine settings.
+#
+# Eight files left these sets with the native engine: llm.json,
+# system.md, system_doc.md, system_agentic_appendix.md, system_extra.md,
+# review.md, compaction.md and system_reminder.md. The upgrade pass
+# iterates the union of the two sets, so a user who still has those
+# files on disk keeps them: they may hold a customised prompt, that text
+# is real work, and deleting it would be both irreversible and pointless
+# (nothing reads the file either way). Ignoring them costs a few
+# kilobytes. See specs5/1-foundation/configuration.md § Retired files
+# are ignored, not deleted.
 
 _MANAGED_FILES = frozenset({
-    "system.md",
-    "system_doc.md",
-    "system_agentic_appendix.md",
-    "review.md",
     "commit.md",
-    "compaction.md",
-    "system_reminder.md",
     "app.json",
     "snippets.json",
 })
 
 _USER_FILES = frozenset({
     "engine.json",
-    "llm.json",
-    "system_extra.md",
 })
 
 # Version marker filename inside the user config dir. Hidden (leading
@@ -81,53 +90,22 @@ _AC_DC_DIR = ".ac-dc4"
 # ---------------------------------------------------------------------------
 #
 # Only these names can be read/written through the Settings service.
-# Some managed files (commit.md, system_reminder.md) are deliberately
-# absent — they're loaded internally but not exposed for UI editing.
+# ``commit.md`` is deliberately absent — it's loaded internally but not
+# exposed for UI editing.
+#
+# Three entries, down from eight. The five prompt entries went with the
+# prompt files, and the provider entry (``llm.json``) went with the
+# engine that read it; ``engine`` took its place. Note that most of
+# ``engine.json`` takes effect only on a new session — the Settings tab
+# says so rather than appearing to apply live. See
+# specs5/1-foundation/configuration.md § What a config change can and
+# cannot do live.
 
 CONFIG_TYPES: dict[str, str] = {
-    "litellm": "llm.json",
+    "engine": "engine.json",
     "app": "app.json",
     "snippets": "snippets.json",
-    "system": "system.md",
-    "system_extra": "system_extra.md",
-    "compaction": "compaction.md",
-    "review": "review.md",
-    "system_doc": "system_doc.md",
 }
-
-
-# ---------------------------------------------------------------------------
-# Model-family cache minimums
-# ---------------------------------------------------------------------------
-#
-# Anthropic's prompt-caching docs specify different minimums per
-# family and version. Getting this wrong means the provider silently
-# doesn't cache the block and we eat the full ingestion cost.
-#
-# The table itself lives in :mod:`ac_dc.token_counter`; earlier
-# revisions duplicated it here and the two drifted (a new Opus was
-# added to one list and not the other). ``_DEFAULT_MIN_TOKENS`` stays
-# local — it's also the default for the user-facing
-# ``cache_min_tokens`` setting, which is a config concern.
-
-_DEFAULT_MIN_TOKENS = 1024
-
-
-def _model_min_cacheable_tokens(model: str) -> int:
-    """Return the provider's minimum cacheable token count for ``model``.
-
-    Hardcoded per Anthropic's published minimums, resolved by model
-    family and version — see
-    :data:`ac_dc.token_counter._FAMILY_MIN_CACHEABLE`. Non-Claude
-    models and Claude releases older than every listed floor get the
-    default (1024).
-
-    Delegates to :mod:`ac_dc.token_counter` so the table lives in
-    exactly one place. The dependency runs one way only (the counter
-    imports nothing from here), which is what lets the counter stay
-    constructible without a ``ConfigManager``.
-    """
-    return _min_cacheable_for(model)
 
 
 # ---------------------------------------------------------------------------
@@ -250,10 +228,9 @@ class ConfigManager:
             Path(repo_root) if repo_root is not None else None
         )
 
-        # Lazily-loaded caches. None means "not yet loaded"; a dict
-        # or string means "loaded, use this value". Hot-reload
-        # methods set these back to None to force re-read.
-        self._llm_config: dict[str, Any] | None = None
+        # Lazily-loaded cache. None means "not yet loaded"; a dict
+        # means "loaded, use this value". The hot-reload method sets
+        # it back to None to force a re-read.
         self._app_config: dict[str, Any] | None = None
 
         # Run the upgrade pass. Failure here is non-fatal — if the
@@ -467,282 +444,6 @@ class ConfigManager:
         return parsed
 
     # ------------------------------------------------------------------
-    # LLM config accessors
-    # ------------------------------------------------------------------
-
-    @property
-    def llm_config(self) -> dict[str, Any]:
-        """Full LLM config dict, lazily loaded."""
-        if self._llm_config is None:
-            self._llm_config = self._read_user_json("llm.json")
-        return self._llm_config
-
-    @property
-    def model(self) -> str:
-        """Primary model name (provider-prefixed, e.g. ``anthropic/...``)."""
-        return self.llm_config.get(
-            "model", "anthropic/claude-sonnet-4-5-20250929"
-        )
-
-    @property
-    def smaller_model(self) -> str:
-        """Smaller / faster model for auxiliary tasks.
-
-        Accepts both ``smaller_model`` (snake_case, preferred) and
-        ``smallerModel`` (camelCase) for compatibility — specs4 says
-        both must be honoured.
-        """
-        cfg = self.llm_config
-        return cfg.get(
-            "smaller_model",
-            cfg.get("smallerModel", "anthropic/claude-haiku-4-5-20251001"),
-        )
-
-    @property
-    def max_output_tokens(self) -> int | None:
-        """User-configured ceiling for model output tokens.
-
-        Per specs-reference/3-llm/streaming.md § Max-tokens
-        resolution: when set, overrides the per-model default from
-        :class:`TokenCounter`. When absent (the default), callers
-        fall back to ``counter.max_output_tokens``.
-
-        Returning ``None`` rather than a sentinel integer lets
-        callers distinguish "user set no preference" from "user
-        explicitly set this low number". The two interpretations
-        diverge if a future model ships with a smaller default
-        than a previous user config — we want the per-model
-        default to apply, not a stale override.
-
-        Non-integer or non-positive values are ignored with a
-        warning (treated as unset). A zero or negative max
-        tokens is never what the user meant and would cause
-        providers to reject the request outright.
-        """
-        raw = self.llm_config.get("max_output_tokens")
-        if raw is None:
-            return None
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            logger.warning(
-                "llm.json 'max_output_tokens' is not an integer "
-                "(got %r); ignoring",
-                raw,
-            )
-            return None
-        if value <= 0:
-            logger.warning(
-                "llm.json 'max_output_tokens' must be positive "
-                "(got %d); ignoring",
-                value,
-            )
-            return None
-        return value
-
-    @property
-    def cache_min_tokens(self) -> int:
-        """User-configured minimum cacheable tokens.
-
-        Can override the model-family minimum upward but never below
-        the provider's hard floor (enforced in
-        :meth:`cache_target_tokens_for_model`).
-        """
-        return int(self.llm_config.get("cache_min_tokens", _DEFAULT_MIN_TOKENS))
-
-    # ------------------------------------------------------------------
-    # Network / streaming timeouts
-    # ------------------------------------------------------------------
-    #
-    # Three layers of protection against hung LLM calls:
-    #
-    # 1. ``request_timeout_seconds`` — overall wall-clock cap on the
-    #    full streaming request, passed to ``litellm.completion`` as
-    #    its ``timeout`` kwarg. Catches "stream never started" cases
-    #    (DNS hang, TLS handshake hang, slow start before first byte)
-    #    and acts as the absolute ceiling for total request time.
-    # 2. ``first_chunk_timeout_seconds`` — watchdog enforced inside
-    #    the streaming loop. If the provider accepted the request
-    #    but never starts streaming, this fires before the overall
-    #    timeout so the user gets their terminal back faster.
-    # 3. ``chunk_timeout_seconds`` — inter-chunk watchdog. Resets on
-    #    every received chunk. Catches "stream stalled mid-response"
-    #    (provider deadlock, network drop after handshake). Generous
-    #    default so legitimate reasoning pauses don't trigger it.
-    #
-    # Aux calls (commit message, topic detection, URL summarization)
-    # use a single ``aux_request_timeout_seconds`` since they're
-    # non-streaming — the total-call timeout is sufficient.
-
-    @property
-    def request_timeout_seconds(self) -> float:
-        """Overall wall-clock timeout for streaming chat requests.
-
-        Default 300s (5 minutes). Long enough for any legitimate
-        reasoning + answer combination on current models, short
-        enough that a hung connection clears in a tolerable window.
-        Users with very long reasoning workloads can raise this in
-        ``llm.json``.
-        """
-        try:
-            value = float(self.llm_config.get("request_timeout_seconds", 300))
-        except (TypeError, ValueError):
-            return 300.0
-        return value if value > 0 else 300.0
-
-    @property
-    def first_chunk_timeout_seconds(self) -> float:
-        """Watchdog timeout from request start to first chunk.
-
-        Default 60s. If the provider has accepted the request but
-        not emitted any chunk in this window, the watchdog closes
-        the stream and the request fails with a typed error. The
-        user's "Stop" button is the primary cancellation path for
-        legitimate long requests; this is the safety net for hung
-        sockets.
-        """
-        try:
-            value = float(
-                self.llm_config.get("first_chunk_timeout_seconds", 60)
-            )
-        except (TypeError, ValueError):
-            return 60.0
-        return value if value > 0 else 60.0
-
-    @property
-    def chunk_timeout_seconds(self) -> float:
-        """Inter-chunk watchdog timeout.
-
-        Default 120s. Resets on every received chunk. A stream
-        that goes silent for this long mid-response is treated as
-        hung. The default is generous because reasoning models can
-        produce long quiet stretches between visible-text chunks
-        while thinking; values much lower than 60s risk false
-        positives during legitimate reasoning.
-        """
-        try:
-            value = float(
-                self.llm_config.get("chunk_timeout_seconds", 120)
-            )
-        except (TypeError, ValueError):
-            return 120.0
-        return value if value > 0 else 120.0
-
-    @property
-    def aux_request_timeout_seconds(self) -> float:
-        """Timeout for auxiliary non-streaming LLM calls.
-
-        Default 60s. Applies to commit-message generation, topic
-        boundary detection, and URL summarization. All three
-        produce small structured outputs on the smaller/cheaper
-        model — 60s is plenty even on slow upstreams. A hung aux
-        call wedges an aux-executor thread but doesn't block the
-        chat path (which uses a separate executor).
-        """
-        try:
-            value = float(
-                self.llm_config.get("aux_request_timeout_seconds", 60)
-            )
-        except (TypeError, ValueError):
-            return 60.0
-        return value if value > 0 else 60.0
-
-    @property
-    def num_retries(self) -> int:
-        """Number of LiteLLM retries on retryable errors.
-
-        LiteLLM retries with exponential backoff on the typed
-        subset of exceptions it considers transient —
-        ``RateLimitError``, ``APIConnectionError``,
-        ``ServiceUnavailableError``, ``Timeout``, and provider-
-        specific 5xx wrappers. Non-retryable errors
-        (``AuthenticationError``, ``BadRequestError``,
-        ``ContextWindowExceededError``, ``NotFoundError``) fail
-        immediately regardless of this setting.
-
-        For streaming calls the retry applies only to the
-        initial connection — LiteLLM can't replay a partial
-        response. The Bedrock rate-limit pattern we see in
-        practice ("Too many requests, please wait") raises
-        BEFORE any tokens stream, so this catches it cleanly.
-
-        Default 10. A burst of parallel agents against a
-        provider with tight per-minute limits can produce
-        several 429s back-to-back; 10 retries with exponential
-        backoff covers the typical clear window. Non-positive
-        values are clamped to 0 (no retry).
-        """
-        try:
-            value = int(self.llm_config.get("num_retries", 10))
-        except (TypeError, ValueError):
-            return 10
-        return value if value >= 0 else 0
-
-    @property
-    def cache_buffer_multiplier(self) -> float:
-        """Multiplier applied to the cache minimum to compute target.
-
-        Keeps cache writes above the provider's minimum by a small
-        margin so a single-token edit doesn't drop the block below
-        the cacheable threshold.
-        """
-        return float(self.llm_config.get("cache_buffer_multiplier", 1.1))
-
-    @property
-    def cache_target_tokens(self) -> int:
-        """Fallback cache target for callers without a model reference.
-
-        Computed as ``cache_min_tokens × cache_buffer_multiplier``.
-        Callers that have a model name should use
-        :meth:`cache_target_tokens_for_model` — it respects the
-        model-family minimum.
-        """
-        return int(self.cache_min_tokens * self.cache_buffer_multiplier)
-
-    def cache_target_tokens_for_model(self, model: str | None = None) -> int:
-        """Compute the model-aware cache target.
-
-        Formula: ``max(cache_min_tokens, provider_min) × multiplier``.
-
-        Example — Opus 4.6 with the default user config:
-        ``max(1024, 4096) × 1.1 = 4505``.
-
-        Example — Opus 5 or Sonnet with the default user config:
-        ``max(1024, 512 or 1024) × 1.1 = 1126``. The user-facing
-        ``cache_min_tokens`` floor dominates on models whose
-        provider minimum dropped below it, so Opus 5's 512 shows
-        up in :meth:`TokenCounter.min_cacheable_tokens` (which
-        gates the warmer) without shrinking the cache target.
-        """
-        target_model = model or self.model
-        provider_min = _model_min_cacheable_tokens(target_model)
-        effective_min = max(self.cache_min_tokens, provider_min)
-        return int(effective_min * self.cache_buffer_multiplier)
-
-    def apply_llm_env(self) -> None:
-        """Export env vars declared in ``llm.json`` into the process env.
-
-        litellm reads provider credentials from environment variables
-        (``ANTHROPIC_API_KEY``, ``AWS_REGION_NAME``, etc.), so users
-        can keep their keys in ``llm.json`` rather than having to set
-        them in the shell. Called on construction and on hot-reload.
-
-        Values are stringified — JSON allows numeric env values but
-        ``os.environ`` requires strings.
-        """
-        env = self.llm_config.get("env", {})
-        if not isinstance(env, dict):
-            logger.warning(
-                "llm.json 'env' is not an object (got %s); skipping",
-                type(env).__name__,
-            )
-            return
-        for key, value in env.items():
-            if not isinstance(key, str):
-                continue
-            os.environ[key] = str(value)
-
-    # ------------------------------------------------------------------
     # App config accessors
     # ------------------------------------------------------------------
 
@@ -752,42 +453,6 @@ class ConfigManager:
         if self._app_config is None:
             self._app_config = self._read_user_json("app.json")
         return self._app_config
-
-    @property
-    def url_cache_config(self) -> dict[str, Any]:
-        """URL cache section with defaults filled in.
-
-        Layer 4 will consume this. Layer 1 just exposes the accessor.
-        """
-        section = self.app_config.get("url_cache", {})
-        if not isinstance(section, dict):
-            section = {}
-        return {
-            "path": section.get("path"),  # None → use default under tmpdir
-            "ttl_hours": int(section.get("ttl_hours", 24)),
-        }
-
-    @property
-    def compaction_config(self) -> dict[str, Any]:
-        """History compaction section with defaults filled in."""
-        section = self.app_config.get("history_compaction", {})
-        if not isinstance(section, dict):
-            section = {}
-        return {
-            "enabled": bool(section.get("enabled", True)),
-            "compaction_trigger_tokens": int(
-                section.get("compaction_trigger_tokens", 24000)
-            ),
-            "verbatim_window_tokens": int(
-                section.get("verbatim_window_tokens", 4000)
-            ),
-            "summary_budget_tokens": int(
-                section.get("summary_budget_tokens", 500)
-            ),
-            "min_verbatim_exchanges": int(
-                section.get("min_verbatim_exchanges", 2)
-            ),
-        }
 
     @property
     def doc_convert_config(self) -> dict[str, Any]:
@@ -840,348 +505,6 @@ class ConfigManager:
             ),
         }
 
-    @property
-    def reasoning_config(self) -> dict[str, Any]:
-        """Reasoning / extended-thinking section with defaults.
-
-        Drives the ``thinking`` kwarg passed to
-        ``litellm.completion``. Two fields:
-
-        - ``enabled`` — config-level default for whether
-          reasoning is on. The frontend's per-request toggle
-          (``reasoning`` arg to ``chat_streaming``) layers on
-          top of this; when the request explicitly opts in
-          or out, the per-request value wins. When the
-          request leaves it unspecified, the config default
-          applies.
-        - ``budget_tokens`` — token budget for the model's
-          hidden deliberation. Anthropic's parameter shape;
-          LiteLLM translates to ``reasoning_effort`` for
-          OpenAI-shaped providers automatically. Default
-          10000 matches the rough "medium effort" mapping.
-
-        Aux LLM calls (commit message generation, topic
-        detection) read this config but explicitly opt out
-        — see :mod:`ac_dc.llm._helpers` § ``build_thinking_kwargs``.
-        Reasoning on a JSON-structured task wastes tokens
-        without improving output.
-
-        Spec: ``specs4/7-future/reasoning.md`` § Recommended
-        Shape — Commit A.
-        """
-        section = self.app_config.get("reasoning", {})
-        if not isinstance(section, dict):
-            section = {}
-        try:
-            budget = int(section.get("budget_tokens", 10000))
-        except (TypeError, ValueError):
-            budget = 10000
-        if budget <= 0:
-            budget = 10000
-        # Effort levels — LiteLLM's standardised cross-provider
-        # param. Anthropic's adaptive-thinking models (Claude 4.6
-        # and later) use this rather than a token budget; LiteLLM
-        # translates it to ``output_config.effort``
-        # for those backends. The accepted set mirrors LiteLLM's
-        # own ``reasoning_effort`` vocabulary (minimal/low/medium/
-        # high/xhigh/max); the provider rejects a level a given
-        # model doesn't advertise (e.g. xhigh/max are gated by the
-        # model map's ``supports_*_reasoning_effort`` flags).
-        # Unknown values fall back to "medium" rather than raising
-        # — config typos shouldn't crash startup.
-        effort_raw = section.get("effort", "medium")
-        if not isinstance(effort_raw, str):
-            effort_raw = "medium"
-        effort = effort_raw.strip().lower()
-        if effort not in ("minimal", "low", "medium", "high", "xhigh", "max"):
-            effort = "medium"
-        # First-chunk watchdog override for reasoning calls.
-        # Adaptive-thinking models (Bedrock Opus 4.7 and Opus 5
-        # in particular) can take several minutes between
-        # ``litellm.completion`` returning the stream iterator
-        # and the first SSE content chunk arriving — the
-        # provider runs the entire reasoning pass before
-        # yielding any tokens. The default 60s first-chunk
-        # watchdog is correct for non-reasoning calls (a 60s
-        # silence after stream-open really does mean a hung
-        # connection) but trips spuriously on reasoning calls
-        # of any non-trivial complexity.
-        #
-        # Default 900s (15 min). Adaptive-thinking calls on
-        # Opus + xhigh effort with large contexts are
-        # observed taking up to ~15 minutes between
-        # stream-open and the first content chunk; the
-        # whole reasoning pass runs server-side before any
-        # token streams. Lower in user config if you want a
-        # tighter safety net and don't run xhigh reasoning;
-        # non-positive values fall back to the default.
-        try:
-            first_chunk_reasoning = float(
-                section.get("first_chunk_timeout_seconds", 900)
-            )
-        except (TypeError, ValueError):
-            first_chunk_reasoning = 900.0
-        if first_chunk_reasoning <= 0:
-            first_chunk_reasoning = 900.0
-        # Overall request-timeout override for reasoning
-        # calls. ``litellm.completion`` is given this as
-        # its ``timeout`` kwarg — the absolute wall-clock
-        # cap on the request, including the long pre-stream
-        # reasoning phase. Must be >= the first-chunk
-        # watchdog above, otherwise LiteLLM aborts the call
-        # before the watchdog gets a chance to fire and the
-        # finer-grained diagnostic is lost.
-        #
-        # Default 1200s (20 min) — first-chunk watchdog
-        # default + 5 min headroom for the post-first-chunk
-        # streaming phase itself. Lower in user config if
-        # you've also lowered the first-chunk watchdog;
-        # non-positive values fall back to the default.
-        try:
-            request_reasoning = float(
-                section.get("request_timeout_seconds", 1200)
-            )
-        except (TypeError, ValueError):
-            request_reasoning = 1200.0
-        if request_reasoning <= 0:
-            request_reasoning = 1200.0
-        return {
-            "enabled": bool(section.get("enabled", False)),
-            "budget_tokens": budget,
-            "effort": effort,
-            "first_chunk_timeout_seconds": first_chunk_reasoning,
-            "request_timeout_seconds": request_reasoning,
-        }
-
-    @property
-    def reasoning_enabled(self) -> bool:
-        """Convenience — config-level reasoning default.
-
-        Hot path readers (the streaming pipeline) use this
-        rather than unpacking ``reasoning_config`` on every
-        turn. Defaults to False — reasoning is opt-in.
-        """
-        return self.reasoning_config["enabled"]
-
-    @property
-    def reasoning_budget_tokens(self) -> int:
-        """Convenience — configured reasoning budget (legacy models)."""
-        return self.reasoning_config["budget_tokens"]
-
-    @property
-    def reasoning_effort(self) -> str:
-        """Convenience — configured reasoning effort (adaptive models).
-
-        One of ``"minimal"``, ``"low"``, ``"medium"``, ``"high"``,
-        ``"xhigh"``, ``"max"``. Used by adaptive-thinking models
-        (Claude 4.6 and later) where a token budget isn't
-        accepted. LiteLLM translates this to the per-provider
-        field (``output_config.effort`` for Anthropic). The higher
-        tiers (``xhigh``/``max``) are only accepted on models whose
-        map entry advertises them — e.g. Opus 5 and Opus 4.6.
-        """
-        return self.reasoning_config["effort"]
-
-    @property
-    def reasoning_first_chunk_timeout_seconds(self) -> float:
-        """Convenience — first-chunk watchdog for reasoning calls.
-
-        Used by the streaming pipeline when ``thinking`` is
-        active on the request. See ``reasoning_config`` for
-        the prose rationale.
-        """
-        return self.reasoning_config["first_chunk_timeout_seconds"]
-
-    @property
-    def reasoning_request_timeout_seconds(self) -> float:
-        """Convenience — overall request-timeout for reasoning calls.
-
-        Used by the streaming pipeline when ``thinking`` is
-        active on the request. Passed to
-        ``litellm.completion`` as its ``timeout`` kwarg —
-        the absolute wall-clock cap. See
-        ``reasoning_config`` for the prose rationale.
-        """
-        return self.reasoning_config["request_timeout_seconds"]
-
-    @property
-    def cache_warmup_config(self) -> dict[str, Any]:
-        """Cache warm-keeper section with defaults filled in.
-
-        Drives the periodic warm-up call that keeps the
-        provider's prompt cache hot during user idle
-        periods. Two fields:
-
-        - ``enabled`` — whether the warmer runs at all.
-          Default True. Auto-disable on failure or retry-
-          budget exhaustion is independent of this config
-          value (the warmer flips its own runtime flag);
-          re-enabling after auto-disable requires a manual
-          toggle via the future RPC.
-        - ``interval_seconds`` — seconds of idle time
-          before each warm-up firing. Default 270 (4:30),
-          well inside Anthropic's 5-minute cache TTL with
-          margin for retry waits. Values <= 0 fall back to
-          the default — a zero-interval warmer would burn
-          continuous cycles for no benefit.
-
-        Spec: ``cache_warmup`` section of ``app.json``.
-        """
-        section = self.app_config.get("cache_warmup", {})
-        if not isinstance(section, dict):
-            section = {}
-        try:
-            interval = int(section.get("interval_seconds", 270))
-        except (TypeError, ValueError):
-            interval = 270
-        if interval <= 0:
-            interval = 270
-        return {
-            "enabled": bool(section.get("enabled", True)),
-            "interval_seconds": interval,
-        }
-
-    @property
-    def cache_tiering_config(self) -> dict[str, Any]:
-        """Cache-tiering (membrane / flux controller) section.
-
-        Drives the rectified-GHK flux controller that manages
-        promotion across the Active → L3 → L2 → L1 membranes.
-        See ``specs4/3-llm/cache-tiering.md`` and
-        ``specs4/impl-history/decisions.md`` D35. Only the
-        rectified-GHK variant is supported — the linear and
-        bidirectional-GHK forms from earlier revisions are
-        retired.
-
-        Fields:
-
-        - ``flux_threshold`` — accumulator unit charge before
-          a promotion fires. Default 1.0. Values <= 0 fall
-          back to 1.0 (a non-positive threshold would fire
-          unboundedly).
-        - ``membranes`` — list of three per-membrane
-          parameter dicts, one each for Active→L3, L3→L2,
-          L2→L1 (in that order). The L1→L0 membrane is
-          intentionally absent (L0 is content-typed, D27).
-          Each entry is a dict with ``P`` (permeability,
-          float), ``V_T`` (soft-knee voltage scale, float),
-          ``n_admit`` (integer minimum-age admission floor),
-          ``pick_mode`` (``"smallest"`` or ``"oldest"``), and
-          ``admission_only`` (bool — when True the membrane
-          fires whenever an aged-enough mover exists, with no
-          flux equation; used on Active→L3, where V coupling
-          degenerates because active is structurally lighter
-          than the cache).
-          Missing entries are filled with defaults; entries
-          past index 2 are ignored.
-
-        Defaults sourced from the synth-tuner's headline fit
-        (``runs/opt-run2/best_params.json`` in
-        ``~/flatmax/personal.work/research/cache.tiering``):
-        ``P = 1.616399379428934e-06``,
-        ``V_T = 98952.34312610888``, ``n_admit = 3`` and
-        ``admission_only = True`` on Active→L3, plain flux
-        with ``n_admit = 0`` elsewhere.
-
-        Spec: ``cache_tiering`` section of ``app.json``.
-        """
-        section = self.app_config.get("cache_tiering", {})
-        if not isinstance(section, dict):
-            section = {}
-
-        try:
-            threshold = float(section.get("flux_threshold", 1.0))
-        except (TypeError, ValueError):
-            threshold = 1.0
-        if threshold <= 0.0:
-            threshold = 1.0
-
-        default_p = 1.616399379428934e-06
-        default_vt = 98952.34312610888
-        membrane_defaults = [
-            {"P": default_p, "V_T": default_vt, "n_admit": 3,
-             "pick_mode": "oldest", "admission_only": True},
-            {"P": default_p, "V_T": default_vt, "n_admit": 0,
-             "pick_mode": "smallest", "admission_only": False},
-            {"P": default_p, "V_T": default_vt, "n_admit": 0,
-             "pick_mode": "smallest", "admission_only": False},
-        ]
-        raw_list = section.get("membranes", [])
-        if not isinstance(raw_list, list):
-            raw_list = []
-        membranes: list[dict[str, Any]] = []
-        for idx, default in enumerate(membrane_defaults):
-            entry = raw_list[idx] if idx < len(raw_list) else {}
-            if not isinstance(entry, dict):
-                entry = {}
-            try:
-                p_val = float(entry.get("P", default["P"]))
-            except (TypeError, ValueError):
-                p_val = default["P"]
-            try:
-                vt_val = float(entry.get("V_T", default["V_T"]))
-            except (TypeError, ValueError):
-                vt_val = default["V_T"]
-            try:
-                n_admit = int(entry.get("n_admit", default["n_admit"]))
-            except (TypeError, ValueError):
-                n_admit = default["n_admit"]
-            if n_admit < 0:
-                n_admit = 0
-            pick = entry.get("pick_mode", default["pick_mode"])
-            if pick not in {"smallest", "oldest"}:
-                pick = default["pick_mode"]
-            admission_only = bool(
-                entry.get("admission_only", default["admission_only"])
-            )
-            membranes.append(
-                {
-                    "P": p_val,
-                    "V_T": vt_val,
-                    "n_admit": n_admit,
-                    "pick_mode": pick,
-                    "admission_only": admission_only,
-                }
-            )
-
-        return {
-            "flux_threshold": threshold,
-            "membranes": membranes,
-        }
-
-    @property
-    def agents_config(self) -> dict[str, Any]:
-        """Agent-mode section with defaults filled in.
-
-        Gates the parallel-agents capability described in
-        specs4/7-future/parallel-agents.md. Until agent mode is
-        implemented, this flag only affects whether the system
-        prompt's agent-spawn block description is visible to the
-        LLM — it does not change any runtime code path beyond
-        :meth:`get_system_prompt`'s fenced-section stripping.
-
-        Kept separate from :attr:`agents_enabled` so future
-        agent-mode settings (max concurrent agents, per-agent
-        token budget, synthesis delay) can be added to the dict
-        without changing the bool accessor's shape.
-        """
-        section = self.app_config.get("agents", {})
-        if not isinstance(section, dict):
-            section = {}
-        return {
-            "enabled": bool(section.get("enabled", False)),
-        }
-
-    @property
-    def agents_enabled(self) -> bool:
-        """Convenience accessor — True when agent mode is on.
-
-        Callers in the hot prompt-assembly path read this rather
-        than unpacking the config dict on every turn. Defaults to
-        False — agent mode is strictly opt-in.
-        """
-        return self.agents_config["enabled"]
-
     # ------------------------------------------------------------------
     # Directory accessors
     # ------------------------------------------------------------------
@@ -1207,200 +530,36 @@ class ConfigManager:
     # Hot-reload
     # ------------------------------------------------------------------
 
-    def reload_llm_config(self) -> None:
-        """Re-read ``llm.json`` and re-apply env vars.
-
-        Called by the Settings RPC after the user edits LLM config.
-        Clearing the cached dict forces the next accessor call to
-        re-read from disk. Env vars are re-applied immediately so
-        new API keys take effect without waiting for the next LLM
-        request.
-        """
-        self._llm_config = None
-        self.apply_llm_env()
-
     def reload_app_config(self) -> None:
         """Re-read ``app.json``.
 
-        Downstream consumers that access ``compaction_config``,
+        Downstream consumers that access ``doc_convert_config``,
         ``doc_index_config``, etc. through this ConfigManager will
         see the new values on their next access — no need to rebuild
-        the compactor or the doc index.
+        the converter or the doc index.
+
+        Nothing in ``app.json`` reaches the engine's session options, so
+        a reload here never invalidates the CLI's context.
         """
         self._app_config = None
 
     # ------------------------------------------------------------------
-    # Prompt assembly helpers
+    # The commit prompt
     # ------------------------------------------------------------------
     #
-    # Prompts are read fresh from disk on every call — no caching.
-    # Edits to system.md or system_extra.md take effect on the next
-    # LLM request without an explicit reload call.
-
-    def _concat_prompt(self, main: str, extra_filename: str = "system_extra.md") -> str:
-        """Concatenate a main prompt with the optional extra prompt.
-
-        The extra file may be absent (a fresh install creates it from
-        the bundle, but the bundle's copy is empty) — in that case we
-        return just the main prompt. Non-empty extras are separated
-        from the main prompt by a blank line so the LLM treats them
-        as distinct instructions.
-        """
-        extra = self._read_user_file(extra_filename).strip()
-        if not extra:
-            return main
-        return f"{main}\n\n{extra}"
-
-    def get_system_prompt(self) -> str:
-        """Main coding-agent system prompt.
-
-        Assembly order (top to bottom):
-
-        1. ``system.md`` — base prompt
-        2. ``system_agentic_appendix.md`` — appended only when
-           ``agents_enabled`` is True AND the file exists in
-           the user config dir. Describes the agent-spawn
-           capability to the LLM. When ``False`` or file
-           absent, the LLM is never told about agent mode —
-           it cannot emit agent-spawn blocks even if
-           ``app.json`` somehow carries a stale reference.
-        3. ``system_extra.md`` — user customisation, always
-           appended last so project-specific rules apply to
-           everything above.
-
-        Each section is separated from the next by a blank
-        line. Absent or empty sections are skipped cleanly —
-        a user install without the agentic appendix file
-        (e.g., stripped-down release, or user-deleted file)
-        falls through to the extra prompt without error.
-
-        The appendix falls back to the bundled copy when the
-        user-dir file is absent. This matters because
-        ``system_agentic_appendix.md`` was added to the
-        managed-files set in a specific release — users who
-        installed AC⚡DC before that release have a version
-        marker that prevents the upgrade pass from copying the
-        file, but their toggle-enabled state still expects the
-        appendix text to flow into the prompt. The fallback
-        papers over this cross-version gap so "toggle on" reliably
-        produces agent instructions regardless of install
-        history. Users who explicitly want to suppress the
-        appendix text can do so via the ``agents.enabled`` flag
-        in ``app.json`` (which the Settings-tab toggle writes
-        to); there is no use case for "toggle on but appendix
-        text suppressed" that warrants a second independent
-        control.
-        """
-        main = self._read_user_file("system.md")
-        if self.agents_enabled:
-            # Read from the user dir first, falling back to
-            # the bundle when the user file is absent.
-            #
-            # The user-dir file is created by the upgrade
-            # pass on install. However, users who installed
-            # AC⚡DC before `system_agentic_appendix.md` was
-            # added to the managed-files set have a version
-            # marker that prevents the upgrade pass from
-            # copying the file — the early-return on
-            # matching versions skips the per-file check.
-            # The bundle fallback papers over this
-            # cross-version gap so "toggle on" reliably
-            # produces agent instructions regardless of
-            # install history.
-            #
-            # A user who wants to opt out of the appendix
-            # text while keeping the toggle on must set
-            # `agents.enabled: false` in `app.json` —
-            # deleting the appendix file no longer
-            # suppresses it (the bundle is still present).
-            # This is a deliberate trade-off: reliability
-            # of the toggle across install histories
-            # outweighs the niche escape hatch of partial
-            # opt-out via file deletion.
-            appendix = self._read_user_file(
-                "system_agentic_appendix.md"
-            ).strip()
-            if appendix:
-                main = f"{main}\n\n{appendix}"
-        return self._concat_prompt(main)
-
-    def get_doc_system_prompt(self) -> str:
-        """Document-mode system prompt (``system_doc.md`` + extra).
-
-        Used when the user switches to document mode. The extra
-        prompt is appended in both code and document modes — user
-        customisations apply to both.
-        """
-        main = self._read_user_file("system_doc.md")
-        return self._concat_prompt(main)
-
-    def get_agent_system_prompt(self) -> str:
-        """System prompt for spawned agent conversations.
-
-        Per specs4/7-future/parallel-agents.md § Execution
-        Model, agents run through the same streaming pipeline
-        as main-conversation turns — same edit parsing, same
-        apply path, same tool surface. They therefore need
-        the same behavioural instructions as a non-agent
-        turn: the core coding-agent system prompt plus any
-        user customisation.
-
-        Differs from :meth:`get_system_prompt` in one way:
-        the agentic appendix is NEVER appended, regardless
-        of the ``agents.enabled`` toggle. Tree depth is 1
-        per spec — agents don't spawn sub-agents — so
-        describing the spawn capability to an agent would
-        be misleading (it could emit agent-spawn blocks
-        that the parent's ``_is_child_request`` gate
-        silently drops). Omitting the appendix keeps the
-        agent focused on its task and saves tokens.
-
-        Assembly: ``system.md`` → ``system_extra.md``.
-        Same user-customisation contract as the main
-        prompt.
-        """
-        main = self._read_user_file("system.md")
-        return self._concat_prompt(main)
-
-    def get_review_prompt(self) -> str:
-        """Code review system prompt (``review.md`` + extra).
-
-        Used when the user enters review mode. The extra prompt is
-        appended here too so project-specific review guidance lives
-        alongside project-specific coding guidance.
-        """
-        main = self._read_user_file("review.md")
-        return self._concat_prompt(main)
-
-    def get_compaction_prompt(self) -> str:
-        """Topic-boundary detection prompt for the history compactor.
-
-        Loaded as-is — the extra prompt does not apply because the
-        compactor is a narrow auxiliary LLM call whose output format
-        is rigidly defined (JSON schema).
-        """
-        return self._read_user_file("compaction.md")
+    # Read fresh from disk on every call — no caching. An edit to
+    # commit.md takes effect on the next commit without a reload.
 
     def get_commit_prompt(self) -> str:
         """Commit message generation prompt.
 
-        Loaded as-is — same rationale as the compaction prompt.
-        Narrow task, rigid output format.
+        The only prompt AC⚡DC still writes. It is no longer a system
+        prompt for a separately-configured auxiliary model — it is the
+        system prompt of a stateless one-shot ``query()`` against the
+        same CLI, which is handed the staged diff and nothing else. See
+        :mod:`ac_dc.claude_code.commit`.
         """
         return self._read_user_file("commit.md")
-
-    def get_system_reminder(self) -> str:
-        """Edit-format reminder appended to every user prompt.
-
-        Returns a string prefixed with two newlines so callers can
-        simply append it to the user's message. Empty when the
-        reminder file is absent (shouldn't happen in practice — it's
-        a managed file copied on every upgrade).
-        """
-        body = self._read_user_file("system_reminder.md").strip()
-        if not body:
-            return ""
-        return f"\n\n{body}"
 
     # ------------------------------------------------------------------
     # Snippets

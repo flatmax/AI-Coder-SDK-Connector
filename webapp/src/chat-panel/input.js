@@ -11,8 +11,6 @@
 //   - Pending-image strip + lightbox
 //   - Speech-to-text transcript insertion
 //   - Snippet drawer toggle + insertion
-//   - Reasoning toggle (inert since phase 2 — see
-//     properties.js)
 //   - History browser open/close/load
 //   - New session
 //   - File mention detection (the `@filter` bridge
@@ -43,9 +41,6 @@ import {
   AUTO_SCROLL_DISENGAGE_PX,
   AUTO_SCROLL_TOLERANCE_PX,
   _saveDrawerOpen,
-  _saveReasoningEnabled,
-  _saveReasoningEffort,
-  _REASONING_EFFORT_LEVELS,
   generateRequestId,
 } from './helpers.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -404,7 +399,7 @@ export function onHistorySessionLoaded(panel) {
 }
 
 // ---------------------------------------------------------------
-// Snippet drawer + reasoning toggle
+// Snippet drawer
 // ---------------------------------------------------------------
 
 export function toggleSnippetDrawer(panel) {
@@ -412,42 +407,11 @@ export function toggleSnippetDrawer(panel) {
   _saveDrawerOpen(panel._snippetDrawerOpen);
 }
 
-/**
- * Toggle extended-thinking / reasoning mode.
- *
- * **Inert since phase 2**, and no longer reachable from the UI: the flag was
- * forwarded as the ``reasoning`` argument to the native ``chat_streaming``,
- * which ``ClaudeCodeService.chat_streaming`` does not take. Thinking depth is
- * the CLI's to decide — we render the thinking blocks it sends and do not ask
- * for them. Kept because the setting still round-trips to localStorage and
- * deleting it would lose a user's stored preference for no gain; the toast
- * would be a lie if anything called it, and nothing does.
- */
-export function toggleReasoning(panel) {
-  panel._reasoningEnabled = !panel._reasoningEnabled;
-  _saveReasoningEnabled(panel._reasoningEnabled);
-  panel._emitToast(
-    panel._reasoningEnabled
-      ? '🧠 Reasoning enabled — slower, deeper'
-      : 'Reasoning disabled',
-    'info',
-  );
-}
-
-/**
- * Set the per-request reasoning effort level (adaptive models).
- *
- * **Inert since phase 2** for the same reason as `toggleReasoning`: the
- * ``effort`` argument does not exist on the new signature. Effort is a
- * property of the CLI's own model configuration, set by
- * ``ClaudeCodeService.set_model`` and the CLI's settings, not per request
- * from here.
- */
-export function setReasoningEffort(panel, effort) {
-  if (!_REASONING_EFFORT_LEVELS.includes(effort)) return;
-  panel._reasoningEffort = effort;
-  _saveReasoningEffort(effort);
-}
+// `toggleReasoning` and `setReasoningEffort` stood here until conversion
+// phase 3. Neither reached the wire after phase 2 — the ``reasoning`` and
+// ``effort`` arguments they wrote are not on ``chat_streaming``'s new
+// signature — and neither had a control on the action bar. See helpers.js for
+// why their stored preferences could not be carried across.
 
 /**
  * Insert a snippet's message into the textarea at

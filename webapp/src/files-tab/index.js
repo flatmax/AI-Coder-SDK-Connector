@@ -84,7 +84,6 @@ import {
   _PICKER_COLLAPSED_WIDTH,
 } from './constants.js';
 import {
-  _loadL0ExcludePref,
   _loadPickerCollapsed,
   _loadPickerWidth,
   buildPrunedTree,
@@ -101,16 +100,7 @@ import {
 } from './context-menu.js';
 import {
   applyExclusion,
-  applyExclusionWithPrompt,
   onExclusionChanged,
-  onL0DialogApplyNow,
-  onL0DialogBackdropClick,
-  onL0DialogCancel,
-  onL0DialogDefer,
-  onL0DialogKeyDown,
-  renderL0ExcludeDialog,
-  resetL0ExcludePref,
-  resolveL0ExcludeDialog,
   sendExclusionToServer,
 } from './exclusion.js';
 import {
@@ -228,25 +218,10 @@ export class FilesTab extends RpcMixin(LitElement) {
      * presence flag is enough to drive rendering.
      */
     _reviewGraphModal: { type: Object, state: true },
-    /**
-     * L0-exclude confirmation dialog state. Null when
-     * the dialog is closed; populated with the
-     * pending exclusion shape when open:
-     *   {nextExcluded: Set<string>,
-     *    addedPaths: string[]}
-     *
-     * The dialog asks whether to invalidate L0 now
-     * (full cache rewrite, ~100K+ tokens) or defer
-     * until the next L0-invalidating event. User's
-     * choice flows back through `_resolveL0ExcludeDialog`
-     * which calls `_applyExclusion` with the
-     * appropriate `invalidate_l0` flag.
-     *
-     * Only the exclusion path uses this dialog —
-     * inclusion always invalidates immediately and
-     * skips the prompt.
-     */
-    _l0ExcludeDialog: { type: Object, state: true },
+    // `_l0ExcludeDialog` was declared here until
+    // conversion phase 3. Excluding a file no longer
+    // costs a cache rewrite, so there is nothing to
+    // confirm — see ./exclusion.js.
   };
 
   static styles = FILES_TAB_STYLES;
@@ -393,18 +368,11 @@ export class FilesTab extends RpcMixin(LitElement) {
     // tip highlighted.
     this._reviewGraphModal = null;
 
-    // L0-exclude confirmation dialog state. Null when
-    // closed. Populated by `_applyExclusionWithPrompt`
-    // when the user shift+clicks to exclude a file (or
-    // the context menu's Exclude action runs) and the
-    // stored preference is 'ask'. The dialog's button
-    // handlers commit or cancel via
-    // `_resolveL0ExcludeDialog`.
-    this._l0ExcludeDialog = null;
-    // Local copy of the L0-exclude preference. Hydrated
-    // synchronously so the first dialog open / skip
-    // decision uses the persisted value.
-    this._l0ExcludePref = _loadL0ExcludePref();
+    // One-shot latch for the deny-read caveat toast. The
+    // rule applies from the CLI's next read of its
+    // settings sources, which the user should hear once —
+    // not on every checkbox tick. See ./exclusion.js.
+    this._readDenyCaveatShown = false;
 
     // Bound event handlers — same binding used for add and
     // remove so cleanup matches.
@@ -830,34 +798,17 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   // Bodies live in ./exclusion.js. Host method names
   // preserved as forwarders — tests in exclusion.test.js
-  // and per-tab.test.js call _applyExclusion /
-  // _applyExclusionWithPrompt directly, and
-  // resetL0ExcludePref is documented as part of the
-  // settings-tab integration surface.
+  // and per-tab.test.js call _applyExclusion directly.
   _onExclusionChanged(event) {
     return onExclusionChanged(this, event);
   }
 
-  _applyExclusion(newExcluded, notifyServer, invalidateL0 = false) {
-    return applyExclusion(
-      this, newExcluded, notifyServer, invalidateL0,
-    );
+  _applyExclusion(newExcluded, notifyServer) {
+    return applyExclusion(this, newExcluded, notifyServer);
   }
 
-  _applyExclusionWithPrompt(nextExcluded) {
-    return applyExclusionWithPrompt(this, nextExcluded);
-  }
-
-  _resolveL0ExcludeDialog(choice, remember) {
-    return resolveL0ExcludeDialog(this, choice, remember);
-  }
-
-  resetL0ExcludePref() {
-    return resetL0ExcludePref(this);
-  }
-
-  _sendExclusionToServer(files, invalidateL0 = false) {
-    return sendExclusionToServer(this, files, invalidateL0);
+  _sendExclusionToServer(files) {
+    return sendExclusionToServer(this, files);
   }
 
   // ---------------------------------------------------------------
@@ -908,10 +859,11 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   // Per-action dispatchers live in ./context-menu.js
   // (file actions, dir actions, helpers). The host
-  // exposes only the three entries that other
+  // exposes only the four entries that other
   // modules / tests reach into directly:
-  // _dispatchInclude, _dispatchExcludeAll,
-  // _dispatchIncludeAll — see below.
+  // _dispatchExclude, _dispatchInclude,
+  // _dispatchExcludeAll, _dispatchIncludeAll — see
+  // below.
 
   // Body lives in ./mentions.js.
   _onInsertPath(event) {
@@ -942,11 +894,15 @@ export class FilesTab extends RpcMixin(LitElement) {
   //
   // Most dispatchers live in ./context-menu.js and are
   // reached through onContextMenuAction's routing —
-  // tests don't call them directly. The three below are
+  // tests don't call them directly. The four below are
   // exercised via direct method calls in
   // exclusion.test.js (e.g.
   // `t._dispatchInclude('a.md')`), so the host method
   // names stay reachable as one-line forwarders.
+
+  _dispatchExclude(path) {
+    dispatchExclude(this, path);
+  }
 
   _dispatchInclude(path) {
     dispatchInclude(this, path);
@@ -1135,40 +1091,7 @@ export class FilesTab extends RpcMixin(LitElement) {
       </div>
       ${this._renderReviewSelectorModal()}
       ${this._renderReviewGraphModal()}
-      ${this._renderL0ExcludeDialog()}
     `;
-  }
-
-  // ---------------------------------------------------------------
-  // L0-exclude confirmation dialog
-  // ---------------------------------------------------------------
-
-  // L0 dialog rendering + button handlers live in
-  // ./exclusion.js. Forwarders preserve the host
-  // surface — the render template calls
-  // `${this._renderL0ExcludeDialog()}`.
-  _renderL0ExcludeDialog() {
-    return renderL0ExcludeDialog(this);
-  }
-
-  _onL0DialogApplyNow() {
-    return onL0DialogApplyNow(this);
-  }
-
-  _onL0DialogDefer() {
-    return onL0DialogDefer(this);
-  }
-
-  _onL0DialogCancel() {
-    return onL0DialogCancel(this);
-  }
-
-  _onL0DialogBackdropClick(event) {
-    return onL0DialogBackdropClick(this, event);
-  }
-
-  _onL0DialogKeyDown(event) {
-    return onL0DialogKeyDown(this, event);
   }
 
   // ---------------------------------------------------------------

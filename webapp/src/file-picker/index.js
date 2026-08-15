@@ -441,9 +441,9 @@ export class FilePicker extends LitElement {
     ]
       .filter(Boolean)
       .join(' ');
-    const badgeTitle = 'Some files excluded from index';
+    const badgeTitle = 'Agent denied read on some files';
     const checkboxTitle =
-      'Click to select all files, shift+click to exclude all from index.';
+      'Click to select all files, shift+click to deny the agent read on all.';
     return html`
       <div
         class=${rowClasses}
@@ -1147,7 +1147,7 @@ export class FilePicker extends LitElement {
     ]
       .filter(Boolean)
       .join(' ');
-    const badgeTitle = 'Some files excluded from index';
+    const badgeTitle = 'Agent denied read on some files';
     return html`
       <div
         class=${rowClasses}
@@ -1221,8 +1221,8 @@ export class FilePicker extends LitElement {
     const checkboxTitle = isBinary
       ? 'Binary file — cannot be sent to the LLM.'
       : isExcluded
-        ? 'Excluded from index. Click to include and select, or shift+click to return to index-only.'
-        : 'Click to select, shift+click to exclude from index.';
+        ? 'Agent denied read on this file. Click to allow and select, or shift+click to allow without selecting. Takes effect on the CLI\'s next settings read.'
+        : 'Click to select, shift+click to deny the agent read.';
     return html`
       <div
         class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isBinary ? 'is-binary' : ''} ${isActive ? 'active-in-viewer' : ''}"
@@ -1268,8 +1268,8 @@ export class FilePicker extends LitElement {
         ${isExcluded
           ? html`<span
               class="excluded-badge"
-              title="Excluded from index"
-              aria-label="Excluded from index"
+              title="Agent denied read"
+              aria-label="Agent denied read"
               >✕</span
             >`
           : ''}
@@ -1395,17 +1395,17 @@ export class FilePicker extends LitElement {
       base = `${base} (${parts.join(' ')})`;
     }
     if (isBinary) return `${base} (binary — cannot be sent to LLM)`;
-    return isExcluded ? `${base} (excluded)` : base;
+    return isExcluded ? `${base} (read denied)` : base;
   }
 
   _tooltipForDir(node, { allExcluded = false, someExcluded = false } = {}) {
     const base = this._tooltipFor(node);
     if (!base) return '';
     if (allExcluded) {
-      return `${base} — all files excluded from index, Shift+click to re-include all`;
+      return `${base} — agent denied read on all files, Shift+click to allow all`;
     }
     if (someExcluded) {
-      return `${base} — some files excluded from index`;
+      return `${base} — agent denied read on some files`;
     }
     return base;
   }

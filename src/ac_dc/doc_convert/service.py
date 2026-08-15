@@ -117,7 +117,7 @@ class DocConvert:
         # Collab reference, set by main.py when collab mode is
         # active. None in single-user mode — every caller is
         # treated as localhost. Matches the pattern on Repo,
-        # LLMService, and Settings.
+        # ClaudeCodeService, and Settings.
         self._collab: Any = None
 
         # Pipeline instances. Each takes the result builders

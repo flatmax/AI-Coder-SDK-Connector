@@ -60,11 +60,11 @@ def test_config_dir_exists() -> None:
 
 
 def test_all_expected_config_files_present() -> None:
-    """Every config file specs4 references is shipped with the package.
+    """Every config file specs5 references is shipped with the package.
 
     The names here are the union of files listed in:
-      - specs4/1-foundation/configuration.md (config file set)
-      - specs4/6-deployment/packaging.md (managed + user files)
+      - specs5/1-foundation/configuration.md (config file set)
+      - specs5/6-deployment/packaging.md (managed + user files)
 
     We check containment, not equality — extra files in the bundled
     config directory (experiments, transitional files during a
@@ -72,45 +72,75 @@ def test_all_expected_config_files_present() -> None:
     add it both here and in the packaging spec.
     """
     expected = {
-        "llm.json",
+        "engine.json",
         "app.json",
         "snippets.json",
-        "system.md",
-        "system_doc.md",
-        "review.md",
         "commit.md",
-        "compaction.md",
-        "system_reminder.md",
     }
     actual = {p.name for p in CONFIG_DIR.iterdir() if p.is_file()}
     missing = expected - actual
     assert not missing, f"missing config files: {sorted(missing)}"
 
 
-def test_llm_config_is_valid_json_with_required_keys() -> None:
-    """llm.json parses and carries the fields ConfigManager will read.
+def test_the_engines_own_files_are_not_shipped() -> None:
+    """The six native-engine files must not be in the bundle.
 
-    Layer 1 will wrap this file with accessors; at Layer 0 we just ensure
-    the bundled defaults don't ship broken JSON or missing keys.
+    This is the one place where a leftover is actively harmful rather
+    than merely untidy. ``ConfigManager``'s upgrade pass copies every
+    managed file it finds in the bundle into the user's config dir, so a
+    stale ``system.md`` here would be re-installed on every launch — and
+    a user seeing a system prompt in their config dir would reasonably
+    conclude the app sends it. Nothing reads any of these now.
     """
-    data = json.loads((CONFIG_DIR / "llm.json").read_text(encoding="utf-8"))
+    retired = {
+        "llm.json",
+        "system.md",
+        "system_doc.md",
+        "review.md",
+        "compaction.md",
+        "system_reminder.md",
+    }
+    actual = {p.name for p in CONFIG_DIR.iterdir() if p.is_file()}
+    assert not (retired & actual), (
+        f"retired config files still bundled: {sorted(retired & actual)}"
+    )
+
+
+def test_engine_config_is_valid_json_with_required_keys() -> None:
+    """engine.json parses and carries the fields EngineConfig reads.
+
+    Replaces the ``llm.json`` guard. The keys changed shape completely:
+    no provider-qualified model pair and no ``env`` dict, because the CLI
+    resolves its own credentials — writing them from here would silently
+    change which account a turn bills to
+    (``specs5/1-foundation/configuration.md`` § No credentials, and no
+    environment export).
+    """
+    data = json.loads((CONFIG_DIR / "engine.json").read_text(encoding="utf-8"))
     assert isinstance(data, dict)
-    # Required keys per specs4/1-foundation/configuration.md.
-    # cache_min_tokens and cache_buffer_multiplier are optional —
-    # the code provides defaults when absent from the shipped file.
-    assert "model" in data
-    assert "smaller_model" in data
-    # env is allowed to be an empty dict but must be present.
-    assert "env" in data
-    assert isinstance(data["env"], dict)
+    # Required keys per specs5/1-foundation/configuration.md.
+    for key in (
+        "model",
+        "permission_mode",
+        "effort",
+        "thinking_display",
+        "max_budget_usd",
+        "cli_path",
+    ):
+        assert key in data, f"missing engine.json key: {key}"
+    # No credential surface, by design.
+    assert "env" not in data
+    assert "smaller_model" not in data
 
 
 def test_app_config_is_valid_json_with_required_sections() -> None:
     """app.json parses and has the sections downstream layers consume."""
     data = json.loads((CONFIG_DIR / "app.json").read_text(encoding="utf-8"))
     assert isinstance(data, dict)
-    # Required top-level sections per specs4/1-foundation/configuration.md.
-    for section in ("url_cache", "history_compaction", "doc_convert", "doc_index"):
+    # Required top-level sections per specs5/1-foundation/configuration.md.
+    # ``url_cache`` and ``history_compaction`` went with the engine that
+    # fetched URLs and compacted its own history.
+    for section in ("doc_convert", "doc_index"):
         assert section in data, f"missing app.json section: {section}"
         assert isinstance(data[section], dict)
 
@@ -136,44 +166,36 @@ def test_snippets_json_has_all_three_modes() -> None:
             assert "message" in snippet
 
 
-def test_prompt_files_are_non_empty() -> None:
-    """Every prompt file ships with real content, not a zero-byte stub."""
-    prompt_files = [
-        "system.md",
-        "system_doc.md",
-        "review.md",
-        "commit.md",
-        "compaction.md",
-        "system_reminder.md",
-    ]
-    for name in prompt_files:
-        content = (CONFIG_DIR / name).read_text(encoding="utf-8")
-        # Strip whitespace so a file containing only newlines fails the check.
-        assert content.strip(), f"{name} is empty or whitespace-only"
+def test_the_commit_prompt_is_non_empty() -> None:
+    """The one surviving prompt ships real content, not a zero-byte stub.
 
-
-def test_edit_protocol_delimiters_are_defined_correctly() -> None:
-    """The shipped system prompts use the emoji-based edit-block delimiters.
-
-    IMPLEMENTATION_NOTES.md D3 specifies the delimiter set:
-      - 🟧🟧🟧 EDIT  (orange squares, U+1F7E7)
-      - 🟨🟨🟨 REPL  (yellow squares, U+1F7E8)
-      - 🟩🟩🟩 END   (green squares, U+1F7E9)
-
-    This guard prevents a regression to the specs3 guillemet markers or
-    to a subtle variant (e.g., missing the literal END word).
+    It survives because generating a commit message is a request AC⚡DC
+    makes on its own behalf — a one-shot query with its own instructions,
+    not a turn in the user's conversation with the agent.
     """
-    for prompt_name in ("system.md", "system_doc.md"):
-        content = (CONFIG_DIR / prompt_name).read_text(encoding="utf-8")
-        # All three markers must appear at least once (in the protocol
-        # description) and in the example block.
-        assert "🟧🟧🟧 EDIT" in content, f"{prompt_name} missing start marker"
-        assert "🟨🟨🟨 REPL" in content, f"{prompt_name} missing separator"
-        assert "🟩🟩🟩 END" in content, f"{prompt_name} missing end marker"
-        # Guard against the specs3 markers creeping back in.
-        assert "««« EDIT" not in content, f"{prompt_name} has old guillemet markers"
-        assert "»»» EDIT END" not in content, f"{prompt_name} has old guillemet markers"
+    content = (CONFIG_DIR / "commit.md").read_text(encoding="utf-8")
+    # Strip whitespace so a file containing only newlines fails the check.
+    assert content.strip(), "commit.md is empty or whitespace-only"
 
-    # system_reminder.md must also carry the full end marker.
-    reminder = (CONFIG_DIR / "system_reminder.md").read_text(encoding="utf-8")
-    assert "🟩🟩🟩 END" in reminder, "system_reminder.md missing end marker"
+
+def test_no_shipped_file_describes_an_edit_protocol() -> None:
+    """No bundled file teaches an edit-block format any more.
+
+    The emoji delimiters (🟧🟧🟧 EDIT / 🟨🟨🟨 REPL / 🟩🟩🟩 END) were
+    AC⚡DC's own protocol: the model emitted them in prose and a parser
+    turned them into writes. The CLI edits files with its own ``Write``
+    and ``Edit`` tools, so a shipped file still specifying the markers
+    would be instructing the agent to route edits through a parser that
+    no longer exists.
+
+    ``edit-block-render.js`` stays on the frontend — it renders the
+    blocks in *archived* history, which must keep displaying correctly.
+    """
+    for path in CONFIG_DIR.iterdir():
+        if not path.is_file():
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        for marker in ("🟧🟧🟧 EDIT", "🟨🟨🟨 REPL", "🟩🟩🟩 END", "««« EDIT"):
+            assert marker not in content, (
+                f"{path.name} still specifies the {marker!r} edit marker"
+            )

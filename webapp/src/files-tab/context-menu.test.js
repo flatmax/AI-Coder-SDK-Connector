@@ -759,7 +759,7 @@ describe('FilesTab context-menu action dispatch', () => {
             sha: null,
           }),
           'Repo.delete_file': vi.fn().mockResolvedValue({}),
-          'LLMService.set_excluded_index_files': vi
+          'ClaudeCodeService.set_denied_read_files': vi
             .fn()
             .mockResolvedValue([]),
         });
@@ -769,7 +769,6 @@ describe('FilesTab context-menu action dispatch', () => {
         // synchronously — this test exercises the
         // delete-clears-exclusion path, not the
         // prompt flow.
-        t._l0ExcludePref = 'never';
         // Exclude the file first (picker event path).
         const picker = t.shadowRoot.querySelector('ac-file-picker');
         picker.dispatchEvent(
@@ -1279,7 +1278,7 @@ describe('FilesTab context-menu action dispatch', () => {
           sha: null,
         }),
         'Repo.rename_file': vi.fn().mockResolvedValue({}),
-        'LLMService.set_excluded_index_files': vi
+        'ClaudeCodeService.set_denied_read_files': vi
           .fn()
           .mockResolvedValue([]),
       });
@@ -1287,7 +1286,6 @@ describe('FilesTab context-menu action dispatch', () => {
       await settle(t);
       // Skip the L0 dialog — this test exercises
       // rename's path-migration, not the prompt.
-      t._l0ExcludePref = 'never';
       const picker = t.shadowRoot.querySelector('ac-file-picker');
       // Exclude a.md.
       picker.dispatchEvent(
@@ -2275,7 +2273,7 @@ describe('FilesTab context-menu action dispatch', () => {
           detached: false,
           sha: null,
         }),
-        'LLMService.set_excluded_index_files': setExcluded,
+        'ClaudeCodeService.set_denied_read_files': setExcluded,
         'ClaudeCodeService.set_selected_files': setSelected,
       });
       const t = mountTab();
@@ -2295,7 +2293,6 @@ describe('FilesTab context-menu action dispatch', () => {
       // Skip the L0 dialog — this test exercises the
       // context-menu Exclude action's RPC dispatch,
       // not the prompt flow.
-      t._l0ExcludePref = 'never';
       fireContextAction(t, {
         action: 'exclude',
         type: 'file',
@@ -2331,7 +2328,6 @@ describe('FilesTab context-menu action dispatch', () => {
       // deselects it in the same operation.
       const { t, setExcluded, setSelected } =
         await setupExcludeTab();
-      t._l0ExcludePref = 'never';
       // Seed selection.
       t._selectedFiles.add('a.md');
       fireContextAction(t, {
@@ -2352,7 +2348,6 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('propagates the new exclusion to the picker', async () => {
       const { t } = await setupExcludeTab();
-      t._l0ExcludePref = 'never';
       const picker = t.shadowRoot.querySelector('ac-file-picker');
       fireContextAction(t, {
         action: 'exclude',
@@ -2383,7 +2378,7 @@ describe('FilesTab context-menu action dispatch', () => {
           detached: false,
           sha: null,
         }),
-        'LLMService.set_excluded_index_files': setExcluded,
+        'ClaudeCodeService.set_denied_read_files': setExcluded,
       });
       const t = mountTab();
       await settle(t);

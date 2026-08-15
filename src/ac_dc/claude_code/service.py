@@ -13,9 +13,15 @@ and broadcasting the user message, spawning the pump, and turning
 on every connected browser. :class:`~ac_dc.claude_code.session.
 EngineSession` owns the engine.
 
-Scope note — this is conversion phase 2 (``specs5/plan/README.md``). The
-chat path runs on this service and the permission gate is live. Deliberately
-absent, each landing in a later phase with the subsystem it belongs to:
+Since phase 3 it also owns the AC-DC subsystems that outlived the native
+engine and had nowhere else to live once ``LLMService`` was deleted: the
+symbol index's LSP surface, the doc index's background build, review mode,
+and the two git writes the user performs by hand. They are grouped in their
+own sections below and share nothing with the turn path except this class.
+
+Scope note — chat runs on this service and the permission gate is live.
+Deliberately absent, each landing in a later phase with the subsystem it
+belongs to:
 
 - Transcript mirroring, ``history_*``, image persistence — phase 5.
 - ``files_reindexed`` in ``postResponseComplete`` — phase 4, with the MCP
@@ -52,6 +58,7 @@ from ac_dc.claude_code.permissions import (
     read_denied_read_files,
     write_denied_read_files,
 )
+from ac_dc.claude_code.review import ReviewMode
 from ac_dc.claude_code.session import (
     EngineNotReadyError,
     EngineSession,
@@ -174,6 +181,63 @@ class ClaudeCodeService:
         self._connect_lock = asyncio.Lock()
         self._connect_error: str | None = None
         self._turn_tasks: set[asyncio.Task[Any]] = set()
+        # One commit at a time. The button stays disabled until the
+        # commitResult broadcast arrives, and two overlapping runs would
+        # stage each other's half-finished work.
+        self._committing = False
+
+        # AC-DC's own indexes. These are not engine state and did not come
+        # from the native engine — they back the symbol/outline tools the
+        # CLI has no equivalent of, so they outlive it (specs5/plan/
+        # inventory.md § Backend — KEEP). Attached by the startup path
+        # because both are built after the RPC server is already serving.
+        self.symbol_index: Any = None
+        self.doc_builder = self._build_doc_builder()
+
+        self.review = ReviewMode(
+            repo=repo,
+            broadcast=self._broadcast,
+            set_permission_mode=self._set_review_permission_mode,
+            current_permission_mode=lambda: self.session.permission_mode,
+            restricted=self._check_localhost_only,
+            on_selection_cleared=self._clear_selection,
+        )
+        self.review.doc_builder = self.doc_builder
+
+    def _build_doc_builder(self) -> Any:
+        """Construct the doc index and the builder that fills it.
+
+        Unconditional, because construction is cheap: no grammars, no
+        model. The sentence-transformer behind keyword enrichment loads
+        lazily on first use and is absent entirely from a stripped install,
+        where the outlines simply carry no keywords.
+
+        Imported here rather than at module scope so the doc-index package
+        is only pulled in when a service is actually built — the RPC layer
+        imports this module to introspect the surface.
+        """
+        from ac_dc.doc_index.background import DocIndexBuilder
+        from ac_dc.doc_index.index import DocIndex
+        from ac_dc.doc_index.keyword_enricher import (
+            EnrichmentConfig,
+            KeywordEnricher,
+        )
+
+        doc_config = getattr(self._config, "doc_index_config", None) or {}
+        enricher = KeywordEnricher(
+            model_name=doc_config.get("keyword_model", "BAAI/bge-small-en-v1.5")
+        )
+        doc_index = DocIndex(
+            repo_root=self._repo.root if self._repo is not None else None,
+            enricher=enricher,
+            enrichment_config=EnrichmentConfig.from_dict(doc_config),
+        )
+        return DocIndexBuilder(
+            doc_index=doc_index,
+            enricher=enricher,
+            repo=self._repo,
+            progress=self._send_startup_progress,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -241,6 +305,7 @@ class ClaudeCodeService:
         await self.permissions.cancel_all()
         for task in list(self._turn_tasks):
             task.cancel()
+        self.doc_builder.close()
         await self.session.disconnect()
 
     # ------------------------------------------------------------------
@@ -265,6 +330,12 @@ class ClaudeCodeService:
         dialog is open gets the dialog: the request was broadcast before it
         was listening, and the callback is still waiting.
 
+        The ``doc_index_*`` / ``enrichment_status`` fields and
+        ``review_state`` are not engine state either — they belong to
+        AC-DC's own subsystems, which this service now owns. The shell reads
+        them on first paint to decide whether to show the doc-index progress
+        overlay and the review banner.
+
         ``doc_convert_available`` is not engine state — it is a server
         capability probe that the shell has nowhere else to read. Document
         conversion survives the conversion untouched
@@ -285,9 +356,8 @@ class ClaudeCodeService:
             "permission_mode": self.session.permission_mode,
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
-            "doc_index_ready": False,
-            "doc_index_enriched": False,
-            "review_state": {"active": False},
+            **self.doc_builder.status(),
+            "review_state": self.review.state(),
             "engine_health": self.get_engine_health(),
             "doc_convert_available": _doc_convert_available(),
         }
@@ -812,8 +882,226 @@ class ClaudeCodeService:
         return info or {}
 
     # ------------------------------------------------------------------
+    # Indexing — AC-DC's own, not the engine's
+    # ------------------------------------------------------------------
+
+    def _attach_symbol_index(self, symbol_index: Any) -> None:
+        """Hand over the built symbol index. Called once, from startup.
+
+        Underscored deliberately: ``add_service`` publishes every public
+        method, and a browser calling this with a JSON value would replace
+        the index with something that has no ``lsp_get_hover`` — breaking
+        hovers for every client until a restart. ``main.py``'s deferred init
+        is the only legitimate caller, and it is in-process.
+        """
+        self.symbol_index = symbol_index
+        self.review.symbol_index = symbol_index
+
+    def _schedule_doc_index_build(self) -> None:
+        """Start the doc-index build in the background. Idempotent.
+
+        Underscored for the same reason as :meth:`_attach_symbol_index` —
+        a startup hook, not something a browser has business triggering.
+        """
+        self.doc_builder.schedule()
+
+    def lsp_get_hover(self, path: str, line: int, col: int) -> dict[str, Any] | None:
+        """Hover text for a position, from the symbol index.
+
+        ``None`` before the index is built — Monaco reads that as "no hover
+        here", which is the truth at that moment.
+        """
+        if self.symbol_index is None:
+            return None
+        return self.symbol_index.lsp_get_hover(path, line, col)
+
+    def lsp_get_definition(
+        self, path: str, line: int, col: int
+    ) -> dict[str, Any] | None:
+        """Definition site for the symbol at a position."""
+        if self.symbol_index is None:
+            return None
+        return self.symbol_index.lsp_get_definition(path, line, col)
+
+    def lsp_get_references(
+        self, path: str, line: int, col: int
+    ) -> list[dict[str, Any]]:
+        """Every reference to the symbol at a position."""
+        if self.symbol_index is None:
+            return []
+        return self.symbol_index.lsp_get_references(path, line, col)
+
+    def lsp_get_completions(
+        self, path: str, line: int, col: int, prefix: str = ""
+    ) -> list[dict[str, Any]]:
+        """Completion candidates for a position and prefix."""
+        if self.symbol_index is None:
+            return []
+        return self.symbol_index.lsp_get_completions(path, line, col, prefix)
+
+    def get_snippets(self) -> list[dict[str, str]]:
+        """The prompt snippets for the current situation.
+
+        Two sets now, not three: ``review`` while a review is active and
+        ``code`` otherwise. The ``doc`` set went with the modes — there is
+        no longer a state in which documents are the only thing the agent
+        can see, so a document-specific snippet list has nothing to key off.
+        """
+        if self.review.active:
+            return self._config.get_snippets("review")
+        return self._config.get_snippets("code")
+
+    def navigate_file(self, path: str) -> dict[str, Any]:
+        """Ask every client to open ``path``.
+
+        A broadcast, not a local action: this is how one participant points
+        the others at a file (``specs5/4-features/collaboration.md``).
+        Unrestricted for that reason — showing someone a file changes
+        nothing on disk.
+        """
+        self._broadcast_soon(
+            Event("navigateFile", {"path": path}, turn_scoped=False)
+        )
+        return {"status": "ok", "path": path}
+
+    # ------------------------------------------------------------------
+    # Git — commit, reset, review
+    # ------------------------------------------------------------------
+
+    async def commit_all(self) -> dict[str, Any]:
+        """Stage everything and commit with a generated message.
+        **Localhost only.**"""
+        from ac_dc.claude_code.commit import commit_all
+
+        return await commit_all(self)
+
+    def reset_to_head(self) -> dict[str, Any]:
+        """Discard every uncommitted change. **Localhost only.**"""
+        from ac_dc.claude_code.commit import reset_to_head
+
+        return reset_to_head(self)
+
+    def check_review_ready(self) -> dict[str, Any]:
+        """Whether the tree is clean enough to enter a review."""
+        return self.review.check_ready()
+
+    def get_commit_graph(
+        self, limit: int = 100, offset: int = 0, include_remote: bool = False
+    ) -> dict[str, Any]:
+        """Commits and branches for the review selector's graph."""
+        return self.review.commit_graph(
+            limit=limit, offset=offset, include_remote=include_remote
+        )
+
+    async def start_review(self, branch: str, base_commit: str) -> dict[str, Any]:
+        """Enter review mode for ``branch`` from ``base_commit``.
+        **Localhost only.**
+
+        Async because entry switches the engine's permission posture to
+        ``plan``, which is a control request to the CLI.
+        """
+        return await self.review.start(branch, base_commit)
+
+    async def end_review(self) -> dict[str, Any]:
+        """Leave review mode, restoring git state and posture.
+        **Localhost only.**"""
+        return await self.review.end()
+
+    def get_review_state(self) -> dict[str, Any]:
+        """The current review, or the inactive shape."""
+        return self.review.state()
+
+    def get_review_file_diff(self, path: str) -> dict[str, Any]:
+        """The forward diff for one file in the active review."""
+        return self.review.file_diff(path)
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    async def _clear_selection(self) -> None:
+        """Drop the file selection and tell every client.
+
+        Review entry's use of this is the point: the selection described
+        the branch you were on, and the tree has just moved.
+        """
+        self._selected_files = []
+        await self._broadcast(Event("filesChanged", [], turn_scoped=False))
+
+    async def _set_review_permission_mode(self, mode: str) -> str | None:
+        """Apply a posture on review entry or exit, connected or not.
+
+        Returns the mode now in force, or ``None`` when it could not be
+        applied at all — which the review reports to the user rather than
+        swallowing, because the difference is whether the agent can write.
+
+        A cold engine is the ordinary case here, not an edge one: nothing
+        connects the CLI until the first turn, and starting a review before
+        chatting is a normal way to work. So the un-connected path records
+        the posture for the connect to come instead of failing — see
+        :meth:`EngineSession.prefer_permission_mode`.
+        """
+        try:
+            if self.session.ready:
+                applied = await self.session.set_permission_mode(mode)
+            else:
+                applied = self.session.prefer_permission_mode(mode)
+        except (EngineNotReadyError, SessionLostError) as exc:
+            # The session went while we were asking. Nothing can run in the
+            # old posture — there is no session to run it — so recording the
+            # request for the next connect is both safe and honest.
+            logger.warning(
+                "Session unavailable while setting the review posture (%s); "
+                "recording %r for the next connect",
+                exc,
+                mode,
+            )
+            applied = self.session.prefer_permission_mode(mode)
+        except ValueError:
+            logger.error("Review asked for an unknown permission mode: %r", mode)
+            return None
+        await self._broadcast(
+            Event(
+                "permissionModeChanged",
+                {"mode": applied, "by": "review mode"},
+                turn_scoped=False,
+            )
+        )
+        return applied
+
+    async def _send_startup_progress(
+        self, stage: str, message: str, percent: int
+    ) -> None:
+        """Forward one indexing progress event to the shell.
+
+        Not an :class:`Event`: ``startupProgress`` takes three positional
+        arguments rather than a payload object, and it predates this
+        service — the startup orchestrator sends the same shape.
+        """
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback("startupProgress", stage, message, percent)
+        except Exception as exc:
+            logger.debug("startupProgress(%s) failed: %s", stage, exc)
+
+    def _broadcast_soon(self, event: Event) -> None:
+        """Fire-and-forget a broadcast from synchronous code.
+
+        For the handful of RPCs that have nothing to await — the event is
+        the whole point of the call, and making them coroutines just to
+        reach ``_broadcast`` would change their wire signatures for nothing.
+        Off-loop callers lose the event and get a log line; every real
+        caller here is an RPC handler, which is always on the loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("No running loop; dropped %s broadcast", event.name)
+            return
+        task = loop.create_task(self._broadcast(event))
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
 
     def _slash_response(self, message: str) -> dict[str, Any] | None:
         """Answer a built-in slash command without involving the model.

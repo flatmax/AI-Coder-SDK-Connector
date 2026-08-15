@@ -15,7 +15,7 @@ Idempotence matters because:
 Noisy-library capping matters because:
 
 - ``--verbose`` sets the root to DEBUG, which otherwise floods the
-  console with per-frame WebSocket logs and per-request LLM payloads.
+  console with per-frame WebSocket logs and per-request HTTP payloads.
   Our own DEBUG output would be unreadable.
 - The cap is INFO rather than WARNING so operators can still see
   meaningful library-level messages (connection lifecycle, request
@@ -45,13 +45,15 @@ _SENTINEL_ATTR = "_ac_dc_logging_configured"
 
 # Third-party loggers that emit at DEBUG level prolifically. Capped at
 # INFO even when the root is DEBUG so ``--verbose`` remains useful for
-# our own code. Casing matches what each library actually uses for its
-# logger name — ``litellm`` and ``LiteLLM`` both appear in the wild
-# depending on import path, so we set both.
+# our own code.
+#
+# ``claude_agent_sdk`` is deliberately NOT capped. Its DEBUG output is
+# the engine's own diagnostics now — the control-protocol handshake, the
+# message taxonomy, the CLI's stderr — and ``--verbose`` exists mostly
+# to see exactly that. The two provider-SDK entries that used to sit
+# here went with the engine that used them.
 _NOISY_LIBRARIES = (
     "websockets",
-    "litellm",
-    "LiteLLM",
     "urllib3",
     "httpx",
     "httpcore",

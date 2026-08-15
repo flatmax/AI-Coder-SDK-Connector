@@ -102,7 +102,7 @@ describe('directory actions', () => {
       'Repo.stage_files': stage,
       'Repo.unstage_files': unstage,
       'Repo.rename_directory': renameDir,
-      'LLMService.set_excluded_index_files': setExcluded,
+      'ClaudeCodeService.set_denied_read_files': setExcluded,
       'ClaudeCodeService.set_selected_files': setSelected,
     });
     const t = mountTab();
@@ -720,7 +720,6 @@ describe('directory actions', () => {
       const { t, setExcluded } = await setupDirTab();
       // Skip the L0 dialog — exercising the batch
       // RPC dispatch, not the prompt.
-      t._l0ExcludePref = 'never';
       fireDirAction(t, {
         action: 'exclude-all',
         path: 'src',
@@ -739,7 +738,6 @@ describe('directory actions', () => {
       const { t, setSelected } = await setupDirTab({
         selectedFiles: ['src/a.md', 'top.md'],
       });
-      t._l0ExcludePref = 'never';
       fireDirAction(t, {
         action: 'exclude-all',
         path: 'src',
@@ -786,7 +784,7 @@ describe('directory actions', () => {
           detached: false,
           sha: null,
         }),
-        'LLMService.set_excluded_index_files': setExcluded,
+        'ClaudeCodeService.set_denied_read_files': setExcluded,
       });
       const t = mountTab();
       await settle(t);

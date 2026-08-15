@@ -487,10 +487,10 @@ class SymbolIndex:
     def get_legend(self) -> str:
         """Return just the legend block (kind codes, aliases).
 
-        Layer 3's prompt assembly places the legend in a
-        cached L0 block separate from the map body so the
-        legend can stabilise while file blocks cascade
-        through tiers. The base formatter exposes a
+        Separate from the map body because a caller that
+        renders file blocks in pieces — chunked tool output,
+        one directory at a time — wants the decoder key once
+        rather than per chunk. The base formatter exposes a
         standalone ``get_legend`` method that computes
         path aliases from the supplied file list; we pass
         the current set.
@@ -504,14 +504,14 @@ class SymbolIndex:
     ) -> str | None:
         """Render the compact block for a single file.
 
-        Returns None when the file isn't in the index —
-        the stability tracker polls per-file and a deleted
-        file between request assembly and block retrieval
-        would otherwise crash the tier build.
+        Returns None when the file isn't in the index.
+        Callers poll per-file, and a file deleted between
+        listing and retrieval must read as absent rather
+        than raise.
 
-        The block omits the legend and alias block — it's
-        meant to be composed into a cached tier where the
-        legend lives separately in L0.
+        The block omits the legend and alias block — it is
+        meant to be composed with others, which render the
+        legend once between them.
         """
         rel = self._normalise_rel_path(path)
         if rel not in self._all_symbols:
@@ -538,10 +538,9 @@ class SymbolIndex:
         """Return the structural hash for a file, or None if unknown.
 
         Thin wrapper around the cache's hash accessor.
-        The stability tracker uses this to detect when a
-        file's structure genuinely changed (distinct from
-        whitespace-only edits which change mtime but not
-        the signature).
+        Lets a caller detect when a file's structure
+        genuinely changed, as distinct from a whitespace-only
+        edit that changes mtime but not the signature.
         """
         rel = self._normalise_rel_path(path)
         return self._cache.get_signature_hash(rel)
@@ -566,8 +565,8 @@ class SymbolIndex:
     def get_indexed_directories(self) -> list[str]:
         """Return a sorted list of directories with at least one indexed file.
 
-        Used by the stability tracker at init time to enumerate
-        the universe of `symbols:<dir>` keys.
+        The universe of directory keys — what a caller iterates
+        to walk the index a folder at a time.
         """
         dirs: set[str] = set()
         for path in self._all_symbols:
@@ -637,8 +636,8 @@ class SymbolIndex:
     def get_indexed_files(self) -> list[str]:
         """Return all repo-relative paths currently indexed.
 
-        Sorted for determinism. Used by the stability tracker to
-        partition files into dir-blocks.
+        Sorted for determinism, so a caller that partitions or
+        chunks this list gets the same partition every call.
         """
         return sorted(self._all_symbols.keys())
 

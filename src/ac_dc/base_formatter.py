@@ -17,8 +17,8 @@ Design points:
 - Path aliasing is the biggest token win — long repeated
   path prefixes get short aliases, computed once per map
   generation from reference-frequency data. Content-stable
-  across regenerations so the cache stability tracker doesn't
-  see spurious changes.
+  across regenerations, so a map that is handed to the agent
+  twice reads the same both times.
 - Reference counts come from the reference index. The
   formatter never computes them itself.
 - Per-file block generation is the unit. Subclasses implement
@@ -27,7 +27,9 @@ Design points:
 - Legend is language-family-specific — subclasses return their
   own legend text via :meth:`_legend`.
 - Deterministic output — same input produces byte-identical
-  output. The stability tracker hashes formatted blocks.
+  output. The index caches hash formatted blocks to decide
+  whether anything actually changed, so a formatter that
+  reordered its own output would invalidate everything.
 """
 
 from __future__ import annotations
@@ -121,10 +123,9 @@ class BaseFormatter(ABC):
     ) -> str:
         """Return just the legend block, without file content.
 
-        Used by the L0 cache tier block which wants the legend
-        separately from file entries (so the legend can be
-        cached alongside the system prompt while file blocks
-        cascade through tiers independently).
+        Used by callers that want to show or send the legend
+        separately from the file entries — the map is readable
+        without it, but not decodable.
         """
         aliases = self._compute_aliases(
             sorted(files) if files else []

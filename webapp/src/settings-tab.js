@@ -4,10 +4,20 @@
 //
 // Renders a card grid of whitelisted config types. Clicking
 // a card opens its content in an inline monospace textarea.
-// Save writes via Settings.save_config_content; reloadable
-// configs (LLM, App) auto-trigger their reload RPC on save.
+// Save writes via Settings.save_config_content; app.json
+// auto-triggers its reload RPC on save.
 //
-// Governing spec: specs4/5-webapp/settings.md
+// The card set shrank with the native engine. The five prompt
+// files (system, system extra, doc, review, compaction) were
+// AC⚡DC's own prompt assembly, and llm.json its provider
+// credentials — neither exists now. What replaced them is
+// engine.json, which is editable but deliberately NOT
+// reloadable: the model, permission mode and CLI path are
+// read when the subprocess starts, so a mid-session reload
+// would report success while the running engine kept its
+// original values.
+//
+// Governing spec: specs5/1-foundation/configuration.md
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
@@ -71,14 +81,9 @@ const CONFIG_CARDS = [
     locked: true,
     lockedNote: 'Locked — feature in early development',
   },
-  { key: 'litellm', icon: '🤖', label: 'LLM Config', format: 'json', reloadable: true },
+  { key: 'engine', icon: '🤖', label: 'Engine Config', format: 'json', reloadable: false },
   { key: 'app', icon: '⚙️', label: 'App Config', format: 'json', reloadable: true },
-  { key: 'system', icon: '📝', label: 'System Prompt', format: 'md', reloadable: false },
-  { key: 'system_extra', icon: '📎', label: 'System Extra', format: 'md', reloadable: false },
-  { key: 'compaction', icon: '🗜️', label: 'Compaction Skill', format: 'md', reloadable: false },
   { key: 'snippets', icon: '✂️', label: 'Snippets', format: 'json', reloadable: false },
-  { key: 'review', icon: '👁', label: 'Review Prompt', format: 'md', reloadable: false },
-  { key: 'system_doc', icon: '📄', label: 'Doc Prompt', format: 'md', reloadable: false },
 ];
 
 export class SettingsTab extends RpcMixin(LitElement) {
@@ -464,17 +469,13 @@ export class SettingsTab extends RpcMixin(LitElement) {
   async _loadLocalhostFlag() {
     if (!this.rpcConnected) return;
     try {
-      // LLMService.get_mode returns a dict; participants
-      // can read it. The frontend has no dedicated
-      // "am I localhost" RPC today, but get_mode is
-      // universally callable and not relevant here — we
-      // just want to detect if we're participants. The
-      // collab popover surfaces the same info; reusing
-      // its shape avoids a new RPC for this one card.
-      //
-      // For now we assume localhost=true. A future pass
-      // can wire this to Collab.get_collab_role's shape
-      // when the collab UI lands.
+      // There is no dedicated "am I localhost" RPC, and the
+      // one this used to lean on (LLMService.get_mode) went
+      // with the native engine. For now we assume
+      // localhost=true; the backend rejects a remote write
+      // regardless, so the worst case is a rejection toast
+      // rather than a silent change. A future pass can wire
+      // this to Collab.get_collab_role.
       this._localhost = true;
     } catch (err) {
       this._localhost = true;
@@ -596,25 +597,18 @@ export class SettingsTab extends RpcMixin(LitElement) {
         this._emitToast(saveResult.error, 'error');
         return;
       }
-      // Update local state (optimistic) — the reload below
-      // refreshes the context manager's system prompt so the
-      // agentic appendix takes effect on the NEXT turn rather
-      // than being deferred two turns (one for the tracker to
-      // notice the hash change, one for the prompt itself to
-      // reach the LLM).
+      // Update local state optimistically, then reload so the
+      // change takes effect on the next turn rather than the
+      // next launch.
       this._toggles = { ...this._toggles, [card.key]: next };
-      // Trigger the backend reload for the underlying config
-      // type. For app.json this calls reload_app_config,
-      // which invokes refresh_system_prompt on the LLM
-      // service so the agents.enabled flag takes effect
-      // immediately. save_config_content alone writes the
-      // file but does not touch the runtime prompt cache.
+      // Every toggle card is backed by app.json — the only
+      // reloadable config left — so the reload target is not a
+      // choice. `save_config_content` alone writes the file
+      // without re-reading it into the running process.
       try {
-        const reloadMethod =
-          card.toggleConfigKey === 'litellm'
-            ? 'Settings.reload_llm_config'
-            : 'Settings.reload_app_config';
-        const reloadResult = await this.rpcExtract(reloadMethod);
+        const reloadResult = await this.rpcExtract(
+          'Settings.reload_app_config',
+        );
         if (
           reloadResult &&
           typeof reloadResult === 'object' &&
@@ -720,16 +714,22 @@ export class SettingsTab extends RpcMixin(LitElement) {
     }
   }
 
+  /**
+   * Re-read the active config into the running process.
+   *
+   * Only app.json is reloadable, so there is one target. Cards
+   * marked `reloadable: false` — engine.json and snippets.json —
+   * return early rather than calling a reload that would either
+   * fail or lie: engine.json's values were consumed when the
+   * subprocess started, and snippets are read fresh on each
+   * render.
+   */
   async _reload() {
     if (!this._activeKey) return;
     const card = CONFIG_CARDS.find((c) => c.key === this._activeKey);
     if (!card || !card.reloadable) return;
-    const method =
-      this._activeKey === 'litellm'
-        ? 'Settings.reload_llm_config'
-        : 'Settings.reload_app_config';
     try {
-      const result = await this.rpcExtract(method);
+      const result = await this.rpcExtract('Settings.reload_app_config');
       if (result && typeof result === 'object' && result.error) {
         this._emitToast(`Reload failed: ${result.error}`, 'error');
       } else {
@@ -759,7 +759,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
   /**
    * Dispatch a request to the app shell to flip the
    * active dialog tab back to the chat. Companion to
-   * the equivalent method in ContextTab and DocConvertTab.
+   * the equivalent method in ContextUsageTab and DocConvertTab.
    */
   _goBackToChat() {
     this.dispatchEvent(
@@ -805,21 +805,18 @@ export class SettingsTab extends RpcMixin(LitElement) {
           @click=${() => this._minimizeDialog()}
         >▾</button>
       </div>
+      <!--
+        The banner used to lead with the model name from
+        get_config_info. That RPC no longer reports one, on
+        purpose: the model in engine.json is a request, and the
+        engine can answer with a different one (a fallback on
+        rate-limit, a set_model mid-session). The model in
+        force is reported where it is known — per turn, in the
+        usage HUD.
+      -->
       ${this._info
         ? html`
             <div class="info-banner">
-              <div class="info-row">
-                <span class="info-label">Model:</span>
-                <strong>${this._info.model || '—'}</strong>
-              </div>
-              ${this._info.smaller_model
-                ? html`
-                    <div class="info-row">
-                      <span class="info-label">Smaller:</span>
-                      <strong>${this._info.smaller_model}</strong>
-                    </div>
-                  `
-                : ''}
               ${this._info.config_dir
                 ? html`
                     <div class="info-row">

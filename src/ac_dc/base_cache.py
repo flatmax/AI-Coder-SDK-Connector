@@ -186,9 +186,10 @@ class BaseCache(Generic[T]):
     def get_signature_hash(self, path: str | Path) -> str | None:
         """Return the signature hash for a cached entry.
 
-        The stability tracker uses this to decide whether a
-        structural change has occurred — a new hash means demote,
-        an unchanged hash means keep the tier.
+        Callers use this to decide whether a *structural* change
+        has occurred, as opposed to any change at all: a new hash
+        means the shape moved, an unchanged hash means only
+        formatting or comments did.
 
         Returns None if no entry exists. Callers must not
         interpret "missing" as "unchanged"; they should re-extract
@@ -217,15 +218,15 @@ class BaseCache(Generic[T]):
     def _compute_signature_hash(self, value: T) -> str:
         """Hash the structural representation of ``value``.
 
-        Default returns empty string — enough for tests that don't
-        exercise the stability tracker. Concrete subclasses
-        override with a shape-specific hasher.
+        Default returns empty string — enough for tests that never
+        ask about structure. Concrete subclasses override with a
+        shape-specific hasher.
 
         The hash is used to detect structural changes between
         cached entries. A whitespace-only edit changes mtime (so
-        the raw cache invalidates) but typically produces the
-        same signature hash (so the stability tracker doesn't
-        demote).
+        the raw cache invalidates) but typically produces the same
+        signature hash, so callers watching for structural change
+        can ignore it.
         """
         del value  # unused in the base
         return ""

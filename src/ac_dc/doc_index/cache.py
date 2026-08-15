@@ -167,10 +167,10 @@ class DocCache(BaseCache[DocOutline]):
         Extends the base class with keyword-model matching:
 
         - ``keyword_model=None`` (default): accept any cached
-          outline regardless of enrichment state. Used by mode
-          switch and chat requests that must not block on
-          enrichment — an unenriched outline is fully usable
-          for tier assembly.
+          outline regardless of enrichment state. Used by
+          request paths that must not block on enrichment — an
+          unenriched outline is a complete outline, just without
+          keywords.
         - ``keyword_model="..."``: require the cached outline
           to have been enriched with exactly that model. A
           mismatch is a cache miss; the caller re-extracts and
@@ -243,11 +243,10 @@ class DocCache(BaseCache[DocOutline]):
         - Heading ``start_line`` and heading ``incoming_ref_count`` —
           derived from surrounding structure; a whitespace-only
           edit that shifts line numbers but doesn't change
-          structure should not demote
+          structure is not a structural change
 
-        The stability tracker (Layer 3.5) uses this to decide
-        when to demote an entry's tier. An unchanged signature
-        across mtime bumps keeps the tier stable.
+        The point is that an mtime bump alone does not move the
+        hash: a caller can tell a reformat from a rewrite.
         """
         parts: list[str] = [value.doc_type]
         _append_headings_signature(parts, value.headings)

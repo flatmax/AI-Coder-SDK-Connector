@@ -1,7 +1,8 @@
-// Tests for webapp/src/files-tab.js — exclusion slice.
-// Covers: exclusion sync (picker ↔ server) and the
-// L0-exclude confirmation dialog with localStorage-backed
-// preference.
+// Tests for webapp/src/files-tab.js — read-denial slice.
+// Covers: the third checkbox state's sync (picker ↔
+// server) now that it writes `Read` deny rules rather
+// than an index filter (CC-14), and the absence of the
+// L0 confirmation dialog that used to gate it.
 
 import {
   afterEach,
@@ -47,7 +48,7 @@ describe('FilesTab exclusion sync', () => {
     expect(picker.excludedFiles.size).toBe(0);
   });
 
-  it('calls set_excluded_index_files when picker dispatches exclusion-changed', async () => {
+  it('calls set_denied_read_files when picker dispatches exclusion-changed', async () => {
     const setExcluded = vi.fn().mockResolvedValue(['a.md']);
     publishFakeRpc({
       'Repo.get_file_tree': vi
@@ -57,15 +58,10 @@ describe('FilesTab exclusion sync', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': setExcluded,
+      'ClaudeCodeService.set_denied_read_files': setExcluded,
     });
     const t = mountTab();
     await settle(t);
-    // Pre-set the L0 pref to 'never' so the dialog is
-    // skipped — this test covers the RPC call shape, not
-    // the prompt flow. The dedicated L0 prompt block
-    // tests dialog-driven dispatch separately.
-    t._l0ExcludePref = 'never';
     // Simulate the picker dispatching the event (same path
     // the real shift+click flow uses).
     const picker = t.shadowRoot.querySelector('ac-file-picker');
@@ -79,11 +75,10 @@ describe('FilesTab exclusion sync', () => {
     await settle(t);
     expect(setExcluded).toHaveBeenCalledOnce();
     expect(setExcluded.mock.calls[0][0]).toEqual(['a.md']);
-    // Second arg is the invalidate_l0 flag — false
-    // when pref is 'never'. (rpcExtract forwards
-    // positional args verbatim, so the spy receives
-    // [files, invalidateL0].)
-    expect(setExcluded.mock.calls[0][1]).toBe(false);
+    // One argument. The deny list is repo-wide and
+    // authoritative — there is no cache flag to pass and
+    // no per-agent variant to route to.
+    expect(setExcluded.mock.calls[0].length).toBe(1);
   });
 
   it('updates internal state and picker prop on exclusion change', async () => {
@@ -95,13 +90,12 @@ describe('FilesTab exclusion sync', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': vi
+      'ClaudeCodeService.set_denied_read_files': vi
         .fn()
         .mockResolvedValue(['a.md']),
     });
     const t = mountTab();
     await settle(t);
-    t._l0ExcludePref = 'never';
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
@@ -130,11 +124,10 @@ describe('FilesTab exclusion sync', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': setExcluded,
+      'ClaudeCodeService.set_denied_read_files': setExcluded,
     });
     const t = mountTab();
     await settle(t);
-    t._l0ExcludePref = 'never';
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
@@ -166,11 +159,11 @@ describe('FilesTab exclusion sync', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': vi
+      'ClaudeCodeService.set_denied_read_files': vi
         .fn()
         .mockResolvedValue({
           error: 'restricted',
-          reason: 'Participants cannot change exclusion',
+          reason: 'Participants cannot change read denial',
         }),
     });
     const toastListener = vi.fn();
@@ -178,7 +171,6 @@ describe('FilesTab exclusion sync', () => {
     try {
       const t = mountTab();
       await settle(t);
-      t._l0ExcludePref = 'never';
       const picker = t.shadowRoot.querySelector('ac-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exclusion-changed', {
@@ -205,7 +197,7 @@ describe('FilesTab exclusion sync', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': vi
+      'ClaudeCodeService.set_denied_read_files': vi
         .fn()
         .mockRejectedValue(new Error('exclusion boom')),
     });
@@ -217,7 +209,6 @@ describe('FilesTab exclusion sync', () => {
     try {
       const t = mountTab();
       await settle(t);
-      t._l0ExcludePref = 'never';
       const picker = t.shadowRoot.querySelector('ac-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exclusion-changed', {
@@ -242,11 +233,10 @@ describe('FilesTab exclusion sync', () => {
       'Repo.get_file_tree': vi
         .fn()
         .mockResolvedValue(fakeTreeResponse([])),
-      'LLMService.set_excluded_index_files': setExcluded,
+      'ClaudeCodeService.set_denied_read_files': setExcluded,
     });
     const t = mountTab();
     await settle(t);
-    t._l0ExcludePref = 'never';
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     // Defensive — malformed events shouldn't reach the
     // RPC or mutate state.
@@ -292,13 +282,12 @@ describe('FilesTab exclusion sync', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'LLMService.set_excluded_index_files': vi
+      'ClaudeCodeService.set_denied_read_files': vi
         .fn()
         .mockResolvedValue(['a.md']),
     });
     const t = mountTab();
     await settle(t);
-    t._l0ExcludePref = 'never';
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     // Exclude a.md.
     picker.dispatchEvent(
@@ -321,10 +310,18 @@ describe('FilesTab exclusion sync', () => {
 });
 
 // ---------------------------------------------------------------------------
-// L0-exclude confirmation dialog (Commit 3)
+// What replaced the L0-exclude confirmation dialog
 // ---------------------------------------------------------------------------
+//
+// Every user-driven denial used to open a dialog asking
+// whether to invalidate the L0 cache now (a ~100K-token
+// prefix rewrite) or leave the structural map stale. There
+// is no map and no L0 cache, so the dialog went with them
+// in conversion phase 3. These tests pin its absence, and
+// pin the one honest thing it did say: the rule is not
+// instant, because the CLI reads its own settings sources.
 
-describe('FilesTab L0-exclude prompt', () => {
+describe('FilesTab read denial — no L0 prompt', () => {
   /** Dispatch an exclusion-changed event from the picker. */
   function fireExclusionChanged(tab, paths) {
     const picker = tab.shadowRoot.querySelector('ac-file-picker');
@@ -337,13 +334,17 @@ describe('FilesTab L0-exclude prompt', () => {
     );
   }
 
-  /** Find the dialog DOM element (null when closed). */
-  function findDialog(tab) {
-    return tab.shadowRoot.querySelector('.l0-dialog');
-  }
-
-  async function setupTab() {
-    const setExcluded = vi.fn().mockResolvedValue([]);
+  async function setupTab(denyResult) {
+    const setDenied = vi.fn().mockResolvedValue(
+      denyResult === undefined
+        ? {
+          denied_read_files: [],
+          settings_file: '/repo/.claude/settings.local.json',
+          takes_effect:
+              "on the CLI's next read of its settings sources",
+        }
+        : denyResult,
+    );
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -353,341 +354,155 @@ describe('FilesTab L0-exclude prompt', () => {
             { name: 'b.md', path: 'b.md', type: 'file', lines: 1 },
           ]),
         ),
-      'LLMService.set_excluded_index_files': setExcluded,
+      'ClaudeCodeService.set_denied_read_files': setDenied,
     });
     const t = mountTab();
     await settle(t);
-    return { t, setExcluded };
+    return { t, setDenied };
   }
 
-  beforeEach(() => {
-    try {
-      localStorage.removeItem('ac-dc-l0-exclude-pref');
-    } catch (_) {}
-  });
-
-  afterEach(() => {
-    try {
-      localStorage.removeItem('ac-dc-l0-exclude-pref');
-    } catch (_) {}
-  });
-
-  it('default pref is "ask" — dialog opens on first exclusion', async () => {
-    const { t } = await setupTab();
-    expect(t._l0ExcludePref).toBe('ask');
+  it('shift+click denial applies straight through — no dialog', async () => {
+    const { t, setDenied } = await setupTab();
     fireExclusionChanged(t, ['a.md']);
     await settle(t);
-    expect(findDialog(t)).toBeTruthy();
-  });
-
-  it('dialog body names a single file by path', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const body = t.shadowRoot.querySelector('.l0-dialog-body');
-    expect(body.textContent).toContain('a.md');
-  });
-
-  it('dialog body shows file count for multi-file batch', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md', 'b.md']);
-    await settle(t);
-    const body = t.shadowRoot.querySelector('.l0-dialog-body');
-    expect(body.textContent).toContain('2 files');
-  });
-
-  it('Apply now invalidates L0 and closes the dialog', async () => {
-    const { t, setExcluded } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.primary')
-      .click();
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).toHaveBeenCalledOnce();
-    expect(setExcluded.mock.calls[0][0]).toEqual(['a.md']);
-    expect(setExcluded.mock.calls[0][1]).toBe(true);
+    expect(t.shadowRoot.querySelector('.l0-dialog')).toBeNull();
+    expect(
+      t.shadowRoot.querySelector('.l0-dialog-backdrop'),
+    ).toBeNull();
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0]).toEqual(['a.md']);
     expect(t._excludedFiles.has('a.md')).toBe(true);
   });
 
-  it('Defer applies without invalidating L0', async () => {
-    const { t, setExcluded } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.secondary')
-      .click();
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).toHaveBeenCalledOnce();
-    expect(setExcluded.mock.calls[0][1]).toBe(false);
-    expect(t._excludedFiles.has('a.md')).toBe(true);
-  });
-
-  it('Cancel discards the exclusion entirely', async () => {
-    const { t, setExcluded } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.cancel')
-      .click();
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    // No RPC fired — exclusion was abandoned.
-    expect(setExcluded).not.toHaveBeenCalled();
-    expect(t._excludedFiles.has('a.md')).toBe(false);
-  });
-
-  it('Cancel re-pushes exclusion state to the picker', async () => {
-    // Defends against the optimistic-render case: the
-    // picker's shift+click handler updated its local
-    // checkbox visual; cancel must reconcile the
-    // visual back to the unchanged authoritative state.
+  it('stores no preference in localStorage', async () => {
+    // The pref key existed only to remember an answer to
+    // the dialog. Nothing should write it now, including
+    // under its old name — a stale value must not resurrect
+    // any behaviour.
     const { t } = await setupTab();
     fireExclusionChanged(t, ['a.md']);
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    // Simulate the picker's optimistic state — its
-    // checkbox visual would show 'a.md' as excluded.
-    picker.excludedFiles = new Set(['a.md']);
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.cancel')
-      .click();
-    await settle(t);
-    // Picker's prop reconciled to the unchanged
-    // authoritative state.
-    expect(picker.excludedFiles.has('a.md')).toBe(false);
-  });
-
-  it('Backdrop click cancels the dialog', async () => {
-    const { t, setExcluded } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const backdrop = t.shadowRoot.querySelector(
-      '.l0-dialog-backdrop',
-    );
-    backdrop.click();
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).not.toHaveBeenCalled();
-  });
-
-  it('Click inside the dialog does not cancel', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    // Click the title — should NOT close.
-    t.shadowRoot.querySelector('.l0-dialog-title').click();
-    await settle(t);
-    expect(findDialog(t)).toBeTruthy();
-  });
-
-  it('Escape key cancels the dialog', async () => {
-    const { t, setExcluded } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const backdrop = t.shadowRoot.querySelector(
-      '.l0-dialog-backdrop',
-    );
-    backdrop.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Escape',
-        bubbles: true,
-        cancelable: true,
-      }),
-    );
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).not.toHaveBeenCalled();
-  });
-
-  it('"Don\'t ask again" + Apply now stores "always"', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const cb = t.shadowRoot.querySelector(
-      '.l0-dialog input[data-l0-remember]',
-    );
-    cb.checked = true;
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.primary')
-      .click();
-    await settle(t);
-    expect(t._l0ExcludePref).toBe('always');
-    expect(localStorage.getItem('ac-dc-l0-exclude-pref')).toBe(
-      'always',
-    );
-  });
-
-  it('"Don\'t ask again" + Defer stores "never"', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const cb = t.shadowRoot.querySelector(
-      '.l0-dialog input[data-l0-remember]',
-    );
-    cb.checked = true;
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.secondary')
-      .click();
-    await settle(t);
-    expect(t._l0ExcludePref).toBe('never');
-    expect(localStorage.getItem('ac-dc-l0-exclude-pref')).toBe(
-      'never',
-    );
-  });
-
-  it('"Don\'t ask again" + Cancel does NOT persist a preference', async () => {
-    const { t } = await setupTab();
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    const cb = t.shadowRoot.querySelector(
-      '.l0-dialog input[data-l0-remember]',
-    );
-    cb.checked = true;
-    t.shadowRoot
-      .querySelector('.l0-dialog-btn.cancel')
-      .click();
-    await settle(t);
-    expect(t._l0ExcludePref).toBe('ask');
-    expect(localStorage.getItem('ac-dc-l0-exclude-pref')).toBeNull();
-  });
-
-  it('pref="always" skips the dialog and invalidates L0', async () => {
-    const { t, setExcluded } = await setupTab();
-    t._l0ExcludePref = 'always';
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded.mock.calls[0][1]).toBe(true);
-  });
-
-  it('pref="never" skips the dialog and defers L0', async () => {
-    const { t, setExcluded } = await setupTab();
-    t._l0ExcludePref = 'never';
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded.mock.calls[0][1]).toBe(false);
-  });
-
-  it('hydrates pref from localStorage on construction', async () => {
-    // Set the preference BEFORE mounting so the
-    // constructor reads it.
-    localStorage.setItem('ac-dc-l0-exclude-pref', 'always');
-    const { t } = await setupTab();
-    expect(t._l0ExcludePref).toBe('always');
-  });
-
-  it('falls back to "ask" for malformed pref values', async () => {
-    localStorage.setItem('ac-dc-l0-exclude-pref', 'bogus');
-    const { t } = await setupTab();
-    expect(t._l0ExcludePref).toBe('ask');
-  });
-
-  it('inclusion path skips the dialog regardless of pref', async () => {
-    // Exclude a.md first (with pref=never to skip the
-    // first dialog), then dispatch an exclusion-changed
-    // event whose set is SMALLER (the user un-excluded
-    // a.md). The diff is a removal — no dialog.
-    const { t, setExcluded } = await setupTab();
-    t._l0ExcludePref = 'never';
-    fireExclusionChanged(t, ['a.md']);
-    await settle(t);
-    expect(t._excludedFiles.has('a.md')).toBe(true);
-    setExcluded.mockClear();
-    // Now flip the pref to 'ask' so we can verify the
-    // inclusion path does NOT open the dialog.
-    t._l0ExcludePref = 'ask';
-    fireExclusionChanged(t, []);
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).toHaveBeenCalledOnce();
-    // Pure removal — invalidate flag is false.
-    expect(setExcluded.mock.calls[0][1]).toBe(false);
-    expect(t._excludedFiles.has('a.md')).toBe(false);
-  });
-
-  it('include action via context menu always invalidates L0', async () => {
-    // _dispatchInclude is the context-menu Include
-    // path. Always invalidates regardless of pref.
-    const { t, setExcluded } = await setupTab();
-    t._excludedFiles = new Set(['a.md']);
-    t._l0ExcludePref = 'ask';
-    t._dispatchInclude('a.md');
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).toHaveBeenCalledOnce();
-    expect(setExcluded.mock.calls[0][1]).toBe(true);
-  });
-
-  it('exclude-all from directory menu opens the dialog', async () => {
-    const { t } = await setupTab();
-    t._l0ExcludePref = 'ask';
-    t._dispatchExcludeAll('');  // empty path = repo root
-    await settle(t);
-    expect(findDialog(t)).toBeTruthy();
-    const body = t.shadowRoot.querySelector('.l0-dialog-body');
-    // Two files were added → dialog body says "2 files".
-    expect(body.textContent).toContain('2 files');
-  });
-
-  it('include-all always invalidates L0', async () => {
-    const { t, setExcluded } = await setupTab();
-    t._excludedFiles = new Set(['a.md', 'b.md']);
-    t._l0ExcludePref = 'ask';
-    t._dispatchIncludeAll('');
-    await settle(t);
-    expect(findDialog(t)).toBeNull();
-    expect(setExcluded).toHaveBeenCalledOnce();
-    expect(setExcluded.mock.calls[0][1]).toBe(true);
-  });
-
-  it('resetL0ExcludePref clears the stored value', async () => {
-    localStorage.setItem('ac-dc-l0-exclude-pref', 'always');
-    const { t } = await setupTab();
-    expect(t._l0ExcludePref).toBe('always');
-    t.resetL0ExcludePref();
-    expect(t._l0ExcludePref).toBe('ask');
     expect(
       localStorage.getItem('ac-dc-l0-exclude-pref'),
     ).toBeNull();
   });
 
-  it('agent tab does not pass invalidate_l0 to RPC', async () => {
-    // Per the agent-tab carve-out: agent ContextManagers
-    // share the orchestrator's L0, so the agent RPC
-    // doesn't accept the flag. We pre-set pref=always
-    // to skip the dialog, then verify the agent RPC was
-    // called with just the path list (no third arg).
-    const setAgent = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({
-      'Repo.get_file_tree': vi
-        .fn()
-        .mockResolvedValue(
-          fakeTreeResponse([
-            { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
-          ]),
-        ),
-      'LLMService.set_agent_excluded_index_files': setAgent,
-    });
-    const t = mountTab();
+  it('reports the takes-effect caveat once per session', async () => {
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      const { t } = await setupTab();
+      fireExclusionChanged(t, ['a.md']);
+      await settle(t);
+      const first = toastListener.mock.calls.at(-1)[0].detail;
+      expect(first.type).toBe('info');
+      expect(first.message).toContain('next read');
+      const countAfterFirst = toastListener.mock.calls.length;
+      // A second denial is the same caveat. Saying it again
+      // on every checkbox tick would train the user to
+      // ignore it.
+      fireExclusionChanged(t, ['a.md', 'b.md']);
+      await settle(t);
+      expect(toastListener.mock.calls.length).toBe(countAfterFirst);
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('says nothing when the deny list is emptied', async () => {
+    // Clearing every denial is not a denial; there is no
+    // "you are now denied N files" to report.
+    const { t } = await setupTab();
+    fireExclusionChanged(t, ['a.md']);
     await settle(t);
-    t._l0ExcludePref = 'always';
-    // Switch to an agent tab — set _activeTabId
-    // directly to skip the active-tab-changed event
-    // dance.
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      fireExclusionChanged(t, []);
+      await settle(t);
+      expect(toastListener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
+  });
+
+  it('context-menu deny writes the rule and deselects', async () => {
+    const { t, setDenied } = await setupTab();
+    t._selectedFiles = new Set(['a.md']);
+    t._dispatchExclude('a.md');
+    await settle(t);
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0]).toEqual(['a.md']);
+    expect(t._excludedFiles.has('a.md')).toBe(true);
+    // Denied and selected can't coexist — pointing at a
+    // file the agent may not read is a contradiction.
+    expect(t._selectedFiles.has('a.md')).toBe(false);
+  });
+
+  it('context-menu allow drops the path from the rule', async () => {
+    const { t, setDenied } = await setupTab();
+    t._excludedFiles = new Set(['a.md', 'b.md']);
+    t._dispatchInclude('a.md');
+    await settle(t);
+    expect(setDenied).toHaveBeenCalledOnce();
+    // The RPC replaces the whole list, so the removal is
+    // expressed as the surviving list.
+    expect(setDenied.mock.calls[0][0]).toEqual(['b.md']);
+    expect(t._excludedFiles.has('a.md')).toBe(false);
+  });
+
+  it('deny-all over a directory sends one rule set', async () => {
+    const { t, setDenied } = await setupTab();
+    t._dispatchExcludeAll('');  // empty path = repo root
+    await settle(t);
+    expect(t.shadowRoot.querySelector('.l0-dialog')).toBeNull();
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0].sort()).toEqual([
+      'a.md', 'b.md',
+    ]);
+  });
+
+  it('allow-all empties the rule set', async () => {
+    const { t, setDenied } = await setupTab();
+    t._excludedFiles = new Set(['a.md', 'b.md']);
+    t._dispatchIncludeAll('');
+    await settle(t);
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0]).toEqual([]);
+  });
+
+  it('an agent tab writes the same repo-wide rule', async () => {
+    // A per-agent deny set was a filter on a per-agent
+    // prompt. SDK subagents share the session's settings
+    // sources, so there is one rule set and one RPC.
+    const { t, setDenied } = await setupTab();
     t._activeTabId = 'agent-frontend';
     if (!t._excludedFilesByTab.has('agent-frontend')) {
       t._excludedFilesByTab.set('agent-frontend', new Set());
     }
     fireExclusionChanged(t, ['a.md']);
     await settle(t);
-    expect(setAgent).toHaveBeenCalledOnce();
-    expect(setAgent.mock.calls[0][0]).toBe('agent-frontend');
-    expect(setAgent.mock.calls[0][1]).toEqual(['a.md']);
-    // Agent RPC has only 2 args.
-    expect(setAgent.mock.calls[0].length).toBe(2);
+    expect(setDenied).toHaveBeenCalledOnce();
+    expect(setDenied.mock.calls[0][0]).toEqual(['a.md']);
+    expect(setDenied.mock.calls[0].length).toBe(1);
+  });
+
+  it('surfaces a non-restricted error from the RPC', async () => {
+    // `write_denied_read_files` raises ValueError for a path
+    // it refuses (the service turns it into `{error}`). A
+    // silent failure here would leave the checkbox ticked
+    // over a file the agent can still read.
+    const { t } = await setupTab({ error: 'path escapes the repo' });
+    const toastListener = vi.fn();
+    window.addEventListener('ac-toast', toastListener);
+    try {
+      fireExclusionChanged(t, ['../outside.md']);
+      await settle(t);
+      const detail = toastListener.mock.calls.at(-1)[0].detail;
+      expect(detail.type).toBe('error');
+      expect(detail.message).toContain('escapes the repo');
+    } finally {
+      window.removeEventListener('ac-toast', toastListener);
+    }
   });
 });

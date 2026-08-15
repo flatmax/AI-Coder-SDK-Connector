@@ -11,7 +11,7 @@
 //   - a close button that stops playback
 //
 // It's a sibling overlay (mounted by the app shell, same
-// as ac-cache-warmup-progress) rather than living inside
+// as ac-usage-hud) rather than living inside
 // the chat panel, so it floats above the whole app and
 // survives tab switches. It holds no playback state of its
 // own — it reflects the `speech-player-state` window event
@@ -228,8 +228,8 @@ export class SpeechControls extends LitElement {
   _onPlayerState(event) {
     this._state = event.detail || speechPlayer.state;
     // First activation with no saved position — drop the
-    // panel in the bottom-right, above the cache-warmup
-    // overlay's lane.
+    // panel in the bottom-right, clear of the lane the
+    // transient overlays use.
     if (this._state.active && !this._pos) {
       this._pos = _defaultPos();
     }
@@ -391,7 +391,7 @@ export class SpeechControls extends LitElement {
 // Position persistence
 // ---------------------------------------------------------------
 
-/** Bottom-right default, above the cache-warmup lane. */
+/** Bottom-right default, clear of the transient-overlay lane. */
 function _defaultPos() {
   if (typeof window === 'undefined') return { x: 0, y: 0 };
   const w = 248;

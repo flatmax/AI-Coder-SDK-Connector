@@ -11,9 +11,14 @@
 //    (can take minutes on large repos). Per-file progress
 //    events drive a determinate progress bar.
 //
-// The component mirrors CompactionProgress's state machine
-// (hidden / active / success / error) and fade timing, but
-// adds a percent-driven progress bar for the enrichment phase.
+// The state machine is hidden / active / success / error with
+// a timed fade, plus a percent-driven progress bar for the
+// enrichment phase. It was modelled on the compaction overlay,
+// which went with the native engine — the engine compacts its
+// own history and announces the boundary after the fact, so
+// there is nothing left to show a spinner for. This overlay
+// survives because doc-index work is still AC⚡DC's own, and
+// still slow enough to need one.
 //
 // Event channel: window event `doc-index-progress` with
 // detail `{ stage, message, percent }`. The app shell
@@ -42,8 +47,7 @@ import { LitElement, css, html } from 'lit';
 
 /**
  * How long the "Done" success state stays visible before
- * fade-out begins. Matches compaction-progress for visual
- * consistency.
+ * fade-out begins.
  */
 const _SUCCESS_DISPLAY_MS = 800;
 

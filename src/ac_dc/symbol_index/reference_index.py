@@ -2,8 +2,8 @@
 
 Builds a dependency graph from :class:`FileSymbols` objects and
 exposes queries used by the symbol-map formatter (incoming
-reference counts) and the stability tracker (connected
-components for cache tier initialisation).
+reference counts) and by callers asking which files cluster
+together (connected components over mutual references).
 
 Governing spec: ``specs4/2-indexing/reference-graph.md``.
 
@@ -17,8 +17,8 @@ Design notes:
 
 - **Symmetric queries.** "Files that reference X" and "files X
   depends on" are equally cheap lookups. Both are needed —
-  the formatter wants incoming counts, the stability tracker
-  wants connected components which need undirected edges.
+  the formatter wants incoming counts, clustering wants
+  connected components which need undirected edges.
 
 - **Edges carry weight.** Multiple references from file A to
   file B (several call sites or an import plus calls) collapse
@@ -270,11 +270,11 @@ class ReferenceIndex:
 
         Returns canonical ``(lo, hi)`` tuples where
         ``lo < hi`` alphabetically — avoids reporting the
-        same mutual pair twice. The stability tracker's
-        connected-component algorithm uses this as its edge
-        set: only bidirectional references count as "these
-        files belong together"; unidirectional references are
-        too weak a signal to cluster on.
+        same mutual pair twice. :meth:`connected_components`
+        uses this as its edge set: only bidirectional
+        references count as "these files belong together";
+        unidirectional references are too weak a signal to
+        cluster on.
         """
         pairs: set[tuple[str, str]] = set()
         for source, targets in self._outgoing.items():
@@ -291,15 +291,23 @@ class ReferenceIndex:
         Uses the undirected graph formed by
         :meth:`bidirectional_edges`. Files not in any
         bidirectional pair appear as singleton components.
-        Matches the specs4 clustering rule — the stability
-        tracker wants "files that mutually depend on each
-        other" which is a stronger signal than one-way
+        The clustering rule is "files that mutually depend on
+        each other", which is a stronger signal than one-way
         references.
 
-        Returns components in no particular order. The
-        stability tracker's greedy bin-packer doesn't depend
-        on order, and imposing one would mask bugs where
-        callers accidentally rely on a specific traversal.
+        Returns components in no particular order, and no
+        caller may rely on one — imposing an order here would
+        mask bugs where a caller accidentally depends on a
+        specific traversal.
+
+        The tier initialiser that used to be this query's only
+        consumer left with the native engine. Components are
+        kept because they surface structure: "these eleven files
+        form a subsystem" answers an orientation question that an
+        alphabetical listing cannot, and the ``symbol_map`` tool
+        orders its output by component membership so related
+        files appear together (``specs5/2-indexing/reference-graph.md``
+        § Connected Components).
         """
         # Union-Find over all known files.
         parent: dict[str, str] = {f: f for f in self._all_files}

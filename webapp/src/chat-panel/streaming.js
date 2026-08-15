@@ -141,7 +141,7 @@ export function engineErrorReason(result) {
  * frequent enough that the one-decimal seconds display
  * advances smoothly to the eye, but far cheaper than the
  * per-chunk render rate — each tick is a single
- * requestUpdate, like the retry ticker.
+ * requestUpdate.
  */
 const RUN_TIMER_TICK_MS = 250;
 
@@ -301,9 +301,6 @@ function routeChunk(panel, detail, kind) {
   const owner = liveOwner(panel, requestId);
   if (!owner) return;
   const { tab } = owner;
-  // First chunk after a retry means the retry succeeded — clear the banner so
-  // the user sees content instead of a countdown.
-  if (tab.retryInfo) clearRetryBanner(panel, tab);
   if (!stageChunk(tab.turnBlocks, payload, kind)) return;
   scheduleFlush(panel);
   // Apply synchronously in addition to scheduling the rAF coalesce. The rAF
@@ -625,9 +622,6 @@ export function onStreamComplete(panel, event) {
   if (!ownerTab) return;
   const ownerIsActive = ownerTabId === panel._activeTabId;
 
-  // Stream ended — clear any retry banner the tab was displaying.
-  if (ownerTab.retryInfo) clearRetryBanner(panel, ownerTab);
-
   if (requestId === ownerTab.currentRequestId) {
     // Drain anything staged but not yet applied: the engine can send the
     // result immediately after its last chunk, before the rAF fires.
@@ -772,138 +766,13 @@ export function resumeStreamBlocks(panel, tab, stream) {
   return true;
 }
 
-// ---------------------------------------------------------------
-// Retry banner (native-engine path; dead under Claude Code)
-// ---------------------------------------------------------------
-
-/**
- * Handle a `stream-retry` window event.
- *
- * Nothing on the Claude Code path emits this — the CLI owns its own retries
- * and reports rate limits through `rateLimit` instead. Left wired until the
- * native engine is deleted in phase 3.
- */
-export function onStreamRetry(panel, event) {
-  const detail = event.detail || {};
-  const requestId = detail.requestId;
-  const info = detail.info || {};
-  if (!requestId) return;
-  const ownerTabId = findTabForRequest(panel, requestId);
-  if (!ownerTabId) return;
-  const ownerTab = panel._tabs.get(ownerTabId);
-  if (!ownerTab) return;
-
-  const attempt = Number(info.attempt) || 0;
-  const maxAttempts = Number(info.max_attempts) || 0;
-  const waitSeconds = Number(info.wait_seconds) || 0;
-  const errorType = typeof info.error_type === 'string'
-    ? info.error_type
-    : 'llm_error';
-
-  emitRetryToast(panel, { attempt, maxAttempts, waitSeconds, errorType });
-
-  ownerTab.retryInfo = {
-    attempt,
-    maxAttempts,
-    waitSeconds,
-    errorType,
-    message: typeof info.message === 'string' ? info.message : '',
-    provider: typeof info.provider === 'string' ? info.provider : '',
-    context: typeof info.context === 'string' ? info.context : '',
-    startedAt: Date.now(),
-  };
-  if (ownerTabId === panel._activeTabId) {
-    panel.requestUpdate('_retryInfo');
-  }
-  startRetryTick(panel);
-}
-
-/**
- * Emit a `warning`-severity toast describing a retry — the classified error
- * type, the upcoming wait, and the attempt number. Long waits (>= 60 s)
- * collapse to minutes so the toast doesn't show "120 s".
- */
-function emitRetryToast(panel, info) {
-  const { attempt, maxAttempts, waitSeconds, errorType } = info;
-  let label;
-  switch (errorType) {
-    case 'rate_limit': label = 'Rate limited'; break;
-    case 'api_connection': label = 'Connection failed'; break;
-    case 'service_unavailable': label = 'Provider unavailable'; break;
-    case 'timeout': label = 'Request timed out'; break;
-    case 'authentication': label = 'Authentication failed'; break;
-    default: label = 'LLM error'; break;
-  }
-  const waitText = waitSeconds >= 60
-    ? `${Math.round(waitSeconds / 60)} min`
-    : `${Math.max(0, Math.round(waitSeconds))} s`;
-  const attemptText = maxAttempts > 0
-    ? `${attempt}/${maxAttempts}`
-    : `${attempt}`;
-  panel._emitToast(
-    `🔄 ${label} — retrying in ${waitText} (${attemptText})`,
-    'warning',
-  );
-}
-
-/**
- * Start the 100ms re-render ticker driving every active retry banner. Each
- * tick is a single requestUpdate; the render path derives remaining time from
- * `Date.now() - startedAt`, so the tick only kicks a dirty-check.
- */
-function startRetryTick(panel) {
-  if (panel._retryTickInterval != null) return;
-  panel._retryTickInterval = setInterval(() => {
-    // Drain tabs whose banner has expired. The next event usually clears it,
-    // but network jitter can delay that past the bar filling; hiding a stale
-    // "0s remaining" line keeps the UI honest. 2s grace so rapid successive
-    // retries don't blink the banner between clears and new events.
-    let anyActive = false;
-    const now = Date.now();
-    for (const tab of panel._tabs.values()) {
-      if (!tab.retryInfo) continue;
-      const elapsedMs = now - tab.retryInfo.startedAt;
-      const waitMs = tab.retryInfo.waitSeconds * 1000;
-      if (elapsedMs > waitMs + 2000) {
-        tab.retryInfo = null;
-        continue;
-      }
-      anyActive = true;
-    }
-    if (anyActive) {
-      panel.requestUpdate('_retryInfo');
-    } else {
-      stopRetryTick(panel);
-      panel.requestUpdate('_retryInfo');
-    }
-  }, 100);
-}
-
-/**
- * Stop the panel-level ticker. Called when every tab's retryInfo has cleared,
- * and on panel teardown from events.js's detach path.
- */
-export function stopRetryTick(panel) {
-  if (panel._retryTickInterval != null) {
-    clearInterval(panel._retryTickInterval);
-    panel._retryTickInterval = null;
-  }
-}
-
-/**
- * Clear an owning tab's retry banner, stopping the panel ticker if no tab
- * still has an active one.
- */
-function clearRetryBanner(panel, tab) {
-  if (!tab || !tab.retryInfo) return;
-  tab.retryInfo = null;
-  let anyActive = false;
-  for (const t of panel._tabs.values()) {
-    if (t.retryInfo) { anyActive = true; break; }
-  }
-  if (!anyActive) stopRetryTick(panel);
-  panel.requestUpdate('_retryInfo');
-}
+// The retry banner lived here until conversion phase 3. AC⚡DC's own
+// completion wrapper slept between attempts and pushed `streamRetry` before
+// each sleep, so the panel drew a countdown bar to prove the UI hadn't
+// frozen. The CLI retries inside the subprocess and never narrates it; what
+// it does report is a `rateLimit` message, which `onRateLimit` above turns
+// into a notice carrying the real reset time. A countdown we cannot source
+// would be an invented number.
 
 // ---------------------------------------------------------------
 // Passive observer for user messages

@@ -78,11 +78,16 @@ export function applySelection(host, newSelection, notifyServer) {
  * heard about the selection reports it as empty — which
  * would clear the picker on every refresh.
  *
- * The agent path still goes to `LLMService`. It targets a
- * `ConversationScope` that only exists there, and phase 3
- * removes both the call and its caller — the agent tabs of
- * the emoji spawn protocol are not the subagent tabs that
- * replace them.
+ * The agent path still goes to `LLMService`, which phase 3
+ * deleted. It is unreachable rather than broken: an agent
+ * tab could only ever be created by an `agentsSpawned`
+ * push, no backend emits one any more, so `parseAgentTabId`
+ * cannot return a tag outside the tests. The branch stays
+ * with the dormant tab strip it belongs to — re-keying
+ * those tabs onto SDK subagents is CC-8, and the subagent
+ * browser is deferred (specs5/plan/delivery.md). Whoever
+ * builds it decides whether a subagent tab even has a
+ * selection to send; a subagent does not read the picker.
  */
 export async function sendSelectionToServer(host, files) {
   const agentTag = parseAgentTabId(host._activeTabId);

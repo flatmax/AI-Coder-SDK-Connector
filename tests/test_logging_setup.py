@@ -44,8 +44,6 @@ def reset_ac_dc_handler():
         name: logging.getLogger(name).level
         for name in (
             "websockets",
-            "litellm",
-            "LiteLLM",
             "urllib3",
             "httpx",
             "httpcore",
@@ -154,7 +152,7 @@ def test_noisy_libraries_are_capped_at_info_in_verbose_mode():
     """Third-party library loggers stay at INFO even when we're verbose.
 
     Without this cap, enabling --verbose would flood the console with
-    per-frame WebSocket logs and per-request LLM payloads, making our
+    per-frame WebSocket logs and per-request HTTP traffic, making our
     own DEBUG output unreadable.
     """
     configure(verbose=True)
@@ -162,8 +160,6 @@ def test_noisy_libraries_are_capped_at_info_in_verbose_mode():
     # Root is DEBUG, but these should be at INFO.
     for noisy_name in (
         "websockets",
-        "litellm",
-        "LiteLLM",
         "urllib3",
         "httpx",
         "httpcore",
@@ -173,6 +169,25 @@ def test_noisy_libraries_are_capped_at_info_in_verbose_mode():
             f"{noisy_name} logger should be capped at INFO, got "
             f"{logging.getLevelName(noisy_logger.level)}"
         )
+
+
+def test_the_cap_list_names_only_libraries_we_still_load():
+    """``litellm`` and ``LiteLLM`` left the cap list with the provider.
+
+    Capping a logger for a package that is no longer installed is
+    harmless but misleading — it reads as evidence the app still talks
+    to that library. The SDK's own chatter arrives on the ``claude_agent_sdk``
+    logger and is left uncapped deliberately: when a turn misbehaves, the
+    SDK's DEBUG lines are the ones we actually want ``--verbose`` for.
+    """
+    from ac_dc.logging_setup import _NOISY_LIBRARIES
+
+    assert set(_NOISY_LIBRARIES) == {
+        "websockets",
+        "urllib3",
+        "httpx",
+        "httpcore",
+    }
 
 
 def test_handler_emits_to_stderr():

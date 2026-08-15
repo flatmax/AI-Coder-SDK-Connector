@@ -132,27 +132,38 @@ export async function fetchCurrentState(host) {
  * Event handler bound to stream-complete, session-changed,
  * and compaction-event. Fire-and-forget refresh — we don't
  * need to await the fetch here, the reactive property update
- * in _fetchHistoryStatus re-renders when the result lands.
+ * in _fetchContextUsage re-renders when the result lands.
  */
-export function onCompactionStatusRefresh(host) {
-  fetchHistoryStatus(host);
+export function onContextUsageRefresh(host) {
+  fetchContextUsage(host);
 }
 
 /**
- * Fetch the current history status from the backend and
- * update the reactive property. Guarded against overlapping
- * fetches — if one is in flight, new triggers are coalesced
- * into the pending call rather than queueing a second one.
+ * Fetch the engine's context-window usage and update the
+ * reactive property behind the dialog's capacity bar.
  *
- * Non-fatal on failure: missing backend, method not found
- * on an older server, or transient network error all leave
- * the prior snapshot in place. The bar keeps showing the
- * last-known state; next event triggers a retry.
+ * Replaces the `get_history_status` fetch this used to make.
+ * That method merged AC⚡DC's own token budget with its own
+ * compaction threshold — two numbers this app computed about a
+ * prompt it assembled. The engine now owns both, and reports
+ * them together: `percentage` against `maxTokens`, where
+ * `maxTokens` is already reduced by the autocompact buffer. So
+ * the bar filling means a compact is imminent, which is exactly
+ * what the old bar was trying to say.
+ *
+ * Guarded against overlapping fetches — this one crosses into
+ * the CLI subprocess as a control request, so a burst of events
+ * coalescing matters more than it did for a local computation.
+ *
+ * Non-fatal on failure: a disconnected engine, a session that
+ * was lost, or a transient error all leave the prior snapshot
+ * in place. The bar keeps showing the last-known state; the
+ * next event triggers a retry.
  */
-export async function fetchHistoryStatus(host) {
+export async function fetchContextUsage(host) {
   if (!host.call) return;
-  if (host._historyStatusFetchInFlight) return;
-  host._historyStatusFetchInFlight = true;
+  if (host._contextUsageFetchInFlight) return;
+  host._contextUsageFetchInFlight = true;
   try {
     // Call in the same style as _fetchCurrentState — no
     // typeof check on the method reference. The jrpc-oo
@@ -160,11 +171,13 @@ export async function fetchHistoryStatus(host) {
     // callables whose typeof is not necessarily
     // 'function', so guarding on typeof was rejecting
     // valid calls and silently leaving the bar empty.
-    const raw = await host.call['LLMService.get_history_status']();
+    const raw = await host.call[
+      'ClaudeCodeService.get_context_usage'
+    ]();
     // Unwrap single-key envelope the same way
     // _fetchCurrentState does. jrpc-oo returns
     // { ClassName: { ... } } for method calls.
-    let status = raw;
+    let payload = raw;
     if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
       const keys = Object.keys(raw);
       if (keys.length === 1) {
@@ -173,12 +186,25 @@ export async function fetchHistoryStatus(host) {
           inner && typeof inner === 'object'
           && !Array.isArray(inner)
         ) {
-          status = inner;
+          payload = inner;
         }
       }
     }
-    if (status && typeof status === 'object') {
-      host._historyStatus = status;
+    // `{error: ...}` is the service's shape for "the engine
+    // isn't ready" — expected before connect and after a lost
+    // session, so it keeps the last snapshot rather than
+    // blanking the bar.
+    if (payload && typeof payload === 'object' && payload.error) {
+      console.debug(
+        '[app-shell] get_context_usage unavailable', payload.error,
+      );
+      return;
+    }
+    const usage = payload && typeof payload === 'object'
+      ? payload.usage
+      : null;
+    if (usage && typeof usage === 'object') {
+      host._contextUsage = usage;
     }
   } catch (err) {
     // Surface failures with console.warn — debug-level
@@ -190,14 +216,14 @@ export async function fetchHistoryStatus(host) {
     const msg = err?.message || '';
     if (msg.includes('method not found')) {
       console.debug(
-        '[app-shell] get_history_status not available', err,
+        '[app-shell] get_context_usage not available', err,
       );
     } else {
       console.warn(
-        '[app-shell] get_history_status failed', err,
+        '[app-shell] get_context_usage failed', err,
       );
     }
   } finally {
-    host._historyStatusFetchInFlight = false;
+    host._contextUsageFetchInFlight = false;
   }
 }

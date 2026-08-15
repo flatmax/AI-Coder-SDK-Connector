@@ -57,7 +57,6 @@ import {
   onSessionStarted,
   onStreamChunk,
   onStreamComplete,
-  onStreamRetry,
   onSubagentEvent,
   onSystemEvent,
   onThinkingChunk,
@@ -66,7 +65,6 @@ import {
   onUserMessage,
   resumeStreamBlocks,
   startStreamTimerTick,
-  stopRetryTick,
   stopStreamTimerTick,
 } from './streaming.js';
 
@@ -89,7 +87,6 @@ import {
 export function bindEventHandlers(panel) {
   panel._onStreamChunk = (e) => onStreamChunk(panel, e);
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
-  panel._onStreamRetry = (e) => onStreamRetry(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
   // Claude Code engine channels. Every one is a distinct window event
   // because the engine reports them as distinct pushes; folding them into
@@ -277,7 +274,6 @@ export function resumeActiveStreams(panel, activeStreams) {
 export function attachEventListeners(panel) {
   window.addEventListener('stream-chunk', panel._onStreamChunk);
   window.addEventListener('stream-complete', panel._onStreamComplete);
-  window.addEventListener('stream-retry', panel._onStreamRetry);
   window.addEventListener('user-message', panel._onUserMessage);
   // Claude Code engine channels (see the block comment above).
   window.addEventListener('thinking-chunk', panel._onThinkingChunk);
@@ -372,7 +368,6 @@ export function detachEventListeners(panel) {
   document.removeEventListener('keydown', panel._onChatTabShortcutBound);
   window.removeEventListener('stream-chunk', panel._onStreamChunk);
   window.removeEventListener('stream-complete', panel._onStreamComplete);
-  window.removeEventListener('stream-retry', panel._onStreamRetry);
   window.removeEventListener('user-message', panel._onUserMessage);
   window.removeEventListener('thinking-chunk', panel._onThinkingChunk);
   window.removeEventListener('tool-use', panel._onToolUse);
@@ -447,13 +442,7 @@ export function detachEventListeners(panel) {
     clearTimeout(panel._fileSearchDebounceTimer);
     panel._fileSearchDebounceTimer = null;
   }
-  // Panel is unmounting — stop the retry ticker
-  // (if any). Unlike the debounce timers above
-  // this is a setInterval that would otherwise
-  // keep firing requestUpdate on a detached
-  // component.
-  stopRetryTick(panel);
-  // Same for the run-timer ticker — a live stream at
+  // The run-timer ticker — a live stream at
   // unmount would otherwise leave its interval firing
   // requestUpdate on a detached component.
   stopStreamTimerTick(panel);
@@ -702,21 +691,19 @@ function seedIntoHistory(historyEl, msgs) {
  *     to the transcript carrying the before/after
  *     token counts.
  *
- * The remaining stages belong to the native
- * engine and are unreachable from the chat path
- * now that turns run through `ClaudeCodeService`.
- * They stay until phase 3 deletes `LLMService`
- * with them:
+ * That is the whole vocabulary now. Five further
+ * stages — `url_fetch`, `url_ready`, `compacting`,
+ * `compacted` and `compaction_error` — were handled
+ * here until conversion phase 3 deleted the native
+ * engine that broadcast them. The first two belonged
+ * to URL curation (CC-9); the last three to a
+ * compaction this app performed on a history it
+ * owned. The CLI compacts its own context and tells
+ * us after the fact, which is what `compact_boundary`
+ * is.
  *
- *   - `url_fetch` — URL fetch started mid-stream.
- *   - `url_ready` — URL fetch completed.
- *   - `compacting` — history compaction starting.
- *   - `compacted` — compaction done. Replace the
- *     message list with the compacted messages.
- *   - `compaction_error` — compaction failed.
- *
- * `compact_boundary` deliberately does NOT take
- * the `compacted` branch. Compaction is the
+ * `compact_boundary` deliberately did NOT take
+ * the old `compacted` branch. Compaction is the
  * engine's, it happens to the engine's context,
  * and the transcript on this page is not affected
  * by it — what the divider says is "the agent's
@@ -784,77 +771,14 @@ export function onCompactionEvent(panel, event) {
       ];
       return;
     }
-    case 'url_fetch': {
-      const label = payload.url || 'URL';
-      panel._emitToast(`Fetching ${label}…`, 'info');
-      return;
-    }
-    case 'url_ready': {
-      const label = payload.url || 'URL';
-      panel._emitToast(`Fetched ${label}`, 'success');
-      return;
-    }
-    case 'compacting': {
-      panel._emitToast('Compacting history…', 'info');
-      return;
-    }
-    case 'compacted': {
-      // Replace the message list with the
-      // compacted form. The backend's `case`
-      // field tells us what kind of compaction
-      // happened.
-      const newMessages = Array.isArray(payload.messages)
-        ? payload.messages
-        : null;
-      if (newMessages) {
-        panel.messages = newMessages.map((m) => {
-          const normalized = normalizeMessageContent(m);
-          const images = Array.isArray(m.images)
-            ? m.images
-            : normalized.images;
-          // Preserve turn_id and agent_blocks for
-          // the "View agents" affordance — same
-          // shape as onSessionChanged.
-          const turnId =
-            typeof m.turn_id === 'string' && m.turn_id
-              ? m.turn_id
-              : null;
-          const agentBlocks =
-            Array.isArray(m.agent_blocks) &&
-            m.agent_blocks.length > 0
-              ? m.agent_blocks
-              : null;
-          return {
-            role: m.role,
-            content: normalized.content,
-            ...(images.length > 0 ? { images } : {}),
-            ...(m.system_event ? { system_event: true } : {}),
-            ...(turnId ? { turn_id: turnId } : {}),
-            ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
-          };
-        });
-      }
-      const caseName = payload.case;
-      const toastMsg =
-        caseName === 'truncate'
-          ? 'History truncated at topic boundary'
-          : caseName === 'summarize'
-            ? 'History summarised'
-            : 'History compaction complete';
-      panel._emitToast(toastMsg, 'success');
-      return;
-    }
-    case 'compaction_error': {
-      const detail = payload.error || 'unknown error';
-      panel._emitToast(`Compaction failed: ${detail}`, 'error');
-      return;
-    }
     default:
       // Unknown stage — silent drop. Doc
       // enrichment stages fall through here (by
-      // design) and any future backend stage we
-      // haven't learned about is harmless to
-      // ignore.
+      // design), as do the five retired native-engine
+      // stages if a stale backend still broadcasts
+      // them: acting on `compacted` would replace the
+      // transcript the user is reading with a
+      // summary produced by an engine that is gone.
       return;
   }
 }
@@ -1140,7 +1064,7 @@ export async function loadSnippets(panel) {
   if (!panel.rpcConnected) return;
   try {
     const snippets = await panel.rpcExtract(
-      'LLMService.get_snippets',
+      'ClaudeCodeService.get_snippets',
     );
     panel._snippets = Array.isArray(snippets) ? snippets : [];
   } catch (err) {

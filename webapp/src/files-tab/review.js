@@ -134,7 +134,7 @@ export async function onExitReview(host) {
   if (!host.rpcConnected) return;
   try {
     const result = await host.rpcExtract(
-      'LLMService.end_review',
+      'ClaudeCodeService.end_review',
     );
     if (host._isRestrictedError(result)) {
       host._showToast(
@@ -180,7 +180,7 @@ export async function onExitReview(host) {
 export async function onOpenReviewSelector(host) {
   try {
     const readiness = await host.rpcExtract(
-      'LLMService.check_review_ready',
+      'ClaudeCodeService.check_review_ready',
     );
     if (readiness && readiness.clean === false) {
       const msg = readiness.message
@@ -278,7 +278,7 @@ export async function confirmStartReview(host) {
   };
   try {
     const result = await host.rpcExtract(
-      'LLMService.start_review',
+      'ClaudeCodeService.start_review',
       branch,
       baseCommit,
     );

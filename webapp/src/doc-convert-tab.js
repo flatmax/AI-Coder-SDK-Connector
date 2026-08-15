@@ -946,7 +946,7 @@ export class DocConvertTab extends RpcMixin(LitElement) {
   /**
    * Dispatch a request to the app shell to flip the
    * active dialog tab back to the chat. Companion to
-   * the equivalent method in ContextTab and SettingsTab.
+   * the equivalent method in ContextUsageTab and SettingsTab.
    */
   _goBackToChat() {
     this.dispatchEvent(

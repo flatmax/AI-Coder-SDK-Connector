@@ -17,8 +17,8 @@
 //
 // Component-scoped reactive properties (those that
 // don't move with the active tab — `repoFiles`,
-// `reviewActive`, `_committing`, `_reasoningEnabled`,
-// `_mode`, `_crossRefEnabled`, `_tabStripOverflowOpen`)
+// `reviewActive`, `_committing`, `_mode`,
+// `_crossRefEnabled`, `_tabStripOverflowOpen`)
 // use Lit's default accessor path and don't carry
 // `noAccessor: true`.
 
@@ -121,7 +121,7 @@ export const PROPERTIES = {
     noAccessor: true,
   },
   /**
-   * Snippets loaded from LLMService.get_snippets. Each is
+   * Snippets loaded from ClaudeCodeService.get_snippets. Each is
    * `{icon, tooltip, message}`. Empty until RPC ready or on
    * fetch error. Reloaded on mode / review state changes
    * since the server returns mode-aware snippets.
@@ -238,40 +238,12 @@ export const PROPERTIES = {
    * Not per-tab — review is main-conversation-only.
    */
   reviewActive: { type: Boolean },
-  /**
-   * True when extended-thinking / reasoning mode is on.
-   * Component-scoped (not per-tab) — every tab and agent
-   * shares the same setting because the toggle is a
-   * cost/quality dial the user expresses globally. The
-   * value is forwarded into ``LLMService.chat_streaming``
-   * as the ``reasoning`` argument; backend layers
-   * per-request override on top of ``app.json`` config.
-   * Persisted to localStorage under
-   * ``ac-dc-reasoning-enabled``. Spec
-   * ``specs4/7-future/reasoning.md`` § Recommended Shape
-   * — Commit B.
-   *
-   * **Inert since phase 2.** `ClaudeCodeService.chat_streaming` takes no
-   * reasoning arguments — the CLI decides when to think — so nothing reads
-   * this any more, and the 🧠 control that wrote it is off the action bar (see
-   * rendering.js). Left declared because `helpers.js`'s persistence shims and
-   * the `input.js` handlers are still exported and tested; both go with the
-   * native engine in phase 3.
-   */
-  _reasoningEnabled: { type: Boolean, state: true },
-  /**
-   * Per-request reasoning effort level for adaptive-thinking
-   * models — one of ``minimal``/``low``/``medium``/``high``/
-   * ``xhigh``/``max``. Forwarded into
-   * ``LLMService.chat_streaming`` as the ``effort`` argument;
-   * the backend defers to ``config.reasoning_effort`` when it
-   * doesn't recognise the value. Component-scoped like
-   * ``_reasoningEnabled`` and persisted to localStorage under
-   * ``ac-dc-reasoning-effort`` (default ``xhigh``).
-   *
-   * Inert since phase 2 for the same reason as `_reasoningEnabled`.
-   */
-  _reasoningEffort: { type: String, state: true },
+  // `_reasoningEnabled` and `_reasoningEffort` were declared here until
+  // conversion phase 3. They fed the native `chat_streaming`'s `reasoning`
+  // and `effort` arguments, neither of which is on the new signature — the
+  // CLI decides its own thinking depth, and effort is an `engine.json` value
+  // read when the subprocess starts. Their controls came off the action bar
+  // in phase 2; the state, handlers and localStorage shims go here.
   /**
    * Current primary mode — 'code' or 'doc'. Component-
    * scoped (not per-tab) for now: the backend has one

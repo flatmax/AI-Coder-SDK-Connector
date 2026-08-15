@@ -93,6 +93,7 @@ def build_option_kwargs(
     session_store: Any = None,
     resume: str | None = None,
     fork_session: bool = False,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """Build the kwargs for :class:`ClaudeAgentOptions`.
 
@@ -121,6 +122,12 @@ def build_option_kwargs(
         Branch from ``resume`` instead of continuing it. Ignored (with a
         warning) without ``resume``, which is what the SDK would do
         anyway but silently.
+    permission_mode:
+        The posture to start in, overriding ``engine.json``. The session
+        passes its *current* mode, so a posture set before the first
+        connect — review mode entered on a cold engine — is the posture
+        the CLI comes up in, rather than being silently reverted to the
+        configured default by the connect itself.
     """
     kwargs: dict[str, Any] = {
         "cwd": str(repo_root),
@@ -129,7 +136,7 @@ def build_option_kwargs(
         "system_prompt": dict(CLI_SYSTEM_PROMPT),
         # The posture a new session starts in. Live-switchable afterwards
         # via set_permission_mode() without a reconnect.
-        "permission_mode": config.effective_permission_mode,
+        "permission_mode": permission_mode or config.effective_permission_mode,
         # Token-level streaming. Without it the UI only updates per block,
         # which reads as a stall on long responses.
         "include_partial_messages": True,

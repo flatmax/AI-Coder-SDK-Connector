@@ -798,7 +798,7 @@ describe('ChatPanel send flow', () => {
     expect(p.messages[0].content).toBe('hello world');
   });
 
-  it('calls LLMService.chat_streaming with a request ID', async () => {
+  it('calls ClaudeCodeService.chat_streaming with a request ID', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
@@ -1233,7 +1233,7 @@ describe('ChatPanel input history — event handling', () => {
 describe('ChatPanel snippet drawer', () => {
   it('renders the Snippets toggle button', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1247,7 +1247,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('drawer is closed by default', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1258,7 +1258,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('clicking the toggle opens the drawer', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([
         { icon: '🔍', tooltip: 'Search', message: 'find this' },
       ]),
     });
@@ -1273,7 +1273,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('clicking again closes the drawer', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1301,7 +1301,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('active class reflects open state', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1316,7 +1316,7 @@ describe('ChatPanel snippet drawer', () => {
     const getSnippets = vi.fn().mockResolvedValue([
       { icon: '📝', tooltip: 'Note', message: 'take a note' },
     ]);
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const p = mountPanel();
     await settle(p);
     expect(getSnippets).toHaveBeenCalledOnce();
@@ -1326,7 +1326,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('renders one button per snippet', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([
         { icon: '🔍', tooltip: 'one', message: 'a' },
         { icon: '📝', tooltip: 'two', message: 'b' },
         { icon: '🏁', tooltip: 'three', message: 'c' },
@@ -1342,7 +1342,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('empty snippet list shows placeholder when drawer opens', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1359,7 +1359,7 @@ describe('ChatPanel snippet drawer', () => {
         { icon: '✅', tooltip: 'ok', message: 'x' },
       ])
       .mockRejectedValueOnce(new Error('boom'));
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const consoleSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
@@ -1378,7 +1378,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('reloads snippets on mode-changed event', async () => {
     const getSnippets = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const p = mountPanel();
     await settle(p);
     expect(getSnippets).toHaveBeenCalledTimes(1);
@@ -1389,7 +1389,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('reloads snippets on review-started event', async () => {
     const getSnippets = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const p = mountPanel();
     await settle(p);
     window.dispatchEvent(new CustomEvent('review-started'));
@@ -1399,7 +1399,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('reloads snippets on review-ended event', async () => {
     const getSnippets = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const p = mountPanel();
     await settle(p);
     window.dispatchEvent(new CustomEvent('review-ended'));
@@ -1409,7 +1409,7 @@ describe('ChatPanel snippet drawer', () => {
 
   it('does not reload on session-changed event', async () => {
     const getSnippets = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({ 'LLMService.get_snippets': getSnippets });
+    publishFakeRpc({ 'ClaudeCodeService.get_snippets': getSnippets });
     const p = mountPanel();
     await settle(p);
     expect(getSnippets).toHaveBeenCalledTimes(1);
@@ -1426,7 +1426,7 @@ describe('ChatPanel snippet drawer', () => {
 describe('ChatPanel snippet insertion', () => {
   async function setupWithSnippets() {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([
         { icon: '🔍', tooltip: 'Check', message: 'please check' },
         { icon: '📝', tooltip: 'Note', message: 'note that' },
       ]),
@@ -1508,7 +1508,7 @@ describe('ChatPanel snippet insertion', () => {
 
   it('ignores snippets with empty message', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([
         { icon: '🔍', tooltip: 'Empty', message: '' },
       ]),
     });
@@ -1527,7 +1527,7 @@ describe('ChatPanel snippet drawer persistence', () => {
   it('loads drawer state from localStorage', async () => {
     _saveDrawerOpen(true);
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1536,7 +1536,7 @@ describe('ChatPanel snippet drawer persistence', () => {
 
   it('persists state when toggling open', async () => {
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1548,7 +1548,7 @@ describe('ChatPanel snippet drawer persistence', () => {
   it('persists state when toggling closed', async () => {
     _saveDrawerOpen(true);
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
     });
     const p = mountPanel();
     await settle(p);
@@ -1562,7 +1562,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
   it('auto-closes drawer when a message is sent', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
       'ClaudeCodeService.chat_streaming': started,
     });
     const p = mountPanel();
@@ -1581,7 +1581,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
   it('persists closed state after auto-close', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
       'ClaudeCodeService.chat_streaming': started,
     });
     _saveDrawerOpen(true);
@@ -1596,7 +1596,7 @@ describe('ChatPanel snippet drawer close-on-send', () => {
   it('does not touch drawer state if it was already closed', async () => {
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({
-      'LLMService.get_snippets': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.get_snippets': vi.fn().mockResolvedValue([]),
       'ClaudeCodeService.chat_streaming': started,
     });
     const p = mountPanel();

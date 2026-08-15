@@ -103,7 +103,7 @@ describe('FilePicker component', () => {
     });
 
     it('menu items show include OR exclude but not both', async () => {
-      // Not excluded → "Exclude from index" visible.
+      // Not denied → "Deny agent read" visible.
       const tree = rootOf([file('a.md')]);
       const p = mountPicker({
         tree,

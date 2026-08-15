@@ -1,14 +1,15 @@
 """Tests that the bundled default config values are sane.
 
 Goes further than test_package_metadata: validates that numeric values
-are in sensible ranges, model names look like provider-qualified
-identifiers, and snippet content isn't obviously broken. These are the
-values a fresh user sees; shipping nonsense defaults wastes their first
-session.
+are in sensible ranges, that the engine file defers to the CLI rather
+than second-guessing it, and that snippet content isn't obviously
+broken. These are the values a fresh user sees; shipping nonsense
+defaults wastes their first session.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -22,73 +23,58 @@ def _load_json(name: str) -> dict:
     return json.loads((CONFIG_DIR / name).read_text(encoding="utf-8"))
 
 
-# ---- llm.json ------------------------------------------------------------
+# ---- engine.json ---------------------------------------------------------
 
 
-def test_llm_model_names_are_provider_qualified() -> None:
-    """Model names include a provider prefix like 'anthropic/...'.
+def test_engine_defaults_are_all_null() -> None:
+    """Every shipped engine option is null — the CLI decides.
 
-    litellm uses this prefix to route to the correct backend. A bare model
-    name would work only for OpenAI and silently break on any other
-    provider.
+    ``engine.json`` replaced ``llm.json``, and the shape of the question
+    changed with it. The old file named a provider-qualified model and an
+    env dict because AC⚡DC called the provider itself. The CLI resolves
+    its own credentials and its own default model, so a shipped value
+    here would override the user's own ``claude`` configuration with a
+    guess made at packaging time
+    (``specs5/1-foundation/configuration.md`` § The Engine File).
     """
-    data = _load_json("llm.json")
-    for key in ("model", "smaller_model"):
-        value = data[key]
-        assert isinstance(value, str) and value, f"{key} must be a non-empty string"
-        assert "/" in value, (
-            f"{key}={value!r} lacks a provider prefix (expected 'provider/model')"
-        )
+    data = _load_json("engine.json")
+    assert data, "engine.json must ship the keys, so the editor shows them"
+    for key, value in data.items():
+        assert value is None, f"{key}={value!r} — shipped defaults must be null"
 
 
-def test_llm_env_dict_values_are_strings() -> None:
-    """The env dict, if populated, maps strings to strings."""
-    data = _load_json("llm.json")
-    env = data["env"]
-    for k, v in env.items():
-        assert isinstance(k, str), f"env key {k!r} is not a string"
-        assert isinstance(v, str), f"env[{k!r}]={v!r} is not a string"
+def test_engine_defaults_cover_every_field() -> None:
+    """The shipped keys are exactly the ones EngineConfig reads.
+
+    A key the loader ignores is a setting the user can edit with no
+    effect; a field absent from the file is one they will not discover.
+    """
+    from ac_dc.claude_code.engine_config import EngineConfig
+
+    fields = {f.name for f in dataclasses.fields(EngineConfig)}
+    assert set(_load_json("engine.json")) == fields
+
+
+def test_engine_defaults_survive_the_loader() -> None:
+    """Loading the shipped file yields an all-null config, not a warning."""
+    from ac_dc.claude_code.engine_config import EngineConfig
+
+    loaded = EngineConfig.load(CONFIG_DIR)
+    assert loaded == EngineConfig()
 
 
 # ---- app.json ------------------------------------------------------------
 
 
-def test_url_cache_section_fields() -> None:
-    """url_cache has the fields the URL service will consult."""
-    cfg = _load_json("app.json")["url_cache"]
-    assert "path" in cfg
-    assert "ttl_hours" in cfg
-    ttl = cfg["ttl_hours"]
-    assert isinstance(ttl, (int, float))
-    assert ttl > 0, f"ttl_hours must be > 0, got {ttl}"
+def test_app_config_has_only_the_two_live_sections() -> None:
+    """app.json is the two indexes and nothing else.
 
-
-def test_history_compaction_section_fields() -> None:
-    """history_compaction has all the fields the compactor uses."""
-    cfg = _load_json("app.json")["history_compaction"]
-    required = {
-        "enabled",
-        "compaction_trigger_tokens",
-        "verbatim_window_tokens",
-        "summary_budget_tokens",
-        "min_verbatim_exchanges",
-    }
-    missing = required - set(cfg.keys())
-    assert not missing, f"history_compaction missing keys: {sorted(missing)}"
-    assert isinstance(cfg["enabled"], bool)
-    for key in (
-        "compaction_trigger_tokens",
-        "verbatim_window_tokens",
-        "summary_budget_tokens",
-    ):
-        value = cfg[key]
-        assert isinstance(value, int)
-        assert value > 0, f"{key} must be > 0, got {value}"
-    assert cfg["verbatim_window_tokens"] < cfg["compaction_trigger_tokens"], (
-        "verbatim_window_tokens must be smaller than compaction_trigger_tokens"
-    )
-    assert isinstance(cfg["min_verbatim_exchanges"], int)
-    assert cfg["min_verbatim_exchanges"] >= 1
+    Five sections went with the native engine — ``url_cache``,
+    ``history_compaction``, ``agents``, ``reasoning``, ``cache_warmup``
+    and ``cache_tiering``. A section nothing reads is a knob that lies:
+    the user edits it, the app accepts the edit, and nothing changes.
+    """
+    assert set(_load_json("app.json")) == {"doc_convert", "doc_index"}
 
 
 def test_doc_convert_section_fields() -> None:
@@ -104,27 +90,6 @@ def test_doc_convert_section_fields() -> None:
     max_mb = cfg["max_source_size_mb"]
     assert isinstance(max_mb, (int, float))
     assert max_mb > 0, f"max_source_size_mb must be > 0, got {max_mb}"
-
-
-def test_cache_warmup_section_fields() -> None:
-    """cache_warmup has the fields the warmer reads."""
-    cfg = _load_json("app.json")["cache_warmup"]
-    assert "enabled" in cfg
-    assert "interval_seconds" in cfg
-    assert isinstance(cfg["enabled"], bool)
-    interval = cfg["interval_seconds"]
-    assert isinstance(interval, int)
-    assert interval > 0, f"interval_seconds must be > 0, got {interval}"
-    # Sanity: the interval must sit comfortably inside the
-    # 5-minute Anthropic cache TTL with margin for retry
-    # waits. 270s (4:30) is the recommended value; anything
-    # >= 300 would let the cache expire before our warm-up
-    # fires.
-    assert interval < 300, (
-        f"interval_seconds={interval} is at or beyond the "
-        "5-minute Anthropic cache TTL — warm-ups would fire "
-        "after the cache has already expired"
-    )
 
 
 def test_doc_index_section_fields() -> None:
@@ -192,37 +157,17 @@ def test_snippet_messages_do_not_reference_old_delimiters() -> None:
 # ---- Prompt content sanity ----------------------------------------------
 
 
-def test_system_prompt_describes_workflow_and_trust_rules() -> None:
-    """system.md covers the must-have sections for a coding agent."""
-    content = (CONFIG_DIR / "system.md").read_text(encoding="utf-8")
-    lower = content.lower()
-    assert "workflow" in lower, "system.md must describe a workflow"
-    assert "context" in lower and "trust" in lower, (
-        "system.md must establish context-trust rules"
-    )
-    assert "edit" in lower and "protocol" in lower, (
-        "system.md must document the edit protocol"
-    )
-    assert "symbol map" in lower, "system.md must explain the symbol map"
+def test_the_commit_prompt_is_the_only_prompt_shipped() -> None:
+    """Five prompt files went with the engine that assembled them.
 
-
-def test_doc_system_prompt_is_documentation_focused() -> None:
-    """system_doc.md is document-mode and avoids code-mode framing."""
-    content = (CONFIG_DIR / "system_doc.md").read_text(encoding="utf-8")
-    lower = content.lower()
-    assert "document" in lower
-    assert "outline" in lower
-    assert "cross-reference" in lower or "cross reference" in lower
-
-
-def test_review_prompt_states_readonly() -> None:
-    """review.md makes clear the reviewer cannot apply edits."""
-    content = (CONFIG_DIR / "review.md").read_text(encoding="utf-8")
-    lower = content.lower()
-    assert "read-only" in lower or "read only" in lower, (
-        "review.md must state that review mode is read-only"
-    )
-    assert "review" in lower
+    ``system.md``, ``system_doc.md``, ``review.md``, ``compaction.md``
+    and ``system_reminder.md`` all described how to be a coding agent —
+    the workflow, the edit protocol, the context-trust rules. The CLI
+    has its own, and shipping ours alongside would give the user a file
+    to edit that no request reads.
+    """
+    prompts = {p.name for p in CONFIG_DIR.glob("*.md")}
+    assert prompts == {"commit.md"}
 
 
 def test_commit_prompt_mentions_conventional_commit_style() -> None:
@@ -233,22 +178,13 @@ def test_commit_prompt_mentions_conventional_commit_style() -> None:
     assert "imperative" in lower
 
 
-def test_compaction_prompt_requests_json_output() -> None:
-    """compaction.md instructs JSON-only output with expected fields."""
-    content = (CONFIG_DIR / "compaction.md").read_text(encoding="utf-8")
-    lower = content.lower()
-    assert "json" in lower
-    assert "boundary_index" in content
-    assert "confidence" in content
-    assert "summary" in content
+def test_commit_prompt_asks_for_a_bare_message() -> None:
+    """No fencing, no preamble — the output goes straight into git.
 
-
-def test_system_reminder_is_short() -> None:
-    """system_reminder.md is brief — it's appended to every user turn."""
-    content = (CONFIG_DIR / "system_reminder.md").read_text(encoding="utf-8")
-    # Budget: reminder appends on every turn; keep it under ~500 chars.
-    assert len(content) < 1000, (
-        f"system_reminder.md is {len(content)} chars — too long for a per-turn reminder"
-    )
-    # Must still carry the full end marker so the LLM stays correct.
-    assert "\U0001f7e9\U0001f7e9\U0001f7e9 END" in content
+    ``ac_dc.claude_code.commit`` strips a wrapping fence defensively, but
+    the prompt is where the contract is stated: anything the model adds
+    around the message would otherwise land in permanent history.
+    """
+    lower = (CONFIG_DIR / "commit.md").read_text(encoding="utf-8").lower()
+    assert "only the commit message" in lower
+    assert "fencing" in lower or "fence" in lower

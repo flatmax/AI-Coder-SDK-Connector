@@ -10,10 +10,9 @@
 // Some delegate to host helpers for cross-module
 // concerns:
 //
-//   - host._applySelection / host._applyExclusion /
-//     host._applyExclusionWithPrompt — selection +
-//     exclusion paths still live on the host (stage 3
-//     extracts them)
+//   - host._applySelection / host._applyExclusion —
+//     selection + read-denial paths still live on the
+//     host (stage 3 extracts them)
 //   - host._loadFileTree — tree refresh after every
 //     mutation
 //   - host._showToast — user-facing feedback
@@ -340,19 +339,15 @@ export function dispatchDuplicate(host, path) {
  * Excluding a selected file also deselects it —
  * the two states are mutually exclusive. Mirrors
  * the shift+click behaviour in the picker's
- * `_toggleExclusion` path. Routes through the
- * L0-invalidation prompt — same pref logic as
- * shift+click.
+ * `_toggleExclusion` path.
  */
 export function dispatchExclude(host, path) {
   if (host._excludedFiles.has(path)) return;
   const nextExcluded = new Set(host._excludedFiles);
   nextExcluded.add(path);
-  host._applyExclusionWithPrompt(nextExcluded);
-  // Deselect if currently selected — excluded and
-  // selected can't coexist. Selection clear does
-  // NOT route through the L0 prompt because it's a
-  // selection change, not an exclusion change.
+  host._applyExclusion(nextExcluded, /* notifyServer */ true);
+  // Deselect if currently selected — denied and
+  // selected can't coexist.
   if (host._selectedFiles.has(path)) {
     const nextSelected = new Set(host._selectedFiles);
     nextSelected.delete(path);
@@ -371,17 +366,15 @@ export function dispatchExclude(host, path) {
  * Idempotent — a file not currently excluded
  * short-circuits via set-equality.
  *
- * Inclusion always invalidates L0 — the user wants
- * the file's structural block back in the aggregate
- * map immediately. No prompt, no preference check.
+ * Allowing a read is written the same way as denying
+ * one: the RPC takes the whole deny list, so dropping a
+ * path from it is the removal.
  */
 export function dispatchInclude(host, path) {
   if (!host._excludedFiles.has(path)) return;
   const next = new Set(host._excludedFiles);
   next.delete(path);
-  host._applyExclusion(
-    next, /* notifyServer */ true, /* invalidateL0 */ true,
-  );
+  host._applyExclusion(next, /* notifyServer */ true);
 }
 
 /**
@@ -677,21 +670,15 @@ export function dispatchNewDirectory(host, parentPath) {
  * already excluded). Deselects any descendants
  * that were selected, matching the mutual-
  * exclusion rule between selection and exclusion.
- *
- * Routes through the L0-invalidation prompt — the
- * dialog body adapts to show the directory name
- * and file count when more than one file is being
- * excluded.
  */
 export function dispatchExcludeAll(host, dirPath) {
   const files = collectDescendantFilesFromPath(host, dirPath);
   if (files.length === 0) return;
   const nextExcluded = new Set(host._excludedFiles);
   for (const p of files) nextExcluded.add(p);
-  host._applyExclusionWithPrompt(nextExcluded);
+  host._applyExclusion(nextExcluded, /* notifyServer */ true);
   // Deselect any that were selected. Same rationale
-  // as `dispatchExclude` — selection changes don't
-  // route through the L0 prompt.
+  // as `dispatchExclude`.
   const hadSelected = files.some((p) => host._selectedFiles.has(p));
   if (hadSelected) {
     const nextSelected = new Set(host._selectedFiles);
@@ -702,20 +689,16 @@ export function dispatchExcludeAll(host, dirPath) {
 
 /**
  * Remove every descendant file from the excluded
- * set. Returns them to the default index-only
- * state — does NOT auto-select, matching the
- * file-level Include behaviour. Always invalidates
- * L0 (no prompt) — same rationale as
- * dispatchInclude.
+ * set. Returns them to the plain unticked state —
+ * does NOT auto-select, matching the file-level
+ * Allow behaviour.
  */
 export function dispatchIncludeAll(host, dirPath) {
   const files = collectDescendantFilesFromPath(host, dirPath);
   if (files.length === 0) return;
   const next = new Set(host._excludedFiles);
   for (const p of files) next.delete(p);
-  host._applyExclusion(
-    next, /* notifyServer */ true, /* invalidateL0 */ true,
-  );
+  host._applyExclusion(next, /* notifyServer */ true);
 }
 
 // ---------------------------------------------------------------

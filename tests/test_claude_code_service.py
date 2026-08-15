@@ -44,6 +44,14 @@ class FakeConfig:
     def __init__(self, repo_root, config_dir=None):
         self.repo_root = repo_root
         self.config_dir = config_dir
+        self.snippet_calls: list[str] = []
+
+    def get_snippets(self, mode="code"):
+        self.snippet_calls.append(mode)
+        return [{"label": mode, "text": f"snippet for {mode}"}]
+
+    def get_commit_prompt(self):
+        return "Write a conventional commit message for this diff."
 
 
 class FakeSession:
@@ -115,6 +123,15 @@ class FakeSession:
         self.control_calls.append(("set_permission_mode", (mode,)))
         if self.control_error is not None:
             raise self.control_error
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"Unknown permission mode {mode!r}.")
+        self.permission_mode = mode
+        return mode
+
+    def prefer_permission_mode(self, mode):
+        from ac_dc.claude_code.engine_config import PERMISSION_MODES
+
+        self.control_calls.append(("prefer_permission_mode", (mode,)))
         if mode not in PERMISSION_MODES:
             raise ValueError(f"Unknown permission mode {mode!r}.")
         self.permission_mode = mode
@@ -646,7 +663,9 @@ class TestState:
             "model",
             "pending_permissions",
             "doc_index_ready",
+            "doc_index_building",
             "doc_index_enriched",
+            "enrichment_status",
             "review_state",
             "engine_health",
             "doc_convert_available",
@@ -882,10 +901,9 @@ class TestPermissionRpc:
 # Collaboration restrictions
 # ---------------------------------------------------------------------------
 #
-# The ``LLMService`` and ``Repo`` halves live in
-# ``test_collab_restrictions.py``, along with the dispatch-level test that
-# the gate can still see who is calling. This half is here because it needs
-# the fake engine.
+# The ``Repo`` half lives in ``test_collab_restrictions.py``, along with the
+# dispatch-level test that the gate can still see who is calling. This half
+# is here because it needs the fake engine.
 
 # Every mutating RPC, with arguments good enough to reach the gate. The
 # frontend moved onto this service in phase 2, and a gate that was on the
@@ -905,19 +923,43 @@ GATED_METHODS: dict[str, tuple] = {
     "stop_task": ("task-1",),
     "reconnect_mcp_server": ("ac-dc",),
     "toggle_mcp_server": ("ac-dc", True),
+    # Git writes to the host's tree, and the review arrangement moves every
+    # file in it. Same restriction the native methods carried.
+    "commit_all": (),
+    "reset_to_head": (),
+    "start_review": ("feature", "abc123"),
+    "end_review": (),
 }
 
-# Deliberately reachable by a participant. Watching a turn is the point of
-# collaboration: a participant who can see less than the host cannot review
-# what the agent did (``specs5/4-features/collaboration.md`` § Read-Only).
-READ_ONLY_METHODS = {
-    "get_engine_health",
-    "get_current_state",
-    "get_selected_files",
-    "get_denied_read_files",
-    "get_context_usage",
-    "get_mcp_status",
-    "get_server_info",
+# Deliberately reachable by a participant, with arguments good enough to
+# call. Watching a turn is the point of collaboration: a participant who can
+# see less than the host cannot review what the agent did
+# (``specs5/4-features/collaboration.md`` § Read-Only).
+READ_ONLY_METHODS: dict[str, tuple] = {
+    "get_engine_health": (),
+    "get_current_state": (),
+    "get_selected_files": (),
+    "get_denied_read_files": (),
+    "get_context_usage": (),
+    "get_mcp_status": (),
+    "get_server_info": (),
+    # Reading the review, the graph and a diff is the reviewing part of
+    # collaboration; withholding it would leave a participant unable to see
+    # what they were invited to look at.
+    "check_review_ready": (),
+    "get_commit_graph": (),
+    "get_review_state": (),
+    "get_review_file_diff": ("a.py",),
+    "get_snippets": (),
+    # The symbol index answers questions about the tree and changes nothing.
+    "lsp_get_hover": ("a.py", 1, 0),
+    "lsp_get_definition": ("a.py", 1, 0),
+    "lsp_get_references": ("a.py", 1, 0),
+    "lsp_get_completions": ("a.py", 1, 0),
+    # "Broadcast when *any* client navigates to a file"
+    # (specs5/4-features/collaboration.md § File Navigation Sync) — pointing
+    # everyone at a file is a participant's to do.
+    "navigate_file": ("a.py",),
 }
 
 
@@ -938,7 +980,7 @@ class TestCollabRestrictions:
             if not name.startswith("_")
             and callable(getattr(ClaudeCodeService, name, None))
         }
-        assert public == set(GATED_METHODS) | READ_ONLY_METHODS
+        assert public == set(GATED_METHODS) | set(READ_ONLY_METHODS)
 
     @pytest.mark.parametrize("method", sorted(GATED_METHODS))
     async def test_a_participant_is_refused(self, service, method):
@@ -969,7 +1011,7 @@ class TestCollabRestrictions:
     @pytest.mark.parametrize("method", sorted(READ_ONLY_METHODS))
     async def test_a_participant_may_watch(self, service, method):
         service._collab = FakeCollab(is_localhost=False)
-        answer = getattr(service, method)()
+        answer = getattr(service, method)(*READ_ONLY_METHODS[method])
         if asyncio.iscoroutine(answer):
             answer = await answer
         if isinstance(answer, dict):

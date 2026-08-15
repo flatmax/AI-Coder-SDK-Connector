@@ -6,12 +6,11 @@ Layer 1 scope — covers:
   no-op, user file preservation)
 - Accessor read-through (hot-reload changes are observed without
   reconstruction)
-- Model-aware cache target computation (Opus vs Sonnet minimums)
 - Snippet fallback chain (per-repo override precedence, legacy flat
   format, nested format)
 - Per-repo working directory creation and .gitignore wiring
-- Prompt assembly (concatenation with system_extra, reading from user
-  dir not bundle)
+- The commit prompt, which is the one prompt file the config layer
+  still loads
 Uses tmp_path + AC_DC_CONFIG_HOME env var to redirect config to
 isolated temp dirs. Avoids monkeypatching sys.platform etc. — the
 override env var is the designated test hook.
@@ -28,7 +27,6 @@ from ac_dc.config import (
     ConfigManager,
     _bundled_config_dir,
     _bundled_version,
-    _model_min_cacheable_tokens,
     _user_config_dir,
 )
 # ---------------------------------------------------------------------------
@@ -86,27 +84,6 @@ def test_user_config_dir_windows(monkeypatch):
     assert result.name == "ac-dc"
     assert "Roaming" in str(result)
 # ---------------------------------------------------------------------------
-# Model-aware cache minimums
-# ---------------------------------------------------------------------------
-def test_model_min_cacheable_tokens_opus_high_minimum():
-    """Opus 4.5 and 4.6 require 4096-token minimum."""
-    assert _model_min_cacheable_tokens("anthropic/claude-opus-4-5") == 4096
-    assert _model_min_cacheable_tokens("anthropic/claude-opus-4.5") == 4096
-    assert _model_min_cacheable_tokens("anthropic/claude-opus-4-6") == 4096
-    assert _model_min_cacheable_tokens("bedrock/anthropic.claude-opus-4-6") == 4096
-def test_model_min_cacheable_tokens_haiku_45_high_minimum():
-    """Haiku 4.5 requires 4096 — matches Opus family."""
-    assert _model_min_cacheable_tokens("anthropic/claude-haiku-4-5") == 4096
-    assert _model_min_cacheable_tokens("anthropic/claude-haiku-4.5") == 4096
-def test_model_min_cacheable_tokens_sonnet_default():
-    """Sonnet family uses the default 1024-token minimum."""
-    assert _model_min_cacheable_tokens("anthropic/claude-sonnet-4-5") == 1024
-    assert _model_min_cacheable_tokens("anthropic/claude-sonnet-4-20250514") == 1024
-def test_model_min_cacheable_tokens_non_claude_default():
-    """Non-Claude models get the default minimum."""
-    assert _model_min_cacheable_tokens("openai/gpt-4") == 1024
-    assert _model_min_cacheable_tokens("anthropic/claude-haiku-3-5") == 1024
-# ---------------------------------------------------------------------------
 # _bundled_version
 # ---------------------------------------------------------------------------
 def test_bundled_version_reads_version_file():
@@ -123,17 +100,14 @@ def test_first_install_copies_all_files(isolated_config_dir):
     assert not isolated_config_dir.exists()
     ConfigManager()
     assert isolated_config_dir.is_dir()
-    # Every managed + user file is present.
+    # Every managed + user file is present. Five prompt files and
+    # llm.json left this list with the native engine; the ones that
+    # remain are the ones something still reads.
     for filename in (
-        "system.md",
-        "system_doc.md",
-        "review.md",
         "commit.md",
-        "compaction.md",
-        "system_reminder.md",
         "app.json",
         "snippets.json",
-        "llm.json",
+        "engine.json",
     ):
         assert (isolated_config_dir / filename).is_file(), f"missing {filename}"
 def test_first_install_writes_version_marker_for_release_builds(
@@ -175,12 +149,12 @@ def test_same_version_startup_is_noop(isolated_config_dir):
         # First install.
         ConfigManager()
         # User modifies a managed file.
-        system_md = isolated_config_dir / "system.md"
-        system_md.write_text("user-edited content", encoding="utf-8")
+        commit_md = isolated_config_dir / "commit.md"
+        commit_md.write_text("user-edited content", encoding="utf-8")
         # Second startup — same version.
         ConfigManager()
         # User edit preserved.
-        assert system_md.read_text(encoding="utf-8") == "user-edited content"
+        assert commit_md.read_text(encoding="utf-8") == "user-edited content"
 # ---------------------------------------------------------------------------
 # Upgrade flow
 # ---------------------------------------------------------------------------
@@ -190,55 +164,58 @@ def test_upgrade_backs_up_and_overwrites_managed_files(isolated_config_dir):
     with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
     # User customises a managed file.
-    system_md = isolated_config_dir / "system.md"
-    system_md.write_text("user-hacked system prompt", encoding="utf-8")
+    commit_md = isolated_config_dir / "commit.md"
+    commit_md.write_text("user-hacked commit prompt", encoding="utf-8")
     # Startup at version B — triggers upgrade.
     with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     # Original content was backed up somewhere.
-    backups = list(isolated_config_dir.glob("system.md.*"))
+    backups = list(isolated_config_dir.glob("commit.md.*"))
     assert len(backups) == 1
-    assert "user-hacked system prompt" in backups[0].read_text(encoding="utf-8")
+    assert "user-hacked commit prompt" in backups[0].read_text(encoding="utf-8")
     # Managed file was overwritten with the bundled version.
-    current = system_md.read_text(encoding="utf-8")
+    current = commit_md.read_text(encoding="utf-8")
     assert "user-hacked" not in current
-    # Bundled system.md starts with "You are an expert coding agent".
-    assert "expert coding agent" in current
+    assert "commit message" in current
 
     # Marker updated to the new version.
     marker = isolated_config_dir / ".bundled_version"
     assert marker.read_text(encoding="utf-8").strip() == "2025.02.01-bbbbbbbb"
 def test_upgrade_preserves_user_files(isolated_config_dir):
-    """User files (llm.json, system_extra.md) are never overwritten."""
+    """``engine.json`` is a user file and is never overwritten.
+
+    It holds the CLI path, the model and the permission mode — a
+    machine-specific answer the shipped default cannot know. An upgrade
+    that reset it would point the app at a ``claude`` binary that isn't
+    there.
+    """
     # Install at version A.
     with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
-    # User edits llm.json — this is a user file.
-    llm_json = isolated_config_dir / "llm.json"
+    engine_json = isolated_config_dir / "engine.json"
     custom = {
-        "model": "custom/my-model",
-        "env": {"MY_API_KEY": "secret"},
+        "cli_path": "/opt/claude/bin/claude",
+        "model": "claude-opus-5",
     }
-    llm_json.write_text(json.dumps(custom), encoding="utf-8")
+    engine_json.write_text(json.dumps(custom), encoding="utf-8")
     # Upgrade to version B.
     with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     # User file preserved exactly.
-    preserved = json.loads(llm_json.read_text(encoding="utf-8"))
-    assert preserved["model"] == "custom/my-model"
-    assert preserved["env"]["MY_API_KEY"] == "secret"
+    preserved = json.loads(engine_json.read_text(encoding="utf-8"))
+    assert preserved["cli_path"] == "/opt/claude/bin/claude"
+    assert preserved["model"] == "claude-opus-5"
     # And no backup file was created for user files.
-    user_backups = list(isolated_config_dir.glob("llm.json.*"))
-    assert user_backups == []
+    assert list(isolated_config_dir.glob("engine.json.*")) == []
 def test_backup_name_with_version(isolated_config_dir):
     """Backup filename includes the OLD installed version."""
     with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
     # Modify a managed file so it gets backed up.
-    (isolated_config_dir / "system.md").write_text("v1 content", encoding="utf-8")
+    (isolated_config_dir / "commit.md").write_text("v1 content", encoding="utf-8")
     with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
-    backups = list(isolated_config_dir.glob("system.md.*"))
+    backups = list(isolated_config_dir.glob("commit.md.*"))
     assert len(backups) == 1
     # Backup name contains the OLD version, not the new one.
     assert "2025.01.01-aaaaaaaa" in backups[0].name
@@ -249,110 +226,22 @@ def test_backup_name_without_version(isolated_config_dir):
     with patch("ac_dc.config._bundled_version", return_value=""):
         ConfigManager()
     # User customises a managed file.
-    (isolated_config_dir / "system.md").write_text("custom", encoding="utf-8")
+    (isolated_config_dir / "commit.md").write_text("custom", encoding="utf-8")
     # Upgrade to a real version — no installed version to stamp into backup.
     with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
-    backups = list(isolated_config_dir.glob("system.md.*"))
+    backups = list(isolated_config_dir.glob("commit.md.*"))
     assert len(backups) == 1
     # Backup name has a timestamp but no trailing -sha.
-    # Format: system.md.YYYY.MM.DD-HH.MM
+    # Format: commit.md.YYYY.MM.DD-HH.MM
     import re
     assert re.match(
-        r"^system\.md\.\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}$",
+        r"^commit\.md\.\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}$",
         backups[0].name,
     ), f"unexpected backup name: {backups[0].name}"
 # ---------------------------------------------------------------------------
-# Accessor read-through
-# ---------------------------------------------------------------------------
-def test_llm_config_defaults(isolated_config_dir):
-    """Accessor properties return bundled defaults on a fresh install."""
-    cfg = ConfigManager()
-    # The bundled llm.json uses a provider-qualified model identifier;
-    # the exact provider (anthropic/, bedrock/, etc.) is a shipping
-    # detail, not part of the config contract.
-    assert "/" in cfg.model
-    assert "/" in cfg.smaller_model
-    assert cfg.cache_min_tokens == 1024
-    assert cfg.cache_buffer_multiplier == pytest.approx(1.1)
-def test_llm_config_hot_reload(isolated_config_dir):
-    """Editing llm.json and calling reload_llm_config reflects changes.
-    Core contract — accessor properties are read-through, not
-    snapshots at construction time.
-    """
-    cfg = ConfigManager()
-    original_model = cfg.model
-    # User edits llm.json on disk.
-    llm_json = isolated_config_dir / "llm.json"
-    data = json.loads(llm_json.read_text(encoding="utf-8"))
-    data["model"] = "custom/new-model"
-    llm_json.write_text(json.dumps(data), encoding="utf-8")
-    # Before reload — cached snapshot still in effect.
-    assert cfg.model == original_model
-    # After reload — new value visible.
-    cfg.reload_llm_config()
-    assert cfg.model == "custom/new-model"
-def test_smaller_model_accepts_camelcase(isolated_config_dir):
-    """smaller_model accessor honours both snake_case and camelCase keys."""
-    llm_json = isolated_config_dir / "llm.json"
-    # Pre-seed with only the camelCase variant.
-    llm_json.parent.mkdir(parents=True, exist_ok=True)
-    llm_json.write_text(
-        json.dumps({"model": "anthropic/foo", "smallerModel": "anthropic/bar"}),
-        encoding="utf-8",
-    )
-    # First-install logic would overwrite our seed only if the user file
-    # doesn't exist, so create the marker to indicate same-version startup.
-    with patch("ac_dc.config._bundled_version", return_value="seeded-version"):
-        (isolated_config_dir / ".bundled_version").write_text(
-            "seeded-version", encoding="utf-8"
-        )
-        cfg = ConfigManager()
-    assert cfg.smaller_model == "anthropic/bar"
-def test_cache_target_tokens_for_opus(isolated_config_dir):
-    """Opus model: max(1024, 4096) × 1.1 = 4505."""
-    cfg = ConfigManager()
-    target = cfg.cache_target_tokens_for_model("anthropic/claude-opus-4-6")
-    assert target == int(4096 * 1.1)  # 4505
-def test_cache_target_tokens_for_sonnet(isolated_config_dir):
-    """Sonnet model: max(1024, 1024) × 1.1 = 1126."""
-    cfg = ConfigManager()
-    target = cfg.cache_target_tokens_for_model("anthropic/claude-sonnet-4-5")
-    assert target == int(1024 * 1.1)  # 1126
-def test_cache_target_tokens_fallback(isolated_config_dir):
-    """cache_target_tokens (no model) uses cache_min × multiplier."""
-    cfg = ConfigManager()
-    assert cfg.cache_target_tokens == int(1024 * 1.1)
-def test_cache_target_respects_user_override(isolated_config_dir):
-    """User can raise cache_min_tokens above the provider minimum."""
-    llm_json = isolated_config_dir / "llm.json"
-    llm_json.parent.mkdir(parents=True, exist_ok=True)
-    llm_json.write_text(
-        json.dumps({
-            "model": "anthropic/claude-sonnet-4-5",
-            "cache_min_tokens": 8000,
-            "cache_buffer_multiplier": 1.2,
-        }),
-        encoding="utf-8",
-    )
-    with patch("ac_dc.config._bundled_version", return_value="seeded"):
-        (isolated_config_dir / ".bundled_version").write_text("seeded", encoding="utf-8")
-        cfg = ConfigManager()
-    # Sonnet's provider min is 1024, but user set 8000. max = 8000.
-    target = cfg.cache_target_tokens_for_model("anthropic/claude-sonnet-4-5")
-    assert target == int(8000 * 1.2)  # 9600
-# ---------------------------------------------------------------------------
 # App config accessors
 # ---------------------------------------------------------------------------
-def test_compaction_config_defaults(isolated_config_dir):
-    """compaction_config returns all required keys with sensible values."""
-    cfg = ConfigManager()
-    cc = cfg.compaction_config
-    assert cc["enabled"] is True
-    assert cc["compaction_trigger_tokens"] > 0
-    assert cc["verbatim_window_tokens"] > 0
-    assert cc["summary_budget_tokens"] > 0
-    assert cc["min_verbatim_exchanges"] >= 1
 def test_doc_convert_config_defaults(isolated_config_dir):
     """doc_convert_config returns extensions list and size limit."""
     cfg = ConfigManager()
@@ -373,314 +262,50 @@ def test_doc_index_config_defaults(isolated_config_dir):
     assert 0.0 <= dic["keywords_min_score"] <= 1.0
     assert 0.0 <= dic["keywords_diversity"] <= 1.0
     assert 0.0 <= dic["keywords_max_doc_freq"] <= 1.0
-def test_url_cache_config_defaults(isolated_config_dir):
-    """url_cache_config returns path (possibly None) and ttl_hours."""
-    cfg = ConfigManager()
-    ucc = cfg.url_cache_config
-    assert "path" in ucc
-    assert ucc["ttl_hours"] > 0
 
 
-def test_agents_config_defaults(isolated_config_dir):
-    """agents_config returns {'enabled': False} on a fresh install.
-
-    Default-false is the contract — agent mode must be explicitly
-    opted into, never enabled silently.
-    """
-    cfg = ConfigManager()
-    assert cfg.agents_config == {"enabled": False}
-    assert cfg.agents_enabled is False
 
 
-def test_agents_config_reads_enabled_flag(isolated_config_dir):
-    """Flipping the flag in app.json is visible via agents_enabled."""
-    cfg = ConfigManager()
-    # Seed a custom app.json.
-    app_path = cfg.config_dir / "app.json"
-    existing = json.loads(app_path.read_text(encoding="utf-8"))
-    existing.setdefault("agents", {})["enabled"] = True
-    app_path.write_text(json.dumps(existing), encoding="utf-8")
-    # Hot-reload picks it up.
-    cfg.reload_app_config()
-    assert cfg.agents_enabled is True
-    assert cfg.agents_config == {"enabled": True}
 
 
-def test_agents_config_missing_section_defaults_false(isolated_config_dir):
-    """app.json without an `agents` section → flag defaults False.
-
-    Pin for backwards compatibility with pre-toggle app.json
-    files. Users upgrading from an older install must not trip
-    the agent-mode toggle just because their app.json was
-    written before the section existed.
-    """
-    cfg = ConfigManager()
-    # Overwrite app.json without the agents section.
-    app_path = cfg.config_dir / "app.json"
-    app_path.write_text(
-        json.dumps({"url_cache": {"ttl_hours": 12}}),
-        encoding="utf-8",
-    )
-    cfg.reload_app_config()
-    assert cfg.agents_enabled is False
 
 
-def test_agents_config_non_dict_section_defaults_false(isolated_config_dir):
-    """Malformed `agents` section (not a dict) → defaults False.
-
-    Defensive — a user editing app.json by hand could produce a
-    list or string under the `agents` key. We treat that as
-    "nothing valid here" and keep the default.
-    """
-    cfg = ConfigManager()
-    app_path = cfg.config_dir / "app.json"
-    app_path.write_text(
-        json.dumps({"agents": "broken"}),
-        encoding="utf-8",
-    )
-    cfg.reload_app_config()
-    assert cfg.agents_enabled is False
 
 
-def test_agents_config_non_bool_enabled_coerced(isolated_config_dir):
-    """A truthy string under `enabled` coerces to True.
-
-    `bool()` of any non-empty string is True. We accept this —
-    a user writing `"yes"` instead of `true` shouldn't have
-    their intent silently ignored. The toggle card in the UI
-    writes a real bool, so this path only matters for
-    hand-edited app.json.
-    """
-    cfg = ConfigManager()
-    app_path = cfg.config_dir / "app.json"
-    app_path.write_text(
-        json.dumps({"agents": {"enabled": "yes"}}),
-        encoding="utf-8",
-    )
-    cfg.reload_app_config()
-    assert cfg.agents_enabled is True
 
 
-def test_system_prompt_omits_appendix_when_disabled(isolated_config_dir):
-    """agents.enabled=false → appendix NOT in system prompt.
-
-    The LLM must never see the agent-spawn block description
-    when the capability is disabled. If it did, it could emit
-    spawn blocks that the current non-agent pipeline doesn't
-    act on — the user would see mysterious text in the
-    response.
-
-    Pin for the frontend toggle's actual effect: flipping the
-    switch off must remove the capability description from
-    the prompt composition, not just hide it in the UI.
-    """
-    cfg = ConfigManager()
-    # Default state: agents disabled.
-    assert cfg.agents_enabled is False
-    prompt = cfg.get_system_prompt()
-    # The appendix file's content must not appear.
-    assert "Agent-Spawn Capability" not in prompt
-    assert "🟧🟧🟧 AGENT" not in prompt
 
 
-def test_system_prompt_includes_appendix_when_enabled(isolated_config_dir):
-    """agents.enabled=true → appendix IS in system prompt.
-
-    Happy path — flipping the toggle on surfaces the
-    capability description in the next LLM request's prompt.
-    """
-    cfg = ConfigManager()
-    # Enable agents.
-    app_path = cfg.config_dir / "app.json"
-    data = json.loads(app_path.read_text(encoding="utf-8"))
-    data["agents"] = {"enabled": True}
-    app_path.write_text(json.dumps(data), encoding="utf-8")
-    cfg.reload_app_config()
-    assert cfg.agents_enabled is True
-
-    prompt = cfg.get_system_prompt()
-    # Appendix content present.
-    assert "Agent-Spawn Capability" in prompt
-    assert "🟧🟧🟧 AGENT" in prompt
-    assert "🟩🟩🟩 AGEND" in prompt
 
 
-def test_system_prompt_handles_missing_appendix_gracefully(
-    isolated_config_dir,
-):
-    """Missing appendix file in user dir → falls back to bundle.
-
-    Per the documented contract in ``get_system_prompt``'s
-    docstring: deleting the user-dir copy is NOT an escape
-    hatch for opting out of the appendix text. Users who
-    installed AC⚡DC before ``system_agentic_appendix.md``
-    was added to the managed-files set have a version
-    marker that prevents the upgrade pass from copying the
-    file into the user dir — but their toggle-enabled state
-    still expects the appendix text to flow into the prompt.
-    The bundle fallback papers over this cross-version gap.
-
-    The proper opt-out is ``agents.enabled: false`` in
-    ``app.json`` (which the Settings-tab toggle writes to).
-    This test pins that contract: with the toggle on and
-    the user-dir file absent, the appendix text is still
-    present because it loaded from the bundle.
-
-    Deliberate trade-off — reliability of the toggle across
-    install histories outweighs the niche escape hatch of
-    partial opt-out via file deletion.
-    """
-    cfg = ConfigManager()
-    # Enable agents.
-    app_path = cfg.config_dir / "app.json"
-    data = json.loads(app_path.read_text(encoding="utf-8"))
-    data["agents"] = {"enabled": True}
-    app_path.write_text(json.dumps(data), encoding="utf-8")
-    cfg.reload_app_config()
-
-    # Delete the user-dir appendix file. The bundle copy
-    # still exists and serves as the fallback.
-    (cfg.config_dir / "system_agentic_appendix.md").unlink()
-
-    # Must not raise.
-    prompt = cfg.get_system_prompt()
-    # Base prompt still present.
-    assert "coding agent" in prompt.lower()
-    # Appendix content present via bundle fallback.
-    assert "Agent-Spawn Capability" in prompt
 
 
-def test_system_prompt_assembly_order(isolated_config_dir):
-    """Assembly order: base → appendix → extra.
-
-    Pin for the specs4 contract: user customisation in
-    `system_extra.md` must land LAST so project-specific
-    rules apply to everything above (including the agent
-    appendix when enabled).
-
-    A user saying "always use type annotations" in
-    system_extra.md should have that rule apply to code
-    the agents write too.
-    """
-    cfg = ConfigManager()
-    # Enable agents.
-    app_path = cfg.config_dir / "app.json"
-    data = json.loads(app_path.read_text(encoding="utf-8"))
-    data["agents"] = {"enabled": True}
-    app_path.write_text(json.dumps(data), encoding="utf-8")
-    cfg.reload_app_config()
-
-    # Put a distinctive marker in system_extra.md.
-    extra_path = cfg.config_dir / "system_extra.md"
-    extra_path.write_text(
-        "PROJECT-EXTRA-MARKER-XYZ",
-        encoding="utf-8",
-    )
-
-    prompt = cfg.get_system_prompt()
-    # All three sections present.
-    assert "coding agent" in prompt.lower()  # base
-    assert "Agent-Spawn Capability" in prompt  # appendix
-    assert "PROJECT-EXTRA-MARKER-XYZ" in prompt  # extra
-
-    # Order check: base before appendix before extra.
-    base_idx = prompt.lower().find("coding agent")
-    appendix_idx = prompt.find("Agent-Spawn Capability")
-    extra_idx = prompt.find("PROJECT-EXTRA-MARKER-XYZ")
-    assert base_idx < appendix_idx < extra_idx
 def test_app_config_hot_reload(isolated_config_dir):
     """Editing app.json and calling reload_app_config reflects changes."""
     cfg = ConfigManager()
-    original_trigger = cfg.compaction_config["compaction_trigger_tokens"]
+    original = cfg.doc_index_config["keywords_top_n"]
     # User edits app.json on disk.
-
     app_json = isolated_config_dir / "app.json"
     data = json.loads(app_json.read_text(encoding="utf-8"))
-    data["history_compaction"]["compaction_trigger_tokens"] = 99999
+    data["doc_index"]["keywords_top_n"] = 99
     app_json.write_text(json.dumps(data), encoding="utf-8")
     # Before reload — cached.
-    assert cfg.compaction_config["compaction_trigger_tokens"] == original_trigger
+    assert cfg.doc_index_config["keywords_top_n"] == original
     # After reload — new value.
     cfg.reload_app_config()
-    assert cfg.compaction_config["compaction_trigger_tokens"] == 99999
+    assert cfg.doc_index_config["keywords_top_n"] == 99
 # ---------------------------------------------------------------------------
 # Corrupt-config resilience
 # ---------------------------------------------------------------------------
-def test_corrupt_llm_json_returns_empty_dict(isolated_config_dir):
-    """Malformed JSON doesn't crash construction — logs and falls back."""
-    # Install normally.
-    ConfigManager()
-    # Overwrite with garbage.
-    (isolated_config_dir / "llm.json").write_text(
-        "{not valid json", encoding="utf-8"
-    )
-    cfg = ConfigManager()
-    # Properties fall back to their hard-coded defaults.
-    assert cfg.model.startswith("anthropic/")
-    assert cfg.cache_min_tokens == 1024
 def test_non_dict_json_root_falls_back(isolated_config_dir):
     """A JSON root that's not an object logs and falls back."""
     ConfigManager()
     (isolated_config_dir / "app.json").write_text("[]", encoding="utf-8")
     cfg = ConfigManager()
     # Accessors return their defaults despite the broken file.
-    assert cfg.compaction_config["enabled"] is True
-# ---------------------------------------------------------------------------
-# apply_llm_env
-# ---------------------------------------------------------------------------
-def test_apply_llm_env_exports_variables(isolated_config_dir, monkeypatch):
-    """apply_llm_env() exports env vars from llm.json into os.environ."""
-    # Ensure the var isn't already set.
-    monkeypatch.delenv("MY_TEST_API_KEY", raising=False)
-    ConfigManager()
-    llm_json = isolated_config_dir / "llm.json"
-    data = json.loads(llm_json.read_text(encoding="utf-8"))
-    data["env"] = {"MY_TEST_API_KEY": "secret-value"}
-    llm_json.write_text(json.dumps(data), encoding="utf-8")
-    cfg = ConfigManager()
-    cfg.apply_llm_env()
-    assert os.environ["MY_TEST_API_KEY"] == "secret-value"
-def test_apply_llm_env_stringifies_non_string_values(
-    isolated_config_dir, monkeypatch
-):
-    """Numeric env values get stringified — os.environ requires strings."""
-    monkeypatch.delenv("MY_NUMERIC_VAR", raising=False)
-    ConfigManager()
-    llm_json = isolated_config_dir / "llm.json"
-    data = json.loads(llm_json.read_text(encoding="utf-8"))
-    data["env"] = {"MY_NUMERIC_VAR": 42}
-    llm_json.write_text(json.dumps(data), encoding="utf-8")
-    cfg = ConfigManager()
-    cfg.apply_llm_env()
-    assert os.environ["MY_NUMERIC_VAR"] == "42"
-def test_apply_llm_env_handles_non_dict(isolated_config_dir):
-    """Malformed env value (not a dict) logs and is a no-op."""
-    ConfigManager()
-    llm_json = isolated_config_dir / "llm.json"
-    llm_json.write_text(
-        json.dumps({"model": "anthropic/foo", "env": "not a dict"}),
-        encoding="utf-8",
-    )
-    with patch("ac_dc.config._bundled_version", return_value="seeded"):
-        (isolated_config_dir / ".bundled_version").write_text(
-            "seeded", encoding="utf-8"
-        )
-        cfg = ConfigManager()
-    # Should not raise.
-    cfg.apply_llm_env()
-def test_reload_llm_config_reapplies_env(isolated_config_dir, monkeypatch):
-    """reload_llm_config re-applies env vars after reading new llm.json."""
-    monkeypatch.delenv("RELOAD_TEST_KEY", raising=False)
-    cfg = ConfigManager()
-    # Initially no env var.
-    assert "RELOAD_TEST_KEY" not in os.environ
-    # User edits llm.json to add an env var.
-    llm_json = isolated_config_dir / "llm.json"
-    data = json.loads(llm_json.read_text(encoding="utf-8"))
-    data["env"] = {"RELOAD_TEST_KEY": "new-secret"}
-    llm_json.write_text(json.dumps(data), encoding="utf-8")
-    cfg.reload_llm_config()
-    assert os.environ["RELOAD_TEST_KEY"] == "new-secret"
+    assert cfg.app_config == {}
+    assert cfg.doc_index_config["keyword_model"]
+    assert cfg.doc_convert_config["max_source_size_mb"] > 0
 # ---------------------------------------------------------------------------
 # Per-repo .ac-dc/ working directory
 # ---------------------------------------------------------------------------
@@ -892,120 +517,25 @@ def test_get_snippets_per_repo_non_object_falls_through(
     result = cfg.get_snippets("code")
     assert len(result) > 0
 # ---------------------------------------------------------------------------
-# Prompt assembly
+# The commit prompt
 # ---------------------------------------------------------------------------
-def test_get_system_prompt_concatenates_with_extra(isolated_config_dir):
-    """system.md + blank line + system_extra.md.
-    The bundled system_extra.md is empty, so we write a marker into it
-    to prove concatenation works.
-    """
-    cfg = ConfigManager()
-    extra_file = isolated_config_dir / "system_extra.md"
-    extra_file.write_text("PROJECT-SPECIFIC-MARKER-XYZ", encoding="utf-8")
-    prompt = cfg.get_system_prompt()
-    assert "PROJECT-SPECIFIC-MARKER-XYZ" in prompt
-    # The main prompt is still present.
-    assert "expert coding agent" in prompt
-    # Separator is a blank line between main and extra.
-    assert "\n\nPROJECT-SPECIFIC-MARKER-XYZ" in prompt
-def test_get_system_prompt_empty_extra_returns_main_only(isolated_config_dir):
-    """Empty system_extra.md produces just the main prompt, no trailing whitespace."""
-    cfg = ConfigManager()
-    # Ensure extra is empty.
-    extra_file = isolated_config_dir / "system_extra.md"
-    extra_file.write_text("", encoding="utf-8")
-    prompt = cfg.get_system_prompt()
-    main_only = (isolated_config_dir / "system.md").read_text(encoding="utf-8")
-    assert prompt == main_only
-def test_get_system_prompt_reads_fresh_every_call(isolated_config_dir):
-    """Edits to system.md take effect on the next get_system_prompt() call.
-    Prompts are intentionally NOT cached — users can edit prompt files
-    and see the change on the next LLM request without an explicit
-    reload call.
-    """
-    cfg = ConfigManager()
-    first = cfg.get_system_prompt()
-    # Append a marker to system.md.
-    system_file = isolated_config_dir / "system.md"
-    original = system_file.read_text(encoding="utf-8")
-    system_file.write_text(original + "\nHOT-RELOAD-MARKER", encoding="utf-8")
-    second = cfg.get_system_prompt()
-    assert "HOT-RELOAD-MARKER" in second
-    assert second != first
-def test_get_doc_system_prompt_uses_doc_main(isolated_config_dir):
-    """get_doc_system_prompt concatenates system_doc.md + extra."""
-    cfg = ConfigManager()
-    extra_file = isolated_config_dir / "system_extra.md"
-    extra_file.write_text("DOC-EXTRA-MARKER", encoding="utf-8")
-    prompt = cfg.get_doc_system_prompt()
-    # Doc-mode prompt uses documentation-focused content.
-    lower = prompt.lower()
-    assert "document" in lower
-    # Extra is appended.
-    assert "DOC-EXTRA-MARKER" in prompt
-def test_get_review_prompt_uses_review_main(isolated_config_dir):
-    """get_review_prompt concatenates review.md + extra."""
-    cfg = ConfigManager()
-    extra_file = isolated_config_dir / "system_extra.md"
-    extra_file.write_text("REVIEW-EXTRA-MARKER", encoding="utf-8")
-    prompt = cfg.get_review_prompt()
-    lower = prompt.lower()
-    # review.md is explicit about read-only review mode.
-    assert "read-only" in lower or "read only" in lower
-    assert "REVIEW-EXTRA-MARKER" in prompt
-def test_get_compaction_prompt_loads_as_is(isolated_config_dir):
-    """Compaction prompt is loaded without extra-prompt concatenation.
-    The compactor is an auxiliary LLM call with a rigid JSON output
-    format — user extras would corrupt it.
-    """
-    cfg = ConfigManager()
-    # Even if system_extra.md has content, it's not applied here.
-    (isolated_config_dir / "system_extra.md").write_text(
-        "SHOULD-NOT-APPEAR", encoding="utf-8"
-    )
-    prompt = cfg.get_compaction_prompt()
-    assert "SHOULD-NOT-APPEAR" not in prompt
-    # Still returns real content from compaction.md.
-    assert "boundary_index" in prompt
 def test_get_commit_prompt_loads_as_is(isolated_config_dir):
-    """Commit prompt is loaded without extra-prompt concatenation."""
+    """The commit prompt is the file, verbatim.
+
+    It used to be one of several prompt files the config layer
+    concatenated. There is no assembly left — the system prompt is the
+    CLI's now — so this reads ``commit.md`` and nothing else, and the
+    one-shot in ``ac_dc.claude_code.commit`` gets exactly what the user
+    sees in the settings editor.
+    """
     cfg = ConfigManager()
-    (isolated_config_dir / "system_extra.md").write_text(
-        "SHOULD-NOT-APPEAR", encoding="utf-8"
-    )
     prompt = cfg.get_commit_prompt()
-    assert "SHOULD-NOT-APPEAR" not in prompt
-    # Still returns real content.
-    assert "conventional" in prompt.lower() or "imperative" in prompt.lower()
-def test_get_system_reminder_has_leading_newlines(isolated_config_dir):
-    """get_system_reminder returns content prefixed with \\n\\n.
-    Callers append this to the user's message text directly; the
-    leading blank line separates it from the message content.
-    """
-    cfg = ConfigManager()
-    reminder = cfg.get_system_reminder()
-    assert reminder.startswith("\n\n")
-    # Body is non-empty (shipped reminder always has content).
-    assert reminder.strip()
-def test_get_system_reminder_empty_file_returns_empty(isolated_config_dir):
-    """Empty system_reminder.md produces an empty string, not \\n\\n.
-
-    Callers concatenate the reminder onto the user's message text; an
-    empty file should contribute literally nothing rather than two
-    stray newlines that would leave trailing whitespace on every turn.
-    """
-    cfg = ConfigManager()
-    (isolated_config_dir / "system_reminder.md").write_text("", encoding="utf-8")
-    assert cfg.get_system_reminder() == ""
-
-
-def test_get_system_reminder_whitespace_only_returns_empty(isolated_config_dir):
-    """A whitespace-only reminder file is treated as empty."""
-    cfg = ConfigManager()
-    (isolated_config_dir / "system_reminder.md").write_text(
-        "   \n\n  \t\n", encoding="utf-8"
+    assert prompt == (isolated_config_dir / "commit.md").read_text(
+        encoding="utf-8"
     )
-    assert cfg.get_system_reminder() == ""
+    assert "conventional" in prompt.lower() or "imperative" in prompt.lower()
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1014,47 +544,39 @@ def test_get_system_reminder_whitespace_only_returns_empty(isolated_config_dir):
 
 
 def test_config_types_covers_editable_files():
-    """CONFIG_TYPES whitelist includes every file the Settings UI edits.
+    """CONFIG_TYPES is exactly the three files the Settings UI edits.
 
-    specs4/1-foundation/configuration.md#settings-service names these
-    as the RPC-exposed config types. Adding a new editable file
-    requires adding it here.
+    ``specs5/1-foundation/configuration.md`` § The Whitelist names these
+    three and no others. The list was eight entries while the native
+    engine owned prompt assembly; five of them described a prompt or a
+    provider knob that no longer has a reader, and a settings editor
+    offering an edit that changes nothing is worse than not offering it.
     """
-    expected_keys = {
-        "litellm",
-        "app",
-        "snippets",
-        "system",
-        "system_extra",
-        "compaction",
-        "review",
-        "system_doc",
-    }
-    assert set(CONFIG_TYPES.keys()) == expected_keys
+    assert set(CONFIG_TYPES.keys()) == {"engine", "app", "snippets"}
 
 
-def test_config_types_excludes_internal_prompts():
-    """commit.md and system_reminder.md are NOT in the whitelist.
+def test_config_types_excludes_the_commit_prompt():
+    """commit.md is loaded internally and not offered for UI editing.
 
-    Per D10 / specs4 — these are managed files loaded internally but
-    intentionally not exposed for UI editing. commit.md has a rigid
-    JSON-adjacent output contract; system_reminder.md appends to every
-    user turn and a malformed edit would break every subsequent
-    request. Users who need to customise them can edit the files on
-    disk directly.
+    It has a rigid output contract — the generated text goes straight
+    into git history — and an edit that breaks the format is discovered
+    at commit time. Users who want to change it can edit the file on
+    disk, where the upgrade pass will treat it as managed and back it
+    up before overwriting.
     """
-    whitelisted_files = set(CONFIG_TYPES.values())
-    assert "commit.md" not in whitelisted_files
-    assert "system_reminder.md" not in whitelisted_files
+    assert "commit.md" not in set(CONFIG_TYPES.values())
 
 
 def test_config_types_values_are_real_files(isolated_config_dir):
-    """Every whitelisted type maps to a real shipped file."""
+    """Every whitelisted type maps to a real shipped file.
+
+    ``engine.json`` included: it is a user file the upgrade pass never
+    overwrites, but it is still shipped on first install so the settings
+    editor opens something with the defaults in it rather than a blank
+    page.
+    """
     ConfigManager()  # Trigger install so files exist in user dir.
     for type_name, filename in CONFIG_TYPES.items():
-        # system_extra may be absent or empty; the others must exist.
-        if type_name == "system_extra":
-            continue
         path = isolated_config_dir / filename
         assert path.is_file(), f"{type_name!r} → {filename!r} not installed"
 

@@ -115,11 +115,11 @@ class Repo(
         # "participants can browse but not mutate" policy.
         self._collab: Any = None
         # Post-write callback — set by main.py to
-        # ``LLMService._on_doc_file_written``. Fired after every
+        # ``DocIndexBuilder.note_file_written``. Fired after every
         # successful write/create/rename that produces a file at
         # a path. The callback decides whether the path is
-        # interesting (doc-index-eligible, correct mode) and
-        # kicks off invalidation + re-extract + enrichment.
+        # interesting (the doc index has an extractor for it)
+        # and kicks off invalidation + re-extract + enrichment.
         # Fired outside the per-path write lock so a slow
         # enrichment scheduler can't block further writes.
         # Never raises back into the caller — the callback

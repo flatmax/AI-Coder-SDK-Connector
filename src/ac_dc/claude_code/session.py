@@ -396,6 +396,11 @@ class EngineSession:
                 session_store=self._session_store,
                 resume=resume,
                 fork_session=fork_session,
+                # Our current posture, not the configured one. They differ
+                # when something set a mode before the first connect — see
+                # prefer_permission_mode — and connecting in the config's
+                # mode there would quietly discard the request.
+                permission_mode=self._permission_mode,
             )
             client = ClaudeSDKClient(options=options)
             try:
@@ -714,6 +719,28 @@ class EngineSession:
         started in rather than the one it is in.
         """
         self._permission_mode = mode
+
+    def prefer_permission_mode(self, mode: str) -> str:
+        """Set the posture a *future* connect starts in. No client needed.
+
+        For a mode change requested before the CLI exists — review mode
+        entered on a cold engine. :meth:`connect` builds its options from
+        this value, so the session comes up in the requested posture rather
+        than in ``engine.json``'s and then having to be corrected.
+
+        Not a substitute for :meth:`set_permission_mode`: this cannot move
+        a running session, and the caller is expected to check
+        :attr:`ready` and choose.
+        """
+        from ac_dc.claude_code.engine_config import PERMISSION_MODES
+
+        if mode not in PERMISSION_MODES:
+            raise ValueError(
+                f"Unknown permission mode {mode!r}. Valid modes: "
+                f"{', '.join(PERMISSION_MODES)}."
+            )
+        self._permission_mode = mode
+        return mode
 
     async def set_model(self, model: str | None = None) -> str | None:
         """Switch models mid-session. ``None`` restores the CLI default."""

@@ -7,56 +7,58 @@ The rest of `specs5/` describes the **target** state. This directory describes *
 there** and **why the shape is what it is**. When the conversion is finished, `plan/` becomes
 history and moves under `specs5/impl-history/`.
 
-## Where we are (2026-08-14)
+## Where we are (2026-08-15)
 
-**Phases 0, 1 and 2 are done. Phase 3 — the rip-out — is next and is unblocked.**
+**Phases 0 through 3 are done. Phase 4 — the indexes as MCP tools — is next and is unblocked.**
 
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
-landed, what it deliberately left out, and what the next phase has to do first. The phase-2 entry
+landed, what it deliberately left out, and what the next phase has to do first. The phase-3 entry
 is the one that matters for picking this up cold.
 
-The state phase 3 inherits:
+**The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
+membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
+pipeline, the history compactor, URL fetching and the `🟧🟧🟧 AGENT` factory: 37 modules, 25,371
+lines, plus 52 test files and five dependencies (`litellm`, `tiktoken`, `boto3`, `tenacity`,
+`trafilatura`). `grep -rn -i litellm src/` and the same over `webapp/src/` both return nothing.
 
-- **The chat path runs entirely on Claude Code.** A full working conversation, including a
-  permission-gated write, was verified live against the bundled CLI 2.1.229.
-- **`LLMService` and `src/ac_dc/llm/` are intact and still registered, and nothing in the chat path
-  reaches them.** That is deliberate, per the no-interleaving rule below. Phase 3 deletes them.
-- **Suites are green:** python 3897 passed, nothing failing; webapp 89 files / 3215 passed. The one
-  long-standing failure — `test_odp_routes_to_libreoffice_when_available` — was a test bug, not a
-  missing install: PyMuPDF is an optional extra, and without it an `.odp` correctly falls back
-  without spawning soffice, so the test's dispatch assertion failed for an unrelated reason. It now
-  carries the `_require_pymupdf()` guard its `.pptx` sibling already had and skips honestly. No
-  production code touched; `doc_convert/` stays on the keep-unchanged list.
+The state phase 4 inherits:
 
-**The permission gate was wrong in six ways and is fixed.** Two were recorded as open findings when
-phase 2 first closed; probing the live CLI for what it actually suggests turned them into six
-confirmed defects, all now corrected — see the phase-2 entry in [`delivery.md`](delivery.md). The
-observed suggestion shapes are recorded in
-[`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md).
-The last two of the six were a shell rule that granted more than the dialog showed (a click on
-`git push origin main` authorised `git push --force origin main`, because the derived rule was the
-prefix `git push:*`; the literal command is now the default and the prefix is a second entry in the
-rule menu) and a transcript that rendered an approved call as denied whenever the approval came from
-"always allow".
-
-**The mode control that was open is now built.** For an in-repo edit the CLI's only suggestion is a
-mode switch to `acceptEdits`, which we still refuse to put behind a button labelled "always allow
-this call" — it now has its own amber control, "accept all edits for the rest of this session", that
-says what it costs including the diffs it stops showing. The mode rides back to the CLI on the
-permission result rather than as a separate `set_permission_mode` control request, because the CLI is
-blocked waiting on that result and a second control request would deadlock on a slow user. The CLI
-applies such a mode silently — `permissionMode` appears only in the `init` message — so the broker
-reports the switch back through the service, which broadcasts `permissionModeChanged` and keeps the
-panel's mode pill truthful.
-
-**The open decision is closed:** derived rules named `destination: "projectSettings"`
-(`.claude/settings.json`, git-tracked) where the CLI persists its own approvals to `localSettings`
-(`.claude/settings.local.json`, gitignored), so an "always allow" could land a permission grant in a
-committed file. `localSettings` is now the default and `projectSettings` is offered only as an
-explicitly-labelled menu entry — [`decisions.md#cc-16`](decisions.md). Closing it surfaced a second
-defect of the same kind: nothing stopped a derived rule from naming a path under `.claude/`, which
-would have turned one approved write into `Edit(.claude/settings.json)` — a permission to grant
-permissions. Derived rules now refuse that path outright.
+- **The indexes now have exactly one consumer.** Prompt assembly is deleted, so the symbol and doc
+  indexes are read only by the browser. That was the plan's stated reason for ordering the MCP
+  bridge after the rip-out, and the reason now holds in fact.
+- **Suites are green, and smaller:** python **2550 passed, 75 skipped** (was 3897 passed); webapp
+  **88 files / 3163 passed** (was 89 / 3215). The drop is deleted tests for deleted code — a
+  shrinking denominator, not improving coverage.
+- **Four features moved out of the engine rather than dying with it**: commit
+  (`claude_code/commit.py`), review (`claude_code/review.py`), the post-write doc-index builder
+  (`doc_index/background.py`), and the LSP / snippets / git RPC surface, which folded into
+  `claude_code/service.py`.
+- **Two panels were replaced, not vacated** — [`decisions.md#cc-17`](decisions.md).
+  `context-usage-tab.js` and `usage-hud.js` (1215 lines, replacing 3605) read
+  `ClaudeCodeService.get_context_usage`, a pass-through of the breakdown the CLI's own `/context`
+  prints. **Neither has been exercised against a running CLI, and neither has a unit test** — the
+  first thing worth closing, ahead of its formal home in phase 6.
+- **The file picker's third checkbox state writes a real `Read` deny rule** to
+  `.claude/settings.local.json` (CC-14), and says "deny agent read" rather than "exclude from
+  index". The L0-invalidation dialog is gone with the cache it asked about; its one honest job —
+  the change is not instant — is a once-per-session toast built from the RPC's own `takes_effect`.
+- **Two things wait on the same missing hook.** The file tree does not refresh after the *agent*
+  writes, and the doc index does not learn about those writes either. `Repo`'s post-write callback
+  covers `Repo.write_file` — the user's edits — but the CLI's `Write` and `Edit` go to disk
+  directly. Wiring the post-tool-call hook in phase 4 closes both.
+- **Some surfaces are mounted and inert, deliberately.** The code/doc mode toggle and the agent tab
+  strip have no emitter for the pushes that drive them; their replacements are the preset selector
+  (CC-12) and the subagent browser (CC-8), both deferred by decision. They are annotated where they
+  sit rather than half-deleted, because removing a receiver while leaving its consumer mounted moves
+  the break instead of fixing it. `<ac-history-browser>` is inert for phase 5.
+- **17 RPCs are localhost-gated, and four do not look it.** `commit_all`, `reset_to_head`,
+  `start_review` and `end_review` delegate, so their `_check_localhost_only()` lives in
+  `claude_code/commit.py` and `claude_code/review.py`, not in `service.py`.
+- **`collab.py`'s `ContextVar` fix survived the deletion**, as phase 2 required.
+  `TestGateUnderRealDispatch` in `test_collab_restrictions.py` is what pins it; that file lost half
+  its cases with `LLMService`, and those five tests are the ones that must not go.
+- **Nothing in the config layer writes `os.environ`.** The `claude` CLI resolves its own
+  credentials; injecting a key or a region would silently change which account a turn bills to.
 
 ## The one-paragraph version
 
@@ -81,9 +83,12 @@ Three reasons, in order of weight:
    build: real tool use, bash execution, web fetch and search, subagents, skills, plugins,
    MCP clients, file checkpointing, self-compaction, and its own edit application with
    checkpoint/rewind.
-3. **Maintenance.** ~28k lines of engine become ~2k lines of adapter. The deleted code is the
-   part of the system that was most expensive to reason about and most sensitive to provider
-   behaviour changes.
+3. **Maintenance.** ~28k lines of engine become a small adapter. Measured at the end of phase 3:
+   **25,371 lines of engine deleted** against **6273 lines in `src/ac_dc/claude_code/`** — three
+   times the "~2k" this estimate guessed, because the permission gate (1548 lines) and the message
+   pump (979) are real work the estimate did not foresee. Still a 4:1 reduction, and the deleted
+   code is the part of the system that was most expensive to reason about and most sensitive to
+   provider behaviour changes.
 
 ## What AC⚡DC still contributes
 
@@ -113,21 +118,21 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **0. Plan and specs** ✅ | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
 | **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
-| **3. Rip-out** | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
+| **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
-| **6. Context and cost visualisation** | Context tab rebuilt on `get_context_usage()`; HUD rebuilt on `ResultMessage.model_usage` and `RateLimitEvent`. | The Context tab shows the same numbers as `/context` in the CLI, live. |
+| **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17) but are unverified against a live engine and untested. This phase is now *confirm and finish* rather than *build*. | The Context tab shows the same numbers as `/context` in the CLI, live. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 
-Phases 1–3 are the risky ones and should not be interleaved: keep the native engine intact and
-reachable until phase 2's exit criterion is genuinely met, then delete in one commit. Phase 2's
-criterion is now met, so the deletion is unblocked.
+Phases 1–3 were the risky ones and were not interleaved: the native engine stayed intact and
+reachable until phase 2's exit criterion was genuinely met, and the deletion then landed in one
+commit of 189 files, **+6228 / −69527**.
 
-Phase 3's footprint is wider than its row implies. As of the end of phase 2, `litellm` is reachable
-from ten files: `llm_service.py`, `llm/_commit.py`, `llm/_helpers.py`, `config.py`, `main.py`,
-`settings.py`, `token_counter.py`, `context_manager.py`, `history_compactor.py` and
-`logging_setup.py`. The last four are not obviously "engine" files, which is exactly why the exit
-criterion is a grep rather than a file list.
+Phase 3's footprint was wider than its row implied, and the grep is why we knew. `litellm` was
+reachable from ten files at the end of phase 2 — `llm_service.py`, `llm/_commit.py`,
+`llm/_helpers.py`, `config.py`, `main.py`, `settings.py`, `token_counter.py`, `context_manager.py`,
+`history_compactor.py` and `logging_setup.py` — four of which are not obviously "engine" files. An
+exit criterion written as a file list would have missed them; written as a grep, it did not.
 
 A phase is recorded in [`delivery.md`](delivery.md) when its exit criterion is met — what landed,
 what was deliberately left out, and what the next phase has to do first.

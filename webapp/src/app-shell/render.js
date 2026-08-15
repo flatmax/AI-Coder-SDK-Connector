@@ -10,57 +10,52 @@ import { html } from 'lit';
 import { RESIZE_RIGHT, RESIZE_BOTTOM, RESIZE_CORNER } from './constants.js';
 
 /**
- * Compaction-capacity bar — renders a thin strip at the
- * dialog bottom showing how close current history tokens
- * are to the compaction trigger threshold.
+ * Context-capacity bar — a thin strip at the dialog bottom
+ * showing how full the engine's context window is.
+ *
+ * Re-based from `get_history_status` onto the engine's own
+ * `get_context_usage`. The bar means the same thing it always
+ * did — how close we are to a compaction — but the threshold is
+ * now the engine's rather than one AC⚡DC configured for a
+ * prompt it assembled. `maxTokens` already excludes the
+ * autocompact buffer, so 100% here is the trigger point, not the
+ * model's ceiling.
  *
  * Visibility rules:
  *
- *   - Returns empty when the backend status hasn't been
- *     fetched yet (initial paint before the first
- *     get_history_status response).
- *   - Returns empty when the backend reports compaction
- *     disabled — the ratio is meaningless if there's no
- *     threshold to approach.
- *   - Otherwise always rendered, including at 0% — the
- *     constant placeholder makes the bar's reappearance
- *     after a successful compaction (tokens drop to
- *     near-zero) less surprising.
+ *   - Returns empty before the first successful fetch (initial
+ *     paint, or an engine that has not connected yet).
+ *   - Returns empty when the engine reports no usable window
+ *     size — a ratio against zero says nothing.
+ *   - Otherwise always rendered, including at 0% — the constant
+ *     placeholder makes the bar's collapse after a compact
+ *     (tokens drop sharply) less surprising.
  *
- * Colour follows the same tri-state rule used by the
- * Context tab and Token HUD: green ≤75%, amber 75-90%,
- * red >90%. The red band is the "imminent compaction"
- * warning — users can anticipate the pause.
+ * Colour follows the same tri-state rule used by the Context
+ * tab and the usage HUD: green ≤75%, amber 75-90%, red >90%.
+ * The red band is the "imminent compaction" warning — users can
+ * anticipate the pause.
  */
-export function renderCompactionBar(host) {
-  const status = host._historyStatus;
-  if (!status) return null;
-  // Backend keys come from LLMService.get_history_status,
-  // which merges get_token_budget + get_compaction_status
-  // and re-prefixes the compaction fields to avoid name
-  // collisions. Field shape confirmed in the browser console:
-  //   history_tokens, compaction_enabled, compaction_trigger,
-  //   compaction_percent, max_history_tokens, remaining,
-  //   needs_compaction, session_id.
-  // An earlier draft of this component assumed the un-prefixed
-  // names (enabled, trigger_tokens, percent) — the gate rejected
-  // every snapshot and the bar never rendered.
-  if (!status.compaction_enabled) return null;
-  const trigger = Number(status.compaction_trigger) || 0;
-  if (trigger <= 0) return null;
-  const tokens = Number(status.history_tokens) || 0;
-  // Backend-computed percent is preferred when present;
-  // fall back to a local ratio if the snapshot is a
-  // subset shape. Capped at 100 for display — over-100
-  // is possible briefly before compaction kicks in, and
-  // rendering widths beyond 100% would trigger horizontal
-  // overflow on the bar container.
-  const rawPct = status.compaction_percent != null
-    ? Number(status.compaction_percent)
-    : (tokens / trigger) * 100;
+export function renderContextBar(host) {
+  const usage = host._contextUsage;
+  if (!usage) return null;
+  // Keys are the SDK's ContextUsageResponse, passed through
+  // unmodified by ClaudeCodeService.get_context_usage:
+  //   totalTokens, maxTokens, rawMaxTokens, percentage, model,
+  //   isAutoCompactEnabled, categories, memoryFiles, mcpTools.
+  const max = Number(usage.maxTokens) || 0;
+  if (max <= 0) return null;
+  const tokens = Number(usage.totalTokens) || 0;
+  // Engine-computed percentage is preferred when present; fall
+  // back to a local ratio if a future payload omits it. Capped
+  // at 100 for display — rendering widths beyond 100% would
+  // trigger horizontal overflow on the bar container.
+  const rawPct = usage.percentage != null
+    ? Number(usage.percentage)
+    : (tokens / max) * 100;
   const pct = Math.max(0, Math.min(100, rawPct || 0));
-  // Colour picker — same thresholds as _budgetColor
-  // in context-tab.js / token-hud.js. Keeping the logic
+  // Colour picker — same thresholds as _pctColor in
+  // context-usage-tab.js / usage-hud.js. Keeping the logic
   // inline here avoids an import just for three values.
   let color;
   if (pct > 90) {
@@ -70,13 +65,24 @@ export function renderCompactionBar(host) {
   } else {
     color = '#7ee787';
   }
-  const title = (
-    `History: ${tokens.toLocaleString()} / `
-    + `${trigger.toLocaleString()} tokens `
-    + `(${pct.toFixed(1)}% of compaction threshold)`
-  );
+  const rawMax = Number(usage.rawMaxTokens) || 0;
+  const parts = [
+    `Context: ${tokens.toLocaleString()} / ${max.toLocaleString()} `
+    + `tokens (${pct.toFixed(1)}%)`,
+  ];
+  if (rawMax > max) {
+    // Naming the reserve keeps the number honest: a user who
+    // knows the model's window is 200K should be told why the
+    // bar is full at 172K rather than left to assume a bug.
+    parts.push(
+      `${(rawMax - max).toLocaleString()} reserved for autocompact`,
+    );
+  }
+  if (usage.isAutoCompactEnabled === false) {
+    parts.push('autocompact off — the turn fails at the limit');
+  }
   return html`
-    <div class="compaction-bar" title=${title}>
+    <div class="compaction-bar" title=${parts.join(' · ')}>
       <div
         class="compaction-bar-fill"
         style="width: ${pct}%; background: ${color};"
@@ -129,7 +135,7 @@ export function renderTemplate(host) {
           <ac-files-tab></ac-files-tab>
         </div>
         <div class="tab-panel ${host.activeTab === 'context' ? 'active' : ''}">
-          <ac-context-tab></ac-context-tab>
+          <ac-context-usage-tab></ac-context-usage-tab>
         </div>
         <div class="tab-panel ${host.activeTab === 'settings' ? 'active' : ''}">
           <ac-settings-tab></ac-settings-tab>
@@ -141,7 +147,7 @@ export function renderTemplate(host) {
         ` : null}
       </div>
       <ac-doc-index-progress></ac-doc-index-progress>
-      ${renderCompactionBar(host)}
+      ${renderContextBar(host)}
       <div
         class="resize-handle right"
         @pointerdown=${(e) => host._onHandlePointerDown(e, RESIZE_RIGHT)}
@@ -179,13 +185,17 @@ export function renderTemplate(host) {
       `)}
     </div>
 
-    <ac-compaction-progress></ac-compaction-progress>
-
-    <ac-cache-warmup-progress></ac-cache-warmup-progress>
-
+    <!--
+      Two overlays left with the native engine. ac-compaction-progress
+      covered the 10-30s blocking call AC⚡DC made to find a topic
+      boundary; the engine compacts on its own and reports a
+      compact_boundary after the fact, which renders as a divider in
+      the transcript instead. ac-cache-warmup-progress tracked a
+      warmer that pre-heated prompt tiers this app no longer builds.
+    -->
     <ac-speech-controls></ac-speech-controls>
 
-    <ac-token-hud></ac-token-hud>
+    <ac-usage-hud></ac-usage-hud>
 
     <!--
       Last in the template and at z-index 9000: above the dialog panel,

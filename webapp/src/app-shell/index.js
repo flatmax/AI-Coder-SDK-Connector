@@ -28,13 +28,11 @@ import '../files-tab/index.js';
 import '../diff-viewer/index.js';
 import '../svg-viewer.js';
 import '../settings-tab.js';
-import '../context-tab.js';
+import '../context-usage-tab.js';
 import '../doc-convert-tab.js';
 import '../file-nav.js';
-import '../token-hud.js';
-import '../compaction-progress.js';
+import '../usage-hud.js';
 import '../doc-index-progress.js';
-import '../cache-warmup-progress.js';
 import '../speech-controls.js';
 // Rendered last in the template and at the top of the z-order: a
 // permission request has stalled a turn, and it must not render
@@ -76,7 +74,7 @@ import {
   onSvgViewBoxChanged, onSvgPresentationChanged,
 } from './viewport.js';
 import {
-  fetchCurrentState, fetchHistoryStatus, onCompactionStatusRefresh,
+  fetchCurrentState, fetchContextUsage, onContextUsageRefresh,
 } from './state-fetch.js';
 import { onModeChanged, switchMode, toggleCrossRef } from './mode.js';
 import {
@@ -197,16 +195,19 @@ export class AppShell extends JRPCClient {
      */
     _streaming: { type: Boolean, state: true },
     /**
-     * Compaction capacity — history token usage vs. the
-     * configured trigger threshold. Shape matches
-     * LLMService.get_history_status:
-     *   { history_tokens, compaction_trigger,
-     *     compaction_percent, compaction_enabled, ... }
-     * Null before the first fetch. Refreshed on
-     * stream-complete, session-changed, and successful
-     * compaction events.
+     * Context-window capacity, for the thin bar under the dialog.
+     * Shape is the engine's own `ContextUsageResponse` as passed
+     * through by ClaudeCodeService.get_context_usage:
+     *   { totalTokens, maxTokens, rawMaxTokens, percentage,
+     *     model, isAutoCompactEnabled, categories, ... }
+     * Null before the first fetch. Refreshed on stream-complete,
+     * session-changed, and compaction events.
+     *
+     * `maxTokens` already excludes the autocompact buffer, so a
+     * full bar means a compact is imminent — the same warning the
+     * old `_historyStatus` bar gave, from the party that decides it.
      */
-    _historyStatus: { type: Object, state: true },
+    _contextUsage: { type: Object, state: true },
   };
 
   static styles = APP_SHELL_STYLES;
@@ -388,13 +389,13 @@ export class AppShell extends JRPCClient {
       this._onStreamChunkHeader.bind(this);
     this._onStreamCompleteHeader =
       this._onStreamCompleteHeader.bind(this);
-    // Compaction capacity refresh — bound so the three
+    // Context-capacity refresh — bound so the three
     // window event listeners share one callable and
     // removeEventListener can match. Without the bind,
     // `this` is undefined inside the handler and the
-    // _fetchHistoryStatus call throws.
-    this._onCompactionStatusRefresh =
-      this._onCompactionStatusRefresh.bind(this);
+    // _fetchContextUsage call throws.
+    this._onContextUsageRefresh =
+      this._onContextUsageRefresh.bind(this);
     // Git action button dispatch from the file picker
     // header. The picker doesn't know the RPC call proxy,
     // so it fires a bubbling `git-action` window event
@@ -517,23 +518,23 @@ export class AppShell extends JRPCClient {
     window.addEventListener(
       'stream-complete', this._onStreamCompleteHeader,
     );
-    // Compaction capacity refresh triggers. Three
-    // disjoint events because they arrive on separate
-    // channels: stream-complete after an LLM turn,
-    // session-changed after a restore or history-browser
-    // load, and compaction-event when the compactor
-    // itself fires. All route through the single
-    // _onCompactionStatusRefresh handler so the fetch
-    // logic (debounced, in-flight guarded) lives in
-    // one place.
+    // Context-capacity refresh triggers. Three disjoint
+    // events because they arrive on separate channels:
+    // stream-complete after a turn, session-changed after a
+    // restore or history-browser load, and compaction-event
+    // when the engine reports a compact boundary — at which
+    // point the number has just dropped and the bar would
+    // otherwise stay pinned until the next turn. All route
+    // through the single _onContextUsageRefresh handler so the
+    // fetch logic (in-flight guarded) lives in one place.
     window.addEventListener(
-      'stream-complete', this._onCompactionStatusRefresh,
+      'stream-complete', this._onContextUsageRefresh,
     );
     window.addEventListener(
-      'session-changed', this._onCompactionStatusRefresh,
+      'session-changed', this._onContextUsageRefresh,
     );
     window.addEventListener(
-      'compaction-event', this._onCompactionStatusRefresh,
+      'compaction-event', this._onContextUsageRefresh,
     );
     window.addEventListener('git-action', this._onGitAction);
     // request-dialog-tab is fired by tab bodies (Context,
@@ -628,13 +629,13 @@ export class AppShell extends JRPCClient {
       'stream-complete', this._onStreamCompleteHeader,
     );
     window.removeEventListener(
-      'stream-complete', this._onCompactionStatusRefresh,
+      'stream-complete', this._onContextUsageRefresh,
     );
     window.removeEventListener(
-      'session-changed', this._onCompactionStatusRefresh,
+      'session-changed', this._onContextUsageRefresh,
     );
     window.removeEventListener(
-      'compaction-event', this._onCompactionStatusRefresh,
+      'compaction-event', this._onContextUsageRefresh,
     );
     window.removeEventListener('git-action', this._onGitAction);
     if (this._onRequestDialogTab) {
@@ -680,10 +681,10 @@ export class AppShell extends JRPCClient {
     // selected files, streaming status, and init_complete.
     this._fetchCurrentState();
 
-    // Initial history-status fetch so the compaction bar
-    // reflects restored-session tokens from the first paint.
+    // Initial context-usage fetch so the capacity bar reflects
+    // a resumed session's tokens from the first paint.
     // Subsequent refreshes come through the event handlers.
-    this._fetchHistoryStatus();
+    this._fetchContextUsage();
   }
 
   remoteDisconnected() {
@@ -851,16 +852,15 @@ export class AppShell extends JRPCClient {
   }
 
   /**
-   * Server-push callback fired by ``_post_response`` after
-   * tier state, compaction, and any other post-stream
-   * housekeeping has fully settled. Distinct from
-   * ``streamComplete`` (fired earlier for chat-panel UX
-   * latency reasons): this event signals that the
-   * breakdown RPC will now return consistent data.
+   * Server-push callback fired after the service's own post-turn
+   * housekeeping has settled — distinct from ``streamComplete``, which
+   * fires as soon as the result message lands so the chat panel can
+   * settle its blocks without waiting.
    *
-   * Re-dispatched as a window event so the Context tab
-   * can listen without coupling to AppShell. See
-   * specs4/3-llm/streaming.md § Post-Response.
+   * Re-dispatched as a window event so any listener can wait for the
+   * quiet point after a turn without coupling to AppShell. See
+   * specs5/3-engine/session.md § Two completion events survive, with
+   * new meanings.
    */
   postResponseComplete(requestId, data = null) {
     // The Claude Code engine carries a payload here (reindexed files,
@@ -872,77 +872,20 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
-  /**
-   * Cache-warmup countdown tick. Fired once per second
-   * during the visible 30-second lead-in to a warm-up
-   * call. Payload: {seconds_remaining, total}. Re-
-   * dispatched as a window event so
-   * <ac-cache-warmup-progress> can render a progress
-   * bar matching the retry-banner UX.
-   */
-  cacheWarmupCountdown(payload) {
-    window.dispatchEvent(new CustomEvent('cache-warmup-countdown', {
-      detail: payload || {},
-    }));
-    return true;
-  }
+  // The four ``cacheWarmup*`` server-push receivers lived here until
+  // conversion phase 3. They re-dispatched the warmer's countdown,
+  // firing, completion and cancellation as window events for the
+  // <ac-cache-warmup-progress> overlay. The warmer pre-heated the
+  // prompt tiers AC⚡DC assembled; the engine manages its own cache and
+  // has no equivalent to announce, so nothing will ever call them.
+  // Keeping them would leave the shell advertising a callback the
+  // server cannot invoke.
 
-  /**
-   * Fired the moment the warm-up call goes out, after
-   * the countdown completes. Frontend flips the bar
-   * from countdown to spinner state.
-   */
-  cacheWarmupFiring(payload) {
-    window.dispatchEvent(new CustomEvent('cache-warmup-firing', {
-      detail: payload || {},
-    }));
-    return true;
-  }
-
-  /**
-   * Fired after the warm-up call resolves. Payload
-   * carries {success: bool, reason?: str}. On
-   * failure the warmer auto-disables — the chat
-   * panel surfaces a toast separately.
-   */
-  cacheWarmupComplete(payload) {
-    window.dispatchEvent(new CustomEvent('cache-warmup-complete', {
-      detail: payload || {},
-    }));
-    return true;
-  }
-
-  /**
-   * Fired when the visible countdown is aborted —
-   * either by a user-initiated stream (the warmer
-   * defers to the real request) or by an explicit
-   * cancel. Payload: {reason}.
-   */
-  cacheWarmupCancelled(payload) {
-    window.dispatchEvent(new CustomEvent('cache-warmup-cancelled', {
-      detail: payload || {},
-    }));
-    return true;
-  }
-
-  /**
-   * Server-push callback fired by the retry wrapper in
-   * `retry_litellm_completion` before each sleep. Carries
-   * {attempt, max_attempts, error_type, wait_seconds,
-   * message, provider, context}. Re-dispatched as a
-   * window event so the chat panel can surface a toast
-   * with the backoff countdown — without this, a 10-minute
-   * exponential retry looks like a frozen UI.
-   *
-   * See specs-reference/3-llm/streaming.md § Retry
-   * schedule for the emitted payload shape.
-   */
-  streamRetry(requestId, info) {
-    window.dispatchEvent(new CustomEvent('stream-retry', {
-      detail: { requestId, info },
-    }));
-    return true;
-  }
+  // ``streamRetry`` was received here until conversion phase 3. AC⚡DC's own
+  // completion wrapper pushed it before each backoff sleep so the chat panel
+  // could draw a countdown and prove the UI hadn't frozen. The CLI retries
+  // inside the subprocess and says nothing about it; the retryable condition
+  // it does report is ``rateLimit`` below, which carries a real reset time.
 
   filesChanged(selectedFiles) {
     window.dispatchEvent(new CustomEvent('files-changed', {
@@ -971,68 +914,19 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
-  binaryFilesSkipped(data) {
-    // Fired during sync_file_context when one or more
-    // selected files are dropped from context. Two distinct
-    // causes share this channel:
-    //
-    //   - kind="binary" (default when absent): the file is
-    //     selected but the repo layer refused to decode its
-    //     bytes as text. Selection state is unchanged
-    //     server-side until the trim broadcast that
-    //     accompanies this event.
-    //   - kind="deleted": the file was removed from disk
-    //     outside the application (terminal `rm`, another
-    //     editor, branch checkout). The backend trims it
-    //     from selected_files and the stability tracker
-    //     transitions the entry to a deletion marker on
-    //     the next update cycle.
-    //
-    // Both paths fire a `filesChanged` broadcast just
-    // before this one, so the picker checkbox is already
-    // clearing by the time the toast renders. The
-    // `binary-files-skipped` window event is dispatched
-    // for any subscriber that wants the path list — the
-    // detail carries `kind` so subscribers can branch too.
-    //
-    // Spec: specs4/5-webapp/file-picker.md
-    // § Binary File Selection
-    // Spec: specs4/3-llm/cache-tiering.md
-    // § Item Removal and § Deletion Markers
-    // Spec: specs-reference/5-webapp/shell.md
-    // § binaryFilesSkipped server-push event
-    const paths = Array.isArray(data?.paths) ? data.paths : [];
-    if (paths.length === 0) return true;
-    const kind = typeof data?.kind === 'string' ? data.kind : 'binary';
-    window.dispatchEvent(new CustomEvent('binary-files-skipped', {
-      detail: { paths, kind },
-    }));
-    // Toast wording: lead with the first file, append a
-    // "(+N more)" suffix when the list is long. Keeps the
-    // toast a single line.
-    const head = paths[0];
-    const extra = paths.length > 1
-      ? ` (+${paths.length - 1} more)`
-      : '';
-    let message;
-    if (kind === 'deleted') {
-      // Deleted files: the LLM will see a deletion marker
-      // in place of the file's content on the next turn.
-      // No "convert via Doc Convert" hint — the resolution
-      // is to either restore the file or accept the marker.
-      message = (
-        `File removed from context (deleted from disk): `
-        + `${head}${extra}.`
-      );
-    } else {
-      message = (
-        `Binary file not loaded: ${head}${extra}. `
-        + `Convert via the Doc Convert tab.`
-      );
-    }
-    this._showToast(message, 'warning');
-    return true;
-  }
+  // `binaryFilesSkipped` was received here until conversion
+  // phase 3. It was `sync_file_context`'s way of admitting that a
+  // file the user had ticked never made it into the prompt --
+  // either the repo layer could not decode its bytes as text, or
+  // it had been deleted from disk since the tick. Neither
+  // admission has a subject any more: nothing assembles a prompt
+  // from ticked files, so a tick cannot silently fail to be
+  // honoured (see specs5/plan/decisions.md CC-14 -- selection is
+  // a hint). The picker still knows which files are binary; it
+  // learns it from the tree it already loaded
+  // (`files-tab/tree-loader.js` -> `collectBinaryPaths`), not
+  // from a server push. A deleted file now shows up as a deleted
+  // file in the tree.
 
   userMessage(data) {
     window.dispatchEvent(new CustomEvent('user-message', { detail: data }));
@@ -1064,6 +958,28 @@ export class AppShell extends JRPCClient {
     }
     return true;
   }
+
+  // ---------------------------------------------------------------
+  // Dormant receivers — no emitter after conversion phase 3
+  // ---------------------------------------------------------------
+  //
+  // The five callbacks below (`modeChanged`, `agentModeChanged`,
+  // `agentsSpawned`, `agentsRehydrated`, `agentClosed`) have no
+  // sender: the native engine broadcast them and nothing in
+  // `src/ac_dc/claude_code/` does. They are kept, not tombstoned,
+  // because their consumers are kept too and for the same reason —
+  // the code/doc mode toggle's replacement is the preset selector
+  // (CC-12) and the agent tab strip's is the subagent browser
+  // (CC-8), both deferred by decision in
+  // specs5/plan/delivery.md. Deleting the receiver while leaving
+  // the tab strip in place would move the break rather than fix
+  // it, and would delete the shape whoever picks up CC-8 needs.
+  //
+  // Nothing user-visible depends on them. No tab can exist without
+  // an `agentsSpawned` push, so every agent-tab code path — the
+  // strip, its per-tab modes, its `LLMService` calls — is
+  // unreachable outside the tests, and the mode toggles came out of
+  // the action bar in phase 2.
 
   modeChanged(data) {
     window.dispatchEvent(new CustomEvent('mode-changed', { detail: data }));
@@ -1506,12 +1422,12 @@ export class AppShell extends JRPCClient {
     return fetchCurrentState(this);
   }
 
-  async _fetchHistoryStatus() {
-    return fetchHistoryStatus(this);
+  async _fetchContextUsage() {
+    return fetchContextUsage(this);
   }
 
-  _onCompactionStatusRefresh() {
-    return onCompactionStatusRefresh(this);
+  _onContextUsageRefresh() {
+    return onContextUsageRefresh(this);
   }
 
   _onModeChanged(event) {

@@ -69,7 +69,7 @@ describe('FilesTab review state', () => {
       'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.end_review': endReview,
+      'ClaudeCodeService.end_review': endReview,
     });
     const t = mountTab();
     await settle(t);
@@ -190,7 +190,7 @@ describe('FilesTab review state', () => {
     expect(getTree.mock.calls.length).toBe(mid + 1);
   });
 
-  it('exit-review from picker calls LLMService.end_review', async () => {
+  it('exit-review from picker calls ClaudeCodeService.end_review', async () => {
     const { t, endReview } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
@@ -237,7 +237,7 @@ describe('FilesTab review state', () => {
       'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.end_review': vi.fn().mockResolvedValue({
+      'ClaudeCodeService.end_review': vi.fn().mockResolvedValue({
         error: 'restricted',
         reason: 'Participants cannot end review',
       }),
@@ -282,7 +282,7 @@ describe('FilesTab review state', () => {
       'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.end_review': vi.fn().mockResolvedValue({
+      'ClaudeCodeService.end_review': vi.fn().mockResolvedValue({
         status: 'partial',
         error: 'could not reattach original branch',
       }),
@@ -321,7 +321,7 @@ describe('FilesTab review state', () => {
       'ClaudeCodeService.set_selected_files': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.end_review': vi
+      'ClaudeCodeService.end_review': vi
         .fn()
         .mockRejectedValue(new Error('end_review boom')),
     });

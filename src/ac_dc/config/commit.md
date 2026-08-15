@@ -48,28 +48,30 @@ what every caller already assumed.
 A focused feature:
 
 ```
-feat(cache): add L0 seeding from reference graph
+feat(doc-index): enrich keywords in the background after the outline
 
-L0 previously started empty and took several requests to warm up.
-Seed it at init with the system prompt, legend, and the top-N
-most-referenced index entries. Cuts cold-start cache misses roughly
-in half on a warm repository.
+Keyword extraction loaded a sentence-transformer on the request path,
+so the first outline pane took several seconds to appear. Extract the
+structure first and chain the enrichment behind it, reporting progress
+per file. The pane now opens immediately and fills in keywords as they
+arrive.
 ```
 
 A trivial change — no body needed:
 
 ```
-chore: bump litellm to 1.83.2
+chore: bump claude-agent-sdk to 0.2.140
 ```
 
 A refactor:
 
 ```
-refactor(stability): extract ripple cascade into its own function
+refactor(permissions): extract rule derivation into its own function
 
-cascade logic was inlined in update() and had grown unwieldy. No
-behavior change; the bottom-up pass, anchoring, and promotion checks
-now live in _run_cascade().
+The suggestion-to-rule mapping was inlined in the broker's decision
+handler and had grown unwieldy. No behaviour change; the destination
+choice, the path guard and the shell-prefix menu now live in
+_derive_rules().
 ```
 
 ## What to Avoid

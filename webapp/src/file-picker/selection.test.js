@@ -268,7 +268,7 @@ describe('FilePicker component', () => {
       ).toBeNull();
     });
 
-    it('excluded file tooltip includes "(excluded)"', async () => {
+    it('denied file tooltip includes "(read denied)"', async () => {
       const tree = rootOf([file('a.md', 5)]);
       const p = mountPicker({
         tree,
@@ -276,10 +276,10 @@ describe('FilePicker component', () => {
       });
       await p.updateComplete;
       const row = p.shadowRoot.querySelector('.row.is-file');
-      expect(row.getAttribute('title')).toContain('(excluded)');
+      expect(row.getAttribute('title')).toContain('(read denied)');
     });
 
-    it('checkbox tooltip adapts to exclusion state', async () => {
+    it('checkbox tooltip adapts to the denial state', async () => {
       const tree = rootOf([file('a.md', 5)]);
       const p = mountPicker({
         tree,
@@ -289,7 +289,10 @@ describe('FilePicker component', () => {
       const cb = p.shadowRoot.querySelector(
         '.row.is-file .checkbox',
       );
-      expect(cb.getAttribute('title')).toContain('include');
+      // The tooltip is also where the honest caveat lives:
+      // the rule applies from the CLI's next settings read.
+      expect(cb.getAttribute('title')).toContain('allow');
+      expect(cb.getAttribute('title')).toContain('settings read');
     });
 
     it('shift+click from normal → excluded', async () => {

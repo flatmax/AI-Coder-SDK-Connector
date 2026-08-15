@@ -29,7 +29,7 @@ Design points pinned by specs4/3-llm/history.md:
   ``get_session_messages`` returns full metadata for the history
   browser; ``get_session_messages_for_context`` returns a
   compact role/content shape with reconstructed image data URIs
-  for loading into a context manager.
+  for replaying a past conversation.
 
 Governing spec: ``specs4/3-llm/history.md``.
 """
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # The per-repo working directory name matches the config module's
 # constant. Not imported to avoid a circular dependency — the history
 # store must work with any directory its caller hands it, and in
-# practice the caller (LLMService) composes the path from repo_root.
+# practice the caller composes the path from repo_root.
 
 _HISTORY_FILENAME = "history.jsonl"
 _IMAGES_DIRNAME = "images"

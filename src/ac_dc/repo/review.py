@@ -308,7 +308,8 @@ class ReviewMixin:
         2. Checkout the original branch — HEAD reattaches to the
            branch the user was on before review.
         3. Rebuilding the symbol index is the caller's
-           responsibility (LLMService orchestrates it).
+           responsibility (:mod:`ac_dc.claude_code.review`
+           orchestrates it).
 
         Parameters
         ----------

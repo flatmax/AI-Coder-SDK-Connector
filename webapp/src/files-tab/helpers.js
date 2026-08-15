@@ -6,37 +6,15 @@
 // for unit tests.
 
 import {
-  _L0_EXCLUDE_PREF_ALWAYS,
-  _L0_EXCLUDE_PREF_ASK,
-  _L0_EXCLUDE_PREF_KEY,
-  _L0_EXCLUDE_PREF_NEVER,
   _PICKER_COLLAPSED_KEY,
   _PICKER_DEFAULT_WIDTH,
   _PICKER_MIN_WIDTH,
   _PICKER_WIDTH_KEY,
 } from './constants.js';
 
-/**
- * Read the stored L0-exclude preference. Returns one of
- * 'ask' / 'always' / 'never'. Anything else (missing key,
- * malformed value) falls back to 'ask' so users see the
- * dialog by default — the prompt is the discoverable
- * surface for understanding the L0 trade-off.
- */
-export function _loadL0ExcludePref() {
-  try {
-    const raw = localStorage.getItem(_L0_EXCLUDE_PREF_KEY);
-    if (raw === _L0_EXCLUDE_PREF_ALWAYS) return _L0_EXCLUDE_PREF_ALWAYS;
-    if (raw === _L0_EXCLUDE_PREF_NEVER) return _L0_EXCLUDE_PREF_NEVER;
-  } catch (_) {}
-  return _L0_EXCLUDE_PREF_ASK;
-}
-
-export function _saveL0ExcludePref(pref) {
-  try {
-    localStorage.setItem(_L0_EXCLUDE_PREF_KEY, pref);
-  } catch (_) {}
-}
+// `_loadL0ExcludePref` / `_saveL0ExcludePref` hydrated the
+// L0-exclude preference here until conversion phase 3. Both
+// went with the dialog they served — see ./exclusion.js.
 
 /**
  * Read the persisted picker width from localStorage, falling

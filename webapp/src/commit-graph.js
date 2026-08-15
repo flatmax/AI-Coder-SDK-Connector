@@ -6,7 +6,7 @@
 // § "Commit Selection via Git Graph".
 //
 // The component is data-driven from the backend's
-// `LLMService.get_commit_graph(limit, offset,
+// `ClaudeCodeService.get_commit_graph(limit, offset,
 // include_remote)` RPC. The backend returns:
 //
 //   {
@@ -913,7 +913,7 @@ export class CommitGraph extends LitElement {
   async _callGetCommitGraph(offset) {
     if (!this.rpcCall) return null;
     return this.rpcCall(
-      'LLMService.get_commit_graph',
+      'ClaudeCodeService.get_commit_graph',
       _PAGE_SIZE,
       offset,
       !!this.includeRemote,

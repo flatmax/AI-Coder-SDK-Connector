@@ -25,23 +25,11 @@ export const _PICKER_MIN_WIDTH = 180;
 export const _PICKER_COLLAPSED_WIDTH = 24;
 export const _PICKER_DEFAULT_WIDTH = 280;
 
-// localStorage keys for the L0-invalidation-on-exclude
-// preference. The dialog stores either "always" (don't
-// ask, always invalidate) or "never" (don't ask, always
-// defer). When neither is set, the dialog appears.
-// Symmetric with the existing per-feature preferences
-// stored elsewhere; can be reset via the Settings tab.
-//
-// Design note — three states (ask / always / never) is
-// the right shape. A single boolean would force the
-// user into one of the two pre-set choices; keeping
-// "ask" as the absence of a stored value lets the
-// dialog be the discoverable default and lets users
-// who want a permanent answer opt in to one.
-export const _L0_EXCLUDE_PREF_KEY = 'ac-dc-l0-exclude-pref';
-export const _L0_EXCLUDE_PREF_ASK = 'ask';
-export const _L0_EXCLUDE_PREF_ALWAYS = 'always';
-export const _L0_EXCLUDE_PREF_NEVER = 'never';
+// The `_L0_EXCLUDE_PREF_*` keys lived here until
+// conversion phase 3. They persisted an answer to a
+// question the app no longer asks — whether to pay for an
+// L0 cache rewrite when denying the agent a file. See
+// ./exclusion.js for what replaced the dialog.
 
 /**
  * Default tree stub used before the first RPC load. Lets the
