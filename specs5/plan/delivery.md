@@ -727,7 +727,8 @@ both held nothing but stale `__pycache__` after their contents were deleted.
 ### Deliberately not built
 
 - **No live verification of the new panels** — see above. This is the one that should be closed first.
-- **No unit tests for `usage-hud.js` / `context-usage-tab.js`.**
+  *Closed 2026-08-16; it found five wrong numbers. See the [interlude](#interlude--the-context-panels-meet-a-live-cli-2026-08-16).*
+- **No unit tests for `usage-hud.js` / `context-usage-tab.js`.** *Closed 2026-08-16, same entry.*
 - **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8.
 - **No upgrade notice for a stale `llm.json` or `system.md`.** They are left on disk and ignored.
 - **The doc index still misses the agent's writes.** Phase 4.
@@ -1074,7 +1075,9 @@ Two facts from the live runs worth knowing:
 - **Before you start, the two context panels need tests and one live run.** They refresh on *a turn
   runs* and *a session loads*, and you are building session loading. See the README's status section;
   this is deliberately not phase-5 scope, it is phase 3 work that phase 5 would otherwise inherit the
-  blame for.
+  blame for. **Done — 2026-08-16, in the interlude below.** Two of its findings bind phase 5: session-load
+  fetches must opt into `withRpcTimeout`, and the tab-visibility contract is `onTabVisible`, not a
+  guess.
 - **Nothing in the config layer may write `os.environ`**, and **hooks must never return a
   `permissionDecision`.** The second is new with this phase and is the sharper of the two: a
   `PostToolUse` hook returning one shadows `can_use_tool` entirely, ungating every gated tool with no
@@ -1086,3 +1089,154 @@ Two facts from the live runs worth knowing:
   every tool on it is genuinely read-only and in-process.
 - **`collab.py`'s `ContextVar` fix and its five `TestGateUnderRealDispatch` tests survive**, unchanged
   and still load-bearing.
+
+---
+
+## Interlude — the context panels meet a live CLI (2026-08-16)
+
+Not a phase. The README sequenced this ahead of phase 5 for one reason: `context-usage-tab.js` and
+`usage-hud.js` refresh on *a turn runs* and *a session loads*, phase 5 builds session loading, and
+neither panel had a test or a live run. The bet was that phase 5 would otherwise inherit the blame for
+whatever was already wrong. Five things were.
+
+### Five wrong numbers, and why 3 371 green tests said nothing
+
+Phase 3 shipped the two panels and the shell's capacity bar against a *guessed* model of
+`ContextUsageResponse`. Each of the three views derived the arithmetic independently, so each was wrong
+on its own terms — and the fixtures were written from the same guess, so the suite agreed with it. This
+is the failure mode a fixture cannot catch by construction: the test asserts the guess.
+
+What the engine actually reports, provable from three identities it maintains:
+
+- the content categories sum to `totalTokens`
+- `Free space` is `autoCompactThreshold - totalTokens`
+- `Autocompact buffer` is `maxTokens - autoCompactThreshold`
+
+So the non-deferred categories tile the whole window, `maxTokens` equals `rawMaxTokens` (200 000), and
+the compaction point is a separate field (167 000). Five consequences, every one of them visible on
+screen:
+
+1. **`categories[].color` carries the CLI's theme token names** — `claude`, `promptBorder`,
+   `inactive`, `warning` — not CSS. Every bar segment and legend swatch in both panels rendered
+   transparent.
+2. **Shares divided by `totalTokens`**, which gave `Free space — 692.0%`. The denominator is
+   `maxTokens`; the column is now headed `Share of window` and the shares sum to 100 %.
+3. **The bar segmented by every non-deferred category**, so it sat permanently 100 % full with 73 % of
+   it labelled "Free space" — a capacity bar that cannot show capacity. Structural rows are room left,
+   not content, and are excluded.
+4. **`maxTokens` was believed to arrive pre-reduced by the autocompact buffer.** It does not, at seven
+   sites. That made the `rawMaxTokens > maxTokens` tooltip branches dead in both panels — the one thing
+   they existed to explain was the one thing they never said — and put the >90 % red band out of reach
+   in all three views: at the moment of compaction the bar read **84 %, in green**, the single reading
+   it exists to rule out.
+5. **`MCP tools — 0 loaded` above a table of 35 tools.** All 35 are deferred, so "0 loaded" was true
+   and unreadable; it now names the count, the loaded tokens and the deferred tokens.
+
+Also cosmetic and also live-only: the engine names some rows `System tools (deferred)` *and* flags them,
+which rendered as `System tools (deferred) (deferred)`.
+
+### The arithmetic moved to one place
+
+`context-usage.js` (242 lines) now holds the derivation the three views each got wrong.
+`partitionCategories` checks the sum identity rather than trusting its own name matching, and an
+unverified payload degrades to an unsegmented bar instead of a confident wrong one. `warningPercent`
+puts the warning colour on the figure that predicts the pause *and* on the number being looked at — the
+HUD had been printing one basis and colouring by another.
+
+The three views' fixtures are rebased onto a verbatim live capture, with a `usageAt(totalTokens)`
+helper that rebuilds the structural rows so the identities keep holding as a test moves the number.
+Confirmed live afterwards: `memoryFiles` is `{path, type, tokens}` and `mcpTools` is
+`{name, serverName, tokens, isLoaded}`. **`agents` came back empty, so its element shape is still
+unverified** — the one shape in the payload still resting on a guess.
+
+### A dropped reply wedges every guarded fetch
+
+Found in the same run, and the wider bug of the two. A jrpc-oo call issued while the socket is being
+replaced — a reload mid-reconnect is the reliable way to see it — is dropped without a reply, and its
+promise then neither resolves nor rejects. Survivable alone. What is not is the `if (inFlight) return;`
+guard nearly every fetch in the webapp uses: the flag clears in a `finally`, the `finally` never runs,
+and the component stops fetching for the rest of the session. The HUD's context section went
+permanently blank, and the Context tab's Refresh button — the one affordance that would retry — is
+disabled in exactly that state, because `_loading` both blocks the fetch and greys the button.
+
+`withRpcTimeout` (`rpc.js`) rejects at a deadline so the `finally` runs. **Opt-in, not folded into
+`rpcCall`:** some calls legitimately run for minutes — a document conversion, an index rebuild — and a
+blanket deadline would break them. Nothing cancels the underlying call, since jrpc-oo cannot, so a late
+reply is ignored.
+
+Pick the deadline *above* whatever deadline the backend method already has. Every `ClaudeCodeService`
+method converts its own failures into an `{error}` return, so the backend always replies; a shorter
+deadline here abandons a reply that is still coming and stacks a retry onto whatever was too slow the
+first time. The remaining case — no reply at all — is the only one this helper is for. All three
+`get_context_usage` callers use 90 s, and that number is not arbitrary: the call measured **3–5 s warm,
+14 s on the first fetch after an idle session, and past the SDK's own 60 s control-request deadline
+eight times in one half-hour run.** A control request to the CLI subprocess is not a local computation.
+
+### A revealed tab is told it is on screen
+
+`ContextUsageTab.onTabVisible` had no caller. Its docstring said "called by the dialog when this tab
+becomes visible"; `_switchTab` set `activeTab` and told nobody. The tab refuses to refetch while hidden
+— a breakdown costs a control request — and marks itself stale instead, but it cannot see the class
+change that reveals it, so the badge stayed lit until someone pressed Refresh. The one affordance that
+clears it was unreachable by the gesture it was written for.
+
+`_switchTab` now notifies the newly-active tab on a microtask after the render that moves `.active`, so
+the query finds the tab arriving rather than the one leaving. Deliberately generic: any tab that grows
+the hook gets it, tabs without one are untouched.
+
+### A failed turn is not an included turn
+
+The HUD guarded on `result.error` to skip a turn with no numbers. A `streamComplete` result has no
+`error` key — the engine flags failure as `is_error`, in `messages.py` `_on_result` and in the synthetic
+result `service.py` emits when a turn dies outside the pump, which is what the chat panel reads. **The
+guard had never fired.** So a failed turn popped a HUD reading `included · 0.0s`, where "included" is a
+claim about subscription billing — the turn cost nothing *extra* — standing in for a cost the engine
+never priced. Wrong in the one direction a cost display must not be wrong.
+
+### Tests
+
+No backend change: python stays **2 687 passed, 75 skipped**. Webapp **91 files / 3 380 passed**,
++195 over the phase-4 figure, in four files:
+
+- `context-usage.test.js` — **41**, new. The shared derivation, including the identity check and the
+  degrade-to-unsegmented path.
+- `context-usage-tab.test.js` — **74**, new. The panel phase 3 shipped untested.
+- `usage-hud.test.js` — **68**, new. The auto-hide timers (the HUD is gone by the time anyone looks),
+  hover pause and fade-undo, cost formatting at each magnitude including the null case, the model label
+  when a subagent used a second model, the bar's exclusion of deferred and empty categories, the
+  headroom tooltip, and the `session-changed` path — which refreshes the numbers *without* showing the
+  HUD, because popping up on a session load would report a turn that never happened.
+- `rpc.test.js` — **+8** for `withRpcTimeout`: rejecting at the deadline, releasing the guard so a
+  later fetch succeeds where it used to be locked out, and ignoring a late reply.
+- `app-shell/toasts-and-events.test.js` — **+4**: the revealed tab is told, the tab being *hidden* is
+  not, a tab with no hook is a no-op, and the stale badge clears on the way in.
+
+The lock file was also re-solved (`chore: re-lock`): phase 3 dropped `boto3`, `litellm`, `tenacity`,
+`tiktoken` and `trafilatura` from `pyproject.toml`, and `uv.lock` had pinned all five plus their
+transitive closure ever since — 1 165 lines of resolution for packages nothing imports. No dependency
+changed.
+
+### Deliberately not built
+
+- **A "cost unknown" rendering.** Hiding a failed turn's cost hides the real usage that a late failure
+  carries — `error_max_turns` in particular. Reporting it honestly needs a state distinct from
+  "included", which is phase 6's visualisation work and not a guard's job. Noted in the code where the
+  guard sits.
+- **The rest of the webapp's guarded fetches are still unbounded.** Only the three `get_context_usage`
+  callers opt in. The wedge is generic to the `if (inFlight) return;` idiom; the fix is per-call by
+  design, because the right deadline is per-call.
+- **`agents[]`'s element shape.** Live capture returned it empty. Unverified, and the only part of the
+  payload still guessed.
+- **No visualisation upgrade.** This entry is correctness. Phase 6 is still phase 6.
+
+### What binds phase 5
+
+- **Session-load fetches must opt into `withRpcTimeout`**, with the deadline above the backend
+  method's, never under it. Phase 5 adds the second path into these panels, and it is the path most
+  likely to run during a reconnect — which is exactly when a reply gets dropped.
+- **The staleness contract is `onTabVisible`.** A session load makes the breakdown stale; the panels
+  already know how to say so and already know not to refetch while hidden. Reuse it rather than
+  inventing a second mechanism.
+- **The HUD must not pop on a session load.** `session-changed` refreshes the numbers and shows
+  nothing, because a HUD that appears on resume reports a turn nobody took. If phase 5 introduces
+  another way to load a session, it joins that path and not the turn-complete one.

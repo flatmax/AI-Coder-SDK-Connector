@@ -302,7 +302,7 @@ The unsupported-slash-command note is rendered locally and **never appended to t
 model** — the text was never a message, and recording it would make the agent believe the user said
 something they did not.
 
-Canonical template set: `specs-reference/3-engine/history.md` § Mirrored store record schema.
+Canonical template set: `specs-reference/3-engine/history.md` § System-event content templates.
 
 ### Cross-component flag
 

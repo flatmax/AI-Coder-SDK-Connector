@@ -155,9 +155,9 @@ state intact rather than a directory of records it cannot parse.
 
 | Entry | Purpose | Lifecycle |
 |---|---|---|
-| `history.jsonl` | Mirrored transcript — the browsable archive | Append-only; a failed append surfaces as a health banner, never a silent gap |
-| `sessions/` | Engine transcripts written through our `SessionStore`, plus per-session `subagents/` | Written by the engine through us; deleted per session from the history browser |
-| `images/` | Persisted chat images | Write on paste, read on session load |
+| `sessions/` | Engine transcripts written through our `SessionStore`, plus per-session `subagents/`. The browsable archive and the resume source, one file per session | Append-only; a failed append surfaces as a health banner, never a silent gap. Deleted per session from the history browser — which deletes that session's images with it |
+| `events.jsonl` | AC⚡DC's own operational events, keyed by session and request ID | Append-only; never rewritten |
+| `index/` | Derived search and summary index | Built from `sessions/`; deletable, rebuilt on next start |
 | `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
 | `tex_preview/` | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |
 | `snippets.json` | Optional repo-local snippet override | User-edited |
@@ -174,7 +174,7 @@ key derivation: [`../../specs-reference/3-engine/history.md`](../../specs-refere
 ### Creation and Gitignore
 
 - Working directory created on first run (idempotent)
-- Subdirectories (`sessions/`, `images/`, `doc_cache/`) created by their respective subsystems with exist-ok semantics
+- Subdirectories (`sessions/`, `index/`, `doc_cache/`) created by their respective subsystems with exist-ok semantics; `events.jsonl` is created by its first append
 - Gitignore entry added — if the working directory is not already ignored, an entry is appended to the repo's gitignore; duplicate entries avoided
 - All operations are idempotent — safe to re-run on subsequent startups
 

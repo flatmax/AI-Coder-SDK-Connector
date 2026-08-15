@@ -37,7 +37,7 @@ The conversion added a third kind of twin content: **SDK-behaviour findings**. W
 
 - **Byte-level formats** — the symbol map compact format, doc outline annotation syntax (`←N`, `→target#Section`, `~Nln`, content-type markers), request-ID and block-identity formats, permission-rule syntax
 - **Numeric constants** — debounce intervals, timeouts, retry and backoff schedules, truncation limits, port ranges
-- **Persistent storage schemas** — mirrored-store JSONL records, engine-transcript line format and session-key path mapping, docuvert provenance headers, doc-cache sidecars
+- **Persistent storage schemas** — engine-transcript line format and session-key path mapping, the events-log record shape, the derived index's layout, docuvert provenance headers, doc-cache sidecars
 - **Config file schemas** — exact field names, nesting, whitelists, legacy-format fallbacks
 - **Dependency quirks** — tree-sitter TypeScript function name, Vite `optimizeDeps` exclusions, PyInstaller hidden imports, Monaco worker configuration, `mcp` version floor, CLI discovery and version skew
 - **RPC wire formats** — exact argument shapes, return shapes, event payload structures
@@ -78,7 +78,7 @@ Version skew between the SDK and the `claude` CLI is its own failure class, surf
 
 Changes that cross a boundary visible to users, git, the engine, or other AC⚡DC instances are fixed by interop:
 
-- The persistent storage formats — mirrored-store JSONL schema, engine transcript and session-key layout under `.ac-dc4/`, docuvert headers, `.bundled_version` marker, doc-cache sidecars
+- The persistent storage formats — engine transcript and session-key layout under `.ac-dc4/`, the events-log schema, docuvert headers, `.bundled_version` marker, doc-cache sidecars. The derived index is *not* in this list: it is rebuildable, so its format may change freely
 - The RPC surface the webapp expects, including server-push event names and payload shapes
 - The config file schemas users edit, and the whitelist of what the Settings tab may write
 - The `ac-dc` MCP tool names, argument shapes, and output formats — the agent's prompt cache and any project-level tool-permission rules are keyed to them
@@ -130,7 +130,7 @@ The four that most change how a layer is built:
 |---|---|
 | [CC-1](../plan/decisions.md#cc-1--total-replacement-not-a-dual-engine-mode-user) Total replacement | No dual-engine abstraction layer. Do not write an interface that both a native engine and the SDK could implement; there is one engine. |
 | [CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text) Indexes as tools | The indexes have one consumer shape — request/response — instead of two. No assembly path, no per-turn seeding. |
-| [CC-3](../plan/decisions.md#cc-3--transcript-mirrored-to-ac-dc4-context-continuity-via-the-sdk-user) Mirrored history | Two stores with strictly separated roles. Never read the mirror to build context; never treat the engine transcript as browsable. |
+| [CC-3](../plan/decisions.md#cc-3) + [CC-19](../plan/decisions.md#cc-19) Mirrored history | **One** transcript, two roles. Never read it back to build context — continuity is `resume`/`fork_session`. Never give the store an entry the CLI did not write. Anything else under `.ac-dc4/` is derived and rebuildable, or holds only what the transcript never had. |
 | [CC-15](../plan/decisions.md#cc-15--permission-prompts-are-localhost-only) Localhost-only permissions | The authority check belongs in the resolution path, not in the UI. A hidden button is not a security boundary. |
 
 Contracts inherited from earlier suites that remain live and are not obvious from any single spec: the repository layer's **per-path write mutex**; the **one user-initiated turn at a time** guard, which counts user intent and therefore does not gate subagents; **streaming state keyed by request ID** rather than a singleton passive-stream flag; and the **single bespoke SVG editor** on both panes, with the left pane constructed read-only.

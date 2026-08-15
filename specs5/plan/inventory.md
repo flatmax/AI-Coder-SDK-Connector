@@ -13,8 +13,8 @@ Legend: **KEEP** unchanged · **ADAPT** survives with changes · **DELETE** remo
 
 | | Python (`src/`) | Frontend (`webapp/src/`) | Specs (`specs5/`) |
 |---|---|---|---|
-| DELETE | ~19,600 lines | ~4,900 lines | 12 files |
-| ADAPT | ~4,300 lines | ~7,200 lines | 18 files |
+| DELETE | ~20,700 lines | ~4,900 lines | 12 files |
+| ADAPT | ~3,200 lines | ~7,200 lines | 18 files |
 | KEEP | ~29,700 lines | ~98,800 lines | 21 files |
 | NEW | ~2,400 lines (est.) | ~2,600 lines (est.) | 8 files |
 
@@ -52,11 +52,13 @@ The whole native engine. Nothing here has a consumer after phase 3.
 | `src/ac_dc/agent_factory.py` | ~250 | Agent `ContextManager` construction. |
 | `src/ac_dc/file_context.py` | ~300 | In-memory `{path: content}` map. |
 | `src/ac_dc/llm/_rpc_urls.py`, `_rpc_streaming.py`, `_construction.py`, `_types.py`, `__init__.py` | ~1,000 | Remaining engine RPC surface and re-export hub. |
+| `src/ac_dc/history_store.py` | 1148 | Moved here from ADAPT by [CC-19](decisions.md#cc-19). A store cannot impose a record shape on pass-through entries, so this file's schema is not a head start on the `SessionStore` — it is a second one. Its three jobs re-home to a derived index, read-time rendering, and `events.jsonl`. |
 
 **Tests deleted with them:** `test_context_manager.py`, `test_edit_pipeline.py`,
 `test_edit_protocol.py`, `test_file_context.py`, `test_history_compactor.py`,
-`test_prompt_assembly.py`, `test_stability_tracker/`, `test_token_counter.py`,
-`test_url_content.py`, `test_agent_factory.py`, `test_llm_service/`, `test_thinking_kwargs.py`.
+`test_history_store.py`, `test_prompt_assembly.py`, `test_stability_tracker/`,
+`test_token_counter.py`, `test_url_content.py`, `test_agent_factory.py`, `test_llm_service/`,
+`test_thinking_kwargs.py`.
 
 **Dependency removed:** `litellm` and its transitive tree.
 
@@ -68,10 +70,9 @@ The whole native engine. Nothing here has a consumer after phase 3.
 |---|---:|---|
 | `src/ac_dc/main.py` | 856 | Construct `ClaudeCodeService` instead of `LLMService`; drop stability init, doc-index-for-prompt scheduling, and the `_post_write_callback` into the engine. Keep symbol/doc index build, static server, collab wiring. |
 | `src/ac_dc/config.py` | 1485 | Loses every prompt-composition helper and the whole prompt file set (CC-11); loses cache tuning, compaction config, agent gate, warmup config. Keeps config-dir resolution, version-aware upgrade, managed/user split, snippets. Expect ~600 lines. |
-| `src/ac_dc/history_store.py` | 1148 | Keeps append/search/list/session-summary and image refs. Gains the SDK `SessionStore` protocol implementation (CC-3). Loses nothing structural. |
 | `src/ac_dc/settings.py` | 428 | Config whitelist shrinks to the surviving files; `refresh_system_prompt` removed. |
 | `src/ac_dc/llm/_review.py` | 504 | Git-side review state moves to `src/ac_dc/repo/review.py`; the prompt-swap and review-context-assembly halves are deleted (CC-13). |
-| `src/ac_dc/llm/_rpc_history.py` | 466 | Session RPCs re-pointed at the SDK's session functions plus the mirrored store. |
+| `src/ac_dc/llm/_rpc_history.py` | 466 | Session and history RPCs re-pointed at the SDK's session functions and the `*_from_store` parsers. Method names survive; every return shape changes ([CC-19](decisions.md#cc-19)). |
 | `src/ac_dc/llm/_doc_index_background.py` | 577 | Survives as the doc-index build/enrichment scheduler, moved under `doc_index/`. Loses the "deferred enrichment after edit blocks" coupling. |
 | `src/ac_dc/llm/_rpc_lifecycle.py` | 498 | `get_current_state`, localhost gate, navigate, TeX, snippets survive; deferred-init/stability parts go. |
 
@@ -99,7 +100,9 @@ transport — ~29,700 lines, untouched.
 | `permissions.py` | `can_use_tool` callback, the awaitable browser round-trip, decision persistence, timeout/deny policy. | [`../3-engine/permissions.md`](../3-engine/permissions.md) |
 | `hooks.py` | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` / `PreCompact` / `Stop` / `SubagentStart` / `SubagentStop` handlers that drive UI broadcasts and re-indexing. | [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md) |
 | `mcp_server.py` | In-process SDK MCP server `ac-dc` exposing the indexes, review state, and repo facts as tools. | [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md) |
-| `session_store.py` | `SessionStore` protocol implementation over `.ac-dc4/sessions/`. Verified against the SDK's conformance harness. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `session_store.py` | `SessionStore` protocol implementation over `.ac-dc4/sessions/`. All six methods, entries verbatim, verified against the SDK's conformance harness. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `events_log.py` | `.ac-dc4/events.jsonl` — our own operational events, append-only, keyed by session and request ID. Separate from the store because the store is never given an entry the CLI did not write. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `history_index.py` | The derived index under `.ac-dc4/index/`: search postings, session summaries, request ID ↔ session mapping. Rebuildable from the transcript, so deleting it is supported. | [`../3-engine/history.md`](../3-engine/history.md) |
 | `context_usage.py` | `get_context_usage()` fetch, shaping, and caching for the Context tab. | [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md) |
 
 ---
@@ -142,7 +145,7 @@ implementing phase 2:
 | `webapp/src/app-shell/mode.js` | Mode toggle becomes a preset selector (CC-12). |
 | `webapp/src/settings-tab.js` | Config cards shrink to the surviving files; gains permission-mode, model, effort, and budget controls. |
 | `webapp/src/file-picker/` | Third checkbox state re-labelled from "exclude from index" to "deny agent read" (CC-14). |
-| `webapp/src/history-browser.js` | Reads the mirrored transcript; gains resume-vs-fork affordances (CC-3). |
+| `webapp/src/history-browser.js` | Reads the one transcript through the parsed shapes; gains resume-vs-fork affordances. Loses the `files_modified`, `edit_results` and "show agents" panels — the records behind them retire with `history_store.py` ([CC-19](decisions.md#cc-19)). |
 
 ## Frontend — NEW
 

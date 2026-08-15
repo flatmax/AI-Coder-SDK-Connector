@@ -465,7 +465,7 @@ not about the page.
 - Left panel — session list or search results; preview text, relative timestamp, message count badge
 - Right panel — messages for selected session with simplified markdown rendering and image thumbnails
 - Header — title, search input, close button
-- All three reads (list, messages, search) come from the mirrored store, never from the engine's transcripts. Browsing history never touches the engine
+- All reads (list, messages, search, image bytes) come from the repo-local mirror of the engine transcript, read through the SDK's `*_from_store` parsers. Browsing history never touches the engine — no subprocess, no turn, no context. It is the *same* transcript the engine resumes from, read rather than replayed
 
 ### Interactions
 

@@ -58,7 +58,7 @@ entirely, which would silently disable the permission dialog.
 | `PreToolUse` | Create the tool card immediately; start a timer for the duration display. |
 | `PostToolUse` | Detect file changes → broadcast, re-index, refresh the viewer. The main reaction point. |
 | `PostToolUseFailure` | Mark the card failed and surface the error; expand it by default. |
-| `UserPromptSubmit` | Record the turn boundary in the mirrored transcript. **Not** used to inject context — see [decisions § CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text). |
+| `UserPromptSubmit` | Record the turn boundary — the request-ID mapping in the derived index, and the turn's own events in `events.jsonl`. **Not** used to inject context — see [decisions § CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text). |
 | `PreCompact` | Broadcast that compaction is about to happen, so the UI can show it rather than presenting an unexplained pause. |
 | `Stop` | Turn boundary housekeeping; triggers `postResponseComplete`. |
 | `SubagentStart` / `SubagentStop` | Create and retire subagent tabs. |

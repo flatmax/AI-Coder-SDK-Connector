@@ -2,9 +2,9 @@
 
 **Supplements:** `specs5/3-engine/history.md`
 
-On-disk layout for both stores, the `SessionStore` adapter's key-to-path mapping, the mirrored record
-schema, and the history RPC surface. The behavioural contracts — two stores, resume-never-replays,
-append-only — are in the parent spec.
+On-disk layout, the `SessionStore` adapter's key-to-path mapping, the events-log and derived-index
+schemas, and the history RPC surface. The behavioural contracts — one transcript,
+resume-never-replays, append-only — are in the parent spec.
 
 Verified against `claude-agent-sdk` **0.2.137**.
 
@@ -21,9 +21,12 @@ Verified against `claude-agent-sdk` **0.2.137**.
       <session-uuid>/
         subagents/
           agent-<agent-id>.jsonl        — subagent transcript
-  history.jsonl                         — AC⚡DC mirrored store (browsable record)
-  images/                               — unchanged
+  events.jsonl                          — AC⚡DC's own operational events
+  index/                                — derived search / summary / request-ID index (rebuildable)
 ```
+
+`history.jsonl` and `images/` are gone — [CC-19](../../specs5/plan/decisions.md#cc-19). A directory
+written by the native engine keeps both; nothing reads them.
 
 The `<project_key>` level exists even though AC⚡DC is single-repo: the SDK's key includes it, and
 worktrees of the same repo produce different keys. Flattening it would make two worktrees collide.
@@ -115,48 +118,85 @@ SessionStoreListEntry:
 
 Result order is unspecified — the SDK sorts by `mtime` descending, so ours need not.
 
-### Mirrored store (`history.jsonl`) record schema
+### Events log (`events.jsonl`) record schema
 
-One record per line, UTF-8. Superset of the native-engine schema, so the existing loader, history
-browser, and search keep working.
+One record per line, UTF-8, append-only. This file holds **only** what the transcript never contained:
+AC⚡DC's own operational events. Messages, tool calls and turn results are not duplicated here — they
+are read from the transcript through the SDK's parsers, and their browse rendering is built at read
+time.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `id` | string | ✓ | `{epoch_ms}-{uuid8}` — unchanged, dash separator |
-| `session_id` | string | ✓ | SDK session UUID for post-conversion records; `sess_…` for older ones |
+| `id` | string | ✓ | `{epoch_ms}-{uuid8}` — dash separator, carried over unchanged |
+| `session_id` | string | ✓ | SDK session UUID |
+| `request_id` | string | — | The turn this event belongs to. Absent for events outside a turn (a commit from the toolbar, a preset switch between turns) |
 | `timestamp` | string | ✓ | ISO 8601 UTC, microsecond precision |
-| `role` | `"user"` \| `"assistant"` | ✓ | Retained for the existing browser and search paths |
-| `content` | string | ✓ | Rendered text; never null, may be empty |
-| `kind` | string | — | New discriminator: `user`, `assistant`, `thinking`, `tool`, `result`, `system`. **Absent on pre-conversion records** — readers derive it from `role` and `system_event` |
-| `request_id` | string | — | The turn. Absent on pre-conversion records |
-| `block_id` | string | — | Correlates with the streamed block |
-| `system_event` | bool | — | Unchanged; omitted when false, absence means false |
-| `image_refs` | list[string] | — | Filenames in `.ac-dc4/images/`; omitted when empty |
-| `images` | int | — | Legacy count. Tolerated, never written |
-| `files` | list[string] | — | Framing's selected-file list (user records) |
-| `files_modified` | list[string] | — | Paths changed by tool calls (assistant and tool records) |
-| `turn_id` | string | — | Pre-conversion only. Read, never written |
+| `event` | string | ✓ | Discriminator: `commit`, `reset`, `review_start`, `review_end`, `preset_switch`, `permission_mode`, `session_switch`, `files_written_by_file_tools` |
+| `content` | string | ✓ | The rendered line the browser shows. Never null, may be empty |
+| `payload` | object | — | Event-specific fields; see below |
 
-`kind: "tool"` records add:
+`payload` by event:
 
-| Field | Type | Notes |
+| Event | Payload |
+|---|---|
+| `commit` | `{sha, message, files: list[string]}` |
+| `reset` | `{to: "HEAD", files: list[string]}` |
+| `review_start` / `review_end` | `{base, head, files: list[string]}` |
+| `preset_switch` | `{from, to}` |
+| `permission_mode` | `{from, to, source: "user" \| "engine"}` |
+| `session_switch` | `{action: "resumed" \| "forked", session_id, forked_from?}` |
+| `files_written_by_file_tools` | `{paths: list[string]}` |
+
+**The `files_written_by_file_tools` name is binding**, per
+[CC-18](../../specs5/plan/decisions.md#cc-18). Both available sources — the re-indexer's queue and the
+result message's `files_modified` — see only `Write`, `Edit`, `MultiEdit` and `NotebookEdit`, so a file
+changed by `Bash` is absent from this record. A field called `files_changed` would be a durable claim
+this system cannot make.
+
+There is no `image_refs` field, no `images` count, no `files`, and no `turn_id`: images live in the
+transcript entry that carried them, the framing's selected-file list is part of the user message the
+engine received, and the request ID replaced `turn_id`.
+
+### Derived index (`index/`) layout
+
+Rebuildable from `sessions/` in full, so its format is **not** an interop boundary and may change
+without migration. It exists to answer three questions without reading every transcript:
+
+| Purpose | Key | Value |
 |---|---|---|
-| `tool_name` | string | |
-| `tool_use_id` | string | |
-| `tool_input_summary` | string | ≤ 200 chars |
-| `tool_result_summary` | string | Truncated per the session twin's limits — the mirror is for browsing, not for replaying tool output |
-| `tool_status` | `"ok"` \| `"error"` | |
-| `duration_ms` | int | |
-| `agent_id` | string \| null | Non-null when a subagent made the call |
+| Search | term | postings: `(session_id, entry_uuid, kind)` |
+| Session list | `session_id` | cached summary fields for sorting and filtering |
+| Turn correlation | `request_id` | `(session_id, first_entry_uuid, last_entry_uuid)` |
 
-`kind: "result"` records add `usage`, `model_usage`, `total_cost_usd`, `num_turns`, `duration_ms`,
-`terminal_reason`, `is_error`, `permission_prompts` — the same values as
-`StreamCompleteResult`, so a reopened session shows the same footer it showed live.
+Tool **results** are never indexed — the transcript holds them verbatim because the protocol requires
+it, and the indexer declines to read them. Searching them would return mostly file contents, which is
+what `Grep` is for.
 
-`kind: "system"` records use `role: "user"` with `system_event: true`, as before. Content templates for
-commit, reset, and mode switch are unchanged. New templates:
+A missing or stale index is a performance problem, never a correctness one: search falls back to a
+transcript scan, and the index is rebuilt in the background.
 
-**Compaction boundary**
+### Browse rendering comes from the transcript
+
+What the history browser shows for a message, a tool call, or a turn result is derived at read time
+from parsed entries:
+
+| Rendered element | Source |
+|---|---|
+| User text, assistant text, thinking | `get_session_messages_from_store()` on the session's entries |
+| Tool card — name, input summary, status, duration, `agent_id` | The `tool_use` / `tool_result` entries; summaries are built for the card, never stored |
+| Turn footer — usage, cost, `num_turns`, `terminal_reason`, `is_error` | The transcript's own result entry, which is why a reopened session shows the same footer it showed live |
+| System-event cards | `events.jsonl` |
+
+### System-event content templates
+
+The `content` field of an `events.jsonl` record. Templates for commit, reset and mode switch are
+carried over from the native engine unchanged, so a user's history reads consistently across the
+conversion.
+
+**Compaction boundary** — the one exception: it is the engine's event, arrives in the transcript as
+`SystemMessage(subtype="compact_boundary")`, and is rendered from there. It is never written to
+`events.jsonl`, because a record we wrote would be a second account of something the transcript
+already states.
 
 ```
 **Context compacted** — {trigger}
@@ -181,18 +221,22 @@ The native engine's compaction templates (truncate/summarize cases, `<details>` 
 
 ### Our session summary shape
 
-Returned by `history_list_sessions`. Computed on demand, not persisted:
+Returned by `history_list_sessions`. Served from the derived index, and recomputable from the transcript when the
+index is cold:
 
 | Field | Type | Notes |
 |---|---|---|
 | `session_id` | string | |
-| `timestamp` | string | First message's timestamp |
-| `message_count` | int | |
-| `preview` | string | First ~100 chars of the first message |
+| `timestamp` | string | First entry's timestamp |
+| `message_count` | int | User and assistant messages, not entries |
+| `preview` | string | First ~100 chars of the first user message |
 | `first_role` | string | |
-| `engine_session` | bool | An engine transcript exists for this ID |
-| `resumable` | bool | `engine_session` and the ID is a valid UUID. False ⇒ browsable, labelled non-resumable |
-| `total_cost_usd` | float \| null | Sum over the session's result records; null when every record has a null cost |
+| `resumable` | bool | The store holds loadable entries for this ID and it is a valid UUID. False ⇒ browsable, labelled non-resumable |
+| `total_cost_usd` | float \| null | Sum over the session's result entries; null when every one has a null cost |
+
+`engine_session` is gone: with one store, a session that exists is an engine session. What used to
+distinguish them — a browsable record with no transcript behind it — can now only arise from a deleted
+or unreadable transcript, which is what `resumable: false` reports.
 
 ## Numeric constants
 
@@ -203,7 +247,7 @@ Returned by `history_list_sessions`. Computed on demand, not persisted:
 | Mirror append retries | 3 attempts, short backoff | SDK-side. Then dropped and surfaced as `MirrorErrorMessage` |
 | `load_timeout_ms` | 60 000 | Per `load()` / `list_subkeys()` during resume materialization |
 | Batched-flush ceilings (informational) | 500 entries / 1 MiB | What `"batched"` would have used; relevant when reading SDK logs |
-| Search result cap | unchanged from the native engine | Mirrored store only |
+| Search result cap | unchanged from the native engine | Applies to index-backed search and to the fallback transcript scan alike |
 
 ## Schemas
 
@@ -215,19 +259,33 @@ Sessions:
 |---|---|---|
 | `new_session` | — | `{session_id: str}` |
 | `resume_session` | `session_id: str, fork?: bool` | `{session_id: str, forked_from?: str}` or `{error: str, reason: str}` |
-| `list_engine_sessions` | `limit?: int` | `list[{session_id, mtime, summary?}]` — from the store |
-| `delete_engine_session` | `session_id: str` | `{status: str}` — localhost-only |
+| `delete_engine_session` | `session_id: str` | `{status: str}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts and its events; the images in those entries go with them |
 
 `resume_session` with `fork: true` issues a **new** session ID and leaves the original untouched;
 the response carries both so the UI can label the fork.
 
-History (mirrored store, shapes unchanged from the native engine):
+There is no `list_engine_sessions`. Under two stores it was the store-side listing and
+`history_list_sessions` was the browsable one; with one store they would be two names for one query,
+and two listings of the same sessions is precisely the disagreement [CC-19](../../specs5/plan/decisions.md#cc-19)
+removes. `history_list_sessions` is the single listing.
+
+History — method names are retained from the native engine, but the **shapes are not**:
 
 | Method | Arguments | Return |
 |---|---|---|
 | `history_list_sessions` | `limit?: int` | `list[SessionSummary]` (above) |
-| `history_get_session` | `session_id: str` | `list[MessageDict]` — full metadata, reconstructed image data URIs |
-| `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, message_id, role, content_preview, timestamp}]` |
+| `history_get_session` | `session_id: str` | `list[MessageDict]` — built at read time from parsed entries, interleaved with that session's `events.jsonl` records. Image blocks carry pointers, not data URIs |
+| `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, entry_uuid, role, content_preview, timestamp}]` |
+| `history_get_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
+
+Two field-level renames run through the shapes above: `message_id` becomes `entry_uuid`, because the
+transcript's own `uuid` is already the stable identifier for a line and minting a second one over the
+top of it would be a name for the same thing that can disagree with it; and `engine_session` is gone
+per the summary shape above.
+
+Keeping the names while changing the payloads is a deliberate trade: the browser's call sites stay put,
+and the payload change is caught by the return-shape assertions in the browser's own tests rather than
+by a method-not-found at runtime.
 
 Subagents:
 
@@ -280,8 +338,10 @@ in-flight call may still land.
 
 Consequences:
 
-- The parent spec's durability invariant applies to **our** `history.jsonl` (which we write ourselves,
-  before acknowledging the turn), not to the engine transcript.
+- **No pre-acknowledgement durability exists anywhere.** The parent spec's old invariant leaned on our
+  own `history.jsonl`, written before the turn was acknowledged; with that store retired
+  ([CC-19](../../specs5/plan/decisions.md#cc-19)) the earliest a message is durable in `.ac-dc4/` is
+  the first eager flush *during* the turn. The browser's `input-history.js` covers the window.
 - `MirrorErrorMessage` (a `SystemMessage` subclass, `subtype: "mirror_error"`, fields `key` and
   `error`) must be surfaced — it means the repo-local copy has a hole. `EngineHealth.mirror_gaps`
   counts them, and `import_session_to_store()` re-imports the local file to repair one.

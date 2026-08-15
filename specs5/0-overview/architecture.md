@@ -152,8 +152,9 @@ fixed by interop.
 2. Browser generates a **request ID**, renders the user message optimistically, and calls
    `ClaudeCodeService.chat_streaming(requestId, message, files, images)`
 3. Server returns `{status: "started"}` synchronously; the real work runs in a background task
-4. Server persists the user message to the mirrored store and broadcasts `userMessage` to all
-   connected clients (collaborators see it immediately)
+4. Server broadcasts `userMessage` to all connected clients (collaborators see it immediately). It does
+   **not** persist the message itself: the CLI writes the user entry and the SDK mirrors it to us during
+   the turn, so persistence is a consequence of step 6, not a step of its own ([CC-19](../plan/decisions.md#cc-19))
 5. Server builds the turn's **framing** block — selected file paths, the file open in the viewer, the
    cursor or selection range, review facts if review is active. Framing is bounded and never contains
    file content. Pasted images are attached as content blocks, passed through the SDK's verbatim dict
@@ -333,11 +334,14 @@ repo's `.gitignore`:
 
 | Path | Contents |
 |---|---|
-| `history.jsonl` | The mirrored transcript: what the history browser and search read |
-| `sessions/` | The engine's own transcripts, mirrored via the SDK `SessionStore`, plus summary sidecars and per-subagent transcripts |
-| `images/` | Persisted chat images |
+| `sessions/` | The engine's own transcripts, mirrored via the SDK `SessionStore`, plus summary sidecars and per-subagent transcripts. The one transcript: the engine resumes from it and the history browser reads it |
+| `events.jsonl` | AC⚡DC's own operational events — commit, reset, review entry and exit, preset switch, permission-mode change. No message content |
+| `index/` | Derived search / summary / request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Keyword-enriched outline cache sidecars |
 | `tex_preview/` | Transient TeX compilation workspace |
+
+`history.jsonl` and `images/` are gone — [CC-19](../plan/decisions.md#cc-19) retired the second store,
+so pasted images live in the transcript entries that carried them.
 
 Per-repo rather than per-user, so history and sessions travel with the repository, survive the CLI's
 own retention sweep of `~/.claude/projects/`, and can be audited alongside the code. The `agents/`

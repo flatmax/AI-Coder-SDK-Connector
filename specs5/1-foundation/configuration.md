@@ -64,7 +64,7 @@ The consequences to preserve:
 - **Document index** — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
 - **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `ac-dc` tool call may wait for a pending flush
 - **Permissions** — the decision timeout and the shorter no-localhost-client timeout
-- **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates
+- **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did
 - **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
 
 Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux
@@ -159,15 +159,17 @@ holds:
 
 | Entry | Contents |
 |---|---|
-| `history.jsonl` | The mirrored transcript — AC⚡DC's browsable archive |
-| `sessions/` | Engine transcripts written through our `SessionStore`, plus subagent transcripts |
-| `images/` | Pasted images, referenced from history records |
+| `sessions/` | Engine transcripts written through our `SessionStore`, plus subagent transcripts. The only transcript there is |
+| `events.jsonl` | AC⚡DC's own operational events — commit, reset, review entry and exit, preset and permission-mode changes |
+| `index/` | Derived search, summary and request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Document outline cache |
 | `tex_preview/` | Generated TeX preview output |
 | `snippets.json` | Optional per-repo snippet override |
 
-Gone: the symbol map snapshot (the map is rebuilt in memory and served as a tool), the URL cache, and
-`agents/` from the parallel-agent design.
+Gone: the symbol map snapshot (the map is rebuilt in memory and served as a tool), the URL cache,
+`agents/` from the parallel-agent design, and — per [CC-19](../plan/decisions.md#cc-19) — `history.jsonl`
+and `images/`. Pasted images live in the transcript entries that carried them; a `history.jsonl` left by
+the native engine is ignored rather than read.
 
 ## Invariants
 

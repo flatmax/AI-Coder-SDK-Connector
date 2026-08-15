@@ -54,6 +54,10 @@ sections are repointed from cache tiering to the MCP bridge and the browser.
 
 ## CC-3 — Transcript mirrored to `.ac-dc4/`, context continuity via the SDK **(user)**
 
+> **Partly superseded by [CC-19](#cc-19) (2026-08-16).** The split below stands. The second writer
+> does not: there is one store, `HistoryStore` is retired, and the browser reads the mirrored
+> transcript through the SDK's parsers.
+
 History is split cleanly in two:
 
 - **Display and search** — AC⚡DC persists the rendered message stream to `.ac-dc4/` as JSONL and
@@ -381,3 +385,116 @@ never `files_changed`.
 what the history browser and full-text search then show, permanently, and correcting it means
 migrating transcripts users have already accumulated. The cheap moment to be accurate about scope is
 before the first one is written — phase 5, before CC-18's implementation exists.
+
+---
+
+## CC-19 — One store, entries verbatim; `history_store.py` retires **(user)**
+
+Phase 5 implements the SDK's `SessionStore` protocol fresh, under `.ac-dc4/`, against
+`claude_agent_sdk.testing.session_store_conformance`. **`history_store.py` and
+`test_history_store.py` are deleted with it.** There is no second writer: the history browser and
+full-text search become readers of the mirrored transcript, through the SDK's `*_from_store`
+parsers (`get_session_messages_from_store` and friends), not of records of our own shape.
+
+Entries are stored **verbatim** — the pass-through contract read literally, base64 image payloads
+included.
+
+**This supersedes the first half of [CC-3](#cc-3).**
+CC-3's split of the two jobs stands, and is still the right split: *display and search* are ours,
+*context continuity* is the SDK's, because the SDK owns compaction. What does not stand is CC-3's
+sentence that AC⚡DC "keeps `HistoryStore`" alongside its `SessionStore` implementation. That was
+written before the protocol was read.
+
+**Why:** `SessionStoreEntry` is documented in the installed SDK (0.2.137) as *"a minimal structural
+supertype — adapters should treat entries as pass-through blobs; round-tripping
+`json.dumps`/`json.loads` is the only required invariant"*. The concrete shape is the CLI's own
+transcript union, which is internal. Three things follow:
+
+1. **A store cannot impose a record shape**, so `history_store.py`'s schema is not a head start on
+   one. Of its `append` fields, `system_event` and `turn_id` are what the phase-3 deviations need,
+   while `edit_results` and `agent_blocks` describe an edit protocol and a spawn protocol that were
+   deleted in phase 3.
+2. **The browser must not read raw entries.** An internal discriminated union is exactly the kind of
+   thing that changes under us; the SDK ships parsers for it and they are the supported reader.
+3. **Two writers means drift.** One append per message sounded cheap in CC-3. The real cost is two
+   sources that can disagree about what a session contains, and a reload is where the disagreement
+   surfaces.
+
+Nothing is being migrated: no `.ac-dc4/history.jsonl` exists in practice, and
+`import_session_to_store()` is the SDK's own path for replaying a local transcript if one ever needs
+adopting.
+
+### What replaces the second store's three jobs **(user)**
+
+The spec `3-engine/history.md` gave the rendered mirror three jobs: summarised browse records,
+request-ID correlation, and full-text search that excludes tool results. They are re-homed rather than
+dropped, and neither home is a second transcript:
+
+| Job | Home | Property that makes it safe |
+|---|---|---|
+| Search, session list, request-ID ↔ session correlation | A **derived index** under `.ac-dc4/`, built from the store | Deletable at any time and rebuilt from the transcript. It can go stale; it cannot disagree, because it has no independent content. |
+| Browse rendering, tool-call summaries | Produced at read time from parsed `SessionMessage`s | Summarising at write time is denormalisation that drifts from the transcript it summarises. |
+| AC⚡DC's own system events — commit, reset, review entry and exit, preset switch, permission-mode change | `.ac-dc4/events.jsonl`: ours, append-only, keyed by session ID and request ID, carrying no message content | Not derivable from the transcript, so it cannot live in the index; not the CLI's, so it must not live in the store. |
+
+**The store is never given an entry the CLI did not write.** This is the invariant that keeps the
+single-store design safe. Injecting our own records — namespaced `type` or not — puts them in front of
+the CLI during resume materialisation, where `load()` hands the store's contents back to a subprocess
+that parses its own union. A resume that fails because of a record we invented would present as context
+loss, arbitrarily later, in a session the user cares about.
+
+**Consequences:**
+
+- **Implement all six protocol methods**, not the two that are required. The SDK probes for
+  `list_sessions`, `list_session_summaries`, `delete` and `list_subkeys` by attribute presence, so a
+  missing one degrades a feature *silently* — the failure mode is a browser that lists nothing and
+  reports no error.
+- **Pasted-image extraction to `.ac-dc4/images/` retires with the store.** Images are live — the
+  browser pastes data URIs and `session.py:212` turns them into content blocks — so they arrive as
+  base64 inside opaque entries and stay there. A session with several pasted screenshots produces a
+  multi-MB JSONL. **The revisit trigger is measured size, not distaste**; if it fires, the mechanism
+  is extraction on `append` with rehydration on `load`, which preserves the round-trip invariant, and
+  it is a change to the store alone.
+- **The history browser loses the metadata it renders today.** `files_modified`, `edit_results` and
+  the "show agents" affordance had `HistoryStore` records behind them. What the transcript can support
+  is re-derived from it; what it cannot is dropped rather than faked — and anything persisted about
+  files written obeys CC-18's naming rule.
+- **Pre-ack durability narrows, and the spec must say so.** `3-engine/history.md` asserted that every
+  message is durably appended *before* the turn that produced it is acknowledged. With one store that
+  becomes: appended during the turn, at the eager flush's ~100 ms cadence, after the CLI's own local
+  write. The window where a crash loses the user's typed text is small but real, and the browser's
+  `input-history.js` is what covers it — not the store.
+- **Fifteen spec files describe the two-store design** and are corrected with this decision. Eight were
+  obvious: `3-engine/history.md` (the design itself), `0-overview/glossary.md`,
+  `0-overview/implementation-guide.md`, `1-foundation/configuration.md`, `3-engine/tool-surface.md`,
+  `4-features/images.md`, `6-deployment/packaging.md`, and the schema twin in
+  `specs-reference/3-engine/history.md`. Seven more turned up in a grep sweep for the phrase *mirrored
+  store*, which had come to mean two different files in two different documents:
+  `0-overview/architecture.md` (the `.ac-dc4/` table, and a turn-flow step claiming the server persists
+  the user message itself), `3-engine/session.md` (the same step), `1-foundation/rpc-inventory.md`,
+  `5-webapp/chat.md`, `plan/inventory.md` (`history_store.py` was still filed under ADAPT),
+  `specs-reference/1-foundation/rpc-inventory.md` and `specs-reference/5-webapp/chat.md` (both pointing
+  at a section this decision deletes). The lesson is in the phrase: "mirrored store" was ambiguous
+  *before* this decision, and only reads as one thing now.
+- **`session_store_flush: "eager"`** is already set when a store is present
+  (`claude_code/options.py:183`), which is what makes the mirror near-real-time rather than a turn
+  behind.
+
+### What one store does to the RPC surface
+
+Three consequences fell out of writing the schema twin, none of them decided above. Recorded here rather
+than left implicit in a table:
+
+- **`list_engine_sessions` is deleted.** It listed the store; `history_list_sessions` listed the
+  browsable records. With one store they are two names for one query, and two listings that can disagree
+  about which sessions exist is the exact failure this decision removes. `history_list_sessions` is the
+  single listing. `delete_engine_session` stays — deleting is not listing.
+- **The three history method names survive; none of their shapes do.** `history_list_sessions`,
+  `history_get_session` and `history_search` keep their names so the browser's call sites stay put, and
+  the payloads change underneath: `engine_session` is gone (with one store, a session that exists is an
+  engine session, and an unreadable one is reported by `resumable: false`), and `message_id` becomes
+  `entry_uuid` because the transcript's own `uuid` already identifies a line. Keeping names while
+  changing payloads trades a loud `method not found` for a quieter shape mismatch — acceptable only
+  because the browser's tests assert on return shapes.
+- **`history_get_image(session_id, entry_uuid, block)` is new**, and is required rather than
+  convenient: `4-features/images.md` has the `userMessage` broadcast carry a pointer instead of bytes,
+  which is only viable if something can turn a pointer back into bytes on demand.

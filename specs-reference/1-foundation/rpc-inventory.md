@@ -356,9 +356,11 @@ What remains here are the events that are not turn-scoped and did not change:
 | `AcApp.roleChanged` | `data: {role, reason}` | `true` |
 | `AcApp.docConvertProgress` | `data: {...}` — shape varies by progress stage | `true` |
 
-`MessageDict` is a record from the mirrored store; its schema is in
-`specs-reference/3-engine/history.md` § Mirrored store record schema. In-memory uses may omit `id`,
-`session_id`, and `timestamp`; the core triad is `{role, content, system_event?}`.
+`MessageDict` is what a transcript entry becomes once it has been parsed for display — built at read
+time, never persisted in this shape ([CC-19](../../specs5/plan/decisions.md#cc-19)). What it can carry
+is bounded by what the entry held, plus the `events.jsonl` record when the message *is* a system event;
+see `specs-reference/3-engine/history.md` § Browse rendering comes from the transcript. In-memory uses
+may omit `id`, `session_id`, and `timestamp`; the core triad is `{role, content, system_event?}`.
 
 Deleted: `AcApp.modeChanged`. Nothing replaced it — there are no modes.
 

@@ -1,79 +1,70 @@
 # Image Persistence
 
-Images pasted into the chat input are persisted to disk so they can be displayed when browsing previous
-sessions. Stored as individual files in the per-repo working directory, referenced by content hash in
-the mirrored JSONL history.
+Images pasted into the chat input are persisted so they can be displayed when browsing previous
+sessions. **They live in the transcript, as the base64 content blocks they were sent as** — there is no
+separate image directory and no ref field.
 
-This feature survives the conversion almost intact, because it never had anything to do with the
-engine. It is a browser affordance plus a disk format: the data URI goes to the engine once, as part of
-the turn, and the file on disk is what lets us render it again a week later. What changed is only the
-writer's name and the fact that a *resumed* session's images come from two places — see § Session
-Loading and Resume.
+The frontend half of this feature — paste, thumbnails, lightbox, re-attach, the limits — is untouched by
+the conversion. The storage half is replaced by [CC-19](../plan/decisions.md#cc-19): entries reach our
+`SessionStore` as pass-through blobs, so we cannot extract a payload out of one and leave a pointer
+behind without also rehydrating it on the way back. The image goes to the engine once as part of the
+turn, and the entry the engine writes is what lets us render it again a week later.
 
-## Storage Location
+## Storage
 
-- Images subdirectory within the per-repo working directory
-- Created on working directory init and on history store construction (both idempotent, whichever runs first wins)
-
-## File Naming
-
-- Timestamp prefix plus short content-hash suffix
-- Extension derived from MIME type with a fallback for unknown types
-- Deduplication via content hash — identical data URIs produce identical filenames
-
-### MIME to Extension Mapping
-
-| MIME | Extension |
-|---|---|
-| PNG | .png |
-| JPEG | .jpg |
-| GIF | .gif |
-| WebP | .webp |
-| Fallback | .png |
-
-## Writing Flow
-
-- When a user message with images is persisted, each base64 data URI is processed
-- Hash computed, MIME extracted, data decoded, filename generated
-- Write to images directory, skip if file already exists (deduplication)
-- Store filenames list as image refs in the JSONL record
+- **The transcript under `.ac-dc4/sessions/`**, verbatim. A pasted screenshot is base64 inside a user
+  entry, which is why a session with several of them produces a multi-MB transcript file.
+- **No content-hash filenames and no deduplication.** Pasting the same image in two turns stores it
+  twice, once per entry. The native engine's `{epoch_ms}-{hash12}.{ext}` scheme and its idempotent
+  re-persist are retired with `history_store.py`.
+- **The size revisit is a store-internal change.** If transcript size becomes a real problem, images are
+  extracted on `append` and rehydrated on `load`, which preserves the round-trip invariant the protocol
+  requires and changes nothing outside the store — including nothing in this document.
+- **An `.ac-dc4/images/` directory written by the native engine is ignored**, not read and not migrated.
 
 ## Reading Flow
 
-- For each image ref filename, read binary data
-- Determine MIME from extension
-- Encode as base64 data URI
-- Missing files skipped with a warning
-
-## Message Schema Interaction
-
-- Image refs field on JSONL records — list of filenames in the images directory
-- Legacy image count field — kept for backward compatibility, deprecated
-- Old messages with count-only field load correctly but won't have displayable images
+- Entries are parsed with the SDK's `*_from_store` readers; image blocks come back as the content blocks
+  they were written as.
+- Each image is independent — one unreadable block does not prevent the rest of a message from
+  rendering.
+- A message whose entry never reached the store (see the mirror-gap discussion in
+  [`../3-engine/history.md`](../3-engine/history.md)) renders without its images, with the gap already
+  surfaced by the health banner rather than as a per-image error.
 
 ## Engine Service Integration
 
-- `ClaudeCodeService.chat_streaming(request_id, message, files, images, viewer)` receives the data URIs and does two independent things with them: forwards them to the SDK as the user turn's image content blocks, and hands the same list to the persistence layer
-- The persistence layer accepts either a list of strings (saves each image, stores filenames as refs) or an integer (legacy path, stored as-is)
-- Persistence happens on the way in, before the turn starts, so an interrupted or failed turn still has its images on disk and in the mirror
-- The `userMessage` broadcast carries `image_refs` (filenames), not data URIs, so a collaborator's transcript renders from disk rather than re-receiving megabytes over the WebSocket
+- `ClaudeCodeService.chat_streaming(request_id, message, files, images, viewer)` receives the data URIs
+  and forwards them to the SDK as the user turn's image content blocks. There is no second hand-off to a
+  persistence layer: persistence *is* the transcript.
+- **Persistence is no longer ahead of the turn.** The old path wrote images to disk before the turn
+  started, so a failed turn still had them. Now they are durable once the CLI has written the user entry
+  and the eager flush has handed us a copy. A turn that dies before that leaves the pasted image only in
+  the browser's own pending state.
+- **The `userMessage` broadcast carries a pointer, not bytes** — session ID, entry `uuid`, block index.
+  Collaborators fetch image data on demand through `history_get_image`, which reads the store, so a paste
+  does not push megabytes down every socket. The initiating client already holds the data URI it pasted
+  and fetches nothing.
 
 ## Session Loading and Resume
 
-- `history_get_session` and the initial `get_current_state` reconstruct images from refs. Frontend receives data URI arrays ready to render
-- Each reconstruction is independent — a failed image read does not prevent other images from loading
-- `load_session_into_context` and `get_session_messages_for_context` are gone. Loading a past session into the model's view is `resume_session`, which hands the engine its own transcript; we never re-inject message content
+- Opening a past session reads its images from that session's entries, through the same parsers as the
+  rest of the transcript. Thumbnails resolve by pointer; the lightbox fetches full data on demand via
+  `history_get_image`.
+- `load_session_into_context` and `get_session_messages_for_context` are gone. Loading a past session
+  into the model's view is resume, which hands the engine its own transcript; we never re-inject message
+  content.
 
-### Resume has two image sources, and only one is ours
+### Resume has one image source now
 
-After `resume_session`, the model's view of the images comes from the **engine's** transcript, which
-holds the original content blocks. The browser's view comes from **our** mirror, which holds refs to
-files on disk. Both are correct and they are not the same data.
+The model's view and the browser's view of a resumed session's images are the *same* entries. Under the
+two-store design they were two different records of the same paste — the engine's content blocks and our
+refs-to-disk — and the asymmetry had a memorable failure mode: deleting `.ac-dc4/images/` blinded the
+browser while the model could still reason about an image the user could no longer see.
 
-The consequence to hold onto: deleting `.ac-dc4/images/` blinds the *browser*, not the model. A resumed
-turn can still reason about an image the user can no longer see. The reverse also holds — a mirror gap
-(see [`../3-engine/history.md`](../3-engine/history.md)) can leave an image on disk with no record
-pointing at it, which is a leak, not a failure.
+That divergence is gone, and with it the leak in the other direction (a file on disk with no record
+pointing at it). What replaces it is simpler and worth stating plainly: **losing the transcript loses the
+images too.** There is no second copy, and deleting a session deletes its pictures.
 
 ## Frontend Paste Input
 
@@ -110,25 +101,28 @@ Two interaction paths to re-attach an image to the current input:
 ### Scope
 
 - Current session messages (stored as data URI arrays on message objects)
-- Loaded history sessions (reconstructed from refs as multimodal content blocks)
+- Loaded history sessions (fetched by pointer from the transcript, then attached as a fresh data URI)
 - Both rendering paths wrap thumbnails so the overlay button is consistent
 
 ## What Does Not Change
 
 - AC⚡DC never re-sends an image. The engine keeps the original content blocks in its own context for the rest of the session, so the model does not need us to; re-attaching is a deliberate user action that sends a fresh copy
 - Image size and count limits unchanged
-- The on-disk format, the naming scheme, and the ref field are unchanged — an `.ac-dc4/images/` directory written by the native engine reads correctly here
+- The whole frontend surface — paste, thumbnails, lightbox, re-attach, limits, the absence of token counting — is unchanged. What moved is where the bytes rest
 
 ## Cleanup
 
 - No automatic cleanup
-- Users can delete the images directory to reclaim space without affecting functionality (messages load without images, no errors)
-- A future enhancement could add an explicit cleanup method that cross-references all refs in the JSONL against files in the images directory and removes orphans
+- Reclaiming space means deleting sessions, which deletes their images with them. There is no image
+  directory to clear independently, and therefore no orphan class to cross-reference: an image is either
+  in an entry or it does not exist
+- If transcript size becomes the reason cleanup is wanted, the extraction-and-rehydration option in
+  § Storage is the cheaper answer, because it reclaims space without discarding history
 
 ## Invariants
 
-- Identical image data URIs produce identical filenames (content-hash-based)
-- Writing is idempotent — re-persisting a message never produces duplicate files
-- Missing image files never fail message load — just skipped with a warning
+- An image is stored exactly where the turn that carried it is stored, and nowhere else
+- A message with an unreadable image block still renders; the image is skipped with a warning
 - Per-message image count limit is enforced at paste, re-attach, and message send
-- Re-attach never bypasses the deduplication or count limit
+- Re-attach never bypasses the count limit
+- No image payload travels over a broadcast; collaborators receive pointers and fetch on demand

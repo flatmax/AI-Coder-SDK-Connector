@@ -7,21 +7,27 @@ The rest of `specs5/` describes the **target** state. This directory describes *
 there** and **why the shape is what it is**. When the conversion is finished, `plan/` becomes
 history and moves under `specs5/impl-history/`.
 
-## Where we are (2026-08-15)
+## Where we are (2026-08-16)
 
-**Phases 0 through 4 are done. Phase 5 — history and sessions — is next and is unblocked.**
+**Phases 0 through 4 are done. Phase 5 — history and sessions — is next, is unblocked, and has not
+been started.** Nothing writes a transcript and nothing reads one back. What exists and can read like a
+first pass is phase-1 scaffolding that anticipated it: the SDK's `session_store` and `fork_session`
+parameters are plumbed and tested, `resume` is reachable end to end, and a mirror gap is already a
+health signal — three real pieces with no store to hand them. The fourth, `history_store.py`, is the
+*previous* architecture's store, kept alive through the rip-out and wired to nothing. All four are
+spelled out below under *What phase 5 will find already there*; read it before writing anything, and do
+not mistake the plumbing for the phase.
 
-**One thing goes before phase 5, and it is not a phase.** `context-usage-tab.js` and `usage-hud.js`
-have no unit tests and have never been run against a live CLI (below). They refresh on two events:
-*a turn runs* and *a session loads* — and phase 5 is the phase that introduces session loading. Adding
-a second firing path into an untested panel means the first person to resume a conversation cannot
-tell whether phase 5 broke the breakdown or whether it was ever right. Close it first: unit tests for
-both panels, and one live run. Phase 6 then stays what it should be — confirm the numbers match
-`/context`, and add the `ac-dc` tool inventory with its token cost.
+**The one thing that went before phase 5 is closed.** `context-usage-tab.js` and `usage-hud.js`
+shipped in phase 3 with no unit tests and no live run; they refresh on *a turn runs* and *a session
+loads*, and phase 5 is the phase that introduces session loading. Both now have tests (183 across
+three files) and both have been run against a live CLI, which found five wrong numbers on screen and
+one wedged fetch — see the [interlude entry](delivery.md#interlude--the-context-panels-meet-a-live-cli-2026-08-16).
+Phase 6 is now what it should be: the designed visualisation, not a correctness rescue.
 
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
 landed, what it deliberately left out, and what the next phase has to do first. The phase-4 entry
-is the one that matters for picking this up cold.
+and the interlude that follows it are the two that matter for picking this up cold.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
@@ -39,7 +45,7 @@ without opening a file, and read back a function it had just written.
 
 The state phase 5 inherits:
 
-- **Suites are green:** python **2687 passed, 75 skipped**; webapp **88 files / 3185 passed**.
+- **Suites are green:** python **2687 passed, 75 skipped**; webapp **91 files / 3380 passed**.
 - **`Reindexer` is the only thing that knows what the agent wrote.** `take_reindexed()` is
   repo-relative and filtered to files an index cares about; `result['files_modified']` is absolute and
   everything. If the transcript wants a durable "files changed this turn", those are the two sources,
@@ -52,12 +58,23 @@ The state phase 5 inherits:
   (`doc_index/background.py`), and the LSP / snippets / git RPC surface, which folded into
   `claude_code/service.py`.
 - **Two panels were replaced, not vacated** — [`decisions.md#cc-17`](decisions.md).
-  `context-usage-tab.js` and `usage-hud.js` (1215 lines, replacing 3605) read
-  `ClaudeCodeService.get_context_usage`, a pass-through of the breakdown the CLI's own `/context`
-  prints. **Neither has been exercised against a running CLI, and neither has a unit test** — the only
-  coverage is backend pass-through in `test_claude_code_session.py`. Close it before phase 5, per the
-  note above; the permission dialog's capacity bar is a third reader of the same RPC, so the blast
-  radius is wider than the two panels.
+  `context-usage-tab.js` and `usage-hud.js` read `ClaudeCodeService.get_context_usage`, a pass-through
+  of the breakdown the CLI's own `/context` prints, and the shell's capacity bar is a third reader of
+  the same RPC. **All three now share one derivation** in `context-usage.js` (242 lines): each had
+  derived the arithmetic independently and each was wrong on its own terms. The identities that make it
+  checkable — categories sum to `totalTokens`, `maxTokens` is *not* pre-reduced by the autocompact
+  buffer — are recorded in the interlude entry, and `partitionCategories` verifies the sum rather than
+  trusting its own name matching.
+- **A guarded fetch that loses its reply stays locked out for the session.** The `if (inFlight)
+  return;` idiom nearly every fetch uses clears its flag in a `finally`, and a jrpc-oo call dropped
+  during socket replacement never settles. `withRpcTimeout` in `rpc.js` is opt-in — some calls
+  legitimately run for minutes — so **phase 5's session-load fetches have to opt in**, with the
+  deadline set *above* the backend method's own, never under it. Three `get_context_usage` callers are
+  bounded so far. `get_context_usage` measured 3–5 s warm and 14 s cold, which is the scale to expect
+  from a control request to the CLI.
+- **A revealed tab is told it is on screen.** `_switchTab` notifies the arriving tab's
+  `onTabVisible`; the panels refuse to refetch while hidden and mark themselves stale instead. Session
+  load is the second staleness path, so phase 5 inherits this contract rather than inventing one.
 - **The file picker's third checkbox state writes a real `Read` deny rule** to
   `.claude/settings.local.json` (CC-14), and says "deny agent read" rather than "exclude from
   index". The L0-invalidation dialog is gone with the cache it asked about; its one honest job —
@@ -74,7 +91,8 @@ The state phase 5 inherits:
   strip have no emitter for the pushes that drive them; their replacements are the preset selector
   (CC-12) and the subagent browser (CC-8), both deferred by decision. They are annotated where they
   sit rather than half-deleted, because removing a receiver while leaving its consumer mounted moves
-  the break instead of fixing it. `<ac-history-browser>` is inert for phase 5.
+  the break instead of fixing it. `<ac-history-browser>` is inert for phase 5 — and inert here means
+  *still calling a service that no longer exists*, not disconnected.
 - **17 RPCs are localhost-gated, and four do not look it.** `commit_all`, `reset_to_head`,
   `start_review` and `end_review` delegate, so their `_check_localhost_only()` lives in
   `claude_code/commit.py` and `claude_code/review.py`, not in `service.py`.
@@ -83,6 +101,49 @@ The state phase 5 inherits:
   its cases with `LLMService`, and those five tests are the ones that must not go.
 - **Nothing in the config layer writes `os.environ`.** The `claude` CLI resolves its own
   credentials; injecting a key or a region would silently change which account a turn bills to.
+
+## What phase 5 will find already there
+
+Enough of phase 5's *surface* exists to look like a first pass, and none of its substance does.
+Nothing writes a transcript, nothing reads one back, and
+`test_phase_five_methods_are_absent` (`tests/test_claude_code_service.py:313`) still passes. Five
+things are already in the tree, and they are not equivalent:
+
+- **The SDK's own parameters are plumbed, from phase 1.** `build_options` accepts `session_store` and
+  sets `session_store_flush: "eager"` when one is present (`claude_code/options.py:179`);
+  `fork_session` is passed only alongside a `resume`, and warns rather than silently dropping when it
+  is not (`:187`). `ClaudeCodeSession.connect(resume=…, fork_session=…)` forwards both. **Real, tested,
+  and waiting for an implementation to hand it.**
+- **`resume` is reachable end to end, and gated because of it.**
+  `ClaudeCodeService.connect_engine(resume=…)` is the phase-2 shape, localhost-only precisely because a
+  participant passing a session id would choose which conversation the host's engine attaches to. This
+  is the piece most likely to be misremembered as "phase 5 started": the parameter works; there is no
+  session id in existence to pass it.
+- **A mirror gap is already a health signal.** `MessagePump._mirror_error` (`claude_code/messages.py:382`)
+  turns a failed `SessionStore.append` batch into `stats.mirror_gap` and an `engineHealth` event —
+  non-fatal, not turn-scoped, folded into `EngineHealth` before broadcast. Phase 5 should make the
+  browser say so; the plumbing to say it with is done.
+- **`history_store.py` survived the rip-out and is wired to nothing.**
+  It is the *specs4* store — append-only JSONL at `.ac-dc4/history.jsonl`, images extracted to
+  `.ac-dc4/images/` under a content hash, sessions emergent from a shared `session_id` rather than
+  declared — and its only importer is its own test. `main.py:770` states deliberately that no
+  `HistoryStore` is constructed, because a store nothing writes to is worse than no store.
+
+  **It is retired in phase 5, not adopted** — [`decisions.md#cc-19`](decisions.md). A store cannot
+  impose a record shape (`SessionStoreEntry` is a pass-through blob), so its schema is not a head start
+  on one: of its `append` fields, `system_event` and `turn_id` are what the phase-3 deviations need,
+  while `edit_results` and `agent_blocks` describe protocols phase 3 deleted, and `files_modified` is
+  the name CC-18 forbids. Read it for the file handling if useful; do not inherit the field names.
+- **`history-browser.js` still calls a service that no longer exists.** It is mounted, inert, and its
+  fetch is `LLMService.history_list_sessions` (`history-browser.js:706`) — a name with nothing behind it
+  since phase 3. So the frontend half of phase 5 is not a blank page; it is a reader written against the
+  deleted engine's record shape, and re-pointing it is a rewrite of its assumptions, not of its RPC
+  string. Its fetches are also unbounded — see the `withRpcTimeout` note above.
+
+The three phase-3 deviations that converge here — review entry and exit, a mode change during review,
+and a permission-mode change, all specified as "recorded in the transcript as a system event" and all
+three only broadcast live — are listed in the phase-3 entry of [`delivery.md`](delivery.md), together so
+you find all three rather than one.
 
 ## The one-paragraph version
 
@@ -144,8 +205,8 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
-| **5. History and sessions** | `SessionStore` implementation over `.ac-dc4/`, resume/fork, history browser and full-text search re-pointed at the mirrored transcript. | Restarting the server resumes the previous conversation with context intact. |
-| **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17), and their tests and first live run are pulled forward ahead of phase 5 (see status, above). What is left here is *upgrade*: the designed visualisation, plus MCP server health and the `ac-dc` tool inventory with its token cost — and the bridge-failure banner, which is the same missing surface seen from the other side. | The Context tab shows the same numbers as `/context` in the CLI, live, and names the `ac-dc` tools it is paying for. |
+| **5. History and sessions** | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript through the SDK's `*_from_store` parsers. The SDK-side parameters are already plumbed and the mirror-gap health signal already exists (see *What phase 5 will find already there*); the store, the RPCs and every reader are not. | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. |
+| **6. Context and cost visualisation** | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget — the numbers now match `/context`. What is left is *upgrade*: the designed visualisation, MCP server health and the `ac-dc` tool inventory with its token cost, the bridge-failure banner (the same missing surface seen from the other side), and a "cost unknown" rendering for a turn that fails late carrying real usage, which the HUD currently declines to price rather than mispricing. | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 | **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
 

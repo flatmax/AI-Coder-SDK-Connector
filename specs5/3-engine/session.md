@@ -61,8 +61,8 @@ Unchanged in shape from the native engine, which is why the transport and reconn
 
 1. Browser renders the user message immediately and generates a **request ID**.
 2. Browser calls the streaming RPC; the server returns synchronously with a started status.
-3. Server persists the user message to the mirrored store and broadcasts `userMessage` to all
-   clients.
+3. Server broadcasts `userMessage` to all clients. Persistence is not a step here — the CLI writes the
+   user entry and mirrors it to our store during step 4 ([CC-19](../plan/decisions.md#cc-19)).
 4. Server sends the turn to the engine via `query()` and starts a message pump.
 5. Pump translates SDK messages into server-push events, all carrying the request ID.
 6. Pump runs to `ResultMessage`, then finalises.

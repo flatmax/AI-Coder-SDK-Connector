@@ -4,25 +4,38 @@ History splits cleanly in two, and keeping the halves separate is the whole desi
 
 - **What the model sees** — owned entirely by Claude Code. AC⚡DC never assembles it, never counts
   its tokens, and never compacts it.
-- **What the user browses** — owned by AC⚡DC. A mirrored transcript in `.ac-dc4/`, with the history
-  browser, full-text search, session list, and per-message metadata that surface it.
+- **What the user browses** — owned by AC⚡DC. The same transcript, mirrored into `.ac-dc4/` by our
+  `SessionStore`, surfaced by the history browser, full-text search and session list.
 
-The native engine conflated the two, and that conflation is what made its history layer complex: a
-store that had to be simultaneously a browsable record and a prompt input ends up serving neither
-well.
+The split is about *roles*, not about copies. One transcript serves both: the engine resumes from it and
+the browser reads it, and neither job is allowed to reshape it for the other's convenience. The native
+engine conflated the roles instead — a store that was simultaneously a browsable record and a prompt
+input served neither well, and reading it back into a prompt is precisely how a session came to look
+correct in the UI while the model's view had diverged.
 
-## Two Stores, One Source
+## One Store, One Index, One Events Log
 
-| | Engine transcript | Mirrored store |
-|---|---|---|
-| Owner | Claude Code / SDK | AC⚡DC |
-| Location | `.ac-dc4/sessions/` via our `SessionStore` | `.ac-dc4/history.jsonl` |
-| Contents | The session record the SDK resumes from — the CLI's own transcript format, opaque to us | Rendered messages plus AC⚡DC metadata (image refs, selected files, request IDs, tool summaries) |
-| Consumers | The engine; resume and fork | History browser, search, session list |
-| Compaction | Engine-owned, automatic | Never compacted — it is an archive |
+An earlier draft of this spec described two transcripts: the engine's, and a rendered mirror of our own
+that the message pump wrote in parallel. [CC-19](../plan/decisions.md#cc-19) collapses that to one
+transcript, because the SDK documents `SessionStoreEntry` as a pass-through blob — a store cannot
+impose a record shape, so a second writer buys a second shape that can disagree with the first.
 
-Both live under the repo's working directory, so a repo carries its own history and a clone does not
-inherit someone else's.
+| | Engine transcript | Derived index | Events log |
+|---|---|---|---|
+| Owner | Claude Code / SDK, stored by us | AC⚡DC | AC⚡DC |
+| Location | `.ac-dc4/sessions/` via our `SessionStore` | `.ac-dc4/` | `.ac-dc4/events.jsonl` |
+| Contents | The session record the SDK resumes from — the CLI's own transcript format, opaque to us, stored verbatim | Search terms, session summaries, request ID ↔ session mapping | Our operational events: commit, reset, review entry and exit, preset switch, permission-mode change |
+| Derived from | Nothing — it is the source | The transcript, entirely | Nothing — the transcript never held these |
+| If deleted | The session is unresumable | Rebuilt on next start | Those events are gone; no session breaks |
+| Compaction | Engine-owned, automatic | N/A | Never — it is an archive |
+
+All three live under the repo's working directory, so a repo carries its own history and a clone does
+not inherit someone else's.
+
+**The store is never given an entry the CLI did not write.** `load()` hands the store's contents back
+to a subprocess that parses its own union, so a record we invented would surface as a resume failure —
+which presents as context loss, much later, in a session the user cares about. That is why our own
+events are a separate file rather than namespaced entries.
 
 ## `SessionStore`
 
@@ -43,11 +56,18 @@ what users already assume it is.
 
 Implementation notes that are contracts rather than choices:
 
+- **Entries are stored verbatim.** Round-tripping `json.dumps`/`json.loads` is the only invariant the
+  protocol requires, and it is the only one we rely on. Pasted images therefore sit in the transcript as
+  base64, which is why a session with several screenshots produces a multi-MB file; if that becomes a
+  problem the fix is extraction on `append` with rehydration on `load`, inside the store and invisible
+  to everything else.
 - **The mirror is flushed eagerly, and its gaps are visible.** Mirror appends are best-effort by
   construction — the SDK retries a failed batch and then reports a gap. A gap is surfaced as a banner
-  and repaired by re-importing the local transcript, never left silent. Durability for the user's own
-  message is the mirrored store's job, not the engine transcript's: `history.jsonl` is written before a
-  turn is acknowledged.
+  and repaired by re-importing the local transcript, never left silent.
+- **Nothing here provides pre-acknowledgement durability.** The CLI writes locally first and the SDK
+  hands us a copy afterwards, in eager batches at roughly 100 ms cadence, so the user's message becomes
+  durable *during* the turn rather than before it is accepted. What covers the gap is the browser's own
+  input history, which keeps typed text independently of any of this.
 - **The store is verified against the SDK's conformance suite**
   (`claude_agent_sdk.testing.session_store_conformance`). A store that passes locally but violates the
   protocol produces resume failures that look like context loss.
@@ -60,32 +80,54 @@ Implementation notes that are contracts rather than choices:
 On-disk schema in
 [`../../specs-reference/3-engine/history.md`](../../specs-reference/3-engine/history.md).
 
-## Mirrored Store
+## What the Browser Reads
 
-The mirror is written by the message pump as a turn progresses, one record per rendered element:
+The history browser and the session list read the transcript through the SDK's own parsers —
+`get_session_messages_from_store()` and the other `*_from_store` functions — never the raw entries. The
+concrete entry shape is the CLI's internal discriminated union; it is exactly the kind of thing that
+changes underneath a reader, and the SDK ships the parser for it.
 
-- User messages — text, image references, the framing's selected-file list, request ID, session ID.
-- Assistant text and thinking blocks.
-- Tool calls — name, input summary, result summary, status, duration. Summarised rather than verbatim:
-  the mirror is for browsing, and a full `Read` result of a 2000-line file has no browse value.
-- Turn results — cost, usage, duration, terminal reason.
-- System events — mode changes, commits, resets, compaction boundaries, session switches.
+Rendering happens at read time, not write time:
 
-Lines that fail to parse on load are skipped with a warning, as before; a partial write from a crash
-must not make a session unreadable.
+- User messages, assistant text and thinking blocks come from parsed `SessionMessage`s.
+- Tool calls are summarised for display when the card is built — name, input summary, status, duration.
+  A full `Read` result of a 2000-line file has no browse value, but summarising it *into storage* would
+  be a second version of the truth; summarising it into a card is just rendering.
+- Turn results — cost, usage, duration, terminal reason — likewise come from the result entry.
+- Our own operational events come from `events.jsonl` and are interleaved by session ID and request ID.
 
-The mirror is what the existing `HistoryStore`, history browser, and message search already consume,
-which is why they survive the conversion unchanged in shape.
+A line that fails to parse is skipped with a warning: a partial write from a crash must not make a
+session unreadable. This applies to all three files.
+
+## The Derived Index
+
+Search, the session list, and request-ID correlation are served by an index under `.ac-dc4/` built from
+the transcript. It holds no content of its own, which is the point: it can be stale, and a stale index
+is repaired by rebuilding it, whereas a second transcript that disagrees with the first has no repair
+that does not involve choosing a winner.
+
+- **Rebuildable on demand and on schema change.** Deleting it is a supported operation. It is not
+  backed up, not migrated, and never the answer to "what happened in this session".
+- **The session list is fed by `list_session_summaries`**, which the store maintains incrementally with
+  `fold_session_summary()`; the index caches what the list needs to sort and filter without a read.
+- **Request ID ↔ session mapping lives here** rather than in the store, because entries are
+  pass-through and cannot carry a field of ours.
 
 ## Turn Identity
 
-Every record carries the **session ID** and the **request ID** of the turn that produced it. Together
-they replace the native engine's `turn_id` — a request ID is already unique per turn and already the
-correlation key everywhere else in the system, so introducing a third identifier would be gratuitous.
+The **session ID** and the **request ID** together replace the native engine's `turn_id` — a request ID
+is already unique per turn and already the correlation key everywhere else in the system, so introducing
+a third identifier would be gratuitous.
 
-Records predating the conversion carry `turn_id` instead; the loader tolerates it and the browser
-renders those sessions read-only. There is no migration: old sessions are historical records, and the
-engine that could resume them no longer exists.
+Where each lives is now a consequence of the single store. Transcript entries carry the CLI's own
+identifiers and nothing of ours, so the request ID is not *in* the transcript: the derived index maps a
+request ID to its session and the entries it produced, and every record in `events.jsonl` carries both
+IDs directly. Correlation is therefore a lookup, not a field — and if the index is lost, correlation is
+rebuilt with it.
+
+Pre-conversion history is not read at all. `history.jsonl` from the native engine is left on disk and
+ignored; there is no loader for it, no migration, and no browsable view. Those sessions were resumable
+only by an engine that no longer exists.
 
 ## Resume, Fork, and New
 
@@ -141,22 +183,30 @@ directory crosses a threshold, dismissible, never blocking. Only the measured pa
 
 ## Search
 
-Full-text search runs over the mirrored store, as before: persistent store first, in-memory fallback.
-It searches user text, assistant text, and tool-call summaries. Tool *results* are excluded from the
-index — searching them returns mostly file contents, which is what `Grep` is for, and it would drown
-conversational hits.
+Full-text search runs over the derived index, with a scan of the transcript as the fallback when the
+index is missing or being rebuilt. It searches user text, assistant text, and tool-call *names and
+inputs*. Tool **results** are excluded — searching them returns mostly file contents, which is what
+`Grep` is for, and it would drown conversational hits. The exclusion is now an indexing rule rather
+than a storage one: the transcript holds results verbatim because it must, and the index declines to
+read them.
 
 ## Invariants
 
 - The model's context is never assembled by AC⚡DC; continuity is always `resume` or `fork_session`.
-- Every message is durably appended to the mirrored store before the turn that produced it is
-  acknowledged as complete.
+- **The store is never given an entry the CLI did not write**, and entries are stored byte-faithful:
+  `json.loads(json.dumps(entry)) == entry`.
+- There is exactly one transcript. Anything else under `.ac-dc4/` is either derived from it and
+  rebuildable, or holds only what the transcript never contained.
+- Every message reaches the store during the turn that produced it; typed text that has not reached it
+  yet is held by the browser's input history, not by a second store.
 - The `SessionStore` implementation passes the SDK's conformance suite.
+- All six protocol methods exist, because the SDK probes the optional four by attribute presence.
 - The store appends and deletes; it never rewrites an existing record.
 - A gap in the mirrored engine transcript is always surfaced to the user; it is never tolerated
   silently, because a silent gap turns into a failed resume much later.
-- Every mirrored record carries both a session ID and the request ID of its turn.
-- A malformed line in the mirror is skipped on load and never makes a session unreadable.
+- Every record in `events.jsonl` carries both a session ID and the request ID of its turn; for
+  transcript entries that correlation is a lookup in the derived index.
+- A malformed line in any of the three files is skipped on load and never makes a session unreadable.
 - Sessions without a surviving engine transcript are browsable and labelled non-resumable; clicking
   them never produces an error.
 - Fork is offered wherever resume is offered.

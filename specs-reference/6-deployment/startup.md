@@ -252,8 +252,9 @@ reader is waiting on a decision that will now never arrive. Denying first releas
 first deadlocks the shutdown until the 5-second fallback kills the subprocess.
 
 The interrupt-then-disconnect sequence exists so the CLI can flush its own session files. Those files are
-the primary transcript — `.ac-dc4/history.jsonl` is a mirror — so a hard kill mid-turn can leave the
-authoritative record shorter than what the user watched stream into the browser.
+the primary transcript and `.ac-dc4/sessions/` is a mirror of them, so a hard kill mid-turn can leave the
+authoritative record shorter than what the user watched stream into the browser — and our mirror shorter
+again, since it only ever receives what the CLI has already written.
 
 Child processes (Vite dev/preview in `--dev`/`--preview` mode) are terminated with `process.terminate()` followed by `process.wait(timeout=5.0)`. If the child is still alive after 5 seconds, `process.kill()` is called.
 
