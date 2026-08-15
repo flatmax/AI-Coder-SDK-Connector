@@ -82,6 +82,53 @@ export function rpcExtract(result) {
 }
 
 /**
+ * Reject a call that never gets an answer.
+ *
+ * A jrpc-oo call issued while the socket is being replaced — a reload
+ * mid-reconnect is the reliable way to see it — is dropped without a
+ * reply, and the promise then neither resolves nor rejects. That is
+ * survivable on its own. What is not is the `if (inFlight) return;`
+ * guard nearly every fetch here uses: the flag is cleared in a
+ * `finally`, the `finally` never runs, and the component stops fetching
+ * for the rest of the session. Found live — the usage HUD's context
+ * section went permanently blank after one dropped reply, and the
+ * Context tab's Refresh button stays disabled in the same state.
+ *
+ * Opt-in rather than folded into `rpcCall`, because some calls
+ * genuinely run for minutes (a document conversion, an index rebuild)
+ * and a blanket deadline would break them. Use it for reads that are
+ * idempotent and retriable on the next event.
+ *
+ * Pick `ms` *above* whatever deadline the backend method already has,
+ * not below it. Every `ClaudeCodeService` method converts its own
+ * failures into an `{error}` return, so the backend always replies —
+ * and a deadline shorter than its means giving up on a reply that is
+ * still coming, then stacking a retry onto whatever was too slow to
+ * answer the first. What is left once the backend can't be beaten to
+ * the punch is the only case this helper is for: no reply at all.
+ *
+ * The underlying call is not cancelled — nothing in jrpc-oo can — so a
+ * late reply is simply ignored.
+ *
+ * @param {Promise<any>} promise The in-flight call.
+ * @param {number} ms Deadline in milliseconds.
+ * @param {string} label Method name, for the error message.
+ * @returns {Promise<any>} Settles with the call, or rejects at `ms`.
+ */
+export function withRpcTimeout(promise, ms, label = 'rpc call') {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} did not answer within ${ms}ms`)),
+        ms,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
  * Singleton holder for the jrpc-oo `call` proxy.
  *
  * Lifecycle:

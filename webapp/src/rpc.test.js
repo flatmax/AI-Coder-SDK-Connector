@@ -13,6 +13,7 @@ import {
   RPC_READY_EVENT,
   SharedRpc,
   rpcExtract,
+  withRpcTimeout,
 } from './rpc.js';
 
 // ---------------------------------------------------------------------------
@@ -83,6 +84,127 @@ describe('rpcExtract', () => {
     const inner = { big: 'object' };
     const envelope = { uuid: inner };
     expect(rpcExtract(envelope)).toBe(inner);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withRpcTimeout — bounding a call that never answers
+// ---------------------------------------------------------------------------
+
+describe('withRpcTimeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('resolves with the call result when it answers in time', async () => {
+    const promise = withRpcTimeout(
+      Promise.resolve({ usage: { totalTokens: 42 } }),
+      15000,
+      'get_context_usage',
+    );
+    await expect(promise).resolves.toEqual({ usage: { totalTokens: 42 } });
+  });
+
+  it('propagates a rejection from the call itself', async () => {
+    const promise = withRpcTimeout(
+      Promise.reject(new Error('method not found')),
+      15000,
+    );
+    await expect(promise).rejects.toThrow('method not found');
+  });
+
+  it('rejects at the deadline when the call never settles', async () => {
+    // The dropped-reply case: jrpc-oo issued the call while the socket
+    // was being replaced, so the promise will never settle. Without a
+    // deadline the awaiting code stalls forever.
+    const never = new Promise(() => {});
+    const promise = withRpcTimeout(never, 15000, 'get_context_usage');
+    const assertion = expect(promise).rejects.toThrow(
+      'get_context_usage did not answer within 15000ms',
+    );
+    await vi.advanceTimersByTimeAsync(15000);
+    await assertion;
+  });
+
+  it('does not reject one tick before the deadline', async () => {
+    const never = new Promise(() => {});
+    let settled = false;
+    const promise = withRpcTimeout(never, 15000).catch(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(14999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await promise;
+    expect(settled).toBe(true);
+  });
+
+  it('names the call in the message, defaulting when unlabelled', async () => {
+    const promise = withRpcTimeout(new Promise(() => {}), 500);
+    const assertion = expect(promise).rejects.toThrow(
+      'rpc call did not answer within 500ms',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+    await assertion;
+  });
+
+  it('clears the timer once the call answers', async () => {
+    // Left uncleared, every bounded fetch would hold a live timer for
+    // its full deadline — 15s per turn, and the HUD fetches on every
+    // one. `clearTimeout` in the `finally` is what prevents that.
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    await withRpcTimeout(Promise.resolve('ok'), 15000);
+    expect(clearSpy).toHaveBeenCalled();
+    clearSpy.mockRestore();
+  });
+
+  it('releases an in-flight guard so a later fetch can retry', async () => {
+    // The defect this helper exists for: the guard is cleared in a
+    // `finally`, so a promise that never settles means the `finally`
+    // never runs and the component stops fetching for the whole
+    // session. This is that pattern, verbatim.
+    const state = { inFlight: false, results: [] };
+    const fetchOnce = async (call) => {
+      if (state.inFlight) return;
+      state.inFlight = true;
+      try {
+        state.results.push(await withRpcTimeout(call, 15000, 'get_x'));
+      } catch (err) {
+        state.results.push(err.message);
+      } finally {
+        state.inFlight = false;
+      }
+    };
+
+    const first = fetchOnce(new Promise(() => {}));
+    expect(state.inFlight).toBe(true);
+    await vi.advanceTimersByTimeAsync(15000);
+    await first;
+    expect(state.inFlight).toBe(false);
+
+    await fetchOnce(Promise.resolve('second answer'));
+    expect(state.results).toEqual([
+      'get_x did not answer within 15000ms',
+      'second answer',
+    ]);
+  });
+
+  it('ignores a reply that lands after the deadline', async () => {
+    // Nothing in jrpc-oo can cancel the underlying call, so a late
+    // reply is still delivered. It must not resurrect the rejected
+    // promise or throw an unhandled rejection.
+    let resolveLate;
+    const late = new Promise((resolve) => { resolveLate = resolve; });
+    const promise = withRpcTimeout(late, 1000, 'get_x');
+    const assertion = expect(promise).rejects.toThrow('did not answer');
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    resolveLate('too late');
+    await expect(late).resolves.toBe('too late');
   });
 });
 
