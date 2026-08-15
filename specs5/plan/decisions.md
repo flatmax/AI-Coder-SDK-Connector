@@ -484,17 +484,17 @@ loss, arbitrarily later, in a session the user cares about.
 Three consequences fell out of writing the schema twin, none of them decided above. Recorded here rather
 than left implicit in a table:
 
-- **`list_engine_sessions` is deleted.** It listed the store; `history_list_sessions` listed the
-  browsable records. With one store they are two names for one query, and two listings that can disagree
-  about which sessions exist is the exact failure this decision removes. `history_list_sessions` is the
-  single listing. `delete_engine_session` stays — deleting is not listing.
-- **The three history method names survive; none of their shapes do.** `history_list_sessions`,
-  `history_get_session` and `history_search` keep their names so the browser's call sites stay put, and
-  the payloads change underneath: `engine_session` is gone (with one store, a session that exists is an
-  engine session, and an unreadable one is reported by `resumable: false`), and `message_id` becomes
-  `entry_uuid` because the transcript's own `uuid` already identifies a line. Keeping names while
-  changing payloads trades a loud `method not found` for a quieter shape mismatch — acceptable only
-  because the browser's tests assert on return shapes.
-- **`history_get_image(session_id, entry_uuid, block)` is new**, and is required rather than
-  convenient: `4-features/images.md` has the `userMessage` broadcast carry a pointer instead of bytes,
-  which is only viable if something can turn a pointer back into bytes on demand.
+- **`list_engine_sessions` and `delete_engine_session` are deleted.** They listed and deleted the store;
+  `history_list_sessions` and a browser-side delete covered the browsable records. With one store each
+  pair is two names for one operation, and two listings that can disagree about which sessions exist is
+  the exact failure this decision removes.
+- **The surviving set is `history_list`, `history_load`, `history_search`, `history_delete`.** The first
+  three of those names are not new: phase 1 chose them, the delivery log has carried them since, and
+  `test_phase_five_methods_are_absent` asserts them absent to this day. `history_search` keeps its
+  native name because there was nothing wrong with it. Renaming rather than reusing the native names is
+  the loud option and the right one — every payload changed (`engine_session` is gone, `message_id`
+  becomes `entry_uuid`), so a browser still calling `history_list_sessions` should fail at the call site
+  rather than parse a shape it no longer understands.
+- **`history_image(session_id, entry_uuid, block)` is new**, and is required rather than convenient:
+  `4-features/images.md` has the `userMessage` broadcast carry a pointer instead of bytes, which is only
+  viable if something can turn a pointer back into bytes on demand.

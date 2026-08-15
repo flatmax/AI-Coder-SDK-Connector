@@ -39,8 +39,8 @@ wire; nothing forwards the old namespace.
 - Denied-read files — get, set. The picker's third state, written as `Read(path)` deny rules
 - Turns — start streaming chat (request id, message, optional files, images, viewer framing), cancel streaming
 - Live controls — set permission mode, set model, rewind files to a checkpoint, stop a subagent task, resolve a permission request
-- Sessions — new session, resume session (optionally forking), delete engine session (localhost-only)
-- History — list sessions, get session messages, search history, fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There is no separate session-listing RPC: with one store it would be a second answer to the same question
+- Sessions — new session, resume session (optionally forking)
+- History — list sessions, load a session's messages, search history, delete a session (localhost-only), fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There are no separate engine-session listing or deletion RPCs: with one store each would be a second answer to a question the history surface already answers
 - Subagents — list subagent transcripts, get a subagent transcript
 - Introspection — context usage, MCP server status, reconnect an MCP server, toggle an MCP server, server info (advertised commands, tools, output styles)
 - Commit workflow — generate commit message, commit-all (background)

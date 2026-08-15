@@ -42,7 +42,7 @@ turn, and the entry the engine writes is what lets us render it again a week lat
   and the eager flush has handed us a copy. A turn that dies before that leaves the pasted image only in
   the browser's own pending state.
 - **The `userMessage` broadcast carries a pointer, not bytes** — session ID, entry `uuid`, block index.
-  Collaborators fetch image data on demand through `history_get_image`, which reads the store, so a paste
+  Collaborators fetch image data on demand through `history_image`, which reads the store, so a paste
   does not push megabytes down every socket. The initiating client already holds the data URI it pasted
   and fetches nothing.
 
@@ -50,7 +50,7 @@ turn, and the entry the engine writes is what lets us render it again a week lat
 
 - Opening a past session reads its images from that session's entries, through the same parsers as the
   rest of the transcript. Thumbnails resolve by pointer; the lightbox fetches full data on demand via
-  `history_get_image`.
+  `history_image`.
 - `load_session_into_context` and `get_session_messages_for_context` are gone. Loading a past session
   into the model's view is resume, which hands the engine its own transcript; we never re-inject message
   content.

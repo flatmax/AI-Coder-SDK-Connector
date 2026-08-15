@@ -59,7 +59,11 @@ as absent. Before joining, reject any `subpath` containing `..`, a leading `/`, 
 it arrives from the SDK, but it becomes a filesystem path, and a path-traversal check at the boundary
 costs nothing.
 
-`session_id` is validated as a UUID before it becomes a path component.
+`session_id` gets the **same path-safety check and no more** — reject `..`, separators, and NUL; do
+*not* require a UUID. The conformance suite appends under `"sess"`, `"a"` and `"summ-sess"`, so a store
+that insists on UUIDs fails contracts 1 through 14 without ever reaching a real session. UUID
+validation belongs at the RPC boundary, where a session ID arrives from a browser, and the SDK's own
+`*_from_store` readers already apply it there.
 
 ### Engine transcript line format
 
@@ -221,7 +225,7 @@ The native engine's compaction templates (truncate/summarize cases, `<details>` 
 
 ### Our session summary shape
 
-Returned by `history_list_sessions`. Served from the derived index, and recomputable from the transcript when the
+Returned by `history_list`. Served from the derived index, and recomputable from the transcript when the
 index is cold:
 
 | Field | Type | Notes |
@@ -259,33 +263,39 @@ Sessions:
 |---|---|---|
 | `new_session` | — | `{session_id: str}` |
 | `resume_session` | `session_id: str, fork?: bool` | `{session_id: str, forked_from?: str}` or `{error: str, reason: str}` |
-| `delete_engine_session` | `session_id: str` | `{status: str}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts and its events; the images in those entries go with them |
 
 `resume_session` with `fork: true` issues a **new** session ID and leaves the original untouched;
 the response carries both so the UI can label the fork.
 
-There is no `list_engine_sessions`. Under two stores it was the store-side listing and
-`history_list_sessions` was the browsable one; with one store they would be two names for one query,
-and two listings of the same sessions is precisely the disagreement [CC-19](../../specs5/plan/decisions.md#cc-19)
-removes. `history_list_sessions` is the single listing.
+There is no `list_engine_sessions` and no `delete_engine_session`. Under two stores those were the
+store-side listing and deletion, while `history_list_sessions` and a browser-side delete covered the
+browsable records. With one store each pair is two names for one operation, and two listings that can
+disagree about which sessions exist is precisely what
+[CC-19](../../specs5/plan/decisions.md#cc-19) removes. `history_list` and `history_delete` are the
+single listing and the single deletion.
 
-History — method names are retained from the native engine, but the **shapes are not**:
+History — the whole set is renamed off the native engine's names, because none of the shapes survive:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `history_list_sessions` | `limit?: int` | `list[SessionSummary]` (above) |
-| `history_get_session` | `session_id: str` | `list[MessageDict]` — built at read time from parsed entries, interleaved with that session's `events.jsonl` records. Image blocks carry pointers, not data URIs |
+| `history_list` | `limit?: int` | `list[SessionSummary]` (above) |
+| `history_load` | `session_id: str` | `list[MessageDict]` — built at read time from parsed entries, interleaved with that session's `events.jsonl` records. Image blocks carry pointers, not data URIs |
 | `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, entry_uuid, role, content_preview, timestamp}]` |
-| `history_get_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
+| `history_delete` | `session_id: str` | `{status: str}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts and its events; the images in those entries go with them |
+| `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
+
+`history_list`, `history_load` and `history_delete` are the names phase 1 chose and
+`test_phase_five_methods_are_absent` has asserted absent ever since; `history_search` keeps its name
+because there was nothing wrong with it, and `history_image` is new.
+
+Renaming rather than keeping the native names is the loud option, and the right one here: every payload
+changed, so a browser still calling `history_list_sessions` should fail with a method-not-found at the
+call site rather than parse a shape it no longer understands.
 
 Two field-level renames run through the shapes above: `message_id` becomes `entry_uuid`, because the
 transcript's own `uuid` is already the stable identifier for a line and minting a second one over the
 top of it would be a name for the same thing that can disagree with it; and `engine_session` is gone
 per the summary shape above.
-
-Keeping the names while changing the payloads is a deliberate trade: the browser's call sites stay put,
-and the payload change is caught by the return-shape assertions in the browser's own tests rather than
-by a method-not-found at runtime.
 
 Subagents:
 
@@ -296,7 +306,8 @@ Subagents:
 
 `session_id` defaults to the active session. Deleted RPCs: `get_turn_archive`, `get_agent_history`,
 `close_agent_context`, `set_agent_selected_files`, `load_session_into_context`,
-`get_history_status`.
+`get_history_status`, and the native trio `history_list_sessions` / `history_get_session` /
+`history_search`, the first two by rename and the third by shape.
 
 ### Subagent keys
 
