@@ -97,11 +97,18 @@ SessionSummaryEntry:
 
 `mtime` rules, all load-bearing:
 
-- Stamp it **after** persisting the sidecar, from the same clock source as `list_sessions`' `mtime`
-  (for a file-backed store: `int(st.st_mtime * 1000)`).
+- Stamp it from **the same value `list_sessions` reports for that session** — for our file-backed store,
+  `int(st_mtime * 1000)` of the transcript we just appended to. Sharing one filesystem value is stronger
+  than sharing a clock: the two sides cannot drift, the sidecar needs no second write to re-stat itself,
+  and a crash between the transcript write and the sidecar write leaves a sidecar strictly older than
+  the transcript — which is exactly how "stale" is meant to look. The obvious alternative, statting the
+  sidecar after writing it, costs a second write per ~100 ms batch and can invert the comparison on a
+  filesystem whose timestamp granularity rounds.
 - Never derive it from entry timestamps. Batched writes always commit later than the last entry's
   timestamp, which makes every sidecar look stale and defeats the fast-path staleness check in
   `list_sessions_from_store`.
+- The comparison that has to hold is the conformance suite's: `summary.mtime >= list_sessions` mtime
+  for the same session. Taking both from the transcript makes it hold with equality, by construction.
 - `fold_session_summary()` preserves whatever `mtime` it is given via `prev` and returns `mtime=0` for a
   new session; overwriting it is the adapter's job.
 
@@ -330,12 +337,16 @@ identity and storage routing. No positional index appears in any path or record.
 ### Conformance harness
 
 ```python
-from claude_agent_sdk.testing import session_store_conformance
+from claude_agent_sdk.testing import run_session_store_conformance
 ```
 
-Run against a temp-directory instance of our store as part of the normal test suite. A store that
-passes locally but violates the protocol produces resume failures that present as context loss, which
-is close to undiagnosable from the UI.
+Run against a temp-directory instance of our store as part of the normal test suite, with a fresh
+directory per contract. A store that passes locally but violates the protocol produces resume failures
+that present as context loss, which is close to undiagnosable from the UI.
+
+Pair it with an explicit assertion that all four optional methods resolve to our overrides and not to
+the Protocol's defaults — see § The conformance harness ships with the SDK for why a green run does not
+establish that on its own.
 
 ## Dependency quirks
 

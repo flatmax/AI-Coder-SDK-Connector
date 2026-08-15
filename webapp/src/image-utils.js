@@ -6,12 +6,14 @@
 // a paste event. The chat panel is the only consumer.
 //
 // Design principle — the frontend deals only in data URIs
-// (strings), never in Blob / File objects. The backend's
-// HistoryStore writes binary to disk and serves data URIs
-// back on session restore, so keeping the frontend
-// string-native avoids two conversions per image.
+// (strings), never in Blob / File objects. An image is sent to
+// the engine as a base64 content block and lives in the
+// transcript as one, so `history_image` hands a data URI back on
+// session restore too. Keeping the frontend string-native avoids
+// two conversions per image. There is no image directory on the
+// backend any more — see specs5/4-features/images.md.
 
-/** Accepted image MIME types. Matches specs4/4-features/images.md. */
+/** Accepted image MIME types. Matches specs5/4-features/images.md. */
 const ACCEPTED_IMAGE_MIMES = new Set([
   'image/png',
   'image/jpeg',

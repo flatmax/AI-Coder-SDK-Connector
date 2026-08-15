@@ -353,14 +353,20 @@ class ConfigManager:
 
         Idempotent — safe to call on every startup. Ensures the
         directory exists and that it appears in the repo's
-        ``.gitignore``. An ``images/`` subdirectory is created here
-        because the image-persistence layer (Layer 4) expects it to
-        exist before it writes.
+        ``.gitignore``.
+
+        No subdirectories are created here. The session store makes its
+        own on first write, which keeps "this directory exists" and "a
+        session was mirrored" from being the same signal. The
+        ``images/`` directory this used to create is retired with the
+        native engine: images now live in the transcript as the content
+        blocks they were sent as, so there is nothing to put in it
+        ([CC-19](../../specs5/plan/decisions.md#cc-19)). An existing one
+        left by the native engine is ignored, not read and not migrated.
         """
         assert self._repo_root is not None  # guarded by caller
         ac_dc_path = self._repo_root / _AC_DC_DIR
         ac_dc_path.mkdir(exist_ok=True)
-        (ac_dc_path / "images").mkdir(exist_ok=True)
         self._ensure_gitignore_entry()
 
     def _ensure_gitignore_entry(self) -> None:

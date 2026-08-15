@@ -767,13 +767,12 @@ async def run(
 
     # Step 5: Create the engine adapter.
     #
-    # No HistoryStore is constructed here yet. It used to be built
-    # in this step and handed to LLMService, which mirrored every
-    # turn into it. `history_store.py` survives the rip-out intact
-    # and phase 5 wires it back in as the SDK's SessionStore, at
-    # which point the transcript mirror and the history browser
-    # come back with it. Constructing it now would be a store
-    # nothing writes to.
+    # No store is constructed here, unlike the native engine's
+    # HistoryStore which this step used to build and hand to
+    # LLMService. The SessionStore is derived from `config.ac_dc_dir`
+    # inside ClaudeCodeService, next to `engine_config`, because it is
+    # a path rather than a collaborator and a startup path that forgot
+    # to pass it would lose the transcript mirror silently.
 
     # Event callback — will be wired after the server starts
     event_callback_ref: list[Any] = [None]

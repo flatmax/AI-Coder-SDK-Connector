@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,9 +42,17 @@ PNG = "data:image/png;base64,aGk="
 
 
 class FakeConfig:
-    def __init__(self, repo_root, config_dir=None):
+    def __init__(self, repo_root, config_dir=None, ac_dc_dir=None):
         self.repo_root = repo_root
         self.config_dir = config_dir
+        # Present so the session store is built on the production path in
+        # every service test rather than only where one asks for it. Nothing
+        # here appends, so no file is written — but a wiring change that
+        # dropped the store would now have somewhere to show up.
+        # None without a repo root, matching ConfigManager.ac_dc_dir.
+        if ac_dc_dir is None and repo_root is not None:
+            ac_dc_dir = Path(repo_root) / ".ac-dc4"
+        self.ac_dc_dir = ac_dc_dir
         self.snippet_calls: list[str] = []
 
     def get_snippets(self, mode="code"):
@@ -1128,6 +1137,77 @@ class TestBridgeWiring:
         assert svc.session._hooks is None
         assert svc.session._mcp_servers is not None
         assert "will not follow the agent's writes" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The session store, as the session receives it — phase 5
+# ---------------------------------------------------------------------------
+
+
+class TestSessionStoreWiring:
+    """The mirror reaches the engine, or history quietly stops surviving.
+
+    This wiring has no visible symptom when it breaks: the CLI keeps its
+    own transcript, so a session with no store works right up until the
+    CLI's retention timer expires it — days later, looking like data loss
+    rather than a dropped constructor argument.
+    """
+
+    @pytest.fixture
+    def wired(self, tmp_path, events):
+        return ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+
+    def test_the_store_the_service_built_is_the_one_the_session_got(self, wired):
+        assert wired.session_store is not None
+        assert wired.session._session_store is wired.session_store
+
+    def test_the_store_points_at_the_repo_not_the_home_directory(
+        self, wired, tmp_path
+    ):
+        """`.ac-dc4/sessions/` is the whole point: the CLI already has a copy
+        under ~/.claude/projects/, and that is the one that expires."""
+        assert wired.session_store.root == tmp_path / ".ac-dc4" / "sessions"
+
+    def test_building_the_service_writes_nothing(self, wired, tmp_path):
+        """A directory that exists is not the same signal as a session that
+        was mirrored, so the store makes its own on first append."""
+        assert not (tmp_path / ".ac-dc4" / "sessions").exists()
+
+    def test_an_injected_store_wins(self, tmp_path, events):
+        sentinel = object()
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path),
+            event_callback=events,
+            engine_config=EngineConfig(),
+            session_store=sentinel,
+        )
+        assert svc.session._session_store is sentinel
+
+    def test_no_repo_means_no_store_and_a_session_that_still_runs(
+        self, tmp_path, events, caplog
+    ):
+        """Nowhere to mirror to is not a reason to refuse to start."""
+        with caplog.at_level(logging.INFO):
+            svc = ClaudeCodeService(
+                SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+                event_callback=events,
+                engine_config=EngineConfig(),
+            )
+        assert svc.session_store is None
+        assert svc.session is not None
+        assert svc.session._session_store is None
+        assert "sessions are not mirrored" in caplog.text
+
+    def test_the_project_key_comes_from_the_sdk(self, wired):
+        """A hand-rolled sanitiser would point the readers at a directory
+        nothing writes to."""
+        from claude_agent_sdk import project_key_for_directory
+
+        assert wired._session_project_key() == project_key_for_directory(
+            str(wired._repo_root)
+        )
 
 
 class TestIndexReadiness:

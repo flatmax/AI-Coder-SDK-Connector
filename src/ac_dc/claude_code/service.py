@@ -150,6 +150,7 @@ class ClaudeCodeService:
         repo: Any = None,
         event_callback: EventCallback | None = None,
         engine_config: EngineConfig | None = None,
+        session_store: Any = None,
     ) -> None:
         self._config = config
         self._repo = repo
@@ -162,6 +163,14 @@ class ClaudeCodeService:
         self.engine_config = engine_config or EngineConfig.load(
             getattr(config, "config_dir", None)
         )
+        # Derived from config rather than injected by main.py, like
+        # `engine_config` above and unlike DocConvert: it is a path, not a
+        # collaborator, and a startup path that forgets to pass it would
+        # lose the transcript mirror *silently* — the CLI keeps its own
+        # copy, so the session works until the CLI's retention timer
+        # expires it, which is days later and looks like data loss rather
+        # than a missing argument. Still injectable, for tests.
+        self.session_store = session_store or self._build_session_store()
         # The permission gate. Constructed before the session because the
         # session is built *around* its callback: attaching it afterwards
         # would need a reconnect, and a session running without it would
@@ -215,6 +224,7 @@ class ClaudeCodeService:
             can_use_tool=self.permissions.can_use_tool,
             hooks=hooks,
             mcp_servers=mcp_servers,
+            session_store=self.session_store,
         )
 
         self._selected_files: list[str] = []
@@ -241,6 +251,41 @@ class ClaudeCodeService:
             on_selection_cleared=self._clear_selection,
         )
         self.review.doc_builder = self.doc_builder
+
+    def _build_session_store(self) -> Any:
+        """The repo-local transcript mirror, or ``None`` without a repo.
+
+        No repo means no ``.ac-dc4/`` to mirror into, and the engine runs
+        fine without a store — the CLI keeps its own transcript under
+        ``~/.claude/projects/`` either way. What is lost is survival past
+        the CLI's retention window and the history browser with it.
+        """
+        ac_dc_dir = getattr(self._config, "ac_dc_dir", None)
+        if ac_dc_dir is None:
+            logger.info(
+                "No repo directory, so sessions are not mirrored; history "
+                "will only last as long as the CLI keeps its own transcript."
+            )
+            return None
+        from ac_dc.claude_code.session_store import RepoSessionStore
+
+        return RepoSessionStore(Path(ac_dc_dir) / "sessions")
+
+    def _session_project_key(self) -> str:
+        """The store's project key for this repo.
+
+        Underscored deliberately: `ExposeClass` publishes every public
+        method as an RPC, and this is an internal detail of how the
+        history methods find their sessions, not a question a browser asks.
+
+        Uses the SDK's own helper rather than sanitising the path here:
+        the key must match what the CLI computes, or ``list_sessions`` and
+        every ``*_from_store`` reader look in a directory nothing writes
+        to. Two worktrees of one repo get different keys, which is correct.
+        """
+        from claude_agent_sdk import project_key_for_directory
+
+        return project_key_for_directory(str(self._repo_root))
 
     def _build_doc_builder(self) -> Any:
         """Construct the doc index and the builder that fills it.

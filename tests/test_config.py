@@ -315,12 +315,15 @@ def test_ac_dc_dir_not_created_without_repo(isolated_config_dir):
     assert cfg.ac_dc_dir is None
     assert cfg.repo_root is None
 def test_ac_dc_dir_created_with_repo(isolated_config_dir, repo_root):
-    """When repo_root is given, .ac-dc4/ and .ac-dc4/images/ are created."""
+    """When repo_root is given, .ac-dc4/ is created — and nothing inside it."""
     cfg = ConfigManager(repo_root=repo_root)
     assert cfg.repo_root == repo_root
     assert cfg.ac_dc_dir == repo_root / ".ac-dc4"
     assert cfg.ac_dc_dir.is_dir()
-    assert (cfg.ac_dc_dir / "images").is_dir()
+    # Subdirectories belong to whoever writes them. `images/` in particular
+    # is retired: images live in the transcript now, so an empty one would
+    # only look like a place data should be.
+    assert list(cfg.ac_dc_dir.iterdir()) == []
 def test_ac_dc_dir_creation_is_idempotent(isolated_config_dir, repo_root):
     """Calling ConfigManager twice doesn't fail if .ac-dc4/ already exists."""
     ConfigManager(repo_root=repo_root)
