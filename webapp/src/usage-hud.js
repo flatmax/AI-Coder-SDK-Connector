@@ -286,9 +286,21 @@ export class UsageHud extends RpcMixin(LitElement) {
   _onStreamComplete(event) {
     const result = event.detail?.result;
     if (!result) return;
-    // A stream that failed before reaching the engine has no numbers to
-    // report; the chat panel already surfaces the error.
-    if (result.error) return;
+    // A failed turn has no numbers to report; the chat panel already
+    // surfaces the error, with a toast.
+    //
+    // The engine's flag is `is_error` — a `streamComplete` result has no
+    // `error` key (see `messages.py` `_on_result` and the synthetic result
+    // `service.py` emits for a failure outside the pump). `error` is kept
+    // for any caller that does send one. Checking only `error` made this
+    // guard dead: a failed turn popped a HUD reporting `included · 0.0s`,
+    // and "included" is a claim about subscription billing, not a stand-in
+    // for a cost the engine never priced.
+    //
+    // This hides the cost of a turn that failed *late* — `error_max_turns`
+    // carries real usage. Reporting that needs a "cost unknown" rendering
+    // distinct from "included"; phase 6 territory, not a guard's job.
+    if (result.error || result.is_error) return;
 
     this._turn = {
       // Null under subscription billing — carried through as null so
