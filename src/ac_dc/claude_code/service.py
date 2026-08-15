@@ -78,6 +78,7 @@ from ac_dc.claude_code.session import (
     TurnInProgressError,
     ViewerFraming,
 )
+from ac_dc.claude_code.session_store import DISK_WARNING_BYTES, RepoSessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +287,11 @@ class ClaudeCodeService:
         # commitResult broadcast arrives, and two overlapping runs would
         # stage each other's half-finished work.
         self._committing = False
+        # The session-directory size warning fires at most once per server
+        # lifetime. A user who has decided a gigabyte of transcripts is
+        # fine should not be told again every turn — that is how a warning
+        # worth reading becomes one nobody reads.
+        self._disk_warned = False
 
         self.review = ReviewMode(
             repo=repo,
@@ -312,8 +318,6 @@ class ClaudeCodeService:
                 "will only last as long as the CLI keeps its own transcript."
             )
             return None
-        from ac_dc.claude_code.session_store import RepoSessionStore
-
         return RepoSessionStore(Path(ac_dc_dir) / "sessions")
 
     def _build_events_log(self) -> Any:
@@ -667,6 +671,14 @@ class ClaudeCodeService:
         them on first paint to decide whether to show the doc-index progress
         overlay and the review banner.
 
+        ``disk_warning`` is the startup half of the session-directory size
+        check (``specs-reference/3-engine/history.md`` § Numeric constants:
+        "checked at startup and after each turn"). First paint is where
+        "startup" is observable — a warning broadcast before any browser was
+        listening would be a warning nobody saw — and the one-shot flag is
+        shared with the post-turn check, so it appears exactly once whichever
+        of the two notices first.
+
         ``doc_convert_available`` is not engine state — it is a server
         capability probe that the shell has nowhere else to read. Document
         conversion survives the conversion untouched
@@ -691,6 +703,7 @@ class ClaudeCodeService:
             "review_state": self.review.state(),
             "engine_health": self.get_engine_health(),
             "doc_convert_available": _doc_convert_available(),
+            "disk_warning": await self._disk_warning(),
         }
 
     async def _current_messages(self) -> list[dict[str, Any]]:
@@ -956,10 +969,49 @@ class ClaudeCodeService:
                 {
                     "files_reindexed": files_reindexed,
                     "context_usage": context_usage,
-                    "disk_warning": None,
+                    "disk_warning": await self._disk_warning(),
                 },
             ),
             request_id,
+        )
+
+    async def _disk_warning(self) -> str | None:
+        """The mirrored transcripts' size warning, once per server lifetime.
+
+        ``None`` every time but one: the first check that finds
+        ``.ac-dc4/sessions/`` over :data:`DISK_WARNING_BYTES` returns the
+        sentence and every later check returns nothing, whether it came from
+        a turn ending or a browser asking for its first paint.
+
+        A transcript is the one thing under ``.ac-dc4/`` that does not
+        rebuild, so this is a warning rather than a cleanup: nothing is
+        deleted, nothing is refused, and the user decides. Pasted images are
+        usually the reason — they sit in the entries as base64, verbatim
+        (``specs5/3-engine/history.md`` § `SessionStore`).
+
+        The measurement is a directory walk, so it runs in the executor and
+        a failure is silent: a size we could not read is not worth failing a
+        completed turn over.
+        """
+        if self._disk_warned or self.session_store is None:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(None, self.session_store.total_bytes)
+        except Exception as exc:
+            logger.debug("Could not measure the session directory: %s", exc)
+            return None
+        if total < DISK_WARNING_BYTES:
+            return None
+        self._disk_warned = True
+        gib = total / (1024 * 1024 * 1024)
+        logger.warning("Mirrored session transcripts are using %.1f GiB", gib)
+        return (
+            f"Mirrored session transcripts are using {gib:.1f} GiB in "
+            f"`.ac-dc4/sessions/`. Pasted images are stored in the transcript "
+            "itself, so a few image-heavy sessions account for most of it. "
+            "Deleting old sessions from the history browser reclaims the "
+            "space; nothing here needs doing now."
         )
 
     # ------------------------------------------------------------------

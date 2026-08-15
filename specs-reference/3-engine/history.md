@@ -288,7 +288,7 @@ or unreadable transcript, which is what `resumable: false` reports.
 
 | Constant | Value | Notes |
 |---|---|---|
-| Disk-usage warning threshold | 1 GiB over `.ac-dc4/sessions/` | One-shot per server lifetime, dismissible, never blocking. Checked at startup and after each turn. Carried over from the agent-archive warning; only the measured path changed |
+| Disk-usage warning threshold | 1 GiB over `.ac-dc4/sessions/` | One-shot per server lifetime, dismissible, never blocking. Checked at startup and after each turn — carried by `EngineState.disk_warning` and `PostResponsePayload.disk_warning`, sharing one flag so it is delivered once whichever notices first. The measurement is a directory walk in the executor, and a size that cannot be read is silent rather than a failed turn. Carried over from the agent-archive warning; only the measured path changed |
 | `session_store_flush` | `"eager"` | Batched flushing (the default) can hold a turn's tail until the result message, which makes a crash lose the visible tail of an in-progress turn |
 | Mirror append retries | 3 attempts, short backoff | SDK-side. Then dropped and surfaced as `MirrorErrorMessage` |
 | `load_timeout_ms` | 60 000 | Per `load()` / `list_subkeys()` during resume materialization |

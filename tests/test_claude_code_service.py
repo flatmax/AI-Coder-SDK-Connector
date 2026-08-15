@@ -851,6 +851,7 @@ class TestState:
             "review_state",
             "engine_health",
             "doc_convert_available",
+            "disk_warning",
         }
 
     async def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
@@ -1398,6 +1399,80 @@ class TestSessionStoreWiring:
         assert wired._session_project_key() == project_key_for_directory(
             str(wired._repo_root)
         )
+
+
+class TestTheDiskWarning:
+    """One sentence, once, about the one thing under `.ac-dc4/` that does
+    not rebuild.
+
+    Transcripts hold pasted images verbatim as base64, so an image-heavy
+    week is measured in gigabytes. Nothing is deleted and nothing is
+    refused — the user decides — which is exactly why repeating the warning
+    every turn would be worse than saying nothing
+    (``specs5/3-engine/history.md`` § Subagent Transcripts;
+    ``specs-reference/3-engine/history.md`` § Numeric constants).
+    """
+
+    @pytest.fixture
+    def over_threshold(self, service, monkeypatch):
+        from ac_dc.claude_code import service as service_mod
+
+        monkeypatch.setattr(
+            service.session_store,
+            "total_bytes",
+            lambda: service_mod.DISK_WARNING_BYTES + 1,
+        )
+        return service
+
+    async def test_a_small_directory_says_nothing(self, service):
+        assert await service._disk_warning() is None
+
+    async def test_a_directory_over_the_threshold_says_what_and_where(
+        self, over_threshold
+    ):
+        warning = await over_threshold._disk_warning()
+        assert "1.0 GiB" in warning
+        assert ".ac-dc4/sessions/" in warning
+        assert "history browser" in warning
+
+    async def test_it_fires_at_most_once_per_server_lifetime(self, over_threshold):
+        assert await over_threshold._disk_warning() is not None
+        assert await over_threshold._disk_warning() is None
+        assert await over_threshold._disk_warning() is None
+
+    async def test_the_turn_footer_and_the_first_paint_share_the_one_shot(
+        self, over_threshold, events
+    ):
+        """Whichever notices first is the one that says it, and the other
+        stays quiet — two channels, not two warnings."""
+        state = await over_threshold.get_current_state()
+        assert state["disk_warning"] is not None
+        await send(over_threshold)
+        assert events.payload_of("postResponseComplete")["disk_warning"] is None
+
+    async def test_a_turn_can_be_the_one_that_notices(self, over_threshold, events):
+        await send(over_threshold)
+        assert events.payload_of("postResponseComplete")["disk_warning"] is not None
+        assert (await over_threshold.get_current_state())["disk_warning"] is None
+
+    async def test_a_size_that_cannot_be_read_is_not_a_failed_turn(
+        self, service, monkeypatch
+    ):
+        def boom():
+            raise OSError("the filesystem went away")
+
+        monkeypatch.setattr(service.session_store, "total_bytes", boom)
+        assert await service._disk_warning() is None
+        assert service._disk_warned is False
+
+    async def test_without_a_store_there_is_nothing_to_measure(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        assert await svc._disk_warning() is None
 
 
 class TestHistoryRpcs:

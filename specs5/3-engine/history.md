@@ -236,6 +236,13 @@ description summarises. See [`../../specs-reference/3-engine/history.md`](../../
 Disk-usage monitoring carries over unchanged in mechanism — a one-shot warning when the session
 directory crosses a threshold, dismissible, never blocking. Only the measured path moves.
 
+It is a warning and not a cleanup because a transcript is the one thing under `.ac-dc4/` that does not
+rebuild: deleting one to reclaim space costs a resumable session, which is the user's call and nobody
+else's. The sentence names pasted images, since entries hold them verbatim as base64 and a handful of
+image-heavy sessions is normally the entire figure. It reaches the browser on first paint and after a
+turn, from one flag, so it is said once per server run and then never again — a warning repeated every
+turn about a decision already made is a warning that gets ignored on the turn it matters.
+
 ## Search
 
 Full-text search runs over the derived index, with a scan of the transcript as the fallback when the

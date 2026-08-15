@@ -224,10 +224,13 @@ EngineState:
     model: string | null
     pending_permissions: list[PermissionRequestPayload]
     doc_index_ready: bool
+    doc_index_building: bool
     doc_index_enriched: bool
+    enrichment_status: object             // the four doc-index fields arrive together
     review_state: ReviewState             // always present; check `active`
     engine_health: EngineHealth
     doc_convert_available: bool           // server capability probe, not engine state
+    disk_warning: string | null           // one-shot; see below
 
 ActiveStream:
     request_id: string
@@ -248,6 +251,11 @@ resumes applying chunks, which is the same re-attach mechanism as before at bloc
 
 `pending_permissions` lets a client that connects mid-prompt render the dialog immediately instead of
 waiting for a broadcast it already missed.
+
+`disk_warning` is the session-directory size warning, and it is the *same* one-shot as
+`PostResponsePayload.disk_warning` — one flag behind two carriers, so it is delivered exactly once per
+server lifetime whichever channel notices first. This snapshot is the one that covers "checked at
+startup": first paint is the earliest moment a warning has somebody to reach.
 
 `doc_convert_available` is the odd one out: a probe for whether `markitdown` imports on the server,
 which has nothing to do with the engine. It is here because this snapshot is the only one the shell
