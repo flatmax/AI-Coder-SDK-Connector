@@ -137,15 +137,33 @@ Two more shapes the implementation had to answer for:
 
 ### Debug Section
 
-Off by default. Diagnoses the engine, not the code:
+Off by default — Usage is where the tab opens and Debug is never it, though a reader who chooses it gets
+it back on the next visit like the other two. It diagnoses the engine, not the code:
 
-- Recent hook traffic from `hookEvent` — which hooks fired, with payloads.
-- MCP server status detail from `get_mcp_status()`.
-- Server and CLI info from `get_server_info()`, including which `claude` binary was resolved.
+- **Engine** — which `claude` binary was resolved, its version and where it came from, the SDK version
+  and the CLI it pins, the credential source, and the mirror-gap count as a verdict rather than a
+  number. This is `EngineHealth`, *not* `get_server_info()` as an earlier draft of this section had it:
+  the binary resolution is AC⚡DC's, recorded in `claude_code/health.py`, and the engine's own reply
+  knows nothing about it. Health arrives pushed on `engineHealth` and a pushed record wins over the
+  fetched one, because `mirror_gaps` moves during a turn.
+- **The initialize reply** from `get_server_info()`, summarised by key and then printed verbatim. By
+  key, because this repo has not read a schema for its shape and naming unverified fields is the exact
+  mistake § *Verified field shapes* records. One control request, on the way into the section and not
+  before — a reader who never opens Debug never spends it — and again on Refresh or a session change.
+- **Hook traffic** from `hookEvent` — time, hook, tool, outcome, each row expanding to the payload the
+  engine sent. Collected from the moment the panel mounts rather than the moment the section opens,
+  since the traffic worth reading is the turn that just ran. Bounded to the newest few dozen and
+  labelled as bounded: the `PostToolUse` re-index fires on every file the agent writes.
+- **MCP server status** from `get_mcp_status()`, verbatim. The Session section renders the same payload
+  through `mcpHealth`; the two together are how a reader checks our reading against what arrived.
 - The raw `gridRows` payload, for cross-checking our layout against the CLI's.
 
 `gridRows` is displayed here and **never used for layout**. It is a terminal's pre-laid-out grid;
 rendering it would couple this tab to a CLI presentation choice that can change under us.
+
+The segmented control appears once there is a breakdown **or an error**. Gating it on a successful fetch
+hid Debug in the one situation it is worth the most — the breakdown itself failing — so the Debug
+section renders ahead of the error branch, from sources that do not depend on the breakdown at all.
 
 ## Usage HUD
 
@@ -174,8 +192,8 @@ All collapsible; collapse state persisted to `localStorage` as a serialised set 
 | Section | Content |
 |---|---|
 | Header | Model, context percentage badge (colour-coded), dismiss button |
-| This turn | Cost or billing mode, duration, engine-internal turn count, terminal reason, permission-prompt count |
-| Per-model usage | One row per entry in `model_usage` — input, output, cache read, cache creation, cost, context window |
+| This turn | This turn's cost or why there is none, duration, engine-internal turn count, terminal reason, permission-prompt count |
+| Per-model usage | One row per entry in `turn_model_usage` — input, output, cache read, cache creation, cost, context window |
 | Context | `totalTokens` / `maxTokens` with the auto-compact mark |
 | Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play |
 | Files modified | The turn's `files_modified`, each clickable to the diff viewer |
@@ -183,16 +201,51 @@ All collapsible; collapse state persisted to `localStorage` as a serialised set 
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
 immediately after an agentic turn is which files changed.
 
-### Cost Under Subscription Billing
+### Cost Is Cumulative, and the HUD Reports One Turn
 
-`total_cost_usd` is null under a subscription. The HUD **never** renders that as `$0.00` — a zero cost
-for a turn that plainly consumed tokens reads as a broken HUD and teaches users to ignore the number
-(see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap)).
+**Corrected in phase 6, against the CLI's own wire schema.** This section previously said
+`total_cost_usd` is null under a subscription, and the HUD was built on that: it printed the field
+under the heading "This turn", and labelled a null as "included".
 
-Instead it labels the billing mode and shows the figures that are always meaningful: tokens, context
-percentage, and rate-limit headroom. The rate-limit section is the subscription-mode analogue of a cost
-signal, which is why it gets first-class display rather than a footnote. When `max_budget_usd` is
-configured, a spend-against-budget bar appears in its place.
+Both halves were wrong. The schema types the field as a plain number with **no null branch**, and
+describes it as *"cumulative estimated cost in USD for this query() call … cumulative across turns in
+streaming-input sessions — each result carries the running total so far, so read the latest result
+rather than summing across results."* `modelUsage` carries the same warning. AC⚡DC runs one
+streaming-input client, so:
+
+- The HUD's "This turn" cost was the **whole session's** spend, growing every turn.
+- Its model list named every model the session had ever used, not the ones that answered.
+- Every null in this codebase is one AC⚡DC wrote itself — a synthetic failure footer, or a replayed
+  turn. A live result always carries a figure, subscription or not; it is an estimate the CLI computes,
+  not a billing statement.
+- `credential_source` on the engine-health record is the only real billing-mode signal.
+
+The turn's own cost is therefore a **difference** against the previous result. The baseline is session
+state, so the engine takes the difference (`ac_dc/claude_code/cost.py`) and every client reads the same
+answer; a per-turn `TurnTranslator` could not hold the baseline, and the browser holding it would lose
+it on reconnect. Three per-turn fields ship beside the engine's cumulative ones, under names that cannot
+be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
+
+`turn_cost_basis` is what lets the HUD tell apart the two things it used to render identically:
+
+| Basis | Meaning | Rendering |
+|---|---|---|
+| `measured` | A difference in hand. **Zero is an answer**: the turn cost nothing extra. | The figure, or "nothing extra" |
+| `reset` | The running total went backwards — a `/clear`, or a resumed session. | "cost unknown", reason in the tooltip |
+| `unpriced` | No usable number: a footer AC⚡DC wrote, or one the CLI zeroed. The schema warns that *"crash/startup-error results may carry zeroed values"*, so a zero on an error is no evidence rather than free. | "cost unknown", reason in the tooltip |
+| *(absent)* | A browsed turn. Cost is not in the CLI's transcript, so it was never recorded — a different fact from "we lost track of it". | No cost shown at all |
+
+A `$0.00` is still never printed for a turn whose cost is unknown
+(see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap)) — but the fix is
+naming the reason, not labelling a billing mode. An unpriced turn's spend is not lost: the baseline is
+deliberately not advanced, so it lands on the next turn the engine can price.
+
+Cost is formatted in the CLI's own format — four decimals up to fifty cents, two above — so a figure
+here reads like the one the terminal shows. Two decimals throughout would render most per-turn costs as
+`$0.00`.
+
+The rate-limit section remains the analogue of a cost signal for a user who does not care about dollar
+estimates, and when `max_budget_usd` is configured a spend-against-budget bar appears in its place.
 
 ### Per-Model Rows Are Not Summed
 
@@ -210,7 +263,13 @@ column, not a headline: it was headline-worthy only while AC⚡DC was the thing 
 - Hover pauses the timer; mouse leave restarts it
 - Dismiss button hides immediately
 - Fixed width, max height with internal scroll
-- Never appears for an errored or empty turn
+- Never appears for an **empty** turn — but an errored turn is not automatically an empty one. A turn
+  that failed *late*, after the model answered and the tools ran, is the most expensive kind of failure
+  there is, and the original rule (drop every errored turn) hid exactly that. The HUD appears for a
+  failed turn that has usage to report — a measured cost, per-model tokens, or, for a crash footer that
+  carries no usage at all, evidence that the turn had already done work — and the row says "failed" so
+  the receipt is not mistaken for a finished turn's. A turn that died before doing anything still gets
+  nothing: there is no number, and the chat panel and a toast already carry the error.
 - A turn that ended with a mirror gap shows a marker linking to the health banner, because a HUD reporting a clean turn over a failed transcript append would be misleading
 
 ## Terminal HUD
@@ -234,8 +293,12 @@ tier-distribution HUD.
 - The Debug section is off by default and never required to understand normal usage.
 - Memory files, system prompt sections, and every MCP server including `ac-dc` appear in the Session section with their token cost.
 - The HUD renders without a follow-up RPC.
-- The HUD never appears for an errored or empty turn.
-- A null or zero cost is never rendered as `$0.00`; the billing mode is shown instead.
+- The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
+- No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running
+  totals and only ever appear labelled as such.
+- A turn whose cost cannot be established is never rendered as `$0.00`, and never as a claim about the
+  billing plan; the reason is named instead.
+- A turn that genuinely cost nothing extra renders differently from one whose cost is unknown.
 - Per-model usage rows are never summed into one line.
 - HUD section collapse state persists across sessions via `localStorage`.
 - The terminal HUD prints after every completed turn, cancelled or not.
