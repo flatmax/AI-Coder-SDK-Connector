@@ -243,6 +243,10 @@ image-heavy sessions is normally the entire figure. It reaches the browser on fi
 turn, from one flag, so it is said once per server run and then never again — a warning repeated every
 turn about a decision already made is a warning that gets ignored on the turn it matters.
 
+The browser reads both carriers and shows it as a system-event card in the transcript rather than a
+toast, for the reasons in [`../5-webapp/chat.md`](../5-webapp/chat.md) § Engine Event Routing: it is a
+sentence to read and act on, not a notification to acknowledge.
+
 ## Search
 
 Full-text search runs over the derived index, with a scan of the transcript as the fallback when the

@@ -1466,3 +1466,169 @@ describe('ChatPanel speech-player-state sync', () => {
     expect(p._speakingMsgIndex).toBe(-1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// The session-directory size warning
+// ---------------------------------------------------------------------------
+//
+// One sentence, once per server lifetime, on whichever of its two carriers
+// notices first: the state snapshot ("checked at startup") or a finished turn
+// ("and after each turn" — specs5/3-engine/history.md § Numeric constants).
+// Both were delivered and nothing read either, so a repo whose transcripts had
+// grown past a gigabyte said so to nobody.
+
+describe('ChatPanel disk warning', () => {
+  const WARNING =
+    'Mirrored session transcripts are using 1.4 GiB in `.ac-dc4/sessions/`. '
+    + 'Deleting old sessions from the history browser reclaims the space.';
+
+  function systemCards(panel) {
+    return [
+      ...panel.shadowRoot.querySelectorAll('.message-card.role-system'),
+    ];
+  }
+
+  it('says it when the panel’s own snapshot carries it', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_current_state': async () => ({
+        permission_mode: 'default',
+        disk_warning: WARNING,
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+    expect(p.messages[0]).toEqual({
+      role: 'user',
+      content: WARNING,
+      system_event: true,
+    });
+  });
+
+  it('says nothing when there is nothing to say', async () => {
+    // The overwhelmingly common case: a directory under the threshold, or a
+    // warning some other client's snapshot already spent.
+    publishFakeRpc({
+      'ClaudeCodeService.get_current_state': async () => ({
+        permission_mode: 'default',
+        disk_warning: null,
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await settle(p);
+    expect(p.messages).toEqual([]);
+  });
+
+  it('renders it as a system event, markdown and all', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('post-response-complete', {
+      requestId: 'req-1',
+      data: { disk_warning: WARNING },
+    });
+    await settle(p);
+    const cards = systemCards(p);
+    expect(cards).toHaveLength(1);
+    // The path it names is a code span in the sentence the service writes.
+    expect(cards[0].querySelector('code')?.textContent)
+      .toBe('.ac-dc4/sessions/');
+  });
+
+  it('survives the restore that a state-loaded snapshot does', async () => {
+    // Appended before the restore it travels with, the notice would be
+    // dropped with the message list the restore replaces — and the server's
+    // one-shot is already spent, so there is no second chance at it.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('state-loaded', {
+      messages: [{ role: 'user', content: 'from the transcript' }],
+      disk_warning: WARNING,
+    });
+    await settle(p);
+    expect(p.messages.map((m) => m.content)).toEqual([
+      'from the transcript',
+      WARNING,
+    ]);
+  });
+
+  it('says it even when the snapshot restores nothing', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('state-loaded', { messages: [], disk_warning: WARNING });
+    await settle(p);
+    expect(p.messages.map((m) => m.content)).toEqual([WARNING]);
+  });
+
+  it('says it to a client that is mid-stream', async () => {
+    // The streaming guard is there to protect a live conversation from being
+    // replaced by a snapshot; it is not a reason to withhold the warning.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(p._streaming).toBe(true);
+    pushEvent('state-loaded', {
+      messages: [{ role: 'user', content: 'a snapshot to ignore' }],
+      disk_warning: WARNING,
+    });
+    await settle(p);
+    expect(p.messages.map((m) => m.content)).toEqual(['hi', WARNING]);
+  });
+
+  it('takes it from any turn, not just this client’s', async () => {
+    // The directory is the session's, not the turn's. A collaborator's turn
+    // is as good a messenger as our own, so there is no request-id filter.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('post-response-complete', {
+      requestId: 'someone-elses-turn',
+      data: { disk_warning: WARNING },
+    });
+    await settle(p);
+    expect(p.messages.map((m) => m.content)).toEqual([WARNING]);
+  });
+
+  it('ignores a turn that carries no warning', async () => {
+    const p = mountPanel();
+    await settle(p);
+    for (const detail of [
+      { requestId: 'r' },
+      { requestId: 'r', data: null },
+      { requestId: 'r', data: { files_reindexed: [], context_usage: null } },
+      { requestId: 'r', data: { disk_warning: null } },
+      { requestId: 'r', data: { disk_warning: '' } },
+      { requestId: 'r', data: { disk_warning: { text: WARNING } } },
+      {},
+    ]) {
+      pushEvent('post-response-complete', detail);
+      await settle(p);
+    }
+    expect(p.messages).toEqual([]);
+    // Still live afterwards — a swallowed exception would leave the handler
+    // wired but inert.
+    pushEvent('post-response-complete', {
+      requestId: 'r',
+      data: { disk_warning: WARNING },
+    });
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+  });
+
+  it('stops listening on disconnect', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p.remove();
+    pushEvent('post-response-complete', {
+      requestId: 'r',
+      data: { disk_warning: WARNING },
+    });
+    expect(p.messages).toEqual([]);
+  });
+});

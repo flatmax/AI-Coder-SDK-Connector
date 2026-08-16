@@ -111,6 +111,7 @@ export function bindEventHandlers(panel) {
   panel._onAgentClosed = (e) => onAgentClosed(panel, e);
   panel._onSessionChanged = (e) => onSessionChanged(panel, e);
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
+  panel._onPostResponseComplete = (e) => onPostResponseComplete(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
   panel._onModeOrReviewChanged = () => onModeOrReviewChanged(panel);
   panel._onModeChanged = (e) => onModeChanged(panel, e);
@@ -264,6 +265,11 @@ export function resumeActiveStreams(panel, activeStreams) {
  *     session on boot; without consuming this
  *     event the chat panel would render empty.
  *
+ *   post-response-complete — the quiet point
+ *     after a turn. Read for one field: the
+ *     session-directory size warning, whose other
+ *     carrier is the snapshot above.
+ *
  *   compaction-event — URL fetch progress, history
  *     compaction stages, doc-enrichment stages
  *     (the last group is dropped here — the
@@ -328,6 +334,9 @@ export function attachEventListeners(panel) {
   // message list even though the backend already
   // has the prior conversation in its context.
   window.addEventListener('state-loaded', panel._onStateLoaded);
+  window.addEventListener(
+    'post-response-complete', panel._onPostResponseComplete,
+  );
   window.addEventListener(
     'compaction-event',
     panel._onCompactionEvent,
@@ -401,6 +410,9 @@ export function detachEventListeners(panel) {
   );
   window.removeEventListener('agent-closed', panel._onAgentClosed);
   window.removeEventListener('state-loaded', panel._onStateLoaded);
+  window.removeEventListener(
+    'post-response-complete', panel._onPostResponseComplete,
+  );
   window.removeEventListener(
     'compaction-event',
     panel._onCompactionEvent,
@@ -524,15 +536,26 @@ export function onSessionChanged(panel, event) {
  * own completion will bring the UI back into
  * sync.
  *
- * Also guarded against an empty snapshot. `EngineState.messages`
- * is `[]` until transcript mirroring lands in phase 5, so a
- * `state-loaded` arriving after the user has said something
- * would otherwise replace a live conversation with nothing.
- * An empty snapshot is now always a no-op: absence of a
- * transcript is not evidence there was no conversation.
+ * Also guarded against an empty snapshot. A transcript the
+ * service could not read renders as an empty conversation
+ * rather than a failed snapshot, so a `state-loaded` arriving
+ * after the user has said something would otherwise replace a
+ * live conversation with nothing. An empty snapshot is always a
+ * no-op: absence of a transcript is not evidence there was no
+ * conversation.
  */
 export function onStateLoaded(panel, event) {
   const state = event.detail || {};
+  restoreStateSnapshot(panel, state);
+  // Last, and outside the restore, because the restore *replaces*
+  // `panel.messages` — a warning appended before it would be thrown away
+  // with the list it was appended to, and the server's one-shot has already
+  // been spent by then.
+  noteDiskWarning(panel, state.disk_warning);
+}
+
+/** The transcript half of a `state-loaded` snapshot. */
+function restoreStateSnapshot(panel, state) {
   // Capture whether we were already streaming
   // BEFORE the resume call flips the flag. Used
   // below to gate message restore — a collaborator
@@ -974,7 +997,54 @@ export async function loadEngineState(panel) {
   if (state.engine_health && typeof state.engine_health === 'object') {
     panel._engineHealth = state.engine_health;
   }
+  noteDiskWarning(panel, state.disk_warning);
   resumeActiveStreams(panel, state.active_streams);
+}
+
+/**
+ * Append the session-directory size warning a snapshot or a finished turn
+ * carried, if it carried one — which is almost never.
+ *
+ * A transcript notice rather than a toast. The sentence names a threshold, a
+ * cause and what to do about it, which is more reading than a three-second
+ * toast allows, and as a system event it goes through the markdown renderer
+ * so the directory it names comes out as code. It sits among the commit
+ * notices, blocks nothing, and scrolls away.
+ *
+ * No "have I said this already" guard here. The server owns the one-shot —
+ * one flag behind both carriers, spent by whichever notices first
+ * (`specs-reference/3-engine/session.md` § `EngineState`) — so a second owner
+ * of that rule in the browser could only disagree with it, and would swallow
+ * the honest second warning from a server that has restarted.
+ */
+export function noteDiskWarning(panel, warning) {
+  if (typeof warning !== 'string' || !warning) return;
+  panel.messages = [
+    ...panel.messages,
+    { role: 'user', content: warning, system_event: true },
+  ];
+}
+
+/**
+ * Handle a `post-response-complete` window event — the quiet point after a
+ * turn, once the service's post-turn housekeeping has settled.
+ *
+ * Only the disk warning is read from it, and only because this is the other
+ * half of "checked at startup and after each turn"
+ * (`specs5/3-engine/history.md` § Numeric constants): a session that crosses
+ * the threshold while the browser is open would otherwise hear nothing until
+ * the next reload. The payload's other two fields already have owners — the
+ * context tab refetches its own breakdown when a turn ends, and the file tree
+ * reloads on `filesModified`.
+ *
+ * Not request-scoped: the warning is about the whole session directory, not
+ * about the turn that happened to notice it, so a collaborator's turn is as
+ * good a messenger as our own.
+ */
+export function onPostResponseComplete(panel, event) {
+  const { data } = event.detail || {};
+  if (!data || typeof data !== 'object') return;
+  noteDiskWarning(panel, data.disk_warning);
 }
 
 /**
