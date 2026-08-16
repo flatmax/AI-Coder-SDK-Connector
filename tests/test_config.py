@@ -280,6 +280,70 @@ def test_doc_index_config_defaults(isolated_config_dir):
 
 
 
+def test_history_config_defaults(isolated_config_dir):
+    """history_config returns the two mirror thresholds."""
+    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+
+    cfg = ConfigManager()
+    hc = cfg.history_config
+    assert hc["session_dir_warning_bytes"] == DISK_WARNING_BYTES
+    assert hc["mirror_gap_tolerance"] == DEFAULT_MIRROR_GAP_TOLERANCE
+
+
+def test_history_config_honours_edits(isolated_config_dir):
+    """Both keys are read from the file when the file says something."""
+    ConfigManager()  # installs the bundled app.json
+    app_json = isolated_config_dir / "app.json"
+    data = json.loads(app_json.read_text(encoding="utf-8"))
+    data["history"] = {
+        "session_dir_warning_bytes": 5000,
+        "mirror_gap_tolerance": 0,
+    }
+    app_json.write_text(json.dumps(data), encoding="utf-8")
+    hc = ConfigManager().history_config
+    assert hc["session_dir_warning_bytes"] == 5000
+    # Zero is a real answer for this one: "tell me about the first gap".
+    assert hc["mirror_gap_tolerance"] == 0
+
+
+def test_history_config_rejects_a_silencing_threshold(isolated_config_dir):
+    """A zero, a negative or a typo falls back rather than muting the check."""
+    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+
+    ConfigManager()  # installs the bundled app.json
+    app_json = isolated_config_dir / "app.json"
+    for bad_bytes, bad_gaps in (
+        (0, -1),
+        (-1, "three"),
+        ("lots", None),
+        (None, {}),
+    ):
+        data = json.loads(app_json.read_text(encoding="utf-8"))
+        data["history"] = {
+            "session_dir_warning_bytes": bad_bytes,
+            "mirror_gap_tolerance": bad_gaps,
+        }
+        app_json.write_text(json.dumps(data), encoding="utf-8")
+        hc = ConfigManager().history_config
+        assert hc["session_dir_warning_bytes"] == DISK_WARNING_BYTES, bad_bytes
+        assert hc["mirror_gap_tolerance"] == DEFAULT_MIRROR_GAP_TOLERANCE, bad_gaps
+
+
+def test_history_config_survives_a_non_dict_section(isolated_config_dir):
+    """A section written as something other than an object is ignored."""
+    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+
+    ConfigManager()  # installs the bundled app.json
+    app_json = isolated_config_dir / "app.json"
+    data = json.loads(app_json.read_text(encoding="utf-8"))
+    data["history"] = ["1073741824", 3]
+    app_json.write_text(json.dumps(data), encoding="utf-8")
+    hc = ConfigManager().history_config
+    assert hc["session_dir_warning_bytes"] == DISK_WARNING_BYTES
+
+
 def test_app_config_hot_reload(isolated_config_dir):
     """Editing app.json and calling reload_app_config reflects changes."""
     cfg = ConfigManager()

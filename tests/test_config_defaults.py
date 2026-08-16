@@ -66,15 +66,37 @@ def test_engine_defaults_survive_the_loader() -> None:
 # ---- app.json ------------------------------------------------------------
 
 
-def test_app_config_has_only_the_two_live_sections() -> None:
-    """app.json is the two indexes and nothing else.
+def test_app_config_has_only_the_live_sections() -> None:
+    """app.json is the two indexes, the history thresholds, and nothing else.
 
     Five sections went with the native engine — ``url_cache``,
     ``history_compaction``, ``agents``, ``reasoning``, ``cache_warmup``
     and ``cache_tiering``. A section nothing reads is a knob that lies:
     the user edits it, the app accepts the edit, and nothing changes.
     """
-    assert set(_load_json("app.json")) == {"doc_convert", "doc_index"}
+    assert set(_load_json("app.json")) == {"doc_convert", "doc_index", "history"}
+
+
+def test_history_section_fields() -> None:
+    """history holds the two thresholds the mirror is judged by."""
+    cfg = _load_json("app.json")["history"]
+    assert set(cfg) == {"session_dir_warning_bytes", "mirror_gap_tolerance"}
+    assert cfg["session_dir_warning_bytes"] > 0
+    assert cfg["mirror_gap_tolerance"] >= 0
+
+
+def test_history_defaults_match_the_code() -> None:
+    """The shipped file says what the fallbacks say.
+
+    Two owners of one number is one too many when the file is the one the
+    user edits and the constant is the one that answers when they have not.
+    """
+    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+
+    cfg = _load_json("app.json")["history"]
+    assert cfg["session_dir_warning_bytes"] == DISK_WARNING_BYTES
+    assert cfg["mirror_gap_tolerance"] == DEFAULT_MIRROR_GAP_TOLERANCE
 
 
 def test_doc_convert_section_fields() -> None:

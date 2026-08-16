@@ -642,6 +642,84 @@ class TestPump:
 
 
 # ---------------------------------------------------------------------------
+# When a run of mirror gaps stops being bad luck
+# ---------------------------------------------------------------------------
+
+
+class TestMirrorGapEscalation:
+    """The banner needs to know when to stop calling it bad luck.
+
+    The rule lives on ``EngineHealth`` and not in the browser, for the
+    reason the disk warning's one-shot does: one owner, so a second copy
+    cannot disagree (``specs5/1-foundation/configuration.md`` § App
+    Config — "how many mirror-append failures are tolerated before the
+    health banner escalates").
+    """
+
+    def health(self, **kwargs):
+        from ac_dc.claude_code.health import EngineHealth
+
+        return EngineHealth(**kwargs)
+
+    def test_a_clean_mirror_is_not_escalated(self):
+        assert self.health().to_dict()["mirror_gaps_escalated"] is False
+
+    def test_the_default_tolerates_a_run_of_three(self):
+        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+
+        h = self.health()
+        for _ in range(DEFAULT_MIRROR_GAP_TOLERANCE):
+            h.note_mirror_gap()
+        assert h.to_dict()["mirror_gaps_escalated"] is False
+        h.note_mirror_gap()
+        assert h.to_dict()["mirror_gaps_escalated"] is True
+
+    def test_a_zero_tolerance_escalates_on_the_first(self):
+        """A real answer, not a broken one: "tell me about the first gap"."""
+        h = self.health(mirror_gap_tolerance=lambda: 0)
+        assert h.to_dict()["mirror_gaps_escalated"] is False
+        h.note_mirror_gap()
+        assert h.to_dict()["mirror_gaps_escalated"] is True
+
+    def test_it_is_read_at_serialisation_not_at_construction(self):
+        """`app.json` reloads without a restart, so the value cannot be
+        pinned when the session is built."""
+        tolerance = [10]
+        h = self.health(mirror_gap_tolerance=lambda: tolerance[0])
+        for _ in range(3):
+            h.note_mirror_gap()
+        assert h.to_dict()["mirror_gaps_escalated"] is False
+        tolerance[0] = 1
+        assert h.to_dict()["mirror_gaps_escalated"] is True
+
+    def test_a_broken_tolerance_is_not_a_way_to_silence_a_broken_mirror(self):
+        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+
+        def boom():
+            raise RuntimeError("no config")
+
+        for source in (boom, lambda: None, lambda: "three", lambda: -5):
+            h = self.health(mirror_gap_tolerance=source)
+            for _ in range(DEFAULT_MIRROR_GAP_TOLERANCE + 1):
+                h.note_mirror_gap()
+            assert h.to_dict()["mirror_gaps_escalated"] is True, source
+
+    async def test_the_broadcast_carries_it(self, engine):
+        from claude_agent_sdk import MirrorErrorMessage
+
+        engine.health.mirror_gap_tolerance = lambda: 0
+        client = client_of(engine)
+        client.messages = [
+            DEFAULT_MESSAGES[0],
+            MirrorErrorMessage(subtype="mirror_error", data={}, error="disk full"),
+            *DEFAULT_MESSAGES[1:],
+        ]
+        events, _ = await collect(engine)
+        health = next(e for e in events if e.name == "engineHealth")
+        assert health.payload["mirror_gaps_escalated"] is True
+
+
+# ---------------------------------------------------------------------------
 # Reconnect replay
 # ---------------------------------------------------------------------------
 

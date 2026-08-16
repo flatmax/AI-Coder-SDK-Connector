@@ -75,6 +75,12 @@ logger = logging.getLogger(__name__)
 # Carried over from the native engine's agent-archive warning; only the
 # measured path changed. Never blocks work — a transcript is the one thing
 # under .ac-dc4/ that does not rebuild.
+#
+# The default, not the threshold: `app.json`'s `history` section owns the
+# number a running server uses, and `ConfigManager.history_config` falls back
+# to this one. It stays here because it is this module's own documented
+# constant (specs-reference/3-engine/history.md § Numeric constants) and
+# because a store built without a config manager still needs an answer.
 DISK_WARNING_BYTES = 1024 * 1024 * 1024
 
 _JSONL_SUFFIX = ".jsonl"

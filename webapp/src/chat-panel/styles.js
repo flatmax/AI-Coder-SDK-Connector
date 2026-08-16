@@ -1411,6 +1411,15 @@ export const STYLES = css`
     color: var(--text-secondary, #8b949e);
     border-top-color: rgba(139, 148, 158, 0.25);
   }
+  /* Past the tolerance in app.json's history section. Red now,
+   * and matching the disconnected note on purpose: enough
+   * appends have failed that the local transcript should be
+   * read as broken rather than briefly unlucky. */
+  .health-banner.health-banner-bad {
+    background: rgba(248, 81, 73, 0.1);
+    color: #f85149;
+    border-top-color: rgba(248, 81, 73, 0.25);
+  }
   .health-lines {
     flex: 1;
     display: flex;

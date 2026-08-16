@@ -26,6 +26,7 @@ function health(overrides = {}) {
     auth_warning: null,
     mcp: [],
     mirror_gaps: 0,
+    mirror_gaps_escalated: false,
     last_error: null,
     ...overrides,
   };
@@ -94,6 +95,15 @@ describe('healthKey', () => {
     );
   });
 
+  it('changes when the count crosses the tolerance', () => {
+    // Same count, different verdict: `mirror_gap_tolerance` can be
+    // lowered in app.json between two reports of the same three gaps,
+    // and "this repo has given up on the mirror" is news.
+    expect(healthKey(health({ mirror_gaps: 3 }))).not.toBe(
+      healthKey(health({ mirror_gaps: 3, mirror_gaps_escalated: true })),
+    );
+  });
+
   it('changes when a different thing goes wrong', () => {
     expect(healthKey(health({ last_error: 'boom' }))).not.toBe(
       healthKey(health({ auth_warning: 'boom' })),
@@ -133,6 +143,50 @@ describe('ChatPanel health banner', () => {
     await settle(p);
     await report(p, health({ mirror_gaps: 3 }));
     expect(banner(p).textContent).toContain('3 turns were not appended');
+  });
+
+  it('stays amber while the gaps are still within tolerance', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ mirror_gaps: 2 }));
+    expect(banner(p).classList.contains('health-banner-bad')).toBe(false);
+    expect(banner(p).textContent).not.toContain('more than this repo tolerates');
+  });
+
+  it('escalates when the engine says the tolerance is past', async () => {
+    // The comparison is the engine's — `EngineHealth._escalated()` reads
+    // `app.json`'s `history.mirror_gap_tolerance`. The browser is told
+    // the answer, not the threshold, so there is only one owner of it.
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ mirror_gaps: 4, mirror_gaps_escalated: true }));
+    expect(banner(p).classList.contains('health-banner-bad')).toBe(true);
+    const text = banner(p).textContent;
+    expect(text).toContain('4 turns were not appended');
+    expect(text).toContain('more than this repo tolerates');
+    expect(text).toContain('.ac-dc4/sessions/');
+  });
+
+  it('speaks again when a dismissed warning escalates', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ mirror_gaps: 3 }));
+    p.shadowRoot.querySelector('.health-dismiss').click();
+    await settle(p);
+    expect(banner(p)).toBeNull();
+    // Same three gaps, but the repo's tolerance was lowered under it.
+    await report(p, health({ mirror_gaps: 3, mirror_gaps_escalated: true }));
+    expect(banner(p)).not.toBeNull();
+    expect(banner(p).textContent).toContain('more than this repo tolerates');
+  });
+
+  it('an escalated flag on its own is not a problem', async () => {
+    // Nothing sends this — `_escalated()` cannot be true with no gaps —
+    // but the banner must not invent a red strip out of a stray flag.
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ mirror_gaps_escalated: true }));
+    expect(banner(p)).toBeNull();
   });
 
   it('shows the engine, version and credential warnings together', async () => {

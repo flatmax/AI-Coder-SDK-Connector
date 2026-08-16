@@ -30,7 +30,10 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,13 @@ logger = logging.getLogger(__name__)
 # generous for a version print and still bounded well inside the 60 s
 # connect budget.
 CLI_VERSION_PROBE_TIMEOUT = 15.0
+
+# Failed mirror appends tolerated before the health banner calls the mirror
+# broken rather than unlucky. The SDK retries a batch before reporting a gap
+# at all, so one is bad luck; a fourth is a pattern. `app.json`'s `history`
+# section owns the running value and this is its default — the same
+# relationship `DISK_WARNING_BYTES` has with the threshold beside it.
+DEFAULT_MIRROR_GAP_TOLERANCE = 3
 
 # The floor the SDK itself enforces. Read from the SDK when available so
 # an upgraded floor is honoured without a code change here.
@@ -431,6 +441,13 @@ class EngineHealth:
     mcp: list[dict[str, Any]] = field(default_factory=list)
     mirror_gaps: int = 0
     last_error: str | None = None
+    #: How many failed mirror appends the browser's health banner treats as
+    #: bad luck before it treats them as a broken mirror. A callable, not a
+    #: number, because it comes from ``app.json`` — which reloads without a
+    #: restart, so reading it once here would pin the value the server
+    #: started with. The default answers for a session built without a
+    #: config manager, which is every unit test that does not care.
+    mirror_gap_tolerance: Callable[[], int] = lambda: DEFAULT_MIRROR_GAP_TOLERANCE
 
     def apply_cli(self, resolution: CliResolution) -> None:
         """Record a :func:`resolve_cli` result."""
@@ -447,6 +464,26 @@ class EngineHealth:
         """Count a ``MirrorErrorMessage``; the repo-local copy has a hole."""
         self.mirror_gaps += 1
 
+    def _escalated(self) -> bool:
+        """Whether the gap count has passed what is tolerated.
+
+        The rule lives here rather than in the browser, for the reason the
+        disk warning's one-shot does: one owner. A second copy of it in the
+        panel could only disagree, and would have to be handed the
+        threshold to disagree about.
+
+        A tolerance that raises or answers with nonsense is read as the
+        default rather than as "never escalate" — a broken config key must
+        not be a way to silence a broken mirror.
+        """
+        try:
+            tolerated = int(self.mirror_gap_tolerance())
+        except Exception:  # noqa: BLE001 - a config read, not a control path
+            tolerated = DEFAULT_MIRROR_GAP_TOLERANCE
+        if tolerated < 0:
+            tolerated = DEFAULT_MIRROR_GAP_TOLERANCE
+        return self.mirror_gaps > tolerated
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "connected": self.connected,
@@ -460,5 +497,6 @@ class EngineHealth:
             "auth_warning": self.auth_warning,
             "mcp": list(self.mcp),
             "mirror_gaps": self.mirror_gaps,
+            "mirror_gaps_escalated": self._escalated(),
             "last_error": self.last_error,
         }

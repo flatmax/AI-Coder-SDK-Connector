@@ -60,7 +60,10 @@ from ac_dc.claude_code.events_log import (
     review_start_content,
     session_switch_content,
 )
-from ac_dc.claude_code.health import EngineStartupError
+from ac_dc.claude_code.health import (
+    DEFAULT_MIRROR_GAP_TOLERANCE,
+    EngineStartupError,
+)
 from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers
 from ac_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
 from ac_dc.claude_code.messages import Event
@@ -268,6 +271,12 @@ class ClaudeCodeService:
             mcp_servers=mcp_servers,
             session_store=self.session_store,
         )
+        # When a run of failed mirror appends stops being bad luck. Handed
+        # over as a callable, not a number, so an edited `app.json` takes on
+        # the next broadcast the way its other keys do — and set here rather
+        # than in the session's constructor because the threshold is ours to
+        # know: the session has `engine.json`, not the app config.
+        self.session.health.mirror_gap_tolerance = self._mirror_gap_tolerance
 
         self._selected_files: list[str] = []
         # Last-known viewer state, pushed by the browser on navigation.
@@ -327,6 +336,26 @@ class ClaudeCodeService:
             )
             return None
         return RepoSessionStore(Path(ac_dc_dir) / "sessions")
+
+    def _history_config(self) -> dict[str, Any]:
+        """``app.json``'s ``history`` section, or an empty dict.
+
+        Read per use rather than cached, so ``reload_app_config`` takes
+        without a restart — both values are consulted at the moment they
+        matter, one on a size check and one when health is serialised.
+        Empty when the config manager is a test stub without the property,
+        which leaves each caller on its own documented default.
+        """
+        section = getattr(self._config, "history_config", None)
+        return section if isinstance(section, dict) else {}
+
+    def _mirror_gap_tolerance(self) -> int:
+        """The configured gap tolerance, for :class:`EngineHealth` to read."""
+        return int(
+            self._history_config().get(
+                "mirror_gap_tolerance", DEFAULT_MIRROR_GAP_TOLERANCE
+            )
+        )
 
     def _build_events_log(self) -> Any:
         """``.ac-dc4/events.jsonl``, or ``None`` without a repo.
@@ -989,7 +1018,7 @@ class ClaudeCodeService:
         """The mirrored transcripts' size warning, once per server lifetime.
 
         ``None`` every time but one: the first check that finds
-        ``.ac-dc4/sessions/`` over :data:`DISK_WARNING_BYTES` returns the
+        ``.ac-dc4/sessions/`` over the configured threshold returns the
         sentence and every later check returns nothing, whether it came from
         a turn ending or a browser asking for its first paint.
 
@@ -1011,7 +1040,9 @@ class ClaudeCodeService:
         except Exception as exc:
             logger.debug("Could not measure the session directory: %s", exc)
             return None
-        if total < DISK_WARNING_BYTES:
+        if total < self._history_config().get(
+            "session_dir_warning_bytes", DISK_WARNING_BYTES
+        ):
             return None
         self._disk_warned = True
         gib = total / (1024 * 1024 * 1024)

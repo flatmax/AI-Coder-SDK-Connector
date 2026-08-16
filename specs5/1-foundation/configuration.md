@@ -64,7 +64,7 @@ The consequences to preserve:
 - **Document index** — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
 - **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `ac-dc` tool call may wait for a pending flush
 - **Permissions** — the decision timeout and the shorter no-localhost-client timeout
-- **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did
+- **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did. Both thresholds are compared engine-side and the browser is told the verdict — the banner receives "this has escalated", not the number to compare against, for the same reason the disk warning arrives as a sentence: two owners of one rule can only disagree. Both are read on use rather than at construction, so an edit to `app.json` takes effect on the next turn
 - **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
 
 Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux

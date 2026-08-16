@@ -1704,6 +1704,72 @@ class TestTheDiskWarning:
         svc.session = FakeSession()
         assert await svc._disk_warning() is None
 
+    async def test_the_threshold_comes_from_app_json(self, service, monkeypatch):
+        """A gigabyte is the default, not the rule
+        (``specs5/1-foundation/configuration.md`` § App Config)."""
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 5_000)
+        service._config.history_config = {"session_dir_warning_bytes": 4_000}
+        assert await service._disk_warning() is not None
+
+    async def test_a_raised_threshold_keeps_a_big_directory_quiet(
+        self, over_threshold
+    ):
+        """The knob works in the direction that matters: a user who has
+        decided ten gigabytes is fine can say so."""
+        over_threshold._config.history_config = {
+            "session_dir_warning_bytes": 10 * 1024 * 1024 * 1024
+        }
+        assert await over_threshold._disk_warning() is None
+
+    async def test_a_config_without_the_section_falls_back(self, over_threshold):
+        """Every stub config in these tests is such a config, which is why
+        the module constant stays."""
+        assert not hasattr(over_threshold._config, "history_config")
+        assert await over_threshold._disk_warning() is not None
+
+    async def test_the_reload_takes_without_a_restart(self, service, monkeypatch):
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 5_000)
+        service._config.history_config = {"session_dir_warning_bytes": 6_000}
+        assert await service._disk_warning() is None
+        service._config.history_config = {"session_dir_warning_bytes": 4_000}
+        assert await service._disk_warning() is not None
+
+
+class TestTheMirrorGapTolerance:
+    """The service owns `app.json`; the session owns `engine.json`. The
+    threshold crosses that line as a callable so an edited file takes on the
+    next broadcast rather than at the next restart.
+
+    Built on the real session rather than the shared fixture's fake, because
+    the wiring under test is the one line that hands the real one its
+    threshold.
+    """
+
+    @pytest.fixture
+    def wired(self, tmp_path, events):
+        return ClaudeCodeService(
+            FakeConfig(tmp_path),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+
+    def test_the_session_health_is_handed_the_configured_number(self, wired):
+        wired._config.history_config = {"mirror_gap_tolerance": 7}
+        assert wired.session.health.mirror_gap_tolerance() == 7
+
+    def test_a_config_without_the_section_uses_the_default(self, wired):
+        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+
+        assert not hasattr(wired._config, "history_config")
+        assert (
+            wired.session.health.mirror_gap_tolerance() == DEFAULT_MIRROR_GAP_TOLERANCE
+        )
+
+    def test_it_reaches_the_health_rpc(self, wired):
+        wired._config.history_config = {"mirror_gap_tolerance": 0}
+        wired.session.health.note_mirror_gap()
+        assert wired.get_engine_health()["mirror_gaps_escalated"] is True
+
 
 class TestHistoryRpcs:
     """A real store, a real transcript, and the two read RPCs over it.

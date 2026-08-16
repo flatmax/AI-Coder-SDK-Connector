@@ -84,6 +84,29 @@ _VERSION_MARKER = ".bundled_version"
 # See IMPLEMENTATION_NOTES.md for the rename rationale.
 _AC_DC_DIR = ".ac-dc4"
 
+# Defaults for the `history` section of app.json. Duplicated as a
+# fallback rather than imported from `claude_code.session_store`, which
+# holds the same number as its own default: the config layer must answer
+# without the engine package, and a config manager that imports the
+# engine to read a threshold inverts the dependency.
+_DISK_WARNING_BYTES = 1024 * 1024 * 1024
+_MIRROR_GAP_TOLERANCE = 3
+
+
+def _int_at_least(value: Any, default: int, minimum: int) -> int:
+    """``value`` as an int no smaller than ``minimum``, or ``default``.
+
+    Anything unparseable or below the floor falls back. The floor differs
+    per key and is not decoration: a zero-byte size warning fires on
+    every check, while a zero gap tolerance honestly means "tell me about
+    the first one".
+    """
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= minimum else default
+
 
 # ---------------------------------------------------------------------------
 # Config type whitelist (for the Settings RPC service)
@@ -508,6 +531,44 @@ class ConfigManager:
             ),
             "keywords_max_doc_freq": float(
                 section.get("keywords_max_doc_freq", 0.6)
+            ),
+        }
+
+    @property
+    def history_config(self) -> dict[str, Any]:
+        """Transcript-history section with defaults filled in.
+
+        Two thresholds, both about the mirrored transcripts under
+        ``.ac-dc4/`` (``specs5/1-foundation/configuration.md`` § App
+        Config):
+
+        ``session_dir_warning_bytes``
+            When the session directory passes this, the user is told once.
+            A gigabyte by default. Reached sooner than the native engine's
+            history did, because pasted images now live in the transcript
+            as the base64 blocks they were sent as.
+        ``mirror_gap_tolerance``
+            How many failed mirror appends are tolerated before the
+            engine-health banner escalates from a warning to a fault.
+            Three by default: the SDK retries a batch before reporting a
+            gap at all, so one is bad luck and a fourth is a broken
+            mirror.
+
+        An unreadable value falls back to the default rather than
+        disabling the check. The two floors differ: a size warning of
+        zero bytes would fire on every check, which is how a warning
+        worth reading becomes one nobody reads, while a tolerance of zero
+        honestly means "escalate on the first gap" and is honoured.
+        """
+        section = self.app_config.get("history", {})
+        if not isinstance(section, dict):
+            section = {}
+        return {
+            "session_dir_warning_bytes": _int_at_least(
+                section.get("session_dir_warning_bytes"), _DISK_WARNING_BYTES, 1
+            ),
+            "mirror_gap_tolerance": _int_at_least(
+                section.get("mirror_gap_tolerance"), _MIRROR_GAP_TOLERANCE, 0
             ),
         }
 
