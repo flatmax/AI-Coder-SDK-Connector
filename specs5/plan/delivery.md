@@ -1502,3 +1502,113 @@ no longer claims an affordance that was never built.
 session ready, `file_checkpointing` False, clean disconnect. Phase 5's own exit criterion — a restarted
 server resuming the previous conversation — still has not been run live, and this is the second entry in
 this log to say that a phase's green tests met a live CLI and lost.
+
+---
+
+## Interlude — the exit criterion, and the preview every session shared (2026-08-16)
+
+Phase 5's exit criterion was finally run against a live CLI, and it passes. Six checks: the CLI child
+carries `--resume=1d53df67-39aa-4d04-894a-14a53f7f6d2a`; a question about the *earlier* conversation is
+answered with no tool calls at all, so the answer came from the model's rebuilt context and not from
+anything we replayed; the resumed turns land in the same `.jsonl` with no fork; the HUD stays closed on
+`session-changed`; and SIGINT leaves no `_bundled/claude` survivors and no zombies.
+
+The restart had to be driven from **outside** the app, by a terminal `claude` CLI agent with
+chrome-devtools MCP. The reason is structural and worth writing down: the process under test is the one
+hosting the engine that would be doing the testing. There is no way to verify "the server restarts and
+resumes" from inside the server — killing it kills the turn making the observation. Any future check of
+a shutdown path needs a second agent, not a cleverer test.
+
+### Every session row said the same thing, and 2 915 green tests agreed
+
+The bug the live run exposed was on screen the whole time. The session list showed, for **every** row,
+the same 100 characters of AC⚡DC's own `<ac-dc-ui-context>` prose — and `session-preview` is the only
+field that distinguishes one row from another. A history browser where every entry is identical.
+
+Three things had to line up, and they did:
+
+- The CLI truncates the sidecar's `first_prompt` to **exactly 200 characters**, with an ellipsis. Our
+  framing block is longer than that, so the truncation lands *inside* it and `</ac-dc-ui-context>` never
+  appears in the field.
+- `strip_framing` needs that closing tag. Without it, it takes its "opened and never closed" branch and
+  returns the text unchanged — correct behaviour, on input it was never given a way to fix.
+- `summarise_session` did `info.first_prompt or info.summary` and never called `strip_framing` at all.
+
+The last one is the actual defect, and the live sidecar shows how avoidable it was:
+`info.first_prompt` was 200 characters of framing, while `info.summary` — sitting right there as the
+second operand — was `'Determine next phase after phase 5'`. The CLI had already written a good
+one-line title from its `ai_title` field. We preferred the truncated boilerplate over it. And
+`first_prompt_locked` is `true` in the sidecar, so the field never improves on its own.
+
+The preview now reads the *parsed messages* first, through the same parser the rest of the module reads
+through, where the whole prompt is present and the framing can be stripped; then the CLI's title; then
+the truncated field last rather than never, because something session-specific beats `(empty)`.
+
+Why the suite said nothing is the same shape as the last two interludes: **every fixture's framed prompt
+was short enough for the closing tag to survive the truncation**. The tests exercised
+`strip_framing`'s happy branch exclusively, so they agreed with the bug. The seven new tests in
+`TestThePreviewIsWhatTheUserTyped` are built on the real 200-character truncation, copied verbatim off
+the live sidecar, and one of them asserts the CLI's title wins when the transcript will not parse.
+
+`INDEX_VERSION` goes 1 → 2 with it. The derived index caches the *finished row*, `preview` included, so
+without a bump the old boilerplate would have outlived the fix on every machine that already had a
+cache.
+
+### 73 raw entries, 51 parser messages, 4 rendered turns
+
+Read against a real CLI-written blob rather than a fixture, the fold holds. Fifteen tool calls
+correlated to their results, `num_turns: 12`, per-model usage with cache-read and cache-creation tokens,
+`duration_ms: 231250` — footers reconstructed because the CLI writes one entry per content block and no
+result entry exists to copy. `terminalReason` and cost come back **absent rather than guessed**, which
+is the behaviour `formatCost` exists to protect.
+
+Four entry types the SDK's parser drops account for the 73 → 51: `ai-title`, `attachment`,
+`queue-operation`, `last-prompt`. All four are correctly dropped — the `attachment` here was a
+`deferred_tools_delta`, not user content, so nothing the human wrote or saw is lost in the gap.
+
+### Resuming redirects the CLI's own store, and that has a consequence
+
+This looked like a defect and is not. `subprocess_cli.py` appends `--session-mirror` whenever a store is
+set, and `materialize_resume_session` copies the store's session into a temp `CLAUDE_CONFIG_DIR` laid
+out like `~/.claude/` and points the subprocess there. Confirmed live: both `_bundled/claude` pids carry
+`CLAUDE_CONFIG_DIR=/tmp/claude-resume-<suffix>`.
+
+The consequence belongs in the spec, not just here. **Once AC⚡DC resumes a session,
+`~/.claude/projects/…/<id>.jsonl` is frozen at the moment of resume** — permanently, and a terminal
+`claude --resume` on that id sees a stale conversation ending mid-restart. This sharpens the mirror-gap
+warning from a nicety into the thing it is: before a resume, a gap in our mirror was survivable because
+the CLI kept its own copy. After one, our mirror is the *only* record of every turn that follows, and a
+gap marker is a report of data that exists nowhere.
+
+### The temp directory the signal handler never removes
+
+Chasing the above surfaced a real leak, and it is one neither phase owns alone. The SDK's contract is
+that `MaterializedResume.cleanup()` removes the temp config dir, reached from
+`ClaudeSDKClient.disconnect()`. Our graceful path honours it — `EngineSession.disconnect()` →
+`_quiet_disconnect(client)`. But phase 2's `_signal_handler` exits via `os._exit`, documented right
+there in `_kill_cli_children` as the reason the SDK's `atexit` child guard never fires for us. It skips
+this cleanup for exactly the same reason.
+
+Phase 2's `os._exit` and phase 5's auto-resume compose into it: auto-resume makes **every** start after
+the first a resume, so every launch materialises a directory and every Ctrl-C abandons one. Measured
+after two restarts: `/tmp/claude-resume-fatfygyc`, 900 K, orphaned by the verification's own SIGINT,
+alongside the live one at 1.1 M.
+
+Each holds a full transcript copy and a `.credentials.json`. Calibrating that honestly, because the SDK
+did its part: `refreshToken` is **deliberately redacted** by `_write_redacted_credentials` (a
+single-use token spent under a redirected config dir would revoke the parent's own credentials), and
+the directory is `0700` with the file `0600`, so this is not exposure to anyone else on the machine.
+What remains is a live `accessToken`, valid until its `expiresAt` — 6.7 hours out on the orphan found
+here — accumulating one copy per launch cycle and surviving until the next reboot. Hygiene, not a
+breach, and still ours to fix: `_kill_cli_children` already runs before `os._exit` and is the hook.
+
+**Found, not fixed** — the fix touches phase 2's shutdown path, and the open question is whether to
+reach `client._materialized.config_dir` (private SDK surface, but the same class of reach
+`_kill_cli_children` already makes for `_ACTIVE_CHILDREN`, and guarded the same way) or to record the
+path ourselves at connect time.
+
+### Still not verified
+
+Whether the HUD appears on turn-complete. The live check ran past `_AUTO_HIDE_MS` plus the fade, so the
+observation window was gone before anybody looked — reported as inconclusive rather than as a pass,
+which is the right call and leaves it for phase 6 to see incidentally.

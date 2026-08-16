@@ -100,6 +100,14 @@ Implementation notes that are contracts rather than choices:
   when the session is browsed or resumed, and the health banner carries the running count, because a
   transcript with a hole in it is a standing condition and not an event. The marker links to the
   banner.
+- **After a resume, the mirror is the only copy.** Resuming with a store set makes the SDK materialise
+  our session into a temporary `CLAUDE_CONFIG_DIR` and point the subprocess at that, so the CLI's own
+  `~/.claude/projects/…/<id>.jsonl` is frozen at the moment of resume and never written again — a
+  terminal `claude --resume` on that id sees a conversation ending mid-restart. This is by design and it
+  qualifies both points above. The retention timer stops being the thing to worry about, and a mirror gap
+  stops being survivable: before a resume a gap had the CLI's local file behind it, and after one a gap
+  is a report of turns that exist nowhere. Auto-resume means every server start after the first is a
+  resume, so this is the normal case rather than the exception.
 - **Nothing here provides pre-acknowledgement durability.** The CLI writes locally first and the SDK
   hands us a copy afterwards, in eager batches at roughly 100 ms cadence, so the user's message becomes
   durable *during* the turn rather than before it is accepted. What covers the gap is the browser's own

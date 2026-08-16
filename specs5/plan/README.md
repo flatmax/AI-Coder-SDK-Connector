@@ -23,13 +23,17 @@ the 1 GiB disk warning, and the health banner that four specs routed to and noth
 user's rather than a module constant's. What phase 6 inherits is under *What phase 6 will find already
 there*.
 
-**One warning about phase 5's own confidence:** it shipped with **no live CLI run**. The exit criterion
-is proved by the conformance suite and the unit tests. The last time a phase's numbers met a live
-engine, the interlude found five wrong readings on screen that 3 371 green tests had agreed with.
+**Phase 5 shipped with no live CLI run, and both interludes after it are what that cost.** The first
+found an engine that could not connect at all in any repo. The second ran the exit criterion properly —
+a restarted server, driven from outside by a second agent, because nothing can verify its own shutdown —
+and it passes: `--resume` on the child, the earlier conversation answered with no tool calls, no fork in
+the transcript, a clean SIGINT. It also found that **every row in the session list read as the same 100
+characters** of our own framing prose, which 2 915 green tests had agreed with. Three phases running,
+green numbers have met a live CLI and lost.
 
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
 landed, what it deliberately left out, and what the next phase has to do first. The phase-5 entry and
-the interlude before it are the two that matter for picking this up cold.
+the two interludes after it are what matter for picking this up cold.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
@@ -47,7 +51,7 @@ without opening a file, and read back a function it had just written.
 
 The state phase 6 inherits:
 
-- **Suites are green:** python **2906 passed, 75 skipped**; webapp **92 files / 3526 passed**.
+- **Suites are green:** python **2922 passed, 75 skipped**; webapp **92 files / 3526 passed**.
 - **`Reindexer` is the only thing that knows what the agent wrote.** `take_reindexed()` is
   repo-relative and filtered to files an index cares about; `result['files_modified']` is absolute and
   everything. If the transcript wants a durable "files changed this turn", those are the two sources,
@@ -201,7 +205,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
-| **5. History and sessions** ✅ | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run** — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. |
+| **5. History and sessions** ✅ | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run**; the two interludes after it are what that cost, and the criterion was verified live in the second — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. **Met live**: `--resume` on the CLI child, the earlier conversation answered with no tool calls, no fork in the transcript. |
 | **6. Context and cost visualisation** ← next | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget — the numbers now match `/context`. What is left is *upgrade*: the designed visualisation, MCP server health and the `ac-dc` tool inventory with its token cost, the bridge-failure banner (the same missing surface seen from the other side), and a "cost unknown" rendering for a turn that fails late carrying real usage, which the HUD currently declines to price rather than mispricing. | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 | **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
