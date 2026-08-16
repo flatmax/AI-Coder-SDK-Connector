@@ -160,7 +160,9 @@ user-visible gain.
 permission diff, specified in [`../3-engine/permissions.md`](../3-engine/permissions.md).
 
 **Kept from the old design:** file checkpointing. `enable_file_checkpointing=True` plus
-`rewind_files()` gives an undo that the anchored pipeline never had.
+`rewind_files()` gives an undo that the anchored pipeline never had. ~~Kept~~ — **withdrawn by
+[CC-20](#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)**: the SDK will not enable
+checkpointing in a session that mirrors its transcript, and the mirror is the one phase 5 needs.
 
 ---
 
@@ -498,3 +500,39 @@ than left implicit in a table:
 - **`history_image(session_id, entry_uuid, block)` is new**, and is required rather than convenient:
   `4-features/images.md` has the `userMessage` broadcast carry a pointer instead of bytes, which is only
   viable if something can turn a pointer back into bytes on demand.
+
+---
+
+## CC-20 — The mirror wins over file checkpointing; undo is git's job
+
+`session_store` and `enable_file_checkpointing` cannot both be set. The SDK validates the pair in
+`ClaudeSDKClient.connect()` *and* in `query()`, and raises:
+
+> `session_store cannot be combined with enable_file_checkpointing (checkpoints are local-disk only and
+> would diverge from the mirrored transcript)`
+
+A session that asks for both therefore does not start at all — the user sees "Could not start a Claude
+Code session" and has no engine, no history, and no way to ask for either. AC⚡DC set both from phase 1
+onward and got away with it because nothing *constructed* a store until CC-19's implementation landed;
+the constraint fired on the first run that had one. `claude_code/options.py` now sets checkpointing and
+its `--replay-user-messages` partner only when there is no store, which in practice means only a
+repoless run — every run with a repo mirrors.
+
+**Why the mirror rather than the undo:** the store carries `.ac-dc4/` history, resume after a restart,
+the session browser and the derived index — it *is* CC-19 and most of phase 5. Without it a session
+outlives only the CLI's own retention window, so the loss surfaces days later looking like data loss.
+Checkpointing carries one control that has never had a caller (`delivery.md` § No rewind UI), over
+changes git already tracks and a working tree the user can already diff.
+
+**Consequences:**
+
+- **`rewind_files()` is refused at the RPC**, not attempted and translated. The SDK's own answer is a
+  `ValueError` about local-disk divergence, which tells a user nothing about what to do instead; the
+  refusal names git.
+- **[CC-7](#cc-7--edits-are-claude-codes-applied-by-claude-code)'s closing line is withdrawn.** The undo
+  the anchored pipeline never had is not this one either.
+- **`5-webapp/chat.md`'s "Undo file changes" action is off the table while the mirror is on**, which is
+  every run with a repo. It was never built, so nothing is removed — but the spec must stop promising it.
+- **The revisit trigger is the SDK, not our taste.** One test asserts the constraint still exists
+  (`test_the_sdk_still_refuses_the_pair`). When the SDK learns to checkpoint alongside a store, that test
+  fails, and undo comes back by deleting a branch. Recorded in `7-future/README.md`.

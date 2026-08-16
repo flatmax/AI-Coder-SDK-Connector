@@ -5,7 +5,7 @@ One function, called once per connect. It is a separate module from
 likely to break on an SDK upgrade, and a pure function that builds a
 kwargs dict can be tested without spawning a CLI.
 
-Two rules govern everything here:
+The rules that govern everything here:
 
 - **Null config means omit the option.** A field left out gets the SDK's
   own default, which tracks the CLI. A field passed as ``None`` may mean
@@ -19,6 +19,10 @@ Two rules govern everything here:
 - **``system_prompt`` is the exception that proves the null rule.** It
   carries no text of ours, but it must be *set*: ``None`` means an empty
   prompt, not the CLI's. See ``CLI_SYSTEM_PROMPT``.
+- **One pair is mutually exclusive.** ``session_store`` and
+  ``enable_file_checkpointing`` cannot both be set — the SDK refuses the
+  combination outright, at connect. See
+  :func:`file_checkpointing_available`.
 
 Governing spec: ``specs5/3-engine/session.md``.
 Reference: ``specs-reference/3-engine/session.md`` § Options assembly.
@@ -52,6 +56,8 @@ SETTING_SOURCES = ["user", "project", "local"]
 # messages are replayed back to the SDK. A value of None emits a bare
 # ``--replay-user-messages`` flag. Missing it fails at rewind time rather
 # than connect time, which is why it is pinned here next to its partner.
+# The flag buys nothing on its own, so the two are set together or not at
+# all — see :func:`file_checkpointing_available`.
 REPLAY_USER_MESSAGES_ARG = {"replay-user-messages": None}
 
 # Options AC-DC must never set, with the reason, so a future reader who
@@ -80,6 +86,32 @@ NEVER_SET = {
 # (our own prompt text would fork behaviour between AC-DC and the CLI in a
 # file the user does not know exists), and this sets no text of ours.
 CLI_SYSTEM_PROMPT: dict[str, str] = {"type": "preset", "preset": "claude_code"}
+
+
+def file_checkpointing_available(session_store: Any) -> bool:
+    """Whether this session can offer ``rewind_files()``.
+
+    The SDK refuses ``enable_file_checkpointing`` together with
+    ``session_store`` — ``ValueError`` from
+    ``_internal/session_store_validation.py`` at connect *and* at query,
+    on the grounds that "checkpoints are local-disk only and would diverge
+    from the mirrored transcript". So this is not a preference to tune but
+    a fork in the road, and the mirror takes it:
+
+    - The mirror carries `.ac-dc4/` history, resume-after-restart, the
+      session browser, and the derived search index — everything phase 5
+      shipped. Without it a session outlives only the CLI's own retention
+      window, which looks like data loss days later rather than a missing
+      feature today.
+    - Checkpointing carries one control that nothing calls yet
+      (``specs5/plan/delivery.md`` § No rewind UI), and git already covers
+      most of what it would undo.
+
+    Nobody is refused a session over this: a repoless run has no mirror,
+    so it *does* get checkpointing, and a mirrored run loses the undo
+    rather than the engine.
+    """
+    return session_store is None
 
 
 def build_option_kwargs(
@@ -143,8 +175,6 @@ def build_option_kwargs(
         # Makes hook activity inspectable rather than invisible.
         "include_hook_events": True,
         "setting_sources": list(SETTING_SOURCES),
-        "enable_file_checkpointing": True,
-        "extra_args": dict(REPLAY_USER_MESSAGES_ARG),
     }
 
     resolved_cli = cli_path or config.cli_path
@@ -181,6 +211,16 @@ def build_option_kwargs(
         # Batched flushing holds a turn's tail until the result message,
         # which makes the repo-local mirror lag the UI by a whole turn.
         kwargs["session_store_flush"] = "eager"
+
+    if file_checkpointing_available(session_store):
+        kwargs["enable_file_checkpointing"] = True
+        kwargs["extra_args"] = dict(REPLAY_USER_MESSAGES_ARG)
+    else:
+        logger.info(
+            "Mirroring the transcript into the repo, so file checkpointing is "
+            "off and rewind_files() is unavailable: the SDK refuses the two "
+            "together. Undo file changes with git."
+        )
 
     if resume:
         kwargs["resume"] = resume

@@ -98,7 +98,11 @@ SLASH_EQUIVALENTS: dict[str, str | None] = {
     "clear": "New Session",
     "model": "the model picker in the chat panel, or the Settings tab",
     "cost": "the usage HUD",
-    "rewind": "the undo affordance on your message",
+    # Not the undo affordance it used to name: file checkpoints are off
+    # whenever the transcript is mirrored, which is every run with a repo
+    # (specs5/plan/decisions.md CC-20).
+    "rewind": "git — the engine keeps no file checkpoints while the "
+    "transcript is mirrored into the repo",
     "permissions": "the Settings tab's permission-mode control and rules list",
     "mcp": "MCP server health in the Context tab",
     "agents": "the subagent inventory in the Context tab",
@@ -1292,10 +1296,23 @@ class ClaudeCodeService:
         nothing — the reference spec's ``{restored: [...]}`` cannot be
         satisfied from this call alone. The frontend should refresh the
         file tree on success rather than trusting the list.
+
+        Refused outright while the transcript is mirrored, which is every
+        run with a repo: the SDK will not enable checkpointing alongside a
+        session store, so there is nothing to rewind *to*. Answered here
+        rather than left to the SDK because the SDK's version of this
+        answer is a ``ValueError`` about local-disk divergence, which tells
+        the user nothing about what to do instead.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        if not self.session.file_checkpointing:
+            return {
+                "error": "File checkpoints are unavailable in this session, "
+                "because the transcript is mirrored into the repo and the "
+                "engine will not do both. Use git to undo file changes."
+            }
         try:
             await self.session.rewind_files(user_message_id)
         except (EngineNotReadyError, SessionLostError) as exc:

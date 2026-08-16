@@ -260,3 +260,31 @@ settings where the user can see and revoke it — never an invisible in-memory g
 
 **Tripwire:** count permission prompts per turn in the usage HUD. If the median is above roughly
 two, the tiering is wrong and needs re-cutting.
+
+---
+
+## R-13 — Some `ClaudeAgentOptions` combinations are invalid, and only `connect()` knows
+
+**Severity: high when it fires — no session at all. Likelihood: certain, and it has already happened
+once.**
+
+Individual options are checked by the dataclass. Combinations are checked by
+`_internal/session_store_validation.py`, from inside `connect()` and `query()`, by raising
+`ValueError`. Phase 5 hit the one that exists today: `session_store` plus
+`enable_file_checkpointing` is refused, so the first run that built a store could not start the engine
+at all ([CC-20](decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)).
+
+**Why it bites:** the drift tripwire we had — every key we set exists on the installed dataclass — is a
+test about *field names*, and cannot see a rule about two fields together. It stayed green through the
+failure. Worse, the failing option had been set and harmless for four phases, so the change that broke
+it was somewhere else entirely: the phase that finally supplied the other half.
+
+**Mitigation:** run the SDK's own validator over the options we actually build, for the combinations we
+actually ship — including the ones assembled only when a collaborator is present. And keep a second test
+asserting the constraint still exists, so an SDK that relaxes it tells us rather than being discovered
+by accident.
+
+**Tripwire:** `test_a_mirrored_session_passes_the_sdks_own_validation` and
+`test_the_sdk_still_refuses_the_pair`, both `importorskip`ing the private module. A new validation rule
+in a future SDK will not be caught by either — the general guard is a live connect per phase, which is
+what phase 5 skipped.

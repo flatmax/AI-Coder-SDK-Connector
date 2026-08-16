@@ -9,6 +9,8 @@ test of our own logic:
 - Null config fields are **omitted**, not passed as ``None``
 - ``enable_file_checkpointing`` and ``--replay-user-messages`` ship
   together — checkpointing alone fails at rewind time, not connect time
+- neither ships alongside ``session_store``: the SDK refuses that pair at
+  connect, so the whole engine fails to start
 - ``allowed_tools``, ``agents``, and ``system_prompt`` are never set
 - ``fork_session`` without ``resume`` is refused rather than silently kept
 - Every key we produce exists on the installed dataclass
@@ -31,6 +33,7 @@ from ac_dc.claude_code.options import (
     SETTING_SOURCES,
     build_option_kwargs,
     build_options,
+    file_checkpointing_available,
 )
 
 
@@ -70,6 +73,13 @@ class TestAlwaysSet:
         kwargs["setting_sources"].append("nonsense")
         assert SETTING_SOURCES == ["user", "project", "local"]
 
+
+# ---------------------------------------------------------------------------
+# File checkpointing — and the mirror it cannot share a session with
+# ---------------------------------------------------------------------------
+
+
+class TestFileCheckpointing:
     def test_checkpointing_and_replay_ship_together(self, kwargs):
         """rewind_files() needs both; checkpointing alone fails at call time."""
         assert kwargs["enable_file_checkpointing"] is True
@@ -82,6 +92,28 @@ class TestAlwaysSet:
     def test_extra_args_is_copied_not_shared(self, kwargs):
         kwargs["extra_args"]["something"] = "else"
         assert REPLAY_USER_MESSAGES_ARG == {"replay-user-messages": None}
+
+    def test_a_mirrored_session_gets_neither(self, tmp_path):
+        """The SDK refuses the pair alongside a store — at *connect*, so
+        asking for both anyway costs every session, not only undo."""
+        kwargs = build_option_kwargs(
+            repo_root=tmp_path, config=EngineConfig(), session_store=object()
+        )
+        assert "enable_file_checkpointing" not in kwargs
+        assert "extra_args" not in kwargs
+
+    def test_availability_is_the_absence_of_a_store(self):
+        """One predicate, so the options and the RPC refusal cannot drift."""
+        assert file_checkpointing_available(None) is True
+        assert file_checkpointing_available(object()) is False
+
+    def test_the_lost_undo_is_logged(self, tmp_path, caplog):
+        """A capability that vanished silently would be read as a bug."""
+        with caplog.at_level(logging.INFO):
+            build_option_kwargs(
+                repo_root=tmp_path, config=EngineConfig(), session_store=object()
+            )
+        assert "rewind_files" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +338,36 @@ class TestSdkContract:
             fork_session=True,
         )
         assert set(kwargs) <= known
+
+    def test_a_mirrored_session_passes_the_sdks_own_validation(self, tmp_path):
+        """The regression guard for a whole engine that would not start.
+
+        The SDK validates this pair inside `connect()` *and* `query()`, so
+        the mirror plus checkpointing surfaced as "Could not start a Claude
+        Code session" with a ValueError about local-disk divergence — with
+        no session, no history and no way to ask for one.
+        """
+        validation = pytest.importorskip(
+            "claude_agent_sdk._internal.session_store_validation"
+        )
+        options = build_options(
+            repo_root=tmp_path, config=EngineConfig(), session_store=object()
+        )
+        validation.validate_session_store_options(options)
+
+    def test_the_sdk_still_refuses_the_pair(self, tmp_path):
+        """The tripwire on the constraint itself, not on our compliance:
+        an SDK that starts allowing both fails here, and undo can come back."""
+        validation = pytest.importorskip(
+            "claude_agent_sdk._internal.session_store_validation"
+        )
+        from claude_agent_sdk import ClaudeAgentOptions
+
+        options = ClaudeAgentOptions(
+            session_store=object(), enable_file_checkpointing=True
+        )
+        with pytest.raises(ValueError, match="checkpointing"):
+            validation.validate_session_store_options(options)
 
     def test_build_options_constructs_the_dataclass(self, tmp_path):
         options = build_options(repo_root=tmp_path, config=EngineConfig())

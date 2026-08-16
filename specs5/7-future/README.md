@@ -27,10 +27,15 @@ future reader can tell whether the idea has become cheap.
   ([`../3-engine/history.md § Compaction`](../3-engine/history.md#compaction)). A deliberate "compact
   now" affordance before a long task is a plausible addition; the open question is whether users can
   judge the right moment better than the engine can.
-- **Undo beyond files.** `rewind_files()` restores files to a checkpoint but does not rewind the
-  conversation — after an undo the model still remembers what it did. A true "go back to before this
-  message" needs conversation rewind, which the SDK does not expose. Until it does, the affordance must
-  keep saying *files* and nothing more.
+- **Undo at all, and then undo beyond files.** Two SDK limits stack here. The first is that
+  checkpointing cannot coexist with a `session_store`, so a mirrored session — every session with a repo
+  — has no checkpoints to rewind to and git is the undo
+  ([decisions § CC-20](../plan/decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)).
+  `test_the_sdk_still_refuses_the_pair` is the watch on it: when that test fails, the SDK has learned to
+  do both and the affordance can be built. The second limit outlives the first — `rewind_files()`
+  restores files but does not rewind the conversation, so after an undo the model still remembers what it
+  did. A true "go back to before this message" needs conversation rewind, which the SDK does not expose.
+  Until it does, the affordance must keep saying *files* and nothing more.
 - **Adopting terminal sessions.** `import_session_to_store()` can replay an existing
   `~/.claude/projects/…` transcript into our store, which would let the history browser show and resume
   sessions started in the CLI. Cheap to build; the design question is scoping — a repo's worth, or

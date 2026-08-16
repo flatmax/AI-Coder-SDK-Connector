@@ -73,6 +73,10 @@ class FakeSession:
         self.streaming_active = False
         self.permission_mode = "default"
         self.model = None
+        # False the way the real session reports it whenever the transcript
+        # is mirrored — which is every run with a repo, this fixture
+        # included. Tests about undo turn it on deliberately.
+        self.file_checkpointing = False
         # The turn in flight, which is what a mirrored entry is attributed
         # to. `None` means no turn, the way the real property reports it.
         self.active_request_id = None
@@ -1182,13 +1186,24 @@ class TestLiveControls:
 
     async def test_rewind_does_not_claim_to_know_what_was_restored(self, service):
         """The SDK's rewind_files() returns nothing; refresh the tree instead."""
+        service.session.file_checkpointing = True
         answer = await service.rewind_files("msg-uuid-1")
         assert answer == {"restored": [], "user_message_id": "msg-uuid-1"}
         assert ("rewind_files", ("msg-uuid-1",)) in service.session.control_calls
 
     async def test_a_rewind_failure_is_returned(self, service):
+        service.session.file_checkpointing = True
         service.session.control_error = RuntimeError("no checkpoint")
         assert "no checkpoint" in (await service.rewind_files("m"))["error"]
+
+    async def test_a_mirrored_session_refuses_to_rewind(self, service):
+        """No checkpoints exist to rewind to: the engine will not keep them
+        alongside a session store, and the mirror is what history is built
+        on. Says so, and names what to use instead."""
+        answer = await service.rewind_files("msg-uuid-1")
+        assert "mirrored" in answer["error"]
+        assert "git" in answer["error"]
+        assert service.session.control_calls == []
 
     async def test_stop_task_reports_stopping_not_stopped(self, service):
         """The kill is asynchronous; the task reports its own terminal status."""

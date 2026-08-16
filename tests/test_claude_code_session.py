@@ -388,6 +388,27 @@ class TestConnect:
     async def test_the_probed_binary_is_the_one_configured_to_run(self, engine):
         assert client_of(engine).options.cli_path == "/fake/claude"
 
+    async def test_a_repoless_session_gets_checkpointing(self, engine):
+        """Nothing to mirror into, so undo is free to be on."""
+        assert client_of(engine).options.enable_file_checkpointing is True
+        assert engine.file_checkpointing is True
+
+    async def test_a_mirrored_session_connects_without_checkpointing(self, tmp_path):
+        """The SDK refuses the pair, and refuses it *at connect* — keeping
+        both would cost the session rather than only the undo."""
+        session = EngineSession(tmp_path, EngineConfig(), session_store=object())
+        await session.connect()
+        assert client_of(session).options.enable_file_checkpointing is False
+        assert session.file_checkpointing is False
+        await session.disconnect()
+
+    async def test_checkpointing_is_answerable_before_connect(self, tmp_path):
+        """The RPC refusal has to work on a cold engine too."""
+        assert EngineSession(tmp_path, EngineConfig()).file_checkpointing is True
+        assert (
+            EngineSession(tmp_path, EngineConfig(), session_store=object())
+        ).file_checkpointing is False
+
     async def test_a_second_connect_does_not_replace_the_client(self, engine):
         """One client, never silently re-created."""
         await engine.connect()

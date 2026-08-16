@@ -43,15 +43,26 @@ check alone will tell you it does not exist. It does.
 | `get_mcp_status()` / `reconnect_mcp_server(name)` / `toggle_mcp_server(name, enabled)` | MCP server health surface. |
 | `get_server_info()` | Advertised commands, tools, output styles. |
 | `stop_task(task_id)` | Cancels a single background task / subagent. |
-| `rewind_files(user_message_id)` | File-level undo to a checkpoint. |
+| `rewind_files(user_message_id)` | File-level undo to a checkpoint. Unreachable while a `session_store` is set — see below. |
 
-### `rewind_files` has two prerequisites, not one
+### `rewind_files` has two prerequisites, and they cost the mirror
 
 The origin brief mentions `enable_file_checkpointing=True`. That alone is insufficient — the client
 also requires `extra_args={"replay-user-messages": None}`, because rewinding is keyed on a user
 message ID that only exists if user messages are replayed back to the SDK. Missing the second flag
 produces a runtime error at rewind time, not at connect time, so it will be found late unless
-specified. Both are mandatory in our options assembly.
+specified.
+
+The third prerequisite is the one that decides the feature: **no `session_store`**.
+`_internal/session_store_validation.py` raises `ValueError` from both `connect()` and `query()` for
+that combination — "checkpoints are local-disk only and would diverge from the mirrored transcript" —
+so a session with both starts nowhere. The mirror wins and undo goes
+([CC-20](decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)); all three
+flags are set together, only when there is no store.
+
+The same validator has a second rule worth knowing: `continue_conversation` with a store requires the
+store to implement `list_sessions()`. Ours does, and we pass `resume` explicitly rather than
+`continue_conversation`, so it does not bite — but a minimal store would fail there too.
 
 ---
 
@@ -68,7 +79,7 @@ From `ClaudeAgentOptions`. Fields AC⚡DC uses, and why:
 | `include_partial_messages` | `True` | Token-level streaming → `StreamEvent`. |
 | `include_hook_events` | `True` | Surfaces `HookEventMessage` so hook activity is visible in the transcript. |
 | `setting_sources` | `["user", "project", "local"]` | CC-11 — `CLAUDE.md` and project settings apply. |
-| `enable_file_checkpointing` | `True` | Undo. Requires the `extra_args` flag above. |
+| `enable_file_checkpointing` | `True`, **only without `session_store`** | Undo. Requires the `extra_args` flag above, and excludes the mirror (CC-20). |
 | `mcp_servers` | `{"ac-dc": <in-process server>}` | CC-6. |
 | `max_budget_usd` | optional, from config | A hard stop the native engine never had. |
 | `effort` / `thinking` | optional, from config | `thinking` is a TypedDict, not a class: `{"type": "adaptive", "display": "summarized" \| "omitted"}`. |
@@ -282,7 +293,7 @@ Collected in one place, because the brief is otherwise a good design document an
 |---|---|
 | Native engine remains the default; this is a mode | Total replacement (CC-1) |
 | Four permission modes | Six: `default`, `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`, `auto` |
-| `enable_file_checkpointing=True` enables `rewind_files` | Also requires `extra_args={"replay-user-messages": None}` |
+| `enable_file_checkpointing=True` enables `rewind_files` | Also requires `extra_args={"replay-user-messages": None}`, and is refused outright alongside `session_store` — so the mirror and undo cannot both exist (CC-20) |
 | `PreToolUse` deny shadows `can_use_tool` | `allow` shadows it too; the SDK raises `CanUseToolShadowedWarning` |
 | Permission decisions are allow / deny / ask | Also `defer` |
 | Hook list | Missing `PermissionRequest` and `SubagentStart` |

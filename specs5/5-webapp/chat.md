@@ -196,7 +196,7 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 - Copy raw text to clipboard
 - Insert raw text into chat input
 - Read aloud — speaks the message via text-to-speech; toggles to a stop control while this message is the one playing. Shown only when the browser supports speech synthesis. See [speech.md § Read Aloud](speech.md#read-aloud-text-to-speech)
-- **Undo file changes** — on user message cards only, calls `rewind_files(user_message_id)` to restore the files as they were before that turn. Confirmation dialog first; the result names the restored paths. This is the UI for `/rewind`, and it restores *files*, not the conversation — the transcript is unchanged and the panel says so
+- **Undo file changes** — **not built, and not buildable today.** It would call `rewind_files(user_message_id)` to restore the files as they were before that turn, but the engine keeps no checkpoints in a session that mirrors its transcript, and every session with a repo mirrors ([decisions § CC-20](../plan/decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)). The RPC refuses the call and names git. If the SDK ever allows both: user message cards only, confirmation dialog first, and the panel must say it restores *files* and not the conversation — the transcript is unchanged either way
 - Not shown on streaming messages
 ## Scrolling
 ### Auto-Scroll

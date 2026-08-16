@@ -1443,3 +1443,62 @@ writes into a `SessionStoreEntry` blob across SDK versions.
   The interlude's rule holds: refresh the numbers, show no HUD.
 - **Escalation is a verdict, not a threshold.** If phase 6 grows a second view of mirror health, read
   `mirror_gaps_escalated`; do not re-derive it from a count and a config value.
+
+---
+
+## Interlude — the store that stopped the engine (2026-08-16)
+
+Phase 5 closed with **live verification not done**, named as the open risk of the phase. The risk paid
+out on the first attempt to start the app: no session at all.
+
+```
+Could not start a Claude Code session: session_store cannot be combined with
+enable_file_checkpointing (checkpoints are local-disk only and would diverge
+from the mirrored transcript)
+```
+
+### 2 906 green tests and an engine that could not connect
+
+The SDK validates that pair in `ClaudeSDKClient.connect()` and again in `query()`. AC⚡DC had set
+`enable_file_checkpointing=True` unconditionally since phase 1 and it was harmless for four phases,
+because **nothing constructed a store** — `build_option_kwargs` only adds `session_store` when it is
+given one, and until phase 5 nobody was. The moment `_build_session_store()` started returning a
+`RepoSessionStore`, every connect in every repo raised.
+
+Why the suite said nothing is the part worth keeping. `test_claude_code_options.py` is the SDK-drift
+tripwire and it asserted the right things about the wrong subject: that every key we set exists on the
+installed dataclass, and that checkpointing ships with its `--replay-user-messages` partner. Both were
+true. Neither is *validity* — the SDK's own opinion about combinations lives in
+`_internal/session_store_validation.py`, which the tripwire never called. A contract test against a
+dataclass's field names cannot see a rule about two of its fields together.
+
+Two tests replace that gap, and they point in opposite directions on purpose:
+
+- `test_a_mirrored_session_passes_the_sdks_own_validation` runs the SDK's validator over the options we
+  actually build, with a store. This is the connect the user could not get.
+- `test_the_sdk_still_refuses_the_pair` asserts the constraint *exists*. When the SDK learns to
+  checkpoint alongside a store, that test fails — which is the notification that undo can come back.
+
+Both `importorskip` the private module rather than pretending it is public API. Nine tests in total —
+the two above, the options assembly's three, three on the session's `file_checkpointing`, and one on the
+RPC refusal — take Python to **2 915 passed, 75 skipped**.
+
+### Which one loses, and the answer was not close
+
+[CC-20](decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job) records it. The
+store is `.ac-dc4/` history, resume-after-restart, the session browser and the derived index —
+everything phase 5 shipped, and its absence reads as data loss days later when the CLI's own retention
+window expires. Checkpointing was one control that has never had a caller, over changes git already
+tracks. `options.py` now sets checkpointing and the replay flag only when there is no store, which
+means only a repoless run: undo is not a reason to refuse anybody a session.
+
+The loss is not silent. Connecting with a mirror logs what went with it, `rewind_files()` is refused at
+the RPC with a message that names git instead of letting the SDK raise about local disks, and `/rewind`
+no longer claims an affordance that was never built.
+
+### Live verification — done this time
+
+`EngineSession` with a real `RepoSessionStore`, connect and disconnect against the bundled CLI 2.1.229:
+session ready, `file_checkpointing` False, clean disconnect. Phase 5's own exit criterion — a restarted
+server resuming the previous conversation — still has not been run live, and this is the second entry in
+this log to say that a phase's green tests met a live CLI and lost.

@@ -38,7 +38,7 @@ from typing import Any
 from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineHealth, EngineStartupError, resolve_cli
 from ac_dc.claude_code.messages import Event, TurnTranslator
-from ac_dc.claude_code.options import build_options
+from ac_dc.claude_code.options import build_options, file_checkpointing_available
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +327,19 @@ class EngineSession:
     @property
     def model(self) -> str | None:
         return self._model
+
+    @property
+    def file_checkpointing(self) -> bool:
+        """Whether :meth:`rewind_files` has checkpoints to rewind to.
+
+        False whenever the transcript is mirrored, which is every run with
+        a repo — the SDK refuses a session store alongside checkpointing
+        and the mirror wins
+        (:func:`ac_dc.claude_code.options.file_checkpointing_available`).
+        Read from the store this session was *built* with rather than from
+        the options, so callers can ask before the first connect.
+        """
+        return file_checkpointing_available(self._session_store)
 
     @property
     def active_request_id(self) -> str | None:
@@ -779,9 +792,12 @@ class EngineSession:
 
         Needs both ``enable_file_checkpointing`` and the
         ``--replay-user-messages`` flag, which
-        :mod:`ac_dc.claude_code.options` sets together. The SDK returns
-        nothing, so the caller cannot report *which* files were restored
-        from this call alone.
+        :mod:`ac_dc.claude_code.options` sets together — and only when the
+        transcript is *not* mirrored, because the SDK refuses a session
+        store alongside checkpointing. Callers ask
+        :attr:`file_checkpointing` first; here it would raise from inside
+        the SDK. The SDK returns nothing either way, so the caller cannot
+        report *which* files were restored from this call alone.
         """
         await self._require_client().rewind_files(user_message_id)
 

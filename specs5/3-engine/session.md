@@ -38,7 +38,7 @@ callbacks. The behaviourally load-bearing choices:
 | `include_partial_messages` | Token-level streaming. Without it the UI only updates per block, which reads as a stall on long responses. |
 | `include_hook_events` | Hook activity becomes inspectable rather than invisible. |
 | `setting_sources` = user, project, local | The repo's `CLAUDE.md`, `.claude/settings.json`, agents, skills, and custom slash commands all apply. A session in AC⚡DC behaves like a session in the CLI in the same repo. |
-| `enable_file_checkpointing` + the replay-user-messages flag | `rewind_files()` — a real undo. **Both** are required; checkpointing alone raises at rewind time. |
+| `enable_file_checkpointing` + the replay-user-messages flag | `rewind_files()` — a real undo. **Both** are required; checkpointing alone raises at rewind time. Set **only when there is no `session_store`**, which means only a repoless run — see below. |
 | `mcp_servers` = `{ac-dc: …}` | Repo intelligence as tools. See [mcp-bridge.md](mcp-bridge.md). |
 | `session_store` | The transcript is mirrored into `.ac-dc4/`. See [history.md](history.md). |
 | `max_budget_usd` | An optional hard stop. Absent under subscription billing. |
@@ -54,6 +54,23 @@ Options that AC⚡DC deliberately does **not** set:
 - **`system_prompt`** — prompt customisation is `CLAUDE.md`'s job. Injecting our own system prompt
   would fork behaviour between AC⚡DC and the CLI for the same repo, and would be invisible to the
   user in a file they do not know exists.
+
+### The mirror and file checkpointing exclude each other
+
+The SDK refuses `session_store` together with `enable_file_checkpointing`, and refuses it *at
+connect* — "checkpoints are local-disk only and would diverge from the mirrored transcript". Setting
+both costs the whole session, not just the undo, so one has to go and it is the undo: the mirror is
+what history, resume, and the session browser are built on
+([decisions § CC-20](../plan/decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job)).
+
+Consequences a reader of this file needs:
+
+- Every run with a repo mirrors, so **`rewind_files()` is unavailable in practice**. The RPC refuses
+  it with a message that names git rather than letting the SDK raise about local disks.
+- A repoless run has nothing to mirror into, so it *does* get checkpointing. Undo is not a reason to
+  refuse a session.
+- The replay-user-messages flag goes with it. Its only job is the user-message ID `rewind_files()`
+  takes, so `streamComplete.user_message_id` is `null` whenever the mirror is on.
 
 ## Request Flow
 
@@ -183,7 +200,7 @@ views want consistency. Only the housekeeping behind the second event has change
 | Load a previous session from the history browser | `resume=<that session_id>`. |
 | Branch from a point in history | `fork_session` — leaves the original session intact. |
 | New session | Connect without `resume`; a fresh session ID is issued. |
-| Undo a file change | `rewind_files(user_message_id)` back to a checkpoint. |
+| Undo a file change | `rewind_files(user_message_id)` back to a checkpoint — unavailable while the transcript is mirrored, which is every run with a repo (CC-20). Git is the answer there. |
 
 Context continuity is entirely the SDK's. AC⚡DC never reconstructs a conversation by replaying
 messages into a prompt — the failure mode of that approach is a session that looks right in the UI
@@ -203,7 +220,7 @@ which would silently turn a mistyped command into a question.
 | `/clear` | New Session. |
 | `/model` | `set_model()`, from the Settings tab and a chat-panel model picker. |
 | `/cost` | The usage HUD. |
-| `/rewind` | The undo affordance on user messages (`rewind_files`). |
+| `/rewind` | Nothing, while the transcript is mirrored: the engine will not keep checkpoints alongside a session store (CC-20). Reported as unsupported, naming git. |
 | `/permissions` | The Settings tab's permission-mode control plus the rules list. |
 | `/mcp` | MCP server health in the Context tab, backed by `get_mcp_status()`. |
 | `/agents` | Subagent inventory in the Context tab; live subagents in the tab strip. |
