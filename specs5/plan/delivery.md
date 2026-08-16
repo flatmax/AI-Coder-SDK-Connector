@@ -1240,3 +1240,206 @@ changed.
 - **The HUD must not pop on a session load.** `session-changed` refreshes the numbers and shows
   nothing, because a HUD that appears on resume reports a turn nobody took. If phase 5 introduces
   another way to load a session, it joins that path and not the turn-complete one.
+
+---
+
+## Phase 5 — History and sessions (2026-08-16)
+
+The exit criterion, met: **restarting the server resumes the previous conversation with context
+intact, and `session_store_conformance` passes** —
+`run_session_store_conformance(make_store, skip_optional=frozenset())`, nothing waived.
+
+Two things had to be true at once for that sentence to mean anything. The transcript on disk has to be
+a *record* the browser can read, and the context the model gets has to come from the engine's own
+rebuild of it. Phase 5 keeps those separate on purpose: what we render is a record of the session, and
+what the model gets is the session. Neither is derived from the other, so they cannot drift — which is
+exactly how the previous architecture produced conversations that looked right on screen while the
+model's view had diverged.
+
+### One store, and the one it replaced
+
+`session_store.py` (753 lines) implements the SDK's `SessionStore` protocol as `RepoSessionStore`:
+`.ac-dc4/sessions/<project>/<session>.jsonl` with a sibling `<session>.summary.json`, folded and
+written atomically. Per-key `asyncio.Lock`s, so two appends to one session cannot interleave; every
+key component goes through `_safe_component` / `_safe_subpath` and raises `SessionStoreKeyError`,
+because the session ID reaching the path builder is minted by the CLI and not by us.
+
+`history_store.py` is **retired, not adopted** (CC-19): 1 148 lines of store and 2 079 lines of its
+tests deleted. The reason it could not be a head start is in the plan — `SessionStoreEntry` is a
+pass-through blob, so a store cannot impose a record shape, and half its field names described
+protocols phase 3 deleted. The file handling was worth reading; the schema was not worth inheriting.
+
+**Images are in the transcript entries that carried them.** No `images/` directory, no content-hash
+indirection. A base64 screenshot is bigger on disk than a hash would be, and that cost buys the
+property that matters: a transcript is one file, and a session survives being copied out of the repo.
+The size consequence is the disk warning, below.
+
+### Reopening is a rebuild, and the append observers say when it was not
+
+`history.py` (1 127 lines) folds raw store entries into turn-shaped messages. `_Turn` reassembles a
+turn from its scattered parts — user text, tool calls and their replies interleaved by
+`_interleave`, todos, the result — and `render_messages` returns the same block objects a live turn
+produces, so the browser consumes a browsed turn through `restoreMessage`: one renderer, not a second
+one that agrees with the first until it doesn't. Compaction dividers, elapsed times and event cards
+(`_event_message`) are folded in on the same sort key.
+
+`resume_session(session_id, fork=False)` renders the transcript for the browser and hands the *same
+session ID* to `connect`, and the SDK's `resume` / `fork_session` parameters do the rest. Which
+session a connect attaches to is decided **inside** the connect lock, read from a held
+`_resume_request` rather than passed as an argument: a click on "resume" and a first turn arriving
+together would otherwise race, and the turn would win with the auto-resume default — the user asks for
+an old session and gets the newest one.
+
+Auto-resume needs no pointer file. The store sorts by `last_modified`, so the newest session *is* the
+one we were in, and a pointer would be one more thing that can disagree with the transcripts it names.
+`new_session` is the only thing that turns auto-resume off, and it turns back on after the next
+connect, so a session lost mid-conversation reattaches to itself instead of quietly continuing as a
+blank one. The startup spec's step for pre-loading history before the WebSocket server starts is
+**gone**: `get_current_state` reads the transcript on demand, which gives the same guarantee without a
+startup ordering constraint to get wrong.
+
+A mirror gap — an append the store could not write — is `add_append_observer`'s job, and it is said at
+two scales. The affected turn carries a footer marker; the session carries a running count in engine
+health. Both were specified in phase 1 and neither had a reader until this phase.
+
+### The events log had one writer and six events
+
+`events_log.py` (347 lines), append-only at `.ac-dc4/events.jsonl`, with `EVENT_TYPES` a **closed**
+seven-member set: a typo'd discriminator writes a record the browser has no renderer for, which reads
+as "the event never happened" rather than as a bug. `id` and `timestamp` come from one clock call so
+they cannot disagree.
+
+This closes the three phase-3 deviations that converged here — review entry and exit, a mode change
+during review, and a permission-mode change, all specified as "recorded in the transcript as a system
+event" and all three only broadcast live. They are records now, and they render as system-event cards
+in a browsed session.
+
+`files_written_by_file_tools` keeps CC-18's narrow name. A wrong live broadcast dies at reload; a
+wrong field name in `.ac-dc4/` is what the browser shows until somebody migrates every transcript
+users have accumulated.
+
+### The browser was a reader for an engine that no longer existed
+
+`history-browser.js` went 1 356 → 2 233 lines. Every button in the modal called `LLMService.history_*`
+— a name with nothing behind it since phase 3 — and its record-shape assumptions were the deleted
+engine's. Seven RPCs now stand behind it: `history_list`, `history_load`, `history_search`,
+`history_delete`, `history_image`, `get_subagent_transcript`, `resume_session`.
+
+The pieces that took more than re-pointing:
+
+- **Search that a cold index cannot answer differently.** `history_index.py` (563 lines) is CC-19's
+  derived index: token postings under `.ac-dc4/`, `INDEX_VERSION`-stamped, deletable and rebuildable
+  from the transcripts. It **narrows which sessions to read and never decides a hit** — every match is
+  confirmed against the transcript text — so a warm index and a cold one return the same rows, and the
+  index can go stale without being able to disagree. `role` narrows to user, assistant or *tool*, the
+  new third value: the searches this serves best are for a path or a command the agent used. Tool
+  *results* are not searched at all; that is what `Grep` is for.
+- **Delete, and the one session it refuses** — the live one. Deleting the conversation you are in
+  leaves an engine attached to a transcript that is not there.
+- **Screenshots in a browsed prompt.** `history_image` and `image-refs.js` (117 lines, new): the
+  transcript holds the image, and a listing that dropped it showed a prompt that reads as though the
+  user described a screenshot rather than pasted one.
+- **Subagents from a browsed session.** `list_subagents` / `load_subagent`, opened into read-only
+  tabs keyed `historical:<agent_id>` with a 📜 label marker and no input surface.
+- **Resume is not load.** The confirmation arms on `liveUnread` — a resume that swaps the conversation
+  out while an unread live reply is on screen is the one destructive thing in the modal, so the button
+  asks a second time in amber and only then.
+
+### The two warnings that were delivered to nobody
+
+Both were specified, both had their plumbing built in phase 1, and neither reached a human.
+
+**The disk warning.** The 1 GiB session-directory threshold had nobody watching it; it is now a
+transcript system-event card, read from both carriers so it survives a reload.
+
+**The health banner.** Four specs routed to it — `engineHealth`'s row in chat.md said "the health
+banner owns this", and the turn footer's mirror-gap marker "links to the health banner" — and it did
+not exist. `panel._engineHealth` was being stashed for a reader that was never written. Worse,
+`onEngineHealth` expected a `{requestId, data}` envelope that session-wide events do not carry, so the
+live event had never landed at all; only the state snapshot ever set the field, and nothing tested it.
+The banner sits beside the disconnected note (both are standing conditions about the channel, not
+events in the conversation), is amber while the conversation still works, and its dismissal is keyed to
+*which* problems are showing so a read warning stays quiet and a new one speaks. `connected: false` is
+not a fault: it is the normal state of a freshly loaded page.
+
+> **Correction to the phase-2 entry.** "No health-banner link target. The banner renders and its link
+> goes nowhere" was wrong in a way worth naming: nothing rendered. The link had no target because the
+> banner did not exist. Closed now, and the marker *forces* the banner open rather than un-dismissing
+> it, so the click always lands somewhere — including on "the engine reports nothing wrong", which is
+> the honest answer after a restart.
+
+### The two thresholds the mirror is judged by
+
+`app.json` gains the `history` section configuration.md always specified: the session-directory warning
+threshold and how many mirror-append failures are tolerated before the banner escalates. Both were
+hardcoded; the gap count in particular was compared against nothing, so three failed appends and
+thirty read as the same amber sentence.
+
+The comparison lives on `EngineHealth` — one owner for the rule, the same placement as the disk
+warning's one-shot — and reaches the browser as `mirror_gaps_escalated`, a verdict rather than a
+threshold to re-compare. The tolerance arrives as a `Callable[[], int]` because `reload_app_config()`
+hot-reloads the file and never notifies the service, so a value read at construction would be pinned
+to whatever was on disk at startup. Floors differ per key on purpose: bytes at least 1, because zero is
+a silenced warning; tolerance at least 0, because zero tolerated failures is a legitimate answer.
+
+### Tests
+
+Python **2 906 passed, 75 skipped** (+219 over phase 4, net of the 2 079 lines that went with
+`history_store.py`). Webapp **92 files / 3 526 passed** (+146 over the interlude).
+
+- `test_claude_code_session_store.py` — **new**. Conformance first, with `skip_optional` empty, then
+  the concurrency, key-safety and atomic-write behaviour the protocol does not cover.
+- `test_claude_code_history.py` — **new**, 979 lines. Turn folding, interleaving, compaction dividers,
+  event cards, image refs, subagent listing and loading, and delete.
+- `test_claude_code_events_log.py` — **new**. The closed discriminator, malformed-line tolerance,
+  per-session delete and rewrite.
+- `test_claude_code_service.py` — **350** total, of which **39** cover search and the derived index
+  (including the cold-versus-warm equivalence). Also the seven history RPCs, `resume_session`'s lock
+  ordering and its refusals, auto-resume and what `new_session` turns off, and the disk warning.
+  `history_index.py` has **no test file of its own** — it is exercised through the RPC that uses it,
+  which is thinner coverage than the store or the log got.
+- `history-browser.test.js` — **139**. `chat-panel/input.test.js` — **163**.
+  `chat-panel/events.test.js` — **76**. `view-subagents.test.js` — **12** and
+  `view-subagents-load.test.js` — **26**, replacing the two `view-agents*` files phase 3's naming left
+  behind. `health-banner.test.js` — **28**, new.
+
+### Live verification — not done for this phase
+
+No live CLI run. The exit criterion was verified against the conformance suite and the unit tests, not
+against a restarted server with a real conversation behind it. Given what the interlude found the last
+time a phase's numbers met a live engine, treat this as the open risk of the phase and not as a
+formality — the shapes most worth doubting are the ones the store never chose: what the CLI actually
+writes into a `SessionStoreEntry` blob across SDK versions.
+
+### Deliberately not built
+
+- **No rewind UI.** `rewind_files()` is still on the service and still has no caller. Unchanged from
+  phase 2, and still not this phase's job.
+- **Subagent attribution is still by id, not by name.** A `historical:<agent_id>` tab is labelled with
+  the id. Mapping it to the agent's definition name is unchanged from phase 3.
+- **No per-turn subagent affordance in a browsed session.** A browsed turn's `subagents` is empty, so
+  the way into a subagent transcript is the session-level listing. The per-turn chip stays a
+  live-run-only affordance.
+- **Search is substring, not semantic.** It answers from the transcripts, which is what makes it
+  answer the same cold as warm.
+- **Three App Config sections configuration.md specifies and nothing implements.** `Indexing` — the
+  re-index debounce and the pending-flush ceiling are `hooks.py`'s `DEBOUNCE_SECONDS = 0.6` and
+  `MAX_FLUSH_ROUNDS = 2`, phase 4's to have wired. `Permissions` — `DECISION_TIMEOUT = 300.0` and
+  `NO_LOCALHOST_TIMEOUT = 30.0` in `permissions.py`, phase 2's. `Presets` is deferred by decision
+  (CC-12), the other two by omission. The `history` section is the pattern to follow: a callable
+  provider so a hot reload takes, and a floor per key.
+- **No Settings engine-health card.** `settings.md:83` specifies one. The banner is the surface health
+  reaches now.
+
+### For whoever picks up phase 6
+
+- **The health payload's MCP server list is unrendered, on purpose.** The banner leaves it out because
+  a per-server status wants the Context tab's room. The bridge-failure banner is phase 6's, and the
+  data is already in the payload.
+- **A browsed session goes through `restoreMessage`.** Anything phase 6 adds to a live turn's
+  rendering has to survive arriving from `render_messages` too, or a resumed conversation loses the
+  visualisation the phase exists to add.
+- **`session-changed` is now a real, frequent event.** Auto-resume fires it on every server start.
+  The interlude's rule holds: refresh the numbers, show no HUD.
+- **Escalation is a verdict, not a threshold.** If phase 6 grows a second view of mirror health, read
+  `mirror_gaps_escalated`; do not re-derive it from a count and a config value.
