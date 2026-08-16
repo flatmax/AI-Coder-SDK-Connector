@@ -256,6 +256,203 @@ describe('ChatPanel multimodal session-changed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Restoring a rendered turn
+// ---------------------------------------------------------------------------
+//
+// `history_load` renders a *turn*: an ordered `blocks` list, the files it
+// touched, and a footer summary of usage and duration. The restore used to
+// keep `{role, content, images, system_event}` and drop the rest, which was
+// harmless while the native engine's records held nothing else and is a
+// resumed session showing none of the agent's work now.
+
+describe('ChatPanel restoring a rendered turn', () => {
+  /** An assistant turn in the shape `history_load` renders. */
+  function renderedTurn(overrides = {}) {
+    return {
+      role: 'assistant',
+      content: 'Read the file and fixed it.',
+      blocks: [
+        {
+          block_id: 'b0',
+          kind: 'text',
+          seq: 0,
+          content: 'Read the file and fixed it.',
+          done: true,
+          agent_id: null,
+        },
+      ],
+      subagents: [],
+      files: ['src/foo.py'],
+      turn: {
+        tool_calls: 2,
+        num_turns: 3,
+        files_modified: ['src/foo.py'],
+        duration_ms: 4200,
+        model_usage: {
+          'claude-opus-4': { input_tokens: 10, output_tokens: 20 },
+        },
+      },
+      terminalReason: null,
+      ...overrides,
+    };
+  }
+
+  it('keeps the blocks, the files and the footer', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [renderedTurn()] });
+    await settle(p);
+    const msg = p.messages[0];
+    expect(msg.blocks).toHaveLength(1);
+    expect(msg.files).toEqual(['src/foo.py']);
+    expect(msg.turn.tool_calls).toBe(2);
+    expect(msg.turn.duration_ms).toBe(4200);
+    expect(msg.subagents).toEqual([]);
+  });
+
+  it('renders it as a turn, not as prose', async () => {
+    // `blocks` is what makes renderMessage treat the message as a Claude
+    // Code turn at all — the footer and the tool cards hang off that one
+    // decision, so this is the assertion that the restore is load-bearing.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [renderedTurn()] });
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.turn-footer')).toBeTruthy();
+  });
+
+  it('draws no terminal badge for a browsed turn', async () => {
+    // The transcript holds no result entry, so `terminalReason` is null
+    // and stays null. A "completed" badge on no evidence is worse than
+    // no badge.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [renderedTurn()] });
+    await settle(p);
+    expect(p.messages[0].terminalReason).toBeUndefined();
+    expect(
+      p.shadowRoot.querySelector('.terminal-badge'),
+    ).toBeNull();
+  });
+
+  it('keeps a real terminal reason when there is one', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [renderedTurn({ terminalReason: 'interrupted' })],
+    });
+    await settle(p);
+    expect(p.messages[0].terminalReason).toBe('interrupted');
+  });
+
+  it('invents no footer for a turn that has none', async () => {
+    // An empty footer would report zeros as if they were measurements.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    const turn = renderedTurn();
+    delete turn.turn;
+    delete turn.files;
+    pushEvent('session-changed', { messages: [turn] });
+    await settle(p);
+    expect(p.messages[0].turn).toBeUndefined();
+    expect(p.messages[0].files).toBeUndefined();
+  });
+
+  it('keeps a compaction divider read back from disk', async () => {
+    // Same shape the live `compact_boundary` broadcast appends, so a
+    // divider read from the transcript and one seen as it happened render
+    // by the same path.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'Conversation compacted',
+          system_event: true,
+          compaction: {
+            pre_tokens: 150000,
+            post_tokens: 20000,
+            trigger: 'auto',
+          },
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages[0].compaction.pre_tokens).toBe(150000);
+    expect(
+      p.shadowRoot.querySelector('.compaction-divider'),
+    ).toBeTruthy();
+  });
+
+  it('does not attribute a compact summary to the user', async () => {
+    // The CLI wrote it, about the context it dropped, and the transcript
+    // replays it as a user turn because that is how the model receives
+    // it. Labelling it "You" would credit the reader with writing it.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'Summary of the conversation so far…',
+          compact_summary: true,
+        },
+      ],
+    });
+    await settle(p);
+    expect(p.messages[0].system_event).toBe(true);
+    expect(p.messages[0].compact_summary).toBe(true);
+    const label = p.shadowRoot.querySelector('.role-label');
+    expect(label.textContent.trim()).toBe('System');
+  });
+
+  it('keeps a compact summary out of up-arrow recall', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        { role: 'user', content: 'what I typed' },
+        {
+          role: 'user',
+          content: 'Summary of the conversation so far…',
+          compact_summary: true,
+        },
+      ],
+    });
+    await settle(p);
+    const history = p.shadowRoot.querySelector('ac-input-history');
+    // `_entries` is plain strings; the element exposes no public reader.
+    const recalled = history._entries || [];
+    expect(recalled).toContain('what I typed');
+    expect(recalled.some((t) => (t || '').includes('Summary of the'))).toBe(
+      false,
+    );
+  });
+
+  it('restores the same shape from state-loaded', async () => {
+    // A reconnect and a resume are the same transcript arriving by two
+    // routes; two normalisers would let them disagree.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('state-loaded', { messages: [renderedTurn()] });
+    await settle(p);
+    expect(p.messages[0].blocks).toHaveLength(1);
+    expect(p.messages[0].turn.num_turns).toBe(3);
+    expect(p.shadowRoot.querySelector('.turn-footer')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Compaction events — the retired native-engine stages
 // ---------------------------------------------------------------------------
 //

@@ -452,6 +452,73 @@ export function detachEventListeners(panel) {
 // ---------------------------------------------------------------
 
 /**
+ * One restored message, in the shape the renderer reads.
+ *
+ * Both restore paths — `session-changed` and `state-loaded` — go through
+ * here, because a resumed session and a reconnect-restored one are the
+ * same transcript arriving by two routes and must not render differently.
+ *
+ * The old version of this kept `{role, content, images, system_event}`
+ * and dropped the rest, which was harmless while the native engine's
+ * records held nothing else. `history_load` renders a *turn*: an ordered
+ * `blocks` list (text, thinking, tool cards, the plan), the files it
+ * touched, and a footer summary of usage and duration. Flattening that
+ * to prose is not a small loss of polish — it is a resumed session that
+ * shows none of the work the agent did, in a UI whose whole argument for
+ * tool cards is that the user should be able to see it.
+ *
+ * Fields are copied only when present. Absent is not the same as empty
+ * here: a turn with no `turn` footer is one the transcript could not
+ * supply usage for, and a fabricated empty footer would report zeros as
+ * if they were measurements.
+ */
+export function restoreMessage(m) {
+  // Multimodal messages (images) arrive as an array of
+  // `{type: 'text'/'image_url', ...}` blocks; normalize to
+  // `{content: <string>, images: [<data uri>]}`.
+  const normalized = normalizeMessageContent(m);
+  const images = Array.isArray(m.images) ? m.images : normalized.images;
+  const out = { role: m.role, content: normalized.content };
+  if (images.length > 0) out.images = images;
+  // A compact summary is a user entry because that is how the model
+  // receives it, but the user did not write it — the CLI did, about the
+  // context it dropped. Marked as a system event so it is labelled
+  // "System" rather than attributed to the person reading it, and so
+  // `seedIntoHistory` keeps it out of up-arrow recall.
+  if (m.system_event || m.compact_summary) out.system_event = true;
+  if (m.compact_summary) out.compact_summary = true;
+  // Preserve turn_id and agent_blocks from persisted records so the
+  // "View agents (N)" affordance in renderMessage can find them after a
+  // session reload. Both are optional; only assistant messages from
+  // agentic turns carry agent_blocks.
+  if (typeof m.turn_id === 'string' && m.turn_id) out.turn_id = m.turn_id;
+  if (Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0) {
+    out.agent_blocks = m.agent_blocks;
+  }
+  // The turn shape. `blocks` is what makes `renderMessage` treat this as
+  // a Claude Code turn at all, and the rest hangs off that decision.
+  if (Array.isArray(m.blocks)) out.blocks = m.blocks;
+  if (Array.isArray(m.subagents)) out.subagents = m.subagents;
+  if (Array.isArray(m.files) && m.files.length > 0) out.files = m.files;
+  if (m.turn && typeof m.turn === 'object') out.turn = m.turn;
+  // Null from a browsed turn, and null draws no badge: the transcript
+  // holds no result entry, and a "completed" badge on no evidence is
+  // worse than none. Only a real reason is carried through.
+  if (typeof m.terminalReason === 'string' && m.terminalReason) {
+    out.terminalReason = m.terminalReason;
+  }
+  // The mark that says the agent's memory of everything above it is now
+  // a summary. Same shape the live `compact_boundary` broadcast appends,
+  // so a divider read back from disk and one seen as it happened render
+  // identically.
+  if (m.compaction && typeof m.compaction === 'object') {
+    out.compaction = m.compaction;
+  }
+  if (Array.isArray(m.edit_results)) out.editResults = m.edit_results;
+  return out;
+}
+
+/**
  * Handle a `session-changed` event. Session load
  * or new-session — replace the message list
  * wholesale.
@@ -464,44 +531,7 @@ export function detachEventListeners(panel) {
 export function onSessionChanged(panel, event) {
   const data = event.detail || {};
   const msgs = Array.isArray(data.messages) ? data.messages : [];
-  // Normalise to our internal shape — messages
-  // from the backend carry extra metadata we
-  // ignore here.
-  //
-  // Multimodal messages (images) arrive as an
-  // array of `{type: 'text'/'image_url', ...}`
-  // blocks; normalize to `{content: <string>,
-  // images: [<data uri>]}`.
-  panel.messages = msgs.map((m) => {
-    const normalized = normalizeMessageContent(m);
-    const images = Array.isArray(m.images)
-      ? m.images
-      : normalized.images;
-    // Preserve turn_id and agent_blocks from
-    // persisted records so the "View agents (N)"
-    // affordance in renderMessage (Increment D
-    // commit 3) can find them after a session
-    // reload. Both are optional; only assistant
-    // messages from agentic turns carry
-    // agent_blocks, and only records produced
-    // after Increment A carry turn_id.
-    const turnId =
-      typeof m.turn_id === 'string' && m.turn_id
-        ? m.turn_id
-        : null;
-    const agentBlocks =
-      Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0
-        ? m.agent_blocks
-        : null;
-    return {
-      role: m.role,
-      content: normalized.content,
-      ...(images.length > 0 ? { images } : {}),
-      ...(m.system_event ? { system_event: true } : {}),
-      ...(turnId ? { turn_id: turnId } : {}),
-      ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
-    };
-  });
+  panel.messages = msgs.map(restoreMessage);
   panel._streaming = false;
   panel._streamingContent = '';
   panel._currentRequestId = null;
@@ -520,9 +550,10 @@ export function onSessionChanged(panel, event) {
   for (const tab of panel._tabs.values()) {
     resetTurnBlocks(tab.turnBlocks);
   }
-  // Seed input history from the loaded session's
-  // user messages.
-  seedInputHistory(panel, msgs);
+  // Seed input history from the loaded session's user messages — from the
+  // restored list, not the raw one, so the recall filter sees the same
+  // `system_event` marks the renderer does.
+  seedInputHistory(panel, panel.messages);
 }
 
 /**
@@ -573,32 +604,10 @@ export function onStateLoaded(panel, event) {
   const msgs = Array.isArray(state.messages) ? state.messages : [];
   // Only overwrite when we actually have something to restore.
   if (msgs.length === 0) return;
-  panel.messages = msgs.map((m) => {
-    const normalized = normalizeMessageContent(m);
-    const images = Array.isArray(m.images)
-      ? m.images
-      : normalized.images;
-    // Preserve turn_id and agent_blocks for the
-    // "View agents" affordance — same shape as
-    // onSessionChanged.
-    const turnId =
-      typeof m.turn_id === 'string' && m.turn_id
-        ? m.turn_id
-        : null;
-    const agentBlocks =
-      Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0
-        ? m.agent_blocks
-        : null;
-    return {
-      role: m.role,
-      content: normalized.content,
-      ...(images.length > 0 ? { images } : {}),
-      ...(m.system_event ? { system_event: true } : {}),
-      ...(turnId ? { turn_id: turnId } : {}),
-      ...(agentBlocks ? { agent_blocks: agentBlocks } : {}),
-    };
-  });
-  seedInputHistory(panel, msgs);
+  // Same restore as `onSessionChanged`: this is the same transcript,
+  // reached by reconnecting rather than by resuming.
+  panel.messages = msgs.map(restoreMessage);
+  seedInputHistory(panel, panel.messages);
 }
 
 /**
@@ -609,10 +618,11 @@ export function onStateLoaded(panel, event) {
  * conversation, not just messages typed since
  * mount.
  *
- * Handles multimodal messages — when `content`
- * is an array of `{type: 'text', text: ...}` /
- * `{type: 'image_url', ...}` blocks, concatenates
- * the text blocks and ignores the rest.
+ * Takes the *restored* list, the one `restoreMessage` produced and the
+ * renderer reads. Recall and rendering then agree on which entries the user
+ * actually typed: a compaction divider or a compact summary is a user-role
+ * record the CLI wrote, and offering it back on up-arrow would put the
+ * agent's own words in the composer.
  */
 function seedInputHistory(panel, msgs) {
   const history = panel.shadowRoot?.querySelector(
@@ -634,41 +644,15 @@ function seedInputHistory(panel, msgs) {
 function seedIntoHistory(historyEl, msgs) {
   for (const m of msgs) {
     if (m.role !== 'user' || m.system_event) continue;
-    let text;
-    let images = [];
-    if (typeof m.content === 'string') {
-      text = m.content;
-    } else if (Array.isArray(m.content)) {
-      // Multimodal user message — concatenate
-      // text blocks, harvest image_url blocks
-      // for recall.
-      const textParts = [];
-      for (const b of m.content) {
-        if (!b || typeof b !== 'object') continue;
-        if (b.type === 'text' && typeof b.text === 'string') {
-          textParts.push(b.text);
-        } else if (
-          b.type === 'image_url' &&
-          b.image_url &&
-          typeof b.image_url.url === 'string'
-        ) {
-          images.push(b.image_url.url);
-        }
-      }
-      text = textParts.join('\n');
-    } else {
-      continue;
-    }
-    // Persisted records may also carry a sibling
-    // `images` array (older shape) — prefer it
-    // when present.
-    if (Array.isArray(m.images) && m.images.length > 0) {
-      images = m.images.filter(
-        (s) => typeof s === 'string' && s,
-      );
-    }
-    if ((text && text.trim()) || images.length > 0) {
-      historyEl.addEntry(text || '', images);
+    // `restoreMessage` has already folded multimodal content down to a
+    // string plus a sibling `images` array, so there is one shape here.
+    if (typeof m.content !== 'string') continue;
+    const text = m.content;
+    const images = Array.isArray(m.images)
+      ? m.images.filter((s) => typeof s === 'string' && s)
+      : [];
+    if (text.trim() || images.length > 0) {
+      historyEl.addEntry(text, images);
     }
   }
 }
