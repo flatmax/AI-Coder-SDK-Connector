@@ -127,11 +127,25 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('files-changed', listener);
     });
 
+    it('sessionDeleted dispatches window event with the session id', () => {
+      // Reaches the client that asked for the delete as well as the
+      // ones that did not: a session list still offering the row is a
+      // click that can only fail.
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('session-deleted', listener);
+      shell.sessionDeleted({ session_id: 's1' });
+      const event = listener.mock.calls[0][0];
+      expect(event.detail.session_id).toBe('s1');
+      window.removeEventListener('session-deleted', listener);
+    });
+
     it('callbacks return true for jrpc-oo ack', () => {
       const shell = mountShell();
       expect(shell.streamChunk('r', 'c')).toBe(true);
       expect(shell.streamComplete('r', {})).toBe(true);
       expect(shell.filesChanged([])).toBe(true);
+      expect(shell.sessionDeleted({ session_id: 's1' })).toBe(true);
     });
   });
 

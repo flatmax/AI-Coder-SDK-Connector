@@ -1147,6 +1147,238 @@ describe('HistoryBrowser resume and fork', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Delete
+// ---------------------------------------------------------------------------
+
+/** Collect `ac-toast` details raised while `fn` runs. */
+async function withToasts(fn) {
+  const toasts = [];
+  const onToast = (e) => toasts.push(e.detail);
+  window.addEventListener('ac-toast', onToast);
+  try {
+    await fn();
+  } finally {
+    window.removeEventListener('ac-toast', onToast);
+  }
+  return toasts;
+}
+
+describe('HistoryBrowser delete', () => {
+  async function setupDelete(del, sessions = [oneSession()]) {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue(sessions),
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_delete': del,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  it('is disabled until a session is selected', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([]),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.delete-button').disabled,
+    ).toBe(true);
+  });
+
+  it('arms on the first click and does not call the RPC', async () => {
+    const del = vi.fn().mockResolvedValue({ status: 'deleted' });
+    const el = await setupDelete(del);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    expect(del).not.toHaveBeenCalled();
+    const btn = el.shadowRoot.querySelector('.delete-button');
+    expect(btn.classList.contains('armed')).toBe(true);
+    expect(btn.textContent).toContain('permanently');
+  });
+
+  it('deletes on the second click', async () => {
+    const del = vi
+      .fn()
+      .mockResolvedValue({ session_id: 's1', status: 'deleted' });
+    const el = await setupDelete(del);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    expect(del).toHaveBeenCalledWith('s1');
+  });
+
+  it('disarms when the selection moves', async () => {
+    // An armed Delete belongs to the session it was armed on. The
+    // alternative — re-aiming it at whatever is selected now — is a
+    // click that deletes a session the user never armed.
+    const del = vi.fn().mockResolvedValue({ status: 'deleted' });
+    const el = await setupDelete(del, [
+      oneSession(),
+      oneSession({ session_id: 's2', preview: 'two' }),
+    ]);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.session-item')[1].click();
+    await settle(el);
+    expect(
+      el.shadowRoot
+        .querySelector('.delete-button')
+        .classList.contains('armed'),
+    ).toBe(false);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it('disarms when the modal closes', async () => {
+    const el = await setupDelete(vi.fn());
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    el.open = false;
+    await settle(el);
+    expect(el._confirmDelete).toBeNull();
+  });
+
+  it('keeps the row when the server refuses', async () => {
+    // The live session is refused rather than half-deleted: the store
+    // is a live mirror, so the transcript would come straight back.
+    const del = vi.fn().mockResolvedValue({
+      error: 'That is the current conversation. Start a new session first.',
+      reason: 'session_live',
+    });
+    const el = await setupDelete(del);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    const toasts = await withToasts(async () => {
+      el.shadowRoot.querySelector('.delete-button').click();
+      await settle(el);
+    });
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].message).toContain('Start a new session first');
+    expect(toasts[0].type).toBe('warning');
+    expect(el._sessions).toHaveLength(1);
+    // And it disarms, so the next click is a fresh decision.
+    expect(el._confirmDelete).toBeNull();
+  });
+
+  it('reports a failed delete rather than dropping the row', async () => {
+    const del = vi.fn().mockRejectedValue(new Error('disk is read-only'));
+    const el = await setupDelete(del);
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      el.shadowRoot.querySelector('.delete-button').click();
+      await settle(el);
+      const toasts = await withToasts(async () => {
+        el.shadowRoot.querySelector('.delete-button').click();
+        await settle(el);
+      });
+      expect(toasts[0].message).toContain('disk is read-only');
+      expect(el._sessions).toHaveLength(1);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('drops the row on the broadcast, not on the reply', async () => {
+    // Every client has the same stale row, including this one, and
+    // the broadcast is the only account that reaches all of them.
+    const del = vi
+      .fn()
+      .mockResolvedValue({ session_id: 's1', status: 'deleted' });
+    const el = await setupDelete(del);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    el.shadowRoot.querySelector('.delete-button').click();
+    await settle(el);
+    // The reply alone leaves the list alone.
+    expect(el._sessions).toHaveLength(1);
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's1' },
+      }),
+    );
+    await settle(el);
+    expect(el._sessions).toEqual([]);
+  });
+
+  it('drops a row another client deleted', async () => {
+    const el = await setupDelete(vi.fn(), [
+      oneSession(),
+      oneSession({ session_id: 's2', preview: 'two' }),
+    ]);
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's2' },
+      }),
+    );
+    await settle(el);
+    expect(el._sessions.map((s) => s.session_id)).toEqual(['s1']);
+    // s1 was the selection and is untouched.
+    expect(el._selectedSessionId).toBe('s1');
+  });
+
+  it('clears the preview when the previewed session goes', async () => {
+    const el = await setupDelete(vi.fn());
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's1' },
+      }),
+    );
+    await settle(el);
+    expect(el._selectedSessionId).toBeNull();
+    expect(el._selectedMessages).toEqual([]);
+    expect(
+      el.shadowRoot.querySelector('.preview-empty').textContent,
+    ).toContain('Select a session');
+  });
+
+  it('drops search hits for a deleted session', async () => {
+    const el = await setupDelete(vi.fn());
+    el._searchHits = [
+      { session_id: 's1', content_preview: 'gone' },
+      { session_id: 's2', content_preview: 'stays' },
+    ];
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's1' },
+      }),
+    );
+    await settle(el);
+    expect(el._searchHits.map((h) => h.session_id)).toEqual(['s2']);
+  });
+
+  it('ignores a broadcast with no session id', async () => {
+    const el = await setupDelete(vi.fn());
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', { detail: {} }),
+    );
+    await settle(el);
+    expect(el._sessions).toHaveLength(1);
+  });
+
+  it('stops listening once unmounted', async () => {
+    const el = await setupDelete(vi.fn());
+    el.remove();
+    // No listener, no state change, and above all no throw from a
+    // handler touching a torn-down component.
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's1' },
+      }),
+    );
+    expect(el._sessions).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // State reset on close
 // ---------------------------------------------------------------------------
 

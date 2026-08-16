@@ -21,6 +21,14 @@
 //     conversation, and the spec asks for it wherever resume is
 //     offered. A session whose transcript did not survive comes back
 //     `resumable: false` and is labelled rather than failed on click.
+//   - **Deleting is irreversible and takes three files with it.** The
+//     transcript is the one thing under `.ac-dc4/` that does not
+//     rebuild, and it holds the session's pasted images; the events
+//     log and the derived index lose their rows for it too. So Delete
+//     arms on the first click and acts on the second, and the row
+//     leaves the list on the `sessionDeleted` broadcast rather than
+//     locally — every open browser has the same stale row to drop,
+//     including this one.
 //
 // Responsibilities:
 //
@@ -34,6 +42,8 @@
 //   - Resume or fork the selected session, which triggers the
 //     server's sessionChanged broadcast that the chat panel's
 //     existing handler consumes
+//   - Delete a session, in two clicks, dropping the row when the
+//     server confirms it
 //   - Keyboard shortcuts: Escape closes (or clears search
 //     first if the query is non-empty and the search input is
 //     focused)
@@ -193,6 +203,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
      * is a race between two answers to the same question.
      */
     _loadingSession: { type: String, state: true },
+    /**
+     * The session id whose Delete button is armed, or null. Deleting
+     * a transcript is the one thing in this modal that cannot be
+     * undone — it is also the one thing under `.ac-dc4/` that does
+     * not rebuild — so it takes two clicks on the same session.
+     */
+    _confirmDelete: { type: String, state: true },
+    /** True while a delete RPC is in flight. */
+    _deleting: { type: Boolean, state: true },
     /**
      * Context menu state. Null when closed; otherwise
      * `{x, y, message}` — position in viewport coordinates
@@ -412,10 +431,46 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       gap: 0.5rem;
       background: rgba(22, 27, 34, 0.4);
     }
-    .footer-note {
+    /* Delete and the browse-only note, held at the left end of the
+     * footer so the two session actions keep the right end to
+     * themselves. */
+    .footer-left {
       margin-right: auto;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 0;
+    }
+    .footer-note {
       font-size: 0.75rem;
       color: #d29922;
+    }
+    /* Delete. As far from Resume as the row allows, and unfilled
+     * until it is armed — the second click is the one that destroys
+     * a transcript, so that is the click the red is for. */
+    .delete-button {
+      padding: 0.4rem 0.75rem;
+      background: transparent;
+      border: 1px solid rgba(248, 81, 73, 0.35);
+      border-radius: 4px;
+      color: #f85149;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      cursor: pointer;
+    }
+    .delete-button:hover {
+      background: rgba(248, 81, 73, 0.1);
+      border-color: #f85149;
+    }
+    .delete-button.armed {
+      background: #f85149;
+      border-color: #f85149;
+      color: #0d1117;
+      font-weight: 600;
+    }
+    .delete-button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
     .load-button {
       padding: 0.4rem 1rem;
@@ -722,6 +777,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._searchHits = [];
     this._searchError = '';
     this._loadingSession = null;
+    this._confirmDelete = null;
+    this._deleting = false;
     this._contextMenu = null;
 
     // Debounce timer for search.
@@ -733,6 +790,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContextDismiss = this._onContextDismiss.bind(this);
+    this._onSessionDeleted = this._onSessionDeleted.bind(this);
   }
 
   connectedCallback() {
@@ -740,6 +798,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // Listen on document so Escape works regardless of
     // which element has focus inside the modal.
     document.addEventListener('keydown', this._onKeyDown);
+    // A session can be deleted by another client, or by this one.
+    // Either way the row has to go, and the broadcast is the only
+    // account of it that reaches every open list.
+    window.addEventListener('session-deleted', this._onSessionDeleted);
     // Dismiss context menu on any click outside it.
     // Using `click` (not `pointerdown`) so clicks on
     // menu buttons fire their own handlers before this
@@ -753,6 +815,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     document.removeEventListener(
       'click',
       this._onContextDismiss,
+    );
+    window.removeEventListener(
+      'session-deleted',
+      this._onSessionDeleted,
     );
     if (this._searchDebounceTimer != null) {
       clearTimeout(this._searchDebounceTimer);
@@ -801,6 +867,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._selectedSessionId = null;
           this._selectedMessages = [];
           this._messagesError = '';
+          this._confirmDelete = null;
           this._contextMenu = null;
         });
       }
@@ -1024,6 +1091,9 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._selectedSessionId = sessionId;
     this._selectedMessages = [];
     this._messagesError = '';
+    // An armed Delete belongs to the session it was armed on. Moving
+    // the selection disarms it rather than re-aiming it.
+    this._confirmDelete = null;
     this._loadSessionMessages(sessionId);
   }
 
@@ -1108,6 +1178,86 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       );
     } finally {
       this._loadingSession = null;
+    }
+  }
+
+  /**
+   * Delete the selected session — first click arms, second confirms.
+   *
+   * Two clicks because this is the only irreversible thing in the
+   * modal: the transcript is the one file under `.ac-dc4/` that does
+   * not rebuild, and it takes the session's pasted images, its
+   * operational events and its index rows with it. An arming step is
+   * cheaper than an undo that cannot exist.
+   *
+   * The row is not removed here. `history_delete` broadcasts
+   * `sessionDeleted` to every client, and this component drops the
+   * row when it arrives — so the list this browser shows is the same
+   * list every other open browser shows, by the same route.
+   */
+  async _onDeleteClick() {
+    const sessionId = this._selectedSessionId;
+    if (!sessionId) return;
+    if (!this.rpcConnected) return;
+    if (this._deleting) return;
+    if (this._confirmDelete !== sessionId) {
+      this._confirmDelete = sessionId;
+      return;
+    }
+    this._deleting = true;
+    try {
+      const result = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.history_delete', sessionId),
+        HISTORY_TIMEOUT_MS,
+        'history_delete',
+      );
+      if (result && result.error) {
+        // The commonest refusal is `session_live`: the store is a
+        // live mirror, so deleting the conversation on screen would
+        // see it written straight back. The message says to start a
+        // new session first, which is the way out.
+        this._emitToast(String(result.error), 'warning');
+        return;
+      }
+      this._emitToast('Session deleted', 'success');
+    } catch (err) {
+      console.error('[history-browser] history_delete failed', err);
+      this._emitToast(
+        err?.message || 'Could not delete that session',
+        'warning',
+      );
+    } finally {
+      this._deleting = false;
+      this._confirmDelete = null;
+    }
+  }
+
+  /**
+   * A session went away — deleted here, or by another client.
+   *
+   * Drops the row and any search hits pointing at it. If it was the
+   * one being previewed, the selection goes too: a preview of a
+   * transcript that no longer exists is the same lie as a row that
+   * offers to resume it.
+   */
+  _onSessionDeleted(event) {
+    const sessionId = event?.detail?.session_id;
+    if (!sessionId) return;
+    this._sessions = this._sessions.filter(
+      (s) => s.session_id !== sessionId,
+    );
+    this._searchHits = this._searchHits.filter(
+      (hit) => hit.session_id !== sessionId,
+    );
+    if (this._confirmDelete === sessionId) this._confirmDelete = null;
+    if (this._selectedSessionId === sessionId) {
+      this._selectedSessionId = null;
+      this._selectedMessages = [];
+      this._messagesError = '';
+      // Any load still in flight for it must not paint into the
+      // pane it no longer owns.
+      this._messagesGeneration += 1;
+      this._loadingMessages = false;
     }
   }
 
@@ -1295,12 +1445,31 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       this._loadingSession != null ||
       !resumable ||
       !this.rpcConnected;
+    const armed = this._confirmDelete === this._selectedSessionId;
     return html`
-      ${this._selectedSessionId && !resumable
-        ? html`<span class="footer-note">
-            No engine transcript survives — browsable only
-          </span>`
-        : ''}
+      <div class="footer-left">
+        <button
+          class="delete-button ${armed ? 'armed' : ''}"
+          ?disabled=${!this._selectedSessionId ||
+          this._deleting ||
+          !this.rpcConnected}
+          @click=${() => this._onDeleteClick()}
+          title=${armed
+            ? 'Click again to delete this session permanently'
+            : 'Delete this session, its images and its events'}
+        >
+          ${this._deleting
+            ? 'Deleting…'
+            : armed
+              ? 'Delete permanently?'
+              : '🗑 Delete'}
+        </button>
+        ${this._selectedSessionId && !resumable
+          ? html`<span class="footer-note">
+              No engine transcript survives — browsable only
+            </span>`
+          : ''}
+      </div>
       <button
         class="load-button secondary fork-button"
         ?disabled=${blocked}

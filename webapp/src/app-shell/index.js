@@ -1050,6 +1050,20 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  sessionDeleted(data) {
+    // Fired by `history_delete` once the transcript, its events and
+    // its index rows are gone. Carries `{session_id}`.
+    //
+    // Every client gets it, including the one that asked: a session
+    // list still offering a row whose transcript has been deleted is
+    // a click that can only fail, and the deleting client is not the
+    // only browser that has the list open.
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', { detail: data }),
+    );
+    return true;
+  }
+
   reviewStarted(data) {
     // Re-dispatch as a window event so files-tab's
     // `_onReviewStarted` handler fires. files-tab

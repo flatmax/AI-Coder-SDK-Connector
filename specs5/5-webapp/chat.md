@@ -476,6 +476,9 @@ not about the page.
 - **Resume session** — calls `resume_session(session_id)`, which reconnects the engine with that session's context. Dispatches the session-changed event and closes the browser
 - **Resume as a fork** — `resume_session(session_id, fork=True)`, leaving the original session untouched. The secondary button beside Resume, and offered **whenever Resume is**, not only on a session already resumed once. Two reasons: the engine spec makes it an invariant ([`../3-engine/history.md`](../3-engine/history.md) § Resume, Fork, and New) because a fork is the choice that cannot damage the original and the native engine had no equivalent; and "already resumed once" is not knowable from a listing row, which carries no resume count. A fork's new id is minted by the CLI on its first turn, so the reply names the origin in `forked_from` and the browser reports the session the user clicked
 - Read failures are shown where the list would have been. `history_list`, `history_load` and `history_search` each answer a bare list or `{error}`, and the two halves are drawn differently on purpose: "could not read your history" and "you have no history" want opposite reactions, and the browser used to render the first as the second
+- **Delete session** — `history_delete(session_id)`, in the footer beside Resume. It takes two clicks: the first arms the button (`Delete permanently?`), the second sends. The confirmation is a second click rather than a dialog because the act is small and the modal already owns the screen, but it is confirmed at all because the delete is irreversible and spans three files — transcript, images, events log, and the index rows that point at them. An armed button belongs to the session it was armed on: changing the selection or closing the modal disarms it, so a click can never delete a session the user did not arm
+- The live session is refused, not deleted: `{error, reason: "session_live"}` becomes a toast ("That is the current conversation. Start a new session first.") and the row stays. Deleting the session the engine is mirroring into would only have it written straight back
+- A deleted row leaves the list on the **`sessionDeleted` broadcast**, not on the reply to the delete. The client that asked is not the only one holding a stale list, and a row whose transcript is gone is a click that can only fail; taking the broadcast route means every open browser converges by the same account rather than the acting client converging early and the rest lagging. A failed delete therefore leaves the row exactly where it was
 - Close — backdrop click, close button, or Escape
 
 ### Resume Is Not Load
@@ -494,6 +497,7 @@ the UI in two places that must be got right:
 | `session-changed` | Outward (bubbles) | Carries the resumed session's messages to the chat panel |
 | `paste-to-prompt` | Outward (bubbles) | Carries message text to insert into chat input |
 | `load-diff-panel` | Outward (bubbles) | Load content in diff viewer left or right panel |
+| `session-deleted` | Inward (`window`) | Re-dispatched by the shell from the `sessionDeleted` broadcast; drops the row, its search hits, and the preview if that session was the one selected |
 
 ## Invariants
 
