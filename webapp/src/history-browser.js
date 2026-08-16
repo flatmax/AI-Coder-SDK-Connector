@@ -1,45 +1,54 @@
 // HistoryBrowser — modal overlay for browsing past sessions.
 //
-// Layer 5 Phase 2d — session controls (part 2 of 2, after the
-// new-session button).
+// Conversion phase 5. Every RPC behind this modal belonged to the
+// native engine and now belongs to `ClaudeCodeService`, reading the
+// CLI's own transcript mirrored under `.ac-dc4/sessions/` rather than
+// the native engine's `history.jsonl`. Two consequences reach the UI:
+//
+//   - **The reads answer a union.** `history_list`, `history_load` and
+//     `history_search` each return a bare list on success and
+//     `{error}` on failure. This component used to collapse both into
+//     `Array.isArray(x) ? x : []`, which draws "could not read your
+//     history" as "you have no history" — the two want opposite
+//     reactions from the user, so they are told apart here and the
+//     failure is shown where the list would have been.
+//   - **Loading a session resumes an engine, not a context.**
+//     `resume_session` hands the transcript to the CLI, which rebuilds
+//     its own context from it; nothing is read back into a prompt.
+//     That is why the footer says Resume rather than "Load into
+//     context", and why Fork sits beside it: a fork cannot damage the
+//     original, which makes it the safe way to revisit an old
+//     conversation, and the spec asks for it wherever resume is
+//     offered. A session whose transcript did not survive comes back
+//     `resumable: false` and is labelled rather than failed on click.
 //
 // Responsibilities:
 //
-//   - List past sessions from LLMService.history_list_sessions,
-//     newest-first, with preview + message count + timestamp
-//   - Full-text search across all sessions via
-//     LLMService.history_search, debounced to avoid flooding
-//     the server while the user types
+//   - List past sessions newest-first, with preview + message count
+//     + timestamp
+//   - Full-text search across all sessions, debounced to avoid
+//     flooding the server while the user types
 //   - Preview of a selected session's messages (simplified
-//     rendering — role labels + raw content, no edit-block
-//     segmentation or file-mention wrapping)
-//   - Load action that calls LLMService.load_session_into_context,
-//     which triggers the server's sessionChanged broadcast that
-//     the chat panel's existing handler consumes
+//     rendering — role labels + raw content, no file-mention
+//     wrapping)
+//   - Resume or fork the selected session, which triggers the
+//     server's sessionChanged broadcast that the chat panel's
+//     existing handler consumes
 //   - Keyboard shortcuts: Escape closes (or clears search
 //     first if the query is non-empty and the search input is
 //     focused)
 //   - Backdrop click closes, close button closes
 //
-// Scope cuts for this commit (explicit boundaries):
-//
-//   - Right-click context menu for ad-hoc panel loading —
-//     needs diff viewer (Phase 3)
-//   - Per-message hover action buttons (copy, paste-to-prompt)
-//     — scope creep; basic load flow matters more
-//   - Image thumbnails in preview — history store returns
-//     reconstructed data URIs, but rendering needs thumbnail
-//     styling, add in a follow-up
-//
-// Governing spec: specs4/5-webapp/chat.md "History Browser"
+// Governing spec: specs5/3-engine/history.md § Resume, Fork, and New;
+// specs4/5-webapp/chat.md "History Browser" for the layout.
 //
 // Event contract:
 //   - `close` (bubbles, composed) — dispatched when the user
 //     closes the modal via any path. Parent (chat panel) toggles
 //     the modal open-state off.
 //   - `session-loaded` (bubbles, composed) — dispatched AFTER
-//     the RPC call succeeds, carrying `{session_id}`. The server
-//     also broadcasts sessionChanged to all clients; the chat
+//     the RPC call succeeds, carrying `{session_id, action}`. The
+//     server also broadcasts sessionChanged to all clients; the chat
 //     panel listens for that independently. The event is fired
 //     locally so the parent can distinguish "user loaded from
 //     history" (close the modal) from "another client changed
@@ -55,6 +64,7 @@ import { LitElement, css, html } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { RpcMixin } from './rpc-mixin.js';
+import { withRpcTimeout } from './rpc.js';
 import { renderMarkdown } from './markdown.js';
 import { normalizeMessageContent } from './image-utils.js';
 import { segmentResponse, matchSegmentsToResults } from './edit-blocks.js';
@@ -67,6 +77,50 @@ import { renderEditCard } from './edit-block-render.js';
  * of typing into a single RPC call.
  */
 const SEARCH_DEBOUNCE_MS = 300;
+
+/**
+ * Deadline for every history call. Well above the real work — a
+ * listing is one batch read of the summary sidecars plus one parse per
+ * session, all on the server's executor — so reaching it means no
+ * reply is coming at all, which is the only case `withRpcTimeout` is
+ * for (see rpc.js).
+ *
+ * Without it a dropped reply is a spinner that never resolves, and
+ * this modal is nothing but spinners and lists: "Loading sessions…"
+ * forever says the server is working when nothing is on its way. The
+ * resume path is worse than cosmetic — its in-flight guard is cleared
+ * in a `finally` that never runs, so the button stays disabled for the
+ * rest of the session.
+ */
+const HISTORY_TIMEOUT_MS = 30000;
+
+/**
+ * The `{error}` half of a history read's return union, or null when
+ * the call answered with data.
+ *
+ * `history_list`, `history_load` and `history_search` each return a
+ * bare list on success and `{error: "…"}` on failure, deliberately:
+ * an empty list would conflate "no history yet" with "could not read
+ * it", and only the second is worth a user's attention
+ * (specs5/3-engine/history.md).
+ */
+function historyError(result) {
+  if (Array.isArray(result)) return '';
+  if (result && typeof result === 'object' && result.error) {
+    return String(result.error);
+  }
+  return '';
+}
+
+/**
+ * Whether a listed session can be resumed. Absent means unknown —
+ * a row from a backend that does not report the field — and only an
+ * explicit `false` disables the buttons, so an unknown never costs
+ * the user a session they could have opened.
+ */
+function isResumable(session) {
+  return !session || session.resumable !== false;
+}
 
 /**
  * Format an ISO-8601 timestamp as a short relative-time string
@@ -102,24 +156,43 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
      * prop (parent is the source of truth).
      */
     open: { type: Boolean, reflect: true },
-    /** Session summaries from history_list_sessions. */
+    /** Session summaries from history_list. */
     _sessions: { type: Array, state: true },
     /** Loading state for the session list. */
     _loadingSessions: { type: Boolean, state: true },
+    /**
+     * Why the session list is missing, when it is. Empty string
+     * when the list simply has nothing in it — an empty history and
+     * an unreadable one are different sentences.
+     */
+    _listError: { type: String, state: true },
     /** Currently selected session ID (left pane click). */
     _selectedSessionId: { type: String, state: true },
     /** Messages for the selected session (right pane). */
     _selectedMessages: { type: Array, state: true },
     /** Loading state for the selected session's messages. */
     _loadingMessages: { type: Boolean, state: true },
+    /**
+     * Why the selected session would not load. This is the same
+     * condition that makes a session non-resumable, so the reason
+     * shown here is also the reason Resume is disabled.
+     */
+    _messagesError: { type: String, state: true },
     /** Current search query (may be empty). */
     _searchQuery: { type: String, state: true },
     /** Whether search results mode is active. */
     _searchMode: { type: Boolean, state: true },
     /** Search hits from history_search. */
     _searchHits: { type: Array, state: true },
-    /** True while the load-session RPC is in flight. */
-    _loadingSession: { type: Boolean, state: true },
+    /** Why the search failed, when it did. */
+    _searchError: { type: String, state: true },
+    /**
+     * Which session action is in flight: `'resumed'`, `'forked'`, or
+     * null. Both buttons are disabled while either runs — they
+     * attach the one engine to one conversation, so a second click
+     * is a race between two answers to the same question.
+     */
+    _loadingSession: { type: String, state: true },
     /**
      * Context menu state. Null when closed; otherwise
      * `{x, y, message}` — position in viewport coordinates
@@ -240,10 +313,28 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       padding: 0.05rem 0.35rem;
       border-radius: 3px;
     }
+    /* A session the engine cannot resume — deleted transcript, or
+     * from before the conversion. Still browsable, so it reads as a
+     * qualifier on the row rather than as a failure. */
+    .not-resumable {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      padding: 0.05rem 0.35rem;
+      border-radius: 3px;
+    }
     .empty-list {
       padding: 1rem;
       color: var(--text-secondary, #8b949e);
       font-style: italic;
+      text-align: center;
+    }
+    /* "Could not read your history", never "you have no history".
+     * Coloured, because the empty state next to it is the same
+     * shape and the two must not be mistaken for each other. */
+    .error-note {
+      padding: 1rem;
+      color: #f85149;
+      font-size: 0.8125rem;
       text-align: center;
     }
     .loading-note {
@@ -316,9 +407,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       padding: 0.75rem 1rem;
       border-top: 1px solid rgba(240, 246, 252, 0.1);
       display: flex;
+      align-items: center;
       justify-content: flex-end;
       gap: 0.5rem;
       background: rgba(22, 27, 34, 0.4);
+    }
+    .footer-note {
+      margin-right: auto;
+      font-size: 0.75rem;
+      color: #d29922;
     }
     .load-button {
       padding: 0.4rem 1rem;
@@ -336,6 +433,17 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     .load-button:disabled {
       opacity: 0.4;
       cursor: not-allowed;
+    }
+    /* Fork. Outlined rather than filled: it sits beside Resume and
+     * only one of the two can be the default action. */
+    .load-button.secondary {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.25);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .load-button.secondary:hover {
+      border-color: var(--accent-primary, #58a6ff);
+      background: rgba(88, 166, 255, 0.08);
     }
     .search-hit {
       padding: 0.6rem 0.75rem;
@@ -604,13 +712,16 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this.open = false;
     this._sessions = [];
     this._loadingSessions = false;
+    this._listError = '';
     this._selectedSessionId = null;
     this._selectedMessages = [];
     this._loadingMessages = false;
+    this._messagesError = '';
     this._searchQuery = '';
     this._searchMode = false;
     this._searchHits = [];
-    this._loadingSession = false;
+    this._searchError = '';
+    this._loadingSession = null;
     this._contextMenu = null;
 
     // Debounce timer for search.
@@ -686,8 +797,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._searchQuery = '';
           this._searchMode = false;
           this._searchHits = [];
+          this._searchError = '';
           this._selectedSessionId = null;
           this._selectedMessages = [];
+          this._messagesError = '';
           this._contextMenu = null;
         });
       }
@@ -701,24 +814,31 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   async _loadSessions() {
     if (!this.rpcConnected) return;
     this._loadingSessions = true;
+    this._listError = '';
     try {
-      const result = await this.rpcExtract(
-        'LLMService.history_list_sessions',
+      const result = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.history_list'),
+        HISTORY_TIMEOUT_MS,
+        'history_list',
       );
+      this._listError = historyError(result);
       this._sessions = Array.isArray(result) ? result : [];
     } catch (err) {
       // "Method not found" means the test fixture or a
       // stripped-down backend doesn't expose history. The
       // empty-state placeholder already communicates this
-      // to the user; no error-level log needed. Any other
-      // failure (network, server error) is worth
-      // surfacing.
+      // to the user; no error-level log needed, and no error
+      // banner either — there is nothing wrong to report. Any
+      // other failure (network, dropped reply) is the user's
+      // to see, because it is the difference between an empty
+      // history and an unreadable one.
       const message = err?.message || '';
       if (!message.includes('method not found')) {
         console.error(
-          '[history-browser] history_list_sessions failed',
+          '[history-browser] history_list failed',
           err,
         );
+        this._listError = message || 'Could not read the session history';
       }
       this._sessions = [];
     } finally {
@@ -733,20 +853,29 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // response must not overwrite the new selection.
     const gen = ++this._messagesGeneration;
     this._loadingMessages = true;
+    this._messagesError = '';
     try {
-      const result = await this.rpcExtract(
-        'LLMService.history_get_session',
-        sessionId,
+      const result = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.history_load', sessionId),
+        HISTORY_TIMEOUT_MS,
+        'history_load',
       );
       if (gen !== this._messagesGeneration) return;
+      // A session with nothing readable behind it answers
+      // `{error}` rather than an empty list, precisely so this
+      // pane can say why instead of drawing a conversation that
+      // happened and said nothing.
+      this._messagesError = historyError(result);
       this._selectedMessages = Array.isArray(result) ? result : [];
     } catch (err) {
       console.error(
-        '[history-browser] history_get_session failed',
+        '[history-browser] history_load failed',
         err,
       );
       if (gen === this._messagesGeneration) {
         this._selectedMessages = [];
+        this._messagesError =
+          err?.message || 'Could not read that session';
       }
     } finally {
       if (gen === this._messagesGeneration) {
@@ -759,11 +888,13 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     const gen = ++this._searchGeneration;
     if (!this.rpcConnected) return;
     try {
-      const result = await this.rpcExtract(
-        'LLMService.history_search',
-        query,
+      const result = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.history_search', query),
+        HISTORY_TIMEOUT_MS,
+        'history_search',
       );
       if (gen !== this._searchGeneration) return;
+      this._searchError = historyError(result);
       this._searchHits = Array.isArray(result) ? result : [];
     } catch (err) {
       console.error(
@@ -772,6 +903,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       );
       if (gen === this._searchGeneration) {
         this._searchHits = [];
+        this._searchError =
+          err?.message || 'Could not search the session history';
       }
     }
   }
@@ -813,6 +946,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       // Empty query → exit search mode, show session list.
       this._searchMode = false;
       this._searchHits = [];
+      this._searchError = '';
       // Bump the generation so any in-flight response gets
       // discarded.
       this._searchGeneration += 1;
@@ -835,6 +969,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
         this._searchQuery = '';
         this._searchMode = false;
         this._searchHits = [];
+        this._searchError = '';
         this._searchGeneration += 1;
         if (this._searchDebounceTimer != null) {
           clearTimeout(this._searchDebounceTimer);
@@ -888,6 +1023,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     if (this._selectedSessionId === sessionId) return;
     this._selectedSessionId = sessionId;
     this._selectedMessages = [];
+    this._messagesError = '';
     this._loadSessionMessages(sessionId);
   }
 
@@ -901,37 +1037,77 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._onSessionClick(sessionId);
   }
 
-  async _onLoadClick() {
+  /**
+   * The row the footer buttons act on, or undefined when the
+   * selection is not in the current listing.
+   */
+  _selectedSession() {
+    return this._sessions.find(
+      (s) => s.session_id === this._selectedSessionId,
+    );
+  }
+
+  /**
+   * Attach the engine to the selected session, or to a copy of it.
+   *
+   * `fork` is the difference between continuing that conversation and
+   * branching off it: a fork leaves the original untouched, so it is
+   * the safe half of this pair and the reason both buttons exist.
+   *
+   * Nothing is read back into a prompt. The RPC hands the session ID
+   * to the CLI, which rebuilds its own context from the transcript,
+   * and the server broadcasts `sessionChanged` with the rendered
+   * messages — that broadcast is what repopulates the chat panel. The
+   * local event below only tells the parent to close the modal.
+   */
+  async _onResumeClick(fork = false) {
     if (!this._selectedSessionId) return;
     if (!this.rpcConnected) return;
     if (this._loadingSession) return;
-    this._loadingSession = true;
+    if (!isResumable(this._selectedSession())) return;
+    const action = fork ? 'forked' : 'resumed';
+    this._loadingSession = action;
     try {
-      await this.rpcExtract(
-        'LLMService.load_session_into_context',
-        this._selectedSessionId,
+      const result = await withRpcTimeout(
+        this.rpcExtract(
+          'ClaudeCodeService.resume_session',
+          this._selectedSessionId,
+          fork,
+        ),
+        HISTORY_TIMEOUT_MS,
+        'resume_session',
       );
-      // Dispatch a local event so the parent can close the
-      // modal. The server also broadcasts sessionChanged,
-      // which the chat panel handles independently — that's
-      // how the message list gets populated. This local
-      // event is purely a "user-initiated load succeeded"
-      // signal so the parent can distinguish from remote
-      // session changes.
+      if (result && result.error) {
+        // A refusal, not a crash: a turn is still running, the
+        // caller is a remote participant, or the transcript cannot
+        // be read. Each is a sentence the user can act on, so it
+        // goes to the toast layer verbatim and the modal stays open
+        // on the session they picked.
+        this._emitToast(String(result.error), 'warning');
+        return;
+      }
       this.dispatchEvent(
         new CustomEvent('session-loaded', {
-          detail: { session_id: this._selectedSessionId },
+          detail: {
+            // The session the user acted on. The engine's new ID is
+            // minted by the CLI and only arrives with the first
+            // turn — for a fork there is no other ID yet — so this
+            // is the only one that means anything here.
+            session_id: this._selectedSessionId,
+            action,
+          },
           bubbles: true,
           composed: true,
         }),
       );
     } catch (err) {
-      console.error(
-        '[history-browser] load_session_into_context failed',
-        err,
+      console.error('[history-browser] resume_session failed', err);
+      this._emitToast(
+        err?.message || 'Could not open that session',
+        'warning',
       );
     } finally {
-      this._loadingSession = false;
+      this._loadingSession = null;
     }
   }
 
@@ -1095,17 +1271,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
                 ${this._renderPreview()}
               </div>
               <div class="preview-footer">
-                <button
-                  class="load-button"
-                  ?disabled=${!this._selectedSessionId ||
-                  this._loadingSession ||
-                  !this.rpcConnected}
-                  @click=${this._onLoadClick}
-                >
-                  ${this._loadingSession
-                    ? 'Loading…'
-                    : 'Load into context'}
-                </button>
+                ${this._renderResumeControls()}
               </div>
             </div>
           </div>
@@ -1115,9 +1281,53 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * The footer's two session actions. Fork is rendered beside Resume
+   * rather than behind a menu: it is the choice that cannot damage the
+   * original, and the native engine had no equivalent, so it is worth
+   * surfacing wherever resume is (specs5/3-engine/history.md).
+   */
+  _renderResumeControls() {
+    const selected = this._selectedSession();
+    const resumable = isResumable(selected);
+    const blocked =
+      !this._selectedSessionId ||
+      this._loadingSession != null ||
+      !resumable ||
+      !this.rpcConnected;
+    return html`
+      ${this._selectedSessionId && !resumable
+        ? html`<span class="footer-note">
+            No engine transcript survives — browsable only
+          </span>`
+        : ''}
+      <button
+        class="load-button secondary fork-button"
+        ?disabled=${blocked}
+        @click=${() => this._onResumeClick(true)}
+        title="Branch a copy; the original session stays intact"
+      >
+        ${this._loadingSession === 'forked' ? 'Forking…' : 'Fork'}
+      </button>
+      <button
+        class="load-button resume-button"
+        ?disabled=${blocked}
+        @click=${() => this._onResumeClick(false)}
+        title="Attach the engine to this session"
+      >
+        ${this._loadingSession === 'resumed' ? 'Resuming…' : 'Resume'}
+      </button>
+    `;
+  }
+
   _renderSessionList() {
     if (this._loadingSessions) {
       return html`<div class="loading-note">Loading sessions…</div>`;
+    }
+    if (this._listError) {
+      return html`<div class="error-note" role="alert">
+        ${this._listError}
+      </div>`;
     }
     if (this._sessions.length === 0) {
       return html`<div class="empty-list">No sessions yet</div>`;
@@ -1140,6 +1350,13 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
             <span class="msg-count">
               ${s.message_count} ${s.message_count === 1 ? 'msg' : 'msgs'}
             </span>
+            ${isResumable(s)
+              ? ''
+              : html`<span
+                  class="not-resumable"
+                  title="No engine transcript survives for this session"
+                  >browse only</span
+                >`}
           </div>
         </div>
       `,
@@ -1147,6 +1364,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   }
 
   _renderSearchHits() {
+    if (this._searchError) {
+      return html`<div class="error-note" role="alert">
+        ${this._searchError}
+      </div>`;
+    }
     if (this._searchHits.length === 0) {
       return html`<div class="empty-list">
         ${this._searchQuery.trim()
@@ -1156,7 +1378,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     return this._searchHits.map((hit) => {
       // Hit shape from history_search: {session_id,
-      // message_id, role, content_preview, timestamp}.
+      // entry_uuid, role, content_preview, timestamp}. `role` is
+      // one of user/assistant/tool — that third value is new, and
+      // is what makes a search for a path or a command find the
+      // tool call that used it.
       const preview = hit.content_preview || hit.content || '';
       return html`
         <div
@@ -1182,6 +1407,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     }
     if (this._loadingMessages) {
       return html`<div class="preview-empty">Loading messages…</div>`;
+    }
+    if (this._messagesError) {
+      return html`<div class="error-note" role="alert">
+        ${this._messagesError}
+      </div>`;
     }
     if (this._selectedMessages.length === 0) {
       return html`<div class="preview-empty">Empty session</div>`;

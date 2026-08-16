@@ -474,7 +474,8 @@ not about the page.
 - Message actions — hover reveals copy and paste-to-prompt buttons
 - Context menu — right-click a message shows options to load in left or right panel of diff viewer, copy, paste to prompt
 - **Resume session** — calls `resume_session(session_id)`, which reconnects the engine with that session's context. Dispatches the session-changed event and closes the browser
-- **Resume as a fork** — same, with forking, leaving the original session untouched. Offered as the secondary action on a session that has already been resumed once, because continuing two branches of one session id is how a transcript becomes unreadable
+- **Resume as a fork** — `resume_session(session_id, fork=True)`, leaving the original session untouched. The secondary button beside Resume, and offered **whenever Resume is**, not only on a session already resumed once. Two reasons: the engine spec makes it an invariant ([`../3-engine/history.md`](../3-engine/history.md) § Resume, Fork, and New) because a fork is the choice that cannot damage the original and the native engine had no equivalent; and "already resumed once" is not knowable from a listing row, which carries no resume count. A fork's new id is minted by the CLI on its first turn, so the reply names the origin in `forked_from` and the browser reports the session the user clicked
+- Read failures are shown where the list would have been. `history_list`, `history_load` and `history_search` each answer a bare list or `{error}`, and the two halves are drawn differently on purpose: "could not read your history" and "you have no history" want opposite reactions, and the browser used to render the first as the second
 - Close — backdrop click, close button, or Escape
 
 ### Resume Is Not Load
@@ -484,7 +485,7 @@ Resume hands the engine a session id and lets it restore its own context. The di
 the UI in two places that must be got right:
 
 - Resuming **replaces the live session**. It is not a preview. The browser confirms before resuming if the current session has messages the user has not seen the end of
-- A session in our store that the engine cannot resume (its transcript is gone, or it was written by a different CLI major) is shown as **browsable but not resumable**, with the reason. The alternative — a resume button that fails — trains users to distrust the list
+- A session in our store that the engine cannot resume (its transcript is gone, or it was written by a different CLI major) is shown as **browsable but not resumable**, with the reason. The alternative — a resume button that fails — trains users to distrust the list. It arrives as `resumable: false` on the listing row, badges the row, disables both footer buttons, and the reason itself comes from the `{error}` that `history_load` answers for the same session. A row that does not carry the field at all is treated as resumable: an unknown must not cost the user a session they could have opened
 
 ### Events
 

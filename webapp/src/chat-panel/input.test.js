@@ -1711,7 +1711,7 @@ describe('ChatPanel history browser', () => {
 
   it('the browser is mounted but nothing can open it', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -1732,7 +1732,7 @@ describe('ChatPanel history browser', () => {
 
   it('the handler still opens it, for phase 5 to rewire', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -1748,7 +1748,7 @@ describe('ChatPanel history browser', () => {
 
   it('closes the modal on close event from browser', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -1771,7 +1771,7 @@ describe('ChatPanel history browser', () => {
 
   it('closes the modal on session-loaded event', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -1795,7 +1795,7 @@ describe('ChatPanel history browser', () => {
 
   it('session-loaded event does not crash without session-changed follow-up', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });

@@ -159,7 +159,7 @@ describe('HistoryBrowser session list', () => {
         first_role: 'user',
       },
     ]);
-    publishFakeRpc({ 'LLMService.history_list_sessions': listSessions });
+    publishFakeRpc({ 'ClaudeCodeService.history_list': listSessions });
     const el = mountBrowser({ open: true });
     await settle(el);
     expect(listSessions).toHaveBeenCalledOnce();
@@ -170,7 +170,7 @@ describe('HistoryBrowser session list', () => {
 
   it('shows empty state when no sessions', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -181,7 +181,7 @@ describe('HistoryBrowser session list', () => {
 
   it('handles session list RPC error gracefully', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockRejectedValue(new Error('db exploded')),
     });
@@ -191,10 +191,11 @@ describe('HistoryBrowser session list', () => {
     try {
       const el = mountBrowser({ open: true });
       await settle(el);
-      // Falls back to empty list.
+      // Says what went wrong, and does not say "no sessions yet".
       expect(
-        el.shadowRoot.querySelector('.empty-list'),
-      ).toBeTruthy();
+        el.shadowRoot.querySelector('.error-note').textContent,
+      ).toContain('db exploded');
+      expect(el.shadowRoot.querySelector('.empty-list')).toBeNull();
       expect(consoleSpy).toHaveBeenCalled();
     } finally {
       consoleSpy.mockRestore();
@@ -211,7 +212,7 @@ describe('HistoryBrowser session list', () => {
 
   it('reloads sessions on re-open', async () => {
     const listSessions = vi.fn().mockResolvedValue([]);
-    publishFakeRpc({ 'LLMService.history_list_sessions': listSessions });
+    publishFakeRpc({ 'ClaudeCodeService.history_list': listSessions });
     const el = mountBrowser({ open: true });
     await settle(el);
     expect(listSessions).toHaveBeenCalledTimes(1);
@@ -220,6 +221,119 @@ describe('HistoryBrowser session list', () => {
     el.open = true;
     await settle(el);
     expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The reads answer a union: a list, or {error}
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser read failures', () => {
+  it('shows why the listing is missing instead of "no sessions"', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue({ error: 'Could not read the session history' }),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.error-note').textContent,
+    ).toContain('Could not read the session history');
+    expect(el.shadowRoot.querySelector('.empty-list')).toBeNull();
+    expect(el._sessions).toEqual([]);
+  });
+
+  it('keeps "no sessions yet" for an empty history', async () => {
+    // The other half of the union, and the point of telling them
+    // apart: an empty list is not a failure.
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([]),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.empty-list').textContent,
+    ).toContain('No sessions');
+    expect(el.shadowRoot.querySelector('.error-note')).toBeNull();
+  });
+
+  it('stays quiet when the backend has no history at all', async () => {
+    // A stripped-down backend answers "method not found". Nothing is
+    // wrong, so nothing is reported.
+    publishFakeRpc({});
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(el._listError).toBe('');
+    expect(el.shadowRoot.querySelector('.error-note')).toBeNull();
+  });
+
+  it('shows why a session would not load, not "empty session"', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue([oneSession()]),
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue({
+        error: 'Session s1 has no readable transcript',
+      }),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.error-note').textContent,
+    ).toContain('no readable transcript');
+    expect(el.shadowRoot.querySelector('.preview-empty')).toBeNull();
+  });
+
+  it('clears the load failure when another session is picked', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue([
+          oneSession(),
+          oneSession({ session_id: 's2', preview: 'two' }),
+        ]),
+      'ClaudeCodeService.history_load': vi
+        .fn()
+        .mockImplementation((sid) =>
+          sid === 's1'
+            ? Promise.resolve({ error: 'gone' })
+            : Promise.resolve([{ role: 'user', content: 'here' }]),
+        ),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    const items = el.shadowRoot.querySelectorAll('.session-item');
+    items[0].click();
+    await settle(el);
+    expect(el._messagesError).toBe('gone');
+    items[1].click();
+    await settle(el);
+    expect(el._messagesError).toBe('');
+    expect(
+      el.shadowRoot.querySelectorAll('.preview-message').length,
+    ).toBe(1);
+  });
+
+  it('shows why a search failed instead of "no matches"', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_search': vi
+        .fn()
+        .mockResolvedValue({ error: 'index is rebuilding' }),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    const input = el.shadowRoot.querySelector('.search-input');
+    input.value = 'needle';
+    input.dispatchEvent(new Event('input'));
+    await new Promise((r) => setTimeout(r, SEARCH_DEBOUNCE_MS + 50));
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.error-note').textContent,
+    ).toContain('index is rebuilding');
   });
 });
 
@@ -257,8 +371,8 @@ describe('HistoryBrowser session selection', () => {
       ]);
     });
     publishFakeRpc({
-      'LLMService.history_list_sessions': listSessions,
-      'LLMService.history_get_session': getSession,
+      'ClaudeCodeService.history_list': listSessions,
+      'ClaudeCodeService.history_load': getSession,
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -310,7 +424,7 @@ describe('HistoryBrowser session selection', () => {
 
   it('shows system event styling for system_event messages', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([
         {
           session_id: 's1',
           timestamp: new Date().toISOString(),
@@ -319,7 +433,7 @@ describe('HistoryBrowser session selection', () => {
           first_role: 'user',
         },
       ]),
-      'LLMService.history_get_session': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([
         {
           role: 'user',
           content: '**Committed** abc1234',
@@ -346,7 +460,7 @@ describe('HistoryBrowser session selection', () => {
 
   it('shows empty-session placeholder for empty sessions', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([
         {
           session_id: 's1',
           timestamp: new Date().toISOString(),
@@ -355,7 +469,7 @@ describe('HistoryBrowser session selection', () => {
           first_role: 'user',
         },
       ]),
-      'LLMService.history_get_session': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -377,7 +491,7 @@ describe('HistoryBrowser session selection', () => {
       });
     });
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([
         {
           session_id: 's1',
           timestamp: new Date().toISOString(),
@@ -393,7 +507,7 @@ describe('HistoryBrowser session selection', () => {
           first_role: 'user',
         },
       ]),
-      'LLMService.history_get_session': getSession,
+      'ClaudeCodeService.history_load': getSession,
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -437,10 +551,10 @@ describe('HistoryBrowser search', () => {
   it('debounces search RPC by SEARCH_DEBOUNCE_MS', async () => {
     const search = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': search,
+      'ClaudeCodeService.history_search': search,
     });
     const el = mountBrowser({ open: true });
     // Drain the initial load under fake timers.
@@ -468,10 +582,10 @@ describe('HistoryBrowser search', () => {
   it('coalesces rapid typing into a single RPC call', async () => {
     const search = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': search,
+      'ClaudeCodeService.history_search': search,
     });
     const el = mountBrowser({ open: true });
     await el.updateComplete;
@@ -497,10 +611,10 @@ describe('HistoryBrowser search', () => {
 
   it('empty query returns to session list mode', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await el.updateComplete;
@@ -524,10 +638,10 @@ describe('HistoryBrowser search', () => {
 
   it('whitespace-only query does not enter search mode', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await el.updateComplete;
@@ -543,10 +657,10 @@ describe('HistoryBrowser search', () => {
 
   it('renders search hits', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([
         {
           session_id: 's1',
           message_id: 'm1',
@@ -574,10 +688,10 @@ describe('HistoryBrowser search', () => {
 
   it('clicking a hit selects its session', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([
         {
           session_id: 'target_session',
           message_id: 'm1',
@@ -586,7 +700,7 @@ describe('HistoryBrowser search', () => {
           timestamp: new Date().toISOString(),
         },
       ]),
-      'LLMService.history_get_session': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([
         { role: 'user', content: 'target content' },
       ]),
     });
@@ -617,7 +731,7 @@ describe('HistoryBrowser search', () => {
 describe('HistoryBrowser close actions', () => {
   it('close button dispatches close event', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -631,7 +745,7 @@ describe('HistoryBrowser close actions', () => {
 
   it('backdrop click dispatches close event', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -653,7 +767,7 @@ describe('HistoryBrowser close actions', () => {
 
   it('clicking inside the modal does not close it', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -667,7 +781,7 @@ describe('HistoryBrowser close actions', () => {
 
   it('Escape key dispatches close event', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -683,10 +797,10 @@ describe('HistoryBrowser close actions', () => {
 
   it('Escape in search input clears query first', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -711,7 +825,7 @@ describe('HistoryBrowser close actions', () => {
 
   it('Escape in search input with empty query closes modal', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -742,7 +856,7 @@ describe('HistoryBrowser close actions', () => {
 
   it('removes document listener on disconnect', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
@@ -759,124 +873,171 @@ describe('HistoryBrowser close actions', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Load action
+// Resume and fork
 // ---------------------------------------------------------------------------
 
-describe('HistoryBrowser load action', () => {
-  it('load button is disabled until a session is selected', async () => {
+/** One listed session, enough for the footer to act on. */
+function oneSession(overrides = {}) {
+  return {
+    session_id: 's1',
+    timestamp: new Date().toISOString(),
+    message_count: 1,
+    preview: 'one',
+    first_role: 'user',
+    resumable: true,
+    ...overrides,
+  };
+}
+
+/**
+ * The three RPCs the footer path needs: a listing, a load for the
+ * preview pane, and the resume itself.
+ */
+function publishResumeRpc(resume, session = oneSession()) {
+  return publishFakeRpc({
+    'ClaudeCodeService.history_list': vi
+      .fn()
+      .mockResolvedValue([session]),
+    'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([]),
+    'ClaudeCodeService.resume_session': resume,
+  });
+}
+
+describe('HistoryBrowser resume and fork', () => {
+  it('offers fork wherever it offers resume', async () => {
+    publishResumeRpc(vi.fn());
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.resume-button')).toBeTruthy();
+    expect(el.shadowRoot.querySelector('.fork-button')).toBeTruthy();
+  });
+
+  it('disables both buttons until a session is selected', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await settle(el);
-    const btn = el.shadowRoot.querySelector('.load-button');
-    expect(btn.disabled).toBe(true);
+    expect(
+      el.shadowRoot.querySelector('.resume-button').disabled,
+    ).toBe(true);
+    expect(el.shadowRoot.querySelector('.fork-button').disabled).toBe(
+      true,
+    );
   });
 
-  it('load button enables after selection', async () => {
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-    });
+  it('enables both buttons after selection', async () => {
+    publishResumeRpc(vi.fn());
     const el = mountBrowser({ open: true });
     await settle(el);
     el.shadowRoot.querySelector('.session-item').click();
     await settle(el);
-    const btn = el.shadowRoot.querySelector('.load-button');
-    expect(btn.disabled).toBe(false);
+    expect(
+      el.shadowRoot.querySelector('.resume-button').disabled,
+    ).toBe(false);
+    expect(el.shadowRoot.querySelector('.fork-button').disabled).toBe(
+      false,
+    );
   });
 
-  it('calls load_session_into_context on click', async () => {
-    const load = vi.fn().mockResolvedValue({
-      session_id: 's1',
-      messages: [],
-    });
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-      'LLMService.load_session_into_context': load,
-    });
+  it('resumes without forking', async () => {
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    publishResumeRpc(resume);
     const el = mountBrowser({ open: true });
     await settle(el);
     el.shadowRoot.querySelector('.session-item').click();
     await settle(el);
-    el.shadowRoot.querySelector('.load-button').click();
+    el.shadowRoot.querySelector('.resume-button').click();
     await settle(el);
-    expect(load).toHaveBeenCalledWith('s1');
+    expect(resume).toHaveBeenCalledWith('s1', false);
   });
 
-  it('dispatches session-loaded event on success', async () => {
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-      'LLMService.load_session_into_context': vi
-        .fn()
-        .mockResolvedValue({ session_id: 's1' }),
-    });
+  it('forks on the fork button', async () => {
+    const resume = vi
+      .fn()
+      .mockResolvedValue({ session_id: null, forked_from: 's1' });
+    publishResumeRpc(resume);
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    el.shadowRoot.querySelector('.fork-button').click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledWith('s1', true);
+  });
+
+  it('dispatches session-loaded with the action taken', async () => {
+    publishResumeRpc(vi.fn().mockResolvedValue({ session_id: 's1' }));
     const el = mountBrowser({ open: true });
     await settle(el);
     el.shadowRoot.querySelector('.session-item').click();
     await settle(el);
     const listener = vi.fn();
     el.addEventListener('session-loaded', listener);
-    el.shadowRoot.querySelector('.load-button').click();
+    el.shadowRoot.querySelector('.resume-button').click();
     await settle(el);
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0][0].detail).toEqual({
       session_id: 's1',
+      action: 'resumed',
     });
   });
 
-  it('does not dispatch session-loaded on RPC error', async () => {
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-      'LLMService.load_session_into_context': vi
-        .fn()
-        .mockRejectedValue(new Error('load failed')),
+  it('reports a null session id as the fork it asked for', async () => {
+    // A fork's real ID is minted by the CLI on the first turn, so the
+    // reply carries null. The event still has to name the session the
+    // user clicked, or the parent has nothing to act on.
+    publishResumeRpc(
+      vi.fn().mockResolvedValue({ session_id: null, forked_from: 's1' }),
+    );
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    const listener = vi.fn();
+    el.addEventListener('session-loaded', listener);
+    el.shadowRoot.querySelector('.fork-button').click();
+    await settle(el);
+    expect(listener.mock.calls[0][0].detail).toEqual({
+      session_id: 's1',
+      action: 'forked',
     });
+  });
+
+  it('toasts a refusal instead of loading it', async () => {
+    // `{error, reason}` is a refusal the user can act on — a turn is
+    // still running, or they are not on localhost. It must not read
+    // as a session that opened.
+    publishResumeRpc(
+      vi.fn().mockResolvedValue({
+        error: 'A turn is still running',
+        reason: 'turn_in_progress',
+      }),
+    );
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    const loaded = vi.fn();
+    el.addEventListener('session-loaded', loaded);
+    const toasts = [];
+    const onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('ac-toast', onToast);
+    try {
+      el.shadowRoot.querySelector('.resume-button').click();
+      await settle(el);
+    } finally {
+      window.removeEventListener('ac-toast', onToast);
+    }
+    expect(loaded).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].message).toBe('A turn is still running');
+  });
+
+  it('does not dispatch session-loaded on RPC error', async () => {
+    publishResumeRpc(vi.fn().mockRejectedValue(new Error('load failed')));
     const consoleSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
@@ -887,7 +1048,7 @@ describe('HistoryBrowser load action', () => {
       await settle(el);
       const listener = vi.fn();
       el.addEventListener('session-loaded', listener);
-      el.shadowRoot.querySelector('.load-button').click();
+      el.shadowRoot.querySelector('.resume-button').click();
       await settle(el);
       expect(listener).not.toHaveBeenCalled();
       expect(consoleSpy).toHaveBeenCalled();
@@ -896,72 +1057,92 @@ describe('HistoryBrowser load action', () => {
     }
   });
 
-  it('load button shows Loading during RPC', async () => {
+  it('names the action in flight and disables both buttons', async () => {
     let resolver;
-    const load = vi.fn().mockImplementation(() => {
-      return new Promise((r) => {
-        resolver = r;
-      });
-    });
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-      'LLMService.load_session_into_context': load,
-    });
+    const resume = vi.fn().mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolver = r;
+        }),
+    );
+    publishResumeRpc(resume);
     const el = mountBrowser({ open: true });
     await settle(el);
     el.shadowRoot.querySelector('.session-item').click();
     await settle(el);
-    el.shadowRoot.querySelector('.load-button').click();
+    el.shadowRoot.querySelector('.fork-button').click();
     await el.updateComplete;
-    const btn = el.shadowRoot.querySelector('.load-button');
-    expect(btn.textContent).toContain('Loading');
-    expect(btn.disabled).toBe(true);
-    // Resolve to clean up.
+    expect(
+      el.shadowRoot.querySelector('.fork-button').textContent,
+    ).toContain('Forking');
+    // Both, not just the one clicked: they attach the one engine to
+    // one conversation.
+    expect(
+      el.shadowRoot.querySelector('.resume-button').disabled,
+    ).toBe(true);
+    expect(el.shadowRoot.querySelector('.fork-button').disabled).toBe(
+      true,
+    );
     resolver({ session_id: 's1' });
     await settle(el);
   });
 
-  it('ignores duplicate load clicks', async () => {
-    const load = vi.fn().mockImplementation(() => {
-      return new Promise((r) => setTimeout(() => r({}), 50));
-    });
-    publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
-        {
-          session_id: 's1',
-          timestamp: new Date().toISOString(),
-          message_count: 1,
-          preview: 'one',
-          first_role: 'user',
-        },
-      ]),
-      'LLMService.history_get_session': vi
-        .fn()
-        .mockResolvedValue([]),
-      'LLMService.load_session_into_context': load,
-    });
+  it('ignores duplicate clicks', async () => {
+    const resume = vi
+      .fn()
+      .mockImplementation(
+        () => new Promise((r) => setTimeout(() => r({}), 50)),
+      );
+    publishResumeRpc(resume);
     const el = mountBrowser({ open: true });
     await settle(el);
     el.shadowRoot.querySelector('.session-item').click();
     await settle(el);
-    const btn = el.shadowRoot.querySelector('.load-button');
+    const btn = el.shadowRoot.querySelector('.resume-button');
     btn.click();
     btn.click();
     btn.click();
     await settle(el);
     await new Promise((r) => setTimeout(r, 100));
-    expect(load).toHaveBeenCalledOnce();
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it('labels a non-resumable session rather than failing on it', async () => {
+    const resume = vi.fn();
+    publishResumeRpc(resume, oneSession({ resumable: false }));
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.not-resumable'),
+    ).toBeTruthy();
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.footer-note').textContent,
+    ).toContain('browsable only');
+    expect(
+      el.shadowRoot.querySelector('.resume-button').disabled,
+    ).toBe(true);
+    // Clicking it anyway does nothing — the disabled attribute is the
+    // UI's story, the guard is the one that has to hold.
+    el._onResumeClick(false);
+    await settle(el);
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('treats a row with no resumable field as resumable', async () => {
+    // An unknown must not cost the user a session they could open.
+    const row = oneSession();
+    delete row.resumable;
+    publishResumeRpc(vi.fn().mockResolvedValue({ session_id: 's1' }), row);
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.not-resumable')).toBeNull();
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.resume-button').disabled,
+    ).toBe(false);
   });
 });
 
@@ -972,10 +1153,10 @@ describe('HistoryBrowser load action', () => {
 describe('HistoryBrowser close state reset', () => {
   it('clears search state when closed', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([]),
-      'LLMService.history_search': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.history_search': vi.fn().mockResolvedValue([]),
     });
     const el = mountBrowser({ open: true });
     await settle(el);
@@ -993,7 +1174,7 @@ describe('HistoryBrowser close state reset', () => {
 
   it('clears selection when closed', async () => {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi.fn().mockResolvedValue([
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([
         {
           session_id: 's1',
           timestamp: new Date().toISOString(),
@@ -1002,7 +1183,7 @@ describe('HistoryBrowser close state reset', () => {
           first_role: 'user',
         },
       ]),
-      'LLMService.history_get_session': vi
+      'ClaudeCodeService.history_load': vi
         .fn()
         .mockResolvedValue([{ role: 'user', content: 'x' }]),
     });
@@ -1025,7 +1206,7 @@ describe('HistoryBrowser close state reset', () => {
 describe('HistoryBrowser preview images', () => {
   async function setupWithImage(messages) {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([
           {
@@ -1036,7 +1217,7 @@ describe('HistoryBrowser preview images', () => {
             first_role: 'user',
           },
         ]),
-      'LLMService.history_get_session': vi
+      'ClaudeCodeService.history_load': vi
         .fn()
         .mockResolvedValue(messages),
     });
@@ -1122,7 +1303,7 @@ describe('HistoryBrowser preview images', () => {
 describe('HistoryBrowser message action buttons', () => {
   async function setupWithMessages(messages) {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([
           {
@@ -1133,7 +1314,7 @@ describe('HistoryBrowser message action buttons', () => {
             first_role: 'user',
           },
         ]),
-      'LLMService.history_get_session': vi
+      'ClaudeCodeService.history_load': vi
         .fn()
         .mockResolvedValue(messages),
     });
@@ -1372,7 +1553,7 @@ describe('HistoryBrowser message action buttons', () => {
 describe('HistoryBrowser context menu', () => {
   async function setupWithMessages(messages) {
     publishFakeRpc({
-      'LLMService.history_list_sessions': vi
+      'ClaudeCodeService.history_list': vi
         .fn()
         .mockResolvedValue([
           {
@@ -1383,7 +1564,7 @@ describe('HistoryBrowser context menu', () => {
             first_role: 'user',
           },
         ]),
-      'LLMService.history_get_session': vi
+      'ClaudeCodeService.history_load': vi
         .fn()
         .mockResolvedValue(messages),
     });
