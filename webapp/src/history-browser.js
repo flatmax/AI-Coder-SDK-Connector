@@ -45,6 +45,13 @@
 //   - Preview of a selected session's messages (simplified
 //     rendering — role labels + raw content, no file-mention
 //     wrapping), resolving each image pointer in it to a thumbnail
+//   - List the selected session's subagent transcripts, and hand one
+//     to the chat panel's tab strip when the user opens it. This is
+//     the only way into them for a session that is not the live one:
+//     the transcript records a subagent under its own id but does not
+//     attribute it to the turn that spawned it, so a turn read back
+//     off disk carries no subagent rows to click
+//     (specs5/5-webapp/subagent-browser.md § Historical Transcripts)
 //   - Resume or fork the selected session, which triggers the
 //     server's sessionChanged broadcast that the chat panel's
 //     existing handler consumes
@@ -62,6 +69,12 @@
 //   - `close` (bubbles, composed) — dispatched when the user
 //     closes the modal via any path. Parent (chat panel) toggles
 //     the modal open-state off.
+//   - `view-subagents-requested` (bubbles, composed) — dispatched
+//     when the user opens one of the listed subagent transcripts,
+//     carrying `{agents: [{agent_id, label}], session_id}`. The chat
+//     panel's tab strip owns the tab; the session id is explicit
+//     because the transcript belongs to the browsed session, which is
+//     usually not the one the panel is attached to.
 //   - `session-loaded` (bubbles, composed) — dispatched AFTER
 //     the RPC call succeeds, carrying `{session_id, action}`. The
 //     server also broadcasts sessionChanged to all clients; the chat
@@ -90,6 +103,7 @@ import {
 } from './image-refs.js';
 import { segmentResponse, matchSegmentsToResults } from './edit-blocks.js';
 import { renderEditCard } from './edit-block-render.js';
+import { subagentLabel } from './chat-panel/block-render.js';
 
 /**
  * Debounce delay for search queries. 300ms matches the
@@ -141,6 +155,29 @@ function historyError(result) {
  */
 function isResumable(session) {
   return !session || session.resumable !== false;
+}
+
+/**
+ * What to call one row of `list_subagent_transcripts`.
+ *
+ * `description` and `agent_type` are the good name and they are the two
+ * fields a row may not have: they reach the store as a synthetic
+ * `agent_metadata` entry the CLI sends to a *live* mirror, so a session
+ * AC⚡DC watched has them and one imported from disk does not
+ * (specs5/3-engine/history.md § Subagent Transcripts). `preview` — the
+ * opening words of the prompt the subagent was given — is always there and
+ * says much the same thing, so it is the fallback rather than the id, which
+ * is opaque and only distinguishes one row from another.
+ */
+function subagentRowLabel(row) {
+  const named = subagentLabel(row);
+  if (named) return named;
+  const preview =
+    typeof row?.preview === 'string' ? row.preview.trim() : '';
+  if (preview) return preview;
+  return typeof row?.agent_id === 'string' && row.agent_id
+    ? row.agent_id
+    : 'subagent';
 }
 
 /**
@@ -199,6 +236,21 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
      * shown here is also the reason Resume is disabled.
      */
     _messagesError: { type: String, state: true },
+    /**
+     * The selected session's subagent transcripts, one row per
+     * `list_subagent_transcripts` entry. A separate read from the
+     * messages: a session's subagents are not in its transcript, and a
+     * failure to list them must not cost the user the conversation.
+     */
+    _subagents: { type: Array, state: true },
+    /** Loading state for the subagent listing. */
+    _loadingSubagents: { type: Boolean, state: true },
+    /**
+     * Why the subagent listing is missing, when it is. Empty when the
+     * session simply delegated nothing — which draws no listing at all,
+     * where an unreadable one says so.
+     */
+    _subagentsError: { type: String, state: true },
     /** Current search query (may be empty). */
     _searchQuery: { type: String, state: true },
     /** Whether search results mode is active. */
@@ -386,6 +438,70 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
+    }
+    /* The session's subagents, held above the scroller: they belong to
+     * the session rather than to any message in it, and wrapping rather
+     * than scrolling horizontally so a turn that fanned out widely is
+     * all readable at once. */
+    .subagents-bar {
+      flex-shrink: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+      background: rgba(22, 27, 34, 0.3);
+    }
+    .subagents-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary, #8b949e);
+      margin-right: 0.25rem;
+    }
+    .subagents-note {
+      font-size: 0.75rem;
+      color: var(--text-secondary, #8b949e);
+      font-style: italic;
+    }
+    .subagents-error {
+      font-size: 0.75rem;
+      color: #f85149;
+    }
+    /* One chip per transcript. Reads as a link into something rather
+     * than as an action on the session, which is what the footer's
+     * buttons are for. */
+    .subagent-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      max-width: 18rem;
+      padding: 0.2rem 0.45rem;
+      background: rgba(240, 246, 252, 0.04);
+      border: 1px solid rgba(240, 246, 252, 0.12);
+      border-radius: 4px;
+      color: var(--text-primary, #c9d1d9);
+      font-family: inherit;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+    .subagent-chip:hover {
+      background: rgba(88, 166, 255, 0.12);
+      border-color: var(--accent-primary, #58a6ff);
+    }
+    .subagent-chip-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .subagent-chip-count {
+      flex-shrink: 0;
+      background: rgba(240, 246, 252, 0.08);
+      border-radius: 3px;
+      padding: 0.05rem 0.3rem;
+      color: var(--text-secondary, #8b949e);
     }
     .preview-empty {
       margin: auto;
@@ -807,6 +923,9 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._selectedMessages = [];
     this._loadingMessages = false;
     this._messagesError = '';
+    this._subagents = [];
+    this._loadingSubagents = false;
+    this._subagentsError = '';
     this._searchQuery = '';
     this._searchMode = false;
     this._searchHits = [];
@@ -822,6 +941,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // when the user types faster than the server responds.
     this._searchGeneration = 0;
     this._messagesGeneration = 0;
+    // The subagent listing gets its own counter rather than sharing the
+    // messages one: both reads start on the same click but land
+    // independently, and a shared counter would have each bump discard
+    // the other's answer.
+    this._subagentsGeneration = 0;
     // Resolved image pointers, keyed by `imageKey`. Not a reactive
     // property: it is written one entry at a time from a loop that
     // calls `requestUpdate()` itself, and replacing the whole Map per
@@ -894,8 +1018,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
         // but clear search and selection. Defer to the
         // next microtask so property writes happen outside
         // the update cycle. The initial mount (open goes
-        // from undefined → false) also lands here; all
-        // five fields are already at their defaults so the
+        // from undefined → false) also lands here; every
+        // field is already at its default so the
         // microtask is effectively a no-op, but deferring
         // means we never trigger the change-in-update
         // warning.
@@ -908,6 +1032,8 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._selectedSessionId = null;
           this._selectedMessages = [];
           this._messagesError = '';
+          this._subagents = [];
+          this._subagentsError = '';
           this._confirmDelete = null;
           this._contextMenu = null;
         });
@@ -1010,6 +1136,67 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       isStale: () => gen !== this._messagesGeneration,
       label: 'history-browser',
     });
+  }
+
+  /**
+   * List the subagents the selected session spawned.
+   *
+   * Its own read, alongside the messages rather than after them: the
+   * listing is a directory walk plus a parse per subagent, and holding the
+   * conversation behind it would make every session pay for a feature most
+   * sessions do not use. A failure here is reported in the listing's own
+   * place and leaves the transcript alone.
+   *
+   * Answers a bare list or `{error}`, like every other history read, and
+   * the two halves are drawn differently for the same reason: a session
+   * that delegated nothing and a listing that could not be read want
+   * opposite reactions.
+   */
+  async _loadSubagents(sessionId) {
+    if (!this.rpcConnected || !sessionId) return;
+    const gen = ++this._subagentsGeneration;
+    this._loadingSubagents = true;
+    this._subagentsError = '';
+    try {
+      const result = await withRpcTimeout(
+        this.rpcExtract(
+          'ClaudeCodeService.list_subagent_transcripts',
+          sessionId,
+        ),
+        HISTORY_TIMEOUT_MS,
+        'list_subagent_transcripts',
+      );
+      if (gen !== this._subagentsGeneration) return;
+      this._subagentsError = historyError(result);
+      // Only rows that name an agent: the id is what opens a transcript,
+      // so a row without one is a listing entry with nothing behind it.
+      this._subagents = Array.isArray(result)
+        ? result.filter((row) => row && typeof row.agent_id === 'string' && row.agent_id)
+        : [];
+    } catch (err) {
+      // A backend that does not expose the method is not a failure to
+      // report: it is a backend with no subagents to list, and the
+      // listing's absence already says so — same reasoning as the
+      // session list's. Anything else is the user's to see.
+      const message = err?.message || '';
+      const missing = message.includes('method not found');
+      if (!missing) {
+        console.error(
+          '[history-browser] list_subagent_transcripts failed',
+          err,
+        );
+      }
+      if (gen === this._subagentsGeneration) {
+        this._subagents = [];
+        this._subagentsError = missing
+          ? ''
+          : message || 'Could not read that session’s subagents';
+      }
+    } finally {
+      if (gen === this._subagentsGeneration) {
+        this._loadingSubagents = false;
+      }
+    }
   }
 
   async _runSearch(query) {
@@ -1152,10 +1339,47 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._selectedSessionId = sessionId;
     this._selectedMessages = [];
     this._messagesError = '';
+    this._subagents = [];
+    this._subagentsError = '';
     // An armed Delete belongs to the session it was armed on. Moving
     // the selection disarms it rather than re-aiming it.
     this._confirmDelete = null;
+    // Two reads, neither awaited and neither waiting on the other: the
+    // transcript and the subagent listing are separate files on disk and
+    // the pane draws each as it lands.
     this._loadSessionMessages(sessionId);
+    this._loadSubagents(sessionId);
+  }
+
+  /**
+   * Open one listed subagent's transcript in the chat panel's tab strip.
+   *
+   * The session id goes with it because the transcript belongs to the
+   * session being browsed, which is usually not the one the panel is
+   * attached to — without it the panel would read the live session's
+   * subagent directory and find nothing, or worse, find a different
+   * subagent with the same id. Dispatched rather than rendered here: the
+   * panel already draws transcripts, and a second renderer inside a modal
+   * would be a second answer to a question that has one
+   * (specs5/5-webapp/subagent-browser.md § Historical Transcripts).
+   *
+   * The modal closes, because the tab it just asked for is behind it.
+   */
+  _onSubagentClick(row) {
+    const agentId =
+      typeof row?.agent_id === 'string' ? row.agent_id : '';
+    if (!agentId || !this._selectedSessionId) return;
+    this.dispatchEvent(
+      new CustomEvent('view-subagents-requested', {
+        detail: {
+          agents: [{ agent_id: agentId, label: subagentRowLabel(row) }],
+          session_id: this._selectedSessionId,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    this._close();
   }
 
   _onSearchHitClick(sessionId) {
@@ -1315,10 +1539,18 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       this._selectedSessionId = null;
       this._selectedMessages = [];
       this._messagesError = '';
+      // The subagent directory went with the transcript — deleting a
+      // session takes its subagents' transcripts too, because one whose
+      // parent is gone is unreachable through every RPC we expose
+      // (specs5/5-webapp/subagent-browser.md § Disk Usage).
+      this._subagents = [];
+      this._subagentsError = '';
       // Any load still in flight for it must not paint into the
       // pane it no longer owns.
       this._messagesGeneration += 1;
+      this._subagentsGeneration += 1;
       this._loadingMessages = false;
+      this._loadingSubagents = false;
     }
   }
 
@@ -1478,6 +1710,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
                 : this._renderSessionList()}
             </div>
             <div class="preview-pane">
+              ${this._renderSubagents()}
               <div class="preview-messages">
                 ${this._renderPreview()}
               </div>
@@ -1627,6 +1860,61 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
         </div>
       `;
     });
+  }
+
+  /**
+   * The selected session's subagents, above its messages.
+   *
+   * Above rather than inside the scroller because they belong to the
+   * session rather than to any one message in it, and a strip that scrolls
+   * away is one a reader has to go looking for.
+   *
+   * A session that delegated nothing draws nothing — no header for
+   * something that does not exist. An unreadable listing does draw, in its
+   * own words, because "no subagents" and "could not tell" are the
+   * distinction the whole return union exists to preserve
+   * (specs5/5-webapp/subagent-browser.md § Empty States).
+   */
+  _renderSubagents() {
+    if (!this._selectedSessionId) return '';
+    if (this._loadingSubagents) {
+      return html`<div class="subagents-bar">
+        <span class="subagents-title">Subagents</span>
+        <span class="subagents-note">reading…</span>
+      </div>`;
+    }
+    if (this._subagentsError) {
+      return html`<div class="subagents-bar">
+        <span class="subagents-title">Subagents</span>
+        <span class="subagents-error" role="alert">
+          ${this._subagentsError}
+        </span>
+      </div>`;
+    }
+    if (this._subagents.length === 0) return '';
+    return html`<div class="subagents-bar">
+      <span class="subagents-title">
+        ${this._subagents.length === 1
+          ? '1 subagent'
+          : `${this._subagents.length} subagents`}
+      </span>
+      ${this._subagents.map((row) => {
+        const label = subagentRowLabel(row);
+        const count = Number(row.message_count) || 0;
+        return html`
+          <button
+            class="subagent-chip"
+            @click=${() => this._onSubagentClick(row)}
+            title=${`${label} — ${count} ${
+              count === 1 ? 'message' : 'messages'
+            }${row.preview ? `\n${row.preview}` : ''}`}
+          >
+            <span class="subagent-chip-label">📜 ${label}</span>
+            <span class="subagent-chip-count">${count}</span>
+          </button>
+        `;
+      })}
+    </div>`;
   }
 
   _renderPreview() {

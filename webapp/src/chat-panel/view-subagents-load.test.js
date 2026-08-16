@@ -493,3 +493,67 @@ describe('view-subagents handler — no channel to a subagent', () => {
     expect(chat).toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// From the history browser
+// ---------------------------------------------------------------------------
+
+describe('view-subagents handler — the history browser’s route in', () => {
+  it('opens a transcript the browser hands up, for the session it names', async () => {
+    // The whole seam in one test: the browser lives in the panel's shadow
+    // root, so the event it dispatches has to be composed to reach the
+    // panel's listener, and the session id has to travel with it — the
+    // panel's own session is not the one being browsed.
+    const read = vi.fn().mockResolvedValue(TRANSCRIPT);
+    publishFakeRpc({
+      'ClaudeCodeService.get_subagent_transcript': read,
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue([
+        {
+          session_id: 'sess_old',
+          timestamp: new Date().toISOString(),
+          message_count: 2,
+          preview: 'a conversation from last week',
+          first_role: 'user',
+        },
+      ]),
+      'ClaudeCodeService.history_load': vi
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
+      'ClaudeCodeService.list_subagent_transcripts': vi
+        .fn()
+        .mockResolvedValue([
+          {
+            agent_id: 'agent_abc',
+            subpath: 'subagents/agent-agent_abc',
+            message_count: 3,
+            preview: 'find the auth call sites',
+            agent_type: 'explore',
+            description: 'find auth call sites',
+          },
+        ]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-started', { data: { session_id: 'sess_live' } });
+    await settle(p);
+
+    p.shadowRoot.querySelector('.history-button').click();
+    await settle(p);
+    const browser = p.shadowRoot.querySelector('ac-history-browser');
+    await browser.updateComplete;
+    await settle(p);
+    browser.shadowRoot.querySelector('.session-item').click();
+    await browser.updateComplete;
+    await settle(p);
+    browser.shadowRoot.querySelector('.subagent-chip').click();
+    await settle(p);
+
+    expect(read).toHaveBeenCalledWith('agent_abc', 'sess_old');
+    expect(p._tabLabels.get('historical:agent_abc')).toBe(
+      '📜 explore: find auth call sites',
+    );
+    expect(p._activeTabId).toBe('historical:agent_abc');
+    // The modal closes: the tab it asked for is behind it.
+    expect(p._historyOpen).toBe(false);
+  });
+});

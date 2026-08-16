@@ -2397,3 +2397,340 @@ describe('HistoryBrowser context menu', () => {
     expect(() => document.body.click()).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Subagent listing
+//
+// The only way into a past session's subagent transcripts. A turn read
+// back off disk carries no subagent rows — the transcript records each
+// subagent under its own id without attributing it to the turn that
+// spawned it — so the per-turn "View subagents" affordance has nothing to
+// offer here and this listing is what does
+// (specs5/5-webapp/subagent-browser.md § Historical Transcripts).
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser subagent listing', () => {
+  const SESSIONS = [
+    {
+      session_id: 's1',
+      timestamp: new Date().toISOString(),
+      message_count: 2,
+      preview: 'Session one',
+      first_role: 'user',
+    },
+    {
+      session_id: 's2',
+      timestamp: new Date().toISOString(),
+      message_count: 1,
+      preview: 'Session two',
+      first_role: 'user',
+    },
+  ];
+
+  function row(over = {}) {
+    return {
+      agent_id: 'agent_1',
+      subpath: 'subagents/agent-agent_1',
+      message_count: 4,
+      preview: 'Find every call site of authenticate()',
+      ...over,
+    };
+  }
+
+  async function setup(listing, extra = {}) {
+    const listSubagents =
+      typeof listing === 'function'
+        ? vi.fn().mockImplementation(listing)
+        : vi.fn().mockResolvedValue(listing);
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue(SESSIONS),
+      'ClaudeCodeService.history_load': vi
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
+      'ClaudeCodeService.list_subagent_transcripts': listSubagents,
+      ...extra,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    return { el, listSubagents };
+  }
+
+  function chips(el) {
+    return [...el.shadowRoot.querySelectorAll('.subagent-chip')];
+  }
+
+  it('lists the selected session’s subagents', async () => {
+    const { el, listSubagents } = await setup([
+      row({
+        agent_id: 'a1',
+        agent_type: 'explore',
+        description: 'find auth',
+      }),
+      row({
+        agent_id: 'a2',
+        agent_type: 'plan',
+        description: 'sketch a fix',
+      }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    // The browsed session, explicitly: the panel's default is the live
+    // one, which is not what is on screen here.
+    expect(listSubagents).toHaveBeenCalledWith('s1');
+    const labels = chips(el).map((c) => c.textContent.trim());
+    expect(labels[0]).toContain('explore: find auth');
+    expect(labels[1]).toContain('plan: sketch a fix');
+  });
+
+  it('counts the transcripts in the bar’s title', async () => {
+    const { el } = await setup([
+      row({ agent_id: 'a1' }),
+      row({ agent_id: 'a2' }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.subagents-title').textContent,
+    ).toContain('2 subagents');
+  });
+
+  it('says "1 subagent" for a single transcript', async () => {
+    const { el } = await setup([row({ agent_id: 'a1' })]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.subagents-title').textContent,
+    ).toContain('1 subagent');
+  });
+
+  it('shows each transcript’s message count', async () => {
+    const { el } = await setup([
+      row({ agent_id: 'a1', message_count: 7 }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot
+        .querySelector('.subagent-chip-count')
+        .textContent.trim(),
+    ).toBe('7');
+  });
+
+  it('falls back to the prompt preview when the metadata is absent', async () => {
+    // A session imported from disk rather than mirrored live: the CLI's
+    // `agent_metadata` entry never reached the store, so there is no
+    // description or type to label the row with.
+    const { el } = await setup([
+      row({ agent_id: 'a1', preview: 'Search for the token parser' }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(chips(el)[0].textContent).toContain(
+      'Search for the token parser',
+    );
+  });
+
+  it('falls back to the agent id when there is nothing else', async () => {
+    const { el } = await setup([
+      row({ agent_id: 'agent_xyz', preview: '' }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(chips(el)[0].textContent).toContain('agent_xyz');
+  });
+
+  it('skips a row with no agent id', async () => {
+    // The id is what opens a transcript, so a row without one is a
+    // listing entry with nothing behind it.
+    const { el } = await setup([
+      row({ agent_id: 'a1' }),
+      { subpath: 'subagents/junk', message_count: 2, preview: 'orphan' },
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(chips(el).length).toBe(1);
+  });
+
+  it('draws nothing before a session is selected', async () => {
+    const { el, listSubagents } = await setup([row()]);
+    expect(el.shadowRoot.querySelector('.subagents-bar')).toBeNull();
+    expect(listSubagents).not.toHaveBeenCalled();
+  });
+
+  it('draws nothing for a session that delegated nothing', async () => {
+    const { el } = await setup([]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.subagents-bar')).toBeNull();
+  });
+
+  it('shows why an unreadable listing is missing', async () => {
+    // `{error}` rather than an empty list, so "delegated nothing" and
+    // "could not tell" stay different sentences.
+    const { el } = await setup({ error: 'Could not read the subagents' });
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.subagents-error').textContent,
+    ).toContain('Could not read the subagents');
+  });
+
+  it('says it is still reading rather than saying none', async () => {
+    const { el } = await setup(() => new Promise(() => {}));
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.subagents-note').textContent,
+    ).toContain('reading');
+  });
+
+  it('draws no error when the backend does not expose the method', async () => {
+    // A stripped-down backend has no subagents to list, which the
+    // listing's absence already says; an error banner would report a
+    // problem that is not one.
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue(SESSIONS),
+      'ClaudeCodeService.history_load': vi
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.subagents-bar')).toBeNull();
+    expect(el._subagentsError).toBe('');
+  });
+
+  it('does not hold the transcript behind the listing', async () => {
+    // Two independent reads. A listing that never answers must not cost
+    // the user the conversation.
+    const { el } = await setup(() => new Promise(() => {}));
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelectorAll('.preview-message').length,
+    ).toBe(1);
+  });
+
+  it('does not lose the listing to the messages read’s generation', async () => {
+    // Both reads start on the same click; each bumping the other's
+    // counter would have them discard each other's answers.
+    const { el } = await setup([row({ agent_id: 'a1' })]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(chips(el).length).toBe(1);
+    expect(
+      el.shadowRoot.querySelectorAll('.preview-message').length,
+    ).toBe(1);
+  });
+
+  it('discards a stale listing response', async () => {
+    const resolvers = {};
+    const { el } = await setup(
+      (sid) =>
+        new Promise((resolve) => {
+          resolvers[sid] = resolve;
+        }),
+    );
+    const items = el.shadowRoot.querySelectorAll('.session-item');
+    items[0].click();
+    await el.updateComplete;
+    items[1].click();
+    await el.updateComplete;
+    // Empty previews so the id is what labels each chip, which is what
+    // tells the two answers apart on screen.
+    resolvers.s2([row({ agent_id: 'from_s2', preview: '' })]);
+    await settle(el);
+    resolvers.s1([
+      row({ agent_id: 'stale_a', preview: '' }),
+      row({ agent_id: 'stale_b', preview: '' }),
+    ]);
+    await settle(el);
+    const labels = chips(el).map((c) => c.textContent);
+    expect(labels.length).toBe(1);
+    expect(labels[0]).toContain('from_s2');
+  });
+
+  it('hands the agent id, its label and the browsed session over', async () => {
+    const { el } = await setup([
+      row({
+        agent_id: 'a1',
+        agent_type: 'explore',
+        description: 'find auth',
+      }),
+    ]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    const seen = [];
+    el.addEventListener('view-subagents-requested', (e) => seen.push(e));
+    chips(el)[0].click();
+    await settle(el);
+    expect(seen.length).toBe(1);
+    expect(seen[0].detail).toEqual({
+      agents: [{ agent_id: 'a1', label: 'explore: find auth' }],
+      session_id: 's1',
+    });
+    // Composed and bubbling, because the chat panel listens on itself
+    // and this element lives inside its shadow root.
+    expect(seen[0].bubbles).toBe(true);
+    expect(seen[0].composed).toBe(true);
+  });
+
+  it('closes the modal on opening a transcript', async () => {
+    const { el } = await setup([row({ agent_id: 'a1' })]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    const closed = vi.fn();
+    el.addEventListener('close', closed);
+    chips(el)[0].click();
+    await settle(el);
+    // The tab it just asked for is behind this modal.
+    expect(closed).toHaveBeenCalledOnce();
+  });
+
+  it('replaces the listing when the selection moves', async () => {
+    const { el } = await setup((sid) =>
+      Promise.resolve([row({ agent_id: `${sid}_agent`, preview: '' })]),
+    );
+    const items = el.shadowRoot.querySelectorAll('.session-item');
+    items[0].click();
+    await settle(el);
+    expect(chips(el)[0].textContent).toContain('s1_agent');
+    items[1].click();
+    await settle(el);
+    const labels = chips(el).map((c) => c.textContent);
+    expect(labels.length).toBe(1);
+    expect(labels[0]).toContain('s2_agent');
+  });
+
+  it('drops the listing when the selected session is deleted', async () => {
+    // Deleting a session takes its subagent directory with it.
+    const { el } = await setup([row({ agent_id: 'a1' })]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(chips(el).length).toBe(1);
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', {
+        detail: { session_id: 's1' },
+      }),
+    );
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.subagents-bar')).toBeNull();
+    expect(el._subagents).toEqual([]);
+  });
+
+  it('clears the listing when the modal closes', async () => {
+    const { el } = await setup([row({ agent_id: 'a1' })]);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    el.open = false;
+    await settle(el);
+    expect(el._subagents).toEqual([]);
+    expect(el._subagentsError).toBe('');
+  });
+});
