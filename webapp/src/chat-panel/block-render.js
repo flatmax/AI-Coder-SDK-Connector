@@ -25,6 +25,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderEditBody } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
+import { costLabel, modelUsageLines, turnTokens } from '../turn-cost.js';
 
 import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
 import { revealHealth } from './health-banner.js';
@@ -166,69 +167,12 @@ export function formatTokens(count) {
   return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
-/**
- * Every token a usage dict accounts for.
- *
- * Cache reads and cache writes are included: they are tokens the turn moved,
- * and a summary that omitted them would show a large cached turn as tiny.
- * Returns 0 for a missing or empty dict, which callers read as "nothing to
- * show" rather than "a free turn".
- */
-export function totalTokens(usage) {
-  if (!usage || typeof usage !== 'object') return 0;
-  const keys = [
-    'input_tokens',
-    'output_tokens',
-    'cache_creation_input_tokens',
-    'cache_read_input_tokens',
-  ];
-  let total = 0;
-  for (const key of keys) {
-    const value = usage[key];
-    if (Number.isFinite(value) && value > 0) total += value;
-  }
-  return total;
-}
-
-/**
- * Per-model usage lines for the turn footer.
- *
- * `model_usage` is keyed by the raw model string the provider reported, which
- * can be an alias or a provider-specific id; each entry carries a friendlier
- * `modelName` when the CLI knows one. Prefer that, fall back to the key.
- *
- * Cost is *not* summarised here. It is reported per model and it is null under
- * subscription billing, so the footer decides separately whether there is a
- * number worth showing at all (specs5/plan/risks.md § R-6).
- */
-export function usageLines(modelUsage) {
-  if (!modelUsage || typeof modelUsage !== 'object') return [];
-  const lines = [];
-  for (const [key, entry] of Object.entries(modelUsage)) {
-    if (!entry || typeof entry !== 'object') continue;
-    const tokens = totalTokens(entry);
-    if (tokens <= 0) continue;
-    lines.push({
-      model: typeof entry.modelName === 'string' && entry.modelName ? entry.modelName : key,
-      tokens,
-    });
-  }
-  return lines;
-}
-
-/**
- * Cost, or null when there is none to report.
- *
- * The whole point of this function is the null. Subscription billing reports
- * `total_cost_usd: null` and rendering that as `$0.00` would tell users their
- * turns are free, which is both false and the exact failure R-6 names.
- */
-export function formatCost(totalCostUsd) {
-  if (!Number.isFinite(totalCostUsd)) return null;
-  if (totalCostUsd <= 0) return null;
-  if (totalCostUsd < 0.01) return `<$0.01`;
-  return `$${totalCostUsd.toFixed(2)}`;
-}
+// Token counting, the per-model lines and the cost wording all moved to
+// ../turn-cost.js — see the import at the top of this file. They were local
+// helpers that knew only the snake_case spellings a replayed transcript uses,
+// so a *live* turn, whose per-model counters arrive in the engine's camelCase,
+// summed to zero and rendered no usage lines at all. The usage HUD read the
+// same numbers and got them wrong differently. One owner now.
 
 // ---------------------------------------------------------------
 // Compaction boundary
@@ -820,7 +764,7 @@ function openSubagentTranscript(panel, row) {
 export function renderSubagentRow(panel, row, blocks, candidates, settled) {
   if (!row) return nothing;
   const live = !row.terminal && !settled;
-  const tokens = totalTokens(row.usage);
+  const tokens = turnTokens(row.usage);
   const desc = row.description || row.task_type || 'Subagent';
   return html`
     <div class="subagent-row ${live ? 'live' : 'terminal'}" data-agent-id=${row.agent_id || row.key}>
@@ -898,8 +842,12 @@ export function renderTurnFooter(panel, summary, files) {
     : 0;
   const duration = formatDuration(summary.duration_ms);
   const turns = Number.isFinite(summary.num_turns) ? summary.num_turns : null;
-  const usage = usageLines(summary.model_usage);
-  const cost = formatCost(summary.total_cost_usd);
+  // Both read the per-turn figures the engine derived for us, never the
+  // cumulative `model_usage` / `total_cost_usd` sitting beside them: this
+  // footer belongs to one turn, and a session running total on it would grow
+  // on every turn while claiming to describe this one.
+  const usage = modelUsageLines(summary);
+  const cost = costLabel(summary);
 
   const stats = [];
   if (toolCalls > 0) {
@@ -923,10 +871,18 @@ export function renderTurnFooter(panel, summary, files) {
       <span class="turn-stat turn-usage">${line.model} ${formatTokens(line.tokens)} tok</span>
     `);
   }
-  // Cost only when the engine reported one. Under subscription billing it
-  // reports null, and `$0.00` would read as "this was free" (R-6).
+  // Three renderings, and the tooltip says which: a price, "nothing extra"
+  // for a turn the engine's total did not move for, and "cost unknown" when
+  // the turn's share cannot be separated out. Nothing at all for a browsed
+  // turn — cost is not in the CLI's transcript, and "unknown" on every
+  // replayed footer would be noise about a thing that was never recorded.
   if (cost) {
-    stats.push(html`<span class="turn-stat turn-cost">${cost}</span>`);
+    stats.push(html`
+      <span
+        class="turn-stat turn-cost ${cost.known ? '' : 'turn-cost-unknown'}"
+        title=${cost.title}
+      >${cost.text}</span>
+    `);
   }
 
   if (paths.length === 0 && stats.length === 0 && !summary.mirror_gap) return nothing;

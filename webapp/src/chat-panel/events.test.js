@@ -292,7 +292,10 @@ describe('ChatPanel restoring a rendered turn', () => {
         num_turns: 3,
         files_modified: ['src/foo.py'],
         duration_ms: 4200,
-        model_usage: {
+        // `turn_model_usage`, snake_case, no cost: exactly what
+        // `history.py`'s `TurnBuilder.freeze()` produces. A browsed turn
+        // carries no cost at all — the CLI's transcript does not record it.
+        turn_model_usage: {
           'claude-opus-4': { input_tokens: 10, output_tokens: 20 },
         },
       },

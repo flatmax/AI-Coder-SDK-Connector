@@ -3,8 +3,9 @@
 //
 // Landed in phase 3 (CC-17) with no coverage. Three things here are easy to
 // break and impossible to notice: the auto-hide timers (the HUD is gone by
-// the time anyone looks), the cost rendering (a null cost means
-// "subscription", not "free"), and the session-changed path, which refreshes
+// the time anyone looks), the cost rendering (three different facts — a
+// price, "nothing extra", "cost unknown" — that all used to render as the
+// word "included"), and the session-changed path, which refreshes
 // the numbers *without* showing the HUD — phase 5 is what starts firing it,
 // and a HUD that pops up on session load would be reporting a turn that
 // never happened.
@@ -131,7 +132,17 @@ function usageAt(totalTokens, overrides = {}) {
   });
 }
 
-/** A `streamComplete` result, field-for-field as `messages.py` builds it. */
+/**
+ * A `streamComplete` result, field-for-field as the engine builds it.
+ *
+ * Note the two scopes, because the HUD used to read the wrong one:
+ * `model_usage` / `total_cost_usd` are the *session's* running totals, and
+ * `turn_model_usage` / `turn_cost_usd` / `turn_cost_basis` are this turn's,
+ * differenced by `ac_dc/claude_code/cost.py`. The fixture keeps them
+ * deliberately different — a session that has spent $1.20 across several
+ * turns, of which this turn is 3.42 cents — so a test cannot pass by
+ * reading either one in place of the other.
+ */
 function resultFixture(overrides = {}) {
   return {
     session_id: 'sess-1',
@@ -143,8 +154,14 @@ function resultFixture(overrides = {}) {
     duration_ms: 4200,
     duration_api_ms: 3900,
     usage: { input_tokens: 100, output_tokens: 50 },
-    model_usage: { 'claude-opus-4-6': { inputTokens: 100 } },
-    total_cost_usd: 0.0342,
+    model_usage: {
+      'claude-opus-4-6': { inputTokens: 4000, costUSD: 1.1 },
+      'claude-haiku-4-5': { inputTokens: 900, costUSD: 0.1 },
+    },
+    total_cost_usd: 1.2,
+    turn_model_usage: { 'claude-opus-4-6': { inputTokens: 100, costUSD: 0.0342 } },
+    turn_cost_usd: 0.0342,
+    turn_cost_basis: 'measured',
     tool_calls: 3,
     permission_prompts: 0,
     files_modified: [],
@@ -155,6 +172,26 @@ function resultFixture(overrides = {}) {
   };
 }
 
+/** The synthetic footer AC⚡DC writes when a turn dies before the engine's. */
+function crashFixture(overrides = {}) {
+  return resultFixture({
+    is_error: true,
+    subtype: 'error_during_execution',
+    terminal_reason: 'engine_error',
+    response: '',
+    usage: null,
+    model_usage: null,
+    total_cost_usd: null,
+    turn_model_usage: null,
+    turn_cost_usd: null,
+    turn_cost_basis: 'unpriced',
+    tool_calls: 0,
+    duration_ms: 0,
+    errors: ['kaboom'],
+    ...overrides,
+  });
+}
+
 function hud(el) {
   return el.shadowRoot.querySelector('.hud');
 }
@@ -163,6 +200,12 @@ function turnRow(el) {
   return [...el.shadowRoot.querySelectorAll('.row')].find((r) =>
     r.querySelector('.label')?.textContent.includes('This turn'),
   );
+}
+
+/** The turn row's value, whitespace collapsed so assertions read plainly. */
+function turnText(el) {
+  const row = turnRow(el);
+  return row ? row.querySelector('.value').textContent.replace(/\s+/g, ' ').trim() : '';
 }
 
 function contextRow(el) {
@@ -213,26 +256,46 @@ describe('UsageHud visibility', () => {
     expect(hud(el)).toBeNull();
   });
 
-  it('stays hidden for a turn that failed', async () => {
-    // The chat panel already surfaces the error, and an errored result has
-    // no cost to report — `total_cost_usd` is null because the price is
-    // unknown, not because the turn was free.
+  it('stays hidden for a turn that failed with nothing to report', async () => {
+    // Nothing ran, nothing was said, nothing was priced. The chat panel and
+    // a toast already carry the error.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(crashFixture());
+    await settle(el);
+    expect(hud(el)).toBeNull();
+  });
+
+  it('appears for a turn that failed after doing work', async () => {
+    // `error_max_turns` after twenty tool calls is the most expensive kind
+    // of failure there is, and the old rule — no HUD for any errored turn —
+    // hid exactly that. specs5/plan/README.md phase 6.
     publishUsage();
     const el = mountHud();
     await settle(el);
     pushComplete(
       resultFixture({
         is_error: true,
-        subtype: 'error_during_execution',
-        terminal_reason: 'engine_error',
-        total_cost_usd: null,
-        tool_calls: 0,
-        duration_ms: 0,
-        model_usage: null,
+        terminal_reason: 'error_max_turns',
+        turn_cost_usd: 0.87,
+        total_cost_usd: 2.07,
       }),
     );
     await settle(el);
-    expect(hud(el)).toBeNull();
+    expect(turnText(el)).toContain('$0.87');
+    expect(turnText(el)).toContain('failed');
+  });
+
+  it('appears for a crash footer once the turn had already spent something', async () => {
+    // The engine never wrote this footer, so it carries no usage at all —
+    // the only evidence the turn cost money is that it had done work.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(crashFixture({ tool_calls: 4, response: 'partial answer' }));
+    await settle(el);
+    expect(turnText(el)).toContain('cost unknown');
   });
 
   it('dismisses immediately on the close button', async () => {
@@ -393,44 +456,102 @@ describe('UsageHud auto-hide', () => {
 // ---------------------------------------------------------------------------
 
 describe('UsageHud cost', () => {
-  async function costFor(total_cost_usd) {
+  async function showCost(overrides) {
     publishUsage();
     const el = mountHud();
     await settle(el);
-    pushComplete(resultFixture({ total_cost_usd }));
+    pushComplete(resultFixture(overrides));
     await settle(el);
-    return turnRow(el).querySelector('.value').textContent.trim();
+    return el;
   }
+
+  async function costFor(turn_cost_usd) {
+    const el = await showCost({ turn_cost_usd });
+    return turnText(el);
+  }
+
+  it('reports what this turn cost, not what the session has spent', async () => {
+    // The bug this whole slice exists for: `total_cost_usd` is a running
+    // total, so the row headed "This turn" showed the session's bill and
+    // grew on every turn regardless of what the turn did.
+    const el = await showCost({ turn_cost_usd: 0.0342, total_cost_usd: 1.2 });
+    expect(turnText(el)).toContain('$0.0342');
+    expect(turnText(el)).not.toContain('$1.20');
+  });
 
   it('renders a sub-cent turn to four decimals', async () => {
     // Two decimals would print "$0.00", which reads as free.
     expect(await costFor(0.0042)).toContain('$0.0042');
   });
 
-  it('renders a turn over a cent to two decimals', async () => {
+  it('renders a turn over fifty cents to two decimals', async () => {
+    // The CLI's own cut-over, so a figure here reads like the terminal's.
     expect(await costFor(1.234_5)).toContain('$1.23');
   });
 
-  it('renders an exact zero without decimal noise', async () => {
-    expect(await costFor(0)).toContain('$0');
+  it('keeps four decimals up to fifty cents', async () => {
+    expect(await costFor(0.42)).toContain('$0.4200');
   });
 
-  it('says "included" under subscription billing rather than $0.00', async () => {
-    // A turn on a Max plan did not cost nothing — it cost nothing extra.
-    const text = await costFor(null);
-    expect(text).toContain('included');
+  it('says a measured zero cost nothing extra rather than $0', async () => {
+    // The engine's running total did not move, which is a real answer:
+    // the turn was served from what had already been paid for.
+    const text = await costFor(0);
+    expect(text).toContain('nothing extra');
     expect(text).not.toContain('$');
   });
 
-  it('says "included" when the engine omits a cost entirely', async () => {
+  it('says the cost is unknown when the turn could not be priced', async () => {
+    // Distinct from "nothing extra" — the distinction phase 6 exists to
+    // draw. Both used to render as the word "included".
+    const el = await showCost({ turn_cost_usd: null, turn_cost_basis: 'unpriced' });
+    expect(turnText(el)).toContain('cost unknown');
+    expect(turnText(el)).not.toContain('nothing extra');
+  });
+
+  it('says the cost is unknown when the session total restarted', async () => {
+    const el = await showCost({ turn_cost_usd: null, turn_cost_basis: 'reset' });
+    expect(turnText(el)).toContain('cost unknown');
+  });
+
+  it('gives the reason for an unknown cost in the tooltip', async () => {
+    // "cost unknown" on its own invites the reading that the app is broken.
+    const el = await showCost({ turn_cost_usd: null, turn_cost_basis: 'reset' });
+    const chip = [...turnRow(el).querySelectorAll('[title]')].pop();
+    expect(chip.title).toContain('restarted');
+    expect(chip.title).toContain('/clear');
+  });
+
+  it('names the session total in the tooltip of a priced turn', async () => {
+    const el = await showCost({ turn_cost_usd: 0.0342, total_cost_usd: 1.2 });
+    const chip = turnRow(el).querySelector('[title]');
+    expect(chip.title).toContain('$1.20');
+    expect(chip.title).toContain('estimate');
+  });
+
+  it('shows no cost at all for a turn that never recorded one', async () => {
+    // A browsed turn: cost is not in the CLI's transcript, and "unknown" on
+    // every replayed footer is noise about a thing that was never measured.
     publishUsage();
     const el = mountHud();
     await settle(el);
     const result = resultFixture();
-    delete result.total_cost_usd;
+    delete result.turn_cost_usd;
+    delete result.turn_cost_basis;
     pushComplete(result);
     await settle(el);
-    expect(turnRow(el).textContent).toContain('included');
+    expect(turnText(el)).not.toContain('$');
+    expect(turnText(el)).not.toContain('unknown');
+    expect(turnText(el)).not.toContain('nothing extra');
+  });
+
+  it('never prints the word "included"', async () => {
+    // It claimed a billing mode the payload says nothing about. The only
+    // real billing-mode signal is `credential_source` on engine health.
+    for (const basis of ['measured', 'reset', 'unpriced']) {
+      const el = await showCost({ turn_cost_basis: basis, turn_cost_usd: 0 });
+      expect(turnText(el)).not.toContain('included');
+    }
   });
 });
 
@@ -498,14 +619,30 @@ describe('UsageHud model label', () => {
 
   it('names the model that answered', async () => {
     const label = await labelFor({
-      model_usage: { 'claude-opus-4-6': {} },
+      turn_model_usage: { 'claude-opus-4-6': { inputTokens: 100 } },
+    });
+    expect(label.textContent.trim()).toBe('claude-opus-4-6');
+  });
+
+  it('names only the models that answered *this* turn', async () => {
+    // The session's `model_usage` lists every model it has ever used, so
+    // reading it made a plain opus turn claim a haiku subagent it never ran.
+    const label = await labelFor({
+      turn_model_usage: { 'claude-opus-4-6': { inputTokens: 100 } },
+      model_usage: {
+        'claude-opus-4-6': { inputTokens: 4000 },
+        'claude-haiku-4-5': { inputTokens: 900 },
+      },
     });
     expect(label.textContent.trim()).toBe('claude-opus-4-6');
   });
 
   it('counts the extras when a subagent used another model', async () => {
     const label = await labelFor({
-      model_usage: { 'claude-opus-4-6': {}, 'claude-haiku-4-5': {} },
+      turn_model_usage: {
+        'claude-opus-4-6': { inputTokens: 100 },
+        'claude-haiku-4-5': { inputTokens: 40 },
+      },
     });
     expect(label.textContent.trim()).toBe('claude-opus-4-6 +1');
     expect(label.title).toBe(
@@ -513,22 +650,49 @@ describe('UsageHud model label', () => {
     );
   });
 
+  it('leads with the model that did the most work', async () => {
+    // The `+n` should hide the subagent, not the model that answered.
+    const label = await labelFor({
+      turn_model_usage: {
+        'claude-haiku-4-5': { inputTokens: 40 },
+        'claude-opus-4-6': { inputTokens: 100 },
+      },
+    });
+    expect(label.textContent.trim()).toBe('claude-opus-4-6 +1');
+  });
+
+  it('prefers the canonical name over a provider-specific id', async () => {
+    // On Bedrock the map is keyed by ids like this one; the schema carries
+    // the canonical name beside it.
+    const label = await labelFor({
+      turn_model_usage: {
+        'us.anthropic.claude-opus-4-6-v1:0': {
+          inputTokens: 100,
+          canonicalModel: 'claude-opus-4-6',
+        },
+      },
+    });
+    expect(label.textContent.trim()).toBe('claude-opus-4-6');
+  });
+
   it('falls back to the context breakdown model', async () => {
     // `set_model` between turns would make the two disagree, so the turn
     // wins when it has an answer — this is the case where it does not.
-    const label = await labelFor({ model_usage: null });
+    const label = await labelFor({ turn_model_usage: null });
     expect(label.textContent.trim()).toBe('claude-opus-4-6');
   });
 
   it('falls back to a generic name when neither knows', async () => {
     const usage = usageFixture();
     delete usage.model;
-    const label = await labelFor({ model_usage: null }, usage);
+    const label = await labelFor({ turn_model_usage: null }, usage);
     expect(label.textContent.trim()).toBe('Claude Code');
   });
 
   it('titles the single-model case with the model name', async () => {
-    const label = await labelFor({ model_usage: { 'claude-opus-4-6': {} } });
+    const label = await labelFor({
+      turn_model_usage: { 'claude-opus-4-6': { inputTokens: 100 } },
+    });
     expect(label.title).toBe('claude-opus-4-6');
   });
 });

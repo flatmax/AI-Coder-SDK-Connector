@@ -36,7 +36,6 @@ import {
   compactionSummary,
   diffSegments,
   formatBytes,
-  formatCost,
   formatDuration,
   formatTokens,
   groupBlocksByScope,
@@ -54,8 +53,6 @@ import {
   terminalBadge,
   toggleBlock,
   toolLabel,
-  totalTokens,
-  usageLines,
 } from './block-render.js';
 
 // ---------------------------------------------------------------------------
@@ -343,84 +340,9 @@ describe('formatTokens', () => {
   });
 });
 
-describe('totalTokens', () => {
-  it('is zero for a usage dict that is absent or empty', () => {
-    expect(totalTokens(null)).toBe(0);
-    expect(totalTokens(undefined)).toBe(0);
-    expect(totalTokens('12000')).toBe(0);
-    expect(totalTokens({})).toBe(0);
-  });
-
-  it('counts cache traffic as tokens the turn moved', () => {
-    // Omitting cache reads would report a large cached turn as a tiny one,
-    // which is the opposite of what a usage line is for.
-    expect(totalTokens({
-      input_tokens: 100,
-      output_tokens: 200,
-      cache_creation_input_tokens: 1000,
-      cache_read_input_tokens: 40_000,
-    })).toBe(41_300);
-  });
-
-  it('ignores junk fields rather than propagating NaN', () => {
-    expect(totalTokens({
-      input_tokens: 100,
-      output_tokens: '200',
-      cache_read_input_tokens: -5,
-      web_search_requests: 3,
-    })).toBe(100);
-  });
-});
-
-describe('usageLines', () => {
-  it('is empty for no usage at all', () => {
-    expect(usageLines(null)).toEqual([]);
-    expect(usageLines({})).toEqual([]);
-    expect(usageLines('claude')).toEqual([]);
-  });
-
-  it('prefers the friendly model name and falls back to the raw key', () => {
-    expect(usageLines({
-      'claude-opus-5': { modelName: 'Claude Opus 5', input_tokens: 900, output_tokens: 100 },
-      'some-provider/alias': { input_tokens: 50 },
-    })).toEqual([
-      { model: 'Claude Opus 5', tokens: 1000 },
-      { model: 'some-provider/alias', tokens: 50 },
-    ]);
-  });
-
-  it('drops entries with nothing to report', () => {
-    expect(usageLines({
-      'claude-haiku-4-5': { input_tokens: 0, output_tokens: 0 },
-      'claude-opus-5': null,
-      'claude-sonnet-5': 'nope',
-    })).toEqual([]);
-  });
-});
-
-describe('formatCost', () => {
-  it('is null when there is no cost to report', () => {
-    // The whole point of the function (R-6). Subscription billing reports
-    // null, and `$0.00` would tell the user their turns are free.
-    expect(formatCost(null)).toBeNull();
-    expect(formatCost(undefined)).toBeNull();
-    expect(formatCost(NaN)).toBeNull();
-    expect(formatCost(0)).toBeNull();
-    expect(formatCost(-1)).toBeNull();
-    expect(formatCost('0.42')).toBeNull();
-  });
-
-  it('says "less than a cent" rather than rounding to zero', () => {
-    expect(formatCost(0.0004)).toBe('<$0.01');
-    expect(formatCost(0.009)).toBe('<$0.01');
-  });
-
-  it('shows cents for anything a cent or more', () => {
-    expect(formatCost(0.01)).toBe('$0.01');
-    expect(formatCost(1.239)).toBe('$1.24');
-    expect(formatCost(12)).toBe('$12.00');
-  });
-});
+// `totalTokens`, `usageLines` and `formatCost` moved to ../turn-cost.js, which
+// the usage HUD reads too — see turn-cost.test.js for their coverage. The
+// footer's use of them is still exercised below.
 
 // ---------------------------------------------------------------------------
 // Compaction summary
@@ -1312,32 +1234,80 @@ describe('renderTurnFooter', () => {
 
   it('reports usage per model', () => {
     const host = draw(renderTurnFooter(stubPanel(), {
-      model_usage: {
-        'claude-opus-5': { modelName: 'Claude Opus 5', input_tokens: 40_000, output_tokens: 2000 },
-        'claude-haiku-4-5': { input_tokens: 800 },
+      turn_model_usage: {
+        'claude-opus-5': { inputTokens: 40_000, outputTokens: 2000 },
+        'claude-haiku-4-5': { inputTokens: 800 },
       },
     }, []));
     expect([...host.querySelectorAll('.turn-usage')].map((s) => text(s))).toEqual([
-      'Claude Opus 5 42.0k tok',
+      'claude-opus-5 42.0k tok',
       'claude-haiku-4-5 800 tok',
     ]);
   });
 
-  it('shows a cost only when the engine reported one', () => {
-    // R-6 again, at the place the user would read it. Under subscription
-    // billing `total_cost_usd` is null and there is no line at all.
-    const priced = draw(renderTurnFooter(stubPanel(), { total_cost_usd: 0.42 }, []));
-    expect(text(priced.querySelector('.turn-cost'))).toBe('$0.42');
-    for (const cost of [null, 0]) {
-      const free = draw(renderTurnFooter(
-        stubPanel(),
-        { total_cost_usd: cost, tool_calls: 1 },
-        [],
-      ));
-      expect(free.querySelector('.turn-cost')).toBeNull();
-      // And the rest of the footer is unaffected.
-      expect(free.querySelector('.turn-stat')).toBeTruthy();
-    }
+  it('reads the live camelCase counters, not just a transcript’s', () => {
+    // The failure this fixes: the footer knew only the snake_case spellings a
+    // replayed transcript uses, so a live turn summed to zero tokens and
+    // rendered no usage lines at all — while the same turn, browsed back
+    // later, rendered fine.
+    const live = draw(renderTurnFooter(stubPanel(), {
+      turn_model_usage: { 'claude-opus-5': { inputTokens: 900, outputTokens: 100 } },
+    }, []));
+    const replayed = draw(renderTurnFooter(stubPanel(), {
+      turn_model_usage: { 'claude-opus-5': { input_tokens: 900, output_tokens: 100 } },
+    }, []));
+    expect(text(live.querySelector('.turn-usage'))).toBe('claude-opus-5 1.0k tok');
+    expect(text(replayed.querySelector('.turn-usage')))
+      .toBe(text(live.querySelector('.turn-usage')));
+  });
+
+  it('ignores the session’s cumulative usage map', () => {
+    // `model_usage` grows all session, so a footer built from it would
+    // credit this turn with every model and every token that came before.
+    const host = draw(renderTurnFooter(stubPanel(), {
+      model_usage: { 'claude-opus-5': { inputTokens: 400_000 } },
+      tool_calls: 1,
+    }, []));
+    expect(host.querySelector('.turn-usage')).toBeNull();
+  });
+
+  it('prices the turn, not the session', () => {
+    const host = draw(renderTurnFooter(stubPanel(), {
+      turn_cost_usd: 0.42,
+      turn_cost_basis: 'measured',
+      total_cost_usd: 9.99,
+    }, []));
+    expect(text(host.querySelector('.turn-cost'))).toBe('$0.4200');
+  });
+
+  it('distinguishes a turn that cost nothing extra from one it cannot price', () => {
+    // The phase 6 exit criterion, at the place the user reads it.
+    const free = draw(renderTurnFooter(
+      stubPanel(),
+      { turn_cost_usd: 0, turn_cost_basis: 'measured' },
+      [],
+    ));
+    expect(text(free.querySelector('.turn-cost'))).toBe('nothing extra');
+    expect(free.querySelector('.turn-cost-unknown')).toBeNull();
+
+    const unknown = draw(renderTurnFooter(
+      stubPanel(),
+      { turn_cost_usd: null, turn_cost_basis: 'unpriced' },
+      [],
+    ));
+    expect(text(unknown.querySelector('.turn-cost'))).toBe('cost unknown');
+    expect(unknown.querySelector('.turn-cost-unknown')).toBeTruthy();
+    expect(unknown.querySelector('.turn-cost').getAttribute('title'))
+      .toMatch(/lands on the next turn/);
+  });
+
+  it('says nothing about cost for a turn that never recorded one', () => {
+    // A browsed turn: cost is not in the CLI's transcript. "Unknown" on
+    // every replayed footer would be noise about a thing never measured.
+    const host = draw(renderTurnFooter(stubPanel(), { tool_calls: 1 }, []));
+    expect(host.querySelector('.turn-cost')).toBeNull();
+    // And the rest of the footer is unaffected.
+    expect(host.querySelector('.turn-stat')).toBeTruthy();
   });
 
   it('warns when the turn never reached the local transcript', () => {

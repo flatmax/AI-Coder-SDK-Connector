@@ -2800,12 +2800,22 @@ export const STYLES = css`
   .turn-usage {
     font-family: 'SFMono-Regular', Consolas, monospace;
   }
-  /* Only ever rendered when the engine reported a real
-   * number — under subscription billing it reports null,
-   * and "$0.00" would read as "that was free" (R-6). */
+  /* Green for a figure we measured, including a genuine
+   * "nothing extra". */
   .turn-cost {
     color: #7ee787;
     opacity: 1;
+  }
+  /* "cost unknown" is not a price, so it does not get the
+   * colour of one. Dotted underline to say the tooltip has
+   * the reason — the turn's share of the session total
+   * could not be separated out, which is a different fact
+   * from a free turn. */
+  .turn-cost-unknown {
+    color: var(--text-secondary, #8b949e);
+    text-decoration: underline dotted;
+    text-underline-offset: 0.2em;
+    cursor: help;
   }
   /* The turn did not make it into the repo-local
    * transcript. Amber, because the conversation is fine

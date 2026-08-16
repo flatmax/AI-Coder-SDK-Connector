@@ -19,19 +19,23 @@
 //      model's raw window: the compaction point is `autoCompactThreshold`,
 //      a separate field some 16% below it. See context-usage.js, which
 //      owns that arithmetic for all three views that render this payload.
-//   2. Cost — what this turn cost. Null under subscription billing, and
-//      rendered as "included" rather than "$0.00" in that case: a turn
-//      on a Max plan did not cost nothing, it cost nothing *extra*.
+//   2. Cost — what this turn cost. Which is *not* `total_cost_usd`: that
+//      field is the session's running total, so this row reported the
+//      whole session's spend under the label "This turn". The engine
+//      differences it for us now; turn-cost.js reads the result and owns
+//      the wording, including the difference between a turn that cost
+//      nothing extra and one whose cost is unknown.
 //   3. Model — which model answered. It can change mid-session via
 //      `set_model` (and a subagent may have used a different one), so
 //      the turn reports its own rather than the HUD reading a config
-//      default.
+//      default. Also not `model_usage`, for the same reason: cumulative,
+//      so it named every model the session had ever used.
 //
 // Interaction is deliberately unchanged from the old HUD, because users
 // have the muscle memory: appears on stream-complete, auto-hides after
 // 8s, hover pauses the timer, the × dismisses immediately.
 
-import { LitElement, css, html } from 'lit';
+import { LitElement, css, html, nothing } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import { withRpcTimeout } from './rpc.js';
 import {
@@ -43,6 +47,7 @@ import {
   warningPercent,
   windowPercent,
 } from './context-usage.js';
+import { costLabel, modelNames, reportsUsage } from './turn-cost.js';
 
 /** Auto-hide delay (ms). Matches the old HUD. */
 const _AUTO_HIDE_MS = 8000;
@@ -62,20 +67,6 @@ function _fmtTokens(n) {
   if (n < 1000) return String(Math.round(n));
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
   return `${(n / 1_000_000).toFixed(2)}M`;
-}
-
-/**
- * Format a USD cost.
- *
- * Sub-cent turns are the common case, so two decimals would render
- * most turns as "$0.00" — which reads as free rather than as small.
- * Four decimals below a cent, two above.
- */
-function _fmtCost(usd) {
-  if (typeof usd !== 'number' || !Number.isFinite(usd)) return null;
-  if (usd === 0) return '$0';
-  if (usd < 0.01) return `$${usd.toFixed(4)}`;
-  return `$${usd.toFixed(2)}`;
 }
 
 export class UsageHud extends RpcMixin(LitElement) {
@@ -285,37 +276,32 @@ export class UsageHud extends RpcMixin(LitElement) {
    * Cancelled turns still get a HUD. The user interrupted after some
    * work was already billed, and hiding the number would make the
    * interrupt look free.
+   *
+   * So do failed turns that got far enough to spend something. The old
+   * rule dropped every errored turn, on the grounds that it "has no
+   * numbers to report" — true of a turn that died at the first message,
+   * false of one that hit `error_max_turns` after twenty tool calls,
+   * which is the most expensive kind there is. `reportsUsage` draws that
+   * line; the chat panel and a toast still carry the error itself.
+   *
+   * (The engine's flag is `is_error` — a `streamComplete` payload has no
+   * `error` key. `error` is checked too, for any caller that sends one.)
    */
   _onStreamComplete(event) {
     const result = event.detail?.result;
     if (!result) return;
-    // A failed turn has no numbers to report; the chat panel already
-    // surfaces the error, with a toast.
-    //
-    // The engine's flag is `is_error` — a `streamComplete` result has no
-    // `error` key (see `messages.py` `_on_result` and the synthetic result
-    // `service.py` emits for a failure outside the pump). `error` is kept
-    // for any caller that does send one. Checking only `error` made this
-    // guard dead: a failed turn popped a HUD reporting `included · 0.0s`,
-    // and "included" is a claim about subscription billing, not a stand-in
-    // for a cost the engine never priced.
-    //
-    // This hides the cost of a turn that failed *late* — `error_max_turns`
-    // carries real usage. Reporting that needs a "cost unknown" rendering
-    // distinct from "included"; phase 6 territory, not a guard's job.
-    if (result.error || result.is_error) return;
+    const failed = !!(result.error || result.is_error);
+    if (failed && !reportsUsage(result)) return;
 
     this._turn = {
-      // Null under subscription billing — carried through as null so
-      // the renderer can say "included" instead of inventing a zero.
-      cost: typeof result.total_cost_usd === 'number'
-        ? result.total_cost_usd
-        : null,
-      // `model_usage` is keyed by model name, so a turn that delegated
-      // to a subagent on a cheaper model lists both.
-      models: result.model_usage
-        ? Object.keys(result.model_usage)
-        : [],
+      // What this turn cost, with the reason attached when there is no
+      // figure. Emphatically not `total_cost_usd`, which is the whole
+      // session's running total — see turn-cost.js.
+      cost: costLabel(result),
+      // From `turn_model_usage`, so a turn that delegated to a subagent
+      // on a cheaper model lists both and a turn that did not is not
+      // credited with models the session used earlier.
+      models: modelNames(result),
       durationMs: typeof result.duration_ms === 'number'
         ? result.duration_ms
         : null,
@@ -323,6 +309,7 @@ export class UsageHud extends RpcMixin(LitElement) {
         ? result.tool_calls
         : null,
       cancelled: !!result.cancelled,
+      failed,
     };
 
     this._visible = true;
@@ -456,10 +443,11 @@ export class UsageHud extends RpcMixin(LitElement) {
   /**
    * Header label — the model that answered.
    *
-   * Prefers the turn's own `model_usage` keys over the context
-   * breakdown's `model`, because the turn is what the HUD is
-   * reporting on and a `set_model` between turns would make the
-   * context figure disagree with it.
+   * Prefers the turn's own models over the context breakdown's `model`,
+   * because the turn is what the HUD is reporting on and a `set_model`
+   * between turns would make the context figure disagree with it. The
+   * busiest model leads, so the `+n` hides subagents rather than the
+   * model that did the work.
    */
   _modelLabel() {
     const models = this._turn?.models || [];
@@ -581,7 +569,7 @@ export class UsageHud extends RpcMixin(LitElement) {
   _renderTurn() {
     const turn = this._turn;
     if (!turn) return '';
-    const cost = _fmtCost(turn.cost);
+    const cost = turn.cost;
     const bits = [];
     if (turn.toolCalls) {
       bits.push(`${turn.toolCalls} tool ${turn.toolCalls === 1 ? 'call' : 'calls'}`);
@@ -590,16 +578,23 @@ export class UsageHud extends RpcMixin(LitElement) {
       bits.push(`${(turn.durationMs / 1000).toFixed(1)}s`);
     }
     if (turn.cancelled) bits.push('interrupted');
+    // A turn only reaches the HUD after failing if it spent something, so
+    // say which it was: without this the row reads as a normal turn's
+    // receipt for a turn that never finished.
+    if (turn.failed) bits.push('failed');
     return html`
       <div class="row">
         <span class="label">This turn</span>
         <span class="value">
           ${cost
-            // Only the engine knows the price. A null means subscription
-            // billing, where the marginal cost genuinely is nothing —
-            // saying "included" is accurate where "$0.00" would not be.
-            ? cost
-            : html`<span class="muted">included</span>`}
+            // Three renderings, because they are three different facts: a
+            // price, "nothing extra", and "cost unknown". The tooltip
+            // carries the why — turn-cost.js owns both.
+            ? html`<span
+                class=${cost.known ? '' : 'muted'}
+                title=${cost.title}
+              >${cost.text}</span>`
+            : nothing}
           ${bits.length > 0
             ? html`<span class="muted"> · ${bits.join(' · ')}</span>`
             : ''}
