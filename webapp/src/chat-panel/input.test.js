@@ -1910,6 +1910,91 @@ describe('ChatPanel history browser', () => {
     await settle(p);
     expect(p._historyOpen).toBe(true);
   });
+
+  // -------------------------------------------------------------------------
+  // Telling the browser whether the live conversation has been read
+  // -------------------------------------------------------------------------
+  //
+  // Resuming replaces the live session, and the modal that offers it covers
+  // the transcript it is about to replace — so the panel has to say whether
+  // the reader reached the end of it (specs5/5-webapp/chat.md § Resume Is Not
+  // Load). The browser turns a yes into a second click.
+
+  function browserOf(panel) {
+    return panel.shadowRoot.querySelector('ac-history-browser');
+  }
+
+  it('says nothing is unread when the transcript is empty', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(browserOf(p).liveUnread).toBe(false);
+  });
+
+  it('says nothing is unread while pinned to the bottom', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'read it all' }],
+    });
+    await settle(p);
+    p._autoScroll = true;
+    p.requestUpdate();
+    await settle(p);
+    expect(browserOf(p).liveUnread).toBe(false);
+  });
+
+  it('says the end is unread when the reader has scrolled up', async () => {
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'somewhere above' }],
+    });
+    await settle(p);
+    p._autoScroll = false;
+    p.requestUpdate();
+    await settle(p);
+    expect(browserOf(p).liveUnread).toBe(true);
+  });
+
+  it('says the end is unread while a turn is still running', async () => {
+    // Pinned or not, the end has not been written yet.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(p._streaming).toBe(true);
+    expect(p._autoScroll).toBe(true);
+    expect(browserOf(p).liveUnread).toBe(true);
+  });
+
+  it('scrolling back to the bottom clears it', async () => {
+    // The scroll listener is the only writer of the flag the browser reads,
+    // so the two have to agree without anything in between.
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'somewhere above' }],
+    });
+    await settle(p);
+    const container = p.shadowRoot.querySelector('.messages');
+    const scrollTo = (distanceFromBottom) => {
+      Object.defineProperty(container, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(container, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      container.scrollTop = 500 - distanceFromBottom;
+      container.dispatchEvent(new Event('scroll'));
+    };
+    scrollTo(400);
+    p.requestUpdate();
+    await settle(p);
+    expect(browserOf(p).liveUnread).toBe(true);
+    scrollTo(0);
+    p.requestUpdate();
+    await settle(p);
+    expect(browserOf(p).liveUnread).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

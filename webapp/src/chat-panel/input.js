@@ -1107,6 +1107,27 @@ export function onMessagesScroll(panel, event) {
 }
 
 /**
+ * Whether the live conversation has messages the user has not read to the
+ * end of.
+ *
+ * Asked by the history browser, which is about to replace this conversation
+ * and offers a second click when the answer is yes
+ * (specs5/5-webapp/chat.md § Resume Is Not Load).
+ *
+ * Two ways to not have seen the end. A turn in flight means the end has not
+ * been written yet; otherwise it is a question of where the reader is, and
+ * `_autoScroll` is the panel's own running answer to "is the bottom on
+ * screen" — the flag that decides whether a new message scrolls into view or
+ * waits above the fold. An empty transcript has no end to miss.
+ */
+export function hasUnreadLiveMessages(panel) {
+  const messages = panel.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  if (panel._streaming) return true;
+  return panel._autoScroll === false;
+}
+
+/**
  * Single click listener on the messages
  * container — event delegation for three kinds of
  * target:

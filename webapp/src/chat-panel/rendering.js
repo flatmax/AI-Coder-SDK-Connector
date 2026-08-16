@@ -123,6 +123,7 @@ import {
   speakMessage,
   onNewSession,
   onOpenHistory,
+  hasUnreadLiveMessages,
 } from './input.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 
@@ -272,8 +273,15 @@ export function render(panel) {
       ${readOnly ? renderReadOnlyNote() : renderInputSurface(panel)}
       ${renderLedRow(panel)}
     </div>
+    <!--
+      liveUnread is the answer to a question only this panel can answer:
+      the modal covers the transcript it is about to replace. Bound rather
+      than snapshotted at open time, so a collaborator's turn arriving
+      behind the modal counts as something the reader has not seen.
+    -->
     <ac-history-browser
       ?open=${panel._historyOpen}
+      .liveUnread=${hasUnreadLiveMessages(panel)}
       @close=${() => panel._onHistoryClose()}
       @session-loaded=${() => panel._onHistorySessionLoaded()}
     ></ac-history-browser>

@@ -1148,6 +1148,149 @@ describe('HistoryBrowser resume and fork', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Resuming out from under a half-read conversation
+// ---------------------------------------------------------------------------
+//
+// Resuming replaces the live session, and a fork spares the session being
+// opened rather than the one being left. When the reader has not reached the
+// end of the live conversation, that is worth a second click
+// (specs5/5-webapp/chat.md § Resume Is Not Load). `liveUnread` is the chat
+// panel's answer — this modal covers the transcript it is asking about.
+
+describe('HistoryBrowser resume confirmation', () => {
+  async function pickSession(resume, props = {}) {
+    publishResumeRpc(resume);
+    const el = mountBrowser({ open: true, ...props });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  function resumeBtn(el) {
+    return el.shadowRoot.querySelector('.resume-button');
+  }
+
+  function forkBtn(el) {
+    return el.shadowRoot.querySelector('.fork-button');
+  }
+
+  it('asks once before replacing a half-read conversation', async () => {
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    const el = await pickSession(resume, { liveUnread: true });
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).not.toHaveBeenCalled();
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume anyway?');
+    expect(resumeBtn(el).title).toContain('Click again');
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledWith('s1', false);
+  });
+
+  it('asks before forking too', async () => {
+    // A fork leaves the *browsed* session alone. The live one is replaced
+    // either way, which is what the question is about.
+    const resume = vi.fn().mockResolvedValue({ session_id: null });
+    const el = await pickSession(resume, { liveUnread: true });
+    forkBtn(el).click();
+    await settle(el);
+    expect(resume).not.toHaveBeenCalled();
+    expect(forkBtn(el).textContent.trim()).toBe('Fork anyway?');
+    forkBtn(el).click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledWith('s1', true);
+  });
+
+  it('does not ask when the reader is at the end', async () => {
+    // The ordinary case, and the reason this is conditional: a
+    // confirmation on every resume is one that stops being read.
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    const el = await pickSession(resume, { liveUnread: false });
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledWith('s1', false);
+  });
+
+  it('asks again when the answer would be a different action', async () => {
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    const el = await pickSession(resume, { liveUnread: true });
+    resumeBtn(el).click();
+    await settle(el);
+    forkBtn(el).click();
+    await settle(el);
+    expect(resume).not.toHaveBeenCalled();
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume');
+    expect(forkBtn(el).textContent.trim()).toBe('Fork anyway?');
+  });
+
+  it('disarms when the selection moves', async () => {
+    const resume = vi.fn().mockResolvedValue({ session_id: 's2' });
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue([oneSession(), oneSession({ session_id: 's2' })]),
+      'ClaudeCodeService.history_load': vi.fn().mockResolvedValue([]),
+      'ClaudeCodeService.resume_session': resume,
+    });
+    const el = mountBrowser({ open: true, liveUnread: true });
+    await settle(el);
+    const rows = [...el.shadowRoot.querySelectorAll('.session-item')];
+    rows[0].click();
+    await settle(el);
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume anyway?');
+    // An armed Resume belongs to the session it was armed on.
+    rows[1].click();
+    await settle(el);
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume');
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it('disarms when the modal closes', async () => {
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    const el = await pickSession(resume, { liveUnread: true });
+    resumeBtn(el).click();
+    await settle(el);
+    el.open = false;
+    await settle(el);
+    el.open = true;
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume');
+  });
+
+  it('disarms after the resume it asked about', async () => {
+    // A refusal leaves the modal open on the session the user picked, so
+    // the next attempt has to be a fresh question rather than a click that
+    // acts immediately.
+    const resume = vi.fn().mockResolvedValue({ error: 'A turn is running' });
+    const el = await pickSession(resume, { liveUnread: true });
+    resumeBtn(el).click();
+    await settle(el);
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledOnce();
+    expect(resumeBtn(el).textContent.trim()).toBe('Resume');
+  });
+
+  it('defaults to not asking', async () => {
+    // A parent that never sets the property is a browser that behaves the
+    // way it did before the confirmation existed.
+    const resume = vi.fn().mockResolvedValue({ session_id: 's1' });
+    const el = await pickSession(resume);
+    expect(el.liveUnread).toBe(false);
+    resumeBtn(el).click();
+    await settle(el);
+    expect(resume).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Delete
 // ---------------------------------------------------------------------------
 

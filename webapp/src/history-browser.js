@@ -54,7 +54,9 @@
 //     (specs5/5-webapp/subagent-browser.md § Historical Transcripts)
 //   - Resume or fork the selected session, which triggers the
 //     server's sessionChanged broadcast that the chat panel's
-//     existing handler consumes
+//     existing handler consumes — behind one confirming click when
+//     the panel says the live conversation has not been read to the
+//     end, because both actions replace it
 //   - Delete a session, in two clicks, dropping the row when the
 //     server confirms it
 //   - Keyboard shortcuts: Escape closes (or clears search
@@ -128,6 +130,16 @@ const SEARCH_DEBOUNCE_MS = 300;
  * rest of the session.
  */
 const HISTORY_TIMEOUT_MS = 30000;
+
+/**
+ * What the armed Resume and Fork buttons say they are waiting for. The
+ * live conversation is not lost by either — it stays on disk and stays in
+ * this list — so the sentence names what actually happens rather than
+ * warning about damage.
+ */
+const UNREAD_CONFIRM_TITLE =
+  'Click again — this replaces the live conversation, which you have not '
+  + 'read to the end of. It stays in this list.';
 
 /**
  * The `{error}` half of a history read's return union, or null when
@@ -214,6 +226,19 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
      * prop (parent is the source of truth).
      */
     open: { type: Boolean, reflect: true },
+    /**
+     * Whether the live conversation has messages the user has not read
+     * to the end of. Set by the chat panel, which is the only thing
+     * that knows — this modal covers the transcript it is asking about.
+     *
+     * Resuming replaces the live session, so a reader in the middle of
+     * one gets a second click before it is swapped out from under them
+     * (specs5/5-webapp/chat.md § Resume Is Not Load). Nothing is lost
+     * either way: the session being left is still on disk and still in
+     * this list, which is why this is one extra click rather than a
+     * dialog.
+     */
+    liveUnread: { type: Boolean },
     /** Session summaries from history_list. */
     _sessions: { type: Array, state: true },
     /** Loading state for the session list. */
@@ -273,6 +298,18 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
      * not rebuild — so it takes two clicks on the same session.
      */
     _confirmDelete: { type: String, state: true },
+    /**
+     * Which session action is armed and waiting for its second click:
+     * `'resumed'`, `'forked'`, or null. Only ever set when
+     * `liveUnread` is true — with the reader at the end of the live
+     * conversation there is nothing to interrupt, and a confirmation
+     * every time is one that stops being read.
+     *
+     * Armed per action rather than per session, because Fork and
+     * Resume answer different questions about the session on screen;
+     * arming one and clicking the other asks again.
+     */
+    _confirmResume: { type: String, state: true },
     /** True while a delete RPC is in flight. */
     _deleting: { type: Boolean, state: true },
     /**
@@ -627,6 +664,15 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       border-color: var(--accent-primary, #58a6ff);
       background: rgba(88, 166, 255, 0.08);
     }
+    /* Armed, waiting for the second click. Amber rather than the
+     * delete button's red: nothing is destroyed by resuming, the user
+     * is only being told that the conversation on screen goes away. */
+    .load-button.armed,
+    .load-button.secondary.armed {
+      background: #d29922;
+      border: 1px solid #d29922;
+      color: #0d1117;
+    }
     .search-hit {
       padding: 0.6rem 0.75rem;
       cursor: pointer;
@@ -916,6 +962,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   constructor() {
     super();
     this.open = false;
+    this.liveUnread = false;
     this._sessions = [];
     this._loadingSessions = false;
     this._listError = '';
@@ -932,6 +979,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._searchError = '';
     this._loadingSession = null;
     this._confirmDelete = null;
+    this._confirmResume = null;
     this._deleting = false;
     this._contextMenu = null;
 
@@ -1035,6 +1083,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           this._subagents = [];
           this._subagentsError = '';
           this._confirmDelete = null;
+          this._confirmResume = null;
           this._contextMenu = null;
         });
       }
@@ -1341,9 +1390,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     this._messagesError = '';
     this._subagents = [];
     this._subagentsError = '';
-    // An armed Delete belongs to the session it was armed on. Moving
-    // the selection disarms it rather than re-aiming it.
+    // An armed Delete or Resume belongs to the session it was armed on.
+    // Moving the selection disarms it rather than re-aiming it.
     this._confirmDelete = null;
+    this._confirmResume = null;
     // Two reads, neither awaited and neither waiting on the other: the
     // transcript and the subagent listing are separate files on disk and
     // the pane draws each as it lands.
@@ -1421,6 +1471,16 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     if (this._loadingSession) return;
     if (!isResumable(this._selectedSession())) return;
     const action = fork ? 'forked' : 'resumed';
+    // Both of these replace the live session — a fork spares the session
+    // being opened, not the one being left — so when the user has not read
+    // to the end of the live conversation, the first click arms and the
+    // second acts. The same step Delete takes, for a smaller reason: this
+    // one costs a click, and the alternative is a conversation swapped out
+    // mid-sentence (specs5/5-webapp/chat.md § Resume Is Not Load).
+    if (this.liveUnread && this._confirmResume !== action) {
+      this._confirmResume = action;
+      return;
+    }
     this._loadingSession = action;
     try {
       const result = await withRpcTimeout(
@@ -1463,6 +1523,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       );
     } finally {
       this._loadingSession = null;
+      this._confirmResume = null;
     }
   }
 
@@ -1537,6 +1598,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     if (this._confirmDelete === sessionId) this._confirmDelete = null;
     if (this._selectedSessionId === sessionId) {
       this._selectedSessionId = null;
+      this._confirmResume = null;
       this._selectedMessages = [];
       this._messagesError = '';
       // The subagent directory went with the transcript — deleting a
@@ -1765,20 +1827,34 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           : ''}
       </div>
       <button
-        class="load-button secondary fork-button"
+        class="load-button secondary fork-button
+          ${this._confirmResume === 'forked' ? 'armed' : ''}"
         ?disabled=${blocked}
         @click=${() => this._onResumeClick(true)}
-        title="Branch a copy; the original session stays intact"
+        title=${this._confirmResume === 'forked'
+          ? UNREAD_CONFIRM_TITLE
+          : 'Branch a copy; the original session stays intact'}
       >
-        ${this._loadingSession === 'forked' ? 'Forking…' : 'Fork'}
+        ${this._loadingSession === 'forked'
+          ? 'Forking…'
+          : this._confirmResume === 'forked'
+            ? 'Fork anyway?'
+            : 'Fork'}
       </button>
       <button
-        class="load-button resume-button"
+        class="load-button resume-button
+          ${this._confirmResume === 'resumed' ? 'armed' : ''}"
         ?disabled=${blocked}
         @click=${() => this._onResumeClick(false)}
-        title="Attach the engine to this session"
+        title=${this._confirmResume === 'resumed'
+          ? UNREAD_CONFIRM_TITLE
+          : 'Attach the engine to this session'}
       >
-        ${this._loadingSession === 'resumed' ? 'Resuming…' : 'Resume'}
+        ${this._loadingSession === 'resumed'
+          ? 'Resuming…'
+          : this._confirmResume === 'resumed'
+            ? 'Resume anyway?'
+            : 'Resume'}
       </button>
     `;
   }
