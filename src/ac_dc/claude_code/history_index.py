@@ -53,7 +53,13 @@ logger = logging.getLogger(__name__)
 # The format is not an interop boundary — the index is rebuildable from
 # `sessions/` in full — so a bump just discards the file rather than
 # migrating it.
-INDEX_VERSION = 1
+#
+# 2: the cache holds finished session rows, so it also holds whatever
+# `summarise_session` decided a `preview` was. Version 1 cached previews
+# built from the sidecar's truncated `first_prompt`, which rendered as the
+# framing boilerplate for every session; without a bump those rows would
+# survive the fix in the one place a user would still see it.
+INDEX_VERSION = 2
 
 # The native engine's `HistoryStore.search` default, carried over
 # unchanged: it applies to index-backed search and the fallback scan alike

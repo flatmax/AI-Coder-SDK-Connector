@@ -197,8 +197,33 @@ def summarise_session(
     prompt that created the session, and a post-compaction continuation
     begins with the compact summary, which is also a user entry. It is kept
     because the session-row renderer reads it.
+
+    ``preview`` is read from the *parsed messages*, not from the sidecar's
+    ``first_prompt``, and that ordering is load-bearing. The CLI truncates
+    ``first_prompt`` to 200 characters — and AC⚡DC's ``<ac-dc-ui-context>``
+    framing is longer than that, so the truncation lands *inside* the
+    framing block and the closing tag never appears in the field.
+    :func:`strip_framing` needs that tag, takes its "opened and never
+    closed" branch, and returns the boilerplate unchanged. Since the framing
+    opens identically on every prompt, every row in the session list read as
+    the same 100 characters of our own prose — and ``session-preview`` is
+    the only thing that distinguishes one row from another. Verified against
+    a real CLI-written transcript; ``first_prompt_locked`` in the sidecar
+    means it never improves on its own.
+
+    So: the user's own words first, via the parser the rest of this module
+    reads through (``specs5/3-engine/history.md`` § What the Browser Reads),
+    where the whole prompt is present and the framing can actually be
+    stripped. The CLI's generated ``summary`` is the fallback — it is a real
+    title, and a session whose transcript will not parse has no words to
+    quote — with the truncated field last rather than never, because
+    something specific to the session beats "(empty)".
     """
-    preview = (info.first_prompt or info.summary or "").strip()
+    preview = (
+        _first_prompt(messages)
+        or (info.summary or "").strip()
+        or (info.first_prompt or "").strip()
+    )
     return {
         "session_id": info.session_id,
         "timestamp": _iso_from_epoch_ms(info.created_at),

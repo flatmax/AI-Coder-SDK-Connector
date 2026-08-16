@@ -957,6 +957,86 @@ class TestTheSessionSummary:
         assert summary["message_count"] == 0
 
 
+# The framing as the CLI's sidecar actually holds it: `first_prompt` is
+# truncated to 200 characters, and AC-DC's context block is longer than
+# that, so the closing tag is not in the field. Taken from a real
+# transcript rather than shortened for the test — the shortening is the
+# reason the original tests passed while every row on screen was wrong.
+_TRUNCATED_FRAMING = (
+    "<ac-dc-ui-context> Files the user has selected in the file picker (a "
+    "hint about what they are pointing at, not their contents — read them "
+    "yourself if you need them): - specs5/0-overview/glossary.md -…"
+)
+
+
+class TestThePreviewIsWhatTheUserTyped:
+    """The session list's only distinguishing field.
+
+    Found by rendering a real CLI-written transcript: every row read as the
+    same 100 characters of AC-DC's own framing, because the sidecar's
+    ``first_prompt`` is truncated before the closing tag that
+    ``strip_framing`` needs.
+    """
+
+    def test_the_truncated_framing_does_not_become_the_preview(self):
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="Some title"),
+            [human("u1", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n\nwhat is next ?")[0]],
+        )
+        assert summary["preview"] == "what is next ?"
+
+    def test_no_preview_ever_opens_with_the_framing_tag(self):
+        """The invariant behind the fix, stated where a future change to the
+        preference order would trip over it."""
+        for info in (
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="A title"),
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING),
+        ):
+            summary = summarise_session(
+                info, [human("u1", _TRUNCATED_FRAMING + "\n</ac-dc-ui-context>\n\nask")[0]]
+            )
+            assert not summary["preview"].startswith("<ac-dc-ui-context>")
+
+    def test_the_prompt_is_preferred_over_the_generated_title(self):
+        """Both are available and specific; the user's own words win."""
+        summary = summarise_session(
+            FakeInfo(first_prompt="ignored", summary="A generated title"),
+            [human("u1", "the actual question")[0]],
+        )
+        assert summary["preview"] == "the actual question"
+
+    def test_a_tool_reply_is_not_mistaken_for_the_first_prompt(self):
+        """A transcript's ``user`` entries include tools reporting back."""
+        summary = summarise_session(
+            FakeInfo(),
+            [
+                tool_reply("t1", "tu1", "some tool output")[0],
+                human("u1", "the real prompt")[0],
+            ],
+        )
+        assert summary["preview"] == "the real prompt"
+
+    def test_the_title_is_the_fallback_when_no_prompt_can_be_read(self):
+        """A transcript that will not parse has no words to quote."""
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="Fix the parser"), []
+        )
+        assert summary["preview"] == "Fix the parser"
+
+    def test_the_truncated_field_is_last_rather_than_never(self):
+        """Something specific to the session beats ``(empty)`` on screen."""
+        summary = summarise_session(FakeInfo(first_prompt="a short prompt"), [])
+        assert summary["preview"] == "a short prompt"
+
+    def test_a_framing_only_prompt_does_not_render_as_the_boilerplate(self):
+        """Nothing but framing: the title is better than our own prose."""
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="A title"),
+            [human("u1", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n")[0]],
+        )
+        assert summary["preview"] == "A title"
+
+
 # ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------
