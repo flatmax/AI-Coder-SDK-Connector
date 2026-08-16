@@ -2068,6 +2068,26 @@ export const STYLES = css`
     display: block;
     cursor: pointer;
   }
+  /* A pointer that has not resolved yet, and one that never will. Both
+   * hold the 80px box the image will occupy, so a prompt full of
+   * screenshots does not reflow tile by tile as they arrive. */
+  .message-image-pending,
+  .message-image-missing {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+  }
+  .message-image-pending {
+    border-style: dashed;
+    background: rgba(240, 246, 252, 0.04);
+    opacity: 0.5;
+  }
+  .message-image-missing {
+    border-color: rgba(248, 81, 73, 0.35);
+    background: rgba(248, 81, 73, 0.08);
+    cursor: help;
+  }
   .message-image-reattach {
     position: absolute;
     top: 2px;

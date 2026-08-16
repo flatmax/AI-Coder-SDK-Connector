@@ -51,6 +51,11 @@ turn, and the entry the engine writes is what lets us render it again a week lat
 - Opening a past session reads its images from that session's entries, through the same parsers as the
   rest of the transcript. Thumbnails resolve by pointer; the lightbox fetches full data on demand via
   `history_image`.
+- **Resuming one does the same thing in the chat panel.** A restored message carries `image_refs` rather
+  than data URIs, and the panel resolves them the way the browser does — after the transcript is on
+  screen, one at a time, tiles at their final size, failures marked and cached. The two components draw
+  different tiles and share the fetching, because the part that is easy to get subtly wrong (abandoning
+  the work when the user resumes something else mid-fetch) is the part that is identical.
 - `load_session_into_context` and `get_session_messages_for_context` are gone. Loading a past session
   into the model's view is resume, which hands the engine its own transcript; we never re-inject message
   content.

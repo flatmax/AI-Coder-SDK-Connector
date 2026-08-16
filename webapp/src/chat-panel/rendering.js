@@ -69,6 +69,7 @@ import {
 import { renderEditCard } from '../edit-block-render.js';
 import { renderAgentCard } from '../agent-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
+import { imageRefKey, imageRefsOf } from '../image-refs.js';
 import { renderMarkdown } from '../markdown.js';
 import {
   compactionSummary,
@@ -500,6 +501,10 @@ export function renderMessage(panel, msg, index) {
     `;
   }
   const images = Array.isArray(msg.images) ? msg.images : [];
+  // A restored prompt carries pointers where a live one carries bytes. Both
+  // draw the same strip, so an image the user pasted an hour ago and one they
+  // pasted this turn look the same and re-attach the same.
+  const imageRefs = imageRefsOf(msg);
   const toolbar = renderMessageToolbar(panel, msg, index);
   const highlightClass = isHighlighted ? ' search-highlight' : '';
   const isBlockTurn =
@@ -584,8 +589,8 @@ export function renderMessage(panel, msg, index) {
       <div class="message-toolbar top">${toolbar}</div>
       <div class="role-label">${roleLabel}${topFinishBadge}${runTimerBadge}</div>
       ${bodyHtml}
-      ${images.length > 0
-        ? renderMessageImages(panel, images)
+      ${images.length > 0 || imageRefs.length > 0
+        ? renderMessageImages(panel, images, imageRefs)
         : ''}
       ${editSummary}
       ${fileSummary}
@@ -969,36 +974,82 @@ export function renderEditSummary(panel, msg) {
   `;
 }
 
-export function renderMessageImages(panel, images) {
+/**
+ * The image strip under a message: the bytes it already holds, then whatever
+ * its pointers have resolved to.
+ *
+ * `images` is data URIs — what a live paste puts on the message. `refs` is
+ * pointers into the transcript, which is what a restored one carries
+ * (`specs5/4-features/images.md` § Reading Flow); they resolve to bytes
+ * asynchronously through `panel._imageRefData`, and until they do the tile is
+ * drawn at its final size so the transcript does not reflow image by image as
+ * they land.
+ *
+ * A resolved pointer becomes the same tile a pasted image gets, lightbox and
+ * re-attach included. That is the spec's requirement rather than a
+ * convenience: re-attaching from a past session is one of the two documented
+ * paths into the composer, and it works by sending a fresh copy of the bytes.
+ */
+export function renderMessageImages(panel, images, refs = []) {
   return html`
     <div class="message-images" role="list">
-      ${images.map(
-        (dataUri) => html`
-          <div class="message-image-wrapper" role="listitem">
-            <img
-              class="message-image"
-              src=${dataUri}
-              alt=""
-              @click=${() => openLightbox(panel, dataUri)}
-              title="Click to view"
-            />
-            <button
-              class="message-image-reattach"
-              @click=${(e) => {
-                // Don't also open the lightbox
-                // from the click-through on the
-                // image itself.
-                e.stopPropagation();
-                reattachImage(panel, dataUri);
-              }}
-              aria-label="Re-attach image to your message"
-              title="Re-attach to composition"
+      ${images.map((dataUri) => renderImageTile(panel, dataUri))}
+      ${refs.map((ref) => {
+        const entry = panel._imageRefData?.get(imageRefKey(ref));
+        if (entry?.dataUri) return renderImageTile(panel, entry.dataUri);
+        // A pointer that will never resolve keeps a tile of its own with the
+        // reason. An image silently absent from a prompt reads as a prompt
+        // that never had one, which is a different conversation from the one
+        // that happened.
+        if (entry?.error) {
+          return html`
+            <div
+              class="message-image-wrapper message-image-missing"
+              role="listitem"
+              title=${entry.error}
             >
-              📎
-            </button>
+              🚫
+            </div>
+          `;
+        }
+        return html`
+          <div
+            class="message-image-wrapper message-image-pending"
+            role="listitem"
+            title=${ref.media_type || 'image'}
+          >
+            🖼
           </div>
-        `,
-      )}
+        `;
+      })}
+    </div>
+  `;
+}
+
+function renderImageTile(panel, dataUri) {
+  return html`
+    <div class="message-image-wrapper" role="listitem">
+      <img
+        class="message-image"
+        src=${dataUri}
+        alt=""
+        @click=${() => openLightbox(panel, dataUri)}
+        title="Click to view"
+      />
+      <button
+        class="message-image-reattach"
+        @click=${(e) => {
+          // Don't also open the lightbox
+          // from the click-through on the
+          // image itself.
+          e.stopPropagation();
+          reattachImage(panel, dataUri);
+        }}
+        aria-label="Re-attach image to your message"
+        title="Re-attach to composition"
+      >
+        📎
+      </button>
     </div>
   `;
 }

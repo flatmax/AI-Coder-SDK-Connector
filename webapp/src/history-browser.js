@@ -83,6 +83,11 @@ import { RpcMixin } from './rpc-mixin.js';
 import { withRpcTimeout } from './rpc.js';
 import { renderMarkdown } from './markdown.js';
 import { normalizeMessageContent } from './image-utils.js';
+import {
+  hydrateImageRefs,
+  imageRefKey,
+  imageRefsOf,
+} from './image-refs.js';
 import { segmentResponse, matchSegmentsToResults } from './edit-blocks.js';
 import { renderEditCard } from './edit-block-render.js';
 
@@ -136,29 +141,6 @@ function historyError(result) {
  */
 function isResumable(session) {
   return !session || session.resumable !== false;
-}
-
-/**
- * The image pointers on a rendered message, always an array.
- *
- * A pointer is `{session_id, entry_uuid, block, media_type}` — what
- * `history_load` renders in place of an image block's base64.
- */
-function imageRefs(msg) {
-  if (!msg || !Array.isArray(msg.image_refs)) return [];
-  return msg.image_refs.filter(
-    (ref) => ref && typeof ref === 'object',
-  );
-}
-
-/**
- * Cache key for one image pointer, or '' if it names nothing
- * fetchable. Keyed on the pointer's own three fields rather than on
- * the selected session, so the cache survives switching away and back.
- */
-function imageKey(ref) {
-  if (!ref || !ref.session_id || !ref.entry_uuid) return '';
-  return `${ref.session_id}|${ref.entry_uuid}|${ref.block ?? 0}`;
 }
 
 /**
@@ -1017,66 +999,17 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   /**
    * Resolve the image pointers in a loaded session to data URIs.
    *
-   * `history_load` renders image blocks as `{session_id, entry_uuid,
-   * block, media_type}` rather than base64: a session with a handful of
-   * screenshots is megabytes of it, and inlining them would send all of
-   * it on every open and every reconnect. So the bytes come back one
-   * pointer at a time, here, from `history_image`.
-   *
-   * Sequentially, and not because of ordering — a session that pasted
-   * twenty screenshots would otherwise open twenty concurrent RPCs at
-   * a backend whose reads are disk-bound anyway. The tiles fill in as
-   * each one lands.
-   *
-   * Results are cached across sessions, including the failures: a
-   * missing image is missing every time it is looked at, and retrying
-   * it on each reselect is a stall the user cannot fix.
+   * The fetching itself is shared with the chat panel (`image-refs.js`),
+   * which reads the same pointers out of a resumed session. What is local
+   * to the browser is what makes this work stale: selecting another
+   * session, which bumps `_messagesGeneration` mid-loop.
    */
-  async _hydrateImages(messages, gen) {
-    if (!this.rpcConnected) return;
-    for (const msg of messages) {
-      const refs = imageRefs(msg);
-      for (const ref of refs) {
-        // Re-checked every iteration, not once: the loop awaits, and
-        // the user is free to click another session while it does.
-        if (gen !== this._messagesGeneration) return;
-        const key = imageKey(ref);
-        if (!key || this._images.has(key)) continue;
-        let entry;
-        try {
-          const result = await withRpcTimeout(
-            this.rpcExtract(
-              'ClaudeCodeService.history_image',
-              ref.session_id,
-              ref.entry_uuid,
-              ref.block,
-            ),
-            HISTORY_TIMEOUT_MS,
-            'history_image',
-          );
-          entry =
-            result && result.data_uri
-              ? { dataUri: String(result.data_uri) }
-              : {
-                  error:
-                    (result && result.error && String(result.error)) ||
-                    'That image is no longer readable',
-                };
-        } catch (err) {
-          console.error(
-            '[history-browser] history_image failed',
-            err,
-          );
-          entry = {
-            error: err?.message || 'Could not read that image',
-          };
-        }
-        this._images.set(key, entry);
-        // A Map is not a reactive property — the tile that is waiting
-        // on this entry only redraws if we say so.
-        this.requestUpdate();
-      }
-    }
+  _hydrateImages(messages, gen) {
+    return hydrateImageRefs(this, messages, {
+      cache: this._images,
+      isStale: () => gen !== this._messagesGeneration,
+      label: 'history-browser',
+    });
   }
 
   async _runSearch(query) {
@@ -1747,7 +1680,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // array above is what a live paste hands us in the same turn. Both
     // can be present on the same message and neither displaces the
     // other, so they are drawn as two groups rather than merged.
-    const refs = imageRefs(msg);
+    const refs = imageRefsOf(msg);
     // For assistant messages, segment the response so edit
     // blocks render as visual cards rather than as a wall
     // of marker-laden prose. Past sessions carry no live
@@ -1846,7 +1779,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     return html`
       <div class="preview-images" role="list">
         ${refs.map((ref) => {
-          const entry = this._images.get(imageKey(ref));
+          const entry = this._images.get(imageRefKey(ref));
           if (entry?.dataUri) {
             return html`
               <img

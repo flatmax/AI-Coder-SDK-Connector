@@ -453,6 +453,243 @@ describe('ChatPanel restoring a rendered turn', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Restoring image pointers
+// ---------------------------------------------------------------------------
+//
+// A prompt's screenshots live in the transcript as base64 (specs5/4-features/
+// images.md — the transcript *is* the storage), so `history_load` renders them
+// as pointers and the bytes are fetched one at a time through `history_image`.
+// A restore that dropped the pointers was a resumed prompt whose screenshots
+// were simply gone, with nothing on screen to say so.
+
+describe('ChatPanel restoring image pointers', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+
+  function ref(overrides = {}) {
+    return {
+      session_id: 's1',
+      entry_uuid: 'u1',
+      block: 0,
+      media_type: 'image/png',
+      ...overrides,
+    };
+  }
+
+  /** A prompt carrying pointers, in the shape `history_load` renders. */
+  function prompt(refs) {
+    return { role: 'user', content: 'look at this', image_refs: refs };
+  }
+
+  /** Extra settle rounds — each pointer resolves on its own microtask. */
+  async function drain(panel, rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) await settle(panel);
+  }
+
+  function tiles(panel) {
+    return {
+      images: [...panel.shadowRoot.querySelectorAll('img.message-image')],
+      pending: [
+        ...panel.shadowRoot.querySelectorAll('.message-image-pending'),
+      ],
+      missing: [
+        ...panel.shadowRoot.querySelectorAll('.message-image-missing'),
+      ],
+    };
+  }
+
+  it('carries the pointers through the restore', async () => {
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await settle(p);
+    expect(p.messages[0].image_refs).toEqual([ref()]);
+  });
+
+  it('resolves each pointer and draws the image', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    expect(fetchImage).toHaveBeenCalledWith('s1', 'u1', 0);
+    expect(tiles(p).images.map((i) => i.getAttribute('src'))).toEqual([PNG]);
+  });
+
+  it('holds the tile before the bytes arrive', async () => {
+    // The box is the size the image will be, so a prompt with several
+    // screenshots does not reflow tile by tile as they land.
+    let release;
+    const held = new Promise((r) => {
+      release = r;
+    });
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': () => held,
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [prompt([ref(), ref({ block: 1 })])],
+    });
+    await settle(p);
+    expect(tiles(p).pending).toHaveLength(2);
+    release({ data_uri: PNG });
+    await drain(p);
+  });
+
+  it('keeps a marked tile for a pointer that cannot be read', async () => {
+    // An image silently absent from a prompt reads as a prompt that never
+    // had one, which is a different conversation from the one that happened.
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': async () => ({
+        error: 'That entry is gone',
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    const { missing, images } = tiles(p);
+    expect(images).toHaveLength(0);
+    expect(missing).toHaveLength(1);
+    expect(missing[0].getAttribute('title')).toBe('That entry is gone');
+  });
+
+  it('marks the tile when the call itself fails', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': async () => {
+        throw new Error('socket closed');
+      },
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    expect(tiles(p).missing).toHaveLength(1);
+  });
+
+  it('fetches one pointer at a time', async () => {
+    // Twenty pasted screenshots would otherwise open twenty concurrent
+    // RPCs at a backend whose reads are disk-bound anyway.
+    const calls = [];
+    let release;
+    const held = new Promise((r) => {
+      release = r;
+    });
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': (session, uuid, block) => {
+        calls.push(block);
+        return calls.length === 1 ? held : Promise.resolve({ data_uri: PNG });
+      },
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [prompt([ref(), ref({ block: 1 }), ref({ block: 2 })])],
+    });
+    await drain(p);
+    expect(calls).toEqual([0]);
+    release({ data_uri: PNG });
+    await drain(p, 6);
+    expect(calls).toEqual([0, 1, 2]);
+  });
+
+  it('fetches a pointer once, however often it is restored', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+    expect(tiles(p).images).toHaveLength(1);
+  });
+
+  it('abandons the fetching when another session is restored', async () => {
+    // The loop awaits, and during the await the user is free to resume
+    // something else. The rest of that work belongs to nobody.
+    const calls = [];
+    let release;
+    const held = new Promise((r) => {
+      release = r;
+    });
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': (session, uuid, block) => {
+        calls.push(`${session}:${block}`);
+        return calls.length === 1 ? held : Promise.resolve({ data_uri: PNG });
+      },
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [prompt([ref(), ref({ block: 1 })])],
+    });
+    await settle(p);
+    expect(calls).toEqual(['s1:0']);
+    // A different session lands while the first pointer is still in flight.
+    pushEvent('session-changed', {
+      messages: [{ role: 'user', content: 'a session with no pictures' }],
+    });
+    await settle(p);
+    release({ data_uri: PNG });
+    await drain(p, 6);
+    // The second pointer of the abandoned session was never asked for.
+    expect(calls).toEqual(['s1:0']);
+  });
+
+  it('offers a resolved pointer to the lightbox and the composer', async () => {
+    // Re-attaching from a past session is a documented path into the
+    // composer, and it works by sending a fresh copy of the bytes.
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': async () => ({ data_uri: PNG }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', { messages: [prompt([ref()])] });
+    await drain(p);
+    p.shadowRoot.querySelector('img.message-image').click();
+    expect(p._lightboxImage).toBe(PNG);
+    p.shadowRoot.querySelector('.message-image-reattach').click();
+    expect(p._pendingImages).toEqual([PNG]);
+  });
+
+  it('draws a prompt that carries both bytes and pointers', async () => {
+    // The live half of a prompt the user pasted into and then resumed.
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': async () => ({ data_uri: PNG }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('session-changed', {
+      messages: [
+        {
+          role: 'user',
+          content: 'both',
+          images: ['data:image/png;base64,BBB'],
+          image_refs: [ref()],
+        },
+      ],
+    });
+    await drain(p);
+    expect(tiles(p).images).toHaveLength(2);
+  });
+
+  it('hydrates the state-loaded path too', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('state-loaded', { messages: [prompt([ref()])] });
+    await drain(p);
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+    expect(tiles(p).images).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Compaction events — the retired native-engine stages
 // ---------------------------------------------------------------------------
 //

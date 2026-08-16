@@ -35,6 +35,7 @@
 // wiring tables here means the events file is the
 // one place to look when adding a new event.
 
+import { hydrateImageRefs } from '../image-refs.js';
 import { normalizeMessageContent } from '../image-utils.js';
 import { SPEECH_STATE_EVENT } from '../speech-player.js';
 import { compactionSummary } from './block-render.js';
@@ -480,6 +481,15 @@ export function restoreMessage(m) {
   const images = Array.isArray(m.images) ? m.images : normalized.images;
   const out = { role: m.role, content: normalized.content };
   if (images.length > 0) out.images = images;
+  // Image pointers, not bytes. A prompt's screenshots come back from
+  // `history_load` as `{session_id, entry_uuid, block, media_type}` and are
+  // resolved one at a time afterwards; carrying them is what lets the tiles
+  // appear at all, and dropping them is why a resumed prompt used to lose
+  // every screenshot in it.
+  const refs = Array.isArray(m.image_refs)
+    ? m.image_refs.filter((ref) => ref && typeof ref === 'object')
+    : [];
+  if (refs.length > 0) out.image_refs = refs;
   // A compact summary is a user entry because that is how the model
   // receives it, but the user did not write it — the CLI did, about the
   // context it dropped. Marked as a system event so it is labelled
@@ -554,6 +564,7 @@ export function onSessionChanged(panel, event) {
   // restored list, not the raw one, so the recall filter sees the same
   // `system_event` marks the renderer does.
   seedInputHistory(panel, panel.messages);
+  restoreImages(panel);
 }
 
 /**
@@ -608,6 +619,31 @@ export function onStateLoaded(panel, event) {
   // reached by reconnecting rather than by resuming.
   panel.messages = msgs.map(restoreMessage);
   seedInputHistory(panel, panel.messages);
+  restoreImages(panel);
+}
+
+/**
+ * Resolve the image pointers in the message list that was just restored.
+ *
+ * Deliberately not awaited by either caller: the transcript is readable while
+ * the bytes are still arriving, and a session with twenty screenshots in it
+ * would otherwise hold the whole restore behind twenty disk reads.
+ *
+ * The generation bump is what makes an in-flight hydration abandonable. Two
+ * restores in a row — a reconnect landing while a resume is still fetching —
+ * would otherwise have the first one's tiles written into the cache for a
+ * transcript nobody is looking at any more. The cache itself is not cleared:
+ * pointers are keyed by session, so entries fetched for the session being
+ * left are exactly what makes returning to it instant.
+ */
+export function restoreImages(panel) {
+  const gen = ++panel._restoreGeneration;
+  const messages = panel.messages;
+  hydrateImageRefs(panel, messages, {
+    cache: panel._imageRefData,
+    isStale: () => gen !== panel._restoreGeneration,
+    label: 'chat',
+  });
 }
 
 /**

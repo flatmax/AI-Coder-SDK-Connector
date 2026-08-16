@@ -271,6 +271,19 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // opened stays open once the message is frozen into the list.
     this._blockExpansion = new Map();
 
+    // Resolved image pointers: Map<`session|uuid|block`, {dataUri}|{error}>.
+    // A restored prompt carries pointers rather than bytes, and the tiles are
+    // filled in from here as `history_image` answers each one — see
+    // `image-refs.js`. Not reactive for the same reason as `_blockExpansion`:
+    // it is mutated in place, so the hydrator calls `requestUpdate()` itself.
+    // Keyed by the pointer's own fields, so an image re-attached, resumed
+    // away from and resumed back to is fetched once.
+    this._imageRefData = new Map();
+    // Bumped by every wholesale message replace. A hydration in flight when
+    // the user resumes a different session belongs to nobody, and its tiles
+    // are no longer on screen.
+    this._restoreGeneration = 0;
+
     // Bind handlers. tabs.js owns the overflow + Alt+`
     // closures; events.js owns window-event handlers;
     // input.js owns the speech-to-text + history

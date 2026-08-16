@@ -273,6 +273,7 @@ never a dismiss (see [permission-dialog.md](permission-dialog.md)).
 - Thumbnail previews with remove button below textarea
 - Lightbox overlay on click (full-size view, Escape to close)
 - Re-attach button on thumbnails and in lightbox (see [images.md](../4-features/images.md))
+- **A restored prompt carries pointers where a live one carries bytes.** A message the user pasted into this session holds its data URIs; the same message reached by resuming or by reconnecting holds `image_refs`, and each is resolved through `history_image` after the transcript is on screen — never before it, so the text is readable while the bytes are still arriving. A resolved pointer becomes the same tile a pasted image gets, lightbox and re-attach included, because re-attaching from a past session is one of the two documented paths into the composer. Unresolved tiles hold their final size, and a pointer that cannot be read keeps a marked tile with the reason rather than vanishing. The fetching is shared with the history browser's — same pointers, same sequential reads, same cache-the-failures rule, one implementation
 - No token estimate is shown. AC⚡DC does not count tokens; the turn footer reports what the engine actually used
 - Not automatically re-sent on subsequent messages — display-only after original send
 ### Links and URLs
