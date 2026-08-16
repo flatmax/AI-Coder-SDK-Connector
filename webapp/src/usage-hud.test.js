@@ -852,6 +852,41 @@ describe('UsageHud context bar', () => {
     expect(segs[1].title).toBe('Messages: 42.0K');
   });
 
+  it('marks where autocompact fires', async () => {
+    // The bar's colour is keyed to the threshold, not the window, so
+    // without the mark an amber bar at 84% looks like an arbitrary
+    // choice rather than the compaction it is predicting.
+    const el = await show();
+    const mark = el.shadowRoot.querySelector('.mark');
+    // 167000 / 200000
+    expect(parseFloat(mark.style.left)).toBeCloseTo(83.5, 1);
+    expect(mark.title).toContain('167,000 tokens');
+  });
+
+  it('says so in words when autocompact is off, instead of just dropping the mark', async () => {
+    // An unmarked bar otherwise reads as one whose threshold is somewhere
+    // off to the right, which is the opposite of the truth.
+    const el = await show(usageFixture({ isAutoCompactEnabled: false }));
+    expect(el.shadowRoot.querySelector('.mark')).toBeNull();
+    expect(el.shadowRoot.querySelector('.no-mark').textContent)
+      .toMatch(/autocompact off/i);
+    expect(el.shadowRoot.querySelector('.no-mark').textContent)
+      .toMatch(/fails at the limit/i);
+  });
+
+  it('carries no note while autocompact is on', async () => {
+    const el = await show();
+    expect(el.shadowRoot.querySelector('.no-mark')).toBeNull();
+  });
+
+  it('drops the mark when the engine reports no threshold', async () => {
+    const el = await show(usageFixture({ autoCompactThreshold: 0 }));
+    expect(el.shadowRoot.querySelector('.mark')).toBeNull();
+    // And says nothing about it: autocompact is on, the engine just did
+    // not say where. A warning here would be inventing a fact.
+    expect(el.shadowRoot.querySelector('.no-mark')).toBeNull();
+  });
+
   it('excludes deferred and empty categories from the fill', async () => {
     const el = await show();
     const titles = [...el.shadowRoot.querySelectorAll('.bar-seg')].map(

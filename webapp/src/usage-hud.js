@@ -19,6 +19,10 @@
 //      model's raw window: the compaction point is `autoCompactThreshold`,
 //      a separate field some 16% below it. See context-usage.js, which
 //      owns that arithmetic for all three views that render this payload.
+//      That threshold is marked on the bar, because it is what the bar's
+//      colour is keyed to: an amber bar at 84% of the window is not a
+//      near-miss, it is the compaction, and a bar with nothing on it to
+//      compare against made the colour look arbitrary.
 //   2. Cost — what this turn cost. Which is *not* `total_cost_usd`: that
 //      field is the session's running total, so this row reported the
 //      whole session's spend under the label "This turn". The engine
@@ -44,6 +48,7 @@ import {
   compactionLimit,
   compactionPercent,
   partitionCategories,
+  thresholdPercent,
   warningPercent,
   windowPercent,
 } from './context-usage.js';
@@ -181,6 +186,7 @@ export class UsageHud extends RpcMixin(LitElement) {
     }
 
     .bar {
+      position: relative;
       height: 6px;
       border-radius: 3px;
       background: rgba(240, 246, 252, 0.08);
@@ -189,6 +195,29 @@ export class UsageHud extends RpcMixin(LitElement) {
     }
     .bar-seg {
       height: 100%;
+    }
+    /* The autocompact mark, same treatment as the Context tab's gauge:
+     * inside the bar rather than a tick beneath it, so the fill is read
+     * against it directly. Without it the bar's colour turns amber for
+     * a reason nothing on screen accounts for — the threshold sits some
+     * 16% below the window, and the tooltip was the only place that
+     * said so. */
+    .mark {
+      position: absolute;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      margin-left: -1px;
+      background: var(--text-primary, #c9d1d9);
+      box-shadow: 0 0 0 1px rgba(13, 17, 23, 0.8);
+      pointer-events: none;
+    }
+    /* Said out loud, not just in the tooltip: with autocompact off the
+     * bar has no mark, and an unmarked bar looks like a bar whose
+     * threshold happens to be off-screen. */
+    .no-mark {
+      color: #d29922;
+      font-size: 0.6875rem;
     }
 
     .cats {
@@ -482,6 +511,11 @@ export class UsageHud extends RpcMixin(LitElement) {
     // categories are excluded from the fill — they are tokens the
     // engine has budgeted but not yet loaded — and so are the
     // structural rows, which are the room left rather than content.
+    // Where the compaction fires, as a share of the window the bar is
+    // drawn against. Null when autocompact is off, which the note below
+    // says in words rather than leaving an unmarked bar to imply.
+    const markPct = thresholdPercent(ctx);
+    const limit = compactionLimit(ctx);
     const { content, deferred, verified } = partitionCategories(ctx);
     const segments = verified && max > 0
       ? content.map((c) => ({
@@ -520,7 +554,19 @@ export class UsageHud extends RpcMixin(LitElement) {
                   style="width: ${clamped}%; background: ${_contextColor(warnPct)};"
                 ></div>
               `}
+          ${markPct != null ? html`
+            <div
+              class="mark"
+              style="left: ${markPct}%"
+              title="Autocompact triggers here, at ${limit.toLocaleString()} tokens"
+            ></div>
+          ` : nothing}
         </div>
+        ${ctx.isAutoCompactEnabled === false ? html`
+          <div class="no-mark">
+            Autocompact off — no mark, and the turn fails at the limit.
+          </div>
+        ` : nothing}
         ${content.length > 0 ? html`
           <div class="cats">
             ${[...content, ...deferred].map((c) => html`
