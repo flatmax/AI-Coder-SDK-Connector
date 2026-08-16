@@ -1040,7 +1040,9 @@ Two facts from the live runs worth knowing:
   Glob/Grep/Read. Nothing reaches the browser. Two service tests pin the degradation itself
   (`McpBridge.build_server` raising leaves hooks intact; `build_hook_matchers` raising leaves servers
   intact), so the failure is survivable and silent rather than fatal and silent — but a user watching
-  the agent grep its way around a repo will not know why.
+  the agent grep its way around a repo will not know why. **Closed in phase 6**: each loss is recorded
+  as a sentence on `EngineHealth.degradations` where it happens, and the health banner renders it beside
+  the version and credential warnings. The same two tests now assert the sentence, not just the log.
 - **No token-cost display for the tool inventory.** `mcp-bridge.md` also wants server health and the
   `ac-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
   the panel does not mention them. Phase 6 territory. The banner above is the same missing surface seen

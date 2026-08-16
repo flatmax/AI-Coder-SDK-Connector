@@ -25,12 +25,23 @@ function health(overrides = {}) {
     credential_source: 'subscription',
     auth_warning: null,
     mcp: [],
+    degradations: [],
     mirror_gaps: 0,
     mirror_gaps_escalated: false,
     last_error: null,
     ...overrides,
   };
 }
+
+/** The sentence `_build_bridge_wiring` writes when the bridge will not start. */
+const NO_BRIDGE = 'The ac-dc repo tools did not start, so the agent has no '
+  + 'symbol map, no document outlines and no reference graph — it will fall '
+  + 'back to Glob, Grep and Read, which answer repo-wide questions less well.';
+
+/** And the one it writes when the post-write hook will not start. */
+const NO_HOOK = 'The post-write re-index hook did not start, so the file tree '
+  + 'and the symbol map will not follow the agent\'s writes — refresh them by '
+  + 'hand after it edits files.';
 
 function banner(panel) {
   return panel.shadowRoot.querySelector('.health-banner');
@@ -50,11 +61,22 @@ describe('hasHealthProblem', () => {
     expect(hasHealthProblem(health())).toBe(false);
   });
 
-  it('each of the four fields is enough on its own', () => {
+  it('each of the five signals is enough on its own', () => {
     expect(hasHealthProblem(health({ mirror_gaps: 1 }))).toBe(true);
     expect(hasHealthProblem(health({ last_error: 'boom' }))).toBe(true);
     expect(hasHealthProblem(health({ version_warning: 'skew' }))).toBe(true);
     expect(hasHealthProblem(health({ auth_warning: 'api key' }))).toBe(true);
+    expect(hasHealthProblem(health({ degradations: [NO_BRIDGE] }))).toBe(true);
+  });
+
+  it('a session that started whole reports no degradation', () => {
+    expect(hasHealthProblem(health({ degradations: [] }))).toBe(false);
+    // Shapes the field has never carried, and must not be read as a loss:
+    // an older engine that predates the field sends nothing at all.
+    expect(hasHealthProblem(health({ degradations: undefined }))).toBe(false);
+    expect(hasHealthProblem(health({ degradations: 'no bridge' }))).toBe(false);
+    expect(hasHealthProblem(health({ degradations: [''] }))).toBe(false);
+    expect(hasHealthProblem(health({ degradations: [null, 0] }))).toBe(false);
   });
 
   it('a disconnected engine with no error is not a fault', () => {
@@ -107,6 +129,20 @@ describe('healthKey', () => {
   it('changes when a different thing goes wrong', () => {
     expect(healthKey(health({ last_error: 'boom' }))).not.toBe(
       healthKey(health({ auth_warning: 'boom' })),
+    );
+  });
+
+  it('changes when a capability is missing', () => {
+    expect(healthKey(health())).not.toBe(
+      healthKey(health({ degradations: [NO_BRIDGE] })),
+    );
+  });
+
+  it('tells one loss from two', () => {
+    // Both are startup losses reported on every health push, so a
+    // dismissal of "no bridge" must not also cover "and no hook either".
+    expect(healthKey(health({ degradations: [NO_BRIDGE] }))).not.toBe(
+      healthKey(health({ degradations: [NO_BRIDGE, NO_HOOK] })),
     );
   });
 
@@ -206,6 +242,63 @@ describe('ChatPanel health banner', () => {
     expect(lines.some((l) => l.includes('connect timed out'))).toBe(true);
     expect(lines.some((l) => l.includes('newer than the SDK pins'))).toBe(true);
     expect(lines.some((l) => l.includes('ANTHROPIC_API_KEY'))).toBe(true);
+  });
+
+  it('reports a capability the session started without', async () => {
+    // specs5/3-engine/mcp-bridge.md § Availability and Degradation: "If it
+    // fails to start, the session continues without it and a banner reports
+    // the loss — otherwise the agent simply appears inexplicably worse at
+    // repo-wide questions."
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ degradations: [NO_BRIDGE] }));
+    const line = p.shadowRoot.querySelector('.health-degraded');
+    expect(line.textContent).toContain('Degraded');
+    expect(line.textContent).toContain('the agent has no symbol map');
+    expect(line.textContent).toContain('Glob, Grep and Read');
+    // A lost capability leaves the conversation working: amber, not red.
+    expect(banner(p).classList.contains('health-banner-bad')).toBe(false);
+  });
+
+  it('gives each loss its own line', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ degradations: [NO_HOOK, NO_BRIDGE] }));
+    const lines = [...banner(p).querySelectorAll('.health-degraded')].map(
+      (el) => el.textContent.trim(),
+    );
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('post-write re-index hook');
+    expect(lines[1]).toContain('repo tools did not start');
+  });
+
+  it('shows a loss alongside whatever else is wrong', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(
+      p,
+      health({ degradations: [NO_BRIDGE], mirror_gaps: 1 }),
+    );
+    const text = banner(p).textContent;
+    expect(text).toContain('One turn was not appended');
+    expect(text).toContain('the agent has no symbol map');
+  });
+
+  it('a dismissed loss stays dismissed across health pushes', async () => {
+    // The sentence is written once at startup and re-sent with every health
+    // report for the life of the session, so it has to be dismissible.
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ degradations: [NO_BRIDGE] }));
+    p.shadowRoot.querySelector('.health-dismiss').click();
+    await settle(p);
+    expect(banner(p)).toBeNull();
+    await report(p, health({ degradations: [NO_BRIDGE] }));
+    expect(banner(p)).toBeNull();
+    // A second loss is news the first dismissal did not cover.
+    await report(p, health({ degradations: [NO_BRIDGE, NO_HOOK] }));
+    expect(banner(p)).not.toBeNull();
+    expect(banner(p).textContent).toContain('post-write re-index hook');
   });
 
   it('carries the engine readout under the warning', async () => {

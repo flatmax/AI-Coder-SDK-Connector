@@ -1605,6 +1605,19 @@ class TestBridgeWiring:
         # And the hook half is unaffected: one failure is not the other's.
         assert list(svc.session._hooks) == ["PostToolUse"]
         assert "fall back to Glob/Grep/Read" in caplog.text
+        # And the browser is told, not just the log. `mcp-bridge.md`
+        # § Availability and Degradation: "the session continues without it
+        # and a banner reports the loss — otherwise the agent simply appears
+        # inexplicably worse at repo-wide questions."
+        assert svc.session.health.degradations == [
+            "The ac-dc repo tools did not start, so the agent has no symbol "
+            "map, no document outlines and no reference graph — it will fall "
+            "back to Glob, Grep and Read, which answer repo-wide questions "
+            "less well."
+        ]
+        assert svc.get_engine_health()["degradations"] == (
+            svc.session.health.degradations
+        )
 
     def test_a_hook_that_will_not_build_still_leaves_a_session(
         self, tmp_path, events, monkeypatch, caplog
@@ -1624,6 +1637,44 @@ class TestBridgeWiring:
         assert svc.session._hooks is None
         assert svc.session._mcp_servers is not None
         assert "will not follow the agent's writes" in caplog.text
+        assert svc.session.health.degradations == [
+            "The post-write re-index hook did not start, so the file tree and "
+            "the symbol map will not follow the agent's writes — refresh them "
+            "by hand after it edits files."
+        ]
+
+    def test_both_halves_failing_reports_both_losses(
+        self, tmp_path, events, monkeypatch, caplog
+    ):
+        """One sentence per capability, not one per session: the two
+        failures have different remedies, and a reader told only the first
+        would go looking for a symbol map that is also gone."""
+        from ac_dc.claude_code import mcp_server as mcp_module
+        from ac_dc.claude_code import service as service_module
+
+        def boom_hook(reindexer, broadcast=None):
+            raise RuntimeError("no sdk")
+
+        def boom_server(self):
+            raise RuntimeError("no sdk")
+
+        monkeypatch.setattr(service_module, "build_hook_matchers", boom_hook)
+        monkeypatch.setattr(mcp_module.McpBridge, "build_server", boom_server)
+        with caplog.at_level(logging.WARNING):
+            svc = ClaudeCodeService(
+                FakeConfig(tmp_path),
+                event_callback=events,
+                engine_config=EngineConfig(),
+            )
+        assert len(svc.session.health.degradations) == 2
+        assert "re-index hook" in svc.session.health.degradations[0]
+        assert "repo tools" in svc.session.health.degradations[1]
+
+    def test_a_session_that_started_whole_reports_no_loss(self, wired):
+        """The banner is silent otherwise, so an empty list is the normal
+        state and not a missing report."""
+        assert wired.session.health.degradations == []
+        assert wired.get_engine_health()["degradations"] == []
 
 
 # ---------------------------------------------------------------------------

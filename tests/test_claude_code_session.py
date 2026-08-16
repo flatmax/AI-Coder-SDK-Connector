@@ -874,6 +874,64 @@ class TestMirrorGapEscalation:
 
 
 # ---------------------------------------------------------------------------
+# Capabilities the session started without
+# ---------------------------------------------------------------------------
+
+
+class TestStartupDegradation:
+    """What the health record says about a session that started short.
+
+    Sentences rather than flags, for the reason the disk warning is a
+    sentence: the words belong to whoever knows what was lost, and a
+    browser turning a flag into prose would be a second owner of the
+    meaning (``specs5/3-engine/mcp-bridge.md`` § Availability and
+    Degradation).
+    """
+
+    def health(self, **kwargs):
+        from ac_dc.claude_code.health import EngineHealth
+
+        return EngineHealth(**kwargs)
+
+    def test_a_whole_session_has_nothing_to_report(self):
+        assert self.health().to_dict()["degradations"] == []
+
+    def test_a_loss_is_carried_to_the_browser(self):
+        h = self.health()
+        h.note_degradation("The ac-dc repo tools did not start.")
+        assert h.to_dict()["degradations"] == ["The ac-dc repo tools did not start."]
+
+    def test_two_losses_keep_the_order_they_were_noted_in(self):
+        h = self.health()
+        h.note_degradation("first")
+        h.note_degradation("second")
+        assert h.degradations == ["first", "second"]
+
+    def test_the_same_loss_twice_is_not_two_losses(self):
+        """A standing condition, not an event: it is re-reported on every
+        health push, and the banner keys its dismissal on what it showed."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        h.note_degradation("no bridge")
+        assert h.degradations == ["no bridge"]
+
+    def test_nothing_to_say_says_nothing(self):
+        h = self.health()
+        for empty in ("", "   ", "\n"):
+            h.note_degradation(empty)
+        assert h.degradations == []
+
+    def test_the_dict_hands_over_a_copy(self):
+        """The payload is serialised and broadcast; a later note must not
+        edit a dict that has already gone out."""
+        h = self.health()
+        h.note_degradation("no bridge")
+        payload = h.to_dict()
+        h.note_degradation("no hook")
+        assert payload["degradations"] == ["no bridge"]
+
+
+# ---------------------------------------------------------------------------
 # Reconnect replay
 # ---------------------------------------------------------------------------
 

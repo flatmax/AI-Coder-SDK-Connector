@@ -441,6 +441,16 @@ class EngineHealth:
     mcp: list[dict[str, Any]] = field(default_factory=list)
     mirror_gaps: int = 0
     last_error: str | None = None
+    #: Capabilities the session started *without*, one sentence each.
+    #:
+    #: The bridge and the post-write hook both degrade to None rather than
+    #: refusing to construct, which keeps the editor alive and used to keep
+    #: the loss to a log line nobody reads —
+    #: ``specs5/3-engine/mcp-bridge.md`` § Availability and Degradation asks
+    #: for a banner instead. Sentences rather than flags because the browser
+    #: is told what was lost and what the agent will do instead, for the
+    #: reason it is told the disk warning's sentence: one owner of the words.
+    degradations: list[str] = field(default_factory=list)
     #: How many failed mirror appends the browser's health banner treats as
     #: bad luck before it treats them as a broken mirror. A callable, not a
     #: number, because it comes from ``app.json`` — which reloads without a
@@ -463,6 +473,18 @@ class EngineHealth:
     def note_mirror_gap(self) -> None:
         """Count a ``MirrorErrorMessage``; the repo-local copy has a hole."""
         self.mirror_gaps += 1
+
+    def note_degradation(self, sentence: str) -> None:
+        """Record a capability this session is running without.
+
+        Deduplicated on the text: this is a standing condition rather than
+        an event, so a second report of the same loss is not new information
+        — and the banner keys its dismissal on what it showed, which a
+        growing list of identical sentences would defeat.
+        """
+        text = str(sentence).strip()
+        if text and text not in self.degradations:
+            self.degradations.append(text)
 
     def _escalated(self) -> bool:
         """Whether the gap count has passed what is tolerated.
@@ -499,4 +521,5 @@ class EngineHealth:
             "mirror_gaps": self.mirror_gaps,
             "mirror_gaps_escalated": self._escalated(),
             "last_error": self.last_error,
+            "degradations": list(self.degradations),
         }

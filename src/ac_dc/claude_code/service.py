@@ -266,6 +266,9 @@ class ClaudeCodeService:
             ui_state=self._ui_state_snapshot,
             flush=self.reindexer.flush,
         )
+        # Filled by the call below, drained onto the health record once the
+        # session that owns it exists.
+        self._degradations: list[str] = []
         hooks, mcp_servers = self._build_bridge_wiring()
 
         self.session = EngineSession(
@@ -282,6 +285,11 @@ class ClaudeCodeService:
         # than in the session's constructor because the threshold is ours to
         # know: the session has `engine.json`, not the app config.
         self.session.health.mirror_gap_tolerance = self._mirror_gap_tolerance
+        # What the bridge wiring above could not give this session. Set here
+        # for the same reason the tolerance is: the wiring is built before the
+        # session exists, and the record it belongs on is the session's.
+        for sentence in self._degradations:
+            self.session.health.note_degradation(sentence)
 
         self._selected_files: list[str] = []
         # Last-known viewer state, pushed by the browser on navigation.
@@ -495,6 +503,13 @@ class ClaudeCodeService:
         without the hook the file tree needs a manual refresh. Both are
         worth losing to keep a session that starts. Refusing to construct
         would trade a missing feature for a dead editor.
+
+        Each loss is also recorded in ``self._degradations``, which the
+        constructor hands to ``session.health`` the moment the session
+        exists. A log line was the whole report until phase 6, and
+        ``mcp-bridge.md`` § Availability and Degradation had always asked for
+        a banner: without one the agent simply appears inexplicably worse at
+        repo-wide questions, which is the hardest kind of fault to attribute.
         """
         try:
             hooks = build_hook_matchers(self.reindexer, self._broadcast)
@@ -505,6 +520,11 @@ class ClaudeCodeService:
                 exc,
             )
             hooks = None
+            self._degradations.append(
+                "The post-write re-index hook did not start, so the file tree "
+                "and the symbol map will not follow the agent's writes — "
+                "refresh them by hand after it edits files."
+            )
         try:
             mcp_servers = {SERVER_NAME: self.mcp_bridge.build_server()}
         except Exception as exc:
@@ -514,6 +534,12 @@ class ClaudeCodeService:
                 exc,
             )
             mcp_servers = None
+            self._degradations.append(
+                "The ac-dc repo tools did not start, so the agent has no "
+                "symbol map, no document outlines and no reference graph — it "
+                "will fall back to Glob, Grep and Read, which answer "
+                "repo-wide questions less well."
+            )
         return hooks, mcp_servers
 
     def _live_symbol_index(self) -> Any:

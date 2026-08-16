@@ -133,6 +133,13 @@ flushed synchronously before any `ac-dc` index-reading tool returns. See
 - The server starts with the session. If it fails to start, the session continues without it and a
   banner reports the loss — otherwise the agent simply appears inexplicably worse at repo-wide
   questions.
+- **The loss is a sentence, and the engine writes it.** `EngineHealth.degradations` carries one per
+  capability the session started without — the bridge and the post-write re-index hook are separate
+  losses with separate remedies — and the chat panel's health banner renders them as it renders the
+  version and credential warnings. Sentences rather than flags for the reason the disk warning is a
+  sentence: whoever knows what was lost also knows what the agent will do instead, and a browser
+  turning a flag into prose would be a second owner of the meaning. Deduplicated on the text, because
+  this is a standing condition re-sent on every health push rather than an event.
 - Index build is deferred at startup. Tools called before their index is ready return an explicit
   "index still building, retry shortly" result rather than an empty one. An empty result reads as "the
   repo has no symbols", which sends the agent down a wrong path it will not revisit.
