@@ -120,13 +120,14 @@ describe('ChatPanel session-changed event', () => {
     expect('turn_id' in p.messages[2]).toBe(false);
   });
 
-  it('preserves agent_blocks from persisted assistant records', async () => {
-    // Per spec specs4/3-llm/history.md § Cross-Turn
-    // Agent Reconstruction — assistant records that
-    // spawned agents persist the {id, agent_idx}
-    // mapping. Session reload threads it back so
-    // historical-turn UI can recover the right
-    // archive directories.
+  it('preserves the subagent rows a restored turn carries', async () => {
+    // What the rows are for: `agent_id` is the handle
+    // `get_subagent_transcript` reads by, so dropping
+    // them here would leave a restored turn's
+    // delegation unreadable. `_Turn.freeze` writes
+    // `subagents: []` today — the transcript does not
+    // record which turn spawned which subagent — but
+    // the restore is not the place to assume that.
     const p = mountPanel();
     await settle(p);
     pushEvent('session-changed', {
@@ -136,34 +137,37 @@ describe('ChatPanel session-changed event', () => {
           role: 'assistant',
           content: 'delegated',
           turn_id: 'turn_abc',
-          agent_blocks: [
-            { id: 'a0', agent_idx: 0 },
-            { id: 'a1', agent_idx: 1 },
+          subagents: [
+            { key: 'task-1', agent_id: 'agent_abc', status: 'completed' },
           ],
         },
       ],
     });
     await settle(p);
-    expect(p.messages[1].agent_blocks).toEqual([
-      { id: 'a0', agent_idx: 0 },
-      { id: 'a1', agent_idx: 1 },
+    expect(p.messages[1].subagents).toEqual([
+      { key: 'task-1', agent_id: 'agent_abc', status: 'completed' },
     ]);
   });
 
-  it('omits empty agent_blocks array on reload', async () => {
-    // Records that DO have the key but with an
-    // empty array (defensive against future
-    // backend changes) shouldn't surface a phantom
-    // affordance trigger.
+  it('drops the native engine’s agent_blocks mapping', async () => {
+    // `{id, agent_idx}` addressed a per-agent archive
+    // directory under the native engine. The CLI has
+    // no such thing — a subagent is read by its own
+    // id — and nothing in the panel consumes the key,
+    // so carrying it forward would only preserve a
+    // dead pointer in the restored records.
     const p = mountPanel();
     await settle(p);
     pushEvent('session-changed', {
       messages: [
         {
           role: 'assistant',
-          content: 'no agents',
+          content: 'delegated',
           turn_id: 'turn_abc',
-          agent_blocks: [],
+          agent_blocks: [
+            { id: 'a0', agent_idx: 0 },
+            { id: 'a1', agent_idx: 1 },
+          ],
         },
       ],
     });

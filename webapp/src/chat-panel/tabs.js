@@ -26,7 +26,13 @@
 // flat.
 
 import { html } from 'lit';
-import { deriveAgentTabLabel, parseAgentTabId } from './helpers.js';
+import { withRpcTimeout } from '../rpc.js';
+import {
+  _AGENT_LABEL_MAX_LENGTH,
+  deriveAgentTabLabel,
+  parseAgentTabId,
+} from './helpers.js';
+import { restoreMessage } from './restore.js';
 import { makeTabState } from './state.js';
 
 // ---------------------------------------------------------------
@@ -380,12 +386,12 @@ export function renderTabStrip(panel) {
           // tasked with similar prose differ only in
           // their mode. Main tab uses its
           // bare label (mode is reflected in the
-          // action-bar toggle). Historical tabs append
-          // a hint that they're archive-only.
+          // action-bar toggle). A subagent transcript
+          // appends a hint that it is read-only.
           const mode = panel._tabModes?.get(tabId);
           const baseTooltip = mode ? `${label} (${mode})` : label;
           const tooltip = readOnly
-            ? `${baseTooltip} — historical archive (read-only)`
+            ? `${baseTooltip} — subagent transcript (read-only)`
             : baseTooltip;
           const cls = [
             'tab-strip-tab',
@@ -844,52 +850,55 @@ export function installTabHandlers(panel) {
     onOverflowKeyDown(panel, event);
   panel._onChatTabShortcut = (event) =>
     onChatTabShortcut(panel, event);
-  panel._onViewAgentsRequested = (event) =>
-    onViewAgentsRequested(panel, event);
+  panel._onViewSubagentsRequested = (event) =>
+    onViewSubagentsRequested(panel, event);
 }
 
 // ---------------------------------------------------------------
-// Historical tab loading (Increment D commit 3)
+// Historical subagent transcripts
 // ---------------------------------------------------------------
 
 /**
- * Tab-id prefix for historical (read-only) agent
- * tabs loaded from the archive. Distinct from the
- * live-agent namespace so a future re-spawn of the
- * same agent id doesn't collide — and distinct
- * enough that ``parseAgentTabId`` could route on
- * the prefix if cross-tab routing is ever added.
+ * Deadline for one ``get_subagent_transcript`` call. Same 30s as the other
+ * history reads, for the same reason: this is disk I/O on the server's
+ * executor, so reaching the deadline means no reply is coming rather than
+ * that the read is slow. Without it a dropped reply is a tab that never
+ * fills and a strip the user cannot clear.
+ */
+const SUBAGENT_TIMEOUT_MS = 30000;
+
+/**
+ * Tab-id prefix for historical (read-only) subagent tabs read off disk.
  *
- * Per spec ``specs4/5-webapp/agent-browser.md`` §
- * Historical Turns: read-only tabs target a
- * ``ContextManager`` that no longer exists on the
- * backend, so they don't accept new messages.
+ * Live subagent tabs are keyed by the SDK ``agent_id`` verbatim, so the
+ * prefix is what keeps a transcript read from the archive from colliding
+ * with the same subagent's live tab — and what
+ * :func:`clearHistoricalTabs` matches on when the strip has to drop back
+ * to Main. Per ``specs5/5-webapp/subagent-browser.md`` § Tab Lifetime.
  */
 const _HISTORICAL_TAB_PREFIX = 'historical:';
 
 /**
- * Build the tab ID for a historical agent.
+ * Build the tab ID for a subagent transcript read off disk.
  *
- * Format: ``historical:{turn_id}/{agent_id}``.
- * The turn_id segment is included so multiple
- * turns' archives can coexist in the strip
- * without collision (which would happen if the
- * same agent id was spawned in two different
- * turns and the user clicked View Agents on
- * both).
+ * The agent id alone: SDK agent ids are unique within a session, so a turn
+ * segment would only encode which turn the user clicked through from —
+ * which a browsed transcript cannot supply anyway, because the transcript
+ * does not attribute a subagent to a turn.
  */
-function _historicalTabId(turnId, agentId) {
-  return `${_HISTORICAL_TAB_PREFIX}${turnId}/${agentId}`;
+function _historicalTabId(agentId) {
+  return `${_HISTORICAL_TAB_PREFIX}${agentId}`;
 }
 
 /**
- * Check whether a tab id is a historical tab.
+ * Check whether a tab id names a subagent transcript read off disk.
  *
- * Used by the input gate in send(), the tab
- * strip's read-only badge, and the future
- * scroll-away cleanup.
+ * The strip's read-only styling and the send gate both key off the tab
+ * state's own ``readOnly`` flag instead, since that is what they have in
+ * hand; this is for the id-keyed work — deciding what
+ * :func:`clearHistoricalTabs` sweeps.
  */
-export function isHistoricalTab(tabId) {
+function isHistoricalTab(tabId) {
   return (
     typeof tabId === 'string' &&
     tabId.startsWith(_HISTORICAL_TAB_PREFIX)
@@ -897,19 +906,22 @@ export function isHistoricalTab(tabId) {
 }
 
 /**
- * Clear all historical tabs from the strip.
+ * Clear every historical tab from the strip.
  *
- * Called before each fresh load so the strip
- * doesn't accumulate archives across multiple
- * affordance clicks. Matches the spec's
- * "scrolling away clears them" intent at click
- * granularity (scroll-aware cleanup is a future
- * enhancement).
+ * Called before each fresh load, so the strip does not accumulate
+ * transcripts across clicks, and on a session change, because a subagent
+ * transcript belongs to the session that spawned it.
  *
- * If the active tab was historical, switches
- * back to main before deletion.
+ * The generation bump is what stops a load still in flight: an
+ * ``await`` on a transcript read spans user actions, and the tab it was
+ * going to add belongs to a strip that has since been cleared.
+ *
+ * If the active tab was historical, switches back to Main before deletion —
+ * the active-tab setter would otherwise be left pointing at a missing key.
  */
-function _clearHistoricalTabs(panel) {
+export function clearHistoricalTabs(panel) {
+  panel._historicalTabGeneration =
+    (panel._historicalTabGeneration || 0) + 1;
   const historical = [];
   for (const tabId of panel._tabs.keys()) {
     if (isHistoricalTab(tabId)) {
@@ -917,11 +929,6 @@ function _clearHistoricalTabs(panel) {
     }
   }
   if (historical.length === 0) return;
-  // Switch to main before deletion so the
-  // active-tab transition fires cleanly. If the
-  // active tab is one we're about to delete, the
-  // setter would otherwise see ``_activeTabId``
-  // pointing at a missing key.
   if (isHistoricalTab(panel._activeTabId)) {
     panel._activeTabId = 'main';
   }
@@ -933,170 +940,157 @@ function _clearHistoricalTabs(panel) {
 }
 
 /**
- * Handle the ``view-agents-requested`` event.
+ * The strip label for one subagent transcript.
  *
- * Per Increment D commit 3:
- *
- * 1. Identify the agent ids in ``event.detail.agent_blocks``
- *    that are NOT currently live in the strip.
- * 2. Fetch the archive via ``LLMService.get_turn_archive(turn_id)``.
- * 3. Create one read-only tab per non-live agent,
- *    populated with the archive's messages.
- * 4. Activate the first newly-created tab.
- *
- * Errors surface as toasts; the strip stays
- * unchanged so the user can retry. Empty archives
- * (turn_id missing on disk, or every agent in
- * agent_blocks already live) toast and no-op.
+ * 📜 because the strip has no live indicator to distinguish an archived
+ * transcript from a running one, and hover text is not a distinction a user
+ * scanning the strip can see. The description is what the label carries —
+ * an SDK agent id says nothing about what the subagent was doing — with the
+ * id as the fallback for a transcript whose row supplied no description.
  */
-async function onViewAgentsRequested(panel, event) {
+function _subagentTabLabel(label, agentId) {
+  const text = typeof label === 'string' ? label.trim() : '';
+  const base = text || agentId;
+  return base.length > _AGENT_LABEL_MAX_LENGTH
+    ? `📜 ${base.slice(0, _AGENT_LABEL_MAX_LENGTH - 1)}…`
+    : `📜 ${base}`;
+}
+
+/**
+ * One entry standing in for a transcript that could not be read.
+ *
+ * Per ``specs5/5-webapp/subagent-browser.md`` § Empty States: the tab shows
+ * the reason in place of the messages and is *not* removed. Its row in Main
+ * is evidence the subagent ran, and a tab that vanished on click would
+ * contradict that — the user would read it as "nothing happened" rather
+ * than "the record is gone".
+ *
+ * Shaped as a system event, the same shape a commit notice or a compaction
+ * divider takes, because this is the app speaking about the transcript
+ * rather than anything the subagent said.
+ */
+function _unreadableTranscript(reason) {
+  return [{ role: 'user', content: `⚠️ ${reason}`, system_event: true }];
+}
+
+/**
+ * Read one subagent's transcript, as messages the renderer can draw.
+ *
+ * Never throws and never returns empty: every failure — a dropped reply, an
+ * ``{error}`` from the service, a session whose subagent directory was
+ * pruned — comes back as the one-entry explanation above, because the
+ * caller's job is to put a tab in the strip either way.
+ */
+async function _loadSubagentTranscript(panel, agentId, sessionId) {
+  let result;
+  try {
+    result = await withRpcTimeout(
+      panel.rpcExtract(
+        'ClaudeCodeService.get_subagent_transcript',
+        agentId,
+        sessionId,
+      ),
+      SUBAGENT_TIMEOUT_MS,
+      'get_subagent_transcript',
+    );
+  } catch (err) {
+    console.error('[chat] get_subagent_transcript failed', err);
+    return _unreadableTranscript(
+      err?.message || 'Could not read this subagent transcript',
+    );
+  }
+  if (!Array.isArray(result)) {
+    const reason = result && result.error ? String(result.error) : '';
+    return _unreadableTranscript(
+      reason || 'This subagent has no readable transcript',
+    );
+  }
+  if (result.length === 0) {
+    return _unreadableTranscript('This subagent has no readable transcript');
+  }
+  // Through the same normalizer as a resumed session: this is the same
+  // backend renderer's output, so a subagent's tool cards must survive the
+  // trip the way the main transcript's do.
+  return result.map(restoreMessage);
+}
+
+/**
+ * Handle the ``view-subagents-requested`` event.
+ *
+ * Detail is ``{agents: [{agent_id, label}], session_id?}`` — dispatched by
+ * the "View subagents (N)" affordance under a settled turn with all of that
+ * turn's rows, and by a single subagent row with just its own. The session
+ * defaults to the one the panel is attached to, which is the session Main is
+ * showing; the history browser passes an explicit one when the transcript
+ * belongs to a session that is not live.
+ *
+ * Tabs appear one at a time as their reads land, and the first one is
+ * activated as soon as it exists rather than after the last: a turn that
+ * fanned out to eight subagents would otherwise leave the user on Main
+ * watching nothing happen. Per
+ * ``specs5/5-webapp/subagent-browser.md`` § Historical Transcripts.
+ */
+async function onViewSubagentsRequested(panel, event) {
   const detail = event?.detail;
   if (!detail || typeof detail !== 'object') return;
-  const turnId = detail.turn_id;
-  const agentBlocks = Array.isArray(detail.agent_blocks)
-    ? detail.agent_blocks
-    : null;
-  if (typeof turnId !== 'string' || !turnId) return;
-  if (!agentBlocks || agentBlocks.length === 0) return;
+  const agents = Array.isArray(detail.agents) ? detail.agents : null;
+  if (!agents || agents.length === 0) return;
 
-  // Pre-filter: skip agent ids that are still
-  // live. Their content is already reachable via
-  // the strip; loading them again as historical
-  // tabs would duplicate the affordance for no
-  // gain.
-  const wantedAgentIds = new Set();
-  for (const block of agentBlocks) {
-    const id = block?.id;
-    if (typeof id !== 'string' || !id) continue;
-    if (panel._tabs.has(id)) continue; // still live
-    wantedAgentIds.add(id);
+  // Skip subagents whose live tab is still in the strip: that tab is the
+  // running conversation, and replacing it with a snapshot of what has
+  // reached disk so far would be a worse view of the same subagent.
+  const wanted = [];
+  const seen = new Set();
+  for (const agent of agents) {
+    const id =
+      agent && typeof agent.agent_id === 'string' ? agent.agent_id : '';
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    if (panel._tabs.has(id)) continue;
+    wanted.push({ agentId: id, label: agent.label });
   }
-  if (wantedAgentIds.size === 0) {
+  if (wanted.length === 0) {
     panel._emitToast(
-      'All agents from this turn are still active in the tab strip',
+      agents.length === 1
+        ? 'That subagent is still active in the tab strip'
+        : 'Those subagents are still active in the tab strip',
       'info',
     );
     return;
   }
 
-  // Fetch the archive. The RPC returns the union
-  // of every agent's messages from this turn —
-  // we filter to wantedAgentIds locally because
-  // the backend has no "filter by id" parameter
-  // (and shouldn't — the per-turn RPC is
-  // intentionally simple per spec).
-  let archive;
-  try {
-    archive = await panel.rpcExtract(
-      'LLMService.get_turn_archive',
-      turnId,
+  const sessionId =
+    typeof detail.session_id === 'string' && detail.session_id
+      ? detail.session_id
+      : panel._sessionInfo?.session_id || null;
+
+  clearHistoricalTabs(panel);
+  const generation = panel._historicalTabGeneration;
+
+  let activated = false;
+  for (const { agentId, label } of wanted) {
+    const messages = await _loadSubagentTranscript(
+      panel,
+      agentId,
+      sessionId,
     );
-  } catch (err) {
-    console.error(
-      '[chat] view-agents-requested: get_turn_archive failed',
-      err,
-    );
-    panel._emitToast(
-      `Failed to load archive: ${err?.message || err}`,
-      'error',
-    );
-    return;
-  }
-
-  if (!Array.isArray(archive) || archive.length === 0) {
-    panel._emitToast(
-      'No archive found for this turn — files may have been deleted',
-      'warning',
-    );
-    return;
-  }
-
-  // Build a lookup from agent_idx to archive
-  // entry, then map each wanted agent id back to
-  // its messages. The archive shape is
-  // ``[{agent_idx, messages}, ...]``; we need to
-  // pair each wanted id with the right entry by
-  // walking the original agent_blocks list.
-  const archiveByIdx = new Map();
-  for (const entry of archive) {
-    if (
-      entry &&
-      typeof entry.agent_idx === 'number'
-    ) {
-      archiveByIdx.set(entry.agent_idx, entry);
-    }
-  }
-
-  // Clear any prior historical tabs so each
-  // affordance click produces a clean strip.
-  _clearHistoricalTabs(panel);
-
-  // Spawn read-only tabs in spawn order so the
-  // strip mirrors the original layout.
-  const createdTabIds = [];
-  for (const block of agentBlocks) {
-    const id = block?.id;
-    const idx = block?.agent_idx;
-    if (typeof id !== 'string' || !id) continue;
-    if (!wantedAgentIds.has(id)) continue;
-    if (typeof idx !== 'number') continue;
-    const entry = archiveByIdx.get(idx);
-    if (!entry) continue; // archive entry missing
-
-    const tabId = _historicalTabId(turnId, id);
+    // The strip was cleared under us — a session resume, or another click
+    // on a different turn. These messages belong to nobody now.
+    if (generation !== panel._historicalTabGeneration) return;
+    const tabId = _historicalTabId(agentId);
     const state = makeTabState();
     state.readOnly = true;
-    state.messages = Array.isArray(entry.messages)
-      ? entry.messages.map((m) => {
-          // Persisted records from the archive
-          // can carry the same fields the live
-          // path produces (role, content,
-          // images, system_event, edit_results
-          // for assistants). Pass them through
-          // so the rendering path treats
-          // historical messages identically to
-          // live ones.
-          const out = {
-            role: m.role,
-            content: m.content ?? '',
-          };
-          if (Array.isArray(m.images) && m.images.length > 0) {
-            out.images = m.images;
-          }
-          if (m.system_event) out.system_event = true;
-          if (Array.isArray(m.edit_results)) {
-            out.editResults = m.edit_results;
-          }
-          return out;
-        })
-      : [];
-
+    state.messages = messages;
     panel._tabs.set(tabId, state);
-    panel._tabLabels.set(tabId, `📜 ${id}`);
-    createdTabIds.push(tabId);
+    panel._tabLabels.set(tabId, _subagentTabLabel(label, agentId));
+    // Map mutations don't trigger Lit's reactivity on their own — same
+    // pattern as spawnAgentTabs.
+    panel.requestUpdate();
+    // Only the first one, and only ever once: a later read landing must not
+    // yank the user out of the transcript they started reading.
+    if (!activated) {
+      activated = true;
+      panel._activeTabId = tabId;
+    }
   }
-
-  if (createdTabIds.length === 0) {
-    // Defensive — every wanted id failed to
-    // resolve an archive entry. Could happen if
-    // the backend returned a malformed shape;
-    // toast so the user knows the click did
-    // nothing.
-    panel._emitToast(
-      'Archive contained no readable conversations',
-      'warning',
-    );
-    return;
-  }
-
-  // Force a re-render so the strip picks up the
-  // new tabs (Map mutations don't trigger Lit's
-  // reactivity on their own — same pattern as
-  // spawnAgentTabs).
-  panel.requestUpdate();
-
-  // Activate the first newly-created tab so the
-  // user lands inside the conversation they
-  // clicked through to.
-  panel._activeTabId = createdTabIds[0];
 }

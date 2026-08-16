@@ -1369,6 +1369,15 @@ export const STYLES = css`
     color: #fff;
   }
 
+  /* What sits where the input row would be on a subagent transcript.
+   * Quiet and unbordered: it explains an absence, it is not a warning. */
+  .read-only-note {
+    padding: 0.5rem 0.25rem;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+
   /* Disconnected banner — shown when RPC isn't ready so users
    * understand why the Send button is inert. */
   .disconnected-note {
@@ -1833,15 +1842,15 @@ export const STYLES = css`
     text-decoration: underline;
   }
 
-  /* Historical (read-only) tab styling. Tabs
-   * loaded from the archive via the View Agents
-   * affordance carry a muted appearance so users
-   * can distinguish them at a glance from live
-   * tabs. The 📜 prefix in the label is the
-   * primary signal; the dimmed background +
-   * border is the secondary one. Active state
-   * still uses the accent border so the user can
-   * see which historical tab they're reading. */
+  /* Read-only tab styling. A subagent transcript
+   * opened via "View subagents" carries a muted
+   * appearance so users can distinguish it at a
+   * glance from a live tab. The 📜 prefix in the
+   * label is the primary signal; the dimmed
+   * background + border is the secondary one.
+   * Active state still uses the accent border so
+   * the user can see which transcript they're
+   * reading. */
   .tab-strip-tab.read-only {
     opacity: 0.7;
     font-style: italic;
@@ -1853,22 +1862,20 @@ export const STYLES = css`
     border-bottom-color: rgba(22, 27, 34, 0.6);
   }
 
-  /* View-agents affordance — small button below
-   * agentic-turn assistant messages that aren't
-   * the active turn. Visible only on hover by
-   * default to avoid visual noise on every
-   * agentic message; full opacity on focus so
-   * keyboard users can find it. */
-  .view-agents-affordance {
+  /* View-subagents affordance — small button below a settled turn that
+   * delegated, opening each subagent's transcript as a read-only tab.
+   * Visible only on hover by default to avoid visual noise on every such
+   * turn; full opacity on focus so keyboard users can find it. */
+  .view-subagents-affordance {
     margin-top: 0.5rem;
     opacity: 0.4;
     transition: opacity 120ms ease;
   }
-  .message-card:hover .view-agents-affordance,
-  .view-agents-affordance:focus-within {
+  .message-card:hover .view-subagents-affordance,
+  .view-subagents-affordance:focus-within {
     opacity: 1;
   }
-  .view-agents-button {
+  .view-subagents-button {
     background: transparent;
     border: 1px solid rgba(240, 246, 252, 0.15);
     color: var(--text-secondary, #8b949e);
@@ -1885,12 +1892,12 @@ export const STYLES = css`
       border-color 120ms ease,
       color 120ms ease;
   }
-  .view-agents-button:hover {
+  .view-subagents-button:hover {
     background: rgba(240, 246, 252, 0.06);
     border-color: rgba(240, 246, 252, 0.25);
     color: var(--text-primary, #c9d1d9);
   }
-  .view-agents-button:focus-visible {
+  .view-subagents-button:focus-visible {
     outline: 2px solid var(--accent-primary, #58a6ff);
     outline-offset: 2px;
   }
@@ -2613,6 +2620,26 @@ export const STYLES = css`
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The description as the way into the transcript. Styled as the text it
+   * replaces rather than as a button — a bordered control here would
+   * compete with Stop, which is the row's one write affordance. */
+  .subagent-desc-button {
+    padding: 0;
+    background: transparent;
+    border: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .subagent-desc-button:hover {
+    text-decoration: underline;
+    color: var(--text-primary, #c9d1d9);
+  }
+  .subagent-desc-button:focus-visible {
+    outline: 2px solid var(--accent-primary, #58a6ff);
+    outline-offset: 2px;
   }
   .subagent-type,
   .subagent-status,

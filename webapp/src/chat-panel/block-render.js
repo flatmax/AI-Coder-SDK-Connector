@@ -763,6 +763,43 @@ export function renderTodoList(todos, live) {
 // ---------------------------------------------------------------
 
 /**
+ * The human label for a subagent — "explore: find auth call sites".
+ *
+ * Per specs5/5-webapp/subagent-browser.md § Tab Strip: the type plus the
+ * description, because an SDK agent id is opaque and means nothing to a
+ * reader. Two vocabularies reach here — a live row's `task_type` and a
+ * transcript listing's `agent_type` — and either part may be missing;
+ * a row with neither returns '' and its caller falls back to the id.
+ */
+export function subagentLabel(row) {
+  const rawType = row?.task_type || row?.agent_type;
+  const type = typeof rawType === 'string' ? rawType.trim() : '';
+  const desc =
+    typeof row?.description === 'string' ? row.description.trim() : '';
+  if (type && desc) return `${type}: ${desc}`;
+  return desc || type || '';
+}
+
+/**
+ * Ask for one subagent's transcript in a tab of its own.
+ *
+ * The row is the evidence the subagent ran, so it is also the way in to
+ * what it did (specs5/5-webapp/chat.md § Subagent Activity). Dispatched
+ * rather than called: `tabs.js` owns the strip, and the panel is listening.
+ */
+function openSubagentTranscript(panel, row) {
+  panel?.dispatchEvent(
+    new CustomEvent('view-subagents-requested', {
+      detail: {
+        agents: [{ agent_id: row.agent_id, label: subagentLabel(row) }],
+      },
+      bubbles: true,
+      composed: true,
+    }),
+  );
+}
+
+/**
  * A subagent's row, with its tool cards indented beneath it.
  *
  * The row spins until its status is terminal. `terminal` latches from either
@@ -773,16 +810,31 @@ export function renderTodoList(todos, live) {
  *
  * Stop is the only write affordance. AC⚡DC did not create this subagent and
  * cannot message it; the one thing a user can legitimately do is end it.
+ *
+ * The description doubles as the way into the transcript, for a row that
+ * names an agent. A button rather than a click handler on the row itself:
+ * the row contains the subagent's own tool cards, which expand on click,
+ * and one of those clicks must not also open a tab.
  */
 export function renderSubagentRow(panel, row, blocks, candidates, settled) {
   if (!row) return nothing;
   const live = !row.terminal && !settled;
   const tokens = totalTokens(row.usage);
+  const desc = row.description || row.task_type || 'Subagent';
   return html`
     <div class="subagent-row ${live ? 'live' : 'terminal'}" data-agent-id=${row.agent_id || row.key}>
       <div class="subagent-head">
         <span class="subagent-dot ${live ? 'spinning' : ''}"></span>
-        <span class="subagent-desc">${row.description || row.task_type || 'Subagent'}</span>
+        ${row.agent_id
+          ? html`<button
+              class="subagent-desc subagent-desc-button"
+              title="Read this subagent's transcript"
+              @click=${(e) => {
+                e.stopPropagation();
+                openSubagentTranscript(panel, row);
+              }}
+            >${desc}</button>`
+          : html`<span class="subagent-desc">${desc}</span>`}
         ${row.task_type
           ? html`<span class="subagent-type">${row.task_type}</span>`
           : nothing}

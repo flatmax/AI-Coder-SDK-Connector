@@ -31,10 +31,12 @@
 //                         → action bar
 //                           → renderPermissionModeSelector
 //                         → renderSearchBar
-//                         → renderSnippetDrawer
-//                         → input-history
-//                         → renderPendingImages
-//                         → input row + send column
+//                         → renderInputSurface
+//                           → renderSnippetDrawer
+//                           → input-history
+//                           → renderPendingImages
+//                           → input row + send column
+//                         → renderReadOnlyNote (read-only tabs instead)
 //                       → ac-history-browser (inert until phase 5)
 //                       → renderLightbox
 //
@@ -76,6 +78,7 @@ import {
   renderTerminalBadge,
   renderTurnBlocks,
   renderTurnFooter,
+  subagentLabel,
   terminalBadge,
 } from './block-render.js';
 import { isEmptyTurn } from './blocks.js';
@@ -166,7 +169,8 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 // `.search-collapsible` group: expanding the search bar must not be able to
 // hide the safety posture. The session group *is* collapsible, and is dropped
 // outright in file-search mode and on any tab but `main` — a subagent
-// transcript and a read-only archive have no session to restart.
+// transcript has no session of its own to restart, and the ✨ on it would
+// restart the conversation that spawned it.
 
 // ---------------------------------------------------------------
 // Top-level render
@@ -196,9 +200,17 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
  * The lightbox lives at component-root level so it
  * can cover the whole shadow root regardless of
  * scroll position inside the messages list.
+ *
+ * Everything from `ac-input-history` down is absent on a subagent
+ * transcript, replaced by one line saying why. Not disabled — absent:
+ * "a greyed-out textarea implies a channel that might open under some
+ * condition, and none exists" (specs5/5-webapp/subagent-browser.md
+ * § Tab Content). The action bar and the LED row stay, because the safety
+ * posture and which conversation is live are true on every tab.
  */
 export function render(panel) {
   const fileMode = panel._searchMode === 'file';
+  const readOnly = !!panel._tabs.get(panel._activeTabId)?.readOnly;
   return html`
     ${renderTabStrip(panel)}
     <div class="messages-wrapper">
@@ -257,76 +269,7 @@ export function render(panel) {
               </div>
             `}
       </div>
-      ${panel._snippetDrawerOpen
-        ? renderSnippetDrawer(panel)
-        : ''}
-      <ac-input-history
-        @history-select=${(e) => onHistorySelect(panel, e)}
-        @history-cancel=${(e) => onHistoryCancel(panel, e)}
-      ></ac-input-history>
-      ${panel._pendingImages.length > 0
-        ? renderPendingImages(panel)
-        : ''}
-      <div class="input-row">
-        <textarea
-          class="input-textarea"
-          placeholder=${(() => {
-            const activeTab = panel._tabs.get(panel._activeTabId);
-            if (activeTab?.readOnly) {
-              return 'Historical archive — replies disabled';
-            }
-            return 'Send a message… (Enter to send, Shift+Enter for newline)';
-          })()}
-          .value=${panel._input}
-          ?disabled=${!panel.rpcConnected ||
-            panel._tabs.get(panel._activeTabId)?.readOnly}
-          @input=${(e) => onInputChange(panel, e)}
-          @keydown=${(e) => onInputKeyDown(panel, e)}
-          @paste=${(e) => onInputPaste(panel, e)}
-          aria-label="Message input"
-        ></textarea>
-        <div class="send-column">
-          <div class="send-column-top">
-            <button
-              class="action-button snippet-drawer-button ${panel
-                ._snippetDrawerOpen
-                ? 'active'
-                : ''}"
-              @click=${() => toggleSnippetDrawer(panel)}
-              aria-label=${panel._snippetDrawerOpen
-                ? 'Close snippet drawer'
-                : 'Open snippet drawer'}
-              aria-expanded=${panel._snippetDrawerOpen}
-              title="Quick-insert snippets"
-            >
-              ✂️
-            </button>
-            <ac-speech-to-text
-              @transcript=${(e) => panel._onTranscript(e)}
-              @recognition-error=${(e) => panel._onRecognitionError(e)}
-            ></ac-speech-to-text>
-          </div>
-          ${panel._streaming
-            ? html`<button
-                class="send-button stop"
-                @click=${() => cancel(panel)}
-                aria-label="Stop streaming"
-              >
-                ⏹ Stop
-              </button>`
-            : html`<button
-                class="send-button"
-                ?disabled=${!panel.rpcConnected ||
-                panel._tabs.get(panel._activeTabId)?.readOnly ||
-                (!panel._input.trim() &&
-                  panel._pendingImages.length === 0)}
-                @click=${() => send(panel)}
-                aria-label="Send message"
-              >
-                Send
-              </button>`}
-        </div>
-      </div>
+      ${readOnly ? renderReadOnlyNote() : renderInputSurface(panel)}
       ${renderLedRow(panel)}
     </div>
     <ac-history-browser
@@ -335,6 +278,83 @@ export function render(panel) {
       @session-loaded=${() => panel._onHistorySessionLoaded()}
     ></ac-history-browser>
     ${panel._lightboxImage ? renderLightbox(panel) : ''}
+  `;
+}
+
+/**
+ * Everything the user composes with: the snippet drawer, the
+ * recalled-input list, the attached images and the textarea/send row.
+ * Absent on a read-only tab — see `render`'s note.
+ */
+function renderInputSurface(panel) {
+  return html`
+    ${panel._snippetDrawerOpen ? renderSnippetDrawer(panel) : ''}
+    <ac-input-history
+      @history-select=${(e) => onHistorySelect(panel, e)}
+      @history-cancel=${(e) => onHistoryCancel(panel, e)}
+    ></ac-input-history>
+    ${panel._pendingImages.length > 0 ? renderPendingImages(panel) : ''}
+    <div class="input-row">
+      <textarea
+        class="input-textarea"
+        placeholder="Send a message… (Enter to send, Shift+Enter for newline)"
+        .value=${panel._input}
+        ?disabled=${!panel.rpcConnected}
+        @input=${(e) => onInputChange(panel, e)}
+        @keydown=${(e) => onInputKeyDown(panel, e)}
+        @paste=${(e) => onInputPaste(panel, e)}
+        aria-label="Message input"
+      ></textarea>
+      <div class="send-column">
+        <div class="send-column-top">
+          <button
+            class="action-button snippet-drawer-button ${panel
+              ._snippetDrawerOpen
+              ? 'active'
+              : ''}"
+            @click=${() => toggleSnippetDrawer(panel)}
+            aria-label=${panel._snippetDrawerOpen
+              ? 'Close snippet drawer'
+              : 'Open snippet drawer'}
+            aria-expanded=${panel._snippetDrawerOpen}
+            title="Quick-insert snippets"
+          >
+            ✂️
+          </button>
+          <ac-speech-to-text
+            @transcript=${(e) => panel._onTranscript(e)}
+            @recognition-error=${(e) => panel._onRecognitionError(e)}
+          ></ac-speech-to-text>
+        </div>
+        ${panel._streaming
+          ? html`<button
+              class="send-button stop"
+              @click=${() => cancel(panel)}
+              aria-label="Stop streaming"
+            >
+              ⏹ Stop
+            </button>`
+          : html`<button
+              class="send-button"
+              ?disabled=${!panel.rpcConnected ||
+              (!panel._input.trim() && panel._pendingImages.length === 0)}
+              @click=${() => send(panel)}
+              aria-label="Send message"
+            >
+              Send
+            </button>`}
+      </div>
+    </div>
+  `;
+}
+
+/** What stands in for the input surface on a subagent transcript. */
+function renderReadOnlyNote() {
+  return html`
+    <div class="read-only-note" role="note">
+      Read-only transcript — there is no channel to a subagent. Switch to
+      Main to send a message.
+    </div>
   `;
 }
 
@@ -565,19 +585,13 @@ export function renderMessage(panel, msg, index) {
     msg.role === 'assistant' && !msg.system_event && !isBlockTurn
       ? renderEditSummary(panel, msg)
       : '';
-  // View-agents affordance for historical
-  // agentic turns. Per Increment D and
-  // specs4/5-webapp/agent-browser.md § Historical
-  // Turns — only renders when the message is from
-  // a previous turn (agent ids no longer in the
-  // live tab strip). The active turn's agents
-  // are already reachable via the tab strip
-  // itself, so a duplicate affordance would be
-  // noise.
-  const viewAgents =
-    msg.role === 'assistant' && !msg.system_event && !isBlockTurn
-      ? renderViewAgentsAffordance(panel, msg)
-      : '';
+  // "View subagents (N)" for a turn that delegated. Only Claude Code turns
+  // have subagents to read — they are the agent's own `Task` calls — and
+  // only a turn whose rows are no longer in the strip needs the affordance,
+  // which `renderViewSubagentsAffordance` decides.
+  const viewSubagents = isBlockTurn
+    ? renderViewSubagentsAffordance(panel, msg)
+    : '';
   const finishFooterClass = bottomFinishBadge
     ? ' has-finish-footer'
     : '';
@@ -594,7 +608,7 @@ export function renderMessage(panel, msg, index) {
         : ''}
       ${editSummary}
       ${fileSummary}
-      ${viewAgents}
+      ${viewSubagents}
       ${bottomFinishBadge
         ? html`<div class="finish-reason-footer">${bottomFinishBadge}</div>`
         : ''}
@@ -1869,94 +1883,54 @@ export function renderFileSummary(panel, files) {
 }
 
 /**
- * Render the "View agents (N)" affordance for
- * historical agentic turns.
+ * Render the "View subagents (N)" affordance beneath a settled turn.
  *
- * Per spec specs4/5-webapp/agent-browser.md §
- * Historical Turns — once a new agentic turn
- * starts in the main tab, the previous turn's
- * agent tabs leave the strip but their archives
- * remain on disk. Scrolling back surfaces this
- * affordance below the assistant message that
- * spawned them; clicking it populates read-only
- * tabs from the archive (commit 3 wires the
- * handler).
+ * Per specs5/5-webapp/subagent-browser.md § Historical Transcripts: a
+ * previous turn's subagent tabs have left the strip, but their transcripts
+ * are still on disk under the session's `subagents/` directory. Scrolling
+ * back to the turn surfaces this; clicking it reads each one through
+ * `get_subagent_transcript` into a read-only tab.
  *
- * Visibility rules — returns empty when:
+ * Returns empty when the turn spawned no subagents, when none of its rows
+ * names an agent (a row keyed only by task id has nothing to read a
+ * transcript by), and when every one of them is still live in the strip —
+ * the active turn, where the strip already offers the same thing.
  *
- *   - Message lacks turn_id (pre-Increment-A
- *     records, non-agentic turns)
- *   - Message lacks agent_blocks (non-agentic
- *     turns)
- *   - agent_blocks is non-array or empty
- *     (defensive — backend filters these out
- *     before persistence per spec, but a stale
- *     in-memory record might slip through)
- *   - Every agent in agent_blocks is currently
- *     live in the tab strip (the active turn —
- *     duplicating the strip's own affordances
- *     would be noise)
- *
- * The "currently live" check uses
- * parseAgentTabId-style matching: each block's
- * id is checked against panel._tabs directly,
- * since tab IDs equal agent IDs under the
- * flat-identity contract.
- *
- * Click dispatches `view-agents-requested` with
- * `{turn_id, agent_blocks}` for commit 3 to
- * handle. The bubbling event lets a future
- * handler outside the chat panel intercept too,
- * but commit 3 will install the handler at the
- * panel level since that's where the tab strip
- * lives.
+ * A turn read back off disk has no rows at all, because the transcript does
+ * not record which turn spawned which subagent. So this appears on turns
+ * from the current run, and the history browser is the way into an older
+ * session's subagents.
  */
-export function renderViewAgentsAffordance(panel, msg) {
-  if (!msg || msg.role !== 'assistant') return '';
-  const turnId = msg.turn_id;
-  if (typeof turnId !== 'string' || !turnId) return '';
-  const agentBlocks = msg.agent_blocks;
-  if (!Array.isArray(agentBlocks) || agentBlocks.length === 0) {
-    return '';
+export function renderViewSubagentsAffordance(panel, msg) {
+  const rows = Array.isArray(msg?.subagents) ? msg.subagents : [];
+  const agents = [];
+  for (const row of rows) {
+    const agentId = typeof row?.agent_id === 'string' ? row.agent_id : '';
+    if (!agentId) continue;
+    agents.push({ agent_id: agentId, label: subagentLabel(row) });
   }
-  // Skip when every spawned agent is still live —
-  // the active-turn case. Reading the live tab
-  // map directly because parseAgentTabId would
-  // just return the same id; tab id IS agent id.
-  const liveTabs = panel._tabs;
-  let allLive = true;
-  for (const block of agentBlocks) {
-    const id = block?.id;
-    if (typeof id !== 'string' || !id) {
-      allLive = false;
-      break;
-    }
-    if (!liveTabs.has(id)) {
-      allLive = false;
-      break;
-    }
-  }
-  if (allLive) return '';
-  const count = agentBlocks.length;
-  const label = count === 1
-    ? 'View agent (1)'
-    : `View agents (${count})`;
+  if (agents.length === 0) return '';
+  if (agents.every(({ agent_id: id }) => panel._tabs.has(id))) return '';
+  const label =
+    agents.length === 1
+      ? 'View subagent (1)'
+      : `View subagents (${agents.length})`;
   return html`
-    <div class="view-agents-affordance">
+    <div class="view-subagents-affordance">
       <button
-        class="view-agents-button"
+        class="view-subagents-button"
         @click=${(e) => {
           e.stopPropagation();
           panel.dispatchEvent(
-            new CustomEvent('view-agents-requested', {
-              detail: { turn_id: turnId, agent_blocks: agentBlocks },
+            new CustomEvent('view-subagents-requested', {
+              detail: { agents },
               bubbles: true,
               composed: true,
             }),
           );
         }}
         aria-label=${label}
-        title=${`Open archived tabs from this turn (turn ${turnId})`}
+        title="Read these subagents' transcripts in the tab strip"
       >
         🤖 ${label}
       </button>

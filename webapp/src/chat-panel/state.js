@@ -172,15 +172,13 @@ export function makeTabState() {
     // tab so a previous failure doesn't show stale red
     // on the next turn.
     lastEditOutcome: null,
-    // Read-only flag for historical agent tabs (those
-    // populated via `view-agents-requested` from a
-    // previous turn). Per spec
-    // ``specs4/5-webapp/agent-browser.md`` § Tab
-    // Lifetime — read-only tabs disable the input box
-    // because the agent's `ContextManager` is gone
-    // server-side; users can read the archive but not
-    // continue the conversation. Live tabs default to
-    // false; only historical tabs flip this to true.
+    // Read-only flag for subagent transcripts read off disk (those
+    // populated via `view-subagents-requested`). Per spec
+    // ``specs5/5-webapp/subagent-browser.md`` — there is no channel to a
+    // subagent at all, live or finished, so the tab carries no input
+    // surface: not a greyed-out textarea, which would imply a channel that
+    // might open under some condition, but none at all. Main defaults to
+    // false; only transcript tabs flip this to true.
     readOnly: false,
   };
 }

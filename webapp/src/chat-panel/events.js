@@ -36,7 +36,6 @@
 // one place to look when adding a new event.
 
 import { hydrateImageRefs } from '../image-refs.js';
-import { normalizeMessageContent } from '../image-utils.js';
 import { SPEECH_STATE_EVENT } from '../speech-player.js';
 import { compactionSummary } from './block-render.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -45,7 +44,8 @@ import {
   onRoleChanged,
   probeModeAuthority,
 } from './permission-mode.js';
-import { onChatTabShortcut, onTabClose } from './tabs.js';
+import { restoreMessage } from './restore.js';
+import { clearHistoricalTabs, onChatTabShortcut, onTabClose } from './tabs.js';
 import {
   onAgentsSpawned,
   onEngineHealth,
@@ -453,82 +453,6 @@ export function detachEventListeners(panel) {
 // ---------------------------------------------------------------
 
 /**
- * One restored message, in the shape the renderer reads.
- *
- * Both restore paths — `session-changed` and `state-loaded` — go through
- * here, because a resumed session and a reconnect-restored one are the
- * same transcript arriving by two routes and must not render differently.
- *
- * The old version of this kept `{role, content, images, system_event}`
- * and dropped the rest, which was harmless while the native engine's
- * records held nothing else. `history_load` renders a *turn*: an ordered
- * `blocks` list (text, thinking, tool cards, the plan), the files it
- * touched, and a footer summary of usage and duration. Flattening that
- * to prose is not a small loss of polish — it is a resumed session that
- * shows none of the work the agent did, in a UI whose whole argument for
- * tool cards is that the user should be able to see it.
- *
- * Fields are copied only when present. Absent is not the same as empty
- * here: a turn with no `turn` footer is one the transcript could not
- * supply usage for, and a fabricated empty footer would report zeros as
- * if they were measurements.
- */
-export function restoreMessage(m) {
-  // Multimodal messages (images) arrive as an array of
-  // `{type: 'text'/'image_url', ...}` blocks; normalize to
-  // `{content: <string>, images: [<data uri>]}`.
-  const normalized = normalizeMessageContent(m);
-  const images = Array.isArray(m.images) ? m.images : normalized.images;
-  const out = { role: m.role, content: normalized.content };
-  if (images.length > 0) out.images = images;
-  // Image pointers, not bytes. A prompt's screenshots come back from
-  // `history_load` as `{session_id, entry_uuid, block, media_type}` and are
-  // resolved one at a time afterwards; carrying them is what lets the tiles
-  // appear at all, and dropping them is why a resumed prompt used to lose
-  // every screenshot in it.
-  const refs = Array.isArray(m.image_refs)
-    ? m.image_refs.filter((ref) => ref && typeof ref === 'object')
-    : [];
-  if (refs.length > 0) out.image_refs = refs;
-  // A compact summary is a user entry because that is how the model
-  // receives it, but the user did not write it — the CLI did, about the
-  // context it dropped. Marked as a system event so it is labelled
-  // "System" rather than attributed to the person reading it, and so
-  // `seedIntoHistory` keeps it out of up-arrow recall.
-  if (m.system_event || m.compact_summary) out.system_event = true;
-  if (m.compact_summary) out.compact_summary = true;
-  // Preserve turn_id and agent_blocks from persisted records so the
-  // "View agents (N)" affordance in renderMessage can find them after a
-  // session reload. Both are optional; only assistant messages from
-  // agentic turns carry agent_blocks.
-  if (typeof m.turn_id === 'string' && m.turn_id) out.turn_id = m.turn_id;
-  if (Array.isArray(m.agent_blocks) && m.agent_blocks.length > 0) {
-    out.agent_blocks = m.agent_blocks;
-  }
-  // The turn shape. `blocks` is what makes `renderMessage` treat this as
-  // a Claude Code turn at all, and the rest hangs off that decision.
-  if (Array.isArray(m.blocks)) out.blocks = m.blocks;
-  if (Array.isArray(m.subagents)) out.subagents = m.subagents;
-  if (Array.isArray(m.files) && m.files.length > 0) out.files = m.files;
-  if (m.turn && typeof m.turn === 'object') out.turn = m.turn;
-  // Null from a browsed turn, and null draws no badge: the transcript
-  // holds no result entry, and a "completed" badge on no evidence is
-  // worse than none. Only a real reason is carried through.
-  if (typeof m.terminalReason === 'string' && m.terminalReason) {
-    out.terminalReason = m.terminalReason;
-  }
-  // The mark that says the agent's memory of everything above it is now
-  // a summary. Same shape the live `compact_boundary` broadcast appends,
-  // so a divider read back from disk and one seen as it happened render
-  // identically.
-  if (m.compaction && typeof m.compaction === 'object') {
-    out.compaction = m.compaction;
-  }
-  if (Array.isArray(m.edit_results)) out.editResults = m.edit_results;
-  return out;
-}
-
-/**
  * Handle a `session-changed` event. Session load
  * or new-session — replace the message list
  * wholesale.
@@ -560,6 +484,12 @@ export function onSessionChanged(panel, event) {
   for (const tab of panel._tabs.values()) {
     resetTurnBlocks(tab.turnBlocks);
   }
+  // Subagent transcripts belong to the session that was on screen. Keeping
+  // them across a resume would leave a tab labelled with one session's task
+  // showing a transcript from another, so the strip drops to Main alone
+  // (specs5/5-webapp/subagent-browser.md § Tab Lifetime). This also abandons
+  // a load still in flight for the session being left.
+  clearHistoricalTabs(panel);
   // Seed input history from the loaded session's user messages — from the
   // restored list, not the raw one, so the recall filter sees the same
   // `system_event` marks the renderer does.

@@ -284,6 +284,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // are no longer on screen.
     this._restoreGeneration = 0;
 
+    // Bumped every time the strip's historical tabs are cleared. A subagent
+    // transcript still being read when the user resumes a session or clicks
+    // a different turn is a tab that must not arrive late — the strip it was
+    // joining is gone.
+    this._historicalTabGeneration = 0;
+
     // Bind handlers. tabs.js owns the overflow + Alt+`
     // closures; events.js owns window-event handlers;
     // input.js owns the speech-to-text + history
@@ -434,16 +440,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
     if (draft && !this._input) {
       this._input = draft;
     }
-    // Listen for view-agents-requested events
-    // dispatched by the renderViewAgentsAffordance
-    // button. The event is composed + bubbles so
-    // it crosses the shadow boundary; we listen
-    // on the panel itself rather than on window
-    // so a future host outside the chat panel
-    // can intercept too. Bound in constructor by
-    // installTabHandlers.
+    // Listen for view-subagents-requested events — dispatched by the
+    // "View subagents (N)" affordance under a settled turn and by an
+    // individual subagent row. The event is composed + bubbles so it
+    // crosses the shadow boundary; we listen on the panel itself rather
+    // than on window so a future host outside the chat panel can intercept
+    // too. Bound in constructor by installTabHandlers.
     this.addEventListener(
-      'view-agents-requested', this._onViewAgentsRequested,
+      'view-subagents-requested', this._onViewSubagentsRequested,
     );
   }
 
@@ -468,7 +472,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
 
   disconnectedCallback() {
     this.removeEventListener(
-      'view-agents-requested', this._onViewAgentsRequested,
+      'view-subagents-requested', this._onViewSubagentsRequested,
     );
     detachEventListeners(this);
     // Stop any in-flight text-to-speech so it doesn't keep

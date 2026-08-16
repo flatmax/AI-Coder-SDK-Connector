@@ -133,17 +133,17 @@ export async function send(panel) {
   if (!text && panel._pendingImages.length === 0) return;
   if (panel._streaming) return;
   if (!panel.rpcConnected) return;
-  // Read-only tab gate (Increment D commit 3) —
-  // historical agent tabs target a
-  // ``ContextManager`` that no longer exists on
-  // the backend. The user can read the archive
-  // but can't continue the conversation. Toast
-  // and bail; the input stays so the user can
-  // copy-paste it into a live tab if needed.
+  // Read-only tab gate. A subagent transcript has no channel to reply
+  // down — the subagent finished when its `Task` call returned, and even
+  // while it ran the only way in was the agent's own prompt. `render`
+  // leaves out the input surface entirely on such a tab, so this is the
+  // belt-and-braces guard for a send arriving some other way (a shortcut,
+  // a tab switch racing a keystroke). Toast and bail, keeping the text so
+  // the user can carry it to Main.
   const activeTab = panel._tabs.get(panel._activeTabId);
   if (activeTab && activeTab.readOnly) {
     panel._emitToast(
-      'This is a historical archive — replies disabled. Switch to a live tab to send messages.',
+      'Read-only transcript — there is no channel to a subagent. Switch to Main to send a message.',
       'warning',
     );
     return;

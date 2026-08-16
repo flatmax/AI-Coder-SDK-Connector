@@ -143,7 +143,14 @@ A subagent tab renders its transcript through the same pipeline as the main chat
 - Message-level toolbars for copy and paste-to-prompt. Paste-to-prompt targets **Main's** input, which is the only input there is; a user who wants to follow up on something a subagent said does so by talking to the agent
 
 There is no input box, disabled or otherwise. A greyed-out textarea implies a channel that might open
-under some condition, and none exists.
+under some condition, and none exists. The whole composing surface goes with it — the recalled-input
+list, the snippet drawer, the attached-image strip, the send button — replaced by one line saying why:
+"Read-only transcript — there is no channel to a subagent. Switch to Main to send a message."
+
+Two things below the transcript do stay, because they are true on every tab rather than about this one:
+the action bar's permission-mode selector (what the agent is allowed to do next, which must never be
+hidden — see [chat.md](chat.md)) and the LED row (which conversation is live). The session group — ✨ and
+📜 — is dropped, as it is on any tab but Main: a subagent transcript has no session of its own to restart.
 
 ### Tool cards in a subagent tab
 
@@ -159,14 +166,23 @@ The same card object drives both renderings; there is no duplication of state, o
 
 Past turns' subagents are reachable without leaving the chat:
 
-- Scrolling Main back to a previous turn surfaces a "View subagents (N)" affordance beneath that turn's assistant message.
-- Clicking it populates the tab strip with that turn's subagent transcripts, read from disk via `get_subagent_transcript(agent_id, session_id)`.
-- Leaving the historical turn removes those tabs.
-- The history browser lists a session's subagents alongside its messages; opening one from there does the same thing for a session that is not the live one.
+- Scrolling Main back to a previous turn surfaces a "View subagents (N)" affordance beneath that turn's assistant message. A single subagent reads "View subagent (1)"; a subagent row's own description is also a link, opening that one transcript.
+- Clicking it populates the tab strip with that turn's subagent transcripts, read from disk via `get_subagent_transcript(agent_id, session_id)`. A subagent whose live tab is still in the strip is skipped — the live tab is the better view of it, and a second tab for the same subagent would be two views of one thing.
+- The next such click clears the previous one's transcripts, so the strip does not accumulate them, and so does a session change: a transcript belongs to the session that spawned it, and a tab labelled with one session's task showing another's would be worse than no tab. A read still in flight when either happens is abandoned rather than allowed to land in a strip that has moved on.
+- The history browser lists a session's subagents alongside its messages; opening one from there does the same thing for a session that is not the live one, passing that session's id explicitly.
 
-Historical and live tabs render identically and differ only in whether the live indicator is drawn. This
-is a simplification over the old design, where historical tabs were a distinct read-only *mode* of a
-normally-writable tab. Every tab is read-only now, so there is no mode to distinguish.
+The affordance is a **live-run** affordance. A turn read back off disk carries no subagent rows — the
+transcript records each subagent under its own id but does not attribute it to the turn that spawned it
+(see [`../3-engine/history.md`](../3-engine/history.md#subagent-transcripts)) — so a resumed session's
+turns offer nothing here, by omission rather than by oversight, and the history browser's session-level
+listing is the way into them.
+
+A transcript tab is labelled `📜 <description>` and drawn muted and italic, with "— subagent transcript
+(read-only)" appended to its tooltip. The old spec said historical and live tabs "differ only in whether
+the live indicator is drawn", which was true of a strip where the live tabs exist to compare against; a
+strip of nothing but transcripts needs the label itself to say what it is holding. The deeper
+simplification stands: read-only is not a *mode* a tab enters, the way it was in the old design — every
+tab in this spec is read-only, so there is nothing to toggle.
 
 ## The Agent's View of Its Subagents
 
@@ -178,7 +194,7 @@ in-limbo turn state for the user to resolve. The turn ends when the agent ends i
 ## Empty States
 
 - **No subagents in this turn** — Main tab only. The strip still exists, carrying one tab and one LED.
-- **Transcript unreadable** — a tab whose `get_subagent_transcript` call returns an error shows the reason in place of the messages ("transcript not found", "session pruned"). The tab is not removed: its row in Main is evidence the subagent ran, and removing the tab would contradict that.
+- **Transcript unreadable** — a tab whose `get_subagent_transcript` call returns an error shows the reason in place of the messages ("transcript not found", "session pruned"), as a system note rather than as something the subagent said. A transcript that comes back empty, and a read that gets no reply at all, are the same case with a different sentence. The tab is not removed: its row in Main is evidence the subagent ran, and removing the tab would contradict that. One unreadable transcript does not stop the rest of a turn's from being read.
 - **Subagent with no transcript yet** — a tab created by a `started` event before any content has been written shows the description and a working indicator, not an empty message list.
 
 ## Disk Usage
@@ -206,7 +222,9 @@ records carry.
 - `stop_task` is the only write affordance reachable from a subagent tab.
 - Tab identity is the SDK `agent_id`, verbatim. No positional index appears in a tab key, a transcript path, or a record.
 - Tab creation is idempotent; a repeated `started` event for a known `agent_id` updates the tab rather than adding one.
-- The panel never invents a tab. Live tabs come from `subagentEvent` or from the `get_current_state` snapshot; historical tabs come from a transcript listing.
+- The panel never invents a tab. Live tabs come from `subagentEvent` or from the `get_current_state` snapshot; a transcript tab comes from an `agent_id` the panel was handed — a row on a turn from this run, or the history browser's listing — never from one it composed.
+- A transcript tab is keyed on the `agent_id` under a prefix that marks it as read from disk, so it can never collide with the same subagent's live tab.
+- The strip holds one click's worth of transcripts. A fresh click, and a session change, clear the ones before it.
 - A tab settles on terminal status from either `updated` or `notification`, whichever arrives, and never waits for both.
 - A live subagent at turn end is shown as status-unknown, never as completed.
 - Tool cards with a non-null `agent_id` render in both the subagent's tab and its row in Main, from one card object.
