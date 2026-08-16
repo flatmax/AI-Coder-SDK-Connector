@@ -21,6 +21,8 @@ Public surface:
   which ``claude`` binary, which version, which credentials
 - :func:`build_options` — the ``ClaudeAgentOptions`` assembly
 - :class:`Event`, :class:`TurnTranslator` — SDK messages → AC⚡DC events
+- :class:`CostLedger` — the engine's cumulative cost and per-model usage,
+  differenced into what *this* turn cost
 - :class:`EngineSession`, :class:`Turn`, :class:`ViewerFraming` — the
   session lifecycle and one user turn's inputs
 - :class:`ClaudeCodeService` — the browser-facing RPC surface. The class
@@ -35,6 +37,7 @@ CLI is not installed.
 
 from __future__ import annotations
 
+from ac_dc.claude_code.cost import MEASURED, RESET, UNPRICED, CostLedger
 from ac_dc.claude_code.engine_config import (
     EFFORT_LEVELS,
     PERMISSION_MODES,
@@ -63,9 +66,13 @@ from ac_dc.claude_code.session import (
 
 __all__ = [
     "EFFORT_LEVELS",
+    "MEASURED",
     "PERMISSION_MODES",
+    "RESET",
     "THINKING_DISPLAYS",
+    "UNPRICED",
     "ClaudeCodeService",
+    "CostLedger",
     "EngineConfig",
     "EngineHealth",
     "EngineNotReadyError",

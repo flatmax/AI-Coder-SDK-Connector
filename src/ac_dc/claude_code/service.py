@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ac_dc.claude_code.cost import UNPRICED
 from ac_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
 from ac_dc.claude_code.events_log import (
     permission_mode_content,
@@ -969,6 +970,13 @@ class ClaudeCodeService:
                         "usage": None,
                         "model_usage": None,
                         "total_cost_usd": None,
+                        # The engine sent no footer, so nothing here can be
+                        # differenced against the session's running total.
+                        # "unpriced", not zero: the turn may have spent
+                        # plenty before we lost track of it.
+                        "turn_cost_usd": None,
+                        "turn_cost_basis": UNPRICED,
+                        "turn_model_usage": None,
                         "tool_calls": 0,
                         "permission_prompts": 0,
                         "files_modified": [],

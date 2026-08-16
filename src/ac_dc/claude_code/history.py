@@ -204,11 +204,14 @@ def summarise_session(
 ) -> dict[str, Any]:
     """The seven-field summary a session row is drawn from.
 
-    ``total_cost_usd`` is always ``None``: cost is not in the transcript,
-    the CLI computes it from a pricing table we do not have, and it is null
-    under subscription billing anyway. ``None`` renders as no cost at all,
-    which is the honest outcome — see ``formatCost`` in the frontend, whose
-    whole purpose is that a missing cost must never print as ``$0.00``.
+    ``total_cost_usd`` is always ``None``: cost is not in the transcript and
+    the CLI computes it from a pricing table we do not have. ``None`` renders
+    as no cost at all, which is the honest outcome — a missing cost must never
+    print as ``$0.00``. It is *not* null because of subscription billing, as
+    this docstring used to say: the CLI's wire schema types the field as a
+    plain number with no null branch, so on a live result there is always a
+    figure and every null in this codebase is one AC⚡DC wrote itself (see
+    :mod:`ac_dc.claude_code.cost`).
 
     ``first_role`` is structurally ``"user"``: a transcript begins with the
     prompt that created the session, and a post-compaction continuation
@@ -1045,7 +1048,15 @@ class _Turn:
     # -- freezing -------------------------------------------------------
 
     def freeze(self) -> dict[str, Any]:
-        """The settled assistant message for this turn."""
+        """The settled assistant message for this turn.
+
+        The usage map goes out as ``turn_model_usage``, not ``model_usage``:
+        it is summed from *this turn's* transcript entries, whereas a live
+        result's ``model_usage`` is the session running total the engine
+        reports (:mod:`ac_dc.claude_code.cost`). One name per scope, so a
+        renderer cannot read a cumulative figure as a per-turn one — which is
+        precisely what a browsed turn and a live turn used to disagree about.
+        """
         model_usage: dict[str, dict[str, Any]] = {}
         for model, usage in self._usage.values():
             bucket = model_usage.setdefault(model, {})
@@ -1068,7 +1079,7 @@ class _Turn:
             "files_modified": list(self._files),
         }
         if model_usage:
-            summary["model_usage"] = model_usage
+            summary["turn_model_usage"] = model_usage
         duration = _elapsed_ms(
             self._asked_at or self._first_timestamp, self._last_timestamp
         )

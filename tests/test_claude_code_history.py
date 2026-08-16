@@ -538,7 +538,7 @@ class TestTheFooterWithoutAResultEntry:
                 usage={"input_tokens": 5, "output_tokens": 3},
             ),
         )
-        assert rendered[1]["turn"]["model_usage"] == {
+        assert rendered[1]["turn"]["turn_model_usage"] == {
             "claude-opus-5": {
                 "input_tokens": 105,
                 "output_tokens": 23,
@@ -560,7 +560,7 @@ class TestTheFooterWithoutAResultEntry:
                 usage=usage,
             ),
         )
-        assert rendered[1]["turn"]["model_usage"]["claude-opus-5"] == {
+        assert rendered[1]["turn"]["turn_model_usage"]["claude-opus-5"] == {
             "input_tokens": 100,
             "output_tokens": 20,
         }
@@ -577,7 +577,7 @@ class TestTheFooterWithoutAResultEntry:
                 model="claude-haiku-4-5-20251001",
             ),
         )
-        assert set(rendered[1]["turn"]["model_usage"]) == {
+        assert set(rendered[1]["turn"]["turn_model_usage"]) == {
             "claude-opus-5",
             "claude-haiku-4-5-20251001",
         }

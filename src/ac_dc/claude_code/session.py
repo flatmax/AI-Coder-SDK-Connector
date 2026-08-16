@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ac_dc.claude_code.cost import CostLedger
 from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineHealth, EngineStartupError, resolve_cli
 from ac_dc.claude_code.messages import Event, TurnTranslator
@@ -286,6 +287,10 @@ class EngineSession:
         self._clock = clock
 
         self.health = EngineHealth()
+        # The engine reports cost and per-model usage as session running
+        # totals, so the turn's own share is a difference against the
+        # previous result — and the baseline outlives the turn.
+        self._cost = CostLedger()
         self._client: Any = None
         self._active_turn: ActiveTurn | None = None
         # Guards connect/disconnect against each other; turn admission is
@@ -441,6 +446,10 @@ class EngineSession:
             self._session_lost = False
             self.health.connected = True
             self.health.last_error = None
+            # The CLI's cost ledger is per-process and, in its own words,
+            # "resumed sessions start fresh". Carrying our baseline across a
+            # connect would price the new session's first turn as a refund.
+            self._cost.reset()
             # A resume with a store materialises a temp CLAUDE_CONFIG_DIR
             # that only disconnect() cleans up, and the signal handler
             # never reaches disconnect(). Recorded here, removed there.
@@ -584,6 +593,14 @@ class EngineSession:
                         self.health.last_error = event.payload.get("error") or None
                         event = Event("engineHealth", self.health.to_dict(), turn_scoped=False)
                     if event.name == "streamComplete":
+                        # Same reason as engineHealth above: the translator
+                        # knows this turn, and what the turn *cost* is only
+                        # visible against the session's running total.
+                        event = Event(
+                            "streamComplete",
+                            self._price_turn(event.payload),
+                            turn_scoped=event.turn_scoped,
+                        )
                         result = event.payload
                     await self._emit(emit, event)
         except asyncio.CancelledError:
@@ -643,12 +660,28 @@ class EngineSession:
             "user_message_id": active.translator.user_message_id,
             "errors": [str(exc) or type(exc).__name__],
         }
+        # Through the ledger like any other result, which prices it `unpriced`:
+        # this footer is ours, the engine never sent one, and whatever the turn
+        # spent before it died is still on the session's running total for the
+        # next turn to be measured against.
+        result = self._price_turn(result)
         await self._emit(emit, Event("streamComplete", result))
         if lost:
             await self._emit(
                 emit, Event("engineHealth", self.health.to_dict(), turn_scoped=False)
             )
         return result
+
+    def _price_turn(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Add this turn's own cost and per-model usage to a result payload.
+
+        ``total_cost_usd`` and ``model_usage`` stay exactly as the engine sent
+        them — they are its numbers and they are cumulative. The three fields
+        added beside them are ours and are per-turn; see
+        :mod:`ac_dc.claude_code.cost` for why the difference has to be taken
+        here rather than in the browser, and what makes it unavailable.
+        """
+        return {**result, **self._cost.price(result)}
 
     async def _emit(self, emit: Emit | None, event: Event) -> None:
         """Deliver one event, absorbing consumer failures.

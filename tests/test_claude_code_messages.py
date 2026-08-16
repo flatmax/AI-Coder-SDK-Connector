@@ -906,10 +906,22 @@ class TestResult:
         assert payload["tool_calls"] == 0
         assert translator.complete is True
 
-    def test_subscription_billing_reports_null_cost(self, translator):
-        """Never rendered as $0.00 — null means "not priced", not "free"."""
+    def test_a_missing_cost_stays_missing_rather_than_becoming_zero(self, translator):
+        """The CLI's wire schema types ``total_cost_usd`` as a plain number
+        with no null branch, so a live result always carries a figure — but
+        the translator also replays turns AC⚡DC wrote itself, where cost was
+        never recorded. Defaulting that to 0.0 would render as "free"."""
         events = translator.translate(result_message(total_cost_usd=None))
         assert events[0].payload["total_cost_usd"] is None
+
+    def test_the_cumulative_reading_is_passed_through_untouched(self, translator):
+        """A translator is one turn's worth of state, and this turn's share
+        of the cost is a difference against the *previous* turn's result —
+        so ``EngineSession`` owns that arithmetic and this figure stays the
+        engine's running total, under the engine's own name."""
+        events = translator.translate(result_message(total_cost_usd=0.30))
+        assert events[0].payload["total_cost_usd"] == 0.30
+        assert "turn_cost_usd" not in events[0].payload
 
     @pytest.mark.parametrize(
         "reason", ["aborted_streaming", "aborted_tools"]

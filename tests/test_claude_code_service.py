@@ -1877,7 +1877,7 @@ class TestHistoryRpcs:
         messages = await wired.history_load(session_id)
         assert [m["role"] for m in messages] == ["user", "assistant"]
         assert messages[0]["content"] == "fix the parser"
-        assert messages[1]["turn"]["model_usage"] == {
+        assert messages[1]["turn"]["turn_model_usage"] == {
             "claude-opus-5": {"input_tokens": 40, "output_tokens": 9}
         }
         # Prompt at :00, reply at :02 — the wait the user actually had.

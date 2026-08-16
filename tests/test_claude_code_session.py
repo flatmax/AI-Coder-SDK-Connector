@@ -704,6 +704,98 @@ class TestPump:
 
 
 # ---------------------------------------------------------------------------
+# What the turn cost, as opposed to what the session has spent
+# ---------------------------------------------------------------------------
+
+
+class TestTurnCost:
+    """The engine reports cost cumulatively; the browser wants this turn's.
+
+    The difference lives here rather than in the translator because the
+    baseline is session state and a ``TurnTranslator`` only ever sees one
+    turn — the same reason ``engineHealth`` is folded in by the pump.
+    """
+
+    async def one_turn(self, engine, **result_fields):
+        client = client_of(engine)
+        client.messages = [DEFAULT_MESSAGES[0], DEFAULT_MESSAGES[1], result_message(**result_fields)]
+        events, result = await collect(engine)
+        return next(e for e in events if e.name == "streamComplete").payload
+
+    async def test_a_completion_carries_the_turns_own_cost(self, engine):
+        payload = await self.one_turn(engine, total_cost_usd=0.21)
+        assert payload["turn_cost_usd"] == 0.21
+        assert payload["turn_cost_basis"] == "measured"
+
+    async def test_the_engines_cumulative_figure_is_left_alone_beside_it(self, engine):
+        """Both readings ship, under names that cannot be confused: the
+        Session section of the Context tab wants the running total."""
+        payload = await self.one_turn(engine, total_cost_usd=0.21)
+        assert payload["total_cost_usd"] == 0.21
+
+    async def test_the_second_turn_is_priced_against_the_first(self, engine):
+        await self.one_turn(engine, total_cost_usd=0.21)
+        payload = await self.one_turn(engine, total_cost_usd=0.30)
+        assert payload["turn_cost_usd"] == pytest.approx(0.09, abs=1e-9)
+        assert payload["total_cost_usd"] == 0.30
+
+    async def test_per_model_usage_is_differenced_too(self, engine):
+        """Keys are the engine's camelCase, straight off the wire schema —
+        ``model_usage`` is passed through untranslated, so the ledger and
+        every renderer downstream read the same spelling."""
+        await self.one_turn(
+            engine,
+            total_cost_usd=0.10,
+            model_usage={"m": {"inputTokens": 100, "outputTokens": 20, "costUSD": 0.10}},
+        )
+        payload = await self.one_turn(
+            engine,
+            total_cost_usd=0.30,
+            model_usage={"m": {"inputTokens": 180, "outputTokens": 45, "costUSD": 0.30}},
+        )
+        assert payload["turn_model_usage"]["m"]["inputTokens"] == 80
+        assert payload["turn_model_usage"]["m"]["outputTokens"] == 25
+        assert payload["turn_model_usage"]["m"]["costUSD"] == pytest.approx(0.20, abs=1e-9)
+        # The engine's own cumulative map is still there under its own name.
+        assert payload["model_usage"]["m"]["inputTokens"] == 180
+
+    async def test_a_reconnect_starts_the_baseline_over(self, engine):
+        """The CLI's ledger is per-process and, in its own words, resumed
+        sessions start fresh — so carrying ours across a connect would
+        price the new session's first turn as a refund."""
+        await self.one_turn(engine, total_cost_usd=0.40)
+        await engine.disconnect()
+        await engine.connect()
+        payload = await self.one_turn(engine, total_cost_usd=0.05)
+        assert payload["turn_cost_usd"] == 0.05
+        assert payload["turn_cost_basis"] == "measured"
+
+    async def test_a_turn_that_cost_nothing_extra_says_so_with_a_zero(self, engine):
+        await self.one_turn(engine, total_cost_usd=0.40)
+        payload = await self.one_turn(engine, total_cost_usd=0.40)
+        assert payload["turn_cost_usd"] == 0.0
+        assert payload["turn_cost_basis"] == "measured"
+
+    async def test_a_crash_footer_is_unpriced_not_free(self, engine):
+        """The synthetic completion the pump writes when the engine dies
+        has no cost of its own, and the turn may have spent plenty before
+        we lost track of it."""
+        client = client_of(engine)
+        client.messages = [DEFAULT_MESSAGES[0], _raise(RuntimeError("kaboom"))]
+        events, result = await collect(engine)
+        assert result["turn_cost_usd"] is None
+        assert result["turn_cost_basis"] == "unpriced"
+
+    async def test_spend_lost_to_a_crash_lands_on_the_next_priced_turn(self, engine):
+        await self.one_turn(engine, total_cost_usd=0.40)
+        client = client_of(engine)
+        client.messages = [DEFAULT_MESSAGES[0], _raise(RuntimeError("kaboom"))]
+        await collect(engine)
+        payload = await self.one_turn(engine, total_cost_usd=0.60)
+        assert payload["turn_cost_usd"] == pytest.approx(0.20, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
 # When a run of mirror gaps stops being bad luck
 # ---------------------------------------------------------------------------
 

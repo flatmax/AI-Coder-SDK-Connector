@@ -839,12 +839,18 @@ class TurnTranslator:
             "num_turns": getattr(message, "num_turns", 0),
             "duration_ms": getattr(message, "duration_ms", 0),
             "duration_api_ms": getattr(message, "duration_api_ms", 0),
+            # Per-turn, unlike the two fields below — and main-agent-loop
+            # only, so it excludes the subagents that make a turn expensive.
             "usage": getattr(message, "usage", None),
             # Per-model, camelCase keys, passed through as the SDK gives
             # them: a turn that used a subagent on a cheaper model reports
-            # both models here.
+            # both models here. **Cumulative across the session**, not this
+            # turn's — the CLI's own schema says so, and
+            # `EngineSession._price_turn` adds the per-turn difference beside
+            # it rather than reinterpreting this field.
             "model_usage": {k: dict(v) for k, v in (model_usage or {}).items()} or None,
-            # Null under subscription billing. Never render as $0.00.
+            # Also cumulative: the session's running estimate, not this
+            # turn's cost. See ac_dc.claude_code.cost.
             "total_cost_usd": getattr(message, "total_cost_usd", None),
             "tool_calls": self.stats.tool_calls,
             "permission_prompts": self.stats.permission_prompts,
