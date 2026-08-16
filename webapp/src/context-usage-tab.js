@@ -63,23 +63,23 @@ import {
 const _FETCH_TIMEOUT_MS = 90000;
 
 /**
- * The sections the spec gives this tab, and the one it does not have
- * yet.
+ * The three sections `viewers-hud.md` gives this tab.
  *
- * `viewers-hud.md` specifies three — Usage, Session, Debug — behind a
- * segmented control. Debug is a reader of `hookEvent` traffic,
- * `get_server_info` and the raw `gridRows`, none of which this panel
- * fetches, so it is absent rather than present and empty. A control with
- * a segment that opens onto nothing is the disclosure triangle problem
- * the categories table already refuses to have.
+ * Debug was absent until its four sources had a reader — a segment that
+ * opens onto nothing is the disclosure-triangle problem the categories
+ * table already refuses to have. It has them now: `hookEvent` traffic
+ * arrives pushed, `get_engine_health` and `get_server_info` are fetched
+ * on the way in, `get_mcp_status` is already here for the Session
+ * section's pills, and `gridRows` rides along on the breakdown.
  *
- * Debug's fourth source, `get_mcp_status`, *is* fetched — but for the
- * Session section's per-server health rather than for a raw dump, since
- * "is this server answering" belongs next to what it costs.
+ * Usage is the default and Debug is never it, which is what "off by
+ * default" means for a section behind a segmented control. A reader who
+ * chooses it still gets it back on the next visit, like the other two.
  */
 const _SECTIONS = [
   { id: 'usage', label: 'Usage' },
   { id: 'session', label: 'Session' },
+  { id: 'debug', label: 'Debug' },
 ];
 
 /** localStorage key for the section the user was last reading. */
@@ -143,6 +143,63 @@ function _fmtTokens(n) {
   if (v < 1000) return String(Math.round(v));
   if (v < 1_000_000) return `${(v / 1000).toFixed(1)}K`;
   return `${(v / 1_000_000).toFixed(2)}M`;
+}
+
+/**
+ * How many hook events the Debug section keeps.
+ *
+ * A ring buffer rather than the session's whole traffic: the `PostToolUse`
+ * re-index fires on every file the agent writes, so one long turn can
+ * produce hundreds. "What just fired" is the question a hook log answers,
+ * and the newest few are the answer.
+ */
+const _HOOK_LOG_LIMIT = 40;
+
+/** Longest raw payload the Debug section prints, in characters. */
+const _JSON_LIMIT = 20000;
+
+/**
+ * A raw payload, formatted for reading and bounded.
+ *
+ * The bound is not cosmetic: `gridRows` and a server-info reply are both
+ * unbounded in principle, and a 200 KB `<pre>` in a shadow root is a
+ * scroll container the panel never recovers from.
+ */
+function _json(value) {
+  let text;
+  try {
+    text = JSON.stringify(value, null, 2);
+  } catch {
+    // Circular structures are the only realistic cause here, and a
+    // debug view that throws on one is worse than one that says so.
+    return '(not serialisable)';
+  }
+  if (typeof text !== 'string') return String(text);
+  if (text.length <= _JSON_LIMIT) return text;
+  return `${text.slice(0, _JSON_LIMIT)}\n… truncated at ${_JSON_LIMIT} characters.`;
+}
+
+/**
+ * One line describing a value, without knowing what it is.
+ *
+ * The Debug section summarises `get_server_info()` by key rather than by
+ * field name on purpose. Its shape is the CLI's initialize reply, this
+ * repo has not read a schema for it, and naming fields we have not
+ * verified is the exact mistake `3-engine/context-visibility.md` records
+ * under *Verified field shapes*. So the summary counts what is there and
+ * the dump below it carries the truth.
+ */
+function _describeValue(v) {
+  if (Array.isArray(v)) {
+    return `${v.length} ${v.length === 1 ? 'entry' : 'entries'}`;
+  }
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'object') {
+    const n = Object.keys(v).length;
+    return `${n} ${n === 1 ? 'key' : 'keys'}`;
+  }
+  const text = String(v);
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
 }
 
 export class ContextUsageTab extends RpcMixin(LitElement) {
@@ -452,6 +509,26 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     .warn {
       color: #d29922;
     }
+
+    /**
+     * A raw payload. Capped in height rather than left to grow: the grid
+     * rows alone are longer than this panel, and a dump that pushes the
+     * sections under it off screen makes the Debug section unreadable in
+     * the one situation it exists for.
+     */
+    pre.json {
+      margin: 0;
+      max-height: 16rem;
+      overflow: auto;
+      padding: 0.5rem;
+      background: rgba(240, 246, 252, 0.04);
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-radius: 4px;
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 0.6875rem;
+      line-height: 1.45;
+      color: var(--text-secondary, #8b949e);
+    }
   `;
 
   constructor() {
@@ -473,19 +550,49 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      */
     this._openGroups = new Set();
 
+    /**
+     * Debug's state, deliberately *not* reactive properties.
+     *
+     * Hook events arrive throughout a turn — dozens of them, since every
+     * file the agent writes fires `PostToolUse` — and a reactive field
+     * would re-render this whole panel for each one while the reader is
+     * looking at Usage, or at another tab entirely. So these are plain
+     * fields and `_debugUpdate()` asks for the render only when Debug is
+     * the section on screen. Same rule as `_openGroups`, for the same
+     * reason: Lit's identity check is not the right trigger here.
+     */
+    this._hooks = [];
+    this._hookSeq = 0;
+    /** The last `engineHealth` record, pushed or fetched. */
+    this._health = null;
+    /** `get_server_info()`'s reply, fetched when Debug is first opened. */
+    this._serverInfo = null;
+    this._debugError = '';
+    this._debugLoading = false;
+
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onHookEvent = this._onHookEvent.bind(this);
+    this._onEngineHealth = this._onEngineHealth.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('stream-complete', this._onStreamComplete);
     window.addEventListener('session-changed', this._onSessionChanged);
+    // Both of these are pushes, not fetches, and both are collected even
+    // while this panel is hidden: a hook log that starts empty when Debug
+    // is opened has no history to show, and the interesting traffic
+    // happened during the turn the reader is now asking about.
+    window.addEventListener('hook-event', this._onHookEvent);
+    window.addEventListener('engine-health', this._onEngineHealth);
   }
 
   disconnectedCallback() {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener('hook-event', this._onHookEvent);
+    window.removeEventListener('engine-health', this._onEngineHealth);
     super.disconnectedCallback();
   }
 
@@ -523,8 +630,66 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   }
 
   _onSessionChanged() {
+    // A resume or a fork is a different session, and both of Debug's
+    // fetched answers belong to the old one: the advertised commands come
+    // from an initialize this session did not do, and the hook traffic
+    // records tool calls in a conversation the user has left. Dropped
+    // rather than carried over, on the same principle as the health pill.
+    this._serverInfo = null;
+    this._debugError = '';
+    this._hooks = [];
     if (this._isTabActive()) this._refresh();
     else this._stale = true;
+  }
+
+  /**
+   * A hook fired. Kept newest-first in a bounded log.
+   *
+   * The id is a sequence number rather than the array index, because the
+   * expanded-row state is keyed by it and an index shifts under the reader
+   * every time a new hook arrives.
+   */
+  _onHookEvent(e) {
+    const data = e?.detail?.data;
+    if (!data || typeof data !== 'object') return;
+    this._hookSeq += 1;
+    const entry = {
+      id: this._hookSeq,
+      at: Date.now(),
+      name: String(data.hook_event_name || data.phase || 'hook'),
+      phase: data.phase ? String(data.phase) : '',
+      tool: data.tool_name ? String(data.tool_name) : '',
+      outcome: data.outcome != null && data.outcome !== '' ? String(data.outcome) : '',
+      exitCode: Number.isFinite(Number(data.exit_code)) ? Number(data.exit_code) : null,
+      raw: data.raw && typeof data.raw === 'object' ? data.raw : data,
+    };
+    this._hooks = [entry, ...this._hooks].slice(0, _HOOK_LOG_LIMIT);
+    this._debugUpdate();
+  }
+
+  /**
+   * The engine's own health record, which arrives pushed on connect and
+   * again whenever it changes — a mirror gap, a lost session.
+   *
+   * Preferred over the fetch for exactly that reason: `mirror_gaps` moves
+   * during a turn, and a Debug section showing the count from when it was
+   * opened would report a clean mirror over a broken one.
+   */
+  _onEngineHealth(e) {
+    const data = e?.detail;
+    if (!data || typeof data !== 'object') return;
+    this._health = data;
+    this._debugUpdate();
+  }
+
+  /**
+   * Render, but only for a reader who is looking at Debug.
+   *
+   * Everything this guards is diagnostic state that changes far more often
+   * than the breakdown does.
+   */
+  _debugUpdate() {
+    if (this._section === 'debug') this.requestUpdate();
   }
 
   // ---------------------------------------------------------------
@@ -535,6 +700,20 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (this._loading) return;
     if (!this.rpcConnected) return;
     this._loading = true;
+    try {
+      await this._refreshBreakdown();
+    } finally {
+      this._loading = false;
+    }
+    // Refresh means "refresh what I am reading", and for a reader on Debug
+    // that is the engine's own answers. Outside the breakdown's guard so a
+    // *failed* breakdown — the case Debug exists to explain — refreshes
+    // them too, and `_ensureDebug` has its own in-flight flag.
+    if (this._section === 'debug') await this._ensureDebug({ force: true });
+  }
+
+  /** The breakdown and its health decoration; errors land in `_error`. */
+  async _refreshBreakdown() {
     try {
       // Both calls go out together: they are separate control requests
       // to the same subprocess, and this one is slow enough (3-14s) that
@@ -568,8 +747,6 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       this._stale = false;
     } catch (err) {
       this._error = err?.message || 'Could not read context usage.';
-    } finally {
-      this._loading = false;
     }
   }
 
@@ -599,6 +776,73 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     return null;
   }
 
+  /**
+   * What the engine says about itself, for the Debug section.
+   *
+   * Fetched on the way *into* Debug rather than with the breakdown,
+   * because `get_server_info` is another control request to the same
+   * subprocess and the answer is the session's initialize reply — it
+   * cannot change while the session lives. So: once per session, plus
+   * whenever the reader presses Refresh while Debug is on screen.
+   *
+   * Health is fetched here too, for the client that connected between two
+   * pushes and would otherwise show nothing until the next turn.
+   */
+  async _ensureDebug({ force = false } = {}) {
+    if (this._debugLoading) return;
+    if (!force && (this._serverInfo || this._debugError)) return;
+    if (!this.rpcConnected) return;
+    this._debugLoading = true;
+    this._debugUpdate();
+    try {
+      const [health, info] = await Promise.all([
+        this._fetchEngineHealth(),
+        withRpcTimeout(
+          this.rpcExtract('ClaudeCodeService.get_server_info'),
+          _FETCH_TIMEOUT_MS,
+          'get_server_info',
+        ),
+      ]);
+      // A pushed record is fresher than this one by definition, so a fetch
+      // that answers nothing leaves whatever arrived pushed in place.
+      if (health) this._health = health;
+      if (info && info.error) {
+        this._debugError = String(info.error);
+      } else {
+        this._serverInfo = info && typeof info === 'object' ? info : {};
+        this._debugError = '';
+      }
+    } catch (err) {
+      this._debugError = err?.message || 'Could not read server info.';
+    } finally {
+      this._debugLoading = false;
+      this._debugUpdate();
+    }
+  }
+
+  /**
+   * The engine-health record, on request.
+   *
+   * Local state on the service rather than a control request, so this one
+   * is cheap. Quiet on failure: `engine-health` pushes are the primary
+   * source and the section says so when neither has landed.
+   *
+   * @returns {Promise<object|null>}
+   */
+  async _fetchEngineHealth() {
+    try {
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_engine_health'),
+        _FETCH_TIMEOUT_MS,
+        'get_engine_health',
+      );
+      if (res && typeof res === 'object' && !res.error) return res;
+    } catch {
+      // Deliberately quiet — see above.
+    }
+    return null;
+  }
+
   _goBackToChat() {
     this.dispatchEvent(
       new CustomEvent('request-dialog-tab', {
@@ -622,6 +866,9 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (this._section === id) return;
     this._section = id;
     _saveSection(id);
+    // Lazily, and only here: a reader who never opens Debug never spends a
+    // control request on it.
+    if (id === 'debug') this._ensureDebug();
   }
 
   _toggleGroup(key) {
@@ -673,7 +920,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           @click=${this._minimizeDialog}
         >▾</button>
       </div>
-      ${this._usage ? this._renderSegmented() : ''}
+      ${this._usage || this._error ? this._renderSegmented() : ''}
       <div class="content">${this._renderBody()}</div>
     `;
   }
@@ -682,6 +929,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * The section selector, in its own row rather than in the toolbar:
    * the toolbar's buttons act on the *breakdown* — go back, refetch,
    * minimize — and these choose which part of one breakdown to read.
+   *
+   * Shown once there is a breakdown *or* an error. The error case is not a
+   * courtesy: a breakdown that failed is the moment Debug is worth the most,
+   * and gating the control on success alone hid it exactly then.
    */
   _renderSegmented() {
     return html`
@@ -699,6 +950,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   }
 
   _renderBody() {
+    // Ahead of the error branch on purpose: Debug reads the engine, not the
+    // breakdown, and it is the section a reader reaches for when the
+    // breakdown is the thing that failed.
+    if (this._section === 'debug') {
+      return html`${this._renderDebugSection()}${this._renderFooter()}`;
+    }
     if (this._error && !this._usage) {
       return html`
         <p class="error">${this._error}</p>
@@ -1540,6 +1797,265 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
               : 'In the window'}, costing
           ${_fmtTokens(tokens)} tokens.
         </p>
+      </section>
+    `;
+  }
+
+  /**
+   * Debug — for diagnosing the engine, not the code.
+   *
+   * Four readers of four sources, in the order a diagnosis uses them: what
+   * binary is running, what it has been doing, whether its servers are
+   * answering, and finally its own layout of the numbers the Usage section
+   * lays out itself.
+   *
+   * Nothing here is required to understand normal usage, which is why it is
+   * a section a reader has to ask for rather than a row in the other two.
+   */
+  _renderDebugSection() {
+    return html`
+      ${this._renderEngine()}
+      ${this._renderHookTraffic()}
+      ${this._renderMcpRaw()}
+      ${this._renderGridRows()}
+    `;
+  }
+
+  /**
+   * Which `claude` is running, under whose credentials, with what SDK.
+   *
+   * The four numbers at the top are the ones that explain a whole class of
+   * "it worked yesterday": a resolved binary that is not the bundled one, a
+   * version below the SDK's pin, a credential source nobody expected. They
+   * come from `EngineHealth`, which is local state — the control request
+   * below it is the engine's initialize reply.
+   */
+  _renderEngine() {
+    const h = this._health;
+    const rows = [];
+    if (h) {
+      rows.push(['Binary', h.cli_path || '—']);
+      rows.push([
+        'CLI version',
+        [h.cli_version || 'unknown', h.cli_source ? `(${h.cli_source})` : '']
+          .filter(Boolean)
+          .join(' '),
+      ]);
+      rows.push([
+        'SDK',
+        [h.sdk_version || 'unknown', h.sdk_cli_pin ? `pins CLI ${h.sdk_cli_pin}` : '']
+          .filter(Boolean)
+          .join(' · '),
+      ]);
+      rows.push(['Credentials', h.credential_source || 'unknown']);
+      rows.push([
+        'Mirror gaps',
+        h.mirror_gaps_escalated
+          ? `${h.mirror_gaps ?? 0} — past tolerance`
+          : String(h.mirror_gaps ?? 0),
+      ]);
+    }
+    return html`
+      <section>
+        <h3>Engine</h3>
+        ${h
+          ? html`
+              <table>
+                <tbody>
+                  ${rows.map(([label, value]) => html`
+                    <tr>
+                      <td>${label}</td>
+                      <td class="path">${value}</td>
+                    </tr>
+                  `)}
+                </tbody>
+              </table>
+              ${h.version_warning
+                ? html`<p class="warn">${h.version_warning}</p>`
+                : ''}
+              ${h.auth_warning ? html`<p class="warn">${h.auth_warning}</p>` : ''}
+              ${h.last_error ? html`<p class="error">${h.last_error}</p>` : ''}
+            `
+          : html`<p class="note">
+              No engine health has arrived yet. It is pushed on connect and
+              whenever it changes, so this fills in as soon as the engine
+              reports.
+            </p>`}
+        ${this._renderServerInfo()}
+      </section>
+    `;
+  }
+
+  /** The initialize reply: summarised by key, then printed verbatim. */
+  _renderServerInfo() {
+    if (this._debugLoading && !this._serverInfo) {
+      return html`<p class="note">Asking the engine what it advertises…</p>`;
+    }
+    if (this._debugError) {
+      return html`<p class="error">
+        Server info unavailable: ${this._debugError}
+      </p>`;
+    }
+    const info = this._serverInfo;
+    if (!info) {
+      return html`<p class="note">
+        Server info has not been read yet.
+      </p>`;
+    }
+    const keys = Object.keys(info);
+    if (keys.length === 0) {
+      return html`<p class="note">
+        The engine answered with an empty record — it advertises nothing, or
+        the session has not initialized.
+      </p>`;
+    }
+    return html`
+      <table>
+        <thead>
+          <tr>
+            <th>Advertised</th>
+            <th>Contents</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${keys.map((k) => html`
+            <tr>
+              <td>${k}</td>
+              <td>${_describeValue(info[k])}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table>
+      <pre class="json">${_json(info)}</pre>
+    `;
+  }
+
+  /**
+   * Which hooks fired, newest first.
+   *
+   * The log starts when this panel mounts, not when the section opens —
+   * otherwise the traffic a reader came to look at is the traffic they just
+   * missed. Each row expands to the payload the engine sent, since the
+   * summarised columns are the fields we chose to read and the interesting
+   * one is usually not among them.
+   */
+  _renderHookTraffic() {
+    const hooks = this._hooks;
+    return html`
+      <section>
+        <h3>
+          Hook traffic
+          ${hooks.length
+            ? html`<span class="sub">
+                — ${hooks.length}
+                ${hooks.length === 1 ? 'event' : 'events'}${hooks.length >= _HOOK_LOG_LIMIT
+                  ? `, newest ${_HOOK_LOG_LIMIT}`
+                  : ''}
+              </span>`
+            : ''}
+        </h3>
+        ${hooks.length === 0
+          ? html`<p class="note">
+              No hooks have fired since this panel was mounted. The
+              PostToolUse re-index fires on every file the agent writes, so a
+              turn with an edit in it fills this.
+            </p>`
+          : html`
+              <table>
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Hook</th>
+                    <th>Tool</th>
+                    <th>Outcome</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${hooks.map((e) => this._renderHookRows(e))}
+                </tbody>
+              </table>
+            `}
+      </section>
+    `;
+  }
+
+  _renderHookRows(e) {
+    const key = `hook:${e.id}`;
+    const open = this._openGroups.has(key);
+    const outcome = [
+      e.outcome,
+      e.exitCode != null && e.exitCode !== 0 ? `exit ${e.exitCode}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    return html`
+      <tr>
+        <td>${new Date(e.at).toLocaleTimeString()}</td>
+        <td>
+          <button
+            class="link"
+            aria-expanded=${open ? 'true' : 'false'}
+            title="Show the payload the engine sent"
+            @click=${() => this._toggleGroup(key)}
+          >${e.name}</button>
+          ${e.phase && e.phase !== e.name
+            ? html` <span class="note">(${e.phase})</span>`
+            : ''}
+        </td>
+        <td>${e.tool || '—'}</td>
+        <td class=${e.exitCode ? 'error' : ''}>${outcome || '—'}</td>
+      </tr>
+      ${open
+        ? html`<tr>
+            <td colspan="4"><pre class="json">${_json(e.raw)}</pre></td>
+          </tr>`
+        : ''}
+    `;
+  }
+
+  /**
+   * `get_mcp_status()` verbatim.
+   *
+   * The Session section already renders this through `mcpHealth`, which is
+   * the point of printing it raw here: the two together are how a reader
+   * checks our reading of a payload against the payload.
+   */
+  _renderMcpRaw() {
+    return html`
+      <section>
+        <h3>MCP status</h3>
+        ${this._mcpStatus
+          ? html`<pre class="json">${_json(this._mcpStatus)}</pre>`
+          : html`<p class="note">
+              The last status fetch did not land, so the Session section's
+              server pills are absent too.
+            </p>`}
+      </section>
+    `;
+  }
+
+  /**
+   * The CLI's own pre-laid-out grid, printed and never rendered.
+   *
+   * It is a terminal's layout decision. Laying the tab out from it would
+   * couple this view to a presentation choice that can change under us, so
+   * the Usage section lays out from `categories` and this is where the two
+   * can be compared.
+   */
+  _renderGridRows() {
+    const grid = this._usage?.gridRows;
+    return html`
+      <section>
+        <h3>Grid rows</h3>
+        <p class="note">
+          The CLI's own layout of these numbers, for cross-checking the Usage
+          section against it. Never used for layout here.
+        </p>
+        ${grid
+          ? html`<pre class="json">${_json(grid)}</pre>`
+          : html`<p class="note">
+              This breakdown carried no grid rows.
+            </p>`}
       </section>
     `;
   }

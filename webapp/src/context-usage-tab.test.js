@@ -1248,24 +1248,38 @@ describe('ContextUsageTab sections', () => {
     );
   }
 
-  it('offers only the sections that have something in them', async () => {
-    // The spec lists a third, Debug, which reads hook traffic and server
-    // info this panel does not fetch. A segment opening onto nothing
-    // would be worse than its absence.
+  it('offers the three sections the spec names', async () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
-    expect(segments(el)).toEqual(['Usage', 'Session']);
+    expect(segments(el)).toEqual(['Usage', 'Session', 'Debug']);
   });
 
-  it('shows no control before the first breakdown arrives', async () => {
-    // Nothing to switch between, and the empty state is one line.
+  it('shows no control before anything has been read', async () => {
+    // No proxy, so no fetch has been attempted and there is nothing to
+    // switch between — not even a failure to diagnose. The empty state is
+    // one line.
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.segmented')).toBeNull();
+    expect(el.shadowRoot.querySelector('.empty').textContent).toContain(
+      'No breakdown yet',
+    );
+  });
+
+  it('still offers the control when the breakdown failed', async () => {
+    // A failed breakdown is the moment Debug is worth the most — it is the
+    // section that says which binary is running and what it last did. The
+    // control used to be gated on a *successful* fetch, which hid the
+    // diagnosis exactly when it was wanted.
     publishFakeRpc({
       'ClaudeCodeService.get_context_usage': () => ({ error: 'no session' }),
     });
     const el = mountTab();
     await settle(el);
-    expect(el.shadowRoot.querySelector('.segmented')).toBeNull();
+    expect(segments(el)).toEqual(['Usage', 'Session', 'Debug']);
+    await showSection(el, 'Debug');
+    expect(sectionFor(el, 'Hook traffic')).not.toBeUndefined();
   });
 
   it('opens on Usage', async () => {
@@ -1328,7 +1342,9 @@ describe('ContextUsageTab sections', () => {
   });
 
   it('ignores a stored section it no longer has', async () => {
-    localStorage.setItem('ac-dc-context-section', 'debug');
+    // "cache" was the old tab's second sub-view, and a build that had
+    // written it is exactly the one that upgrades into this panel.
+    localStorage.setItem('ac-dc-context-section', 'cache');
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
@@ -2019,6 +2035,315 @@ describe('ContextUsageTab slash commands', () => {
     await settle(el);
     await showSection(el, 'Session');
     expect(sectionFor(el, 'Slash commands')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Debug
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab debug', () => {
+  const HEALTH = {
+    connected: true,
+    cli_path: '/opt/ac-dc/bundled/claude',
+    cli_version: '2.1.4',
+    cli_source: 'bundled',
+    sdk_version: '0.9.1',
+    sdk_cli_pin: '2.1.4',
+    credential_source: 'subscription',
+    mirror_gaps: 0,
+  };
+
+  // Shaped by key count rather than by field name, because that is all the
+  // panel claims to know about this reply — see `_describeValue`.
+  const INFO = {
+    commands: [{ name: 'compact' }, { name: 'clear' }],
+    outputStyles: ['default'],
+    version: '2.1.4',
+  };
+
+  function publishDebug({
+    info = INFO,
+    health = HEALTH,
+    usage = usageFixture(),
+    status = null,
+  } = {}) {
+    const infoHandler = vi.fn(() => info);
+    const healthHandler = vi.fn(() => health);
+    const methods = {
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage,
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': infoHandler,
+      'ClaudeCodeService.get_engine_health': healthHandler,
+    };
+    if (status) methods['ClaudeCodeService.get_mcp_status'] = () => status;
+    publishFakeRpc(methods);
+    return { infoHandler, healthHandler };
+  }
+
+  async function openDebug(opts) {
+    const handlers = publishDebug(opts);
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+    await settle(el);
+    return { el, ...handlers };
+  }
+
+  function debugText(el) {
+    return el.shadowRoot.textContent.replace(/\s+/g, ' ');
+  }
+
+  function dumps(el) {
+    return [...el.shadowRoot.querySelectorAll('pre.json')].map(
+      (p) => p.textContent,
+    );
+  }
+
+  function hookRows(el) {
+    const section = sectionFor(el, 'Hook traffic');
+    return [...section.querySelectorAll('tbody tr')]
+      .filter((tr) => tr.querySelectorAll('td').length === 4)
+      .map((tr) => [...tr.querySelectorAll('td')].map((td) =>
+        td.textContent.trim(),
+      ));
+  }
+
+  function pushHook(fields) {
+    pushEvent('hook-event', { requestId: 'r1', data: fields });
+  }
+
+  it('does not ask the engine about itself until Debug is opened', async () => {
+    // Another control request to the same subprocess, for an answer a
+    // reader who never opens the section never looks at.
+    const { infoHandler } = publishDebug();
+    const el = mountTab();
+    await settle(el);
+    expect(infoHandler).not.toHaveBeenCalled();
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(infoHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches once, not once per visit', async () => {
+    // The initialize reply cannot change while the session lives.
+    const { el, infoHandler } = await openDebug();
+    await showSection(el, 'Usage');
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(infoHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the binary, its version and where it came from', async () => {
+    const { el } = await openDebug();
+    expect(debugText(el)).toContain('/opt/ac-dc/bundled/claude');
+    expect(debugText(el)).toContain('2.1.4 (bundled)');
+    expect(debugText(el)).toContain('0.9.1 · pins CLI 2.1.4');
+  });
+
+  it('names the credential source, the only billing signal there is', async () => {
+    const { el } = await openDebug();
+    expect(debugText(el)).toContain('Credentials subscription');
+  });
+
+  it('surfaces a version warning and a lost-session error', async () => {
+    const { el } = await openDebug({
+      health: {
+        ...HEALTH,
+        version_warning: 'CLI 2.1.4 is below the SDK pin 2.2.0',
+        last_error: 'Session lost: the child exited',
+      },
+    });
+    expect(el.shadowRoot.querySelector('.warn').textContent).toContain(
+      'below the SDK pin',
+    );
+    expect(
+      [...el.shadowRoot.querySelectorAll('.error')].map((n) => n.textContent),
+    ).toContainEqual(expect.stringContaining('the child exited'));
+  });
+
+  it('reports a mirror past tolerance as a verdict, not a count', async () => {
+    const { el } = await openDebug({
+      health: { ...HEALTH, mirror_gaps: 4, mirror_gaps_escalated: true },
+    });
+    expect(debugText(el)).toContain('4 — past tolerance');
+  });
+
+  it('takes a pushed health record over the one it fetched', async () => {
+    // `mirror_gaps` moves during a turn, so a section showing the count
+    // from when it was opened would report a clean mirror over a broken one.
+    const { el } = await openDebug();
+    expect(debugText(el)).toContain('Mirror gaps 0');
+    pushEvent('engine-health', { ...HEALTH, mirror_gaps: 2 });
+    await settle(el);
+    expect(debugText(el)).toContain('Mirror gaps 2');
+  });
+
+  it('says so when no health has arrived at all', async () => {
+    const { el } = await openDebug({ health: null });
+    expect(debugText(el)).toContain('No engine health has arrived yet');
+  });
+
+  it('summarises the initialize reply by key, not by field name', async () => {
+    // The shape of this reply has not been read out of a schema, and naming
+    // fields we have not verified is the mistake the context-visibility
+    // spec records. So the summary counts, and the dump carries the truth.
+    const { el } = await openDebug();
+    const rows = [...sectionFor(el, 'Engine').querySelectorAll('tbody tr')]
+      .map((tr) => [...tr.querySelectorAll('td')].map((td) =>
+        td.textContent.trim(),
+      ))
+      .filter(([label]) => ['commands', 'outputStyles', 'version'].includes(label));
+    expect(rows).toEqual([
+      ['commands', '2 entries'],
+      ['outputStyles', '1 entry'],
+      ['version', '2.1.4'],
+    ]);
+    expect(dumps(el)[0]).toContain('"outputStyles"');
+  });
+
+  it('says an empty reply is empty rather than showing nothing', async () => {
+    const { el } = await openDebug({ info: {} });
+    expect(debugText(el)).toContain('answered with an empty record');
+  });
+
+  it('reports a server-info failure without losing the rest', async () => {
+    const { el } = await openDebug({ info: { error: 'engine not ready' } });
+    expect(debugText(el)).toContain('Server info unavailable: engine not ready');
+    // The health table came from a different call and is still there.
+    expect(debugText(el)).toContain('/opt/ac-dc/bundled/claude');
+  });
+
+  it('collects hook traffic before Debug is ever opened', async () => {
+    // The traffic a reader came to look at is the traffic from the turn
+    // that just ran, so the log cannot start when the section does.
+    publishDebug();
+    const el = mountTab();
+    await settle(el);
+    pushHook({ hook_event_name: 'PreToolUse', tool_name: 'Write' });
+    pushHook({ hook_event_name: 'PostToolUse', tool_name: 'Write', outcome: 'ok' });
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(hookRows(el).map((r) => r[1])).toEqual([
+      'PostToolUse',
+      'PreToolUse',
+    ]);
+  });
+
+  it('names the hook, the tool and the outcome', async () => {
+    const { el } = await openDebug();
+    pushHook({ hook_event_name: 'PostToolUse', tool_name: 'Edit', outcome: 'ok' });
+    await settle(el);
+    const [row] = hookRows(el);
+    expect(row[1]).toBe('PostToolUse');
+    expect(row[2]).toBe('Edit');
+    expect(row[3]).toBe('ok');
+  });
+
+  it('flags a hook that exited non-zero', async () => {
+    const { el } = await openDebug();
+    pushHook({ hook_event_name: 'PreToolUse', tool_name: 'Bash', exit_code: 2 });
+    await settle(el);
+    expect(hookRows(el)[0][3]).toContain('exit 2');
+    expect(
+      sectionFor(el, 'Hook traffic').querySelector('td.error'),
+    ).not.toBeNull();
+  });
+
+  it('expands a row to the payload the engine sent', async () => {
+    // The columns are the fields we chose to read; the interesting one is
+    // usually not among them.
+    const { el } = await openDebug();
+    pushHook({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Write',
+      raw: { tool_input: { file_path: 'src/thing.js' } },
+    });
+    await settle(el);
+    expect(dumps(el).join('')).not.toContain('src/thing.js');
+    sectionFor(el, 'Hook traffic').querySelector('.link').click();
+    await settle(el);
+    expect(dumps(el).join('')).toContain('src/thing.js');
+  });
+
+  it('keeps the newest events and says that is what it kept', async () => {
+    const { el } = await openDebug();
+    for (let i = 0; i < 45; i += 1) {
+      pushHook({ hook_event_name: `Hook${i}`, tool_name: 'Write' });
+    }
+    await settle(el);
+    const rows = hookRows(el);
+    expect(rows).toHaveLength(40);
+    expect(rows[0][1]).toBe('Hook44');
+    expect(heading(el, 'Hook traffic')).toContain('newest 40');
+  });
+
+  it('ignores a hook event with no payload', async () => {
+    const { el } = await openDebug();
+    pushEvent('hook-event', { requestId: 'r1' });
+    await settle(el);
+    expect(debugText(el)).toContain('No hooks have fired');
+  });
+
+  it('drops the log and refetches when the session changes', async () => {
+    // A resume is a different conversation: the traffic records tool calls
+    // the user has left, and the advertised commands come from an
+    // initialize this session did not do.
+    const { el, infoHandler } = await openDebug();
+    pushHook({ hook_event_name: 'PostToolUse', tool_name: 'Write' });
+    await settle(el);
+    expect(hookRows(el)).toHaveLength(1);
+    pushEvent('session-changed', { sessionId: 'other' });
+    await settle(el);
+    expect(debugText(el)).toContain('No hooks have fired');
+    expect(infoHandler).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes the engine answers when Refresh is pressed on Debug', async () => {
+    const { el, infoHandler } = await openDebug();
+    [...el.shadowRoot.querySelectorAll('.toolbar button')][1].click();
+    await settle(el);
+    expect(infoHandler).toHaveBeenCalledTimes(2);
+  });
+
+  it('prints the MCP status payload verbatim', async () => {
+    // The Session section renders this through `mcpHealth`; the two
+    // together are how a reader checks our reading against the payload.
+    const { el } = await openDebug({
+      status: { mcpServers: [{ name: 'ac-dc', status: 'connected' }] },
+    });
+    expect(dumps(el).join('')).toContain('"ac-dc"');
+  });
+
+  it('says when the status fetch did not land', async () => {
+    const { el } = await openDebug();
+    expect(debugText(el)).toContain('last status fetch did not land');
+  });
+
+  it('prints the grid rows and says it never lays out from them', async () => {
+    const { el } = await openDebug({
+      usage: usageFixture({ gridRows: [['System prompt', '3.2k']] }),
+    });
+    expect(dumps(el).join('')).toContain('System prompt');
+    expect(debugText(el)).toContain('Never used for layout here');
+  });
+
+  it('says so when the breakdown carried no grid rows', async () => {
+    const { el } = await openDebug();
+    expect(debugText(el)).toContain('carried no grid rows');
+  });
+
+  it('opens straight onto Debug when that is where the reader left', async () => {
+    // `_switchSection` never fires on this path, so the fetch cannot hang
+    // off the click alone.
+    localStorage.setItem('ac-dc-context-section', 'debug');
+    const { infoHandler } = publishDebug();
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Hook traffic')).not.toBeUndefined();
+    expect(infoHandler).toHaveBeenCalledTimes(1);
   });
 });
 
