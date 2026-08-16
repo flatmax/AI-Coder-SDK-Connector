@@ -1354,7 +1354,53 @@ class ClaudeCodeService:
         except Exception as exc:
             logger.exception("get_context_usage failed")
             return {"error": f"Could not read context usage: {exc}"}
-        return {"usage": usage, "fetched_at": _now()}
+        return {"usage": self._mark_openable_memory_files(usage), "fetched_at": _now()}
+
+    def _mark_openable_memory_files(self, usage: Any) -> Any:
+        """Tag each memory file the viewer can actually open.
+
+        The engine reports memory files by absolute path, and every repo
+        read takes a path *relative* to the root and rejects absolute ones
+        outright. So a Context tab that made every path clickable would
+        offer to open files the read path refuses — and a user-level
+        ``~/.claude/CLAUDE.md`` is genuinely unopenable, being outside the
+        repo altogether.
+
+        ``relPath`` is therefore added only where the file is inside the
+        root, which lets the browser make exactly the openable rows
+        clickable. Answered here because this is the layer that knows
+        where the root is; ``session.get_context_usage`` stays the pure
+        pass-through it is documented as being.
+        """
+        if not isinstance(usage, dict):
+            return usage
+        files = usage.get("memoryFiles")
+        if not isinstance(files, list):
+            return usage
+        marked = []
+        for entry in files:
+            rel = (
+                self._repo_relative(entry.get("path"))
+                if isinstance(entry, dict)
+                else None
+            )
+            marked.append({**entry, "relPath": rel} if rel else entry)
+        return {**usage, "memoryFiles": marked}
+
+    def _repo_relative(self, path: Any) -> str | None:
+        """``path`` as a repo-relative string, or None if it is outside.
+
+        Symlinks are resolved on both sides, matching the containment
+        check the repo layer applies when the read actually happens — a
+        path that passes here and fails there would be the clickable row
+        that does nothing.
+        """
+        if not isinstance(path, str) or not path:
+            return None
+        try:
+            return str(Path(path).resolve().relative_to(self._repo_root.resolve()))
+        except (OSError, ValueError, RuntimeError):
+            return None
 
     async def get_mcp_status(self) -> dict[str, Any]:
         try:

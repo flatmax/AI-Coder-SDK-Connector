@@ -74,6 +74,13 @@ Four consequences a capture alone could not have given us:
 - **`percentage` is `round(totalTokens / rawMaxTokens * 100)`**, and `maxTokens` and `rawMaxTokens` are
   assigned from one variable — equal by construction, not merely equal in the capture.
 
+One field is ours rather than the engine's. `memoryFiles[].path` is absolute, and the repo layer takes
+paths relative to the root and rejects absolute ones outright, so `ClaudeCodeService.get_context_usage`
+adds **`relPath`** to each entry inside the root — resolving symlinks on both sides, as the read itself
+will — and leaves entries outside it unmarked. That is the difference between a clickable row and a row
+that would offer to open a file the read path refuses. `session.get_context_usage` stays a pure
+pass-through; the annotation happens in the layer that knows where the root is.
+
 The engine also bands this pressure by *distance*, not proportion: its own reader warns within 20 000
 tokens of the effective ceiling and treats the last 3 000 before the raw window as blocked. Worth
 knowing before anyone tunes our percentage bands for a 1 M-token window, where 20 000 tokens is 2%.

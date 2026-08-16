@@ -111,8 +111,29 @@ the old tab could not, and it is mostly a set of tables:
 
 Two deliberate details:
 
-- **Memory files are clickable.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it.
+- **Memory files are clickable — the ones that can be opened.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it. Clicking one also minimizes the dialog, because the viewer is behind it and a click that opens a file under an opaque panel is indistinguishable from a click that did nothing. The engine reports these paths as *absolute* and every repo read rejects an absolute path, so `get_context_usage` adds `relPath` to each entry that lives inside the repo root and the browser makes exactly those rows clickable. A user-level `~/.claude/CLAUDE.md` is outside the repo, has no repo-relative name, and stays text.
 - **`ac-dc` appears in the tools table like any other MCP server**, with its token cost. Our own bridge is not exempt from the accounting it exists to provide (see [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)).
+
+Two of the interactions above are not implementable from this payload, and saying so here is cheaper than
+each reader rediscovering it:
+
+- **An agent or skill row cannot open its defining file.** Both carry `source`, and `source` is a
+  settings *scope* — `projectSettings`, `userSettings`, `plugin`, `built-in` — not a path. The rows show
+  the scope in the CLI's own words instead. Opening the file would need a second source that maps a scope
+  and a name to a location on disk.
+- **A system prompt section cannot expand to its text.** The element shape is `{name, tokens}`; the text
+  is not in the response. The table's own hedge — "where the payload carries it" — resolves to nowhere.
+
+Two more shapes the implementation had to answer for:
+
+- **A server that failed to start still gets a row.** It has no tools *because* it failed, so a listing
+  built from `mcpTools` alone answers "which servers do I have" by omitting the broken one. Groups are
+  the union of `mcpTools` and `get_mcp_status()`, and an unwell server sorts above a heavier healthy one.
+- **Health comes from `get_mcp_status()`, fetched beside the breakdown and allowed to fail.** The
+  breakdown is the point of the tab and health is a decoration on it, so a status call that times out
+  leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it is a
+  field with no writer. A pill is never carried over from an earlier fetch — "connected" is a claim about
+  now, and this is the one figure where being out of date is worse than being absent.
 
 ### Debug Section
 

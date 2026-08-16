@@ -16,9 +16,13 @@ import {
   categoryColor,
   compactionLimit,
   compactionPercent,
+  mcpHealth,
   messageComposition,
   overLimit,
   partitionCategories,
+  serverGroups,
+  skillInventory,
+  sourceLabel,
   thresholdPercent,
   windowPercent,
 } from './context-usage.js';
@@ -734,6 +738,306 @@ describe('context-usage derivations', () => {
       expect(windowPercent(null)).toBe(0);
       expect(windowPercent({})).toBe(0);
       expect(windowPercent({ totalTokens: 5, maxTokens: 0 })).toBe(0);
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // sourceLabel
+  //
+  // The mapping is lifted from the CLI's own shared label mapper, not
+  // inferred from the two values a live session happened to report —
+  // which is also how the raw keys were found to be reaching our tables:
+  // "projectSettings" where /context prints "Project".
+  // -----------------------------------------------------------------
+
+  describe('sourceLabel', () => {
+    it('speaks the CLI\'s words for a settings scope', () => {
+      expect(sourceLabel('userSettings')).toBe('User');
+      expect(sourceLabel('projectSettings')).toBe('Project');
+      expect(sourceLabel('localSettings')).toBe('Local');
+      expect(sourceLabel('flagSettings')).toBe('Flag');
+      expect(sourceLabel('plugin')).toBe('Plugin');
+      expect(sourceLabel('built-in')).toBe('Built-in');
+      expect(sourceLabel('mcp')).toBe('MCP');
+      expect(sourceLabel('memoryStore')).toBe('Memory store');
+    });
+
+    it('calls policySettings "Managed", as the shared mapper does', () => {
+      // The CLI disagrees with itself here: the switch inlined in its
+      // markdown renderer says "Policy". The shared mapper wins, because
+      // it is the one the CLI also uses for skills.
+      expect(sourceLabel('policySettings')).toBe('Managed');
+    });
+
+    it('passes an unknown scope through rather than blanking it', () => {
+      // A scope we have not seen is still more informative raw.
+      expect(sourceLabel('newScopeSettings')).toBe('newScopeSettings');
+    });
+
+    it('is an em dash when there is nothing to label', () => {
+      expect(sourceLabel(undefined)).toBe('—');
+      expect(sourceLabel('')).toBe('—');
+      expect(sourceLabel('   ')).toBe('—');
+      expect(sourceLabel(7)).toBe('—');
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // mcpHealth
+  // -----------------------------------------------------------------
+
+  describe('mcpHealth', () => {
+    it('keys each server by name with a label and a colour', () => {
+      const h = mcpHealth({
+        mcpServers: [
+          { name: 'ac-dc', status: 'connected' },
+          { name: 'other', status: 'pending' },
+        ],
+      });
+      expect([...h.keys()]).toEqual(['ac-dc', 'other']);
+      expect(h.get('ac-dc').label).toBe('connected');
+      expect(h.get('ac-dc').color).toBe('#7ee787');
+      // "pending" is what the wire says; "connecting" is what it means.
+      expect(h.get('other').label).toBe('connecting');
+    });
+
+    it('ambers needs-auth rather than reddening it', () => {
+      // The server is reachable and waiting on the user, which is not
+      // the same situation as one that failed to start.
+      const h = mcpHealth({
+        mcpServers: [
+          { name: 'a', status: 'needs-auth' },
+          { name: 'b', status: 'failed' },
+        ],
+      });
+      expect(h.get('a').label).toBe('needs auth');
+      expect(h.get('a').color).toBe('#d29922');
+      expect(h.get('b').color).toBe('#f85149');
+    });
+
+    it('reads the transport off the config discriminant', () => {
+      // `config` is a union over stdio / sse / http / sdk /
+      // claudeai-proxy, and `type` is the arm every one of them carries.
+      const h = mcpHealth({
+        mcpServers: [
+          {
+            name: 'ac-dc',
+            status: 'connected',
+            scope: 'project',
+            config: { type: 'sse', url: 'http://localhost:9000' },
+            serverInfo: { name: 'ac-dc', version: '0.4.1' },
+            tools: [{ name: 'symbol_map' }, { name: 'ui_state' }],
+          },
+        ],
+      });
+      expect(h.get('ac-dc')).toMatchObject({
+        scope: 'project',
+        transport: 'sse',
+        version: '0.4.1',
+        toolCount: 2,
+      });
+    });
+
+    it('carries the error a failed server reported', () => {
+      const h = mcpHealth({
+        mcpServers: [{ name: 'a', status: 'failed', error: 'spawn ENOENT' }],
+      });
+      expect(h.get('a').error).toBe('spawn ENOENT');
+    });
+
+    it('leaves toolCount null when the server listed none', () => {
+      // Absent and empty are different: a connected server with zero
+      // tools is a fact, and "not reported" is not zero.
+      const h = mcpHealth({ mcpServers: [{ name: 'a', status: 'connected' }] });
+      expect(h.get('a').toolCount).toBeNull();
+      expect(
+        mcpHealth({ mcpServers: [{ name: 'b', status: 'connected', tools: [] }] })
+          .get('b').toolCount,
+      ).toBe(0);
+    });
+
+    it('keeps an unrecognised status rather than dropping the server', () => {
+      const h = mcpHealth({ mcpServers: [{ name: 'a', status: 'reticulating' }] });
+      expect(h.get('a').label).toBe('reticulating');
+      expect(h.get('a').color).toBe(UNCOLOURED);
+    });
+
+    it('is an empty map for junk', () => {
+      expect(mcpHealth(null).size).toBe(0);
+      expect(mcpHealth({}).size).toBe(0);
+      expect(mcpHealth({ mcpServers: 'nope' }).size).toBe(0);
+      expect(mcpHealth({ mcpServers: [null, {}, { name: '  ' }] }).size).toBe(0);
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // serverGroups
+  // -----------------------------------------------------------------
+
+  describe('serverGroups', () => {
+    const tools = [
+      { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
+      { name: 'doc_outline', serverName: 'ac-dc', tokens: 700, isLoaded: false },
+      { name: 'search', serverName: 'other', tokens: 4000 },
+    ];
+
+    it('groups tools under the server that provides them', () => {
+      const g = serverGroups({ mcpTools: tools });
+      expect(g.map((x) => x.name)).toEqual(['other', 'ac-dc']);
+      expect(g[1].tools.map((t) => t.name)).toEqual([
+        'symbol_map',
+        'doc_outline',
+      ]);
+    });
+
+    it('counts loaded and deferred separately', () => {
+      // Summing them would report a cost the session is not paying: a
+      // deferred tool's schema is not in the window until first use.
+      const [, acdc] = serverGroups({ mcpTools: tools });
+      expect(acdc).toMatchObject({
+        tokens: 1600,
+        loadedTokens: 900,
+        deferredTokens: 700,
+        loadedCount: 1,
+        deferredCount: 1,
+      });
+    });
+
+    it('sorts tools within a group heaviest first, then by name', () => {
+      const g = serverGroups({
+        mcpTools: [
+          { name: 'b', serverName: 's', tokens: 10 },
+          { name: 'a', serverName: 's', tokens: 10 },
+          { name: 'c', serverName: 's', tokens: 90 },
+        ],
+      });
+      expect(g[0].tools.map((t) => t.name)).toEqual(['c', 'a', 'b']);
+    });
+
+    it('joins health onto the group', () => {
+      const health = mcpHealth({
+        mcpServers: [{ name: 'ac-dc', status: 'connected' }],
+      });
+      const g = serverGroups({ mcpTools: tools }, health);
+      expect(g.find((x) => x.name === 'ac-dc').health.label).toBe('connected');
+      expect(g.find((x) => x.name === 'other').health).toBeNull();
+    });
+
+    it('lists a server that failed before offering any tools', () => {
+      // The interesting case, not an edge one: a server has no tools
+      // *because* it failed, so a listing built from mcpTools alone
+      // answers "which servers do I have" by omitting the broken one.
+      const health = mcpHealth({
+        mcpServers: [{ name: 'broken', status: 'failed', error: 'refused' }],
+      });
+      const g = serverGroups({ mcpTools: [] }, health);
+      expect(g).toHaveLength(1);
+      expect(g[0]).toMatchObject({ name: 'broken', tokens: 0, tools: [] });
+      expect(g[0].health.error).toBe('refused');
+    });
+
+    it('puts an unwell server above a heavier healthy one', () => {
+      // A failed server costs nothing, so heaviest-first buries the one
+      // row that needs acting on.
+      const health = mcpHealth({
+        mcpServers: [
+          { name: 'ac-dc', status: 'failed' },
+          { name: 'other', status: 'connected' },
+        ],
+      });
+      expect(serverGroups({ mcpTools: tools }, health).map((x) => x.name))
+        .toEqual(['ac-dc', 'other']);
+    });
+
+    it('does not promote a disabled or connecting server', () => {
+      // Disabled is a choice somebody made, and pending resolves itself.
+      const health = mcpHealth({
+        mcpServers: [
+          { name: 'ac-dc', status: 'disabled' },
+          { name: 'other', status: 'pending' },
+        ],
+      });
+      expect(serverGroups({ mcpTools: tools }, health).map((x) => x.name))
+        .toEqual(['other', 'ac-dc']);
+    });
+
+    it('breaks a token tie by name, so the order is stable', () => {
+      const g = serverGroups({
+        mcpTools: [
+          { name: 't', serverName: 'zeta', tokens: 100 },
+          { name: 't', serverName: 'alpha', tokens: 100 },
+        ],
+      });
+      expect(g.map((x) => x.name)).toEqual(['alpha', 'zeta']);
+    });
+
+    it('files a server-less tool under "unknown"', () => {
+      const g = serverGroups({ mcpTools: [{ name: 't', tokens: 5 }] });
+      expect(g[0].name).toBe('unknown');
+      expect(g[0].tools[0].name).toBe('t');
+    });
+
+    it('is empty for junk, and ignores a non-Map health argument', () => {
+      expect(serverGroups(null)).toEqual([]);
+      expect(serverGroups({})).toEqual([]);
+      expect(serverGroups({ mcpTools: 'nope' })).toEqual([]);
+      expect(serverGroups({ mcpTools: [null, 'x'] })).toEqual([]);
+      expect(serverGroups({ mcpTools: tools }, { 'ac-dc': {} })).toHaveLength(2);
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // skillInventory
+  // -----------------------------------------------------------------
+
+  describe('skillInventory', () => {
+    it('reports both counts, because they answer different questions', () => {
+      // 3 of 40 loaded means 37 skills cost nothing right now.
+      const inv = skillInventory({
+        skills: { totalSkills: 40, includedSkills: 3, tokens: 1469 },
+      });
+      expect(inv).toMatchObject({ total: 40, included: 3, tokens: 1469 });
+    });
+
+    it('sorts frontmatter heaviest first, then by name', () => {
+      const inv = skillInventory({
+        skills: {
+          tokens: 300,
+          skillFrontmatter: [
+            { name: 'b', source: 'projectSettings', tokens: 100 },
+            { name: 'a', source: 'projectSettings', tokens: 100 },
+            { name: 'c', source: 'userSettings', tokens: 200 },
+          ],
+        },
+      });
+      expect(inv.rows.map((r) => r.name)).toEqual(['c', 'a', 'b']);
+      expect(inv.rows[0].source).toBe('User');
+    });
+
+    it('keeps the plugin name, which is all that separates its skills', () => {
+      const inv = skillInventory({
+        skills: {
+          tokens: 50,
+          skillFrontmatter: [
+            { name: 'deploy', source: 'plugin', pluginName: 'acme', tokens: 50 },
+          ],
+        },
+      });
+      expect(inv.rows[0]).toMatchObject({ source: 'Plugin', plugin: 'acme' });
+    });
+
+    it('survives a total with no itemisation', () => {
+      const inv = skillInventory({ skills: { totalSkills: 3, tokens: 90 } });
+      expect(inv.rows).toEqual([]);
+      expect(inv.tokens).toBe(90);
+      expect(inv.included).toBeNull();
+    });
+
+    it('is null when there is nothing to report', () => {
+      expect(skillInventory(null)).toBeNull();
+      expect(skillInventory({})).toBeNull();
+      expect(skillInventory({ skills: [] })).toBeNull();
+      expect(skillInventory({ skills: { totalSkills: 0, tokens: 0 } })).toBeNull();
     });
   });
 });

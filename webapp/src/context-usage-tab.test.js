@@ -59,11 +59,29 @@ function publishFakeRpc(methods) {
   SharedRpc.set(proxy);
 }
 
-/** Install a `get_context_usage` that answers with `usage`. */
+/**
+ * Install a `get_context_usage` that answers with `usage`.
+ *
+ * Deliberately leaves `get_mcp_status` unpublished, which is how the
+ * panel behaves against a backend that cannot answer it: `rpcCall`
+ * throws "method not found", the health fetch swallows it, and server
+ * groups render without a status pill.
+ */
 function publishUsage(usage, fetchedAt = '2026-08-15T10:30:00Z') {
   const handler = vi.fn(() => ({ usage, fetched_at: fetchedAt }));
   publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
   return handler;
+}
+
+/** Install both of the panel's fetches: the breakdown and MCP health. */
+function publishWithStatus(usage, status, fetchedAt = '2026-08-15T10:30:00Z') {
+  const usageHandler = vi.fn(() => ({ usage, fetched_at: fetchedAt }));
+  const statusHandler = vi.fn(() => status);
+  publishFakeRpc({
+    'ClaudeCodeService.get_context_usage': usageHandler,
+    'ClaudeCodeService.get_mcp_status': statusHandler,
+  });
+  return { usageHandler, statusHandler };
 }
 
 async function settle(el) {
@@ -207,6 +225,50 @@ function sectionFor(el, heading) {
   return [...el.shadowRoot.querySelectorAll('section')].find((s) =>
     s.querySelector('h3')?.textContent.includes(heading),
   );
+}
+
+/** A section's heading, whitespace-collapsed — Lit breaks it over lines. */
+function heading(el, section) {
+  return sectionFor(el, section)
+    .querySelector('h3')
+    .textContent.replace(/\s+/g, ' ')
+    .trim();
+}
+
+// The Tools section holds several collapsible groups under one heading, so
+// `rows()` — which is scoped to a `<section>` — cannot address one group's
+// table. These are scoped to `.group` instead.
+
+function groupNames(el) {
+  return [...el.shadowRoot.querySelectorAll('.group-name')].map((s) =>
+    s.textContent.trim(),
+  );
+}
+
+function groupNamed(el, name) {
+  return [...el.shadowRoot.querySelectorAll('.group')].find(
+    (g) => g.querySelector('.group-name')?.textContent.trim() === name,
+  );
+}
+
+async function expandGroup(el, name) {
+  const group = groupNamed(el, name);
+  if (!group) throw new Error(`no "${name}" tool group on screen`);
+  group.querySelector('.group-head').click();
+  await settle(el);
+  // Re-queried: the toggle re-renders the group.
+  return groupNamed(el, name);
+}
+
+function groupRows(group) {
+  return [...group.querySelectorAll('tbody tr')].map((tr) =>
+    [...tr.querySelectorAll('td')].map((td) => td.textContent.trim()),
+  );
+}
+
+function pillFor(el, name) {
+  const pill = groupNamed(el, name)?.querySelector('.pill');
+  return pill ? pill.textContent.trim() : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,9 +1358,9 @@ describe('ContextUsageTab sections', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(el.shadowRoot.querySelector('.empty').textContent).toContain(
-      'no memory files, MCP tools or agent',
-    );
+    expect(
+      el.shadowRoot.querySelector('.empty').textContent.replace(/\s+/g, ' '),
+    ).toContain('no memory files, prompt sections, tools or inventory');
   });
 });
 
@@ -1385,10 +1447,151 @@ describe('ContextUsageTab memory files', () => {
       ['—', '—', '5'],
     ]);
   });
+
+  it('totals the files in the heading', async () => {
+    publishUsage(
+      usageFixture({
+        memoryFiles: [
+          { path: '/repo/CLAUDE.md', type: 'Project', tokens: 1800 },
+          { path: '/home/u/.claude/CLAUDE.md', type: 'User', tokens: 320 },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(heading(el, 'Memory files')).toContain('2 files, 2.1K tokens');
+  });
+
+  it('opens a memory file in the viewer when its path is clicked', async () => {
+    // Knowing CLAUDE.md costs 1.8K tokens is half an answer; the other
+    // half is being in the file. `relPath` is the service's answer to
+    // "can the viewer actually open this" — every repo read rejects an
+    // absolute path, so that is the one it navigates with.
+    publishUsage(
+      usageFixture({
+        memoryFiles: [
+          {
+            path: '/repo/.claude/CLAUDE.md',
+            relPath: '.claude/CLAUDE.md',
+            type: 'Project',
+            tokens: 1800,
+          },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const navigated = vi.fn();
+    window.addEventListener('navigate-file', navigated);
+    try {
+      sectionFor(el, 'Memory files').querySelector('.link').click();
+    } finally {
+      window.removeEventListener('navigate-file', navigated);
+    }
+    expect(navigated).toHaveBeenCalledTimes(1);
+    expect(navigated.mock.calls[0][0].detail).toEqual({
+      path: '.claude/CLAUDE.md',
+    });
+  });
+
+  it('names an in-repo file the way the rest of the app does', async () => {
+    // Relative in the cell, absolute on the tooltip: the engine's own
+    // name for it is still one hover away.
+    publishUsage(
+      usageFixture({
+        memoryFiles: [
+          { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(rows(el, 'Memory files')).toEqual([['CLAUDE.md', '—', '1.8K']]);
+    expect(
+      sectionFor(el, 'Memory files').querySelector('td.path').title,
+    ).toBe('/repo/CLAUDE.md');
+  });
+
+  it('minimizes the dialog on the way, since the viewer is behind it',
+    async () => {
+      // A click that opens a file under an opaque panel is
+      // indistinguishable from a click that did nothing.
+      publishUsage(
+        usageFixture({
+          memoryFiles: [
+            { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
+          ],
+        }),
+      );
+      const el = mountTab();
+      await settle(el);
+      await showSection(el, 'Session');
+      const minimized = vi.fn();
+      el.addEventListener('request-dialog-minimize', minimized);
+      sectionFor(el, 'Memory files').querySelector('.link').click();
+      expect(minimized).toHaveBeenCalledTimes(1);
+    });
+
+  it('leaves a file outside the repo unclickable', async () => {
+    // A user-level CLAUDE.md has no repo-relative name, and the read
+    // path would refuse it. Better no click than one that fails.
+    publishUsage(
+      usageFixture({
+        memoryFiles: [{ path: '/home/u/.claude/CLAUDE.md', tokens: 27 }],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
+    expect(rows(el, 'Memory files')).toEqual([
+      ['/home/u/.claude/CLAUDE.md', '—', '27'],
+    ]);
+  });
+
+  it('leaves a path-less row unclickable', async () => {
+    publishUsage(usageFixture({ memoryFiles: [{ tokens: 5 }] }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
+  });
 });
 
-describe('ContextUsageTab MCP tools', () => {
-  const tools = [
+describe('ContextUsageTab system prompt', () => {
+  it('lists prompt sections, heaviest first, with a total', async () => {
+    publishUsage(
+      usageFixture({
+        systemPromptSections: [
+          { name: 'Tone and style', tokens: 800 },
+          { name: 'Core system prompt', tokens: 9200 },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(rows(el, 'System prompt')).toEqual([
+      ['Core system prompt', '9.2K'],
+      ['Tone and style', '800'],
+    ]);
+    expect(heading(el, 'System prompt')).toContain('2 sections, 10.0K tokens');
+  });
+
+  it('omits the section when the engine names no prompt sections', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'System prompt')).toBeUndefined();
+  });
+});
+
+describe('ContextUsageTab tools', () => {
+  const mcpTools = [
     { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
     { name: 'doc_outline', serverName: 'ac-dc', tokens: 700 },
     {
@@ -1399,69 +1602,295 @@ describe('ContextUsageTab MCP tools', () => {
     },
   ];
 
-  it('reports the tool count, loaded tokens, and deferred tokens', async () => {
-    // The heading read "MCP tools — 0 loaded" on a live payload, where
-    // every tool is deferred until first use. Directly above a table of
-    // 35 tools, that parses as "no tools" rather than "no tokens".
-    publishUsage(usageFixture({ mcpTools: tools }));
+  it('reports every group and the whole section in the heading', async () => {
+    publishUsage(
+      usageFixture({
+        systemTools: [{ name: 'Read', tokens: 1100 }],
+        mcpTools,
+      }),
+    );
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const heading = sectionFor(el, 'MCP tools')
-      .querySelector('h3')
-      .textContent.replace(/\s+/g, ' ')
-      .trim();
-    // 900 + 700 in the window, the 600 that is not counted separately.
-    expect(heading).toContain('3 tools');
-    expect(heading).toContain('1.6K tokens loaded');
-    expect(heading).toContain('600 deferred');
+    // Loaded and deferred stay apart at the section level too: summing
+    // them here would have reported 3.3K when the window is paying 2.7K.
+    expect(heading(el, 'Tools')).toContain(
+      '4 tools in 2 groups · 2.7K loaded · 600 deferred',
+    );
+    expect(groupNames(el)).toEqual(['Built-in tools', 'ac-dc']);
   });
 
-  it('omits the deferred clause when every tool is loaded', async () => {
+  it('says the section costs nothing when every tool is deferred', async () => {
+    publishUsage(
+      usageFixture({
+        mcpTools: [
+          { name: 'a', serverName: 'ac-dc', tokens: 0, isLoaded: false },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(heading(el, 'Tools')).toContain('1 tool in 1 group · no tokens');
+  });
+
+  it('keeps loaded and deferred tokens apart in the group header', async () => {
+    // The heading this replaces read "MCP tools — 0 loaded" on a live
+    // payload where every tool is deferred until first use. Directly
+    // above a table of 35 tools that parses as "no tools" rather than
+    // "no tokens" — and summing the two would report a cost the session
+    // is not paying, since a deferred schema is not in the window.
+    publishUsage(usageFixture({ mcpTools }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const meta = groupNamed(el, 'ac-dc')
+      .querySelector('.group-meta')
+      .textContent.trim();
+    expect(meta).toBe('3 tools · 1.6K loaded · 600 deferred');
+  });
+
+  it('says so when a server contributes no tokens at all', async () => {
     publishUsage(usageFixture({
-      mcpTools: [{ name: 'symbol_map', serverName: 'ac-dc', tokens: 900 }],
+      mcpTools: [{ name: 'ping', serverName: 'quiet', tokens: 0 }],
     }));
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const heading = sectionFor(el, 'MCP tools')
-      .querySelector('h3')
-      .textContent.replace(/\s+/g, ' ')
-      .trim();
-    expect(heading).toContain('1 tool,');
-    expect(heading).not.toContain('deferred');
+    expect(
+      groupNamed(el, 'quiet').querySelector('.group-meta').textContent.trim(),
+    ).toBe('1 tool · no tokens');
   });
 
-  it('lists every tool, loaded or not', async () => {
-    publishUsage(usageFixture({ mcpTools: tools }));
+  it('starts collapsed, so 35 tools do not bury the section', async () => {
+    publishUsage(usageFixture({ mcpTools }));
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(rows(el, 'MCP tools')).toEqual([
-      ['symbol_map', 'ac-dc', '900'],
-      ['doc_outline', 'ac-dc', '700'],
-      ['find_references', 'ac-dc', '600'],
+    const group = groupNamed(el, 'ac-dc');
+    expect(group.querySelector('table')).toBeNull();
+    expect(group.querySelector('.group-head').getAttribute('aria-expanded'))
+      .toBe('false');
+  });
+
+  it('lists a group\'s tools, heaviest first, when expanded', async () => {
+    publishUsage(usageFixture({ mcpTools }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const group = await expandGroup(el, 'ac-dc');
+    expect(groupRows(group)).toEqual([
+      ['symbol_map', '900'],
+      ['doc_outline', '700'],
+      ['find_references', '600'],
     ]);
+    expect(group.querySelector('.group-head').getAttribute('aria-expanded'))
+      .toBe('true');
+  });
+
+  it('collapses again on a second click', async () => {
+    publishUsage(usageFixture({ mcpTools }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    await expandGroup(el, 'ac-dc');
+    const group = await expandGroup(el, 'ac-dc');
+    expect(group.querySelector('table')).toBeNull();
+  });
+
+  it('expands one group without opening the others', async () => {
+    publishUsage(
+      usageFixture({ systemTools: [{ name: 'Read', tokens: 1100 }], mcpTools }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    await expandGroup(el, 'ac-dc');
+    expect(groupNamed(el, 'Built-in tools').querySelector('table')).toBeNull();
   });
 
   it('dims a tool whose schema is not in the window', async () => {
-    publishUsage(usageFixture({ mcpTools: tools }));
+    publishUsage(usageFixture({ mcpTools }));
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const dimmed = [
-      ...sectionFor(el, 'MCP tools').querySelectorAll('tr.deferred'),
-    ];
+    const group = await expandGroup(el, 'ac-dc');
+    const dimmed = [...group.querySelectorAll('tr.deferred')];
     expect(dimmed).toHaveLength(1);
     expect(dimmed[0].textContent).toContain('find_references');
   });
 
-  it('omits the section when the engine has no MCP tools', async () => {
+  it('gives the deferred built-ins their own group', async () => {
+    // Their own list in the payload, and their own group here: they are
+    // budgeted but not loaded, so mixing them into the built-in table
+    // would overstate what the session is paying for.
+    publishUsage(
+      usageFixture({
+        systemTools: [{ name: 'Read', tokens: 1100 }],
+        deferredBuiltinTools: [
+          { name: 'NotebookEdit', tokens: 400, isLoaded: false },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(groupNames(el)).toEqual([
+      'Built-in tools',
+      'Built-in tools, deferred',
+    ]);
+    const group = await expandGroup(el, 'Built-in tools, deferred');
+    expect(groupRows(group)).toEqual([['NotebookEdit', '400']]);
+    expect(group.querySelectorAll('tr.deferred')).toHaveLength(1);
+  });
+
+  it('omits the section when the engine reports no tools', async () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(sectionFor(el, 'MCP tools')).toBeUndefined();
+    expect(sectionFor(el, 'Tools')).toBeUndefined();
+  });
+});
+
+describe('ContextUsageTab MCP health', () => {
+  const mcpTools = [
+    { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
+    { name: 'search', serverName: 'other', tokens: 4000 },
+  ];
+
+  it('pills each server with its connection state', async () => {
+    publishWithStatus(usageFixture({ mcpTools }), {
+      mcpServers: [
+        { name: 'ac-dc', status: 'connected' },
+        { name: 'other', status: 'pending' },
+      ],
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(pillFor(el, 'ac-dc')).toBe('connected');
+    expect(pillFor(el, 'other')).toBe('connecting');
+  });
+
+  it('puts a failed server above a heavier healthy one', async () => {
+    // A failed server costs nothing, so heaviest-first buries the one row
+    // that needs acting on.
+    publishWithStatus(usageFixture({ mcpTools }), {
+      mcpServers: [
+        { name: 'ac-dc', status: 'failed', error: 'spawn ENOENT' },
+        { name: 'other', status: 'connected' },
+      ],
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(groupNames(el)).toEqual(['ac-dc', 'other']);
+  });
+
+  it('lists a server that failed before it could offer any tools', async () => {
+    // The interesting case, and the one a listing built from `mcpTools`
+    // alone answers by silently omitting.
+    publishWithStatus(usageFixture({ mcpTools: [] }), {
+      mcpServers: [
+        { name: 'broken', status: 'failed', error: 'connection refused' },
+      ],
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(groupNames(el)).toEqual(['broken']);
+    const group = await expandGroup(el, 'broken');
+    expect(group.textContent).toContain('connection refused');
+    expect(group.querySelector('.empty').textContent).toContain(
+      'contributed no tools',
+    );
+  });
+
+  it('shows scope, transport and version behind the pill', async () => {
+    publishWithStatus(usageFixture({ mcpTools }), {
+      mcpServers: [
+        {
+          name: 'ac-dc',
+          status: 'connected',
+          scope: 'project',
+          config: { type: 'sse', url: 'http://localhost:9000' },
+          serverInfo: { name: 'ac-dc', version: '0.4.1' },
+          tools: [{ name: 'symbol_map' }, { name: 'ui_state' }],
+        },
+      ],
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const group = await expandGroup(el, 'ac-dc');
+    expect(group.querySelector('.note').textContent.trim()).toBe(
+      'project · sse · v0.4.1 · 2 advertised',
+    );
+  });
+
+  it('says health is missing rather than implying the server is fine',
+    async () => {
+      publishUsage(usageFixture({ mcpTools }));
+      const el = mountTab();
+      await settle(el);
+      await showSection(el, 'Session');
+      expect(pillFor(el, 'ac-dc')).toBeNull();
+      const group = await expandGroup(el, 'ac-dc');
+      expect(group.querySelector('.note').textContent.replace(/\s+/g, ' '))
+        .toContain('MCP status was not available');
+    });
+
+  it('keeps the breakdown when the status call fails', async () => {
+    // Health is a decoration on the numbers; an error from it must not
+    // replace a page of usable ones.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture({ mcpTools }),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_mcp_status': () => {
+        throw new Error('control request timeout');
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(el._error).toBe('');
+    expect(groupNames(el)).toEqual(['other', 'ac-dc']);
+    expect(pillFor(el, 'ac-dc')).toBeNull();
+  });
+
+  it('drops a stale pill rather than keeping it past its fetch', async () => {
+    // "connected" is a claim about now. Kept from an earlier fetch it is
+    // the one field where being out of date is worse than being absent.
+    let status = { mcpServers: [{ name: 'ac-dc', status: 'connected' }] };
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture({ mcpTools }),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_mcp_status': () => status,
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(pillFor(el, 'ac-dc')).toBe('connected');
+
+    status = { error: 'no session' };
+    el.shadowRoot.querySelectorAll('.toolbar button')[1].click();
+    await settle(el);
+    expect(pillFor(el, 'ac-dc')).toBeNull();
+  });
+
+  it('renders an unrecognised status as its raw name', async () => {
+    publishWithStatus(usageFixture({ mcpTools }), {
+      mcpServers: [{ name: 'ac-dc', status: 'reticulating' }],
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(pillFor(el, 'ac-dc')).toBe('reticulating');
   });
 });
 
@@ -1470,22 +1899,34 @@ describe('ContextUsageTab agent definitions', () => {
   // — a live capture came back with the list empty. It is the CLI's own
   // wire schema now: `{agentType, source, tokens}`. The `name` fallback
   // below is kept for a payload that predates it.
-  it('lists agents by type and source', async () => {
+  it('lists agents by type and source, heaviest first', async () => {
     publishUsage(
       usageFixture({
         agents: [
+          { name: 'reviewer', source: 'projectSettings', tokens: 300 },
           { agentType: 'Explore', source: 'built-in', tokens: 450 },
-          { name: 'reviewer', source: 'project', tokens: 300 },
         ],
       }),
     );
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
+    // Sources are settings keys on the wire; these are the words the CLI
+    // itself prints for them.
     expect(rows(el, 'Agent definitions')).toEqual([
-      ['Explore', 'built-in', '450'],
-      ['reviewer', 'project', '300'],
+      ['Explore', 'Built-in', '450'],
+      ['reviewer', 'Project', '300'],
     ]);
+  });
+
+  it('passes an unmapped source through rather than blanking it', async () => {
+    publishUsage(
+      usageFixture({ agents: [{ agentType: 'a', source: 'newScope', tokens: 1 }] }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(rows(el, 'Agent definitions')).toEqual([['a', 'newScope', '1']]);
   });
 
   it('omits the section when no agents are loaded', async () => {
@@ -1494,6 +1935,90 @@ describe('ContextUsageTab agent definitions', () => {
     await settle(el);
     await showSection(el, 'Session');
     expect(sectionFor(el, 'Agent definitions')).toBeUndefined();
+  });
+});
+
+describe('ContextUsageTab skills', () => {
+  it('names both counts, because they answer different questions', async () => {
+    publishUsage(
+      usageFixture({
+        skills: {
+          totalSkills: 40,
+          includedSkills: 2,
+          tokens: 620,
+          skillFrontmatter: [
+            { name: 'deploy', source: 'projectSettings', tokens: 220 },
+            { name: 'review', source: 'plugin', pluginName: 'acme', tokens: 400 },
+          ],
+        },
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(heading(el, 'Skills')).toContain('2 of 40 loaded, 620 tokens');
+    expect(rows(el, 'Skills')).toEqual([
+      ['review', 'Plugin (acme)', '400'],
+      ['deploy', 'Project', '220'],
+    ]);
+  });
+
+  it('reports a total the engine did not itemise', async () => {
+    publishUsage(usageFixture({ skills: { totalSkills: 3, tokens: 90 } }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Skills').textContent).toContain(
+      'named no individual skills',
+    );
+  });
+
+  it('omits the section when the session has no skills', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Skills')).toBeUndefined();
+  });
+});
+
+describe('ContextUsageTab slash commands', () => {
+  it('reports the counts the engine gives, and nothing more', async () => {
+    // No per-command rows exist in the payload, so a table with one row
+    // in it would be a table pretending to be a list.
+    publishUsage(
+      usageFixture({
+        slashCommands: { totalCommands: 12, includedCommands: 9, tokens: 1400 },
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const text = sectionFor(el, 'Slash commands')
+      .textContent.replace(/\s+/g, ' ')
+      .trim();
+    expect(text).toContain('9 of 12 in the window, costing 1.4K tokens');
+    expect(sectionFor(el, 'Slash commands').querySelector('table')).toBeNull();
+  });
+
+  it('falls back to the total when only one count is reported', async () => {
+    publishUsage(
+      usageFixture({ slashCommands: { totalCommands: 12, tokens: 1400 } }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(
+      sectionFor(el, 'Slash commands').textContent.replace(/\s+/g, ' '),
+    ).toContain('12 available, costing 1.4K tokens');
+  });
+
+  it('omits the section when the engine reports no commands', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Slash commands')).toBeUndefined();
   });
 });
 

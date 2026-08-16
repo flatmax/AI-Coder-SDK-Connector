@@ -128,9 +128,13 @@ in the tree:
 - **A session load must not pop the HUD.** `session-changed` refreshes the numbers and shows nothing,
   because a HUD that appears on resume reports a turn nobody took. Auto-resume means this fires on
   every server start now, not just on a click.
-- **The health payload already carries what the bridge-failure banner needs.** `EngineHealth.to_dict()`
-  includes the per-server `mcp` list; the chat panel's banner deliberately leaves it out because a
-  per-server status wants the Context tab's room. Read it there rather than adding a second source.
+- **`EngineHealth.mcp` is a field with no writer.** This bullet used to say the health payload already
+  carried what a per-server status view needs. It does not: `mcp` is declared on `EngineHealth`,
+  serialised by `to_dict()`, and assigned by nothing in `src/`, so every consumer reads `[]`. The
+  Context tab's Session section therefore calls `ClaudeCodeService.get_mcp_status()` alongside the
+  breakdown and tolerates it failing — health is a decoration on the numbers, so its error must not
+  replace them. Anything else wanting per-server status has the same two options, and the empty list is
+  not one of them.
 - **A browsed turn and a live turn are the same objects.** `render_messages` returns the block shapes a
   live turn produces and the browser restores them through `restoreMessage`. Anything phase 6 adds to a
   live turn's rendering has to survive arriving that way, or a resumed conversation loses the

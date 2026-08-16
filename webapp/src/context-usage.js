@@ -312,6 +312,229 @@ export function overLimit(usage) {
 }
 
 /**
+ * The settings scopes the engine attributes an agent or a skill to.
+ *
+ * `source` is not a path. It is one of these keys, so the spec's "click
+ * an agent or skill to open its defining file" cannot be built from this
+ * payload — there is no file in it to open. Read from the CLI's own
+ * label mapper rather than inferred from the two values a live session
+ * happened to report, which is also how the raw keys were found to be
+ * reaching our tables: "projectSettings" where `/context` prints
+ * "Project".
+ *
+ * One divergence inside the CLI is worth recording: its shared mapper
+ * calls `policySettings` "Managed", while the switch inlined in its
+ * markdown renderer calls the same value "Policy". The shared one wins
+ * here, because it is the one the CLI also uses for skills.
+ */
+const _SOURCE_LABELS = {
+  userSettings: 'User',
+  projectSettings: 'Project',
+  localSettings: 'Local',
+  flagSettings: 'Flag',
+  policySettings: 'Managed',
+  plugin: 'Plugin',
+  'built-in': 'Built-in',
+  mcp: 'MCP',
+  memoryStore: 'Memory store',
+};
+
+/**
+ * A settings scope, in the words the CLI uses for it.
+ *
+ * An unknown key passes through unchanged rather than becoming "Unknown":
+ * a scope we have not seen is still more informative raw than blanked,
+ * and the CLI does the same.
+ *
+ * @param {unknown} value A `source` from `agents[]` or `skillFrontmatter`.
+ * @returns {string} A label, or '—' when there is nothing to label.
+ */
+export function sourceLabel(value) {
+  if (typeof value !== 'string' || !value.trim()) return '—';
+  const v = value.trim();
+  return _SOURCE_LABELS[v] || v;
+}
+
+/**
+ * MCP connection states, as the SDK types them, with a colour each.
+ *
+ * `needs-auth` is amber rather than red on purpose: the server is
+ * reachable and waiting on the user, which is a different situation from
+ * one that failed to start. `disabled` is grey because it is a choice
+ * somebody made, not a fault.
+ */
+const _MCP_STATUS = {
+  connected: { label: 'connected', color: '#7ee787' },
+  pending: { label: 'connecting', color: '#d29922' },
+  failed: { label: 'failed', color: '#f85149' },
+  'needs-auth': { label: 'needs auth', color: '#d29922' },
+  disabled: { label: 'disabled', color: '#6e7681' },
+};
+
+/**
+ * Per-server connection health, keyed by server name.
+ *
+ * Takes the `get_mcp_status()` payload rather than the usage breakdown:
+ * `mcpTools` says what each server *costs* and nothing about whether it
+ * is answering, and a token cost for a server that failed to start is
+ * the most misleading row this tab could draw.
+ *
+ * `EngineHealth.mcp` would have been the cheaper source — the health
+ * payload is already pushed to the browser — but that field is declared,
+ * serialised, and never written by anything, so it is always `[]`.
+ *
+ * @param {object|null|undefined} status An `McpStatusResponse`.
+ * @returns {Map<string, {status: string, label: string, color: string,
+ *   error: string, scope: string, transport: string, version: string,
+ *   toolCount: number|null}>}
+ */
+export function mcpHealth(status) {
+  const out = new Map();
+  const servers = Array.isArray(status?.mcpServers) ? status.mcpServers : [];
+  for (const s of servers) {
+    if (!s || typeof s !== 'object') continue;
+    const name = String(s.name ?? '').trim();
+    if (!name) continue;
+    const key = String(s.status ?? '').trim();
+    const known = _MCP_STATUS[key];
+    out.set(name, {
+      status: key,
+      label: known ? known.label : (key || 'unknown'),
+      color: known ? known.color : UNCOLOURED,
+      error: typeof s.error === 'string' ? s.error : '',
+      scope: typeof s.scope === 'string' ? s.scope : '',
+      // `config` is a union over stdio / sse / http / sdk / claudeai-proxy,
+      // and `type` is the discriminant every arm carries.
+      transport: typeof s.config?.type === 'string' ? s.config.type : '',
+      version: typeof s.serverInfo?.version === 'string'
+        ? s.serverInfo.version
+        : '',
+      toolCount: Array.isArray(s.tools) ? s.tools.length : null,
+    });
+  }
+  return out;
+}
+
+/** A connection state that wants the user's attention. */
+function _unwell(entry) {
+  return entry?.status === 'failed' || entry?.status === 'needs-auth';
+}
+
+/**
+ * `mcpTools` grouped by the server that provides them, joined to health.
+ *
+ * The flat table this replaces put 35 `ac-dc` rows next to two from
+ * another server and made the question the section exists to answer —
+ * what does each server cost me — a subtraction the reader had to do.
+ *
+ * Loaded and deferred tokens are counted separately because they are
+ * different facts: deferred is the normal state of an MCP tool until
+ * first use, so a server's deferred total is what it *would* cost, and
+ * summing the two would overstate every server in the list.
+ *
+ * A server that appears in `health` but contributes no tools still gets a
+ * row. That is not an edge case, it is the interesting one: a server that
+ * failed to start has no tools *because* it failed, and a listing built
+ * from `mcpTools` alone would answer "which servers do I have" by
+ * silently omitting the broken one.
+ *
+ * @param {object|null|undefined} usage A `ContextUsageResponse`.
+ * @param {Map<string, object>} [health] From `mcpHealth`.
+ * @returns {{name: string, tools: object[], tokens: number,
+ *   loadedTokens: number, deferredTokens: number, loadedCount: number,
+ *   deferredCount: number, health: object|null}[]}
+ *   Servers wanting attention first, then heaviest, ties broken by name
+ *   so the order is stable across refreshes.
+ */
+export function serverGroups(usage, health) {
+  const tools = Array.isArray(usage?.mcpTools) ? usage.mcpTools : [];
+  const map = health instanceof Map ? health : new Map();
+  const byServer = new Map();
+  const group = (name) => {
+    if (!byServer.has(name)) {
+      byServer.set(name, {
+        name,
+        tools: [],
+        tokens: 0,
+        loadedTokens: 0,
+        deferredTokens: 0,
+        loadedCount: 0,
+        deferredCount: 0,
+        health: map.get(name) || null,
+      });
+    }
+    return byServer.get(name);
+  };
+  for (const t of tools) {
+    if (!t || typeof t !== 'object') continue;
+    const g = group(String(t.serverName ?? '').trim() || 'unknown');
+    const tokens = _tokens(t.tokens);
+    const deferred = t.isLoaded === false;
+    g.tools.push({ name: String(t.name ?? '—'), tokens, deferred });
+    g.tokens += tokens;
+    if (deferred) {
+      g.deferredTokens += tokens;
+      g.deferredCount += 1;
+    } else {
+      g.loadedTokens += tokens;
+      g.loadedCount += 1;
+    }
+  }
+  for (const name of map.keys()) group(name);
+  for (const g of byServer.values()) {
+    g.tools.sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name));
+  }
+  return [...byServer.values()].sort((a, b) => {
+    // Unwell first: a failed server costs nothing, so a pure
+    // heaviest-first order buries the one row that needs acting on.
+    const bad = Number(_unwell(b.health)) - Number(_unwell(a.health));
+    if (bad) return bad;
+    return b.tokens - a.tokens || a.name.localeCompare(b.name);
+  });
+}
+
+/**
+ * The skills whose frontmatter is in the window, with their scope.
+ *
+ * `skills` also carries `totalSkills` and `includedSkills`, and the gap
+ * between them matters: only the included ones are costing anything, and
+ * a session with 40 skills available and 3 loaded is a different picture
+ * from one with 3 of 3.
+ *
+ * @returns {{rows: object[], tokens: number, total: number|null,
+ *   included: number|null}|null}
+ */
+export function skillInventory(usage) {
+  const skills = usage?.skills;
+  if (!skills || typeof skills !== 'object' || Array.isArray(skills)) {
+    return null;
+  }
+  const rows = (Array.isArray(skills.skillFrontmatter)
+    ? skills.skillFrontmatter
+    : []
+  )
+    .filter((s) => s && typeof s === 'object')
+    .map((s) => ({
+      name: String(s.name ?? '—'),
+      source: sourceLabel(s.source),
+      // A plugin's skills all report `source: 'plugin'`, so the plugin's
+      // own name is the only thing distinguishing them.
+      plugin: typeof s.pluginName === 'string' ? s.pluginName : '',
+      tokens: _tokens(s.tokens),
+    }))
+    .sort((a, b) => b.tokens - a.tokens || a.name.localeCompare(b.name));
+  const tokens = _tokens(skills.tokens);
+  if (rows.length === 0 && tokens === 0) return null;
+  const total = Number.isFinite(Number(skills.totalSkills))
+    ? Number(skills.totalSkills)
+    : null;
+  const included = Number.isFinite(Number(skills.includedSkills))
+    ? Number(skills.includedSkills)
+    : null;
+  return { rows, tokens, total, included };
+}
+
+/**
  * The message parts the engine accounts for, in conversation order.
  *
  * Order is fixed rather than ranked. These are segments of one bar and
