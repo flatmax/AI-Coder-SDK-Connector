@@ -29,6 +29,12 @@
 //     leaves the list on the `sessionDeleted` broadcast rather than
 //     locally — every open browser has the same stale row to drop,
 //     including this one.
+//   - **Images arrive as pointers, not bytes.** A prompt's image
+//     blocks come back from `history_load` as `image_refs`, and each
+//     one is resolved separately by `history_image`. Entries hold
+//     pasted images verbatim as base64, so a load that inlined them
+//     would push megabytes at every client on every open and again on
+//     every reconnect.
 //
 // Responsibilities:
 //
@@ -38,7 +44,7 @@
 //     flooding the server while the user types
 //   - Preview of a selected session's messages (simplified
 //     rendering — role labels + raw content, no file-mention
-//     wrapping)
+//     wrapping), resolving each image pointer in it to a thumbnail
 //   - Resume or fork the selected session, which triggers the
 //     server's sessionChanged broadcast that the chat panel's
 //     existing handler consumes
@@ -130,6 +136,29 @@ function historyError(result) {
  */
 function isResumable(session) {
   return !session || session.resumable !== false;
+}
+
+/**
+ * The image pointers on a rendered message, always an array.
+ *
+ * A pointer is `{session_id, entry_uuid, block, media_type}` — what
+ * `history_load` renders in place of an image block's base64.
+ */
+function imageRefs(msg) {
+  if (!msg || !Array.isArray(msg.image_refs)) return [];
+  return msg.image_refs.filter(
+    (ref) => ref && typeof ref === 'object',
+  );
+}
+
+/**
+ * Cache key for one image pointer, or '' if it names nothing
+ * fetchable. Keyed on the pointer's own three fields rather than on
+ * the selected session, so the cache survives switching away and back.
+ */
+function imageKey(ref) {
+  if (!ref || !ref.session_id || !ref.entry_uuid) return '';
+  return `${ref.session_id}|${ref.entry_uuid}|${ref.block ?? 0}`;
 }
 
 /**
@@ -579,6 +608,30 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       border: 1px solid rgba(240, 246, 252, 0.15);
       display: block;
     }
+    /* A pointer that has not been resolved yet, and one that never
+     * will be. Both hold the same 60px box the image will occupy, so
+     * a session full of screenshots does not reflow line by line as
+     * they arrive. */
+    .preview-image-pending,
+    .preview-image-missing {
+      width: 60px;
+      height: 60px;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.2rem;
+    }
+    .preview-image-pending {
+      border: 1px dashed rgba(240, 246, 252, 0.2);
+      background: rgba(240, 246, 252, 0.04);
+      opacity: 0.5;
+    }
+    .preview-image-missing {
+      border: 1px solid rgba(248, 81, 73, 0.35);
+      background: rgba(248, 81, 73, 0.08);
+      cursor: help;
+    }
     /* Edit-block cards — mirrored from chat-panel so
      * historical assistant messages render edit blocks
      * the same way the live chat does. Shadow-DOM
@@ -787,6 +840,12 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     // when the user types faster than the server responds.
     this._searchGeneration = 0;
     this._messagesGeneration = 0;
+    // Resolved image pointers, keyed by `imageKey`. Not a reactive
+    // property: it is written one entry at a time from a loop that
+    // calls `requestUpdate()` itself, and replacing the whole Map per
+    // image so Lit could see the change would be a lie about what
+    // changed.
+    this._images = new Map();
 
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onContextDismiss = this._onContextDismiss.bind(this);
@@ -934,6 +993,10 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
       // happened and said nothing.
       this._messagesError = historyError(result);
       this._selectedMessages = Array.isArray(result) ? result : [];
+      // Deliberately not awaited: the transcript is readable now and
+      // the images arrive underneath it. Awaiting here would hold the
+      // whole preview behind the last screenshot.
+      this._hydrateImages(this._selectedMessages, gen);
     } catch (err) {
       console.error(
         '[history-browser] history_load failed',
@@ -947,6 +1010,71 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     } finally {
       if (gen === this._messagesGeneration) {
         this._loadingMessages = false;
+      }
+    }
+  }
+
+  /**
+   * Resolve the image pointers in a loaded session to data URIs.
+   *
+   * `history_load` renders image blocks as `{session_id, entry_uuid,
+   * block, media_type}` rather than base64: a session with a handful of
+   * screenshots is megabytes of it, and inlining them would send all of
+   * it on every open and every reconnect. So the bytes come back one
+   * pointer at a time, here, from `history_image`.
+   *
+   * Sequentially, and not because of ordering — a session that pasted
+   * twenty screenshots would otherwise open twenty concurrent RPCs at
+   * a backend whose reads are disk-bound anyway. The tiles fill in as
+   * each one lands.
+   *
+   * Results are cached across sessions, including the failures: a
+   * missing image is missing every time it is looked at, and retrying
+   * it on each reselect is a stall the user cannot fix.
+   */
+  async _hydrateImages(messages, gen) {
+    if (!this.rpcConnected) return;
+    for (const msg of messages) {
+      const refs = imageRefs(msg);
+      for (const ref of refs) {
+        // Re-checked every iteration, not once: the loop awaits, and
+        // the user is free to click another session while it does.
+        if (gen !== this._messagesGeneration) return;
+        const key = imageKey(ref);
+        if (!key || this._images.has(key)) continue;
+        let entry;
+        try {
+          const result = await withRpcTimeout(
+            this.rpcExtract(
+              'ClaudeCodeService.history_image',
+              ref.session_id,
+              ref.entry_uuid,
+              ref.block,
+            ),
+            HISTORY_TIMEOUT_MS,
+            'history_image',
+          );
+          entry =
+            result && result.data_uri
+              ? { dataUri: String(result.data_uri) }
+              : {
+                  error:
+                    (result && result.error && String(result.error)) ||
+                    'That image is no longer readable',
+                };
+        } catch (err) {
+          console.error(
+            '[history-browser] history_image failed',
+            err,
+          );
+          entry = {
+            error: err?.message || 'Could not read that image',
+          };
+        }
+        this._images.set(key, entry);
+        // A Map is not a reactive property — the tile that is waiting
+        // on this entry only redraws if we say so.
+        this.requestUpdate();
       }
     }
   }
@@ -1602,12 +1730,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
           ? 'Assistant'
           : msg.role || 'Message';
     // Normalize content for both text rendering and
-    // image extraction. Session-reloaded messages with
-    // images come through as multimodal arrays; the
+    // image extraction. Multimodal arrays come from
+    // callers that hand us a raw message shape; the
     // normalizer strips text and images into clean
-    // fields. Messages with a pre-existing `images`
-    // field (legacy image_refs reconstruction on the
-    // server) take precedence.
+    // fields. A pre-existing `images` field of data URIs
+    // takes precedence over extraction.
     const normalized = normalizeMessageContent(msg);
     const textContent =
       typeof msg.content === 'string'
@@ -1616,6 +1743,11 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     const images = Array.isArray(msg.images)
       ? msg.images
       : normalized.images;
+    // Pointers are the shape `history_load` renders; the data-URI
+    // array above is what a live paste hands us in the same turn. Both
+    // can be present on the same message and neither displaces the
+    // other, so they are drawn as two groups rather than merged.
+    const refs = imageRefs(msg);
     // For assistant messages, segment the response so edit
     // blocks render as visual cards rather than as a wall
     // of marker-laden prose. Past sessions carry no live
@@ -1680,6 +1812,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
         ${images.length > 0
           ? this._renderPreviewImages(images)
           : ''}
+        ${refs.length > 0 ? this._renderImageRefs(refs) : ''}
       </div>
     `;
   }
@@ -1697,6 +1830,54 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
             />
           `,
         )}
+      </div>
+    `;
+  }
+
+  /**
+   * One tile per image pointer, in whichever of its three states it
+   * is in: waiting on `history_image`, resolved to bytes, or gone.
+   *
+   * A failure gets a tile of its own rather than nothing. An image
+   * silently absent from a prompt reads as a prompt that never had one,
+   * which is a different conversation from the one that happened.
+   */
+  _renderImageRefs(refs) {
+    return html`
+      <div class="preview-images" role="list">
+        ${refs.map((ref) => {
+          const entry = this._images.get(imageKey(ref));
+          if (entry?.dataUri) {
+            return html`
+              <img
+                class="preview-image"
+                src=${entry.dataUri}
+                alt=""
+                role="listitem"
+              />
+            `;
+          }
+          if (entry?.error) {
+            return html`
+              <div
+                class="preview-image-missing"
+                role="listitem"
+                title=${entry.error}
+              >
+                🚫
+              </div>
+            `;
+          }
+          return html`
+            <div
+              class="preview-image-pending"
+              role="listitem"
+              title=${ref.media_type || 'image'}
+            >
+              🖼
+            </div>
+          `;
+        })}
       </div>
     `;
   }

@@ -16,8 +16,9 @@
 //   - Search mode toggle
 //   - Keyboard shortcuts (Escape closes, Escape in search clears first)
 //   - Backdrop click closes
-//   - Load button calls load_session_into_context
-//   - session-loaded event fires on successful load
+//   - Resume and fork call resume_session; delete is two-click
+//   - Image pointers resolved one at a time via history_image
+//   - session-loaded event fires on successful resume
 //   - Stale response handling (generation guards)
 
 import {
@@ -1461,10 +1462,9 @@ describe('HistoryBrowser preview images', () => {
   }
 
   it('renders thumbnails for messages with images field', async () => {
-    // The history store reconstructs image_refs into a
-    // top-level `images` array (the backend's
-    // get_session_messages path does this). The preview
-    // should render thumbnails from it.
+    // A message carrying its own data URIs — what a live paste hands
+    // us in the turn it happened. Loaded history uses pointers
+    // instead; both shapes render.
     const el = await setupWithImage([
       {
         role: 'user',
@@ -1525,6 +1525,310 @@ describe('HistoryBrowser preview images', () => {
     expect(body.textContent).toContain('look');
     // And thumbnail renders.
     expect(el.shadowRoot.querySelector('.preview-image')).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image pointers
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser image pointers', () => {
+  function ref(overrides = {}) {
+    return {
+      session_id: 's1',
+      entry_uuid: 'u1',
+      block: 0,
+      media_type: 'image/png',
+      ...overrides,
+    };
+  }
+
+  /** Enough turns of the loop for sequential hydration to drain. */
+  async function drain(el, rounds = 6) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await el.updateComplete;
+  }
+
+  async function setupWithRefs(messages, image, sessions) {
+    const rows =
+      sessions ||
+      [
+        {
+          session_id: 's1',
+          timestamp: new Date().toISOString(),
+          message_count: messages.length,
+          preview: 'with image',
+          first_role: 'user',
+        },
+      ];
+    const load = vi.fn().mockResolvedValue(messages);
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue(rows),
+      'ClaudeCodeService.history_load': load,
+      'ClaudeCodeService.history_image': image,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return el;
+  }
+
+  it('resolves a pointer to a thumbnail', async () => {
+    const image = vi
+      .fn()
+      .mockResolvedValue({ data_uri: 'data:image/png;base64,PNG' });
+    const el = await setupWithRefs(
+      [{ role: 'user', content: 'look', image_refs: [ref()] }],
+      image,
+    );
+    await drain(el);
+    expect(image).toHaveBeenCalledWith('s1', 'u1', 0);
+    const thumb = el.shadowRoot.querySelector('.preview-image');
+    expect(thumb.src).toContain('base64,PNG');
+  });
+
+  it('holds the tile while the pointer is unresolved', async () => {
+    // The box is there before the bytes are, so a session full of
+    // screenshots does not reflow line by line as they land.
+    let release;
+    const image = vi.fn(
+      () => new Promise((r) => { release = r; }),
+    );
+    const el = await setupWithRefs(
+      [{ role: 'user', content: 'look', image_refs: [ref()] }],
+      image,
+    );
+    expect(
+      el.shadowRoot.querySelector('.preview-image-pending'),
+    ).toBeTruthy();
+    expect(el.shadowRoot.querySelector('.preview-image')).toBeNull();
+    release({ data_uri: 'data:image/png;base64,PNG' });
+    await drain(el);
+    expect(el.shadowRoot.querySelector('.preview-image')).toBeTruthy();
+    expect(
+      el.shadowRoot.querySelector('.preview-image-pending'),
+    ).toBeNull();
+  });
+
+  it('does not hold the transcript behind the images', async () => {
+    // The text is readable while the bytes are still coming.
+    const image = vi.fn(() => new Promise(() => {}));
+    const el = await setupWithRefs(
+      [{ role: 'user', content: 'look at this', image_refs: [ref()] }],
+      image,
+    );
+    expect(el._loadingMessages).toBe(false);
+    expect(
+      el.shadowRoot.querySelector('.preview-body').textContent,
+    ).toContain('look at this');
+  });
+
+  it('marks an image that is gone rather than dropping it', async () => {
+    // An image silently absent from a prompt reads as a prompt that
+    // never had one — a different conversation from the one that
+    // happened.
+    const image = vi
+      .fn()
+      .mockResolvedValue({ error: 'That image is no longer in the transcript' });
+    const el = await setupWithRefs(
+      [{ role: 'user', content: 'look', image_refs: [ref()] }],
+      image,
+    );
+    await drain(el);
+    const tile = el.shadowRoot.querySelector('.preview-image-missing');
+    expect(tile).toBeTruthy();
+    expect(tile.title).toContain('no longer in the transcript');
+    expect(el.shadowRoot.querySelector('.preview-image')).toBeNull();
+  });
+
+  it('marks an image whose fetch threw', async () => {
+    const image = vi.fn().mockRejectedValue(new Error('socket closed'));
+    const consoleSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    try {
+      const el = await setupWithRefs(
+        [{ role: 'user', content: 'look', image_refs: [ref()] }],
+        image,
+      );
+      await drain(el);
+      expect(
+        el.shadowRoot.querySelector('.preview-image-missing').title,
+      ).toContain('socket closed');
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('fetches each pointer once, one at a time', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const image = vi.fn(async (_s, _u, block) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 0));
+      inFlight -= 1;
+      return { data_uri: `data:image/png;base64,B${block}` };
+    });
+    const el = await setupWithRefs(
+      [
+        {
+          role: 'user',
+          content: 'three',
+          image_refs: [
+            ref({ block: 0 }),
+            ref({ block: 1 }),
+            ref({ block: 2 }),
+          ],
+        },
+      ],
+      image,
+    );
+    await drain(el, 12);
+    expect(image).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1);
+    const thumbs = [...el.shadowRoot.querySelectorAll('.preview-image')];
+    expect(thumbs.map((t) => t.src.slice(-2))).toEqual([
+      'B0',
+      'B1',
+      'B2',
+    ]);
+  });
+
+  it('caches across a reselect, failures included', async () => {
+    const image = vi
+      .fn()
+      .mockResolvedValueOnce({ data_uri: 'data:image/png;base64,PNG' })
+      .mockResolvedValueOnce({ error: 'gone' });
+    const el = await setupWithRefs(
+      [
+        {
+          role: 'user',
+          content: 'two',
+          image_refs: [ref({ block: 0 }), ref({ block: 1 })],
+        },
+      ],
+      image,
+    );
+    await drain(el, 10);
+    expect(image).toHaveBeenCalledTimes(2);
+    // Leave and come back: the pointers are unchanged, so nothing is
+    // refetched — least of all the failure, which would stall the
+    // preview again to reach the same answer.
+    el._selectedSessionId = null;
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    await drain(el, 10);
+    expect(image).toHaveBeenCalledTimes(2);
+    expect(el.shadowRoot.querySelector('.preview-image')).toBeTruthy();
+    expect(
+      el.shadowRoot.querySelector('.preview-image-missing'),
+    ).toBeTruthy();
+  });
+
+  it('abandons hydration when the selection moves on', async () => {
+    // The generation guard is rechecked every iteration, not once:
+    // the loop awaits, and the user is free to click away while it
+    // does. Otherwise a slow first image pays for the rest of a
+    // session nobody is looking at any more.
+    const seen = [];
+    let release;
+    const image = vi.fn((_s, _u, block) => {
+      seen.push(block);
+      return new Promise((r) => { release = r; });
+    });
+    const row = (session_id, preview) => ({
+      session_id,
+      timestamp: new Date().toISOString(),
+      message_count: 1,
+      preview,
+      first_role: 'user',
+    });
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue([row('s1', 'one'), row('s2', 'two')]),
+      // s2 has no images of its own, so anything fetched after the
+      // click could only come from the abandoned loop.
+      'ClaudeCodeService.history_load': vi.fn(async (id) =>
+        id === 's1'
+          ? [
+              {
+                role: 'user',
+                content: 'many',
+                image_refs: [
+                  ref({ block: 0 }),
+                  ref({ block: 1 }),
+                  ref({ block: 2 }),
+                ],
+              },
+            ]
+          : [{ role: 'user', content: 'no images here' }],
+      ),
+      'ClaudeCodeService.history_image': image,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.session-item')[0].click();
+    await settle(el);
+    // Exactly one fetch is in flight and blocked.
+    expect(seen).toEqual([0]);
+
+    el.shadowRoot.querySelectorAll('.session-item')[1].click();
+    await settle(el);
+    // Let the in-flight one land. Its result is cached — the loop
+    // just must not go on to ask for blocks 1 and 2.
+    release({ data_uri: 'data:image/png;base64,X' });
+    await drain(el, 10);
+    expect(seen).toEqual([0]);
+    expect(
+      el.shadowRoot.querySelector('.preview-body').textContent,
+    ).toContain('no images here');
+  });
+
+  it('ignores a pointer that names nothing fetchable', async () => {
+    const image = vi.fn();
+    const el = await setupWithRefs(
+      [
+        {
+          role: 'user',
+          content: 'broken',
+          image_refs: [{ media_type: 'image/png' }],
+        },
+      ],
+      image,
+    );
+    await drain(el);
+    expect(image).not.toHaveBeenCalled();
+    // Still a tile: the entry said there was an image there.
+    expect(
+      el.shadowRoot.querySelector('.preview-image-pending'),
+    ).toBeTruthy();
+  });
+
+  it('renders data URIs and pointers on the same message', async () => {
+    const image = vi
+      .fn()
+      .mockResolvedValue({ data_uri: 'data:image/png;base64,REF' });
+    const el = await setupWithRefs(
+      [
+        {
+          role: 'user',
+          content: 'both',
+          images: ['data:image/png;base64,LIVE'],
+          image_refs: [ref()],
+        },
+      ],
+      image,
+    );
+    await drain(el);
+    const thumbs = [...el.shadowRoot.querySelectorAll('.preview-image')];
+    expect(thumbs).toHaveLength(2);
+    expect(thumbs[0].src).toContain('LIVE');
+    expect(thumbs[1].src).toContain('REF');
   });
 });
 
