@@ -39,6 +39,7 @@ from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineHealth, EngineStartupError, resolve_cli
 from ac_dc.claude_code.messages import Event, TurnTranslator
 from ac_dc.claude_code.options import build_options, file_checkpointing_available
+from ac_dc.claude_code import resume_cleanup
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +441,10 @@ class EngineSession:
             self._session_lost = False
             self.health.connected = True
             self.health.last_error = None
+            # A resume with a store materialises a temp CLAUDE_CONFIG_DIR
+            # that only disconnect() cleans up, and the signal handler
+            # never reaches disconnect(). Recorded here, removed there.
+            resume_cleanup.remember(client)
             if resume and not fork_session:
                 # The init message will report the resumed ID; recording it
                 # now means get_current_state() is right before the first

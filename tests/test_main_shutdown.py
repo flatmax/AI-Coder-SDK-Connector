@@ -1,17 +1,26 @@
-"""Tests for the CLI-child kill on shutdown — conversion phase 2.
+"""Tests for what ``os._exit`` skips on shutdown — phases 2 and 5.
 
 ``main._signal_handler`` exits via ``os._exit`` to avoid hanging on
 ``_heavy_init``'s sentence-transformer load in the default executor. That
-also skips ``atexit``, and the Claude Agent SDK's *only* orphan guard is
-an ``atexit`` hook, so the CLI child has to be killed explicitly.
+also skips ``atexit`` and every teardown that only runs inside the event
+loop, and the SDK puts two things there.
 
-Measured before the fix: SIGINT during a streaming turn left the
-``claude`` process running for a further ~38 seconds, reparented to init,
-still holding the repo as its working directory.
+**The CLI child** (phase 2). The SDK's *only* orphan guard is an
+``atexit`` hook, so the child has to be killed explicitly. Measured
+before the fix: SIGINT during a streaming turn left the ``claude``
+process running for a further ~38 seconds, reparented to init, still
+holding the repo as its working directory.
+
+**The resumed session's temp config dir** (phase 5, found by the live
+verification). The SDK removes it in ``disconnect()``, which this path
+never reaches, so every Ctrl-C abandoned one holding a transcript copy
+and a live access token — once per launch cycle, since auto-resume makes
+every start after the first a resume.
 
 These tests spawn real processes rather than mocking ``os.kill``, because
 the thing under test *is* the signal delivery — a mock would pass whether
-or not the signal reached anything.
+or not the signal reached anything. For the same reason the temp-dir
+tests use real directories rather than asserting on a mocked ``rmtree``.
 
 They cannot assert on ``Popen.returncode``: ``_kill_cli_children`` reaps
 with ``waitpid`` by design, which consumes the status ``Popen`` would
@@ -24,6 +33,8 @@ from the pid being gone.
 from __future__ import annotations
 
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -31,7 +42,13 @@ from contextlib import suppress
 
 import pytest
 
-from ac_dc.main import _child_exited, _kill_cli_children
+from ac_dc.claude_code import resume_cleanup
+from ac_dc.main import (
+    _child_exited,
+    _kill_cli_children,
+    _kill_vite,
+    _purge_resume_dirs,
+)
 
 # Sleeps until killed. No SIGTERM handler, so it dies on the polite one.
 SLEEPER = "import time; time.sleep(60)"
@@ -77,6 +94,32 @@ def _gone(pid: int) -> bool:
     return False
 
 
+def _stopped(pid: int) -> bool:
+    """Whether ``pid`` has stopped running, zombie or not.
+
+    Needed for a process that is not ours to reap. ``_gone`` cannot answer
+    it — a dead child whose own parent never calls ``wait`` is a zombie,
+    and a zombie still answers signal 0, so ``_gone`` reports it as alive
+    forever. ``_kill_cli_children`` sidesteps this by reaping what it
+    kills; a *grandchild* leaves nothing we are allowed to reap.
+
+    Reads ``/proc`` where there is one, and falls back to ``_gone``
+    elsewhere — on a platform without ``/proc`` the zombie window is not
+    what these tests are about.
+    """
+    stat = f"/proc/{pid}/stat"
+    if not os.path.exists("/proc"):
+        return _gone(pid)
+    try:
+        with open(stat, encoding="utf-8") as handle:
+            # The comm field can contain spaces and parens; the state
+            # letter is the first field after the closing paren.
+            fields = handle.read().rpartition(")")[2].split()
+        return fields[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
 @pytest.fixture
 def registry(monkeypatch):
     """An isolated stand-in for the SDK's module-level child set.
@@ -98,14 +141,18 @@ def spawn(tmp_path):
     Waits for the child's own readiness marker where it has one, so a
     test never races the installation of the handler it is testing.
     """
-    spawned: list[subprocess.Popen] = []
+    spawned: list[tuple[subprocess.Popen, bool]] = []
     counter = [0]
 
-    def _spawn(code: str) -> tuple[subprocess.Popen, object]:
+    def _spawn(code: str, new_session: bool = False) -> tuple[subprocess.Popen, object]:
+        """``new_session`` mirrors how Vite is launched: its own group."""
         counter[0] += 1
         marker = tmp_path / f"marker-{counter[0]}"
-        process = subprocess.Popen([sys.executable, "-c", code, str(marker)])
-        spawned.append(process)
+        process = subprocess.Popen(
+            [sys.executable, "-c", code, str(marker)],
+            start_new_session=new_session,
+        )
+        spawned.append((process, new_session))
         ready = marker.with_suffix(marker.suffix + ".ready")
         if "ready" in code:
             deadline = time.monotonic() + 10
@@ -116,7 +163,14 @@ def spawn(tmp_path):
 
     yield _spawn
 
-    for process in spawned:
+    for process, new_session in spawned:
+        # A group leader may have spawned grandchildren that outlive it,
+        # which is the whole point of the fixtures that use it — so the
+        # group is what has to go, or a leaked ``node`` stand-in sleeps
+        # for a minute after the suite ends.
+        if new_session:
+            with suppress(OSError, AttributeError, ProcessLookupError):
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
         with suppress(OSError):
             if process.poll() is None:
                 process.kill()
@@ -248,3 +302,260 @@ class TestChildExited:
         PID 1 is never a child of ours, and never exits.
         """
         assert _child_exited(1) is True
+
+
+class TestKillVite:
+    """``npx vite`` is a chain, and ``Popen`` only knows the top of it.
+
+    ``npx`` becomes ``npm exec vite`` → ``sh -c "vite"`` → ``node vite``.
+    Before the fix, ``terminate()`` signalled the wrapper and the node
+    process holding the port survived, reparented to init. Observed as
+    orphan Vite servers of 22h40m and 50m still bound to ports.
+
+    The fixture below is that shape, not a mock of it: a parent that
+    spawns a grandchild and then ignores SIGTERM itself, so a test that
+    only signals the parent's pid cannot pass by accident.
+    """
+
+    # Spawns a grandchild that outlives it, then declines SIGTERM. The
+    # grandchild writes its pid so the test can check it independently.
+    #
+    # The order is load-bearing and cost an hour to notice: SIG_IGN is
+    # inherited across ``fork`` *and* ``exec``, unlike a handler, which
+    # resets to the default. Ignoring SIGTERM before spawning gives the
+    # grandchild the same immunity and the test passes for the wrong
+    # reason — it reads as "the group kill did not work".
+    WRAPPER = (
+        "import signal, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c',\n"
+        "    'import sys, time\\n'\n"
+        "    'open(sys.argv[1], \"w\").write(str(__import__(\"os\").getpid()))\\n'\n"
+        "    'time.sleep(60)\\n', sys.argv[1] + '.grandchild'])\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "open(sys.argv[1] + '.ready', 'w').write('1')\n"
+        "time.sleep(60)\n"
+    )
+
+    def _grandchild_pid(self, marker) -> int:
+        path = marker.with_suffix(marker.suffix + ".grandchild")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if path.exists() and path.read_text().strip():
+                return int(path.read_text().strip())
+            time.sleep(0.01)
+        raise AssertionError("grandchild never reported its pid")
+
+    def test_the_whole_group_goes_not_just_the_wrapper(self, spawn):
+        """The actual regression: the node server holding the port.
+
+        The wrapper ignores SIGTERM, so if this passes, the grandchild
+        was reached by the group signal and not by the parent dying.
+        """
+        wrapper, marker = spawn(self.WRAPPER, new_session=True)
+        grandchild = self._grandchild_pid(marker)
+
+        _kill_vite(wrapper)
+
+        deadline = time.monotonic() + 5
+        while not _stopped(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _stopped(grandchild), "the node process outlived the shutdown"
+
+    def test_no_vite_is_not_an_error(self):
+        """``--dev`` off, or a Vite that failed to start at all."""
+        _kill_vite(None)  # must not raise
+
+    def test_an_already_dead_vite_is_not_an_error(self, spawn):
+        """Shutdown races a Vite that crashed on its own."""
+        wrapper, _marker = spawn(SLEEPER, new_session=True)
+        wrapper.kill()
+        wrapper.wait()
+
+        _kill_vite(wrapper)  # must not raise
+
+    def test_a_process_without_a_group_falls_back_to_terminate(self, spawn):
+        """Windows has no process groups, and the old behaviour is better
+        than leaving Vite entirely unsignalled."""
+        child, marker = spawn(POLITE)
+
+        def _no_groups(_pid):
+            raise AttributeError("no getpgid here")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "getpgid", _no_groups)
+            _kill_vite(child)
+
+        # Unlike ``_kill_cli_children``, this does not wait: shutdown has
+        # nothing to gain from blocking on Vite.
+        deadline = time.monotonic() + 5
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.read_text() == "term"
+
+
+class _FakeMaterialized:
+    """The one field of the SDK's ``MaterializedResume`` we read."""
+
+    def __init__(self, config_dir) -> None:
+        self.config_dir = config_dir
+
+
+class _FakeClient:
+    """Stands in for ``ClaudeSDKClient`` after ``connect()``.
+
+    ``_materialized`` is ``None`` on a client that did not resume, which
+    is the SDK's own initial value and the common case.
+    """
+
+    def __init__(self, materialized=None) -> None:
+        self._materialized = materialized
+
+
+@pytest.fixture
+def dirs(monkeypatch):
+    """An isolated stand-in for the module-level registry.
+
+    Patched rather than added to: a leaked entry would make a later test
+    — or a later ``purge()`` in this process — delete a directory it does
+    not own.
+    """
+    registry: set = set()
+    monkeypatch.setattr(resume_cleanup, "_DIRS", registry)
+    return registry
+
+
+def _resume_dir(root, name: str = "claude-resume-test"):
+    """A temp config dir shaped like the one the SDK materialises."""
+    config_dir = root / name
+    (config_dir / "projects" / "-repo").mkdir(parents=True)
+    (config_dir / "projects" / "-repo" / "s.jsonl").write_text('{"a": 1}\n')
+    (config_dir / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+    (config_dir / "settings.json").write_text("{}")
+    return config_dir
+
+
+class TestRememberingTheResumeDir:
+    def test_a_resumed_client_is_registered(self, dirs, tmp_path):
+        config_dir = _resume_dir(tmp_path)
+        client = _FakeClient(_FakeMaterialized(config_dir))
+
+        assert resume_cleanup.remember(client) == config_dir
+        assert dirs == {config_dir}
+
+    def test_a_client_that_did_not_resume_registers_nothing(self, dirs):
+        """The common case: a fresh session materialises no directory."""
+        assert resume_cleanup.remember(_FakeClient()) is None
+        assert dirs == set()
+
+    def test_an_sdk_that_moved_the_attribute_degrades_quietly(self, dirs):
+        """Private SDK surface, and the connect must survive losing it.
+
+        The cost of a rename is this cleanup — back to the old leak — and
+        never a session the user cannot start.
+        """
+        assert resume_cleanup.remember(object()) is None
+        assert dirs == set()
+
+    def test_a_materialized_without_a_config_dir_degrades_quietly(self, dirs):
+        broken = _FakeMaterialized(None)
+        del broken.config_dir
+
+        assert resume_cleanup.remember(_FakeClient(broken)) is None
+        assert dirs == set()
+
+    def test_reconnecting_registers_both_dirs(self, dirs, tmp_path):
+        """Each connect materialises its own; the first is not overwritten.
+
+        The SDK cleans the earlier one on its own disconnect, so this set
+        is normally one live directory and some already-removed paths —
+        which is why :func:`purge` ignores errors instead of pruning.
+        """
+        first = _resume_dir(tmp_path, "claude-resume-one")
+        second = _resume_dir(tmp_path, "claude-resume-two")
+        resume_cleanup.remember(_FakeClient(_FakeMaterialized(first)))
+        resume_cleanup.remember(_FakeClient(_FakeMaterialized(second)))
+
+        assert dirs == {first, second}
+
+
+class TestPurgingTheResumeDirs:
+    def test_the_transcript_and_the_token_both_go(self, dirs, tmp_path):
+        """The whole point: neither outlives the process that made it."""
+        config_dir = _resume_dir(tmp_path)
+        dirs.add(config_dir)
+
+        resume_cleanup.purge()
+
+        assert not config_dir.exists()
+
+    def test_the_registry_is_emptied(self, dirs, tmp_path):
+        """A second purge must not try to remove paths again.
+
+        ``purge`` is reachable twice if a second signal arrives while the
+        handler is still running.
+        """
+        dirs.add(_resume_dir(tmp_path))
+
+        resume_cleanup.purge()
+
+        assert dirs == set()
+        resume_cleanup.purge()  # must not raise
+
+    def test_a_dir_the_sdk_already_removed_is_not_an_error(self, dirs, tmp_path):
+        """The normal case for every client but the last.
+
+        A graceful ``disconnect()`` cleans up, and the path stays
+        registered — so this is what most entries look like at shutdown.
+        """
+        config_dir = _resume_dir(tmp_path)
+        shutil.rmtree(config_dir)
+        dirs.add(config_dir)
+
+        resume_cleanup.purge()  # must not raise
+
+    def test_an_unregistered_neighbour_is_untouched(self, dirs, tmp_path):
+        """Registered, never discovered by prefix.
+
+        Sweeping the temp dir for ``claude-resume-`` would also match the
+        live directory of another AC⚡DC or a plain ``claude`` running
+        beside us. Deleting that is a worse bug than the leak.
+        """
+        ours = _resume_dir(tmp_path, "claude-resume-ours")
+        theirs = _resume_dir(tmp_path, "claude-resume-theirs")
+        dirs.add(ours)
+
+        resume_cleanup.purge()
+
+        assert not ours.exists()
+        assert (theirs / ".credentials.json").exists()
+
+    def test_one_unremovable_dir_does_not_spare_the_others(self, dirs, tmp_path):
+        """Best-effort, per directory.
+
+        A path that is not a directory at all stands in for any rmtree
+        failure. The handler's next statement is ``os._exit``, so giving
+        up on the rest would cost the fix for no gain.
+        """
+        wedged = tmp_path / "not-a-dir"
+        wedged.write_text("x")
+        config_dir = _resume_dir(tmp_path)
+        dirs.update({wedged, config_dir})
+
+        resume_cleanup.purge()
+
+        assert not config_dir.exists()
+
+    def test_mains_wrapper_removes_it_too(self, dirs, tmp_path):
+        """What the signal handler actually calls."""
+        config_dir = _resume_dir(tmp_path)
+        dirs.add(config_dir)
+
+        _purge_resume_dirs()
+
+        assert not config_dir.exists()
+
+    def test_mains_wrapper_survives_a_broken_import(self, monkeypatch):
+        """An import failure at shutdown must not block the exit."""
+        monkeypatch.setitem(sys.modules, "ac_dc.claude_code.resume_cleanup", object())
+
+        _purge_resume_dirs()  # must not raise

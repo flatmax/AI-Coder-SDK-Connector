@@ -51,7 +51,7 @@ without opening a file, and read back a function it had just written.
 
 The state phase 6 inherits:
 
-- **Suites are green:** python **2922 passed, 75 skipped**; webapp **92 files / 3526 passed**.
+- **Suites are green:** python **2940 passed, 75 skipped**; webapp **92 files / 3526 passed**.
 - **`Reindexer` is the only thing that knows what the agent wrote.** `take_reindexed()` is
   repo-relative and filtered to files an index cares about; `result['files_modified']` is absolute and
   everything. If the transcript wants a durable "files changed this turn", those are the two sources,

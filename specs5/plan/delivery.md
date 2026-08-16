@@ -1600,12 +1600,48 @@ single-use token spent under a redirected config dir would revoke the parent's o
 the directory is `0700` with the file `0600`, so this is not exposure to anyone else on the machine.
 What remains is a live `accessToken`, valid until its `expiresAt` — 6.7 hours out on the orphan found
 here — accumulating one copy per launch cycle and surviving until the next reboot. Hygiene, not a
-breach, and still ours to fix: `_kill_cli_children` already runs before `os._exit` and is the hook.
+breach, and ours to fix.
 
-**Found, not fixed** — the fix touches phase 2's shutdown path, and the open question is whether to
-reach `client._materialized.config_dir` (private SDK surface, but the same class of reach
-`_kill_cli_children` already makes for `_ACTIVE_CHILDREN`, and guarded the same way) or to record the
-path ourselves at connect time.
+`resume_cleanup.py` is the fix. `remember(client)` records the path after a successful connect and
+`purge()` removes it from the signal handler, after `_kill_cli_children` and never before — the
+directory is the live `CLAUDE_CONFIG_DIR` of the children being killed, and pulling it out from under a
+CLI still flushing its transcript would trade a disk leak for a write error on the way out.
+
+Two choices in it are worth the ink. It is **registered, not discovered**: sweeping the temp dir for
+the `claude-resume-` prefix would also match the live directory of another AC⚡DC or a plain `claude`
+running alongside, and deleting that is a worse bug than the leak. And the registry is **not pruned on
+a graceful disconnect** — `purge()` removes with `ignore_errors`, so an already-cleaned path costs one
+failed `rmtree`, which is cheaper than keeping two sources of truth about which directories still
+exist.
+
+### The other thing `os._exit` was skipping: Vite
+
+Chasing the temp dirs turned up two orphan Vite servers on the same machine — 22h40m on port 19001 and
+50m on 19000, both reparented to systemd, both still bound. The comment in the signal handler said
+"vite shuts itself down once the parent dies". It does not, and this is the fourth observation of that:
+sending SIGTERM to a running server orphaned a third one on demand, in front of us.
+
+The cause is one level of indirection. We launch `npx vite`, and `npx` is a chain —
+`npm exec vite` → `sh -c "vite"` → `node …/vite`. `Popen` holds the pid of the *wrapper*, so
+`terminate()` signalled the top of the chain and the `node` process holding the port survived. Ctrl-C
+at a terminal usually hid it, because the shell signals the whole foreground process group and reaches
+`node` that way — so the leak only appeared when the server ended by any other route, which is exactly
+what a supervisor, an IDE stop button or a `kill` does.
+
+`start_new_session=True` at launch puts the chain in its own process group and `_kill_vite` signals the
+group. That also takes Vite out of the terminal's foreground group, which means this kill is now the
+only thing that stops it — hence the documented fallback to signalling the wrapper when there is no
+group to address.
+
+The regression test spawns a real wrapper that ignores SIGTERM and holds a grandchild, so a fix that
+only reaches the wrapper cannot pass. Two things about it cost real time and are recorded so the next
+person does not re-derive them: **`SIG_IGN` is inherited across `exec`**, unlike a handler, which
+resets to the default — ignoring SIGTERM before spawning the grandchild gives it the same immunity and
+the test then fails for the wrong reason. And **a zombie answers `kill(pid, 0)`**, which the phase-2
+tests already knew for their own children; a *grandchild* leaves nothing we are allowed to reap, so
+liveness has to be read from `/proc` instead.
+
+Fourteen tests across the two fixes take Python to **2 940 passed, 75 skipped**.
 
 ### Still not verified
 

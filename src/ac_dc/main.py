@@ -143,6 +143,69 @@ def _kill_cli_children(grace: float = 0.25) -> None:
             os.kill(pid, _HARD_KILL)
 
 
+def _kill_vite(vite_process: Any) -> None:
+    """Kill the Vite dev/preview server and everything ``npx`` put under it.
+
+    ``terminate()`` was not enough, and the comment that used to sit in
+    the signal handler — "vite shuts itself down once the parent dies" —
+    was wrong. We launch ``npx vite``, and ``npx`` becomes a chain:
+    ``npm exec vite`` → ``sh -c "vite"`` → ``node .../vite``. ``Popen``
+    holds the pid of the *wrapper*, so ``terminate()`` signalled the top
+    of that chain and the node process holding the port survived,
+    reparented to init.
+
+    Observed on one machine before the fix: orphan Vite servers of 22h40m
+    and 50m still bound to ports 19000 and 19001, and a third orphaned
+    on demand by sending SIGTERM to a running server. Ctrl-C at a
+    terminal often hid it, because the shell signals the whole foreground
+    group and reaches ``node`` that way — so the leak only showed up when
+    the server was ended any other way.
+
+    ``start_new_session=True`` at launch puts the chain in its own
+    process group precisely so this can address all of it at once. That
+    also takes Vite out of the terminal's foreground group, which is why
+    the kill here is now the *only* thing that stops it — hence the
+    fallback to signalling the wrapper directly if the group lookup
+    fails.
+    """
+    if vite_process is None:
+        return
+    try:
+        os.killpg(os.getpgid(vite_process.pid), signal.SIGTERM)
+        return
+    except Exception as exc:
+        # No process group to speak of (Windows, or a vite that already
+        # exited and was reaped). Fall back to the old behaviour rather
+        # than leaving it entirely unsignalled.
+        logger.debug("Could not signal the Vite process group: %s", exc)
+    with suppress(Exception):
+        vite_process.terminate()
+        return
+    with suppress(Exception):
+        vite_process.kill()
+
+
+def _purge_resume_dirs() -> None:
+    """Remove the temp config dirs a resumed session materialised.
+
+    Called from the signal handler *after* ``_kill_cli_children``,
+    because those directories are the live ``CLAUDE_CONFIG_DIR`` of the
+    children it kills. Same gap as the kill above: the SDK cleans up in
+    ``disconnect()``, and ``os._exit`` never gets there.
+
+    Wrapped because an import failure at shutdown must not be the reason
+    the server will not exit. See
+    :mod:`ac_dc.claude_code.resume_cleanup` for what accumulates without
+    this.
+    """
+    try:
+        from ac_dc.claude_code import resume_cleanup
+
+        resume_cleanup.purge()
+    except Exception as exc:
+        logger.debug("Could not purge resume temp dirs: %s", exc)
+
+
 def _child_exited(pid: int) -> bool:
     """Whether child ``pid`` has exited, reaping it if it has.
 
@@ -747,6 +810,12 @@ async def run(
             vite_process = subprocess.Popen(
                 cmd,
                 cwd=str(webapp_dir),
+                # Its own process group, so shutdown can kill the whole
+                # ``npx`` → ``npm exec`` → ``sh`` → ``node`` chain.
+                # Popen only knows the wrapper's pid, and signalling that
+                # left the node server holding the port — see
+                # ``_kill_vite``.
+                start_new_session=True,
             )
             logger.info("Vite %s server started (PID %d)",
                         "dev" if dev else "preview", vite_process.pid)
@@ -931,9 +1000,9 @@ async def run(
     # via ``os._exit`` to bypass asyncio's runner cleanup —
     # otherwise the runner re-enters the loop to cancel
     # tasks and hangs on ``_heavy_init``'s sentence-transformer
-    # load running in the default executor. Vite gets a
-    # SIGTERM via ``terminate()``; we don't wait for it,
-    # vite shuts itself down once the parent dies.
+    # load running in the default executor. Vite goes with us,
+    # by process group — see ``_kill_vite`` for why
+    # ``terminate()`` was not enough.
     #
     # ``os._exit`` also skips ``atexit``, and the Claude Agent
     # SDK's only orphan guard is an ``atexit`` hook — so the
@@ -941,16 +1010,15 @@ async def run(
     # without this: SIGINT during a streaming turn left the
     # ``claude`` process running for a further ~38 seconds,
     # reparented to init, still holding the repo as its cwd.
+    #
+    # The same gap costs us the SDK's other teardown: a resumed
+    # session's temp ``CLAUDE_CONFIG_DIR``, cleaned in
+    # ``disconnect()``, which this path never reaches. Purged
+    # after the kill, never before — see ``_purge_resume_dirs``.
     def _signal_handler(sig: int, frame: Any) -> None:
-        if vite_process is not None:
-            try:
-                vite_process.terminate()
-            except Exception:
-                try:
-                    vite_process.kill()
-                except Exception:
-                    pass
+        _kill_vite(vite_process)
         _kill_cli_children()
+        _purge_resume_dirs()
         os._exit(0)
 
     signal.signal(signal.SIGINT, _signal_handler)

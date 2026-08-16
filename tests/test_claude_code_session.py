@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+from types import SimpleNamespace
 
 import pytest
 from claude_agent_sdk import (
@@ -102,6 +103,9 @@ class FakeClient:
         self.context_usage = {"total_tokens": 1000}
         self.mcp_status = {"servers": []}
         self.server_info = {"commands": []}
+        # The SDK's own initial value. Set on connect() when a resume
+        # materialises a temp CLAUDE_CONFIG_DIR — see resume_cleanup.
+        self._materialized = None
         FakeClient.instances.append(self)
 
     async def connect(self):
@@ -477,6 +481,43 @@ class TestConnect:
         # A fresh session is not a lost one; `admit` must not refuse its
         # first turn.
         assert engine._session_lost is False
+
+    async def test_a_resumed_connect_registers_its_temp_config_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """Otherwise Ctrl-C abandons it: the signal handler exits via
+        ``os._exit`` and never reaches the ``disconnect()`` the SDK cleans
+        up in. One directory per launch cycle, holding a transcript copy
+        and a live access token."""
+        from ac_dc.claude_code import resume_cleanup
+
+        registry: set = set()
+        monkeypatch.setattr(resume_cleanup, "_DIRS", registry)
+        config_dir = tmp_path / "claude-resume-xyz"
+        materialized = SimpleNamespace(config_dir=config_dir)
+        original = FakeClient.connect
+
+        async def connect(self):
+            """Materialise on connect, the way the real client does."""
+            await original(self)
+            self._materialized = materialized
+
+        monkeypatch.setattr(FakeClient, "connect", connect)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect(resume="prev-session")
+
+        assert registry == {config_dir}
+
+    async def test_a_fresh_connect_registers_nothing(self, tmp_path, monkeypatch):
+        """No resume, no materialised directory, nothing to clean up."""
+        from ac_dc.claude_code import resume_cleanup
+
+        registry: set = set()
+        monkeypatch.setattr(resume_cleanup, "_DIRS", registry)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+
+        assert registry == set()
 
     async def test_the_connect_timeout_is_the_documented_sixty_seconds(self):
         """The bundled binary's cold first exec is the slow case."""
