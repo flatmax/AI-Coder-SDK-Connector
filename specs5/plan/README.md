@@ -114,11 +114,14 @@ Phase 6 is the *designed* visualisation, and the correctness rescue is already d
 found and fixed five wrong readings on screen before phase 5 could inherit the blame for them. What is
 in the tree:
 
-- **One derivation, checkable against the engine's own identities.** `context-usage.js` (242 lines) is
-  the single owner of the arithmetic all three views share, and `partitionCategories` verifies the sum
-  identity rather than trusting its name matching. An unverified payload degrades to an unsegmented bar.
-  **`agents[]`'s element shape is still unverified** — the live capture returned it empty, and it is the
-  only part of the payload still resting on a guess.
+- **One derivation, checkable against the engine's own identities.** `context-usage.js` is the single
+  owner of the arithmetic all three views share, and `partitionCategories` verifies the sum identity
+  rather than trusting its name matching. An unverified payload degrades to an unsegmented bar.
+  **No part of the payload's shape rests on a guess any more.** Phase 6 read the wire schema out of the
+  bundled `claude` binary, which settled `agents[]` (the live capture returned it empty),
+  `messageBreakdown`, the reserve category's second name — "Compact buffer", when autocompact is off —
+  and the theme tokens for the two rows the capture could not show. Recorded in
+  `3-engine/context-visibility.md`.
 - **The staleness contract is `onTabVisible`.** The panels refuse to refetch while hidden — a breakdown
   costs a control request — and mark themselves stale instead. Both a turn completing and a session
   loading go through it.

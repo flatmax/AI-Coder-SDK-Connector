@@ -80,12 +80,33 @@ function pushEvent(name, detail) {
   window.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
+/**
+ * Click through to one of the tab's sections.
+ *
+ * Phase 6 put the breakdown behind a segmented control, so the Session
+ * tables are no longer on screen at mount — the panel opens on Usage.
+ * Matching the segment by its visible label rather than by index keeps
+ * these tests indifferent to a third segment being added later.
+ */
+async function showSection(el, label) {
+  const seg = [...el.shadowRoot.querySelectorAll('.seg')].find(
+    (b) => b.textContent.trim() === label,
+  );
+  if (!seg) throw new Error(`no "${label}" segment on screen`);
+  seg.click();
+  await settle(el);
+  return el;
+}
+
 afterEach(() => {
   while (_mounted.length) {
     const el = _mounted.pop();
     el.remove();
   }
   SharedRpc.reset();
+  // The selected section persists, so a test that switches would
+  // otherwise decide which section the next test opens on.
+  localStorage.removeItem('ac-dc-context-section');
 });
 
 // ---------------------------------------------------------------------------
@@ -833,6 +854,452 @@ describe('ContextUsageTab categories', () => {
       expect(s.style.background).toMatch(/^rgb/);
     }
   });
+
+  it('drops a category the engine counted at zero', async () => {
+    publishUsage(
+      usageFixture({
+        categories: [
+          { name: 'Messages', tokens: 61500, color: 'warning' },
+          { name: 'Skills', tokens: 0, color: 'warning' },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    expect(rows(el, 'Categories').map((r) => r[0])).toHaveLength(1);
+  });
+
+  it('keeps a category whose count is unusable', async () => {
+    // A row the engine named but could not count is worth seeing; a row
+    // that costs nothing is not. Only the second is dropped.
+    publishUsage(
+      usageFixture({
+        categories: [
+          { name: 'Messages', tokens: 61500, color: 'warning' },
+          { name: 'Mystery', color: 'warning' },
+        ],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    const mystery = rows(el, 'Categories').find((r) =>
+      r[0].includes('Mystery'),
+    );
+    expect(mystery[1]).toBe('—');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The autocompact mark on the gauge
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab autocompact mark', () => {
+  it('marks the threshold short of the bar end', async () => {
+    // The point of the gauge. 167000/200000 — the fill reads 30.8% and
+    // the session gives out at 83.5%, not at the bar's end.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const mark = el.shadowRoot.querySelector('.bar .mark');
+    expect(mark).not.toBeNull();
+    expect(parseFloat(mark.style.left)).toBeCloseTo(83.5, 6);
+  });
+
+  it('names the token count it marks', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.mark').title).toContain('167,000');
+  });
+
+  it('labels the mark and the window end beneath the bar', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const note = el.shadowRoot
+      .querySelector('.mark-note')
+      .textContent.replace(/\s+/g, ' ');
+    expect(note).toContain('Autocompact at 83.5%');
+    expect(note).toContain('200,000');
+  });
+
+  it('draws no mark when autocompact is off, and says why', async () => {
+    // A mark would promise an intervention that is not coming.
+    publishUsage(usageFixture({ isAutoCompactEnabled: false }));
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.mark')).toBeNull();
+    expect(el.shadowRoot.querySelector('.mark-note')).toBeNull();
+    expect(
+      el.shadowRoot.querySelector('.warn').textContent.replace(/\s+/g, ' '),
+    ).toContain('the bar carries no mark');
+  });
+
+  it('draws no mark when the threshold is the window itself', async () => {
+    publishUsage(usageFixture({ autoCompactThreshold: 200000 }));
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.mark')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Past the window
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab over the limit', () => {
+  it('says nothing while the context fits', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+  });
+
+  it('reports the overshoot a clamped gauge cannot', async () => {
+    // The bar pins at 100% here, so without this line the panel shows a
+    // full bar and no explanation.
+    publishUsage(usageAt(210000));
+    const el = mountTab();
+    await settle(el);
+    const text = el.shadowRoot
+      .querySelector('.error')
+      .textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('10,000 tokens past the 200,000-token');
+    expect(text).toContain('Autocompact should bring it back down');
+  });
+
+  it('does not promise a recovery when autocompact is off', async () => {
+    publishUsage(usageAt(210000, { isAutoCompactEnabled: false }));
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error').textContent).toContain(
+      'nothing will reduce it',
+    );
+  });
+
+  it('calls an auto-sized window a hard limit', async () => {
+    publishUsage(usageAt(210000, { autocompactSource: 'auto' }));
+    const el = mountTab();
+    await settle(el);
+    expect(
+      el.shadowRoot.querySelector('.error').textContent.replace(/\s+/g, ' '),
+    ).toContain("Past the model's 200,000-token limit by 10,000 tokens.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Message breakdown, tool traffic, attachments
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab message breakdown', () => {
+  /** Parts summing to the fixture's 42000-token Messages category. */
+  function breakdown(overrides = {}) {
+    return {
+      userMessageTokens: 8000,
+      assistantMessageTokens: 12000,
+      toolCallTokens: 4000,
+      toolResultTokens: 16000,
+      attachmentTokens: 1500,
+      redirectedContextTokens: 0,
+      unattributedTokens: 500,
+      toolCallsByType: [
+        { name: 'Read', callTokens: 1500, resultTokens: 9000 },
+        { name: 'Bash', callTokens: 2500, resultTokens: 7000 },
+      ],
+      attachmentsByType: [{ name: 'pasted_text', tokens: 1500 }],
+      ...overrides,
+    };
+  }
+
+  const withBreakdown = (mb = breakdown()) =>
+    usageFixture({ messageBreakdown: mb });
+
+  it('totals the conversation in the heading', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Messages').querySelector('h3').textContent).toContain(
+      '42.0K tokens',
+    );
+  });
+
+  it('draws one segment per non-zero part, tiling the bar', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    const segs = [
+      ...sectionFor(el, 'Messages').querySelectorAll('.bar-seg'),
+    ];
+    expect(segs).toHaveLength(6);
+    expect(segs[0].title).toBe('User messages: 8.0K');
+    const width = segs.reduce((sum, s) => sum + parseFloat(s.style.width), 0);
+    expect(width).toBeCloseTo(100, 6);
+  });
+
+  it('lists the parts in conversation order with their share', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    expect(rows(el, 'Messages')).toEqual([
+      ['User messages', '8.0K', '19.0%'],
+      ['Assistant messages', '12.0K', '28.6%'],
+      ['Tool calls', '4.0K', '9.5%'],
+      ['Tool results', '16.0K', '38.1%'],
+      ['Attachments', '1.5K', '3.6%'],
+      ['Unattributed', '500', '1.2%'],
+    ]);
+  });
+
+  it('gives every part a visible swatch', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    const swatches = [
+      ...sectionFor(el, 'Messages').querySelectorAll('.swatch'),
+    ];
+    expect(swatches).toHaveLength(6);
+    for (const s of swatches) expect(s.style.background).toMatch(/^rgb/);
+  });
+
+  it('says so when the parts overshoot the Messages category', async () => {
+    // The engine floors `unattributedTokens` at zero, so its per-part
+    // estimate can exceed what the category is charged. The bar still
+    // tiles; the note explains the difference.
+    publishUsage(withBreakdown(breakdown({
+      assistantMessageTokens: 20000,
+      unattributedTokens: 0,
+    })));
+    const el = mountTab();
+    await settle(el);
+    const note = sectionFor(el, 'Messages')
+      .querySelector('.note')
+      .textContent.replace(/\s+/g, ' ');
+    expect(note).toContain('49,500 tokens against the 42,000');
+  });
+
+  it('adds no note when the parts reconcile', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Messages').querySelector('.note')).toBeNull();
+  });
+
+  it('omits the section when the engine sent no breakdown', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Messages')).toBeUndefined();
+  });
+
+  it('omits the section for a session with no turns yet', async () => {
+    publishUsage(withBreakdown({
+      userMessageTokens: 0,
+      toolCallsByType: [],
+      attachmentsByType: [],
+    }));
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Messages')).toBeUndefined();
+  });
+
+  it('names the tools the context is paying for, heaviest first', async () => {
+    // The exit criterion's "names the ac-dc tools it is paying for":
+    // these are the engine's own tool names, so a bridge tool appears
+    // under the name it was registered with.
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    expect(rows(el, 'Tool traffic')).toEqual([
+      ['Read', '1.5K', '9.0K', '10.5K'],
+      ['Bash', '2.5K', '7.0K', '9.5K'],
+    ]);
+  });
+
+  it('splits calls from results, which are separately fixable', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    const heads = [
+      ...sectionFor(el, 'Tool traffic').querySelectorAll('th'),
+    ].map((th) => th.textContent.trim());
+    expect(heads).toEqual(['Tool', 'Calls', 'Results', 'Total']);
+  });
+
+  it('counts the tools and their total in the heading', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    const heading = sectionFor(el, 'Tool traffic')
+      .querySelector('h3')
+      .textContent.replace(/\s+/g, ' ');
+    expect(heading).toContain('2 tools');
+    expect(heading).toContain('20.0K tokens');
+  });
+
+  it('omits tool traffic when no tool has been called', async () => {
+    publishUsage(withBreakdown(breakdown({ toolCallsByType: [] })));
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Tool traffic')).toBeUndefined();
+  });
+
+  it('breaks attachments down by kind', async () => {
+    publishUsage(withBreakdown(breakdown({
+      attachmentsByType: [
+        { name: 'image', tokens: 400 },
+        { name: 'pasted_text', tokens: 1100 },
+      ],
+    })));
+    const el = mountTab();
+    await settle(el);
+    expect(rows(el, 'Attachments')).toEqual([
+      ['pasted_text', '1.1K'],
+      ['image', '400'],
+    ]);
+  });
+
+  it('omits attachments when nothing was attached', async () => {
+    publishUsage(withBreakdown(breakdown({ attachmentsByType: [] })));
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Attachments')).toBeUndefined();
+  });
+
+  it('keeps the conversation sections out of the Session view', async () => {
+    publishUsage(withBreakdown());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Messages')).toBeUndefined();
+    expect(sectionFor(el, 'Tool traffic')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The segmented control
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab sections', () => {
+  function segments(el) {
+    return [...el.shadowRoot.querySelectorAll('.seg')].map((b) =>
+      b.textContent.trim(),
+    );
+  }
+
+  it('offers only the sections that have something in them', async () => {
+    // The spec lists a third, Debug, which reads hook traffic and server
+    // info this panel does not fetch. A segment opening onto nothing
+    // would be worse than its absence.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    expect(segments(el)).toEqual(['Usage', 'Session']);
+  });
+
+  it('shows no control before the first breakdown arrives', async () => {
+    // Nothing to switch between, and the empty state is one line.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({ error: 'no session' }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.segmented')).toBeNull();
+  });
+
+  it('opens on Usage', async () => {
+    publishUsage(usageFixture({
+      memoryFiles: [{ path: '/repo/CLAUDE.md', type: 'Project', tokens: 1800 }],
+    }));
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Categories')).not.toBeUndefined();
+    expect(sectionFor(el, 'Memory files')).toBeUndefined();
+  });
+
+  it('swaps the body when a section is selected', async () => {
+    publishUsage(usageFixture({
+      memoryFiles: [{ path: '/repo/CLAUDE.md', type: 'Project', tokens: 1800 }],
+    }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Memory files')).not.toBeUndefined();
+    expect(sectionFor(el, 'Categories')).toBeUndefined();
+  });
+
+  it('marks the active segment for assistive tech', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const selected = () =>
+      [...el.shadowRoot.querySelectorAll('.seg')]
+        .filter((b) => b.getAttribute('aria-selected') === 'true')
+        .map((b) => b.textContent.trim());
+    expect(selected()).toEqual(['Usage']);
+    await showSection(el, 'Session');
+    expect(selected()).toEqual(['Session']);
+  });
+
+  it('keeps the footer under every section', async () => {
+    // It carries when the numbers were read, which qualifies both views.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(el.shadowRoot.textContent).toContain('Read from the engine at');
+  });
+
+  it('reopens on the section last read', async () => {
+    publishUsage(usageFixture());
+    const first = mountTab();
+    await settle(first);
+    await showSection(first, 'Session');
+    expect(localStorage.getItem('ac-dc-context-section')).toBe('session');
+
+    const second = mountTab();
+    await settle(second);
+    expect(
+      [...second.shadowRoot.querySelectorAll('.seg')]
+        .filter((b) => b.getAttribute('aria-selected') === 'true')
+        .map((b) => b.textContent.trim()),
+    ).toEqual(['Session']);
+  });
+
+  it('ignores a stored section it no longer has', async () => {
+    localStorage.setItem('ac-dc-context-section', 'debug');
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    expect(sectionFor(el, 'Categories')).not.toBeUndefined();
+  });
+
+  it('survives localStorage throwing', async () => {
+    // Private-mode quota errors are not worth a broken panel; the
+    // section simply does not persist.
+    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    try {
+      publishUsage(usageFixture());
+      const el = mountTab();
+      await settle(el);
+      await showSection(el, 'Session');
+      expect(sectionFor(el, 'Memory files')).toBeUndefined();
+      expect(el.shadowRoot.textContent).toContain('no memory files');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('says so when the session has nothing to show', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(el.shadowRoot.querySelector('.empty').textContent).toContain(
+      'no memory files, MCP tools or agent',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -874,7 +1341,7 @@ describe('ContextUsageTab token formatting', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Memory files, MCP tools, agents
+// Memory files, MCP tools, agents — the Session section
 // ---------------------------------------------------------------------------
 
 describe('ContextUsageTab memory files', () => {
@@ -889,6 +1356,7 @@ describe('ContextUsageTab memory files', () => {
     );
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(rows(el, 'Memory files')).toEqual([
       ['/repo/CLAUDE.md', 'Project', '1.8K'],
       ['/home/u/.claude/CLAUDE.md', 'User', '320'],
@@ -899,6 +1367,7 @@ describe('ContextUsageTab memory files', () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(sectionFor(el, 'Memory files')).toBeUndefined();
   });
 
@@ -910,6 +1379,7 @@ describe('ContextUsageTab memory files', () => {
     );
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(rows(el, 'Memory files')).toEqual([
       ['AGENTS.md', '—', '90'],
       ['—', '—', '5'],
@@ -936,6 +1406,7 @@ describe('ContextUsageTab MCP tools', () => {
     publishUsage(usageFixture({ mcpTools: tools }));
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     const heading = sectionFor(el, 'MCP tools')
       .querySelector('h3')
       .textContent.replace(/\s+/g, ' ')
@@ -952,6 +1423,7 @@ describe('ContextUsageTab MCP tools', () => {
     }));
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     const heading = sectionFor(el, 'MCP tools')
       .querySelector('h3')
       .textContent.replace(/\s+/g, ' ')
@@ -964,6 +1436,7 @@ describe('ContextUsageTab MCP tools', () => {
     publishUsage(usageFixture({ mcpTools: tools }));
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(rows(el, 'MCP tools')).toEqual([
       ['symbol_map', 'ac-dc', '900'],
       ['doc_outline', 'ac-dc', '700'],
@@ -975,6 +1448,7 @@ describe('ContextUsageTab MCP tools', () => {
     publishUsage(usageFixture({ mcpTools: tools }));
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     const dimmed = [
       ...sectionFor(el, 'MCP tools').querySelectorAll('tr.deferred'),
     ];
@@ -986,11 +1460,16 @@ describe('ContextUsageTab MCP tools', () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(sectionFor(el, 'MCP tools')).toBeUndefined();
   });
 });
 
 describe('ContextUsageTab agent definitions', () => {
+  // `agents[]`'s element shape was the last guess left in this payload
+  // — a live capture came back with the list empty. It is the CLI's own
+  // wire schema now: `{agentType, source, tokens}`. The `name` fallback
+  // below is kept for a payload that predates it.
   it('lists agents by type and source', async () => {
     publishUsage(
       usageFixture({
@@ -1002,6 +1481,7 @@ describe('ContextUsageTab agent definitions', () => {
     );
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(rows(el, 'Agent definitions')).toEqual([
       ['Explore', 'built-in', '450'],
       ['reviewer', 'project', '300'],
@@ -1012,6 +1492,7 @@ describe('ContextUsageTab agent definitions', () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
+    await showSection(el, 'Session');
     expect(sectionFor(el, 'Agent definitions')).toBeUndefined();
   });
 });

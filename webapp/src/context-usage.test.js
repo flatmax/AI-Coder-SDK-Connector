@@ -16,7 +16,10 @@ import {
   categoryColor,
   compactionLimit,
   compactionPercent,
+  messageComposition,
+  overLimit,
   partitionCategories,
+  thresholdPercent,
   windowPercent,
 } from './context-usage.js';
 
@@ -61,6 +64,39 @@ function livePayload() {
     model: 'au.anthropic.claude-opus-5',
     autoCompactThreshold: 167000,
     isAutoCompactEnabled: true,
+  };
+}
+
+/**
+ * A `messageBreakdown`, and the one fixture here that is not a capture.
+ *
+ * The live session that produced `livePayload` had 2905 tokens of
+ * history and the response carried no breakdown for it, so this is built
+ * from the wire schema the `claude` binary validates the field against —
+ * `{toolCallTokens, toolResultTokens, attachmentTokens,
+ * assistantMessageTokens, userMessageTokens, redirectedContextTokens,
+ * unattributedTokens, toolCallsByType, attachmentsByType}`. Not a guess,
+ * but not an observation either, which is why it is labelled.
+ *
+ * The seven part counts sum to 2905, matching `livePayload`'s Messages
+ * category, because that is the engine's own arithmetic: it derives
+ * `unattributedTokens` as the category minus the other six.
+ */
+function messageBreakdown(overrides = {}) {
+  return {
+    userMessageTokens: 400,
+    assistantMessageTokens: 900,
+    toolCallTokens: 300,
+    toolResultTokens: 1200,
+    attachmentTokens: 100,
+    redirectedContextTokens: 0,
+    unattributedTokens: 5,
+    toolCallsByType: [
+      { name: 'Read', callTokens: 120, resultTokens: 800 },
+      { name: 'Bash', callTokens: 180, resultTokens: 400 },
+    ],
+    attachmentsByType: [{ name: 'pasted_text', tokens: 100 }],
+    ...overrides,
   };
 }
 
@@ -155,6 +191,18 @@ describe('context-usage derivations', () => {
       expect(categoryColor('  claude  ')).toBe(categoryColor('claude'));
     });
 
+    it('colours the two rows the live capture could not show', () => {
+      // The session behind `livePayload` had every MCP tool deferred and
+      // no custom agents, so "MCP tools" and "Custom agents" never
+      // appeared as content rows. Their tokens come from the CLI's own
+      // category builder; grey here would put the row naming our bridge
+      // in the uncoloured bucket.
+      expect(categoryColor('cyan_FOR_SUBAGENTS_ONLY')).not.toBe(UNCOLOURED);
+      expect(categoryColor('permission')).not.toBe(UNCOLOURED);
+      expect(categoryColor('cyan_FOR_SUBAGENTS_ONLY'))
+        .not.toBe(categoryColor('permission'));
+    });
+
     it('falls back to grey for an unknown token', () => {
       expect(categoryColor('someFutureToken')).toBe(UNCOLOURED);
     });
@@ -224,6 +272,28 @@ describe('context-usage derivations', () => {
       const { content, structural } = partitionCategories(u);
       expect(content.map((c) => c.name)).toEqual(['Messages']);
       expect(structural).toHaveLength(2);
+    });
+
+    it('treats the autocompact-off reserve as structural too', () => {
+      // With autocompact off the engine still holds tokens back and
+      // names the row "Compact buffer". That name was missing from the
+      // structural set, so it counted as content, the sum overshot
+      // `totalTokens`, and every autocompact-off session lost its
+      // segmented bar to the degrade path.
+      const { content, structural, verified } = partitionCategories({
+        totalTokens: 21087,
+        maxTokens: 200000,
+        isAutoCompactEnabled: false,
+        categories: [
+          { name: 'Messages', tokens: 21087 },
+          { name: 'Compact buffer', tokens: 33000 },
+          { name: 'Free space', tokens: 145913 },
+        ],
+      });
+      expect(content.map((c) => c.name)).toEqual(['Messages']);
+      expect(structural.map((c) => c.name))
+        .toEqual(['Compact buffer', 'Free space']);
+      expect(verified).toBe(true);
     });
 
     it('treats a deferred row as deferred even if named structurally', () => {
@@ -388,6 +458,253 @@ describe('context-usage derivations', () => {
 
     it('is 0 at an empty context', () => {
       expect(compactionPercent({ ...livePayload(), totalTokens: 0 })).toBe(0);
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // thresholdPercent — where the mark goes on the gauge
+  // -----------------------------------------------------------------
+
+  describe('thresholdPercent', () => {
+    it('places the mark well short of the bar\'s end', () => {
+      // 167000/200000. The 16.5 points between the mark and the end are
+      // the reason the gauge needs one at all: the bar reads 11% full
+      // and gives out at 83.5%, not at 100%.
+      expect(thresholdPercent(livePayload())).toBeCloseTo(83.5, 6);
+    });
+
+    it('is null when autocompact is off', () => {
+      // Nothing triggers, so there is nothing to mark. A mark drawn
+      // anyway would promise an intervention that is not coming.
+      expect(thresholdPercent({
+        ...livePayload(),
+        isAutoCompactEnabled: false,
+      })).toBeNull();
+    });
+
+    it('is null when the engine reports no threshold', () => {
+      const u = livePayload();
+      delete u.autoCompactThreshold;
+      expect(thresholdPercent(u)).toBeNull();
+    });
+
+    it('is null when the threshold is the window itself', () => {
+      // The mark would sit on the bar's own end and read as a second
+      // limit inside the first.
+      expect(thresholdPercent({
+        ...livePayload(),
+        autoCompactThreshold: 200000,
+      })).toBeNull();
+      expect(thresholdPercent({
+        ...livePayload(),
+        autoCompactThreshold: 250000,
+      })).toBeNull();
+    });
+
+    it('is null for junk', () => {
+      for (const u of [undefined, null, {}, { maxTokens: 0 },
+        { maxTokens: 200000 }, { autoCompactThreshold: 167000 }]) {
+        expect(thresholdPercent(u)).toBeNull();
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // overLimit — past the window, which is reachable
+  // -----------------------------------------------------------------
+
+  describe('overLimit', () => {
+    it('is null while the context fits', () => {
+      expect(overLimit(livePayload())).toBeNull();
+    });
+
+    it('is null exactly at the window', () => {
+      expect(overLimit({ ...livePayload(), totalTokens: 200000 })).toBeNull();
+    });
+
+    it('reports the overshoot against the compaction window', () => {
+      expect(overLimit({ ...livePayload(), totalTokens: 210000 })).toEqual({
+        over: 10000,
+        window: 200000,
+        kind: 'compaction_window',
+      });
+    });
+
+    it('calls an auto-sized window a hard limit', () => {
+      // The engine's own split: a window it sized itself has no
+      // compaction headroom left to overshoot into.
+      expect(overLimit({
+        ...livePayload(),
+        autocompactSource: 'auto',
+        totalTokens: 210000,
+      }).kind).toBe('hard_limit');
+    });
+
+    it('measures against rawMaxTokens, falling back to maxTokens', () => {
+      // Equal by construction today; asserted so a future payload that
+      // separates them is measured the way the engine measures it.
+      expect(overLimit({
+        ...livePayload(),
+        rawMaxTokens: 220000,
+        totalTokens: 210000,
+      })).toBeNull();
+      const u = livePayload();
+      delete u.rawMaxTokens;
+      expect(overLimit({ ...u, totalTokens: 210000 }).window).toBe(200000);
+    });
+
+    it('is null for junk', () => {
+      for (const u of [undefined, null, {}, { maxTokens: 0 },
+        { maxTokens: 200000 }, { maxTokens: 200000, totalTokens: 'x' }]) {
+        expect(overLimit(u)).toBeNull();
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // messageComposition
+  // -----------------------------------------------------------------
+
+  describe('messageComposition', () => {
+    const withBreakdown = (mb = messageBreakdown()) => ({
+      ...livePayload(),
+      messageBreakdown: mb,
+    });
+
+    it('lists the non-zero parts in conversation order', () => {
+      // Order is fixed rather than ranked: these are segments of one bar
+      // across repeated fetches, and a bar whose colours reorder every
+      // refresh cannot be read at a glance.
+      const { parts } = messageComposition(withBreakdown());
+      expect(parts.map((p) => p.label)).toEqual([
+        'User messages',
+        'Assistant messages',
+        'Tool calls',
+        'Tool results',
+        'Attachments',
+        'Unattributed',
+      ]);
+    });
+
+    it('drops a part the engine counted at zero', () => {
+      const { parts } = messageComposition(withBreakdown());
+      // redirectedContextTokens is 0 in the fixture.
+      expect(parts.map((p) => p.key))
+        .not.toContain('redirectedContextTokens');
+    });
+
+    it('gives every part a colour of its own', () => {
+      const { parts } = messageComposition(withBreakdown());
+      const colours = parts.map((p) => p.color);
+      expect(new Set(colours).size).toBe(colours.length);
+      for (const c of colours) expect(c).toMatch(/^#[0-9a-f]{6}$/i);
+    });
+
+    it('reconciles with the Messages category', () => {
+      const c = messageComposition(withBreakdown());
+      expect(c.partsTokens).toBe(2905);
+      expect(c.messagesTokens).toBe(2905);
+      expect(c.reconciled).toBe(true);
+    });
+
+    it('does not reconcile when the parts overshoot the category', () => {
+      // Reachable rather than defensive: the engine derives
+      // `unattributedTokens` as the category minus the other six and
+      // floors it at zero, so its own per-part estimate can exceed what
+      // the category is charged. The caller says so instead of drawing a
+      // bar that does not add up.
+      const c = messageComposition(withBreakdown(messageBreakdown({
+        assistantMessageTokens: 2000,
+        unattributedTokens: 0,
+      })));
+      expect(c.partsTokens).toBe(4000);
+      expect(c.messagesTokens).toBe(2905);
+      expect(c.reconciled).toBe(false);
+    });
+
+    it('totals each tool\'s calls and results, heaviest first', () => {
+      const { byTool } = messageComposition(withBreakdown());
+      expect(byTool).toEqual([
+        { name: 'Read', callTokens: 120, resultTokens: 800, tokens: 920 },
+        { name: 'Bash', callTokens: 180, resultTokens: 400, tokens: 580 },
+      ]);
+    });
+
+    it('re-sorts tools the engine sent out of order', () => {
+      const { byTool } = messageComposition(withBreakdown(messageBreakdown({
+        toolCallsByType: [
+          { name: 'Grep', callTokens: 10, resultTokens: 20 },
+          { name: 'Read', callTokens: 120, resultTokens: 800 },
+        ],
+      })));
+      expect(byTool.map((t) => t.name)).toEqual(['Read', 'Grep']);
+    });
+
+    it('sorts attachments by cost and drops empty ones', () => {
+      const { byAttachment } = messageComposition(
+        withBreakdown(messageBreakdown({
+          attachmentsByType: [
+            { name: 'image', tokens: 40 },
+            { name: 'empty', tokens: 0 },
+            { name: 'pasted_text', tokens: 60 },
+          ],
+        })),
+      );
+      expect(byAttachment).toEqual([
+        { name: 'pasted_text', tokens: 60 },
+        { name: 'image', tokens: 40 },
+      ]);
+    });
+
+    it('names an entry the engine sent without one', () => {
+      const { byTool, byAttachment } = messageComposition(
+        withBreakdown(messageBreakdown({
+          toolCallsByType: [{ callTokens: 5, resultTokens: 5 }],
+          attachmentsByType: [{ tokens: 5 }],
+        })),
+      );
+      expect(byTool[0].name).toBe('unknown');
+      expect(byAttachment[0].name).toBe('unknown');
+    });
+
+    it('is null when the engine sent no breakdown', () => {
+      expect(messageComposition(livePayload())).toBeNull();
+      for (const mb of [undefined, null, 'x', 42, []]) {
+        expect(messageComposition({ ...livePayload(), messageBreakdown: mb }))
+          .toBeNull();
+      }
+      expect(messageComposition(null)).toBeNull();
+    });
+
+    it('is null for a session with no turns yet', () => {
+      // An all-zero breakdown is not an empty section with zeroes in it;
+      // there is nothing to show.
+      expect(messageComposition(withBreakdown({
+        userMessageTokens: 0,
+        assistantMessageTokens: 0,
+        toolCallsByType: [],
+        attachmentsByType: [],
+      }))).toBeNull();
+    });
+
+    it('skips non-object list entries', () => {
+      const { byTool, byAttachment } = messageComposition(
+        withBreakdown(messageBreakdown({
+          toolCallsByType: [null, 'x', 7, { name: 'Read', callTokens: 5 }],
+          attachmentsByType: [null, { name: 'image', tokens: 5 }],
+        })),
+      );
+      expect(byTool).toHaveLength(1);
+      expect(byAttachment).toHaveLength(1);
+    });
+
+    it('reports messagesTokens null when there is no Messages category', () => {
+      const c = messageComposition({
+        messageBreakdown: messageBreakdown(),
+        categories: [{ name: 'System prompt', tokens: 3371 }],
+      });
+      expect(c.messagesTokens).toBeNull();
+      expect(c.reconciled).toBe(false);
     });
   });
 

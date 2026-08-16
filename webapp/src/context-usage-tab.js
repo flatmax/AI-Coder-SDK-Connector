@@ -32,7 +32,10 @@ import {
   categoryColor,
   compactionLimit,
   compactionPercent,
+  messageComposition,
+  overLimit,
   partitionCategories,
+  thresholdPercent,
   warningPercent,
   windowPercent,
 } from './context-usage.js';
@@ -54,6 +57,46 @@ import {
  * was written for: no reply is coming at all.
  */
 const _FETCH_TIMEOUT_MS = 90000;
+
+/**
+ * The sections the spec gives this tab, and the one it does not have
+ * yet.
+ *
+ * `viewers-hud.md` specifies three — Usage, Session, Debug — behind a
+ * segmented control. Debug is a reader of `hookEvent` traffic,
+ * `get_mcp_status`, `get_server_info` and the raw `gridRows`, none of
+ * which this panel fetches, so it is absent rather than present and
+ * empty. A control with a segment that opens onto nothing is the
+ * disclosure triangle problem the categories table already refuses to
+ * have.
+ */
+const _SECTIONS = [
+  { id: 'usage', label: 'Usage' },
+  { id: 'session', label: 'Session' },
+];
+
+/** localStorage key for the section the user was last reading. */
+const _SECTION_KEY = 'ac-dc-context-section';
+
+function _loadSection() {
+  try {
+    if (typeof localStorage === 'undefined') return 'usage';
+    const saved = localStorage.getItem(_SECTION_KEY);
+    return _SECTIONS.some((s) => s.id === saved) ? saved : 'usage';
+  } catch {
+    return 'usage';
+  }
+}
+
+function _saveSection(id) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(_SECTION_KEY, id);
+  } catch {
+    // A private-mode quota error is not worth surfacing; the section
+    // simply does not persist.
+  }
+}
 
 function _fmtTokens(n) {
   const v = Number(n);
@@ -82,6 +125,8 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      * silently refreshed, because the user may be mid-read.
      */
     _stale: { type: Boolean, state: true },
+    /** Which section is on screen: one of `_SECTIONS`'s ids. */
+    _section: { type: String, state: true },
   };
 
   static styles = css`
@@ -135,6 +180,33 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       font-size: 0.75rem;
     }
 
+    .segmented {
+      flex-shrink: 0;
+      display: flex;
+      gap: 0.25rem;
+      padding: 0.5rem 1rem 0;
+    }
+    .seg {
+      background: transparent;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-secondary, #8b949e);
+      padding: 0.2rem 0.7rem;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-family: inherit;
+      line-height: 1.4;
+    }
+    .seg:hover {
+      background: rgba(240, 246, 252, 0.06);
+      color: var(--text-primary, #c9d1d9);
+    }
+    .seg[aria-selected='true'] {
+      background: rgba(88, 166, 255, 0.15);
+      border-color: rgba(88, 166, 255, 0.5);
+      color: var(--text-primary, #c9d1d9);
+    }
+
     .content {
       padding: 1rem;
       display: flex;
@@ -162,14 +234,41 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     }
 
     .bar {
+      position: relative;
       height: 12px;
       border-radius: 6px;
       background: rgba(240, 246, 252, 0.08);
       overflow: hidden;
       display: flex;
     }
+    .bar.gauge {
+      height: 18px;
+    }
     .bar-seg {
       height: 100%;
+    }
+    /**
+     * The autocompact mark. Inside the bar rather than a tick beneath
+     * it, so the fill is read against it directly — the question is
+     * "have the segments reached the mark", and an aligned tick two
+     * pixels below makes that a comparison instead of a glance.
+     */
+    .mark {
+      position: absolute;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      margin-left: -1px;
+      background: var(--text-primary, #c9d1d9);
+      box-shadow: 0 0 0 1px rgba(13, 17, 23, 0.8);
+      pointer-events: none;
+    }
+    .mark-note {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
     }
 
     table {
@@ -220,6 +319,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
+    h3 .sub {
+      text-transform: none;
+      letter-spacing: 0;
+      font-weight: 400;
+      font-variant-numeric: tabular-nums;
+    }
     section {
       display: flex;
       flex-direction: column;
@@ -245,6 +350,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._error = '';
     this._loading = false;
     this._stale = false;
+    this._section = _loadSection();
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
@@ -353,6 +459,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     );
   }
 
+  _switchSection(id) {
+    if (this._section === id) return;
+    this._section = id;
+    _saveSection(id);
+  }
+
   // ---------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------
@@ -381,7 +493,28 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           @click=${this._minimizeDialog}
         >▾</button>
       </div>
+      ${this._usage ? this._renderSegmented() : ''}
       <div class="content">${this._renderBody()}</div>
+    `;
+  }
+
+  /**
+   * The section selector, in its own row rather than in the toolbar:
+   * the toolbar's buttons act on the *breakdown* — go back, refetch,
+   * minimize — and these choose which part of one breakdown to read.
+   */
+  _renderSegmented() {
+    return html`
+      <div class="segmented" role="tablist" aria-label="Context sections">
+        ${_SECTIONS.map((s) => html`
+          <button
+            class="seg"
+            role="tab"
+            aria-selected=${this._section === s.id ? 'true' : 'false'}
+            @click=${() => this._switchSection(s.id)}
+          >${s.label}</button>
+        `)}
+      </div>
     `;
   }
 
@@ -401,13 +534,55 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       </p>`;
     }
     return html`
-      ${this._renderHeadline()}
-      ${this._renderCategories()}
-      ${this._renderMemoryFiles()}
-      ${this._renderMcpTools()}
-      ${this._renderAgents()}
+      ${this._section === 'session'
+        ? this._renderSessionSection()
+        : this._renderUsageSection()}
       ${this._renderFooter()}
     `;
+  }
+
+  /**
+   * Usage — how full the window is, what is filling it, and how long
+   * that leaves. Everything here is about the window's *capacity*;
+   * what the session is made of is the Session section's question.
+   */
+  _renderUsageSection() {
+    // Derived once and handed down: three of these sections read the
+    // same `messageBreakdown`, and re-deriving it per section would put
+    // three sorts and three filters in every render for one payload
+    // that cannot change between them.
+    const comp = messageComposition(this._usage);
+    return html`
+      ${this._renderHeadline()}
+      ${this._renderCategories()}
+      ${this._renderMessageBreakdown(comp)}
+      ${this._renderToolTraffic(comp)}
+      ${this._renderAttachments(comp)}
+    `;
+  }
+
+  /**
+   * Session — what this session is made of and what each part costs.
+   *
+   * Moved here wholesale from the single-scroll layout, not rewritten:
+   * the spec's Session section also wants system prompt sections,
+   * per-server tool grouping with health, skills and slash commands,
+   * and click-through to a memory file, none of which is built. What is
+   * here is the phase-3 tables under the heading they belong to.
+   */
+  _renderSessionSection() {
+    const sections = [
+      this._renderMemoryFiles(),
+      this._renderMcpTools(),
+      this._renderAgents(),
+    ].filter((s) => s !== '');
+    if (sections.length === 0) {
+      return html`<p class="empty">
+        The engine reported no memory files, MCP tools or agent
+        definitions for this session.
+      </p>`;
+    }
+    return html`${sections}`;
   }
 
   /**
@@ -427,6 +602,11 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * autocompact" is a mixed signal, and the green wins. So the digits
    * stay in parity with `/context` while the colour tracks the event
    * the user cares about, and the note spells out which is which.
+   *
+   * The mark on the bar is the third telling of the same fact, and the
+   * only one that is spatial. Both numbers are answers to "how full";
+   * the mark answers "how much further", which is the question a bar is
+   * for.
    */
   _renderHeadline() {
     const u = this._usage;
@@ -437,6 +617,8 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     const limit = compactionLimit(u);
     const toLimit = compactionPercent(u);
     const autoCompacts = u.isAutoCompactEnabled !== false;
+    const markPct = thresholdPercent(u);
+    const over = overLimit(u);
     // Segment the fill by what is actually in the window. The engine's
     // `categories` also contains "Free space" and "Autocompact
     // buffer", which together make up the rest of the window — segment
@@ -454,7 +636,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
             ${total.toLocaleString()} / ${max.toLocaleString()} tokens
           </span>
         </div>
-        <div class="bar">
+        <div class="bar gauge">
           ${segmented
             ? content.map((c) => html`
                 <div
@@ -468,7 +650,33 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                 class="bar-seg"
                 style="width: ${clamped}%; background: ${_pctColor(clamped)};"
               ></div>`}
+          ${markPct != null ? html`
+            <div
+              class="mark"
+              style="left: ${markPct}%"
+              title="Autocompact triggers here, at ${limit.toLocaleString()} tokens"
+            ></div>
+          ` : ''}
         </div>
+        ${markPct != null ? html`
+          <div class="mark-note">
+            <span>Autocompact at ${markPct.toFixed(1)}% of the window</span>
+            <span>${max.toLocaleString()}</span>
+          </div>
+        ` : ''}
+        ${over ? html`
+          <p class="error">
+            ${over.kind === 'hard_limit'
+              ? html`Past the model's ${over.window.toLocaleString()}-token
+                  limit by ${over.over.toLocaleString()} tokens.`
+              : html`${over.over.toLocaleString()} tokens past the
+                  ${over.window.toLocaleString()}-token compaction
+                  window.`}
+            ${autoCompacts
+              ? 'Autocompact should bring it back down on the next turn.'
+              : 'Autocompact is off, so nothing will reduce it.'}
+          </p>
+        ` : ''}
         ${toLimit != null && autoCompacts && limit < max ? html`
           <p class="note" style="color: ${_pctColor(toLimit)}">
             ${toLimit.toFixed(1)}% of the way to an autocompact, which
@@ -481,8 +689,9 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
         ` : ''}
         ${!autoCompacts ? html`
           <p class="warn">
-            Autocompact is off for this session. Reaching the limit
-            fails the turn rather than summarising the history.
+            Autocompact is off for this session, so the bar carries no
+            mark. Reaching the limit fails the turn rather than
+            summarising the history.
           </p>
         ` : ''}
         ${u.model
@@ -492,12 +701,27 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     `;
   }
 
+  /**
+   * The category legend: every row the bar above is drawn from, plus
+   * the rows it deliberately leaves out — the room left over and the
+   * deferred budget — since those are the ones that explain why the bar
+   * is shorter than the window.
+   *
+   * Zero-token rows are dropped, as the spec asks. A row whose count is
+   * *unusable* is kept and shows an em dash: a category the engine named
+   * but could not count is worth seeing, and a category that costs
+   * nothing is not.
+   */
   _renderCategories() {
-    const cats = Array.isArray(this._usage.categories)
-      ? [...this._usage.categories].sort(
-          (a, b) => (Number(b.tokens) || 0) - (Number(a.tokens) || 0),
-        )
-      : [];
+    const cats = (Array.isArray(this._usage.categories)
+      ? this._usage.categories
+      : []
+    )
+      .filter((c) => {
+        const n = Number(c?.tokens);
+        return !Number.isFinite(n) || n > 0;
+      })
+      .sort((a, b) => (Number(b.tokens) || 0) - (Number(a.tokens) || 0));
     if (cats.length === 0) {
       return html`<section>
         <h3>Categories</h3>
@@ -543,6 +767,164 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                     ? `${((Number(c.tokens) / max) * 100).toFixed(1)}%`
                     : '—'}
                 </td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </section>
+    `;
+  }
+
+  /**
+   * What the conversation itself is made of.
+   *
+   * The one part of the window the user changes by *talking*, so it gets
+   * the same treatment as the window: a proportional bar and a legend
+   * under it. Everything else in this tab is fixed cost the session was
+   * started with.
+   *
+   * Drawn against the parts' own sum rather than against the Messages
+   * category, so the segments always tile the bar. The two agree to
+   * within a token in the normal case; when they do not, the note says
+   * which is which rather than leaving a bar that quietly does not add
+   * up — see `messageComposition`.
+   */
+  _renderMessageBreakdown(comp) {
+    if (!comp || comp.parts.length === 0) return '';
+    const { parts, partsTokens, messagesTokens, reconciled } = comp;
+    return html`
+      <section>
+        <h3>
+          Messages
+          <span class="sub">— ${_fmtTokens(partsTokens)} tokens</span>
+        </h3>
+        <div class="bar">
+          ${parts.map((p) => html`
+            <div
+              class="bar-seg"
+              style="width: ${(p.tokens / partsTokens) * 100}%;
+                     background: ${p.color};"
+              title="${p.label}: ${_fmtTokens(p.tokens)}"
+            ></div>
+          `)}
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Part</th>
+              <th class="num">Tokens</th>
+              <th class="num">Share of messages</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${parts.map((p) => html`
+              <tr>
+                <td>
+                  <span
+                    class="swatch"
+                    style="background: ${p.color}"
+                  ></span>${p.label}
+                </td>
+                <td class="num">${_fmtTokens(p.tokens)}</td>
+                <td class="num">
+                  ${((p.tokens / partsTokens) * 100).toFixed(1)}%
+                </td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+        ${!reconciled && messagesTokens ? html`
+          <p class="note">
+            These parts sum to ${partsTokens.toLocaleString()} tokens
+            against the ${messagesTokens.toLocaleString()} in the
+            Messages category above. The per-part figures are the
+            engine's own estimate over the same history, so read the
+            shares as proportions rather than as a second count.
+          </p>
+        ` : ''}
+      </section>
+    `;
+  }
+
+  /**
+   * Which tools the conversation is paying for, and for what.
+   *
+   * This is the section that answers the spec's "names the `ac-dc` tools
+   * it is paying for": the rows carry the engine's own tool names, so
+   * the bridge's tools appear here under the names they were registered
+   * with, alongside every built-in they compete with for the window.
+   *
+   * Calls and results are separate columns because they are separately
+   * fixable. A heavy call column is a request passing too much in; a
+   * heavy result column is a tool answering with more than was asked
+   * for, and only one of those is the caller's to change.
+   */
+  _renderToolTraffic(comp) {
+    if (!comp || comp.byTool.length === 0) return '';
+    const { byTool } = comp;
+    const total = byTool.reduce((sum, t) => sum + t.tokens, 0);
+    return html`
+      <section>
+        <h3>
+          Tool traffic
+          <span class="sub">
+            — ${byTool.length} ${byTool.length === 1 ? 'tool' : 'tools'},
+            ${_fmtTokens(total)} tokens
+          </span>
+        </h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th class="num">Calls</th>
+              <th class="num">Results</th>
+              <th class="num">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${byTool.map((t) => html`
+              <tr>
+                <td>${t.name}</td>
+                <td class="num">${_fmtTokens(t.callTokens)}</td>
+                <td class="num">${_fmtTokens(t.resultTokens)}</td>
+                <td class="num">${_fmtTokens(t.tokens)}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </section>
+    `;
+  }
+
+  /**
+   * Attachments by kind — pasted text, images, file references.
+   *
+   * Its own section rather than a row in the message table because the
+   * message table's Attachments row is the total, and the thing worth
+   * knowing is which kind of attachment it was.
+   */
+  _renderAttachments(comp) {
+    if (!comp || comp.byAttachment.length === 0) return '';
+    const { byAttachment } = comp;
+    const total = byAttachment.reduce((sum, a) => sum + a.tokens, 0);
+    return html`
+      <section>
+        <h3>
+          Attachments
+          <span class="sub">— ${_fmtTokens(total)} tokens</span>
+        </h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th class="num">Tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${byAttachment.map((a) => html`
+              <tr>
+                <td>${a.name}</td>
+                <td class="num">${_fmtTokens(a.tokens)}</td>
               </tr>
             `)}
           </tbody>

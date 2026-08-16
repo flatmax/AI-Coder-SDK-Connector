@@ -36,6 +36,48 @@ Two deliberate choices about how this is consumed:
   our UI to a CLI presentation choice that can change under us. Lay out from `categories`; keep
   `gridRows` behind the debug view for cross-checking.
 
+### Verified field shapes
+
+The table above names the fields; it does not say what is inside them, and the first round of this work
+guessed — then wrote tests that asserted the guess and passed while the app rendered transparent bars.
+The shapes below are not guesses and not a single capture either. The bundled `claude` binary carries
+the zod schema it validates this response against, and the element shapes are read from it:
+
+| Field | Element shape |
+|---|---|
+| `categories` | `{name, tokens, color, isDeferred?}` |
+| `memoryFiles` | `{path, type, tokens}` |
+| `mcpTools` | `{name, serverName, tokens, isLoaded?}` |
+| `deferredBuiltinTools` | `{name, tokens, isLoaded}` |
+| `systemTools`, `systemPromptSections` | `{name, tokens}` |
+| `agents` | `{agentType, source, tokens}` |
+| `slashCommands` | `{totalCommands, includedCommands, tokens}` |
+| `skills` | `{totalSkills, includedSkills, tokens, skillFrontmatter: [{name, source, tokens}]}` |
+| `messageBreakdown` | `{toolCallTokens, toolResultTokens, attachmentTokens, assistantMessageTokens, userMessageTokens, redirectedContextTokens, unattributedTokens, toolCallsByType: [{name, callTokens, resultTokens}], attachmentsByType: [{name, tokens}]}` |
+| `apiUsage` | `{input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens}` or `null` |
+
+Four consequences a capture alone could not have given us:
+
+- **The reserve category has two names.** With autocompact on the engine calls the row "Autocompact
+  buffer"; with it off it still holds tokens back and calls the row "Compact buffer". Under a window
+  sized `auto` there is no reserve row at all. All of them are *room*, not content — a reader that only
+  knows the first name counts the reserve as content, the sum overshoots `totalTokens`, and every
+  autocompact-off session silently loses its segmented bar.
+- **Two content rows carry theme tokens no capture showed**: `cyan_FOR_SUBAGENTS_ONLY` for "MCP tools"
+  and `permission` for "Custom agents". A session with every MCP tool deferred and no custom agents —
+  which is what got captured — reports neither, so both rows would have rendered uncoloured, including
+  the one naming our own bridge.
+- **`unattributedTokens` is derived and floored.** It is the Messages category minus the other six
+  parts, clamped at zero, so the parts can legitimately sum to *more* than the category they belong to.
+  A message bar must be drawn against the parts' own sum, and the discrepancy reported rather than
+  hidden.
+- **`percentage` is `round(totalTokens / rawMaxTokens * 100)`**, and `maxTokens` and `rawMaxTokens` are
+  assigned from one variable — equal by construction, not merely equal in the capture.
+
+The engine also bands this pressure by *distance*, not proportion: its own reader warns within 20 000
+tokens of the effective ceiling and treats the last 3 000 before the raw window as blocked. Worth
+knowing before anyone tunes our percentage bands for a 1 M-token window, where 20 000 tokens is 2%.
+
 ## Refresh Policy
 
 `get_context_usage()` is a round trip to the engine, so it is fetched on state changes rather than on
