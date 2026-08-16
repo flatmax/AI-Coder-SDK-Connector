@@ -997,9 +997,11 @@ Two facts from the live runs worth knowing:
   `chrome-devtools` while our six tools were being called successfully in the same turn. The smoke
   script's status line is context, not the registration check its comment used to claim; what proves
   registration is a `mcp__ac-dc__*` call happening at all.
-- **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.** R-10's
-  tripwire, working: the environment redirects the CLI to a gateway while
-  `~/.claude/.credentials.json` exists. Worth knowing before reading a cost number from any run here.
+- **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.**
+  [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session)'s tripwire, working: the
+  environment redirects the CLI to a gateway while `~/.claude/.credentials.json` exists. Worth knowing
+  before reading a cost number from any run here. (This entry originally cited R-10, which is subagent
+  transcript volume; corrected when phase 5's live verification found the environment unchanged.)
 
 ### Deviations from `inventory.md`
 
@@ -1643,8 +1645,82 @@ liveness has to be read from `/proc` instead.
 
 Fourteen tests across the two fixes take Python to **2 940 passed, 75 skipped**.
 
-### Still not verified
+### Still open after this verification
 
-Whether the HUD appears on turn-complete. The live check ran past `_AUTO_HIDE_MS` plus the fade, so the
-observation window was gone before anybody looked — reported as inconclusive rather than as a pass,
-which is the right call and leaves it for phase 6 to see incidentally.
+- **Whether the HUD appears on turn-complete is unverified.** The live check ran past `_AUTO_HIDE_MS`
+  plus the fade, so the observation window was gone before anybody looked — reported as inconclusive
+  rather than as a pass, which is the right call, and phase 6 will see it incidentally.
+- **`$CLAUDE_CODE_USE_BEDROCK` still redirects this machine to a gateway** while a subscription login
+  sits in `~/.claude/.credentials.json`. Phase 4 recorded the warning firing and called it the tripwire
+  working; two phases later the environment is unchanged, so it is now also a standing caveat on every
+  cost number read here, and phase 6 is the phase that renders cost. It is
+  [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session), not R-10 — the phase-4
+  entry cited the wrong number and it is corrected there.
+- ~~**The mirror read-path verifier is still a throwaway in `/tmp`.**~~ Promoted to
+  `scripts/history_smoke.py`, alongside `engine_smoke.py` and `bridge_smoke.py` and on the same
+  argument those two were promoted on. Five checks, `argparse`, a `Report` that runs every check
+  before exiting non-zero, and no credentials — it reads the mirror off disk, so it costs nothing to
+  run and can gate a phase's sign-off instead of being read by eye. It stays in `scripts/` rather
+  than the suite because it needs a real conversation to have happened in the repo, which no fixture
+  supplies and no CI job will have.
+
+### The bug the promotion found on its first real run
+
+Moving the verifier was meant to be filing. Its own output disagreed:
+
+```
+4. The session-list preview is what the user typed
+        1d53df67  'This session is being continued from a previous conversation that ran '
+  ok    no framing boilerplate in the preview
+```
+
+That check passed. It was still wrong, and wrong in exactly the way it was written to catch — the same
+sentence in every row, from a second source. **The SDK's parser starts a compacted session's message
+list at the compact boundary**, so the first user message of every compacted session is the CLI's
+compaction summary, and that summary opens with a fixed sentence. `_first_prompt` read the messages
+faithfully and returned it. The parser's first three user messages, live:
+
+```
+parser messages: 329
+  user msg #0 (idx   0): 'This session is being continued from a previous conversation that ran out of context. The '
+  user msg #1 (idx 102): '<ac-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+  user msg #2 (idx 265): '<ac-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+```
+
+Three things are worth keeping about this.
+
+**Reading the messages was not the fix; reading the *human's* messages was.** The earlier interlude's
+conclusion — prefer the parsed transcript over the sidecar's truncated field — was right and did not
+go far enough. A transcript contains machine-written user entries too: tool results, which
+`_first_prompt` already skipped, and this one, which it did not.
+
+**The entry says so, and the parser does not carry it.** The raw entry is
+`{"type": "user", "isCompactSummary": true, ...}`, but a `SessionMessage` exposes only `type`, `uuid`,
+`session_id`, `message` and `parent_tool_use_id`, so the flag is gone by the time the fold sees it.
+Re-reading the raw entries to recover it would add a third store read per row to a listing whose whole
+design is two — so `_COMPACT_PREAMBLE` prefix-matches the CLI's wording instead. That is coupling to a
+string the CLI owns, and the honest note is that it can change under us. When it does the row degrades
+to `info.summary`, not to a crash: **a session long enough to have compacted has an `ai_title`**, which
+is why the fallback is reliable here specifically.
+
+**The fallbacks had the same hole.** Writing the invariant down as a test — *no preview ever opens with
+boilerplate* — immediately failed on the case where the sidecar's `first_prompt` is the boilerplate,
+because only the first candidate was filtered. Both sidecar fields now go through `_readable`, so the
+invariant is true of the preference order rather than of its first branch. `INDEX_VERSION` → 3 for the
+same reason it went to 2: the cache holds finished rows, and a stale row is the one thing a user would
+still see.
+
+Live after the fix, on the session this file is being written in — which has since compacted again, and
+so is the "nothing typed since the boundary" case the tests cover:
+
+```
+4. The session-list preview is what the user typed
+        1d53df67  'Determine next phase after phase 5'
+  ok    no framing boilerplate in the preview
+  ok    no compaction preamble in the preview
+```
+
+The second `ok` is new. Check 4 printed the bad preview and passed; a human caught it by reading the
+output. That is a check doing half its job, so the preamble is asserted now — 2 945 tests, five new
+ones built on the real compaction prompt rather than a shortened stand-in, and `history_smoke.py`
+exiting 0.

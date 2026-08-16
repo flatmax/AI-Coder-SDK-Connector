@@ -1037,6 +1037,85 @@ class TestThePreviewIsWhatTheUserTyped:
         assert summary["preview"] == "A title"
 
 
+# The CLI's compaction prompt as it is actually written, opening sentence
+# and all. Taken from a real compacted transcript for the same reason
+# `_TRUNCATED_FRAMING` is: the bug below survived a suite whose fixtures
+# were all short enough to be wrong about.
+_COMPACT_SUMMARY = (
+    "This session is being continued from a previous conversation that ran "
+    "out of context. The summary below covers the earlier portion of the "
+    "conversation.\n\nSummary:\n1. **Primary Request and Intent:**\n"
+    '   - **Initial:** "now that phase 5 is done. what is next ?"'
+)
+
+
+class TestACompactedSessionPreviewsTheHumansWords:
+    """The second source of the identical-row bug.
+
+    The SDK's parser starts a compacted session's message list at the
+    compact boundary, so the first user message is the CLI's summary — which
+    opens with the same sentence in every session that has ever compacted.
+    Found by running ``scripts/history_smoke.py`` over a real transcript
+    *after* the framing fix had already shipped and its checks passed.
+    """
+
+    def test_the_compaction_summary_does_not_become_the_preview(self):
+        summary = summarise_session(
+            FakeInfo(summary="Determine next phase after phase 5"),
+            [
+                human("u1", _COMPACT_SUMMARY)[0],
+                human("u2", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n\nyes cleanup")[0],
+            ],
+        )
+        assert summary["preview"] == "yes cleanup"
+
+    def test_the_summary_is_skipped_when_it_arrives_as_a_content_block(self):
+        """The CLI writes it as a plain string; the parser's own shape for a
+        user message is a list of blocks, and both reach here."""
+        message = FakeSessionMessage(
+            "user",
+            "u1",
+            {"role": "user", "content": [{"type": "text", "text": _COMPACT_SUMMARY}]},
+        )
+        summary = summarise_session(
+            FakeInfo(summary="A title"), [message, human("u2", "the real question")[0]]
+        )
+        assert summary["preview"] == "the real question"
+
+    def test_the_title_stands_in_when_the_summary_is_all_there_is(self):
+        """Compacted and resumed, nothing typed since. The CLI's own title is
+        the only thing specific to the session, and a session long enough to
+        compact has one."""
+        summary = summarise_session(
+            FakeInfo(summary="Determine next phase after phase 5"),
+            [human("u1", _COMPACT_SUMMARY)[0]],
+        )
+        assert summary["preview"] == "Determine next phase after phase 5"
+
+    def test_two_compacted_sessions_do_not_preview_identically(self):
+        """The invariant, in the form the browser actually needs it: a row is
+        told apart from another row by ``preview`` and nothing else."""
+        previews = {
+            summarise_session(
+                FakeInfo(session_id=sid, summary=f"title {sid}"),
+                [human("u1", _COMPACT_SUMMARY)[0], human("u2", asked)[0]],
+            )["preview"]
+            for sid, asked in (("s1", "fix the parser"), ("s2", "write the HUD"))
+        }
+        assert previews == {"fix the parser", "write the HUD"}
+
+    def test_no_preview_ever_opens_with_the_compaction_preamble(self):
+        for info in (
+            FakeInfo(summary="A title", first_prompt="a prompt"),
+            FakeInfo(first_prompt=_COMPACT_SUMMARY),
+            FakeInfo(),
+        ):
+            summary = summarise_session(info, [human("u1", _COMPACT_SUMMARY)[0]])
+            assert not summary["preview"].startswith(
+                "This session is being continued"
+            ), f"preview was {summary['preview']!r}"
+
+
 # ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------

@@ -59,7 +59,13 @@ logger = logging.getLogger(__name__)
 # built from the sidecar's truncated `first_prompt`, which rendered as the
 # framing boilerplate for every session; without a bump those rows would
 # survive the fix in the one place a user would still see it.
-INDEX_VERSION = 2
+#
+# 3: same field, second cause. Version 2 previewed a compacted session with
+# the CLI's compaction summary, which opens identically every time, so every
+# long session read the same — and a long session is the one most worth
+# finding again. Bumped for the same reason as 2: the stale row is what the
+# user would see.
+INDEX_VERSION = 3
 
 # The native engine's `HistoryStore.search` default, carried over
 # unchanged: it applies to index-backed search and the fallback scan alike

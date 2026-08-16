@@ -66,6 +66,23 @@ PREVIEW_CHARS = 100
 _FRAMING_OPEN = "<ac-dc-ui-context>"
 _FRAMING_CLOSE = "</ac-dc-ui-context>"
 
+# How the CLI opens the prompt it writes when it compacts a conversation.
+# Matched as a prefix because the entry's own `isCompactSummary` flag does
+# not survive the SDK's parser: a `SessionMessage` carries only `type`,
+# `uuid`, `session_id`, `message` and `parent_tool_use_id`, so by the time
+# the fold sees it the summary is an ordinary user message.
+#
+# This is the CLI's wording, not ours, so it can change under us. When it
+# does, the fallback below catches it: a session long enough to have
+# compacted has an `ai_title`, and `info.summary` is a real title.
+_COMPACT_PREAMBLE = "This session is being continued from a previous conversation"
+
+# Prose that is identical in every session, and so tells one row from
+# another not at all. Both openers are here rather than checked separately
+# because the failure they cause is one failure: a session list whose rows
+# cannot be distinguished.
+_BOILERPLATE = (_FRAMING_OPEN, _COMPACT_PREAMBLE)
+
 
 class ImageUnavailable(Exception):
     """No image at that pointer, with a reason the user can act on.
@@ -217,12 +234,20 @@ def summarise_session(
     stripped. The CLI's generated ``summary`` is the fallback — it is a real
     title, and a session whose transcript will not parse has no words to
     quote — with the truncated field last rather than never, because
-    something specific to the session beats "(empty)".
+    something specific to the session beats "(empty)", and both sidecar
+    fields filtered through :func:`_readable` so neither can reintroduce the
+    boilerplate the first candidate exists to avoid.
+
+    The same bug has a second source, found the same way and fixed in
+    :func:`_first_prompt`: a compacted session's parsed messages begin with
+    the CLI's compaction summary, whose opening sentence is also identical
+    everywhere. Reading the messages is not sufficient on its own; reading
+    the *human's* messages is.
     """
     preview = (
         _first_prompt(messages)
-        or (info.summary or "").strip()
-        or (info.first_prompt or "").strip()
+        or _readable(info.summary)
+        or _readable(info.first_prompt)
     )
     return {
         "session_id": info.session_id,
@@ -504,21 +529,49 @@ def _agent_id_of(subpath: str) -> str | None:
 
 
 def _first_prompt(messages: list[SessionMessage]) -> str:
-    """The first human-authored text in a conversation, for a preview."""
+    """The first human-authored text in a conversation, for a preview.
+
+    Skips the compaction summary. The SDK's parser starts a compacted
+    session's message list *at* the compact boundary, so the first user
+    message of every compacted session is the CLI's summary — which opens
+    with the same fixed sentence every time. Taken literally that reproduces
+    the bug :func:`summarise_session` documents, in a second guise: every
+    compacted session previewing the same prose, and long sessions are
+    exactly the ones a user has most reason to find again. Skipped, the loop
+    reaches the first thing the user typed *after* the compaction, which is
+    their own words and specific to the session.
+    """
     for message in messages:
         body = getattr(message, "message", None) or {}
         if body.get("role") != "user":
             continue
         content = body.get("content")
         if isinstance(content, str):
-            return strip_framing(content).strip()
+            text = strip_framing(content).strip()
+            if text and not text.startswith(_BOILERPLATE):
+                return text
+            continue
         if isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text = strip_framing(str(block.get("text") or "")).strip()
-                    if text:
+                    if text and not text.startswith(_BOILERPLATE):
                         return text
     return ""
+
+
+def _readable(text: str | None) -> str:
+    """A sidecar field, unless it is prose every session shares.
+
+    The sidecar's two candidate fields are not guaranteed to hold anything
+    the user would recognise: ``first_prompt`` is truncated mid-framing, and
+    the SDK's ``summary`` falls back to that same first prompt when the CLI
+    has generated no title yet. Filtered here so the invariant the tests
+    state — no preview opens with boilerplate — holds for the fallbacks too
+    and not only for the parsed messages.
+    """
+    stripped = (text or "").strip()
+    return "" if stripped.startswith(_BOILERPLATE) else stripped
 
 
 # ---------------------------------------------------------------------------
