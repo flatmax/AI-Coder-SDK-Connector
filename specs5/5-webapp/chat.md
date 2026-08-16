@@ -284,7 +284,9 @@ never a dismiss (see [permission-dialog.md](permission-dialog.md)).
 Two visual groups separated by a thin vertical divider:
 
 - Search group — search-mode toggle (message/file), search input with inline toggles (ignore case, regex, whole word), result counter, arrow navigation, and the preset / permission controls at the right end
-- Session group — new session, open history browser (hidden in file search mode)
+- Session group — new session, open history browser (hidden in file search mode, and on any tab but the live conversation: a subagent transcript and a historical archive have no session of their own to restart, so ✨ there would restart the one behind the tab being read)
+  - ✨ calls `new_session` and clears nothing locally. The server broadcasts `sessionChanged` with an empty message list and the panel acts on that, so the client that started the session and the clients merely watching it take one path. It is disabled while a turn is streaming because the server refuses mid-turn, and a button whose only outcome is a refusal it could have predicted is noise. Two refusals still reach the user as toasts: `turn_in_progress` (the turn started underneath the click) and `restricted` (the call is the host's — it discards the context every client is looking at)
+  - 📜 stays live while a turn streams. Browsing is a pure read of the mirrored transcript; it is *resuming* from inside the browser that the engine refuses mid-turn
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
 

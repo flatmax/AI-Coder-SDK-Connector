@@ -117,19 +117,23 @@ import {
   toggleSnippetDrawer,
   copyMessageText,
   speakMessage,
+  onNewSession,
+  onOpenHistory,
 } from './input.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 
 // ---------------------------------------------------------------
-// What left the action bar in phase 2
+// What left the action bar in phase 2, and what came back
 // ---------------------------------------------------------------
 //
-// Four controls used to sit on this bar and no longer do. Each drove the native
-// engine, and each would have kept reporting success while changing nothing once
-// the chat path moved to Claude Code. That is the exact failure the permission
-// dialog exists to prevent — a control whose visible state does not describe
-// what the engine will do — so they come off in the same commit that repoints
-// the path rather than in phase 3 with the engine itself:
+// Four controls used to sit on this bar. Each drove the native engine, and each
+// would have kept reporting success while changing nothing once the chat path
+// moved to Claude Code. That is the exact failure the permission dialog exists
+// to prevent — a control whose visible state does not describe what the engine
+// will do — so they came off in the same commit that repointed the path rather
+// than in phase 3 with the engine itself.
+//
+// Gone for good:
 //
 //   💻/📄 + 🔀 — `LLMService.switch_mode` / `set_cross_reference`, choosing
 //     which index fed the native engine's context assembly. Claude Code builds
@@ -142,19 +146,26 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 //     signature does not take. Worse than merely inert: phase 2 renders thinking
 //     blocks, so a 🧠 toggle would read as the switch that controls them.
 //
-//   ✨ — `LLMService.new_session`. Session lifecycle belongs to the CLI now and
-//     lands in phase 5 alongside resume; a button that reset the wrong engine's
-//     conversation would leave the visible transcript and the real one disagreeing.
+//   `ac-url-chips`, for the same reason at one remove: the chips fetched URLs
+//     into the native engine's context. The CLI has WebFetch.
 //
-//   📜 — the history browser, reading native-engine session files. Phase 5.
+// Back in phase 5, now that there is a session lifecycle over the CLI to drive:
 //
-// `ac-url-chips` went with them, for the same reason at one remove: the chips
-// fetched URLs into the native engine's context. The CLI has WebFetch.
+//   ✨ — `ClaudeCodeService.new_session`. The engine is not reconnected by it;
+//     the next turn simply connects with no resume, which is what a new session
+//     is. Disabled while streaming because the server refuses mid-turn anyway,
+//     and a button that reports a refusal it could have prevented is noise.
 //
-// What replaces the lot is the permission-mode selector — the one action-bar
-// control that genuinely changes what the next tool call does. It is deliberately
-// the first child and deliberately outside every `.search-collapsible` group:
-// expanding the search bar must not be able to hide the safety posture.
+//   📜 — the history browser, now reading the CLI's own transcript mirrored
+//     under `.ac-dc4/sessions/` rather than native-engine session files.
+//
+// The permission-mode selector is the third member of the row and the one
+// control that genuinely changes what the next tool call does. It is
+// deliberately the first child and deliberately outside every
+// `.search-collapsible` group: expanding the search bar must not be able to
+// hide the safety posture. The session group *is* collapsible, and is dropped
+// outright in file-search mode and on any tab but `main` — a subagent
+// transcript and a read-only archive have no session to restart.
 
 // ---------------------------------------------------------------
 // Top-level render
@@ -219,6 +230,31 @@ export function render(panel) {
         ${renderPermissionModeSelector(panel)}
         <div class="action-divider search-collapsible" aria-hidden="true"></div>
         ${renderSearchBar(panel)}
+        ${panel._searchMode === 'file' || panel._activeTabId !== 'main'
+          ? ''
+          : html`
+              <div class="action-divider" aria-hidden="true"></div>
+              <div class="action-group search-collapsible">
+                <button
+                  class="action-button new-session-button"
+                  ?disabled=${!panel.rpcConnected || panel._streaming}
+                  @click=${() => onNewSession(panel)}
+                  aria-label="Start a new session"
+                  title="New session (clears the conversation)"
+                >
+                  ✨
+                </button>
+                <button
+                  class="action-button history-button"
+                  ?disabled=${!panel.rpcConnected}
+                  @click=${() => onOpenHistory(panel)}
+                  aria-label="Open history browser"
+                  title="Browse past sessions"
+                >
+                  📜
+                </button>
+              </div>
+            `}
       </div>
       ${panel._snippetDrawerOpen
         ? renderSnippetDrawer(panel)

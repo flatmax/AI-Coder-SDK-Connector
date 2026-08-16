@@ -7,14 +7,19 @@
 // because a control whose visible state does not describe what the engine will
 // do is exactly the failure the permission dialog exists to prevent.
 //
-// So this file now pins two things:
+// Phase 5 gave ✨ and 📜 a real engine to drive and they came back; the rest
+// have nothing to come back to. So this file pins three things:
 //
-//   1. **The removed controls stay removed.** A test that only checked the new
-//      selector would pass just as well if someone re-added a dead ✨ button.
-//      The phase-5/6 return points are named in `rendering.js`; until then
-//      their absence is the contract.
+//   1. **The controls with no successor stay removed.** A test that only
+//      checked the new selector would pass just as well if someone re-added a
+//      dead 🔀 button.
 //
-//   2. **The permission-mode selector is always reachable.** Every tab, every
+//   2. **The session group is tab-scoped.** ✨ and 📜 belong to the live
+//      conversation, so they are absent on an agent tab and on a historical
+//      read-only one, where restarting "the session" would restart the one
+//      behind the tab the user is reading.
+//
+//   3. **The permission-mode selector is always reachable.** Every tab, every
 //      search mode. It is the one action-bar control that changes what the next
 //      tool call does, and a user who cannot see the current mode cannot know
 //      whether the next edit will ask.
@@ -30,15 +35,16 @@ import {
   _mounted,
 } from './test-helpers.js';
 
-/** Controls phase 2 removed, with where each one comes back. */
+/** Controls phase 2 removed that phase 5 did not bring back. */
 const REMOVED_CONTROLS = [
   ['.mode-toggle', 'code/doc index switch — the preset selector, CC-12'],
   ['.crossref-btn', 'cross-reference toggle — never; retired in phase 4'],
-  ['.new-session-button', 'session lifecycle — phase 5'],
-  ['.history-button', 'history browser — phase 5'],
   ['.reasoning-toggle', 'reasoning flags chat_streaming no longer takes'],
   ['ac-url-chips', 'URL fetching — the CLI has WebFetch'],
 ];
+
+/** The session group, back in phase 5 against `ClaudeCodeService`. */
+const SESSION_CONTROLS = ['.new-session-button', '.history-button'];
 
 describe('ChatPanel action bar — what it carries', () => {
   describe('controls phase 2 removed', () => {
@@ -57,6 +63,57 @@ describe('ChatPanel action bar — what it carries', () => {
       await settle(panel);
       for (const [selector] of REMOVED_CONTROLS) {
         expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
+      }
+    });
+  });
+
+  describe('the session group', () => {
+    it('renders on the main tab', async () => {
+      const panel = mountPanel();
+      await settle(panel);
+      for (const selector of SESSION_CONTROLS) {
+        expect(panel.shadowRoot.querySelector(selector)).toBeTruthy();
+      }
+    });
+
+    it('is absent on an agent tab', async () => {
+      // A subagent transcript has no session of its own to restart, and the
+      // ✨ on it would restart the conversation that spawned it.
+      const panel = mountPanel();
+      seedLabeledTab(panel, 'agent-0', 'Agent 0');
+      panel._activeTabId = 'agent-0';
+      await settle(panel);
+      for (const selector of SESSION_CONTROLS) {
+        expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
+      }
+    });
+
+    it('is absent on a historical read-only tab', async () => {
+      const panel = mountPanel();
+      seedLabeledTab(panel, 'historical:t_123/agent-0', 'Agent 0');
+      panel._tabs.get('historical:t_123/agent-0').readOnly = true;
+      panel._activeTabId = 'historical:t_123/agent-0';
+      await settle(panel);
+      for (const selector of SESSION_CONTROLS) {
+        expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
+      }
+    });
+
+    it('collapses out of the way of file search', async () => {
+      const panel = mountPanel();
+      panel._searchMode = 'file';
+      await settle(panel);
+      for (const selector of SESSION_CONTROLS) {
+        expect(panel.shadowRoot.querySelector(selector)).toBeFalsy();
+      }
+    });
+
+    it('is inside a search-collapsible group, unlike the selector', async () => {
+      const panel = mountPanel();
+      await settle(panel);
+      for (const selector of SESSION_CONTROLS) {
+        const btn = panel.shadowRoot.querySelector(selector);
+        expect(btn.closest('.search-collapsible')).toBeTruthy();
       }
     });
   });
@@ -93,9 +150,9 @@ describe('ChatPanel action bar — what it carries', () => {
 
     it('survives file-search mode', async () => {
       // The bar's other groups collapse when the search field expands, and
-      // the ✨/📜 pair used to disappear with them. The selector is
-      // deliberately outside every `.search-collapsible` group so expanding
-      // search cannot hide the safety posture.
+      // the ✨/📜 pair goes with them. The selector is deliberately outside
+      // every `.search-collapsible` group so expanding search cannot hide
+      // the safety posture.
       const panel = mountPanel();
       panel._searchMode = 'file';
       await settle(panel);

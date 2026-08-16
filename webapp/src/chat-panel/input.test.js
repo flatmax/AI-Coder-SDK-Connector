@@ -14,6 +14,7 @@ import {
   mountPanel,
   publishFakeRpc,
   pushEvent,
+  seedTab,
   settle,
 } from './test-helpers.js';
 
@@ -1610,53 +1611,54 @@ describe('ChatPanel snippet drawer close-on-send', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Session lifecycle — control removed, handler inert
+// Session lifecycle
 // ---------------------------------------------------------------------------
 //
-// The ✨ button called `LLMService.new_session`, which reset the native
-// engine's conversation. That is not the session the chat path talks to any
-// more: the CLI owns session identity, and a new one starts by reconnecting the
-// engine with no `resume` id. Clearing the native engine while Claude Code
-// carried the conversation would have looked like it worked and changed
-// nothing, so the button is gone until phase 5 rebuilds session management
-// against `ClaudeCodeService`.
+// The ✨ button called `LLMService.new_session` until phase 2 took it off the
+// bar: the CLI owns session identity now, and clearing the native engine while
+// Claude Code carried the conversation would have looked like it worked and
+// changed nothing. Phase 5 gives it a real target — `ClaudeCodeService`'s own
+// `new_session`, which drops the resume target so the next turn connects blank.
 //
-// `_onNewSession` itself is left in place — inert, unreachable from the UI —
-// and the `session-changed` handler with it, because the broadcast plumbing is
-// what phase 5 reuses. These tests pin both halves: no affordance, machinery
-// intact and still guarded.
+// Nothing is cleared locally. The server broadcasts `sessionChanged` with an
+// empty message list and the panel's handler acts on that, so a client that
+// starts a session and a client that merely watches one start take the same
+// path. These tests pin the call, the refusals, and the broadcast.
 
 describe('ChatPanel new-session', () => {
-  it('the button is gone', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    expect(
-      p.shadowRoot.querySelector('.new-session-button'),
-    ).toBeNull();
-  });
-
-  it('nothing in the action bar calls new_session', async () => {
-    // Stronger than the absence of one selector: no button anywhere in the
-    // panel reaches the RPC. A renamed-but-still-wired control would pass the
-    // test above and still clear the wrong engine's session.
+  it('the button calls new_session', async () => {
     const newSession = vi
       .fn()
-      .mockResolvedValue({ session_id: 'sess_new' });
-    publishFakeRpc({ 'LLMService.new_session': newSession });
+      .mockResolvedValue({ session_id: null, status: 'new' });
+    publishFakeRpc({ 'ClaudeCodeService.new_session': newSession });
     const p = mountPanel();
     await settle(p);
-    for (const btn of p.shadowRoot.querySelectorAll('button')) {
-      if (btn.disabled) continue;
-      btn.click();
-    }
+    p.shadowRoot.querySelector('.new-session-button').click();
     await settle(p);
-    expect(newSession).not.toHaveBeenCalled();
+    expect(newSession).toHaveBeenCalledOnce();
   });
 
-  it('a session-changed broadcast still clears messages', async () => {
-    // Server-driven, so it survives the button's removal and is the path
-    // phase 5 will drive. Nothing local has to happen first.
+  it('does not clear the transcript on the reply', async () => {
+    // `sessionChanged` clears it. Doing it here as well would have this
+    // client jump ahead of every other one watching the same session.
+    const newSession = vi
+      .fn()
+      .mockResolvedValue({ session_id: null, status: 'new' });
+    publishFakeRpc({ 'ClaudeCodeService.new_session': newSession });
+    const p = mountPanel({
+      messages: [{ role: 'user', content: 'before' }],
+    });
+    await settle(p);
+    p.shadowRoot.querySelector('.new-session-button').click();
+    await settle(p);
+    expect(p.messages).toHaveLength(1);
+    pushEvent('session-changed', { session_id: null, messages: [] });
+    await settle(p);
+    expect(p.messages).toEqual([]);
+  });
+
+  it('a session-changed broadcast clears messages', async () => {
+    // Server-driven, so a remote client's new session lands the same way.
     publishFakeRpc({});
     const p = mountPanel({
       messages: [{ role: 'user', content: 'before' }],
@@ -1670,22 +1672,88 @@ describe('ChatPanel new-session', () => {
     expect(p.messages).toEqual([]);
   });
 
-  it('the handler is still guarded against streaming', async () => {
+  it('reports a refusal from a non-host client', async () => {
+    // Discarding the context every client is looking at is the host's
+    // call, and the server is the one that decides who that is.
+    const newSession = vi.fn().mockResolvedValue({
+      error: 'restricted',
+      reason: 'Only the host can start a new session',
+    });
+    publishFakeRpc({ 'ClaudeCodeService.new_session': newSession });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    const onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('ac-toast', onToast);
+    try {
+      p.shadowRoot.querySelector('.new-session-button').click();
+      await settle(p);
+    } finally {
+      window.removeEventListener('ac-toast', onToast);
+    }
+    expect(toasts[0].message).toContain('Only the host');
+    expect(toasts[0].type).toBe('warning');
+  });
+
+  it('reports a turn that started underneath the click', async () => {
+    const newSession = vi.fn().mockResolvedValue({
+      error: 'A turn is still running',
+      reason: 'turn_in_progress',
+    });
+    publishFakeRpc({ 'ClaudeCodeService.new_session': newSession });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    const onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('ac-toast', onToast);
+    try {
+      await p._onNewSession();
+      await settle(p);
+    } finally {
+      window.removeEventListener('ac-toast', onToast);
+    }
+    expect(toasts[0].message).toContain('A turn is still running');
+  });
+
+  it('is disabled, and guarded, while streaming', async () => {
+    // Both halves: the server refuses mid-turn, so the button goes flat
+    // rather than offering a click whose only outcome is a toast — and the
+    // handler still checks, because a keyboard path or a stale render is
+    // not a reason to send the call anyway.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     const newSession = vi
       .fn()
-      .mockResolvedValue({ session_id: 'sess_new' });
+      .mockResolvedValue({ session_id: null, status: 'new' });
     publishFakeRpc({
       'ClaudeCodeService.chat_streaming': started,
-      'LLMService.new_session': newSession,
+      'ClaudeCodeService.new_session': newSession,
     });
     const p = mountPanel();
     await settle(p);
     p._input = 'hi';
     await p._send();
     await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.new-session-button').disabled,
+    ).toBe(true);
     await p._onNewSession();
     expect(newSession).not.toHaveBeenCalled();
+  });
+
+  it('is gone on a tab that is not the live session', async () => {
+    // A subagent transcript and a read-only archive have no session to
+    // restart, and the ✨ on such a tab would restart the one behind it.
+    publishFakeRpc({});
+    const p = mountPanel();
+    await settle(p);
+    seedTab(p, 'sub-1');
+    p._activeTabId = 'sub-1';
+    p.requestUpdate();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.new-session-button'),
+    ).toBeNull();
+    expect(p.shadowRoot.querySelector('.history-button')).toBeNull();
   });
 });
 
@@ -1694,22 +1762,13 @@ describe('ChatPanel new-session', () => {
 // ---------------------------------------------------------------------------
 
 describe('ChatPanel history browser', () => {
-  // The 📜 button is gone with the ✨ one, and for the same reason: it browsed
-  // `LLMService`'s session store, which no longer holds the conversation the
-  // user is having. `<ac-history-browser>` stays mounted and closed —
-  // deleting it would mean rebuilding it in phase 5 rather than repointing it
-  // at the CLI's transcripts — so the tests below still drive its events.
+  // The 📜 button came back with the ✨ one in phase 5, now that
+  // `<ac-history-browser>` reads the CLI's own transcript mirrored under
+  // `.ac-dc4/sessions/` instead of `LLMService`'s session store. It stayed
+  // mounted and closed through phases 2–4, which is why it only needed
+  // repointing rather than rebuilding.
 
-  it('the History button is gone', async () => {
-    publishFakeRpc({});
-    const p = mountPanel();
-    await settle(p);
-    expect(
-      p.shadowRoot.querySelector('.history-button'),
-    ).toBeNull();
-  });
-
-  it('the browser is mounted but nothing can open it', async () => {
+  it('the History button opens the browser', async () => {
     publishFakeRpc({
       'ClaudeCodeService.history_list': vi
         .fn()
@@ -1720,17 +1779,34 @@ describe('ChatPanel history browser', () => {
     const browser = p.shadowRoot.querySelector(
       'ac-history-browser',
     );
-    expect(browser).toBeTruthy();
     expect(browser.open).toBe(false);
-    for (const btn of p.shadowRoot.querySelectorAll('button')) {
-      if (btn.disabled) continue;
-      btn.click();
-    }
+    p.shadowRoot.querySelector('.history-button').click();
     await settle(p);
-    expect(browser.open).toBe(false);
+    expect(browser.open).toBe(true);
   });
 
-  it('the handler still opens it, for phase 5 to rewire', async () => {
+  it('is offered while a turn is streaming', async () => {
+    // Browsing is a pure read of the mirrored transcript — no subprocess,
+    // no turn, no context — so unlike ✨ it has no reason to go flat
+    // mid-stream. Resuming from inside it is what the server refuses.
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': started,
+      'ClaudeCodeService.history_list': vi
+        .fn()
+        .mockResolvedValue([]),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._input = 'hi';
+    await p._send();
+    await settle(p);
+    expect(
+      p.shadowRoot.querySelector('.history-button').disabled,
+    ).toBe(false);
+  });
+
+  it('the handler opens it', async () => {
     publishFakeRpc({
       'ClaudeCodeService.history_list': vi
         .fn()

@@ -347,35 +347,51 @@ export async function cancel(panel) {
 // Session lifecycle
 // ---------------------------------------------------------------
 //
-// Unreachable from the UI since phase 2. The ✨ new-session and 📜
-// history buttons came off the action bar with the rest of the native
-// engine's controls (rendering.js), and `ClaudeCodeService` has no
-// `new_session` — session lifecycle over the CLI is phase 5, where
-// resume takes a session id rather than clearing one.
-//
-// The handlers stay because phase 5 wants exactly this shape back: a
-// call, then trust the broadcast. Repointing them at an RPC that does
-// not exist yet would be worse than leaving them plainly inert.
+// Unreachable from the UI between phase 2 and phase 5: the ✨ and 📜
+// buttons came off the action bar with the rest of the native engine's
+// controls, because `ClaudeCodeService` had no session lifecycle to
+// drive yet. It has one now, and the shape these handlers always had
+// is the right one for it — call, then trust the broadcast.
 
 /**
- * Start a new session. The server generates a new
- * session ID, clears history, and broadcasts
- * `sessionChanged` with an empty messages array.
- * The chat panel's `onSessionChanged` handler
- * resets the message list and streaming state — so
- * this method is responsibility-light: call the
- * RPC, trust the broadcast.
+ * Start a new session.
  *
- * Disabled during streaming to avoid racing
- * against an in-flight stream.
+ * Nothing local is cleared here. The server broadcasts `sessionChanged`
+ * with an empty message list, and the panel's handler resets the
+ * transcript and streaming state from that — the same path a remote
+ * client's new session takes, so every client ends up agreeing. A local
+ * clear on the reply would make this client the one that jumped ahead.
+ *
+ * Two refusals come back rather than throw, and both are worth showing:
+ * `turn_in_progress` (the server will not pull a session out from under
+ * a live turn — the button is disabled while streaming, so reaching
+ * this means the turn started underneath the click) and `restricted`
+ * (the call is localhost-only; discarding the context every client is
+ * looking at is the host's decision).
  */
 export async function onNewSession(panel) {
   if (panel._streaming) return;
   if (!panel.rpcConnected) return;
   try {
-    await panel.rpcExtract('LLMService.new_session');
+    const result = await panel.rpcExtract(
+      'ClaudeCodeService.new_session',
+    );
+    if (result && typeof result === 'object' && result.error) {
+      const reason =
+        result.error === 'restricted'
+          ? result.reason || 'Only the host can start a new session'
+          : result.error;
+      panel._emitToast(reason, 'warning');
+    }
+    // Success says nothing: `session_id` is null until the CLI mints
+    // one on the first turn, so there is nothing here to report that
+    // the cleared transcript does not already say.
   } catch (err) {
     console.error('[chat] new_session failed', err);
+    panel._emitToast(
+      `Could not start a new session: ${err?.message || err}`,
+      'warning',
+    );
   }
 }
 
