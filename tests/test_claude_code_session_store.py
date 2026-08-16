@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 from claude_agent_sdk import SessionStore
@@ -224,6 +225,115 @@ async def test_a_subagent_append_does_not_block_on_another_session(store):
         store.append({"project_key": "proj", "session_id": "other"}, [entry(uuid="b")]),
     )
     assert await store.load(KEY) == [entry(uuid="a")]
+
+
+# ---------------------------------------------------------------------------
+# Append observers
+# ---------------------------------------------------------------------------
+#
+# The hook the service builds image pointers on: a pointer needs the entry's
+# ``uuid``, which does not exist until the CLI has written the entry. So the
+# properties tested here are the ones that decision rests on — post-dedup
+# entries, the key verbatim, order, and above all that a subscriber cannot
+# damage the mirror.
+
+
+async def test_an_observer_sees_what_was_written(store):
+    seen: list[tuple[dict, list]] = []
+    store.add_append_observer(lambda key, written: seen.append((key, written)))
+
+    await store.append(KEY, [entry(uuid="a"), entry(uuid="b")])
+
+    assert len(seen) == 1
+    assert seen[0][1] == [entry(uuid="a"), entry(uuid="b")]
+
+
+async def test_an_observer_sees_the_key_verbatim(store):
+    """Including ``subpath`` — telling a subagent's batch from the session's."""
+    seen: list[dict] = []
+    store.add_append_observer(lambda key, written: seen.append(key))
+    sub = {**KEY, "subpath": "subagents/agent-1"}
+
+    await store.append(KEY, [entry(uuid="a")])
+    await store.append(sub, [entry(uuid="b")])
+
+    assert seen == [KEY, sub]
+
+
+async def test_an_observer_is_told_only_about_new_entries(store):
+    """Post-dedup: a retried batch re-sends entries nobody should react to twice."""
+    seen: list[list] = []
+    store.add_append_observer(lambda key, written: seen.append(written))
+
+    await store.append(KEY, [entry(uuid="a")])
+    await store.append(KEY, [entry(uuid="a"), entry(uuid="b")])
+
+    assert seen == [[entry(uuid="a")], [entry(uuid="b")]]
+
+
+async def test_an_all_duplicate_batch_notifies_nobody(store):
+    calls = []
+    store.add_append_observer(lambda key, written: calls.append(written))
+
+    await store.append(KEY, [entry(uuid="a")])
+    await store.append(KEY, [entry(uuid="a")])
+
+    assert len(calls) == 1
+
+
+async def test_an_empty_append_notifies_nobody(store):
+    calls = []
+    store.add_append_observer(lambda key, written: calls.append(written))
+    await store.append(KEY, [])
+    assert calls == []
+
+
+async def test_an_observer_runs_after_the_bytes_are_on_disk(store, tmp_path):
+    """What makes the entry readable by uuid from inside the callback."""
+    found: list[list] = []
+
+    def observe(key, written):
+        path = tmp_path / "sessions" / "proj" / "sess.jsonl"
+        found.append([json.loads(line) for line in path.read_text().splitlines()])
+
+    store.add_append_observer(observe)
+    await store.append(KEY, [entry(uuid="a")])
+
+    assert found == [[entry(uuid="a")]]
+
+
+async def test_a_failing_observer_does_not_fail_the_mirror(store, caplog):
+    """The SDK surfaces an ``append`` exception as a hole in the transcript."""
+    reached = []
+
+    def explode(key, written):
+        raise RuntimeError("subscriber is broken")
+
+    store.add_append_observer(explode)
+    store.add_append_observer(lambda key, written: reached.append(written))
+
+    with caplog.at_level(logging.ERROR):
+        await store.append(KEY, [entry(uuid="a")])
+
+    assert await store.load(KEY) == [entry(uuid="a")]
+    # The one that raised does not stop the one after it.
+    assert reached == [[entry(uuid="a")]]
+    assert "observer failed" in caplog.text
+
+
+async def test_observers_see_batches_in_write_order(store):
+    """Notified under the same lock the write took, so the two orders agree."""
+    seen: list[int] = []
+    store.add_append_observer(
+        lambda key, written: seen.extend(e["n"] for e in written)
+    )
+
+    await asyncio.gather(
+        *(store.append(KEY, [entry(uuid=str(n), n=n)]) for n in range(25))
+    )
+
+    assert seen == list(range(25))
+    assert [e["n"] for e in await store.load(KEY)] == list(range(25))
 
 
 # ---------------------------------------------------------------------------

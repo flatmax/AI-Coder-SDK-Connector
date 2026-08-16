@@ -196,6 +196,14 @@ class ClaudeCodeService:
         # expires it, which is days later and looks like data loss rather
         # than a missing argument. Still injectable, for tests.
         self.session_store = session_store or self._build_session_store()
+        # Watch what the mirror writes, for the one fact about a message
+        # that only exists after the CLI has written it: the entry `uuid` an
+        # image pointer is built from. Registered by capability rather than
+        # unconditionally, because an injected store need not have the hook —
+        # and losing it costs a collaborator's thumbnails, not the turn.
+        add_observer = getattr(self.session_store, "add_append_observer", None)
+        if callable(add_observer):
+            add_observer(self._on_entries_mirrored)
         # The events the transcript never holds — commits, resets, mode
         # switches. Built the same way as the store and for the same reason:
         # a path derived from config, not a collaborator injected by the
@@ -859,10 +867,12 @@ class ClaudeCodeService:
             return {"error": str(exc), "reason": "bad_request"}
 
         # Broadcast before the turn starts so a collaborator's transcript
-        # shows the message even if the turn then fails. image_refs stays
-        # empty until image persistence lands in phase 3 — data URIs are
-        # never broadcast, because a handful of screenshots would be
-        # megabytes per client.
+        # shows the message even if the turn then fails. `image_refs` is
+        # empty *here* and filled in by the `userMessageImages` follow-up:
+        # a pointer needs the entry uuid, and the entry the CLI writes does
+        # not exist yet. Data URIs are never broadcast either way, because a
+        # handful of screenshots would be megabytes per client
+        # (``specs5/4-features/images.md`` § Engine Service Integration).
         await self._broadcast(
             Event(
                 "userMessage",
@@ -2085,14 +2095,69 @@ class ClaudeCodeService:
         Off-loop callers lose the event and get a log line; every real
         caller here is an RPC handler, which is always on the loop.
         """
+        self._dispatch_soon(event, None)
+
+    def _dispatch_soon(self, event: Event, request_id: str | None) -> None:
+        """:meth:`_broadcast_soon` for an event that belongs to a turn."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             logger.debug("No running loop; dropped %s broadcast", event.name)
             return
-        task = loop.create_task(self._broadcast(event))
+        task = loop.create_task(self._dispatch(event, request_id))
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
+
+    def _on_entries_mirrored(self, key: Any, entries: list[Any]) -> None:
+        """Announce image pointers for a user entry the mirror just took.
+
+        The second half of the ``userMessage`` broadcast. That one goes out
+        before the turn starts, when the pasted images have no addresses yet
+        — a pointer is ``(session_id, entry_uuid, block)`` and the entry is
+        written by the CLI, mid-turn, some time later. So the pointers follow
+        as their own event rather than the broadcast waiting for them: a
+        collaborator seeing the text immediately and the thumbnails a moment
+        later is right, and seeing neither until the CLI has flushed is not.
+
+        Only the main transcript, and only inside a turn. A subagent's
+        prompt is not a user message in anybody's chat, and entries mirrored
+        with no turn in flight are a resume or a re-import replaying history
+        that every client already reads through ``history_load``.
+
+        Called from the store on the loop thread, so this stays synchronous
+        and hands the actual send to a task.
+        """
+        if not isinstance(key, dict) or key.get("subpath") is not None:
+            return
+        session_id = key.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        request_id = self.session.active_request_id
+        if not request_id:
+            return
+
+        from ac_dc.claude_code import history
+
+        refs: list[dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("type") != "user":
+                continue
+            content = (entry.get("message") or {}).get("content")
+            uuid = entry.get("uuid")
+            refs.extend(
+                history.image_refs_for_entry(
+                    content, session_id, uuid if isinstance(uuid, str) else ""
+                )
+            )
+        if not refs:
+            # The overwhelmingly common case — every turn's entries pass
+            # through here and almost none of them carry an image.
+            return
+
+        self._dispatch_soon(
+            Event("userMessageImages", {"image_refs": refs}),
+            request_id,
+        )
 
     def _slash_response(self, message: str) -> dict[str, Any] | None:
         """Answer a built-in slash command without involving the model.

@@ -694,6 +694,192 @@ describe('ChatPanel restoring image pointers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Pointers that arrive after the message
+// ---------------------------------------------------------------------------
+//
+// A collaborator's `userMessage` broadcast carries no pointers: it goes out
+// before the turn starts, and a pointer names the transcript entry the image
+// lives in, which the CLI writes mid-turn. So they follow as `userMessageImages`
+// and are attached to the message the request id names — which is a message
+// only a passive observer has, because the sender is holding the bytes it
+// pasted (specs5/4-features/images.md § Engine Service Integration).
+
+describe('ChatPanel late image pointers', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+  const REQ = '1736956800000-a1b2c3';
+
+  function ref(overrides = {}) {
+    return {
+      session_id: 's1',
+      entry_uuid: 'u1',
+      block: 1,
+      media_type: 'image/png',
+      ...overrides,
+    };
+  }
+
+  async function drain(panel, rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) await settle(panel);
+  }
+
+  /** A prompt as a collaborator receives it: text, and a request id. */
+  function observed(panel, requestId = REQ, content = 'look at this') {
+    pushEvent('user-message', { content, request_id: requestId });
+    return settle(panel);
+  }
+
+  function pointers(panel, refs, requestId = REQ) {
+    pushEvent('user-message-images', {
+      requestId,
+      data: { image_refs: refs },
+    });
+    return settle(panel);
+  }
+
+  it('attaches them to the message and fetches the bytes', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p);
+    await pointers(p, [ref()]);
+    await drain(p);
+    expect(p.messages[0].image_refs).toEqual([ref()]);
+    expect(fetchImage).toHaveBeenCalledWith('s1', 'u1', 1);
+    expect(
+      [...p.shadowRoot.querySelectorAll('img.message-image')],
+    ).toHaveLength(1);
+  });
+
+  it('leaves the sender’s own message alone', async () => {
+    // The sender has the data URI it pasted and fetches nothing. Nothing
+    // checks "am I the sender": only the passive path stamps a request id
+    // onto a message, so there is nothing here for this event to match.
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': fetchImage,
+      'ClaudeCodeService.chat_streaming': vi
+        .fn()
+        .mockResolvedValue({ status: 'started' }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._pendingImages = ['data:image/png;base64,BBB'];
+    p._input = 'look at this';
+    await p._send();
+    await settle(p);
+    await pointers(p, [ref()]);
+    await drain(p);
+    expect(p.messages[0].image_refs).toBeUndefined();
+    expect(fetchImage).not.toHaveBeenCalled();
+    // The bytes it pasted are still the one tile it draws.
+    expect(
+      [...p.shadowRoot.querySelectorAll('img.message-image')],
+    ).toHaveLength(1);
+  });
+
+  it('picks the message the request id names', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': vi
+        .fn()
+        .mockResolvedValue({ data_uri: PNG }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p, 'req-first', 'the first prompt');
+    await observed(p, 'req-second', 'the second prompt');
+    await pointers(p, [ref()], 'req-first');
+    await drain(p);
+    expect(p.messages[0].image_refs).toEqual([ref()]);
+    expect(p.messages[1].image_refs).toBeUndefined();
+  });
+
+  it('does not add the same pointer twice', async () => {
+    // A re-broadcast would otherwise draw the same screenshot again.
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p);
+    await pointers(p, [ref()]);
+    await drain(p);
+    await pointers(p, [ref()]);
+    await drain(p);
+    expect(p.messages[0].image_refs).toHaveLength(1);
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds a second image announced separately', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': vi
+        .fn()
+        .mockResolvedValue({ data_uri: PNG }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p);
+    await pointers(p, [ref()]);
+    await drain(p);
+    await pointers(p, [ref({ block: 2, entry_uuid: 'u2' })]);
+    await drain(p);
+    expect(p.messages[0].image_refs.map((r) => r.block)).toEqual([1, 2]);
+  });
+
+  it('ignores an event for a message it does not have', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p, 'req-first');
+    await pointers(p, [ref()], 'req-other');
+    await drain(p);
+    expect(p.messages[0].image_refs).toBeUndefined();
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it('ignores a malformed event', async () => {
+    const fetchImage = vi.fn().mockResolvedValue({ data_uri: PNG });
+    publishFakeRpc({ 'ClaudeCodeService.history_image': fetchImage });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p);
+    for (const detail of [
+      {},
+      { requestId: REQ },
+      { requestId: REQ, data: {} },
+      { requestId: REQ, data: { image_refs: [] } },
+      { requestId: REQ, data: { image_refs: [null, 'nonsense'] } },
+      { data: { image_refs: [ref()] } },
+    ]) {
+      pushEvent('user-message-images', detail);
+      await settle(p);
+    }
+    await drain(p);
+    expect(p.messages[0].image_refs).toBeUndefined();
+    expect(fetchImage).not.toHaveBeenCalled();
+    // Still live afterwards — a swallowed exception would leave the handler
+    // wired but inert.
+    await pointers(p, [ref()]);
+    await drain(p);
+    expect(p.messages[0].image_refs).toEqual([ref()]);
+  });
+
+  it('stops listening on disconnect', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.history_image': vi
+        .fn()
+        .mockResolvedValue({ data_uri: PNG }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    await observed(p);
+    p.remove();
+    await pointers(p, [ref()]);
+    expect(p.messages[0].image_refs).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Compaction events — the retired native-engine stages
 // ---------------------------------------------------------------------------
 //

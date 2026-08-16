@@ -91,7 +91,7 @@ Every turn-scoped event carries the originating request id. The authoritative pa
 - Engine state — compaction event, rate limit, hook event (debug view only), engine health
 - Permissions — permission request, permission resolved, permission mode changed
 - Subagents — subagent event (started, progress, updated, notification)
-- Broadcast — files changed, user message (with request id, framing's file list, image refs), commit result, session changed
+- Broadcast — files changed, user message (with request id and framing's file list), user message images (the pasted images' pointers, once the CLI has written the entry they name — see [`../4-features/images.md`](../4-features/images.md) § Engine Service Integration), commit result, session changed
 - Startup — progress
 - Navigation — navigate file
 - Collaboration — admission request, admission result, client joined, client left, role changed

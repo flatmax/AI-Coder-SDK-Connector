@@ -594,6 +594,41 @@ def render_messages(
     return _interleave(rendered, events)
 
 
+def image_refs_for_entry(
+    content: Any, session_id: str, entry_uuid: str
+) -> list[dict[str, Any]]:
+    """Pointers to the image blocks in one user message's content.
+
+    ``block`` is the index in the content list **as stored**, images and
+    text alike, because that is what :func:`load_image` seeks by. Counting
+    only the images would be a shorter list that addressed the wrong bytes.
+
+    One function so there is one definition of that index. A browsed
+    transcript renders these (:func:`_user_message`) and so does the live
+    turn, where the service builds them off the mirrored entry as it is
+    written — the ``uuid`` a pointer needs does not exist any earlier.
+
+    An entry with no ``uuid`` yields nothing: a pointer that cannot be
+    resolved is worse than an image the browser knows it has not got.
+    """
+    if not isinstance(content, list) or not entry_uuid or not session_id:
+        return []
+    refs: list[dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict) or block.get("type") != "image":
+            continue
+        source = block.get("source")
+        refs.append(
+            {
+                "session_id": session_id,
+                "entry_uuid": entry_uuid,
+                "block": index,
+                "media_type": (source or {}).get("media_type") or "",
+            }
+        )
+    return refs
+
+
 def _user_message(
     message: SessionMessage, entry: dict[str, Any], session_id: str
 ) -> dict[str, Any]:
@@ -607,26 +642,16 @@ def _user_message(
     body = getattr(message, "message", None) or {}
     content = body.get("content")
     text_parts: list[str] = []
-    image_refs: list[dict[str, Any]] = []
 
     if isinstance(content, str):
         text_parts.append(content)
     elif isinstance(content, list):
-        for index, block in enumerate(content):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "text":
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
                 text_parts.append(str(block.get("text") or ""))
-            elif block.get("type") == "image":
-                source = block.get("source") or {}
-                image_refs.append(
-                    {
-                        "session_id": session_id,
-                        "entry_uuid": getattr(message, "uuid", "") or "",
-                        "block": index,
-                        "media_type": source.get("media_type") or "",
-                    }
-                )
+    image_refs = image_refs_for_entry(
+        content, session_id, getattr(message, "uuid", "") or ""
+    )
 
     rendered: dict[str, Any] = {
         "role": "user",

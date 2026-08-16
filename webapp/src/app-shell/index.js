@@ -926,6 +926,18 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  userMessageImages(requestId, data) {
+    // The `image_refs` the `userMessage` above could not carry: a pointer
+    // names the transcript entry the image lives in, and the CLI writes that
+    // entry mid-turn, after the message has already been broadcast. Turn-
+    // scoped, so the request id arrives first and says which message the
+    // pointers belong to.
+    window.dispatchEvent(new CustomEvent('user-message-images', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
   commitResult(result) {
     window.dispatchEvent(new CustomEvent('commit-result', { detail: result }));
     // Refresh open viewers after a commit. The working

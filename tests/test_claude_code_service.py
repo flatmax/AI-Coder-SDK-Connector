@@ -73,6 +73,9 @@ class FakeSession:
         self.streaming_active = False
         self.permission_mode = "default"
         self.model = None
+        # The turn in flight, which is what a mirrored entry is attributed
+        # to. `None` means no turn, the way the real property reports it.
+        self.active_request_id = None
 
         self.connect_calls: list[str | None] = []
         # `(resume, fork_session)` per connect. Separate from
@@ -126,6 +129,9 @@ class FakeSession:
     async def run_turn(self, turn, emit=None):
         self.turns.append(turn)
         self.streaming_active = True
+        # The real session's `_active_turn` lives exactly this long, which is
+        # also the window in which the CLI mirrors the turn's entries.
+        self.active_request_id = turn.request_id
         try:
             for event in self.turn_events:
                 if isinstance(event, BaseException):
@@ -134,6 +140,7 @@ class FakeSession:
                     await emit(event)
         finally:
             self.streaming_active = False
+            self.active_request_id = None
         return {"response": "Hi"}
 
     async def interrupt(self, request_id=None):
@@ -717,6 +724,229 @@ class TestChatStreaming:
         service.session.admit_error = TurnInProgressError("already running")
         await service.chat_streaming(REQUEST_ID, "hello")
         assert events.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Image pointers, after the fact
+# ---------------------------------------------------------------------------
+
+
+class TestUserMessageImages:
+    """The addresses a pasted image only gets once the CLI has written it.
+
+    ``userMessage`` goes out before the turn starts, so its ``image_refs`` is
+    empty by necessity: a pointer is ``(session_id, entry_uuid, block)`` and
+    the entry does not exist yet. The store's append observer is where those
+    three become available, and this is what it announces
+    (``specs5/4-features/images.md`` § Engine Service Integration).
+    """
+
+    @pytest.fixture
+    def mirroring(self, service):
+        """A service with a turn in flight, the way the mirror sees one."""
+        service.session.active_request_id = REQUEST_ID
+        return service
+
+    async def test_a_mirrored_image_becomes_a_pointer(
+        self, mirroring, events, tmp_path
+    ):
+        entry_uuid = await seed_image(mirroring, "sess-1")
+        await finish_turns(mirroring)
+
+        payload = events.payload_of("userMessageImages")
+        assert payload["image_refs"] == [
+            {
+                "session_id": "sess-1",
+                "entry_uuid": entry_uuid,
+                # Index 1, not 0: the pasted text is the first block, and
+                # `history_image` seeks by position in the stored list.
+                "block": 1,
+                "media_type": "image/png",
+            }
+        ]
+
+    async def test_it_is_turn_scoped(self, mirroring, events):
+        """So the browser knows which message the pointers belong to."""
+        await seed_image(mirroring, "sess-1")
+        await finish_turns(mirroring)
+
+        name, request_id, payload = events.call_of("userMessageImages")
+        assert name == "userMessageImages"
+        assert request_id == REQUEST_ID
+        assert isinstance(payload, dict)
+
+    async def test_no_bytes_travel_with_the_pointer(self, mirroring, events):
+        await seed_image(mirroring, "sess-1")
+        await finish_turns(mirroring)
+        assert "aGk=" not in str(events.payload_of("userMessageImages"))
+
+    async def test_every_image_in_the_prompt_is_pointed_at(self, mirroring, events):
+        await mirroring.session_store.append(
+            {"project_key": mirroring._session_project_key(), "session_id": "sess-1"},
+            [
+                {
+                    "type": "user",
+                    "uuid": "u-two",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "compare these"},
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png"},
+                            },
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/webp"},
+                            },
+                        ],
+                    },
+                }
+            ],
+        )
+        await finish_turns(mirroring)
+
+        refs = events.payload_of("userMessageImages")["image_refs"]
+        assert [(r["block"], r["media_type"]) for r in refs] == [
+            (1, "image/png"),
+            (2, "image/webp"),
+        ]
+
+    async def test_a_prompt_without_images_says_nothing(self, mirroring, events):
+        """Every turn's entries pass through here; almost none carry an image."""
+        await seed_transcript(mirroring, "sess-1")
+        await finish_turns(mirroring)
+        assert "userMessageImages" not in events.names()
+
+    async def test_nothing_is_announced_outside_a_turn(self, service, events):
+        """A resume or a re-import replaying history is not a new paste."""
+        service.session.active_request_id = None
+        await seed_image(service, "sess-1")
+        await finish_turns(service)
+        assert events.names() == []
+
+    async def test_a_subagent_prompt_is_not_a_user_message(self, mirroring, events):
+        """It is nobody's chat message, so it belongs in no transcript here."""
+        await mirroring.session_store.append(
+            {
+                "project_key": mirroring._session_project_key(),
+                "session_id": "sess-1",
+                "subpath": "subagents/agent-1",
+            },
+            [
+                {
+                    "type": "user",
+                    "uuid": "sub-img",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        await finish_turns(mirroring)
+        assert "userMessageImages" not in events.names()
+
+    async def test_an_image_inside_a_tool_result_is_not_a_paste(
+        self, mirroring, events
+    ):
+        """A tool result is a user entry too, and its screenshots are not the user's."""
+        await mirroring.session_store.append(
+            {"project_key": mirroring._session_project_key(), "session_id": "sess-1"},
+            [
+                {
+                    "type": "user",
+                    "uuid": "u-tool",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_01",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "image/png",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        await finish_turns(mirroring)
+        assert "userMessageImages" not in events.names()
+
+    async def test_an_assistant_entry_is_never_a_source(self, mirroring, events):
+        await mirroring.session_store.append(
+            {"project_key": mirroring._session_project_key(), "session_id": "sess-1"},
+            [
+                {
+                    "type": "assistant",
+                    "uuid": "a-img",
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        await finish_turns(mirroring)
+        assert "userMessageImages" not in events.names()
+
+    async def test_a_retried_mirror_batch_announces_once(self, mirroring, events):
+        """Post-dedup entries, so the browser is not handed the same tile twice."""
+        await seed_image(mirroring, "sess-1")
+        await seed_image(mirroring, "sess-1")
+        await finish_turns(mirroring)
+        assert events.names().count("userMessageImages") == 1
+
+    async def test_an_entry_with_no_uuid_is_not_pointed_at(self, mirroring, events):
+        """A pointer that cannot resolve is worse than a missing tile."""
+        await mirroring.session_store.append(
+            {"project_key": mirroring._session_project_key(), "session_id": "sess-1"},
+            [
+                {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/png"},
+                            }
+                        ],
+                    },
+                }
+            ],
+        )
+        await finish_turns(mirroring)
+        assert "userMessageImages" not in events.names()
+
+    async def test_a_broken_event_callback_does_not_fail_the_mirror(
+        self, mirroring, events
+    ):
+        """The mirror is the storage; a dropped broadcast costs a thumbnail."""
+        events.error = RuntimeError("socket closed")
+        await seed_image(mirroring, "sess-1")
+        await finish_turns(mirroring)
+        assert await mirroring.session_store.load(
+            {"project_key": mirroring._session_project_key(), "session_id": "sess-1"}
+        )
 
 
 # ---------------------------------------------------------------------------

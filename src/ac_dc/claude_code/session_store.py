@@ -30,6 +30,14 @@ Four properties here are contracts, not choices
   the SDK, and ``import_session_to_store()`` re-imports a whole local
   transcript as a repair tool. Both must be duplicate-safe.
 
+One local addition sits alongside the protocol: ``add_append_observer``
+lets the service watch entries as they are mirrored. That hook exists
+because some facts about a message only exist *after* the CLI has written
+it — an entry's ``uuid`` above all, which is what an image pointer is
+built from (``specs5/4-features/images.md``). Nothing an observer does can
+affect the mirror: it is called after the bytes are on disk, and its
+exceptions are logged and dropped.
+
 This class deliberately does **not** subclass the SDK's ``SessionStore``
 Protocol. Its default methods raise ``NotImplementedError``, and the
 SDK's presence probe reads an inherited default as *absent* — so
@@ -52,6 +60,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from claude_agent_sdk import SessionKey, SessionStoreEntry, SessionSummaryEntry
 
 logger = logging.getLogger(__name__)
@@ -223,6 +233,10 @@ class RepoSessionStore:
         self._files: dict[tuple[str, str, str | None], _FileState] = {}
         self._summaries: dict[tuple[str, str], _SummaryState] = {}
         self._malformed_lines = 0
+        # Notified after each batch reaches disk. A list rather than a
+        # single slot because two unrelated features may both want to read
+        # what was written, and neither should have to know about the other.
+        self._append_observers: list[Callable[[SessionKey, list[Any]], None]] = []
 
     # ------------------------------------------------------------------
     # Protocol — required
@@ -248,9 +262,13 @@ class RepoSessionStore:
             file_state = self._file_state(k)
             summary = None if k.subpath is not None else self._summary_state(k)
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
+            written = await loop.run_in_executor(
                 None, self._append_sync, k, list(entries), file_state, summary
             )
+            # Still under the lock, so observers see batches in the order
+            # they were written. Safe to hold it: an observer is
+            # synchronous, so it cannot await its way back into this store.
+            self._notify_appended(key, written)
 
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         """Read every entry for ``key``, or ``None`` if there is no file.
@@ -345,6 +363,40 @@ class RepoSessionStore:
         """
         return self._malformed_lines
 
+    def add_append_observer(
+        self, observer: Callable[[SessionKey, list[Any]], None]
+    ) -> None:
+        """Call ``observer(key, written)`` after each batch reaches disk.
+
+        ``written`` is what actually went to the file — post-dedup, so a
+        retried batch notifies nobody about the entries it re-sent, and an
+        all-duplicate batch notifies nobody at all. The observer runs on
+        the event loop thread and must not block; the whole point is to
+        read an entry the CLI has just written, not to do work with it.
+
+        The key is passed through verbatim, ``subpath`` included, because
+        whether a batch belongs to the main transcript or to a subagent's
+        is the first thing most observers need to know.
+        """
+        self._append_observers.append(observer)
+
+    def _notify_appended(self, key: SessionKey, written: list[Any]) -> None:
+        """Fan a batch out, absorbing every failure.
+
+        An observer is a bystander. Letting one raise here would fail the
+        ``append`` the SDK is awaiting, which it surfaces as a
+        ``MirrorErrorMessage`` and retries — so a bug in a subscriber
+        would present as a broken transcript mirror, which is the one
+        thing in this file that must not break.
+        """
+        if not written or not self._append_observers:
+            return
+        for observer in self._append_observers:
+            try:
+                observer(key, written)
+            except Exception:
+                logger.exception("session store append observer failed")
+
     def total_bytes(self) -> int:
         """Bytes under ``root``, for the disk-usage warning."""
         total = 0
@@ -385,7 +437,8 @@ class RepoSessionStore:
         entries: list[Any],
         file_state: _FileState,
         summary: _SummaryState | None,
-    ) -> None:
+    ) -> list[Any]:
+        """Write a batch and return the entries that were new to the file."""
         path = self._path_for(k)
         if not file_state.seeded:
             # First touch of this file in this process. Seeding from disk
@@ -413,7 +466,7 @@ class RepoSessionStore:
             # Every entry was a duplicate. Not an error, and deliberately
             # not a fold either: folding them again would double-count the
             # session's own summary.
-            return
+            return written
 
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
@@ -424,6 +477,7 @@ class RepoSessionStore:
             # contribute to the main session's, which is why `append` only
             # hands a holder over for a main transcript.
             self._fold_and_persist(k, path, written, summary)
+        return written
 
     def _fold_and_persist(
         self, k: _Key, transcript: Path, entries: list[Any], summary: _SummaryState

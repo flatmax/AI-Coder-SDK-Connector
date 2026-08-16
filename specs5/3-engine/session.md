@@ -67,6 +67,11 @@ Unchanged in shape from the native engine, which is why the transport and reconn
 5. Pump translates SDK messages into server-push events, all carrying the request ID.
 6. Pump runs to `ResultMessage`, then finalises.
 
+If the prompt carried pasted images, a `userMessageImages` follow-up joins step 4 — pointers to the
+image blocks, sent when the mirror writes the user entry, because the entry `uuid` a pointer is built
+from does not exist at step 3 ([`../4-features/images.md`](../4-features/images.md) § Engine Service
+Integration).
+
 ### Request IDs remain the multiplexing primitive
 
 The browser's request ID — not the SDK's `session_id` — correlates every server-push event with the

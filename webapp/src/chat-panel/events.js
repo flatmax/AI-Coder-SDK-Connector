@@ -35,7 +35,7 @@
 // wiring tables here means the events file is the
 // one place to look when adding a new event.
 
-import { hydrateImageRefs } from '../image-refs.js';
+import { hydrateImageRefs, imageRefKey, imageRefsOf } from '../image-refs.js';
 import { SPEECH_STATE_EVENT } from '../speech-player.js';
 import { compactionSummary } from './block-render.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -88,6 +88,7 @@ export function bindEventHandlers(panel) {
   panel._onStreamChunk = (e) => onStreamChunk(panel, e);
   panel._onStreamComplete = (e) => onStreamComplete(panel, e);
   panel._onUserMessage = (e) => onUserMessage(panel, e);
+  panel._onUserMessageImages = (e) => onUserMessageImages(panel, e);
   // Claude Code engine channels. Every one is a distinct window event
   // because the engine reports them as distinct pushes; folding them into
   // one "engine-event" channel with a discriminator would only move the
@@ -246,6 +247,11 @@ export function resumeActiveStreams(panel, activeStreams) {
  *     messages to all clients; passive observers
  *     append, sender skips its own echo.
  *
+ *   user-message-images — the pointers to that
+ *     message's images, which only exist once the
+ *     CLI has written the entry they live in.
+ *     Attached to the message the request id names.
+ *
  *   agents-spawned — backend pre-spawn signal so
  *     child stream chunks have somewhere to land.
  *
@@ -275,6 +281,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('stream-chunk', panel._onStreamChunk);
   window.addEventListener('stream-complete', panel._onStreamComplete);
   window.addEventListener('user-message', panel._onUserMessage);
+  window.addEventListener('user-message-images', panel._onUserMessageImages);
   // Claude Code engine channels (see the block comment above).
   window.addEventListener('thinking-chunk', panel._onThinkingChunk);
   window.addEventListener('tool-use', panel._onToolUse);
@@ -369,6 +376,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('stream-chunk', panel._onStreamChunk);
   window.removeEventListener('stream-complete', panel._onStreamComplete);
   window.removeEventListener('user-message', panel._onUserMessage);
+  window.removeEventListener('user-message-images', panel._onUserMessageImages);
   window.removeEventListener('thinking-chunk', panel._onThinkingChunk);
   window.removeEventListener('tool-use', panel._onToolUse);
   window.removeEventListener('tool-result', panel._onToolResult);
@@ -574,6 +582,49 @@ export function restoreImages(panel) {
     isStale: () => gen !== panel._restoreGeneration,
     label: 'chat',
   });
+}
+
+/**
+ * Handle a `user-message-images` window event — the addresses of a prompt's
+ * images, arriving after the message they belong to.
+ *
+ * The `userMessage` broadcast goes out before the turn starts, when the
+ * pasted images have no addresses yet: a pointer is `{session_id,
+ * entry_uuid, block}` and the entry is written by the CLI, mid-turn, some
+ * time later. So the pointers follow as their own event and are attached
+ * here, to the message carrying that request id.
+ *
+ * Which means this is a *collaborator's* handler, by construction rather
+ * than by a sender check. Only `onUserMessage` stamps a `request_id` onto a
+ * message, and it only runs on a client that did not send the prompt — the
+ * sender's optimistic message holds the data URIs it pasted and needs
+ * nothing fetched, and a message restored from disk after a reconnect
+ * already came with its pointers.
+ *
+ * Pointers already present are not re-added: two events naming the same
+ * block would otherwise draw the same screenshot twice.
+ */
+export function onUserMessageImages(panel, event) {
+  const { requestId, data } = event.detail || {};
+  if (!requestId) return;
+  const refs = Array.isArray(data?.image_refs)
+    ? data.image_refs.filter((ref) => ref && typeof ref === 'object')
+    : [];
+  if (refs.length === 0) return;
+  for (let i = panel.messages.length - 1; i >= 0; i -= 1) {
+    const msg = panel.messages[i];
+    if (msg?.role !== 'user' || msg.request_id !== requestId) continue;
+    const known = new Set(imageRefsOf(msg).map(imageRefKey));
+    const added = refs.filter((ref) => !known.has(imageRefKey(ref)));
+    if (added.length === 0) return;
+    panel.messages = [
+      ...panel.messages.slice(0, i),
+      { ...msg, image_refs: [...imageRefsOf(msg), ...added] },
+      ...panel.messages.slice(i + 1),
+    ];
+    restoreImages(panel);
+    return;
+  }
 }
 
 /**

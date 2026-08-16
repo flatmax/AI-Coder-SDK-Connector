@@ -45,6 +45,16 @@ turn, and the entry the engine writes is what lets us render it again a week lat
   Collaborators fetch image data on demand through `history_image`, which reads the store, so a paste
   does not push megabytes down every socket. The initiating client already holds the data URI it pasted
   and fetches nothing.
+- **The pointers arrive a moment after the message, as `userMessageImages`.** They cannot ride on
+  `userMessage`: a pointer names the entry `uuid` the image lives in, and that entry does not exist when
+  the broadcast goes out — the CLI writes it mid-turn, and we only learn its `uuid` when the mirror hands
+  it to us. So the store gained an append observer, and the service reads the pointers off the entries as
+  they are written (`RepoSessionStore.add_append_observer` →
+  `history.image_refs_for_entry`, the one owner of the pointer shape). The follow-up is turn-scoped: the
+  request ID says which message the pointers belong to, which is also what makes it a collaborator's
+  event by construction — only a passively-received message carries a request ID to match, so the sender
+  never attaches pointers to the bytes it already has. A prompt without images announces nothing, which
+  is the overwhelmingly common case.
 
 ## Session Loading and Resume
 

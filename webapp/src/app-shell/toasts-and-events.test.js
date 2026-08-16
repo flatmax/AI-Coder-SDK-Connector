@@ -127,6 +127,29 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('files-changed', listener);
     });
 
+    it('userMessageImages carries the request id and the pointers', () => {
+      // The follow-up to `userMessage`, which goes out before the CLI has
+      // written the entry a pointer names. Turn-scoped, so the request id
+      // arrives first and says which message the pointers belong to.
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('user-message-images', listener);
+      const data = {
+        image_refs: [
+          {
+            session_id: 's1',
+            entry_uuid: 'u1',
+            block: 1,
+            media_type: 'image/png',
+          },
+        ],
+      };
+      shell.userMessageImages('req-1', data);
+      const event = listener.mock.calls[0][0];
+      expect(event.detail).toEqual({ requestId: 'req-1', data });
+      window.removeEventListener('user-message-images', listener);
+    });
+
     it('sessionDeleted dispatches window event with the session id', () => {
       // Reaches the client that asked for the delete as well as the
       // ones that did not: a session list still offering the row is a
@@ -146,6 +169,7 @@ describe('AppShell events and toasts', () => {
       expect(shell.streamComplete('r', {})).toBe(true);
       expect(shell.filesChanged([])).toBe(true);
       expect(shell.sessionDeleted({ session_id: 's1' })).toBe(true);
+      expect(shell.userMessageImages('r', { image_refs: [] })).toBe(true);
     });
   });
 
