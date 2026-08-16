@@ -178,7 +178,7 @@ Replaces the edit summary banner. Rendered at the end of the assistant turn, not
 - Tool calls, and how many needed a permission prompt
 - Duration, engine-internal turn count
 - Usage — per-model token counts. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))
-- A mirror-gap marker when the turn failed to append to the repo-local transcript, linking to the health banner
+- A mirror-gap marker when the turn failed to append to the repo-local transcript, linking to the health banner. The link *forces* the banner open rather than merely un-dismissing it, because the engine may have recovered or restarted since that turn — a readout with nothing wrong in it is still an answer, and better than a link that lands on nothing
 
 ### No Retry Prompts
 
@@ -452,7 +452,7 @@ Handler routes `compactionEvent` stages and adjacent engine events to appropriat
 | `reindex` | No toast. The file tree and viewers refresh on `postResponseComplete` |
 | Doc enrichment queued / file done / complete / failed | Not rendered as a toast — header progress bar handles these (see [shell.md](shell.md) and [document-index.md](../2-indexing/document-index.md)) |
 | `rateLimit` | Warning toast on `allowed_warning`, error toast on `rejected`, both naming the reset time. The usage HUD carries the persistent version |
-| `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption |
+| `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption. The banner sits between the transcript and the input area beside the disconnected note — both are standing conditions about the channel rather than events in the conversation — and shows the count of failed appends, the engine's last error, and the version and credential warnings. Amber, not the note's red: the conversation works. Dismissal is keyed to *which* problems are showing, including how many gaps, so a warning that has been read stays quiet and the next thing to go wrong does not. `connected: false` alone is not a fault: it is the normal state before the first prompt, and a session that loses its engine says so in `last_error`. The payload's MCP server list is left out — that is the Context tab's per-server detail (phase 6) |
 | `disk_warning` (on the state snapshot and on `postResponseComplete`) | A system-event card in the transcript, not a toast: the sentence names a threshold, a cause and what to do about it, which is more reading than a toast's three seconds allow, and the card renders the directory it names as code. Read from *both* carriers, because the server spends one flag on whichever notices first — the snapshot for "checked at startup", a finished turn for a session that crosses the threshold while the browser is open. No request-id filter: the directory belongs to the session, so a collaborator's turn is as good a messenger as our own. The browser adds no one-shot of its own; a second owner of that rule could only disagree with the server's, and would swallow the honest second warning from a restarted server |
 
 Handler accepts events for both the current streaming request ID and the most recently completed request ID, since post-turn housekeeping runs asynchronously after `streamComplete`.

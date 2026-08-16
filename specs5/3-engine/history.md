@@ -95,7 +95,11 @@ Implementation notes that are contracts rather than choices:
   to everything else.
 - **The mirror is flushed eagerly, and its gaps are visible.** Mirror appends are best-effort by
   construction — the SDK retries a failed batch and then reports a gap. A gap is surfaced as a banner
-  and repaired by re-importing the local transcript, never left silent.
+  and repaired by re-importing the local transcript, never left silent. It is said twice, at two
+  scales: the affected turn's footer carries a marker, because that is the turn that will be missing
+  when the session is browsed or resumed, and the health banner carries the running count, because a
+  transcript with a hole in it is a standing condition and not an event. The marker links to the
+  banner.
 - **Nothing here provides pre-acknowledgement durability.** The CLI writes locally first and the SDK
   hands us a copy afterwards, in eager batches at roughly 100 ms cadence, so the user's message becomes
   durable *during* the turn rather than before it is accepted. What covers the gap is the browser's own

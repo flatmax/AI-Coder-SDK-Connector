@@ -26,6 +26,7 @@
 //                             → renderTerminalBadge / renderFinishBadge
 //                           → renderStreamingMessage
 //                         → renderFileSearchOverlay
+//                       → renderHealthBanner
 //                       → disconnected-note
 //                       → input-area
 //                         → action bar
@@ -37,7 +38,7 @@
 //                           → renderPendingImages
 //                           → input row + send column
 //                         → renderReadOnlyNote (read-only tabs instead)
-//                       → ac-history-browser (inert until phase 5)
+//                       → ac-history-browser (modal)
 //                       → renderLightbox
 //
 // Assistant cards render one of two ways. A turn produced by Claude Code carries
@@ -82,6 +83,7 @@ import {
   terminalBadge,
 } from './block-render.js';
 import { isEmptyTurn } from './blocks.js';
+import { renderHealthBanner } from './health-banner.js';
 import { renderLedRow } from './led-row.js';
 import { renderPermissionModeSelector } from './permission-mode.js';
 import { renderTabStrip } from './tabs.js';
@@ -187,6 +189,7 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
  *   ├─ messages-wrapper ─────────────────────────┤
  *   │  messages list (or .messages-hidden)        │
  *   │  file-search overlay (when in file mode)   │
+ *   ├─ health-banner (when the engine reports) ──┤
  *   ├─ disconnected-note (when RPC down) ────────┤
  *   ├─ input-area ───────────────────────────────┤
  *   │  action-bar (permission mode + search)      │
@@ -234,6 +237,7 @@ export function render(panel) {
       </div>
       ${fileMode ? renderFileSearchOverlay(panel) : ''}
     </div>
+    ${renderHealthBanner(panel)}
     ${!panel.rpcConnected
       ? html`<div class="disconnected-note">
           Not connected to the server

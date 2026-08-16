@@ -259,6 +259,8 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._canSetPermissionMode = true;
     this._sessionInfo = null;
     this._engineHealth = null;
+    this._healthDismissed = null;
+    this._healthForced = false;
 
     // Per-block expansion state: Map<block_id, boolean>. Not reactive — it is
     // mutated in place, so a dirty-check on identity would never fire;

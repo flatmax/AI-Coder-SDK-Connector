@@ -321,4 +321,16 @@ export const PROPERTIES = {
    * the ones that matter. Null until the engine reports.
    */
   _engineHealth: { type: Object, state: true },
+  /**
+   * The `healthKey` of the problem set the user dismissed, or null. Keyed by
+   * problem rather than by session so the banner stays quiet about what has
+   * been read and speaks up about what has not — see `health-banner.js`.
+   */
+  _healthDismissed: { type: String, state: true },
+  /**
+   * True when the turn footer's mirror-gap marker asked for the banner. Forces
+   * it open even with nothing wrong, because that click is a question and an
+   * empty answer is still an answer.
+   */
+  _healthForced: { type: Boolean, state: true },
 };

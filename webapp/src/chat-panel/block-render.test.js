@@ -1349,4 +1349,15 @@ describe('renderTurnFooter', () => {
     expect(gap.getAttribute('title')).toMatch(/engine health/i);
     expect(host.querySelector('.turn-stats')).toBeNull();
   });
+
+  it('the mirror-gap marker opens the health banner', () => {
+    // The link chat.md § Turn Footer promises. It forces the banner open
+    // rather than un-dismissing it, so it lands somewhere even when the
+    // engine has since recovered.
+    const panel = stubPanel({ _healthDismissed: 'old', _healthForced: false });
+    const host = draw(renderTurnFooter(panel, { mirror_gap: true }, []));
+    host.querySelector('.turn-mirror-gap').click();
+    expect(panel._healthForced).toBe(true);
+    expect(panel._healthDismissed).toBeNull();
+  });
 });

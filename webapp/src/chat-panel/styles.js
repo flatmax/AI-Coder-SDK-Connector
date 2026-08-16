@@ -1388,6 +1388,57 @@ export const STYLES = css`
     border-top: 1px solid rgba(248, 81, 73, 0.25);
   }
 
+  /* Engine-health banner — a standing condition about the
+   * engine, sat next to the disconnected note because both
+   * are about the channel rather than the conversation.
+   * Amber, not the note's red: a mirror gap or a version
+   * warning leaves the conversation working. */
+  .health-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: rgba(210, 153, 34, 0.1);
+    color: #d29922;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    border-top: 1px solid rgba(210, 153, 34, 0.25);
+  }
+  /* Opened from the turn footer with nothing wrong. Muted,
+   * because "nothing wrong" is not a warning. */
+  .health-banner.health-banner-ok {
+    background: rgba(139, 148, 158, 0.1);
+    color: var(--text-secondary, #8b949e);
+    border-top-color: rgba(139, 148, 158, 0.25);
+  }
+  .health-lines {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  .health-label {
+    font-weight: 600;
+  }
+  .health-engine {
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.75rem;
+  }
+  .health-dismiss {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    opacity: 0.7;
+    padding: 0 0.25rem;
+    font-size: 0.75rem;
+  }
+  .health-dismiss:hover {
+    opacity: 1;
+  }
+
   /* Edit blocks — visual cards for edits proposed by the
    * assistant. Minimal styling here; Phase 2d adds the
    * character-level diff highlighting. */
@@ -2749,9 +2800,21 @@ export const STYLES = css`
   }
   /* The turn did not make it into the repo-local
    * transcript. Amber, because the conversation is fine
-   * and only the record is missing. */
+   * and only the record is missing. A button rather than a
+   * label: it opens the health banner, which is where the
+   * detail lives. */
   .turn-mirror-gap {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
     font-size: 0.7rem;
     color: #d29922;
+    cursor: pointer;
+    text-align: left;
+  }
+  .turn-mirror-gap:hover {
+    text-decoration: underline;
   }
 `;

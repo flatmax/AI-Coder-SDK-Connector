@@ -27,6 +27,7 @@ import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
 
 import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
+import { revealHealth } from './health-banner.js';
 
 // ---------------------------------------------------------------
 // Terminal-reason badge
@@ -945,10 +946,11 @@ export function renderTurnFooter(panel, summary, files) {
       ${stats.length ? html`<div class="turn-stats">${stats}</div>` : nothing}
       ${summary.mirror_gap
         ? html`
-            <div
+            <button
               class="turn-mirror-gap"
-              title="This turn was not appended to the repo-local transcript. Engine health has the detail."
-            >⚠ not mirrored to the local transcript</div>
+              @click=${() => revealHealth(panel)}
+              title="This turn was not appended to the repo-local transcript. Click for engine health."
+            >⚠ not mirrored to the local transcript</button>
           `
         : nothing}
     </div>

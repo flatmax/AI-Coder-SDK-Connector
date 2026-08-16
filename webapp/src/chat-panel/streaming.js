@@ -513,12 +513,18 @@ export function formatResetTime(resetsAt) {
  * No toast. A mirror gap means this turn did not reach the repo-local
  * transcript, which is a standing condition rather than an interruption — the
  * health banner owns saying so, and the affected turn's footer carries its own
- * marker. Stashed on the panel so the banner has something to read when it
- * lands.
+ * marker.
+ *
+ * `detail` *is* the payload here, with no `{requestId, data}` envelope around
+ * it: engine health is session-wide (`turn_scoped=False` on the engine side),
+ * so the shell has no request id to pair it with.
  */
 export function onEngineHealth(panel, event) {
-  const { data } = event.detail || {};
-  if (!data || typeof data !== 'object') return;
+  const data = event.detail;
+  // Arrays are excluded rather than tolerated: this is a whole-record
+  // replacement, so anything that is not a record would drop a real warning
+  // in favour of nothing.
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return;
   panel._engineHealth = data;
 }
 
