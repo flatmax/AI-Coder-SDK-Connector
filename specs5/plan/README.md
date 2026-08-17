@@ -103,12 +103,13 @@ and Stop is what closes a dialog nobody wants to answer. The commits on this bra
 | `834aff2` | The delivery record catching up with the interlude it had stopped short of |
 | `092ea58` | The forensic probes moved out of `/tmp` and into `scripts/`, where they run again next time the CLI ships a new build |
 | `aee7b2b` | Option previews: the compare pane, and the correction of what the format env var actually buys |
+| `51ea77f` | The per-answer note (`annotations`), and the retraction of the claim that the format env var is what makes a preview possible |
+| `fa66b99` | The dialog's Monaco given the head styles a shadow root cannot see, edit cards that open themselves, `Bash` summaries that wrap |
+| `218f89d` | `repo_root` in the state snapshot, and the one conversion that stops a file chip asking the repo API for an absolute path |
 
-The last row is not the last commit. The one after it carries the per-answer note (`annotations`) and
-this paragraph, and a table row cannot name its own hash — both are in
-[*Interlude — the examples the question was asking about*](delivery.md#interlude--the-examples-the-question-was-asking-about-2026-08-17),
-which is also where the retraction lives: **setting `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is not what
+`51ea77f` is where the retraction lives: **setting `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is not what
 makes a preview possible**, and this record said otherwise in four places before a live A/B disproved it.
+See [*Interlude — the examples the question was asking about*](delivery.md#interlude--the-examples-the-question-was-asking-about-2026-08-17).
 
 **The live run is done, the phase-6 entry is written, and the cost chip is verified.** The three review
 findings below are all fixed. The live run then found four more, also fixed. The exit criterion's last
@@ -148,6 +149,52 @@ replaced.
 Still deliberately unbuilt, so their absence is not a discovery: `ClaudeCodeService.reconnect_mcp_server`
 exists and no browser surface calls it, and the HUD's Rate limits and Files modified sections and its
 collapse persistence are unwritten — `viewers-hud.md` § *Sections* specifies all three.
+
+### Open items carried forward (as of 2026-08-17)
+
+Known, decided-against-for-now, or awaiting a number. Each one's reasoning is in the `delivery.md`
+interlude that found it; this list exists so that none of them has to be rediscovered from a log.
+
+1. **`max_buffer_size` is still the SDK's 1 MB default** — `src/ac_dc/claude_code/options.py` never sets
+   it, so `_DEFAULT_MAX_BUFFER_SIZE` applies. One stdout line over the limit raises
+   `CLIJSONDecodeError` inside the transport's reader and ends the message pump for that session
+   permanently. The failure path does work as designed — `_is_connection_failure` matches
+   `CLIJSONDecodeError`, so the turn is failed, the session marked lost and `engineHealth` broadcast —
+   but the conversation is over, and **one oversized tool result is enough to do it**: an inline
+   screenshot did exactly that on 2026-08-17. Blocked on a number rather than on design: the buffer is
+   memory held per line, and the question is how large a legitimate result can get.
+2. **A lost session keeps being polled.** After that pump died, the usage HUD went on calling
+   `get_context_usage` — each attempt a control request that ends in a 60-second
+   `Control request timeout` traceback, four of them in one log. `get_context_usage` catches
+   `EngineNotReadyError` and `SessionLostError`, but nothing gates the *poll* on engine health, and the
+   HUD has no "the engine is gone" state to sit in. The tracebacks are noise about a thing already
+   reported by the banner.
+3. **Two mechanisms now answer "absolute engine path → repo path".** `_mark_openable_memory_files` adds
+   a `relPath` field server-side so the Context tab knows which memory files are openable; `toRepoPath`
+   (`218f89d`) converts client-side at the shell's `navigate-file` choke point. Both are correct and
+   neither is wrong to exist, but the next payload carrying an absolute path will pick one of them by
+   accident. They should converge — most likely on the client-side one, which needs no per-payload
+   enrichment.
+4. **An RPC that fails behind a viewer open shows the user nothing.** That is what kept the chip bug
+   unreported for as long as it was: the viewer painted an empty diff and the only evidence anywhere was
+   a bare `Failed: Absolute paths not accepted:` line on the server's stderr. Two independent halves —
+   jrpc-oo prints raw exception text with no request context, and the diff viewer treats a failed fetch
+   as empty content — and **fixing either one alone would have made the bug reportable**.
+5. **Tool-card file chips still display the absolute path.** Only the navigation was converted.
+   Shortening the label is a display decision with its own question (basename, root-relative,
+   middle-elided) and it is the one place a multi-root future would want the root visible.
+6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
+   three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
+   rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the
+   DOM. A screenshot-based regression harness is the only thing that would catch a re-break, and it would
+   have to write files rather than return images inline — see item 1 for why.
+7. **The permission dialog re-clones the whole document head per editor creation.** The same cost the
+   diff viewer has always paid, for the same reason (Monaco's constructor adds rules synchronously), and a
+   request builds at most one editor — so it is unmeasured rather than known-cheap. Incremental cloning is
+   the optimisation if that ever stops being true.
+8. **The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
+   supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
+   and what it measures is exactly the kind of detail a version bump moves.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
