@@ -1985,18 +1985,26 @@ attribution phrase is for a person who decided.
   `scripts/bridge_smoke.py` that no test covers and that would have crashed the script.
 - `tests/test_claude_code_service.py` — 3 new: Stop denies the dialog the turn was waiting on, the deny
   reaches the CLI *before* the interrupt, and a turn that ends any other way sweeps what is left.
+- `tests/test_claude_code_stop_with_permission.py` — **11 new, and the probes' real home.** The service
+  tests above run against a `FakeSession`, so the component that made this a bug — `_watch_drain` — never
+  executes there. This file is a real service, the real `EngineSession` it builds, the real broker wired in
+  as `can_use_tool`, and a fake CLI that asks permission by calling the callback off the `options` it was
+  handed, so a service that forgot to pass `can_use_tool` fails here rather than passing. The fake is
+  parametrised over both probe outcomes — a CLI blocked until answered, and one that abandons the tool and
+  emits a result anyway — against the *same* assertions, which is the substance of the fix: the outcome no
+  longer depends on which shape the CLI has. Checked by neutering `cancel_for_turn` and re-running: **7 of
+  the 11 fail on the pre-fix code**, including the session-lost case. The four that pass are the abandoning
+  CLI's, which is Case A being survivable all along.
 - `webapp/src/permission-dialog/dialog.test.js` — `describe('a deadline that arms mid-request')` (7),
   covering arm, cancel-and-does-not-fire, the surviving deny reason, promotion, the announcements, and an
   unknown `permission_id`. `queue.test.js` gained `spokenSeconds`.
-- Both suites green: python **3120 passed**; webapp **93 files / 3740 passed**.
+- Both suites green: python **3131 passed**; webapp **93 files / 3740 passed**.
 
 ### Deliberately not built
 
-- **The probes are still in `/tmp`.** `probe_stop_during_permission.py`, `probe_deny_recovers.py` and
-  `probe_case_b_real_teardown.py` demonstrated the bug and now pass inverted. Promoting them as regression
-  tests was offered and not taken up; they will not survive a reboot.
 - **Case A versus Case B is still unverified against a real CLI.** The fix makes the distinction moot — the
-  request is released either way — so nothing depends on knowing, but nothing asserts it either.
+  request is released either way, and `test_claude_code_stop_with_permission.py` asserts that over both
+  shapes — so nothing depends on knowing which one the CLI is. Nothing establishes it either.
 - **The `permissions` App Config section is still unwired.** `configuration.md` now specifies
   `no_client_timeout_s` and `presence_poll_s` against `permissions.py`'s two constants, and there is still
   no provider reading them.

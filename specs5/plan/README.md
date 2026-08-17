@@ -62,7 +62,7 @@ after it are the background they assume.
 
 ### Picking phase 7 up cold (as of 2026-08-17)
 
-Both suites are green — python **3120 passed, 0 skipped**; webapp **93 files / 3740 passed**. The skip
+Both suites are green — python **3131 passed, 0 skipped**; webapp **93 files / 3740 passed**. The skip
 count went to zero because the venv gained the tree-sitter grammars, so 75 previously-skipped extractor
 tests now run: 2 992 + 75 = 3 067, plus phase 6's 41 new credential tests. Nothing was deleted and nothing
 was waived.
