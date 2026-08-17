@@ -29,6 +29,8 @@ from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineStartupError
 from ac_dc.claude_code.options import (
     NEVER_SET,
+    QUESTION_PREVIEW_ENV,
+    QUESTION_PREVIEW_FORMAT,
     REPLAY_USER_MESSAGES_ARG,
     SETTING_SOURCES,
     build_option_kwargs,
@@ -72,6 +74,35 @@ class TestAlwaysSet:
         """A caller mutating the result must not corrupt the constant."""
         kwargs["setting_sources"].append("nonsense")
         assert SETTING_SOURCES == ["user", "project", "local"]
+
+    def test_question_previews_are_asked_for(self, kwargs):
+        """Undocumented by default for an SDK entrypoint, and ours is ``sdk-py``.
+
+        The per-option ``preview`` field is in the tool's schema either way,
+        and a model sends one without being told. What is missing while this
+        is unset is the *format*: the schema defers it to a tool description
+        that, for an SDK entrypoint, does not mention previews at all — so
+        markdown or an HTML fragment is the model's guess, and the dialog
+        renders one of those as a mockup and the other as angle brackets.
+        """
+        assert kwargs["env"]["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] == "markdown"
+
+    def test_the_format_is_the_one_the_browser_renders(self):
+        """``html`` is the other value the CLI takes, and it must not be it.
+
+        The dialog renders the preview through the markdown renderer. Flip
+        this and the user is shown the angle brackets of a mockup instead of
+        the mockup — and the alternative fix, model-authored HTML in the
+        dialog's shadow DOM, is the one this choice exists to avoid.
+        """
+        assert QUESTION_PREVIEW_FORMAT == "markdown"
+
+    def test_the_env_is_copied_not_shared(self, kwargs):
+        """The SDK holds it for the session; one session must not edit another's."""
+        kwargs["env"]["CLAUDE_CODE_QUESTION_PREVIEW_FORMAT"] = "html"
+        assert QUESTION_PREVIEW_ENV == {
+            "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown",
+        }
 
 
 # ---------------------------------------------------------------------------

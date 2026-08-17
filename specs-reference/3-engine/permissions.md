@@ -335,15 +335,20 @@ CommandPayload:
 
 QuestionPayload:
     question: string                   // the first question, promoted for the dialog's headline
-    options: list[{label: string, description: string | null}]
+    options: list[Option]
     multi_select: bool
     questions: list[Question]          // every question, in order
 
 Question:
     question: string
     header: string | null              // AskUserQuestion's short chip label
-    options: list[{label: string, description: string | null}]
+    options: list[Option]
     multi_select: bool
+
+Option:
+    label: string
+    description: string | null
+    preview: string | null             // markdown; the example rendered beside the option list
 
 PlanPayload:
     plan: string                       // the whole plan, markdown, never truncated
@@ -367,10 +372,26 @@ normalised: the tool permits a bare string as well as `{label, description}`, an
 The CLI's own bounds are 1–4 questions and 2–4 options each, question texts unique within a call and
 option labels unique within a question. The payload does not enforce them — a call that violated them
 would have been rejected before reaching `can_use_tool`, and a dialog that refused to render an
-out-of-bounds call would fail closed on the one tool class the user cannot route around. An option's
-third field, `preview`, is **not** carried: it is a block of HTML the terminal renders for comparing
-mockups side by side, and forwarding untrusted model-authored HTML into the dialog's shadow DOM is not
-something to do incidentally. See `specs5/5-webapp/permission-dialog.md` § `interact`.
+out-of-bounds call would fail closed on the one tool class the user cannot route around.
+
+### `preview` — the example beside the option
+
+An option's third field is the artefact the model is offering for comparison: an ASCII mockup, one of
+two candidate implementations, a diagram variation, a configuration example. It is carried, and it
+arrives as **markdown**, with anything that is not a non-empty string normalised to `null` so the
+dialog's "does this option have an example?" test is a truth test.
+
+Two facts about it are not guessable from the tool schema, which types it as a bare optional string
+and defers the format to the tool description (verified against the bundled CLI 2.1.233):
+
+- **The format is the host's choice, and there are two of them.** `previewFormat` on the SDK's `askUserQuestion` options reaches the CLI as `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which takes `"markdown"` or `"html"`. Markdown is "rendered as markdown in a monospace box"; html requires "a self-contained HTML fragment (no `<html>`/`<body>` wrapper, no `<script>` or `<style>` tags)" and is validated as such before the call runs. AC⚡DC asks for markdown — see `src/ac_dc/claude_code/options.py`, `QUESTION_PREVIEW_FORMAT`, for why the other one is not a display preference.
+- **Unset, the format is nobody's decision.** The same env var decides whether the tool's *prompt* carries the "Preview feature" block that documents the field — what it is for, which format to author, that the UI turns side-by-side, that it is single-select only. Unset, the CLI adds that block for a terminal session and omits it for every SDK entrypoint; ours is `sdk-py`. The field itself stays in the schema either way, so this is not an on/off switch: a live A/B against the bundled CLI produced previews with the variable removed from the environment altogether, because the model knows the field without being told. What the omission actually costs is the format — the schema's own description defers it to a tool description that then says nothing, leaving markdown-or-html to the model, and the dialog renders one of those as a mockup and the other as a wall of angle brackets. Asking makes the format the host's.
+
+The tool's guidance also says previews are supported for single-select questions only. The payload
+carries them regardless of `multi_select`, because a payload that dropped model-authored content on a
+schema technicality would leave the dialog unable to show something the user is deciding about; how
+the dialog places one on a multi-select is its own call. See
+`specs5/5-webapp/permission-dialog.md` § `interact`.
 
 ### `resolve_permission(permission_id, decision)` — browser → server
 

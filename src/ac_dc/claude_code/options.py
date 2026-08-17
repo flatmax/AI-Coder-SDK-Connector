@@ -60,6 +60,42 @@ SETTING_SOURCES = ["user", "project", "local"]
 # all — see :func:`file_checkpointing_available`.
 REPLAY_USER_MESSAGES_ARG = {"replay-user-messages": None}
 
+# `AskUserQuestion` option previews are undocumented until the host asks
+# for them.
+#
+# The per-option ``preview`` field is in the tool's input schema
+# unconditionally, described only as "see the tool description for the
+# expected content format". This env var is what puts that format there:
+# read at startup, accepting exactly ``"markdown"`` and ``"html"``, it
+# decides whether the tool's prompt carries the "Preview feature" block —
+# what previews are for, which format to author, that the UI turns
+# side-by-side, that they are single-select only. Left unset it is on for a
+# terminal session and off for every SDK entrypoint, and ours is
+# ``sdk-py``.
+#
+# So this is not an on/off switch for the field, and setting it is not what
+# makes a preview possible: a model that knows the field from elsewhere
+# fills it in regardless, which is what a live A/B against this CLI showed
+# — previews arrived with the var popped from the environment entirely.
+# What it fixes is that the format was then nobody's decision. The schema
+# points at a description that says nothing, so markdown or HTML is the
+# model's guess, and the dialog renders one of those as a mockup and the
+# other as a wall of angle brackets. Setting it makes the format ours.
+#
+# ``markdown`` rather than ``html``: html mode has the model author an HTML
+# fragment, and forwarding model-authored HTML into the dialog's shadow DOM
+# is not a thing to do for a display nicety. Markdown reaches the same
+# artefacts the field is for — ASCII mockups, code snippets, diagram
+# variations, configuration examples — through the escaping renderer the
+# chat panel and the plan body already trust.
+#
+# The value is pinned rather than configurable because the browser renders
+# markdown. The two sides have to agree on one format, and a knob is a way
+# for them to disagree: set to ``html`` here, the dialog would show a user
+# the angle brackets of a mockup instead of the mockup.
+QUESTION_PREVIEW_FORMAT = "markdown"
+QUESTION_PREVIEW_ENV = {"CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": QUESTION_PREVIEW_FORMAT}
+
 # Options AC-DC must never set, with the reason, so a future reader who
 # is tempted gets the argument rather than a bare prohibition.
 NEVER_SET = {
@@ -175,6 +211,10 @@ def build_option_kwargs(
         # Makes hook activity inspectable rather than invisible.
         "include_hook_events": True,
         "setting_sources": list(SETTING_SOURCES),
+        # Turns on the per-option previews the question dialog renders.
+        # Copied, not shared: the SDK holds the dict for the session's
+        # lifetime and one session must not be able to edit another's.
+        "env": dict(QUESTION_PREVIEW_ENV),
     }
 
     resolved_cli = cli_path or config.cli_path

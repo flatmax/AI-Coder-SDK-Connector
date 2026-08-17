@@ -313,6 +313,48 @@ class TestQuestionPayload:
     def test_nothing_renderable_is_none(self):
         assert build_question_payload({}) is None
 
+    def test_an_options_example_travels(self):
+        # The artefact the terminal renders beside the option list. Dropping
+        # it left the dialog showing two labels for a call whose whole point
+        # was the two mockups behind them.
+        payload = build_question_payload(
+            {
+                "questions": [
+                    {
+                        "question": "Which layout?",
+                        "options": [
+                            {"label": "A", "description": "one", "preview": "| a |"},
+                            {"label": "B", "description": "two"},
+                        ],
+                    }
+                ]
+            }
+        )
+        options = payload["questions"][0]["options"]
+        assert options[0]["preview"] == "| a |"
+        # Absent, not missing: the dialog's "does this option have an
+        # example?" test reads the key on every option.
+        assert options[1]["preview"] is None
+        assert payload["options"][0]["preview"] == "| a |"
+
+    @pytest.mark.parametrize("value", ["", "   ", 12, {"html": "<p>x</p>"}, []])
+    def test_an_example_that_is_not_text_is_dropped(self, value):
+        # An empty or non-string preview would still answer "yes" to a bare
+        # truth test on the key, so the dialog would switch to the
+        # side-by-side layout and put an empty pane beside the options.
+        payload = build_question_payload(
+            {"questions": [{"question": "Which?", "options": [
+                {"label": "A", "preview": value},
+            ]}]}
+        )
+        assert payload["questions"][0]["options"][0]["preview"] is None
+
+    def test_a_bare_string_option_carries_the_key_too(self):
+        payload = build_question_payload({"question": "Why?", "options": ["x"]})
+        assert payload["options"][0] == {
+            "label": "x", "description": None, "preview": None,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Plans

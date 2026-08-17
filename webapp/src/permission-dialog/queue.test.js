@@ -18,10 +18,12 @@ import {
   describeRule,
   expiryMs,
   formatCountdown,
+  hasPreviews,
   headerTarget,
   interactQuestions,
   offersAlwaysAllow,
   orderQueue,
+  previewIndex,
   secondsRemaining,
   spokenSeconds,
 } from './queue.js';
@@ -593,6 +595,72 @@ describe('interactQuestions', () => {
     expect(interactQuestions({ question: null })).toEqual([]);
     expect(interactQuestions({ question: { options: [] } })).toEqual([]);
     expect(interactQuestions(null)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasPreviews and previewIndex — comparing examples
+// ---------------------------------------------------------------------------
+
+describe('hasPreviews', () => {
+  it('is true when any option carries an example', () => {
+    expect(hasPreviews({
+      options: [{ label: 'a' }, { label: 'b', preview: '| b |' }],
+    })).toBe(true);
+  });
+
+  it('is false for the ordinary question', () => {
+    // Most calls are a question and two labels. The layout must not change
+    // for them, because an empty pane beside two words reads as a bug.
+    expect(hasPreviews({ options: [{ label: 'a' }, { label: 'b' }] })).toBe(false);
+    expect(hasPreviews({ options: [] })).toBe(false);
+    expect(hasPreviews(null)).toBe(false);
+  });
+
+  it('does not count an empty example', () => {
+    // The engine already drops these, but the truth test is the layout
+    // switch and it must not be satisfied by a key with nothing behind it.
+    expect(hasPreviews({ options: [{ label: 'a', preview: '' }] })).toBe(false);
+    expect(hasPreviews({ options: [{ label: 'a', preview: null }] })).toBe(false);
+  });
+});
+
+describe('previewIndex', () => {
+  const question = {
+    options: [
+      { label: 'a', preview: '| a |' },
+      { label: 'b' },
+      { label: 'c', preview: '| c |' },
+    ],
+  };
+
+  it('follows the focused option', () => {
+    // Hover and arrow keys are how two mockups get compared without
+    // committing to either, so focus outranks the selection.
+    expect(previewIndex(question, new Set([0]), 2)).toBe(2);
+  });
+
+  it('falls back to the chosen option', () => {
+    // So the pane and the filled radio agree after a click or a reconnect.
+    expect(previewIndex(question, new Set([2]), null)).toBe(2);
+  });
+
+  it('falls back to the first option that has one', () => {
+    // A pane that opened blank beside a list of examples reads as a pane
+    // that failed to load.
+    expect(previewIndex(question, new Set(), undefined)).toBe(0);
+  });
+
+  it('skips a focused option with no example of its own', () => {
+    // Three of four options carrying examples is a shape the tool permits,
+    // and focusing the fourth must not empty the pane.
+    expect(previewIndex(question, new Set(), 1)).toBe(0);
+    expect(previewIndex(question, new Set([1]), 1)).toBe(0);
+  });
+
+  it('is null when the question has no examples at all', () => {
+    expect(previewIndex({ options: [{ label: 'a' }] }, new Set(), 0)).toBeNull();
+    expect(previewIndex(null, null, null)).toBeNull();
   });
 });
 

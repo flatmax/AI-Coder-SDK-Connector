@@ -18,7 +18,7 @@ import {
   FLAG_TOOLTIPS,
   OTHER_ANSWER_PLACEHOLDER,
 } from './constants.js';
-import { interactQuestions } from './queue.js';
+import { hasPreviews, interactQuestions, previewIndex } from './queue.js';
 
 const NO_SELECTION = new Set();
 
@@ -194,6 +194,74 @@ export function renderPlanBody(host, payload) {
 }
 
 /**
+ * One option's example, rendered.
+ *
+ * Markdown in a monospace box, which is the contract the engine buys by
+ * asking the CLI for `previewFormat: "markdown"` — the same trust call the
+ * plan body makes, and the reason the *other* format the CLI offers was not
+ * taken (see `options.QUESTION_PREVIEW_FORMAT`).
+ *
+ * Monospace because these are mockups: an option that drew a box with
+ * `│` and `└` has to keep its columns, so the box is monospace and its
+ * paragraphs preserve the whitespace the author typed. A fenced block
+ * still renders as a code block inside it.
+ */
+function renderPreviewBody(text) {
+  return html`
+    <div class="option-preview-body markdown">
+      ${unsafeHTML(renderMarkdown(text))}
+    </div>
+  `;
+}
+
+/**
+ * The radio or checkbox for one option, with its label and description.
+ *
+ * Focus and hover report to the host so the compare pane can follow them
+ * — on every question, not just the ones with examples, because the
+ * handler is cheap and a per-layout binding is a way for one layout to
+ * quietly stop working.
+ *
+ * `showing` marks the option the compare pane is currently displaying.
+ * The pane's own label names it in words as well; this is the second
+ * carrier, not the only one, because a column of four options beside one
+ * pane otherwise asks the user to work out which row they are looking at.
+ */
+function renderOption(host, questionIndex, option, index, multi, showing) {
+  const chosen = host._answers.get(questionIndex) || NO_SELECTION;
+  return html`
+    <label
+      class="option ${showing ? 'showing' : ''}"
+      @mouseenter=${() => host._onPreviewFocus(questionIndex, index)}
+    >
+      <input
+        type=${multi ? 'checkbox' : 'radio'}
+        name="permission-answer-${questionIndex}"
+        .checked=${chosen.has(index)}
+        @focus=${() => host._onPreviewFocus(questionIndex, index)}
+        @change=${(event) =>
+          host._onOptionToggle(questionIndex, index, event, multi)}
+      />
+      <span>
+        <span class="option-label">${option.label}</span>
+        ${option.description
+          ? html`<br /><span class="option-description">${option.description}</span>`
+          : null}
+        ${
+          // A multi-select cannot use the pane: several options can be
+          // ticked at once and "which example" has no answer, which is
+          // why the tool tells the model previews are single-select only.
+          // A model that sends one anyway has still authored something the
+          // user is deciding about, so it goes under its own option rather
+          // than being dropped.
+          multi && option.preview ? renderPreviewBody(option.preview) : null
+        }
+      </span>
+    </label>
+  `;
+}
+
+/**
  * `interact` — real choices.
  *
  * The options are selectable controls, not a JSON dump of a question the
@@ -201,6 +269,12 @@ export function renderPlanBody(host, payload) {
  * is rendered, each with its own control group, because the agent is
  * waiting on all of them and a dialog that shows the first alone leaves
  * the rest silently unanswered.
+ *
+ * A question whose options carry examples switches to the side-by-side
+ * layout the terminal uses for the same call: the options in a column on
+ * the left, the focused option's example on the right. That is the whole
+ * point of the field — the model is offering two mockups to be compared,
+ * and a comparison needs both things visible at once.
  *
  * Each question also gets a freeform reply, because the terminal's own
  * question UI always does — the tool tells the model not to write an
@@ -223,35 +297,48 @@ export function renderInteractBody(host, payload) {
       const multi = question.multi_select;
       const chosen = host._answers.get(questionIndex) || NO_SELECTION;
       const typed = host._answerTexts.get(questionIndex) || '';
+      // The pane is single-select only, for the reason `renderOption`
+      // gives. `compare` is therefore the layout test, `hasPreviews` the
+      // content test, and they are not the same question.
+      const compare = !multi && hasPreviews(question);
+      const shown = compare
+        ? previewIndex(question, chosen, host._previewFocus.get(questionIndex))
+        : null;
+      const shownOption = shown == null ? null : question.options[shown];
+      const options = html`
+        <div
+          class="options"
+          role=${multi ? 'group' : 'radiogroup'}
+          data-question=${questionIndex}
+        >
+          ${(question.options || []).map((option, index) => renderOption(
+            host, questionIndex, option, index, multi, index === shown,
+          ))}
+        </div>
+      `;
       return html`
         <div class="question-group">
           ${question.header
             ? html`<span class="question-header">${question.header}</span>`
             : null}
           <p class="question">${question.question}</p>
-          <div
-            class="options"
-            role=${multi ? 'group' : 'radiogroup'}
-            data-question=${questionIndex}
-          >
-            ${(question.options || []).map((option, index) => html`
-              <label class="option">
-                <input
-                  type=${multi ? 'checkbox' : 'radio'}
-                  name="permission-answer-${questionIndex}"
-                  .checked=${chosen.has(index)}
-                  @change=${(event) =>
-                    host._onOptionToggle(questionIndex, index, event, multi)}
-                />
-                <span>
-                  <span class="option-label">${option.label}</span>
-                  ${option.description
-                    ? html`<br /><span class="option-description">${option.description}</span>`
-                    : null}
-                </span>
-              </label>
-            `)}
-          </div>
+          ${compare
+            ? html`
+                <div class="question-compare">
+                  ${options}
+                  <div
+                    class="option-preview"
+                    role="region"
+                    aria-label="example for ${shownOption?.label ?? ''}"
+                  >
+                    <span class="option-preview-label">
+                      example — ${shownOption?.label ?? ''}
+                    </span>
+                    ${renderPreviewBody(shownOption?.preview ?? '')}
+                  </div>
+                </div>
+              `
+            : options}
           <input
             class="other-answer"
             data-question=${questionIndex}

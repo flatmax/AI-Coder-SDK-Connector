@@ -100,6 +100,9 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     _answers: { type: Object, state: true },
     /** `interact` freeform replies: question index → typed answer. */
     _answerTexts: { type: Object, state: true },
+    /** Which option's preview the compare pane shows: question index →
+        option index. Absent means "whichever the renderer picks". */
+    _previewFocus: { type: Object, state: true },
     /** Live-region text: arrival announcement or countdown milestone. */
     _announcement: { type: String, state: true },
   };
@@ -124,6 +127,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._commandDraft = '';
     this._answers = new Map();
     this._answerTexts = new Map();
+    this._previewFocus = new Map();
     this._announcement = '';
 
     /** Monotonic arrival counter — two requests can share a millisecond. */
@@ -367,6 +371,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._commandDraft = payload?.command?.command ?? '';
     this._answers = new Map();
     this._answerTexts = new Map();
+    this._previewFocus = new Map();
     if (!payload) {
       this._settleUntil = 0;
       return;
@@ -739,6 +744,25 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       texts.set(questionIndex, '');
       this._answerTexts = texts;
     }
+    // Deciding is comparing, so the pane follows the choice: picking an
+    // option shows what was picked rather than leaving the example of the
+    // one before it beside a filled radio.
+    if (event.target.checked) this._onPreviewFocus(questionIndex, index);
+  }
+
+  /**
+   * Which option's example the compare pane shows.
+   *
+   * Bound to focus and hover on the options, so comparing two mockups is
+   * arrow keys or a mouse move rather than a click each way — the point of
+   * the pane is the comparison, and a click commits an answer. It is
+   * display state only: nothing here reaches the decision.
+   */
+  _onPreviewFocus(questionIndex, index) {
+    if (this._previewFocus.get(questionIndex) === index) return;
+    const next = new Map(this._previewFocus);
+    next.set(questionIndex, index);
+    this._previewFocus = next;
   }
 
   /**

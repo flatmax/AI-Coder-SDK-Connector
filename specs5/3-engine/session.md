@@ -38,6 +38,7 @@ callbacks. The behaviourally load-bearing choices:
 | `include_partial_messages` | Token-level streaming. Without it the UI only updates per block, which reads as a stall on long responses. |
 | `include_hook_events` | Hook activity becomes inspectable rather than invisible. |
 | `setting_sources` = user, project, local | The repo's `CLAUDE.md`, `.claude/settings.json`, agents, skills, and custom slash commands all apply. A session in AC⚡DC behaves like a session in the CLI in the same repo. |
+| `env` = `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT: markdown` | `AskUserQuestion` options may carry a `preview` — the example the dialog renders beside them. The field is in the tool's schema either way, but the CLI only documents its *format* for a terminal session — so unless the host names one, whether a preview arrives as markdown or as an HTML fragment is the model's guess, and the dialog renders markdown. See [`../5-webapp/permission-dialog.md` § `interact`](../5-webapp/permission-dialog.md#interact--real-choices). |
 | `enable_file_checkpointing` + the replay-user-messages flag | `rewind_files()` — a real undo. **Both** are required; checkpointing alone raises at rewind time. Set **only when there is no `session_store`**, which means only a repoless run — see below. |
 | `mcp_servers` = `{ac-dc: …}` | Repo intelligence as tools. See [mcp-bridge.md](mcp-bridge.md). |
 | `session_store` | The transcript is mirrored into `.ac-dc4/`. See [history.md](history.md). |

@@ -2306,6 +2306,206 @@ describe('a question the options do not answer', () => {
 });
 
 // ---------------------------------------------------------------------------
+// interact — comparing examples
+// ---------------------------------------------------------------------------
+
+describe('a question offering examples', () => {
+  const MOCKUP_A = '┌──────┐\n│ left │\n└──────┘';
+  const MOCKUP_B = '```js\nconst layout = "right";\n```';
+
+  /** A single-select question whose options carry `preview` content. */
+  function compared(over = {}) {
+    const question = {
+      question: 'Which layout?',
+      header: 'Layout',
+      multi_select: false,
+      options: [
+        { label: 'Sidebar', description: 'nav on the left', preview: MOCKUP_A },
+        { label: 'Topbar', description: 'nav across the top', preview: MOCKUP_B },
+      ],
+      ...over,
+    };
+    return interactPayload({
+      question: { ...question, questions: [question] },
+    });
+  }
+
+  const pane = (el) => el.shadowRoot.querySelector('.option-preview');
+  const paneBody = (el) => el.shadowRoot.querySelector('.option-preview-body');
+  const optionLabels = (el) => [...el.shadowRoot.querySelectorAll('.option')];
+
+  async function hover(el, index) {
+    optionLabels(el)[index].dispatchEvent(new MouseEvent('mouseenter'));
+    await settle(el);
+  }
+
+  it('puts the options and the example side by side', async () => {
+    // The whole point of the field is a comparison, and a comparison needs
+    // both things on screen at once — which is the layout the terminal
+    // switches to for the same call.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    const compare = el.shadowRoot.querySelector('.question-compare');
+    expect(compare).not.toBeNull();
+    expect(compare.querySelector('.options')).not.toBeNull();
+    expect(compare.querySelector('.option-preview')).not.toBeNull();
+  });
+
+  it('leaves the ordinary question in one column', async () => {
+    // Most calls are a question and two labels. An empty pane beside those
+    // reads as a pane that failed to load.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    expect(el.shadowRoot.querySelector('.question-compare')).toBeNull();
+    expect(pane(el)).toBeNull();
+    expect(el.shadowRoot.querySelector('.options')).not.toBeNull();
+  });
+
+  it('opens on the first example rather than an empty pane', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Sidebar');
+    expect(paneBody(el).innerHTML).toContain('left');
+    // The pane names the option it belongs to, and the option is marked —
+    // two carriers, so neither colour nor position is doing it alone.
+    expect(optionLabels(el)[0].classList.contains('showing')).toBe(true);
+    expect(pane(el).getAttribute('aria-label')).toContain('Sidebar');
+  });
+
+  it('follows the pointer, so comparing costs no clicks', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    await hover(el, 1);
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Topbar');
+    expect(paneBody(el).textContent).toContain('const layout');
+    expect(optionLabels(el)[1].classList.contains('showing')).toBe(true);
+    expect(optionLabels(el)[0].classList.contains('showing')).toBe(false);
+
+    // And nothing has been answered by looking at it.
+    expect(decision(el, 'allow').disabled).toBe(true);
+  });
+
+  it('follows keyboard focus too', async () => {
+    // Arrow-keying a radio group is how this is read without a mouse.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    const inputs = el.shadowRoot.querySelectorAll('.options input');
+    inputs[1].dispatchEvent(new FocusEvent('focus'));
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Topbar');
+  });
+
+  it('shows what was picked once an option is picked', async () => {
+    // Otherwise the pane keeps the example of the option before it, beside
+    // a radio that is filled on a different one.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    const input = el.shadowRoot.querySelectorAll('.options input')[1];
+    input.checked = true;
+    input.dispatchEvent(new Event('change'));
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Topbar');
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '' }]);
+  });
+
+  it('renders the example as markdown, and keeps its line breaks', async () => {
+    // The engine asks the CLI for `previewFormat: "markdown"`, so a fenced
+    // block is a code block — and an unfenced mockup keeps the lines its
+    // author drew, because a box redrawn as one paragraph is not a mockup.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+
+    expect(paneBody(el).innerHTML).toContain('<br');
+    await hover(el, 1);
+    expect(paneBody(el).querySelector('pre')).not.toBeNull();
+  });
+
+  it('shows an option with no example of its own without emptying the pane', async () => {
+    // Three of four options carrying examples is a shape the tool permits.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared({
+      options: [
+        { label: 'Sidebar', preview: MOCKUP_A },
+        { label: 'Neither', description: 'leave it alone' },
+      ],
+    }));
+
+    await hover(el, 1);
+    expect(paneBody(el).textContent).toContain('left');
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Sidebar');
+  });
+
+  it('puts a multi-select example under its own option instead', async () => {
+    // The pane cannot serve a multi-select: several options can be ticked
+    // and "which example" has no answer, which is why the tool tells the
+    // model previews are single-select only. A model that sends one anyway
+    // has authored something the user is deciding about, so it is shown
+    // rather than dropped.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared({ multi_select: true }));
+
+    expect(el.shadowRoot.querySelector('.question-compare')).toBeNull();
+    const bodies = el.shadowRoot.querySelectorAll('.option .option-preview-body');
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0].textContent).toContain('left');
+    expect(bodies[1].querySelector('pre')).not.toBeNull();
+  });
+
+  it('forgets which example was on screen when the next request arrives', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, compared());
+    await hover(el, 1);
+    const input = el.shadowRoot.querySelectorAll('.options input')[1];
+    input.checked = true;
+    input.dispatchEvent(new Event('change'));
+    await settle(el);
+    decision(el, 'allow').click();
+    await settle(el);
+
+    const next = compared();
+    await ask(el, {
+      ...next, permission_id: 'perm_ask_2', tool_use_id: 'toolu_ask_2',
+    });
+    expect(el.shadowRoot.querySelector('.option-preview-label').textContent)
+      .toContain('Sidebar');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Full input
 // ---------------------------------------------------------------------------
 

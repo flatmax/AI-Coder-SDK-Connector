@@ -176,10 +176,28 @@ answers branch — so a call that set both would report the typed reply and sile
 the user also picked. The reply goes into `answers[<question text>]` like any other answer, and
 `test_no_response_key_is_ever_written` pins it.
 
-Two affordances the tool supports remain **not built**: the per-option `preview` its terminal UI renders
-for comparing mockups, and the per-answer notes (`input.annotations`). Both are additive — a call
-answered by option label or by prose is answered correctly without them — and they belong with the rest
-of the dialog's polish in phase 6.
+**An option's `preview` is the example beside it, and a question with examples is a comparison.** When
+any option carries one, the question switches to the layout the terminal uses for the same call: the
+options in a column on the left, the focused option's example on the right. Both have to be on screen
+at once, because what the model is offering is two mockups to be compared, and a comparison that needs
+scrolling between the halves is not one.
+
+- **The pane follows focus and hover**, falling back to the chosen option and then to the first option that has an example. Comparing must not cost a click each way — a click is an answer — and a pane that opened blank beside a list of examples would read as a pane that failed to load.
+- **The pane names the option it is showing, and that option is marked in the list.** Two carriers, because four options beside one pane otherwise ask the user to work out which row they are looking at.
+- **It is monospace, and paragraphs keep their whitespace.** These are mockups; a box drawn with `│` and `└` re-flowed into prose is not the thing being chosen. A fenced block still renders as a code block inside it.
+- **The example is markdown, not HTML.** That is a choice made on the engine side — the CLI offers both formats and AC⚡DC asks for markdown, so the pane can use the escaping renderer the plan body and the chat panel already trust rather than putting model-authored HTML into the dialog's shadow DOM. The two sides have to agree on one format, so it is pinned rather than configurable.
+- **A multi-select renders each example under its own option instead.** The pane cannot serve one: several options can be ticked and "which example" has no answer, which is why the tool tells the model previews are single-select only. A model that sends one anyway has still authored something the user is deciding about, so it is shown where there is no ambiguity rather than dropped.
+- **The pane is navigable, not announced.** Same call as the diff (§ Accessibility): it is labelled by the option it belongs to and reachable in the DOM, but arrow-keying a radio group must not read a whole mockup aloud on every keystroke.
+
+The engine names the preview format so this has one to render. The CLI documents the field for a
+terminal session and leaves it undocumented for every SDK entrypoint, which does not stop a model
+sending one — it stops anything from saying whether it is markdown or an HTML fragment, and this pane
+renders markdown. See
+[`../../specs-reference/3-engine/permissions.md` § `preview`](../../specs-reference/3-engine/permissions.md#preview--the-example-beside-the-option).
+
+One affordance the tool supports remains **not built**: the per-answer notes (`input.annotations`). It
+is additive — a call answered by option label or by prose is answered correctly without it — and it
+belongs with the rest of the dialog's polish.
 
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot
@@ -370,6 +388,7 @@ back to the tab and reads the dialog.
 - The "always allow" control is labelled with the rule text and its destination file. It never writes a bare tool grant and never a session-only grant.
 - A deny always carries a non-empty reason.
 - An edited input is recorded in the transcript as the input that ran, marked as user-modified.
+- Every `preview` an `interact` call carries is rendered somewhere the user can see it before answering — in the compare pane for a single-select, under its own option for a multi-select. None is dropped.
 - `agent_id` is always surfaced when non-null; a subagent request is never presented as coming from the main agent.
 - Exactly one dialog is visible at a time; queued requests are never auto-answered and there is no bulk approve.
 - Non-localhost clients see the full request body and no decision controls.

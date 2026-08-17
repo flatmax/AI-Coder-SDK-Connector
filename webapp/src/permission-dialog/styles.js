@@ -299,6 +299,119 @@ export const PERMISSION_DIALOG_STYLES = css`
   .option .option-label { color: #e6edf3; }
   .option .option-description { color: #8b949e; font-size: 12px; }
 
+  /* interact — comparing examples
+   *
+   * A question whose options carry 'preview' content switches to the
+   * layout the terminal uses for the same call: the options in a column,
+   * the focused one's example beside them. Both have to be on screen at
+   * once, because the model offered two mockups to be compared and a
+   * comparison that needs scrolling is not one. */
+
+  /* The option the pane is showing. The pane's label names it too — this
+     is the second carrier, not the only one. */
+  .option.showing { border-color: #58a6ff; background: #10161f; }
+
+  .question-compare {
+    display: grid;
+    grid-template-columns: minmax(200px, 2fr) 3fr;
+    gap: 12px;
+    align-items: start;
+  }
+
+  /* Narrow viewports stack it: a 3fr pane at 320px wide is a mockup with
+     one word per line, which misrepresents the thing being chosen. */
+  @media (max-width: 720px) {
+    .question-compare { grid-template-columns: 1fr; }
+  }
+
+  .option-preview {
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #0d1117;
+    padding: 8px 10px;
+    min-width: 0;
+    max-height: 44vh;
+    overflow: auto;
+  }
+
+  .option-preview-label {
+    display: block;
+    margin-bottom: 6px;
+    color: #8b949e;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* Monospace, because these are mockups and a proportional font turns a
+     box drawn with │ and └ into a lopsided one. Whitespace is preserved on
+     the paragraphs rather than the box: 'marked' puts its own newlines
+     *between* block elements, so a 'pre-wrap' container would open a blank
+     line at every paragraph break. */
+  .option-preview-body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #e6edf3;
+    min-width: 0;
+  }
+
+  .option-preview-body p {
+    margin: 0 0 8px;
+    white-space: pre-wrap;
+  }
+
+  .option-preview-body > :first-child { margin-top: 0; }
+  .option-preview-body > :last-child { margin-bottom: 0; }
+  .option-preview-body h1,
+  .option-preview-body h2,
+  .option-preview-body h3,
+  .option-preview-body h4 {
+    margin: 10px 0 5px;
+    font-size: 13px;
+    line-height: 1.3;
+  }
+  .option-preview-body ul, .option-preview-body ol {
+    margin: 0 0 8px;
+    padding-left: 20px;
+  }
+  .option-preview-body li { margin: 2px 0; }
+  .option-preview-body pre {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin: 0 0 8px;
+    overflow: auto;
+  }
+  .option-preview-body code {
+    font-family: inherit;
+    background: #161b22;
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .option-preview-body pre code { background: none; padding: 0; }
+  .option-preview-body a { color: #58a6ff; }
+  .option-preview-body table { border-collapse: collapse; margin: 0 0 8px; }
+  .option-preview-body th, .option-preview-body td {
+    border: 1px solid #30363d;
+    padding: 3px 7px;
+    text-align: left;
+  }
+
+  /* A multi-select cannot use the pane — several options can be ticked and
+     "which example" has no answer — so its previews sit under their own
+     option instead of being dropped. */
+  .option .option-preview-body {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    background: #010409;
+    max-height: 30vh;
+    overflow: auto;
+  }
+
   .other-answer {
     margin-top: 8px;
     width: 100%;

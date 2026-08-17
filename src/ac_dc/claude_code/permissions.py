@@ -510,6 +510,16 @@ def build_question_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
     reference spec's single question), so the first is promoted to the
     top-level fields the dialog renders and the whole list is carried in
     ``questions`` for the rest.
+
+    An option's third field, ``preview``, is carried too: it is the
+    example the terminal renders beside the option list for comparing
+    mockups, and dropping it left the dialog showing labels where the
+    same call in a terminal showed the artefacts being chosen between.
+    It arrives as markdown, because that is the format the engine asks
+    the CLI for (``options.QUESTION_PREVIEW_FORMAT``) — the other value
+    the CLI accepts would put model-authored HTML in the browser.
+    Anything that is not a non-empty string becomes ``None`` rather than
+    being coerced, so the dialog's "has a preview" test is a truth test.
     """
     questions = tool_input.get("questions")
     if not isinstance(questions, list) or not questions:
@@ -526,14 +536,20 @@ def build_question_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
         for option in entry.get("options") or []:
             if isinstance(option, dict):
                 label = option.get("label")
+                preview = option.get("preview")
                 options.append(
                     {
                         "label": label if isinstance(label, str) else str(label),
                         "description": option.get("description"),
+                        "preview": (
+                            preview
+                            if isinstance(preview, str) and preview.strip()
+                            else None
+                        ),
                     }
                 )
             elif isinstance(option, str):
-                options.append({"label": option, "description": None})
+                options.append({"label": option, "description": None, "preview": None})
         normalised.append(
             {
                 "question": str(entry.get("question") or entry.get("header") or ""),

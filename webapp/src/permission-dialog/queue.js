@@ -333,6 +333,52 @@ export function interactQuestions(payload) {
 }
 
 /**
+ * Whether a question is asking the user to compare examples.
+ *
+ * True when any option carries a `preview` — the artefact the tool's own
+ * guidance reserves for "concrete artifacts that users need to visually
+ * compare": ASCII mockups, competing implementations, diagram variations.
+ * It changes the layout and nothing about the answer, so it is a display
+ * test and lives beside the other ones.
+ *
+ * @param {object|null} question
+ * @returns {boolean}
+ */
+export function hasPreviews(question) {
+  return (question?.options || []).some((option) => !!option?.preview);
+}
+
+/**
+ * Which option's example the compare pane shows for one question.
+ *
+ * Focus wins where the user has moved it, because comparing is what the
+ * pane is for and a hover must be able to answer "what does that one look
+ * like?" without committing to it. Failing that the *chosen* option, so
+ * the pane and the filled radio agree. Failing that the first option that
+ * has one, because a pane that opened blank beside a list of examples
+ * reads as a pane that failed to load.
+ *
+ * An option index that carries no preview is skipped rather than shown as
+ * an empty box — three of four options having examples is a shape the tool
+ * permits.
+ *
+ * @param {object|null} question
+ * @param {Set<number>|Iterable<number>|null} chosen
+ * @param {number|null|undefined} focused
+ * @returns {number|null} null when the question has no examples at all
+ */
+export function previewIndex(question, chosen, focused) {
+  const options = question?.options || [];
+  const has = (index) => index != null && !!options[index]?.preview;
+  if (has(focused)) return focused;
+  for (const index of chosen || []) {
+    if (has(index)) return index;
+  }
+  const first = options.findIndex((option) => !!option?.preview);
+  return first === -1 ? null : first;
+}
+
+/**
  * Whether every question has an answer — an option, or a typed reply.
  *
  * The agent is waiting on all of them: an answer map missing a key reads
