@@ -9,11 +9,15 @@ history and moves under `specs5/impl-history/`.
 
 ## Where we are (2026-08-17)
 
-**Phases 0 through 5 are done. Phase 6 is built and unverified against a live CLI** — its cost half is
-landed (see *What phase 6 will find already there*, where reading the CLI's wire schema found both cost
-readers pricing the whole session as one turn), the three Context sections and the health banner are
-written and green, and what remains is the live run. A conversation now
-outlives the process: `RepoSessionStore` mirrors the CLI's transcript under `.ac-dc4/sessions/`,
+**Phases 0 through 6 are done, with one clause of phase 6's criterion outstanding.** The Context tab has
+had its live run: the visualisation and the `ac-dc` tool inventory were read off a live CLI — the app was
+hosting the session doing the verifying — and the run found four things no test could have, all of them
+about what a reader is *told* rather than what is computed. The one clause left is **whether a live turn's
+cost chip distinguishes "nothing extra" from "cost unknown" on screen**, which cannot be observed from
+inside the turn being measured; the method and the ordering constraint are in the
+[phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17) under *Live
+verification*. A conversation now outlives the process: `RepoSessionStore` mirrors the CLI's transcript
+under `.ac-dc4/sessions/`,
 `run_session_store_conformance` passes with nothing waived, and a server that comes back up reattaches
 to the session it was in. **Resumption is the SDK's rebuild, never our replay** — we render a *record*
 of a session for the human and hand the same session ID to the CLI, and the two views cannot drift
@@ -34,15 +38,39 @@ the transcript, a clean SIGINT. It also found that **every row in the session li
 characters** of our own framing prose, which 2 915 green tests had agreed with. Three phases running,
 green numbers have met a live CLI and lost.
 
+**Phase 6 makes it four, and the shape of the loss changed.** Its live run found nothing wrong with the
+arithmetic — the interlude had already spent that budget — and four things wrong with what the tab
+*said*: a credential source predicting a login prompt for an authenticated session, a hook log promising
+traffic the CLI does not emit while the hook it named was working, and two column labels naming counts
+over cells holding tokens. **None of the four was reachable by any test**, because each is a claim in
+prose about a mechanism, and a test asserting the prose would have asserted the wrong prose. That is the
+argument for the live run stated more sharply than phases 3–5 could state it: green numbers were not the
+problem this time; unread sentences were.
+
+**And a fifth loss came from a screenshot rather than a run.** A permission request had been denied by a
+300-second timer while nobody was at the machine, and the question *why does it time out at all?* had no
+good answer: nothing is consumed while a request waits, so the timer was not protecting a resource — it
+was answering for the user. What it *was* protecting was a missing call: nothing released a pending
+request when a user hit Stop, so the expiry was the only thing that ever cleared it. The interlude after
+the phase-6 entry has the chain. The lesson is the phase-6 one again from the other side: the deadline
+was in the specs, tested, green, and load-bearing for a reason none of that recorded.
+
 Read [`delivery.md`](delivery.md) before touching anything: it records what each finished phase
-landed, what it deliberately left out, and what the next phase has to do first. The phase-5 entry and
-the two interludes after it are what matter for picking this up cold.
+landed, what it deliberately left out, and what the next phase has to do first. The phase-6 entry and the
+interlude after it are what matter for picking this up cold; the phase-5 entry and the two interludes
+after it are the background they assume.
 
-### Picking phase 6 up cold (as of 2026-08-17)
+### Picking phase 7 up cold (as of 2026-08-17)
 
-Everything phase 6 names is committed on `dev5-claude-code` and both suites are green — python **2992
-passed, 75 skipped**; webapp **93 files / 3719 passed**. The last four commits are the tab and the
-banner:
+Both suites are green — python **3120 passed, 0 skipped**; webapp **93 files / 3740 passed**. The skip
+count went to zero because the venv gained the tree-sitter grammars, so 75 previously-skipped extractor
+tests now run: 2 992 + 75 = 3 067, plus phase 6's 41 new credential tests. Nothing was deleted and nothing
+was waived.
+
+**Nothing is uncommitted.** Read
+[*Interlude — the timer that answered for the user*](delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
+before touching the permission path: a request now waits indefinitely while a host client is connected,
+and Stop is what closes a dialog nobody wants to answer. The six commits on this branch, oldest first:
 
 | Commit | What it landed |
 |---|---|
@@ -50,27 +78,40 @@ banner:
 | `fd3963a` | The spec reconciliation: § *Verified field shapes — the result footer*, the cost-is-cumulative correction, the Debug section specified ahead of being built |
 | `02373a2` | The Debug section — Engine, initialize reply, hook traffic, MCP status, `gridRows` — and the segmented control appearing on an error, which used to hide Debug exactly when it was worth the most |
 | `551e169` | `EngineHealth.degradations` and the health banner that reads it, so a bridge or hook that did not start reports the loss instead of writing a log line nobody reads |
+| `4efc0f9` | Phase 6's seven fixes — the credential source that predicted a login prompt for an authenticated session, the hook log that reported working machinery as broken, two wrong labels, the late fetch that could overwrite a push, the initialize reply's own heading, the clipped autocompact mark in both readers |
+| `5fc6fa4` | The permission interlude: Stop denies before it interrupts, the decision timeout is gone, and the one deadline left is armed by absence rather than by a clock |
 
-**Two things are left, in order.** First the **live-CLI run** of the whole tab — phase 5's lesson is
-that green numbers have met a live CLI and lost three phases running, and the exit criterion is a claim
-about what a reader sees. Then the **`delivery.md` phase-6 entry**, which by convention is written once
-the criterion is actually met.
+**The live run is done and the phase-6 entry is written.** The three review findings below are all
+fixed. The live run then found four more, also fixed, and left **one clause of the exit criterion
+outstanding** — the live cost chip. That one is not a loose end anyone can close by reading code: a turn
+cannot observe its own completion, and the HUD's window is 8 s wide. **Do this first**: check for
+`window.__phase6` in the running app; if it is absent, reinstall the recorder described in the
+[phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17) *after* the last webapp
+write of the sitting — a Vite HMR reload took the first one — and read it on the following turn.
 
-Three findings from a design review of that last tranche, none of them blocking, all cheap:
+The three review findings, all fixed in this phase:
 
-- **A fetched health record can overwrite a fresher pushed one** — `webapp/src/context-usage-tab.js`
-  in `_ensureDebug`. The rule that section is built on is "a push wins over a fetch, because
-  `mirror_gaps` moves during a turn", and the guard only covers a fetch that answers *nothing*: a push
-  landing while the fetch is in flight is clobbered by the older server snapshot. Milliseconds wide, and
-  the fix is a push counter captured before the `await`.
-- **The initialize reply renders inside the Engine section** — same file, `_renderEngine` calls
-  `_renderServerInfo` under one `<h3>`. That bullet exists to separate provenance: the binary resolution
-  is ours, the reply is the engine's, and two tables under one heading works against the distinction.
-  Its own heading settles it.
-- **The autocompact mark's overhang is clipped** — `.mark` sets `top: -1px; bottom: -1px` and a
-  `box-shadow` ring in both `usage-hud.js` and `context-usage-tab.js`, while `.bar` has
-  `overflow: hidden` in both. The tick renders flush rather than overhanging. Cosmetic, pre-existing in
-  the Context tab and copied faithfully into the HUD, so fix both together or neither.
+- ~~**A fetched health record can overwrite a fresher pushed one**~~ — `_ensureDebug` now captures a
+  `_healthSeq` push counter before the `await` and applies the fetch only if it has not moved. The rule
+  that section is built on is "a push wins over a fetch, because `mirror_gaps` moves during a turn", and
+  the guard had only covered a fetch that answered *nothing*.
+- ~~**The initialize reply renders inside the Engine section**~~ — it has its own `<h3>` now, so Debug is
+  five sections. The distinction is provenance: the binary resolution is ours, the reply is the engine's,
+  and two tables under one heading worked against it.
+- ~~**The autocompact mark's overhang is clipped**~~ — a `.bar-wrap` with `position: relative` holds the
+  mark as a sibling of the `overflow: hidden` bar rather than a child, in `usage-hud.js` and
+  `context-usage-tab.js` together. It was pre-existing in the tab and had been copied faithfully into the
+  HUD, so fixing one would have left the other looking correct by accident.
+
+What the live run found, all fixed, and all four about what a reader is *told*: `detect_credentials()`
+predicted "the CLI will prompt for login" against a fully authenticated session (a resumed session's CLI
+child runs under a materialised `CLAUDE_CONFIG_DIR` this process never reads — the branch now reports
+where it looked and predicts nothing, and the function went from **zero tests to 41**); the hook log's
+empty state promised traffic the CLI never sends, because an SDK-callback hook is answered over the
+control channel and never enters the message stream — **the hook and the re-index were both working, and
+the copy told a diagnosing user they had failed**; and two labels were wrong rather than merely unclear —
+Tool traffic's `Calls`/`Results` columns render tokens, and the 📊 tooltip still named the panel CC-17
+replaced.
 
 Still deliberately unbuilt, so their absence is not a discovery: `ClaudeCodeService.reconnect_mcp_server`
 exists and no browser surface calls it, and the HUD's Rate limits and Files modified sections and its
@@ -270,7 +311,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** ✅ | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run**; the two interludes after it are what that cost, and the criterion was verified live in the second — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. **Met live**: `--resume` on the CLI child, the earlier conversation answered with no tool calls, no fork in the transcript. |
-| **6. Context and cost visualisation** ← in progress | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the three sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `ac-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. What is left is the live-CLI run of the whole tab, which is where the last of these gets to be wrong in public — that plus three review findings are itemised under *Picking phase 6 up cold*. | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. |
+| **6. Context and cost visualisation** ✅ (one clause outstanding) | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `ac-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. The live run then found four things no test could have, all fixed, and all four about what a reader is *told*: see the [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17). | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. **First two clauses met live**; the third is met in code and in 60 tests but **not observed on screen** — a turn cannot observe its own completion, and the recorder that closes it is phase 7's first task. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 | **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
 

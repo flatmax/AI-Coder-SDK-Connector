@@ -1428,8 +1428,8 @@ writes into a `SessionStoreEntry` blob across SDK versions.
   answer the same cold as warm.
 - **Three App Config sections configuration.md specifies and nothing implements.** `Indexing` — the
   re-index debounce and the pending-flush ceiling are `hooks.py`'s `DEBOUNCE_SECONDS = 0.6` and
-  `MAX_FLUSH_ROUNDS = 2`, phase 4's to have wired. `Permissions` — `DECISION_TIMEOUT = 300.0` and
-  `NO_LOCALHOST_TIMEOUT = 30.0` in `permissions.py`, phase 2's. `Presets` is deferred by decision
+  `MAX_FLUSH_ROUNDS = 2`, phase 4's to have wired. `Permissions` — `NO_LOCALHOST_TIMEOUT = 30.0` and
+  `PRESENCE_POLL_SECONDS = 2.0` in `permissions.py`, phase 2's. `Presets` is deferred by decision
   (CC-12), the other two by omission. The `history` section is the pattern to follow: a callable
   provider so a hot reload takes, and a floor per key.
 - **No Settings engine-health card.** `settings.md:83` specifies one. The banner is the surface health
@@ -1726,3 +1726,277 @@ The second `ok` is new. Check 4 printed the bad preview and passed; a human caug
 output. That is a check doing half its job, so the preamble is asserted now — 2 945 tests, five new
 ones built on the real compaction prompt rather than a shortened stand-in, and `history_smoke.py`
 exiting 0.
+
+---
+
+## Phase 6 — Context and cost visualisation (2026-08-17)
+
+The exit criterion: **the Context tab shows the designed visualisation over those numbers, names the
+`ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is
+unknown.** Two of those three clauses are met and were read off a live CLI. The third is met in the code
+and in 60 tests and is *not* live-verified — the reason is structural and is stated below under *Live
+verification*, not buried as a caveat.
+
+The phase divides on which half of it owed a correctness pass. The **context** numbers had already had
+theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
+wrong on its own terms, collapsed into `context-usage.js`. The **cost** numbers turned out to owe one
+nobody had budgeted for. `total_cost_usd` and `modelUsage` are *session running totals* in a
+streaming-input session, which is the only kind AC⚡DC runs, and both readers printed them as one turn's
+— so every turn was mispriced upward, monotonically, and the HUD's "This turn · $1.87" was the whole
+session's bill. The difference is taken in the engine now (`cost.py`, 207 lines), and the wire carries
+`turn_cost_usd`, `turn_cost_basis` and `turn_model_usage`.
+
+### `turn_cost_basis` exists because a missing figure has three different meanings
+
+A null cost is not one state. The specs said it meant a subscription, which was wrong, and `fd3963a`
+corrected them. What it actually means is one of:
+
+| Basis | Figure | What the reader is told |
+|---|---|---|
+| `measured`, difference > 0 | the difference | a price |
+| `measured`, difference == 0 | zero | **nothing extra** |
+| `reset` | none | **cost unknown** — the session's total went *down*, so this turn's share cannot be separated out |
+| `unpriced` | none | **cost unknown** — the engine never priced the turn |
+| unrecognised | none | no chip at all |
+
+That last row is the one worth defending. An unknown basis renders *nothing* rather than "unknown",
+because a future CLI adding a fifth basis would otherwise make every turn report a problem it does not
+have. `turn-cost.js` (254 lines) is the single owner of that table, and `usage-hud.js` and
+`block-render.js` both read it rather than each deciding what a null means — the same mistake in the
+same shape as the three context readers, caught before it was made twice.
+
+A browsed turn shows **no cost chip at all**. Cost is not in the CLI's transcript, so a replayed footer
+has nothing to report, and "unknown" on every one of them would be noise about a thing that was never
+recorded. This is a deliberate asymmetry between a live footer and a browsed one, and it is the one
+place phase 5's "anything phase 6 adds has to survive `restoreMessage`" is answered with "it doesn't,
+on purpose".
+
+### The three review findings, closed
+
+All three were named in the plan as non-blocking and cheap. They were.
+
+**A fetched health record could overwrite a fresher pushed one.** `_ensureDebug`'s rule is that a push
+wins over a fetch, because `mirror_gaps` moves during a turn and the fetch is seconds wide; the guard
+only covered a fetch that answered *nothing*. A `_healthSeq` counter, captured before the `await` and
+compared after, closes the case where a push lands mid-flight and the older server snapshot lands on top
+of it. The test gates the fetch on a promise it releases only after pushing a fresher record, so it
+fails against the old code rather than passing by timing.
+
+**The initialize reply now has its own heading.** It rendered inside Engine, under one `<h3>`, and the
+whole point of the distinction is provenance: the binary resolution is a fact *we* resolved, the reply is
+what the engine says about itself. Two tables under one heading lose exactly the distinction a diagnosis
+needs. Debug is five sections now, not four.
+
+**The autocompact mark is no longer clipped.** `.mark` sets `top: -1px; bottom: -1px` and a `box-shadow`
+ring; `.bar` sets `overflow: hidden`. The overhang the tick is drawn for was being cut off in both
+files. A `.bar-wrap` with `position: relative` holds the mark as a sibling of the bar rather than a
+child, in `usage-hud.js` and `context-usage-tab.js` together — the bug was pre-existing in the tab and
+had been copied faithfully into the HUD, so fixing one would have left the other looking correct by
+accident.
+
+### What the live run found
+
+Four things, none of which any test could have caught, because all four are about what a reader is
+*told*.
+
+**The credential source predicted a future it cannot see.** The no-credentials branch of
+`detect_credentials()` said "the CLI will prompt for login". It said that against a fully authenticated
+session that was never going to prompt for anything. Two facts make the prediction unsupportable: the
+CLI resolves its own credentials, and a *resumed* session's CLI child runs under a materialised
+`CLAUDE_CONFIG_DIR` that is not the one this process reads. So the branch now reports what was looked
+for and where it looked — `unknown — no key, gateway or login file in <dir>` — and predicts nothing.
+`_credential_base()` was split out to say, in one place, that the directory is the limit of what the
+field can know.
+
+`detect_credentials()` had **zero tests** — the only billing-mode signal the browser gets, and the
+function R-9 lives in. It has 41 now, in a new `test_claude_code_health.py`: every source branch, the
+precedence order, `CLAUDE_CODE_USE_BEDROCK=0` not counting as a gateway, both conflict warnings, the
+endpoint overrides, `~` expansion in `CLAUDE_CONFIG_DIR`, and two that pin the contract the config layer
+is built on — that detection leaves `os.environ` byte-identical, and that probing for a login file does
+not *create* the directory it looked in.
+
+**The hook log promised traffic the CLI never sends.** The empty state read "the PostToolUse re-index
+fires on every file the agent writes, so a turn with an edit in it fills this". It never fills. Proven
+both directions, live, with the panel mounted throughout: a `window` probe on `hook-event` recorded
+**zero** events across two agent writes, while `file_symbols` on a file created seconds earlier came back
+fully indexed and the turn footer listed it under "3 files modified". So the hook ran, the re-index ran,
+and the *announcement* is what does not exist — AC⚡DC registers its `PostToolUse` hook as an SDK
+callback, which the CLI answers over the control channel and does not put in the message stream, and
+`HookEventMessage` is the only thing feeding this table. The copy now says an empty table is the normal
+state and is not evidence the re-index did not run.
+
+This is the phase's sharpest instance of a general problem: **a reader that cannot fill looks identical
+to a reader that is broken.** The old copy pointed a diagnosing user at a working mechanism and told them
+it had failed.
+
+**Two labels were wrong rather than unclear.** The Tool traffic columns read `Calls` and `Results` while
+rendering tokens, so "Calls: 4.2K" against a tool called four times is a wrong number — they name the
+unit now. And the per-tab 📊 tooltip still said "View this conversation's context (Budget + Cache)",
+naming the two sections of the panel CC-17 replaced.
+
+### Tests
+
+Python **3 108 passed, 0 skipped**. Webapp **93 files / 3 724 passed**.
+
+The Python count needs a note, because it looks like 75 tests disappeared. Phase 5's baseline was
+**2 992 passed, 75 skipped**; the skips were the tree-sitter extractor tests, and the venv has the
+grammars installed now, so they run. 2 992 + 75 = 3 067, plus this phase's 41 = 3 108. **Nothing was
+deleted and nothing was waived** — the suite got 75 tests wider without a line changing, worth writing
+down precisely because a future reader would otherwise read the skip count going to zero as someone
+having turned something off.
+
+- `test_claude_code_health.py` — **new**, 41. Credential resolution, above.
+- `test_claude_code_cost.py` — 26. The four bases, and the three cases where a turn's share cannot be
+  recovered from a session total.
+- `test_claude_code_mcp_server.py` — 42.
+- `context-usage-tab.test.js` — **168**. `context-usage.test.js` — **93**. `usage-hud.test.js` — **84**.
+  `turn-cost.test.js` — **34**.
+
+### Live verification — the context half done, the cost half still open
+
+Run against a live CLI, and an unusually direct one: **the running app was hosting the very session doing
+the verifying**, so the numbers on screen described the conversation that was reading them. No second app
+instance, no synthetic turn.
+
+Verified by reading it: the segmented context bar and its arithmetic; all five Debug sections; the
+`ac-dc` tool inventory with a token cost per tool, which is the criterion's "names the `ac-dc` tools it
+is paying for"; `get_mcp_status()` answering `connected`; Debug's `Grid rows` cross-checking the Usage
+section it is derived independently of; and both of the fixes above that have a visible consequence.
+
+**The cost chip and the HUD's appearance are not verified.** Not for want of trying — the structure
+forbids it from inside. A turn's cost arrives only in the `result` push (`get_current_state` has no cost
+key), the HUD is visible for `_AUTO_HIDE_MS` = 8 s plus an 800 ms fade, and **a turn cannot observe its
+own completion**. This is phase 5's lesson in a smaller shape: there, a process could not verify its own
+shutdown and needed a second agent; here, the observation window opens exactly when the observer stops
+running. The method that works is to leave a recorder behind — a `stream-complete` listener plus a
+`MutationObserver` on the HUD's `visible` attribute — which turn N+1 reads to describe turn N. It was
+installed once and lost to a Vite HMR full page reload caused by a later edit in this same phase, and the
+reinstall after the last webapp write went unanswered. **So this stays open, with the method known and
+the ordering constraint now explicit: install the recorder after the final webapp write of the sitting,
+or HMR takes it.**
+
+Two smaller things the live run settled about method:
+
+- **Diagnose the Python side first.** A webapp edit HMR-reloads the page, which remounts
+  `ac-context-usage-tab` and clears the hook log the diagnosis is reading. The hook finding above was
+  only reachable because the `health.py` edits came before the `context-usage-tab.js` ones.
+- **`(Budget + Cache)` survived four phases** of the panel it named being replaced. Stale copy is not
+  found by grepping for what changed; it is found by reading the screen.
+
+### Deliberately not built
+
+- **`reconnect_mcp_server` still has no caller.** The RPC exists; no browser surface offers the
+  reconnect. Unchanged from phase 4, and Debug reports the status it would act on.
+- **The HUD's Rate limits and Files modified sections, and its collapse persistence.**
+  `viewers-hud.md` § *Sections* specifies all three. Unchanged from what the plan recorded going in.
+- **`EngineHealth.mcp` is a field with no writer.** The per-server list the banner leaves out is the same
+  data Debug's MCP status fetches live, and one of the two should own it.
+- **No `auth_warning` for the new "unknown" source.** `hasHealthProblem` in `health-banner.js` escalates
+  on `auth_warning`, and an unknown *source* is a limit on what this process can see, not a
+  misconfiguration — banner-escalating it would fire on every resumed session.
+
+### For whoever picks up phase 7
+
+- **Read the recorder.** If `window.__phase6` is present, it holds turn N's `turn_cost_basis`, the HUD's
+  visibility transitions and the rendered chip text. If it is not, reinstall it *after* the last webapp
+  write and read it on the following turn. That closes the criterion's third clause and the interlude's
+  "whether the HUD appears on turn-complete is unverified", which has now been open across two phases for
+  the same reason both times: the window closes before anybody looks.
+- **Cost is cumulative. Every time.** `total_cost_usd` and `modelUsage` are session totals, and the only
+  correct per-turn figures on the wire are `turn_cost_usd` / `turn_model_usage`. A new reader that reaches
+  for the obvious field name will be wrong upward and monotonically, which is the shape of wrong that
+  looks plausible for a long time.
+- **A reader that cannot fill and a reader that is broken look the same.** The hook log's empty state is
+  one instance; anything phase 7 adds that depends on an event the CLI may not emit needs its empty state
+  to say which of the two it is.
+- **`R-9` is still live on this machine.** `$CLAUDE_CODE_USE_BEDROCK` redirects to a gateway with a
+  subscription login present, so every cost figure read here carries that caveat. Three phases have now
+  recorded it; the tripwire works and the environment has not changed.
+
+---
+
+## Interlude — the timer that answered for the user (2026-08-17)
+
+Not a phase. It started with a screenshot: an `evaluate_script` permission request the dialog had closed
+itself, denied, because 300 seconds passed while nobody was at the machine. The question that followed was
+the right one — *why does it time out at all?* — and the honest answer turned out to be "because of a bug
+somewhere else".
+
+### Gating consumes nothing, and that is checkable
+
+The reason a wall-clock limit felt necessary was an assumption that something is being held open while a
+request waits — an API call, a warm cache, a socket. It is not. `can_use_tool` is dispatched by
+`Query._read_messages` through `_spawn_control_request_handler` as its own detached task, so the read loop
+is not held either. What is outstanding is one blocked SDK **control request**, and that is the whole cost:
+the CLI is holding a complete assistant message and cannot issue its next API call until a tool result
+exists. Nothing accrues while the user is away.
+
+So the timer was not protecting a resource. It was answering on the user's behalf, which is the one thing
+a permission dialog must not do.
+
+### But the timer was load-bearing, for a reason nothing said out loud
+
+Removing it needed one check first: what clears `_pending` when a user hits Stop? Nothing did.
+`cancel_all`'s only callers were shutdown, new-session and resume, so `interrupt()` left the request
+suspended and **the 300 s expiry was the only thing that ever released it.** Three throwaway probes against
+a real `EngineSession` and a real `PermissionBroker` with only the SDK client faked — the shape the session
+tests already use — split the outcome in two: a CLI that honours the interrupt anyway leaves a stale dialog
+on screen (Case A); a CLI that cannot finish the turn without a tool result loses the session to
+`_watch_drain` expiring (Case B). Both are the deadline covering for a missing call.
+
+### What landed
+
+1. **Stop denies before it interrupts.** `cancel_streaming` calls `cancel_for_turn(request_id)` *first* —
+   releasing what the CLI is blocked on is what makes the interrupt actionable — and `_run_turn`'s `finally`
+   sweeps anything still open, which covers a lost session, an engine crash, a drain that timed out. `Stop`
+   is now the escape hatch from a dialog nobody wants to answer, which is what lets the request itself wait
+   indefinitely.
+2. **The deadline is presence-driven, not wall-clock.** `DECISION_TIMEOUT` and its deny reason are deleted;
+   `expires_at` is nullable and `None` is the normal case. `NO_LOCALHOST_TIMEOUT = 30 s` survives as the only
+   expiry, and it is armed when the *last* localhost client leaves and cancelled when one returns —
+   re-sampled every `PRESENCE_POLL_SECONDS = 2 s` for the life of the request rather than once at the start.
+   The poll uses `asyncio.wait({fut}, timeout=…)`, never `wait_for`, which would cancel the future it is
+   waiting on. Each arm and disarm broadcasts `permissionDeadline`.
+3. **The dialog updates in place.** `permissionDeadline` is session-wide, not turn-scoped — a request
+   outlives the moment it was raised — and it mutates the queue entry rather than re-enqueuing it: a
+   half-typed deny reason survives and the settling interval is not restarted by a clock the user did not
+   touch. No countdown renders when there is nothing counting down, and a request with no deadline sorts
+   last in the queue.
+
+### One thing the change broke, found by writing the spec rather than by a test
+
+The coarse screen-reader milestones are `[300, 60, 10]` and the loop announced the first threshold the
+remaining time fell under. Correct for a 300 s window; over the 30 s one that is now the only window, it
+told a screen-reader user they had **five minutes** to answer something expiring in thirty seconds. Fixed by
+retiring thresholds above the time the request actually has, and by announcing the arm itself with the real
+remaining — the first milestone inside a 30 s window is the 10 s one, far too late to be the only notice.
+Announcements say "30 seconds left", not the chip's `0:30`, which reads as "zero colon thirty".
+
+Also fixed while checking the new `cancelled` action end to end: the transcript rendered machine denials as
+"cancelled by cancelled" and "shutdown by shutdown". `resolved_by` repeats the cause for those, and an
+attribution phrase is for a person who decided.
+
+### Tests
+
+- `tests/test_claude_code_permissions.py` — 148 in the file. `TestCancelForTurn` (7) is new; the old expiry
+  tests became four presence tests in `TestCanUseTool`, including a client who leaves and one who comes back
+  and stops the clock, and `test_pending_is_ordered_by_expiry` is now a presence flip rather than two
+  synthetic deadlines. Every `decision_timeout=` kwarg is gone — 12 call sites, plus one in
+  `scripts/bridge_smoke.py` that no test covers and that would have crashed the script.
+- `tests/test_claude_code_service.py` — 3 new: Stop denies the dialog the turn was waiting on, the deny
+  reaches the CLI *before* the interrupt, and a turn that ends any other way sweeps what is left.
+- `webapp/src/permission-dialog/dialog.test.js` — `describe('a deadline that arms mid-request')` (7),
+  covering arm, cancel-and-does-not-fire, the surviving deny reason, promotion, the announcements, and an
+  unknown `permission_id`. `queue.test.js` gained `spokenSeconds`.
+- Both suites green: python **3120 passed**; webapp **93 files / 3740 passed**.
+
+### Deliberately not built
+
+- **The probes are still in `/tmp`.** `probe_stop_during_permission.py`, `probe_deny_recovers.py` and
+  `probe_case_b_real_teardown.py` demonstrated the bug and now pass inverted. Promoting them as regression
+  tests was offered and not taken up; they will not survive a reboot.
+- **Case A versus Case B is still unverified against a real CLI.** The fix makes the distinction moot — the
+  request is released either way — so nothing depends on knowing, but nothing asserts it either.
+- **The `permissions` App Config section is still unwired.** `configuration.md` now specifies
+  `no_client_timeout_s` and `presence_poll_s` against `permissions.py`'s two constants, and there is still
+  no provider reading them.
