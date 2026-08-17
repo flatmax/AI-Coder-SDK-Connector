@@ -423,7 +423,7 @@ export function renderTabStrip(panel) {
               role="button"
               tabindex="0"
               aria-label="Open Context for ${label}"
-              title="View this conversation's context (Budget + Cache)"
+              title="View this conversation's context window and turn cost"
               @click=${(e) => {
                 e.stopPropagation();
                 onTabContextClick(panel, tabId);

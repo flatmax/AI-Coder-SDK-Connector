@@ -962,9 +962,23 @@ describe('ContextUsageTab autocompact mark', () => {
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
-    const mark = el.shadowRoot.querySelector('.bar .mark');
+    const mark = el.shadowRoot.querySelector('.bar-wrap .mark');
     expect(mark).not.toBeNull();
     expect(parseFloat(mark.style.left)).toBeCloseTo(83.5, 6);
+  });
+
+  it('draws the mark outside the bar that clips its own children', async () => {
+    // `.bar` has `overflow: hidden` so the segment fill takes the bar's
+    // rounded ends. A mark inside it is drawn flush and ringless — the
+    // pixel of overhang and the shadow are exactly what gets clipped —
+    // so it is a sibling positioned over the bar instead. jsdom computes
+    // no layout, so structure is the only part of this a test can hold.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const mark = el.shadowRoot.querySelector('.mark');
+    expect(mark.parentElement.classList.contains('bar-wrap')).toBe(true);
+    expect(el.shadowRoot.querySelector('.bar .mark')).toBeNull();
   });
 
   it('names the token count it marks', async () => {
@@ -1178,13 +1192,16 @@ describe('ContextUsageTab message breakdown', () => {
   });
 
   it('splits calls from results, which are separately fixable', async () => {
+    // Both headers name the unit. "Calls" read as a count to a live reader
+    // in phase 6 — every cell is tokens, so "Calls: 1.5K" against a tool
+    // called twice was a wrong number rather than an unclear one.
     publishUsage(withBreakdown());
     const el = mountTab();
     await settle(el);
     const heads = [
       ...sectionFor(el, 'Tool traffic').querySelectorAll('th'),
     ].map((th) => th.textContent.trim());
-    expect(heads).toEqual(['Tool', 'Calls', 'Results', 'Total']);
+    expect(heads).toEqual(['Tool', 'Call tokens', 'Result tokens', 'Total']);
   });
 
   it('counts the tools and their total in the heading', async () => {
@@ -2181,6 +2198,38 @@ describe('ContextUsageTab debug', () => {
     expect(debugText(el)).toContain('Mirror gaps 2');
   });
 
+  it('keeps a push that lands while the fetch is still in flight', async () => {
+    // The same rule as above, at the width that actually matters: the fetch
+    // is a round trip, and the reply the server composed *before* the push
+    // is stale the moment the push exists. Answering "0 gaps" over a pushed
+    // 3 would be the clean-mirror-over-a-broken-one report, arriving late.
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => INFO,
+      'ClaudeCodeService.get_engine_health': async () => {
+        await gate;
+        return HEALTH;
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+
+    // The mirror breaks while the server is mid-answer.
+    pushEvent('engine-health', { ...HEALTH, mirror_gaps: 3 });
+    await settle(el);
+    expect(debugText(el)).toContain('Mirror gaps 3');
+
+    release();
+    await settle(el);
+    expect(debugText(el)).toContain('Mirror gaps 3');
+  });
+
   it('says so when no health has arrived at all', async () => {
     const { el } = await openDebug({ health: null });
     expect(debugText(el)).toContain('No engine health has arrived yet');
@@ -2191,7 +2240,9 @@ describe('ContextUsageTab debug', () => {
     // fields we have not verified is the mistake the context-visibility
     // spec records. So the summary counts, and the dump carries the truth.
     const { el } = await openDebug();
-    const rows = [...sectionFor(el, 'Engine').querySelectorAll('tbody tr')]
+    const rows = [
+      ...sectionFor(el, 'Initialize reply').querySelectorAll('tbody tr'),
+    ]
       .map((tr) => [...tr.querySelectorAll('td')].map((td) =>
         td.textContent.trim(),
       ))
@@ -2202,6 +2253,21 @@ describe('ContextUsageTab debug', () => {
       ['version', '2.1.4'],
     ]);
     expect(dumps(el)[0]).toContain('"outputStyles"');
+  });
+
+  it('keeps what we resolved apart from what the engine answered', async () => {
+    // Provenance runs opposite ways through these two tables: the binary and
+    // its version are AC⚡DC's resolution, the reply is the engine's own
+    // claim about itself. Under one heading they read as one source, and
+    // telling them apart is most of what this section is for.
+    const { el } = await openDebug();
+    const engine = sectionFor(el, 'Engine');
+    expect(engine.textContent).toContain('/opt/ac-dc/bundled/claude');
+    expect(engine.textContent).not.toContain('outputStyles');
+    expect(engine.querySelector('pre.json')).toBeNull();
+    expect(sectionFor(el, 'Initialize reply').textContent).toContain(
+      'outputStyles',
+    );
   });
 
   it('says an empty reply is empty rather than showing nothing', async () => {
@@ -2284,7 +2350,22 @@ describe('ContextUsageTab debug', () => {
     const { el } = await openDebug();
     pushEvent('hook-event', { requestId: 'r1' });
     await settle(el);
-    expect(debugText(el)).toContain('No hooks have fired');
+    expect(debugText(el)).toContain('Nothing announced');
+  });
+
+  it('does not promise that our own re-index hook will fill it', async () => {
+    // Verified live in phase 6 against CLI 2.1.229: the empty state used to
+    // say "the PostToolUse re-index fires on every file the agent writes, so
+    // a turn with an edit in it fills this", and it never does. AC⚡DC's
+    // re-index hook is an SDK callback the CLI answers over the control
+    // channel, and it never reaches the message stream. The hook itself ran —
+    // the index had the new file seconds later, and the turn footer listed it —
+    // so the old copy pointed a reader at a broken reader that was working.
+    const { el } = await openDebug();
+    const text = debugText(el);
+    expect(text).toContain("does not include AC⚡DC's own re-index hook");
+    expect(text).toContain('not evidence that the re-index did not run');
+    expect(text).not.toContain('fills this');
   });
 
   it('drops the log and refetches when the session changes', async () => {
@@ -2297,7 +2378,7 @@ describe('ContextUsageTab debug', () => {
     expect(hookRows(el)).toHaveLength(1);
     pushEvent('session-changed', { sessionId: 'other' });
     await settle(el);
-    expect(debugText(el)).toContain('No hooks have fired');
+    expect(debugText(el)).toContain('Nothing announced');
     expect(infoHandler).toHaveBeenCalledTimes(2);
   });
 

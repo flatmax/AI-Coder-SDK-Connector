@@ -863,6 +863,16 @@ describe('UsageHud context bar', () => {
     expect(mark.title).toContain('167,000 tokens');
   });
 
+  it('draws the mark outside the bar that clips its own children', async () => {
+    // Same structure as the Context tab's gauge, and for the same reason:
+    // `.bar` has `overflow: hidden` to round the fill, which clips the
+    // mark's overhang and its ring. Sibling of the bar, drawn over it.
+    const el = await show();
+    const mark = el.shadowRoot.querySelector('.mark');
+    expect(mark.parentElement.classList.contains('bar-wrap')).toBe(true);
+    expect(el.shadowRoot.querySelector('.bar .mark')).toBeNull();
+  });
+
   it('says so in words when autocompact is off, instead of just dropping the mark', async () => {
     // An unmarked bar otherwise reads as one whose threshold is somewhere
     // off to the right, which is the opposite of the truth.

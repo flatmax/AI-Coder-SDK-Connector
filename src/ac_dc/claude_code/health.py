@@ -369,7 +369,14 @@ def detect_credentials() -> tuple[str, str | None]:
     elif subscription is not None:
         source = f"subscription login ({_tilde(subscription)})"
     else:
-        source = "unknown — the CLI will prompt for login"
+        # Reports what was looked for and not found, and predicts nothing.
+        # This branch used to say "the CLI will prompt for login", which is
+        # a claim about the future that this process cannot support: the CLI
+        # resolves its own credentials, and a resumed session runs under a
+        # redirected CLAUDE_CONFIG_DIR that is not this one. Observed live
+        # in phase 6 against a fully authenticated session that was never
+        # going to prompt for anything.
+        source = f"unknown — no key, gateway or login file in {_tilde(_credential_base())}"
 
     warnings: list[str] = []
     if api_key_var and subscription is not None:
@@ -396,10 +403,22 @@ def _truthy(value: str | None) -> bool:
     return bool(value) and value.strip().lower() not in ("0", "false", "no", "")
 
 
+def _credential_base() -> Path:
+    """The directory the CLI's credential file is looked for in.
+
+    Honours ``CLAUDE_CONFIG_DIR`` as read from *this* process. Worth
+    stating because it is the limit of what the field can know: the CLI
+    child of a resumed session runs under a materialised config dir of its
+    own (see ``resume_cleanup``), so a session can be authenticated by a
+    file this function will never see.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+
+
 def _subscription_credential_path() -> Path | None:
     """Locate the CLI's own credential file, honouring CLAUDE_CONFIG_DIR."""
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    base = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    base = _credential_base()
     for name in (".credentials.json", "credentials.json"):
         candidate = base / name
         if candidate.exists():

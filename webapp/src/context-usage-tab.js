@@ -350,7 +350,18 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       height: 100%;
     }
     /**
-     * The autocompact mark. Inside the bar rather than a tick beneath
+     * The mark's positioning parent, and the reason it is not the bar.
+     *
+     * .bar clips its children — that is what rounds the ends of the
+     * segment fill — so a mark inside it loses precisely the pixel of
+     * overhang and the ring below that make it legible against a
+     * segment of any colour. Sibling of the bar, positioned over it.
+     */
+    .bar-wrap {
+      position: relative;
+    }
+    /**
+     * The autocompact mark. Over the bar rather than a tick beneath
      * it, so the fill is read against it directly — the question is
      * "have the segments reached the mark", and an aligned tick two
      * pixels below makes that a comparison instead of a glance.
@@ -565,6 +576,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._hookSeq = 0;
     /** The last `engineHealth` record, pushed or fetched. */
     this._health = null;
+    /**
+     * How many pushes have landed. Read either side of the health *fetch*
+     * so a push that arrives mid-flight is not overwritten by the older
+     * snapshot the server was already composing — see `_ensureDebug`.
+     */
+    this._healthSeq = 0;
     /** `get_server_info()`'s reply, fetched when Debug is first opened. */
     this._serverInfo = null;
     this._debugError = '';
@@ -679,6 +696,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     const data = e?.detail;
     if (!data || typeof data !== 'object') return;
     this._health = data;
+    this._healthSeq += 1;
     this._debugUpdate();
   }
 
@@ -794,6 +812,11 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (!this.rpcConnected) return;
     this._debugLoading = true;
     this._debugUpdate();
+    // Read before the await, compared after. A push is fresher than this
+    // fetch by definition — the server composed its answer before the push
+    // it does not contain — so the fetch only writes when it is still the
+    // newest thing we have.
+    const seq = this._healthSeq;
     try {
       const [health, info] = await Promise.all([
         this._fetchEngineHealth(),
@@ -803,9 +826,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           'get_server_info',
         ),
       ]);
-      // A pushed record is fresher than this one by definition, so a fetch
-      // that answers nothing leaves whatever arrived pushed in place.
-      if (health) this._health = health;
+      // So: a fetch that answers nothing, *and* one that answers late,
+      // both leave whatever arrived pushed in place. `mirror_gaps` moves
+      // during a turn, and this fetch is seconds wide.
+      if (health && this._healthSeq === seq) this._health = health;
       if (info && info.error) {
         this._debugError = String(info.error);
       } else {
@@ -1077,20 +1101,22 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
             ${total.toLocaleString()} / ${max.toLocaleString()} tokens
           </span>
         </div>
-        <div class="bar gauge">
-          ${segmented
-            ? content.map((c) => html`
-                <div
+        <div class="bar-wrap">
+          <div class="bar gauge">
+            ${segmented
+              ? content.map((c) => html`
+                  <div
+                    class="bar-seg"
+                    style="width: ${(Number(c.tokens) / max) * 100}%;
+                           background: ${categoryColor(c.color)};"
+                    title="${c.name}: ${_fmtTokens(c.tokens)}"
+                  ></div>
+                `)
+              : html`<div
                   class="bar-seg"
-                  style="width: ${(Number(c.tokens) / max) * 100}%;
-                         background: ${categoryColor(c.color)};"
-                  title="${c.name}: ${_fmtTokens(c.tokens)}"
-                ></div>
-              `)
-            : html`<div
-                class="bar-seg"
-                style="width: ${clamped}%; background: ${_pctColor(clamped)};"
-              ></div>`}
+                  style="width: ${clamped}%; background: ${_pctColor(clamped)};"
+                ></div>`}
+          </div>
           ${markPct != null ? html`
             <div
               class="mark"
@@ -1299,6 +1325,11 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * fixable. A heavy call column is a request passing too much in; a
    * heavy result column is a tool answering with more than was asked
    * for, and only one of those is the caller's to change.
+   *
+   * Both headers name the unit. They used to read "Calls" and "Results",
+   * which a live reader took for counts — every cell here is tokens, and
+   * "Calls: 4.2k" against a tool called four times is a wrong number
+   * rather than an unclear one.
    */
   _renderToolTraffic(comp) {
     if (!comp || comp.byTool.length === 0) return '';
@@ -1317,8 +1348,8 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           <thead>
             <tr>
               <th>Tool</th>
-              <th class="num">Calls</th>
-              <th class="num">Results</th>
+              <th class="num">Call tokens</th>
+              <th class="num">Result tokens</th>
               <th class="num">Total</th>
             </tr>
           </thead>
@@ -1804,10 +1835,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   /**
    * Debug — for diagnosing the engine, not the code.
    *
-   * Four readers of four sources, in the order a diagnosis uses them: what
-   * binary is running, what it has been doing, whether its servers are
-   * answering, and finally its own layout of the numbers the Usage section
-   * lays out itself.
+   * Five readers of five sources, in the order a diagnosis uses them: what
+   * binary is running, what it says it can do, what it has been doing,
+   * whether its servers are answering, and finally its own layout of the
+   * numbers the Usage section lays out itself.
    *
    * Nothing here is required to understand normal usage, which is why it is
    * a section a reader has to ask for rather than a row in the other two.
@@ -1815,6 +1846,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   _renderDebugSection() {
     return html`
       ${this._renderEngine()}
+      ${this._renderServerInfo()}
       ${this._renderHookTraffic()}
       ${this._renderMcpRaw()}
       ${this._renderGridRows()}
@@ -1826,9 +1858,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    *
    * The four numbers at the top are the ones that explain a whole class of
    * "it worked yesterday": a resolved binary that is not the bundled one, a
-   * version below the SDK's pin, a credential source nobody expected. They
-   * come from `EngineHealth`, which is local state — the control request
-   * below it is the engine's initialize reply.
+   * version below the SDK's pin, a credential source nobody expected.
+   *
+   * All of it comes from `EngineHealth`, and that is the whole section —
+   * these are facts *we* resolved about the engine. What the engine says
+   * about itself is the next section, because two tables under one heading
+   * lose exactly the provenance a diagnosis needs.
    */
   _renderEngine() {
     const h = this._health;
@@ -1881,13 +1916,29 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
               whenever it changes, so this fills in as soon as the engine
               reports.
             </p>`}
-        ${this._renderServerInfo()}
       </section>
     `;
   }
 
-  /** The initialize reply: summarised by key, then printed verbatim. */
+  /**
+   * The initialize reply: summarised by key, then printed verbatim.
+   *
+   * Its own section rather than a second table under *Engine*, because the
+   * provenance is the other way round — everything above is what AC⚡DC
+   * resolved, and everything here is what the engine answered. A diagnosis
+   * that cannot tell those apart is reading one table as both.
+   */
   _renderServerInfo() {
+    return html`
+      <section>
+        <h3>Initialize reply</h3>
+        ${this._renderServerInfoBody()}
+      </section>
+    `;
+  }
+
+  /** The reply's four states: loading, failed, unread, and read. */
+  _renderServerInfoBody() {
     if (this._debugLoading && !this._serverInfo) {
       return html`<p class="note">Asking the engine what it advertises…</p>`;
     }
@@ -1938,6 +1989,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * missed. Each row expands to the payload the engine sent, since the
    * summarised columns are the fields we chose to read and the interesting
    * one is usually not among them.
+   *
+   * What lands here is what the CLI *announces*, which turns out not to be
+   * every hook that runs — see the empty state. Verified live in phase 6
+   * against CLI 2.1.229.
    */
   _renderHookTraffic() {
     const hooks = this._hooks;
@@ -1956,9 +2011,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
         </h3>
         ${hooks.length === 0
           ? html`<p class="note">
-              No hooks have fired since this panel was mounted. The
-              PostToolUse re-index fires on every file the agent writes, so a
-              turn with an edit in it fills this.
+              Nothing announced since this panel was mounted. This shows what
+              the CLI puts in the message stream, which does not include
+              AC⚡DC's own re-index hook — that one is an SDK callback,
+              answered over the control channel. So an empty table is the
+              normal state here, and it is not evidence that the re-index
+              did not run.
             </p>`
           : html`
               <table>

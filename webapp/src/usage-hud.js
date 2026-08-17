@@ -196,8 +196,15 @@ export class UsageHud extends RpcMixin(LitElement) {
     .bar-seg {
       height: 100%;
     }
+    /* The mark's positioning parent, not the bar: .bar clips its
+     * children to round the ends of the fill, which would eat the
+     * overhang and the ring the mark is drawn with. Same as the
+     * Context tab's gauge. */
+    .bar-wrap {
+      position: relative;
+    }
     /* The autocompact mark, same treatment as the Context tab's gauge:
-     * inside the bar rather than a tick beneath it, so the fill is read
+     * over the bar rather than a tick beneath it, so the fill is read
      * against it directly. Without it the bar's colour turns amber for
      * a reason nothing on screen accounts for — the threshold sits some
      * 16% below the window, and the tooltip was the only place that
@@ -534,26 +541,28 @@ export class UsageHud extends RpcMixin(LitElement) {
             ${clamped.toFixed(0)}% · ${_fmtTokens(total)}/${_fmtTokens(max)}
           </span>
         </div>
-        <div
-          class="bar"
-          title=${this._contextTitle(ctx, total, max)}
-          role="img"
-          aria-label="Context ${clamped.toFixed(0)} percent used"
-        >
-          ${segments.length > 0
-            ? segments.map((s) => html`
-                <div
-                  class="bar-seg"
-                  style="width: ${s.width}%; background: ${s.color};"
-                  title="${s.name}: ${_fmtTokens(s.tokens)}"
-                ></div>
-              `)
-            : html`
-                <div
-                  class="bar-seg"
-                  style="width: ${clamped}%; background: ${_contextColor(warnPct)};"
-                ></div>
-              `}
+        <div class="bar-wrap">
+          <div
+            class="bar"
+            title=${this._contextTitle(ctx, total, max)}
+            role="img"
+            aria-label="Context ${clamped.toFixed(0)} percent used"
+          >
+            ${segments.length > 0
+              ? segments.map((s) => html`
+                  <div
+                    class="bar-seg"
+                    style="width: ${s.width}%; background: ${s.color};"
+                    title="${s.name}: ${_fmtTokens(s.tokens)}"
+                  ></div>
+                `)
+              : html`
+                  <div
+                    class="bar-seg"
+                    style="width: ${clamped}%; background: ${_contextColor(warnPct)};"
+                  ></div>
+                `}
+          </div>
           ${markPct != null ? html`
             <div
               class="mark"
