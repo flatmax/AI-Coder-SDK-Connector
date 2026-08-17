@@ -557,6 +557,19 @@ export function renderToolCard(panel, block) {
 }
 
 /**
+ * The denials nobody chose, and what to call them.
+ *
+ * These arrive with `resolved_by` set to the same word as the action, so the
+ * generic "<action> by <resolver>" line rendered "shutdown by shutdown". None
+ * of them is a person's decision, so none of them carries a "by".
+ */
+const MACHINE_DENIAL_LABELS = {
+  timeout: 'Denied — no host client was connected to answer',
+  cancelled: 'Denied — the turn ended before it was answered',
+  shutdown: 'Denied — the session shut down',
+};
+
+/**
  * The card body: the denial reason if there was one, otherwise the input and
  * then the result.
  *
@@ -566,11 +579,14 @@ export function renderToolCard(panel, block) {
  */
 function renderToolBody(block, card, result, segments) {
   if (block.denial) {
+    const machine = MACHINE_DENIAL_LABELS[block.denial.action];
     return html`
       <div class="tool-body tool-body-denied">
         <div class="tool-denial-label">
-          ${block.denial.action === 'deny' ? 'Denied' : block.denial.action}
-          ${block.denial.resolvedBy ? html` by ${block.denial.resolvedBy}` : nothing}
+          ${machine || 'Denied'}
+          ${!machine && block.denial.resolvedBy
+            ? html` by ${block.denial.resolvedBy}`
+            : nothing}
         </div>
         <div class="tool-denial-reason">
           ${block.denial.reason || 'No reason given.'}

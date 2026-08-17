@@ -150,6 +150,25 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('user-message-images', listener);
     });
 
+    it('permissionDeadline dispatches a session-wide window event', () => {
+      // Its own event rather than a re-sent `permissionRequest`: the dialog
+      // on screen is updated in place, because rebuilding it would restart
+      // the settling interval and lose a half-typed deny reason.
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('permission-deadline', listener);
+      const data = {
+        permission_id: 'perm-1',
+        request_id: 'req-1',
+        expires_at: '2026-08-14T00:00:30Z',
+        localhost_available: false,
+      };
+      shell.permissionDeadline(data);
+      const event = listener.mock.calls[0][0];
+      expect(event.detail).toEqual(data);
+      window.removeEventListener('permission-deadline', listener);
+    });
+
     it('sessionDeleted dispatches window event with the session id', () => {
       // Reaches the client that asked for the delete as well as the
       // ones that did not: a session list still offering the row is a

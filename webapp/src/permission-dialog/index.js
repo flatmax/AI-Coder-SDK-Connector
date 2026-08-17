@@ -49,6 +49,7 @@ import {
   interactQuestions,
   orderQueue,
   secondsRemaining,
+  spokenSeconds,
 } from './queue.js';
 import { renderBody, formatJson } from './bodies.js';
 import { renderDecisions } from './decisions.js';
@@ -150,6 +151,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._titleBeforeDialog = null;
 
     this._onPermissionRequest = this._onPermissionRequest.bind(this);
+    this._onPermissionDeadline = this._onPermissionDeadline.bind(this);
     this._onPermissionResolved = this._onPermissionResolved.bind(this);
     this._onRoleChanged = this._onRoleChanged.bind(this);
     this._onKeydownCapture = this._onKeydownCapture.bind(this);
@@ -162,6 +164,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('permission-request', this._onPermissionRequest);
+    window.addEventListener('permission-deadline', this._onPermissionDeadline);
     window.addEventListener('permission-resolved', this._onPermissionResolved);
     window.addEventListener('role-changed', this._onRoleChanged);
     // Capture phase on `window`, which is the outermost target in the
@@ -175,6 +178,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
 
   disconnectedCallback() {
     window.removeEventListener('permission-request', this._onPermissionRequest);
+    window.removeEventListener('permission-deadline', this._onPermissionDeadline);
     window.removeEventListener('permission-resolved', this._onPermissionResolved);
     window.removeEventListener('role-changed', this._onRoleChanged);
     window.removeEventListener('keydown', this._onKeydownCapture, true);
@@ -191,7 +195,9 @@ export class PermissionDialog extends RpcMixin(LitElement) {
    * A refresh mid-request must re-open the dialog with the time it
    * actually has left, not a fresh countdown — which is why the payload
    * carries `expires_at` rather than a duration
-   * (permission-dialog.md § Reconnect).
+   * (permission-dialog.md § Reconnect). Usually there is nothing to count:
+   * a refresh *is* a host client, and the snapshot the server serves has
+   * had its clock cancelled by the time it arrives.
    */
   async onRpcReady() {
     await this._probeAuthority();
@@ -256,6 +262,62 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   _onPermissionRequest(event) {
     const payload = event?.detail;
     if (payload) this._enqueue(payload);
+  }
+
+  /**
+   * A deadline armed or cancelled on a request already on screen.
+   *
+   * Most requests have no deadline at all: a request waits as long as
+   * somebody who could answer it is connected, because nothing is consumed
+   * while it waits (permissions.py § Deadline). A clock appears only when
+   * the last host client leaves, and disappears again when one returns —
+   * which is why this is an update to the entry rather than a new one. The
+   * settling interval and any half-typed deny reason belong to the request,
+   * not to its clock, and re-enqueuing would throw both away.
+   *
+   * Milestone announcements are cleared on a disarm so a clock that arms a
+   * second time announces itself again rather than staying silent.
+   */
+  _onPermissionDeadline(event) {
+    const detail = event?.detail;
+    const id = detail?.permission_id;
+    if (!id) return;
+    let changed = false;
+    this._entries = this._entries.map((entry) => {
+      if (entry.payload.permission_id !== id) return entry;
+      changed = true;
+      return {
+        ...entry,
+        payload: {
+          ...entry.payload,
+          expires_at: detail.expires_at ?? null,
+          localhost_available: detail.localhost_available !== false,
+        },
+      };
+    });
+    if (!changed) return;
+    if (detail.expires_at == null) this._announced.delete(id);
+    const wasCurrent = this._currentId === id;
+    this._now = Date.now();
+    // A clock can reorder the queue — a counting-down request is answered
+    // before an open-ended one — and that can put a different request on
+    // screen. `_syncCurrent` is a no-op when it does not, and when it does
+    // the newly visible one gets its own settling interval.
+    this._syncCurrent();
+    // A clock starting is the news here, and it is the one thing a screen
+    // reader cannot pick up from a numeral that just appeared. Said with
+    // the time the request actually has: the window is 30 s, so the first
+    // milestone below it is the 10-second one — far too late to be the only
+    // notice. Skipped when the arm promoted a *different* request onto the
+    // screen, because `_syncCurrent` has already announced that one and
+    // which request the user is now looking at matters more.
+    if (detail.expires_at != null && wasCurrent && this._currentId === id) {
+      const remaining = secondsRemaining(this.current, this._now);
+      if (remaining != null) {
+        this._announcement =
+          `no host client is connected — ${spokenSeconds(remaining)} to answer`;
+      }
+    }
   }
 
   _enqueue(payload) {
@@ -374,8 +436,14 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const action = detail.action;
     let message;
     if (action === 'timeout') {
-      message = `Permission for ${detail.tool_use_id ? 'a tool call' : 'a call'} `
-        + 'expired and was denied for want of an answer.';
+      // Expiry now means one thing only: no host client was connected to
+      // answer. Saying "for want of an answer" would blame the user for a
+      // dialog that was never on their screen.
+      message = 'A pending permission request was denied — no host client was '
+        + 'connected to answer it.';
+    } else if (action === 'cancelled') {
+      message = 'A pending permission request was denied — the turn it belonged '
+        + 'to ended.';
     } else if (action === 'shutdown') {
       message = 'A pending permission request was denied — the session shut down.';
     } else if (detail.resolved_by && detail.resolved_by !== 'localhost') {
@@ -412,7 +480,13 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   /**
    * Close a request whose clock has run out.
    *
-   * The server is the authority — it denies on its own timeout and
+   * Most requests have no clock, and `secondsRemaining` returns null for
+   * those — they are never swept from here. The ones that do have one got
+   * it because no host client was connected, which makes this a rare path
+   * on a client that is, by definition, connected: the host came back
+   * inside the window and the disarm has not arrived yet.
+   *
+   * The server is the authority — it denies on its own deadline and
    * broadcasts. This is the client catching up when that broadcast is
    * slow or lost, so the user is not left staring at `0:00` on a dialog
    * that is already dead.
@@ -424,7 +498,8 @@ export class PermissionDialog extends RpcMixin(LitElement) {
         const name = entry.payload.tool_name;
         this._dequeue(entry.payload.permission_id);
         this._toast(
-          `Permission for ${name} expired — denied for want of an answer.`,
+          `Permission for ${name} expired — no host client was connected `
+          + 'to answer it.',
           'warning',
         );
       }
@@ -441,14 +516,20 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const id = payload.permission_id;
     const remaining = secondsRemaining(payload, this._now);
     if (remaining == null) return;
-    const done = this._announced.get(id) || new Set();
+    let done = this._announced.get(id);
+    if (!done) {
+      // First sight of this request's clock. Thresholds already above the
+      // time it actually has are retired unannounced, because the loop
+      // below stops at the first match: the only deadline that exists is
+      // the 30 s no-host one, and "5 minutes left to answer" said over a
+      // thirty-second window is worse than saying nothing.
+      done = new Set(ANNOUNCE_AT_SECONDS.filter((t) => t > remaining));
+      this._announced.set(id, done);
+    }
     for (const threshold of ANNOUNCE_AT_SECONDS) {
       if (remaining <= threshold && !done.has(threshold)) {
         done.add(threshold);
-        this._announced.set(id, done);
-        this._announcement = threshold >= 60
-          ? `${threshold / 60} minute${threshold === 60 ? '' : 's'} left to answer`
-          : `${threshold} seconds left to answer`;
+        this._announcement = `${spokenSeconds(threshold)} to answer`;
         return;
       }
     }
@@ -893,9 +974,13 @@ export class PermissionDialog extends RpcMixin(LitElement) {
           ${queue.length > 1
             ? html`<span class="queue-position">1 of ${queue.length}</span>`
             : null}
-          <span class="countdown ${urgency}" aria-hidden="true">
-            ${formatCountdown(remaining)} ⏱
-          </span>
+          ${remaining == null
+            ? null
+            : html`
+                <span class="countdown ${urgency}" aria-hidden="true">
+                  ${formatCountdown(remaining)} ⏱
+                </span>
+              `}
         </header>
 
         ${payload.agent_id
@@ -910,8 +995,9 @@ export class PermissionDialog extends RpcMixin(LitElement) {
         ${payload.localhost_available === false
           ? html`
               <div class="no-localhost">
-                No host client was connected when this was asked, so it has a
-                shorter deadline than usual.
+                No host client is connected, so this request is counting down and
+                will be denied when it reaches zero. Requests wait indefinitely
+                while a host is here.
               </div>
             `
           : null}

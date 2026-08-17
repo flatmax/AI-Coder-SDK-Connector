@@ -80,6 +80,8 @@ class FakeSession:
         # The turn in flight, which is what a mirrored entry is attributed
         # to. `None` means no turn, the way the real property reports it.
         self.active_request_id = None
+        # Tool use IDs the broker recorded against the turn in flight.
+        self.permission_prompts: list[str | None] = []
 
         self.connect_calls: list[str | None] = []
         # `(resume, fork_session)` per connect. Separate from
@@ -152,6 +154,17 @@ class FakeSession:
         if self.control_error is not None:
             raise self.control_error
         return self.interrupt_result
+
+    def note_permission_prompt(self, tool_use_id=None):
+        """What the real session returns: the turn the dialog belongs to.
+
+        ``None`` when nothing is running, which is a request raised outside
+        a turn. Present here because the attribution is what
+        ``cancel_for_turn`` sweeps on — a fake that always answered ``None``
+        would make every one of those tests pass vacuously.
+        """
+        self.permission_prompts.append(tool_use_id)
+        return self.active_request_id
 
     async def set_permission_mode(self, mode):
         from ac_dc.claude_code.engine_config import PERMISSION_MODES
@@ -1055,6 +1068,90 @@ class TestCancel:
         service.session.control_error = RuntimeError("no response")
         answer = await service.cancel_streaming(REQUEST_ID)
         assert "no response" in answer["error"]
+
+    async def test_stop_denies_the_dialog_the_turn_was_waiting_on(self, service):
+        """Stop is the way out of a dialog nobody wants to answer.
+
+        The request has no deadline of its own while a localhost client is
+        connected, so if Stop did not resolve it the turn would stay open
+        indefinitely behind a dialog the user had already dismissed.
+        """
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool(
+                "Bash", {"command": "rm -rf build"}, FakePermissionContext()
+            )
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await service.cancel_streaming(REQUEST_ID)
+
+        result = await asyncio.wait_for(gate, timeout=1)
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "stopped this turn" in result.message
+        assert service.permissions.pending() == []
+
+    async def test_the_deny_reaches_the_cli_before_the_interrupt(self, service):
+        """Order is the point, not a detail.
+
+        The CLI is blocked awaiting the permission control response, so the
+        interrupt is only actionable once that response has gone out. Doing
+        it the other way round is what let ``_watch_drain`` expire and take
+        the session down over an unanswered dialog.
+        """
+        resolved_when_interrupted: list[bool] = []
+        real_interrupt = service.session.interrupt
+
+        async def recording_interrupt(request_id=None):
+            resolved_when_interrupted.append(not service.permissions.pending())
+            return await real_interrupt(request_id)
+
+        service.session.interrupt = recording_interrupt
+
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool(
+                "Bash", {"command": "ls"}, FakePermissionContext()
+            )
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await service.cancel_streaming(REQUEST_ID)
+        await asyncio.wait_for(gate, timeout=1)
+
+        assert resolved_when_interrupted == [True]
+
+    async def test_a_turn_that_ends_sweeps_a_dialog_left_open(self, service):
+        """The backstop, for the ways a turn ends that are not Stop.
+
+        A lost session, an engine crash, or a drain that timed out all end
+        the turn without going through ``cancel_streaming``. Without the
+        sweep the dialog stayed on screen for a turn that was over.
+        """
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool(
+                "Bash", {"command": "ls"}, FakePermissionContext()
+            )
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await send(service)
+        await finish_turns(service)
+
+        result = await asyncio.wait_for(gate, timeout=1)
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "The turn ended" in result.message
+        assert service.permissions.pending() == []
 
 
 # ---------------------------------------------------------------------------

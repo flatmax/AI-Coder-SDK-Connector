@@ -131,8 +131,9 @@ wrong tool in a path rule.
 
 | Constant | Value | Notes |
 |---|---|---|
-| Decision timeout | 300 s | Generous enough to read a diff carefully. On expiry: deny with the timeout reason. |
-| No-localhost-client timeout | 30 s | Shorter path when no localhost client is connected at request time, since a fast deny is more useful than a five-minute stall. A localhost client that connects inside the window can still answer. |
+| Decision deadline | none, while a localhost client is connected | Gating consumes nothing, so a wall-clock limit on the answer buys nothing and denies a user who walked away. Stop, or the end of the turn, is the way out — not a timer. |
+| No-localhost-client timeout | 30 s | The only expiry left. Armed when the last localhost client leaves — sampled repeatedly, not once at request time — and cancelled when one returns. A remote-only session is unattended, and a fast deny beats a stalled turn. |
+| Presence poll | 2 s | How often "is a localhost client connected?" is re-asked while a request is open. Cheap: a dict iteration in the collab registry. |
 | Diff render ceiling | 2 MiB per side | Above it, the dialog shows a summary and the raw input with an explicit "too large to diff" label rather than hanging Monaco. |
 | Command display cap | 4 000 chars | Above it the command is shown truncated with a full-text expander. Never truncated silently. |
 | Prompts-per-turn metric | counted per turn, reported in `StreamCompleteResult.permission_prompts` | Feeds the click-through tripwire in `specs5/plan/risks.md` § R-12. |
@@ -192,7 +193,7 @@ Mapping from user decision:
 | Always allow | `PermissionResultAllow(updated_permissions=[PermissionUpdate(...)])` |
 | Deny | `PermissionResultDeny(message=<reason>, interrupt=False)` |
 | Deny and stop the turn | `PermissionResultDeny(message=<reason>, interrupt=True)` |
-| Timeout | `PermissionResultDeny(message=<timeout reason>, interrupt=False)` |
+| No answer possible — stopped turn, ended turn, no-localhost expiry, or teardown | `PermissionResultDeny(message=<reason naming the cause>, interrupt=False)` |
 
 `interrupt=True` aborts the whole turn, not just the call. It is offered as a distinct button, never
 as the default deny — a denial the agent can adapt to is more useful than a stopped turn.
@@ -293,8 +294,12 @@ PermissionRequestPayload:
     command: CommandPayload | null     // present for tool_class == "exec"
     question: QuestionPayload | null   // present for tool_class == "interact"
     plan: PlanPayload | null           // present for tool_class == "plan"
-    expires_at: string                 // ISO 8601 UTC; drives the dialog countdown
-    localhost_available: bool          // false ⇒ dialog explains the short timeout
+    expires_at: string | null          // ISO 8601 UTC; drives the dialog countdown.
+                                       // null — the normal case — means nothing is
+                                       // counting down, because a localhost client is
+                                       // here to answer.
+    localhost_available: bool          // false ⇒ nobody can answer, so `expires_at` is
+                                       // set and the dialog explains the countdown
 
 SuggestedRule:
     label: string                      // rendered on the "always allow" control
@@ -396,7 +401,7 @@ Returns:
 | `{status: "accepted"}` | Decision recorded and returned to the SDK |
 | `{error: "restricted", reason: str}` | Caller is not localhost — the standard restricted shape, see `specs-reference/1-foundation/rpc-inventory.md` § Restricted error shape |
 | `{error: "unknown", reason: str}` | No such `permission_id` |
-| `{error: "already_resolved", resolved_by: str}` | Another localhost client won the race, or it timed out |
+| `{error: "already_resolved", resolved_by: str}` | Another localhost client won the race, or the request was already denied by the turn ending, the no-localhost deadline, or teardown |
 
 ### Answering an `interact` request
 
@@ -477,9 +482,10 @@ the SDK does not expose `prePlanMode`, so the engine would be guessing rather th
 PermissionResolvedPayload:
     permission_id: string
     request_id: string | null
-    action: string                     // as above, plus "timeout"
+    action: string                     // as above, plus the machine causes
+                                       // "timeout" | "cancelled" | "shutdown"
     reason: string | null
-    resolved_by: string                // client id, or "timeout"
+    resolved_by: string                // client id, or the machine cause
     rule_written: SuggestedRule | null
     mode_set: string | null             // the mode the decision switched the session to
 ```
@@ -493,6 +499,33 @@ Every action in `ALLOW_ACTIONS` — `allow`, `allow_always`, `allow_mode` — me
 ahead. Anything else is a denial. Consumers must test membership rather than `== "allow"`: the
 transcript renderer compared against `"allow"` alone and marked calls approved with "always allow"
 as *denied*, with the amber lock and a denial body, on calls that ran.
+
+Three of the actions name a machine, not a person: `timeout` (the no-localhost deadline ran out),
+`cancelled` (Stop, or the end of the turn, swept the request), and `shutdown` (session teardown).
+`resolved_by` repeats the cause rather than carrying a client id, so a renderer that prints
+"denied by {resolved_by}" produces "denied by cancelled". They need their own copy — an attribution
+phrase is for a person who decided, and these are denials nobody made.
+
+### `permissionDeadline(data)` — server → browser (broadcast)
+
+```pseudo
+PermissionDeadlinePayload:
+    permission_id: string
+    request_id: string | null
+    expires_at: string | null          // ISO 8601 UTC, or null when the clock is cancelled
+    localhost_available: bool
+```
+
+Sent whenever a request's deadline is armed or cancelled after the `permissionRequest` that opened
+it, which happens when the last localhost client leaves or when one returns. It is a **session-wide**
+event, not turn-scoped: a request outlives the moment it was raised, and its clock has to reach a
+client that reloaded since.
+
+It is a separate event rather than a re-sent `permissionRequest` because the dialog on screen is
+updated in place. Rebuilding it would restart the announcement and settling timers and discard a
+half-typed deny reason — the request has not changed, only whether anything is counting down.
+
+A client that has never seen the `permission_id` ignores it.
 
 ### Tool classification map
 
@@ -549,9 +582,13 @@ An earlier draft of this file said a slow `can_use_tool` blocks message delivery
 does not. `Query._read_messages` dispatches a `control_request` through
 `_spawn_control_request_handler`, which spawns each handler as its own detached child task
 (`spawn_task` → `spawn_detached`, tracked in `_inflight_requests` so `close()` can cancel it). The read
-loop returns to reading immediately, so a five-minute permission decision does not stall the turn's
-remaining messages, and two permission requests raised by parallel tool calls are genuinely concurrent
-rather than serialised behind each other.
+loop returns to reading immediately, so a permission decision the user takes their time over does not
+stall the turn's remaining messages, and two permission requests raised by parallel tool calls are
+genuinely concurrent rather than serialised behind each other.
+
+This is also why an unanswered request costs nothing to hold: the blocked control request is the whole
+of it. No API call is in flight, and nothing is being kept warm on the wire — which is what makes a
+deadline on the answer optional rather than a resource limit.
 
 What still matters, and what the implementation still does:
 

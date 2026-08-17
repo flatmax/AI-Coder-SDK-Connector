@@ -47,7 +47,7 @@ clicks outside the dialog do nothing. Clicking the scrim is **not** a dismiss �
 
 **Header** — tool class glyph, tool name, and the single most identifying piece of the input (the path,
 the first words of the command, the MCP server name). Then the queue position when more than one request
-is pending, then the countdown to expiry.
+is pending, then — only when something is actually counting down — the countdown to expiry.
 
 The CLI sends its own copy for the call and it is preferred over anything we would compose:
 `display_name` ("Read file") is the tool label, and `title` ("Claude wants to read foo.txt") is the
@@ -285,23 +285,39 @@ routed around by habit within a day.
 `can_use_tool` can fire concurrently — the agent runs tool calls in parallel.
 
 - Exactly one dialog is visible. Additional requests queue.
-- Ordering is by `expires_at` ascending, so the request closest to timing out is answered first. Ties break by arrival.
-- The header shows `n of m`. The count is live: a request that times out or is answered on another client leaves the queue and the count drops.
+- Ordering is by `expires_at` ascending, so the request closest to timing out is answered first. A `null` `expires_at` — the normal case, nothing counting down — sorts last, because that request will still be there afterwards. Ties break by arrival.
+- A deadline that arms mid-request therefore promotes it, and one that is cancelled demotes it again. The queue reorders live rather than being fixed at arrival.
+- The header shows `n of m`. The count is live: a request that expires, is swept by the end of its turn, or is answered on another client leaves the queue and the count drops.
 - Nothing is ever auto-answered to clear the queue, and there is no "allow all pending" control. A bulk-approve button is a click-through generator with extra steps.
 - A queued `interact` request does not jump the queue. It is gated by the SDK regardless of mode, so it will still be there.
 
 When the queue drains, the scrim releases and focus returns to whatever held it before the first
 request — usually the chat input, mid-sentence.
 
-## Countdown and Timeout
+## Countdown
+
+**Most dialogs show no countdown, because most requests have no deadline.** A request waits
+indefinitely while a host client is connected to answer it — nothing is consumed while it waits — so
+`expires_at` is `null` and there is nothing to render. A dialog that showed a clock anyway would be
+inventing a pressure that does not exist, and a coffee break is not a denial
+([`../3-engine/permissions.md` § Waiting for an Answer](../3-engine/permissions.md#waiting-for-an-answer)).
+
+When a deadline does exist — no host client is connected, so nobody can answer:
 
 - The countdown renders from `expires_at`, not from a client-side timer started on arrival, so a slow socket does not produce a dialog that claims more time than it has.
-- Under a minute remaining it turns amber; under ten seconds, red. It is never hidden.
-- On expiry the dialog closes itself and shows a toast naming what expired and that it was denied for want of an answer.
-- When `localhost_available` is false the dialog explains the shorter timeout in place of the ordinary countdown label — "no host client was connected when this was asked".
+- Under a minute remaining it turns amber; under ten seconds, red. While it exists it is never hidden.
+- On expiry the dialog closes itself and shows a toast naming what expired and that it was denied because no host client was connected to answer it.
+- The dialog says why in place of the ordinary countdown label: no host is connected, this one is counting down, and requests wait indefinitely while a host is here. Without that sentence a countdown appearing on some requests and not others reads as a bug.
 
-The countdown is not decoration: the turn is blocked behind it, and a user who wanders off should be able
-to see on return that a decision was taken for them and what it was.
+**A deadline can arrive or leave while the dialog is open.** `permissionDeadline` arms it when the last
+host client disconnects and cancels it when one returns, and the dialog updates in place: the countdown
+appears or disappears, the queue reorders, the coarse announcements reset. What it does *not* do is
+rebuild the dialog — a half-typed deny reason survives, and the settling interval is not restarted by a
+clock the user did not touch. A promoted request that becomes current does get a settling interval,
+because it is newly on screen.
+
+The countdown is not decoration where it appears: it means nobody who could answer is here, and a user
+who returns should be able to see that a decision was taken for them and what it was.
 
 ## Multiple Clients
 
@@ -315,8 +331,9 @@ to see on return that a decision was taken for them and what it was.
 `get_current_state` carries `pending_permissions`, each a full request payload with its original
 `expires_at`. The dialog reconstructs from that list on connect:
 
-- A refresh mid-request re-opens the dialog with the remaining time, not a fresh countdown.
-- A request that expired while the browser was away is simply absent from the snapshot; the transcript carries the timeout denial.
+- A refresh mid-request re-opens the dialog with the remaining time, not a fresh countdown — and with no countdown at all when the request has no deadline, which is what a refresh during an ordinary wait looks like.
+- A request resolved while the browser was away — expired, swept by the end of its turn, or answered elsewhere — is simply absent from the snapshot; the transcript carries the denial and its cause.
+- `permissionDeadline` is session-wide rather than turn-scoped for this reason: a request outlives the moment it was raised, so a client that reloaded still has to be told when its clock starts.
 - The settling interval applies to a reconstructed dialog too — a page load should not be able to approve anything either.
 
 ## Attention
@@ -334,7 +351,8 @@ back to the tab and reads the dialog.
 
 - `role="dialog"`, `aria-modal="true"`, labelled by the header; focus is trapped for the dialog's lifetime.
 - On arrival, screen readers are given the class, the tool, and the target — "permission request: edit, src/auth/session.py, 12 added 3 removed" — rather than being walked through the diff. The diff itself is navigable but is not the announcement.
-- The countdown is announced at coarse intervals (five minutes, one minute, ten seconds) via a polite live region. A per-second live region is unusable.
+- Where a countdown exists it is announced at coarse intervals (five minutes, one minute, ten seconds) via a polite live region. A per-second live region is unusable. A milestone above the time the request actually has is never announced — over a thirty-second window, "five minutes left" is worse than silence — so a clock arming announces itself with the real remaining instead, which is the one thing a reader cannot pick up from a numeral that just appeared.
+- Announcements say "30 seconds left", not the chip's `0:30`, which reads as "zero colon thirty".
 - Every decision control has a keyboard path; the ▾ menus are proper menus, not hover-only.
 - Colour is never the only carrier of risk: the advisory chips carry text, and the countdown's urgency states carry the numeral.
 
@@ -342,6 +360,7 @@ back to the tab and reads the dialog.
 
 - The dialog renders above every other surface in the application, including the startup overlay and the toast layer.
 - The dialog resolves exactly once, through `resolve_permission`, a broadcast `permissionResolved`, or expiry. It never closes without one of those.
+- A `permissionDeadline` never closes a dialog, never restarts its settling interval, and never discards a half-typed deny reason. It changes only whether a clock is running.
 - Escape denies with a reason. The scrim does nothing. Neither ever dismisses a request unresolved.
 - Every `write` request shows a diff, the full new content for a new file, or an explicit binary/too-large label — never a tool name and a JSON blob alone.
 - Every request, of every class, offers the verbatim tool input behind a disclosure.
@@ -354,4 +373,4 @@ back to the tab and reads the dialog.
 - `agent_id` is always surfaced when non-null; a subagent request is never presented as coming from the main agent.
 - Exactly one dialog is visible at a time; queued requests are never auto-answered and there is no bulk approve.
 - Non-localhost clients see the full request body and no decision controls.
-- The countdown derives from `expires_at` and is never hidden.
+- The countdown derives from `expires_at`. It is absent exactly when `expires_at` is null, and never hidden when it is not — a dialog never invents a deadline, and never conceals one.

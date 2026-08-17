@@ -15,10 +15,14 @@ Three things about this module are load-bearing
   that drew tool cards from here would go silent the moment a user switched
   to ``acceptEdits``.
 - **Every request resolves exactly once, and the SDK always gets a
-  result.** By a localhost decision, by the timeout, or by
-  :meth:`PermissionBroker.cancel_all` at teardown. A request that resolved
-  twice would answer one control request and leave another hanging; one
-  that never resolved would wedge the turn.
+  result.** By a localhost decision, by the no-localhost deadline, by
+  :meth:`PermissionBroker.cancel_for_turn` when the turn is stopped or
+  ends, or by :meth:`PermissionBroker.cancel_all` at teardown. A request
+  that resolved twice would answer one control request and leave another
+  hanging; one that never resolved would wedge the turn. Note what is
+  *not* on that list: a wall-clock deadline while somebody is there to
+  answer. A request outlives a coffee break, and the way out of one
+  nobody wants to answer is Stop, not a timer — see § Deadline.
 - **Only localhost may answer.** ``can_use_tool`` authorises arbitrary
   ``Bash``; a remote participant able to answer it would make
   collaboration mode a remote-code-execution grant. The gate itself lives
@@ -62,14 +66,30 @@ logger = logging.getLogger(__name__)
 # (specs-reference/3-engine/permissions.md § Numeric constants)
 # ---------------------------------------------------------------------------
 
-# Long enough to read a diff carefully; short enough that a forgotten tab
-# does not wedge a turn for the rest of the day.
-DECISION_TIMEOUT = 300.0
-
-# The shorter path when no localhost client is connected when the request is
-# raised. A fast deny is more useful than a five-minute stall, and a
-# localhost client that connects inside the window can still answer.
+# § Deadline. There is no wall-clock limit on answering while a localhost
+# client is connected. There used to be — 300 seconds — and it was wrong in
+# the one case that matters: the user walks away, comes back, and finds the
+# request was denied on their behalf by a timer. Nothing is consumed while a
+# request waits (the CLI already has its complete assistant message and
+# cannot issue the next API call until the tool result exists), so the wait
+# costs nothing but an open turn, and an open turn is now escapable — Stop
+# resolves pending requests before it interrupts, and the end of a turn
+# sweeps whatever is left. A dialog nobody wants to answer is closed by the
+# person who does not want to answer it, not by a clock.
+#
+# The clock that remains runs only when nobody who *could* answer is there.
+# A remote collaborator cannot grant permissions, so a session whose only
+# participants are remote is not "thinking about it" — it is unattended, and
+# a fast deny beats a stall. A localhost client that connects inside the
+# window cancels the clock; one that leaves starts it.
 NO_LOCALHOST_TIMEOUT = 30.0
+
+# How often presence is re-sampled while a request is open. Once at request
+# time is not enough: the whole point is that the answer to "is anyone
+# there?" changes during the wait, in both directions. Cheap — a dict
+# iteration in the collab registry — so the interval is short enough that
+# the clock arms promptly against a 30-second window.
+PRESENCE_POLL_SECONDS = 2.0
 
 # Per side. Above it the dialog gets a summary and an explicit "too large to
 # diff" label rather than a Monaco instance that hangs the tab.
@@ -163,15 +183,12 @@ def classify_tool(tool_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Every denial carries a reason, because a blank denial produces an agent
-# that retries the same call. These three distinguish "nobody was there"
-# from "the user said no" so the model can tell it was not refused on the
-# merits.
-
-DENY_TIMEOUT_REASON = (
-    "Nobody answered this permission request within {seconds:.0f} seconds, so it "
-    "was denied automatically. This is not a refusal on the merits — say what you "
-    "need and why, or continue with something that does not need permission."
-)
+# that retries the same call. These distinguish "nobody was there" from "the
+# user said no" so the model can tell it was not refused on the merits.
+#
+# There is no "nobody answered in time" reason any more: with no wall-clock
+# limit while a localhost client is connected, the only expiry left is the
+# no-localhost one below (§ Deadline).
 
 DENY_NO_LOCALHOST_REASON = (
     "No local AC-DC client was connected to answer this permission request within "
@@ -182,6 +199,16 @@ DENY_NO_LOCALHOST_REASON = (
 
 DENY_SHUTDOWN_REASON = (
     "The AC-DC session shut down before this permission request was answered."
+)
+
+DENY_CANCELLED_REASON = (
+    "The user stopped this turn before answering the permission request, so the "
+    "call was denied and never made. This is not a refusal on the merits."
+)
+
+DENY_TURN_ENDED_REASON = (
+    "The turn ended before this permission request was answered, so the call was "
+    "denied and never made. This is not a refusal on the merits."
 )
 
 DENY_DEFAULT_REASON = "The user denied this call without giving a reason."
@@ -201,6 +228,14 @@ ALLOW_ACTIONS = frozenset({"allow", "allow_always", "allow_mode"})
 # ---------------------------------------------------------------------------
 
 
+class _NoLocalhostExpiry(Exception):
+    """The no-localhost clock ran out while the request was open.
+
+    Private and control-flow only: it never leaves ``can_use_tool``, which
+    turns it into the deny the SDK is waiting for.
+    """
+
+
 @dataclass
 class PendingPermission:
     """One in-flight request and the future the callback is waiting on."""
@@ -211,7 +246,10 @@ class PendingPermission:
     tool_use_id: str
     payload: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
-    expires_at: float
+    # ``None`` while a localhost client is connected: the request waits as
+    # long as it takes. Set when the last one leaves, cleared when one comes
+    # back (§ Deadline).
+    expires_at: float | None
     resolved: bool = False
     resolved_by: str | None = None
     suggested_rules: list[dict[str, Any]] = field(default_factory=list)
@@ -228,6 +266,16 @@ class PendingPermission:
 
 def _iso(epoch_seconds: float) -> str:
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+
+
+def _iso_or_none(epoch_seconds: float | None) -> str | None:
+    """``None`` stays ``None`` — the wire's way of saying "no deadline"."""
+    return None if epoch_seconds is None else _iso(epoch_seconds)
+
+
+def _expiry_order(pending: "PendingPermission") -> tuple[bool, float]:
+    """Sort key placing counting-down requests ahead of open-ended ones."""
+    return (pending.expires_at is None, pending.expires_at or 0.0)
 
 
 def _resolve_path(repo_root: Path, raw: Any) -> Path | None:
@@ -1087,8 +1135,10 @@ class PermissionBroker:
         it.
     localhost_available:
         ``() -> bool``. Whether a localhost client is connected *now*.
-        Only shortens the timeout — the authority check itself is the
-        service's, because only it knows who is calling.
+        Sampled repeatedly for the lifetime of each request, because it is
+        what decides whether a deadline runs at all (§ Deadline). The
+        authority check itself is the service's, because only it knows who
+        is calling.
     clock:
         Epoch-seconds source, injectable for tests.
     """
@@ -1101,8 +1151,8 @@ class PermissionBroker:
         note_prompt: NotePrompt | None = None,
         note_mode: NoteMode | None = None,
         localhost_available: Callable[[], bool] | None = None,
-        decision_timeout: float = DECISION_TIMEOUT,
         no_localhost_timeout: float = NO_LOCALHOST_TIMEOUT,
+        presence_poll: float = PRESENCE_POLL_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._repo_root = Path(repo_root)
@@ -1110,8 +1160,8 @@ class PermissionBroker:
         self._note_prompt = note_prompt
         self._note_mode = note_mode
         self._localhost_available = localhost_available or (lambda: True)
-        self._decision_timeout = decision_timeout
         self._no_localhost_timeout = no_localhost_timeout
+        self._presence_poll = presence_poll
         self._clock = clock
 
         self._pending: dict[str, PendingPermission] = {}
@@ -1129,10 +1179,13 @@ class PermissionBroker:
 
         Ordered by ``expires_at`` ascending, which is the order the dialog
         presents them in, so "1 of 3" means the same thing on every client.
+        Requests with no deadline sort last: a request that is counting down
+        is the one that needs answering first, and one that is not counting
+        down will still be there afterwards.
         """
         return [
             dict(entry.payload)
-            for entry in sorted(self._pending.values(), key=lambda p: p.expires_at)
+            for entry in sorted(self._pending.values(), key=_expiry_order)
             if not entry.resolved
         ]
 
@@ -1189,8 +1242,8 @@ class PermissionBroker:
                 logger.exception("Could not record the permission prompt on the turn")
 
         localhost = self._localhost_present()
-        timeout = self._decision_timeout if localhost else self._no_localhost_timeout
-        expires_at = self._clock() + timeout
+        # No deadline while somebody who can answer is connected (§ Deadline).
+        expires_at = None if localhost else self._clock() + self._no_localhost_timeout
 
         try:
             payload = await self._build_payload(
@@ -1230,18 +1283,18 @@ class PermissionBroker:
 
         await self._broadcast(Event("permissionRequest", payload, turn_scoped=False))
         logger.info(
-            "Permission %s asked for %s (turn %s, localhost=%s, %.0fs)",
+            "Permission %s asked for %s (turn %s, localhost=%s, deadline=%s)",
             permission_id,
             tool_name,
             request_id,
             localhost,
-            timeout,
+            "none" if expires_at is None else f"{self._no_localhost_timeout:.0f}s",
         )
 
         try:
-            decision = await asyncio.wait_for(pending.future, timeout)
-        except asyncio.TimeoutError:
-            return await self._deny_on_timeout(pending, localhost, timeout)
+            decision = await self._await_decision(pending)
+        except _NoLocalhostExpiry:
+            return await self._deny_on_timeout(pending)
         except asyncio.CancelledError:
             # The SDK cancels its in-flight control-request handlers when
             # the client closes. Nothing to broadcast — the transport is
@@ -1253,6 +1306,81 @@ class PermissionBroker:
             self._pending.pop(permission_id, None)
 
         return self._to_result(pending, decision)
+
+    async def _await_decision(self, pending: PendingPermission) -> dict[str, Any]:
+        """Wait for a localhost decision, re-sampling presence as we go.
+
+        The loop exists because presence changes *during* the wait, in both
+        directions, and the deadline follows it (§ Deadline):
+
+        - a localhost client is connected → no deadline; the request waits.
+        - the last one leaves → ``NO_LOCALHOST_TIMEOUT`` starts. Nobody who
+          can answer is watching, so a fast deny beats a stall.
+        - one comes back inside that window → the clock is cancelled, and
+          the request is answerable again.
+
+        Each arm and disarm is broadcast, because the dialog renders a
+        countdown from ``expires_at`` and a client that was told "no
+        deadline" would otherwise keep showing that after one started.
+
+        Raises :class:`_NoLocalhostExpiry` when the clock runs out.
+        """
+        while True:
+            if self._localhost_present():
+                if pending.expires_at is not None:
+                    await self._set_deadline(pending, None)
+            elif pending.expires_at is None:
+                await self._set_deadline(
+                    pending, self._clock() + self._no_localhost_timeout
+                )
+
+            wait = self._presence_poll
+            if pending.expires_at is not None:
+                wait = min(wait, max(0.0, pending.expires_at - self._clock()))
+
+            # `asyncio.wait` rather than `wait_for`: on timeout it leaves the
+            # future alone, where `wait_for` would cancel the very thing the
+            # next iteration needs to keep waiting on.
+            done, _ = await asyncio.wait({pending.future}, timeout=wait)
+            if done:
+                return pending.future.result()
+            if pending.expires_at is not None and self._clock() >= pending.expires_at:
+                raise _NoLocalhostExpiry
+
+    async def _set_deadline(
+        self, pending: PendingPermission, expires_at: float | None
+    ) -> None:
+        """Arm or disarm a request's countdown, and say so on every client."""
+        pending.expires_at = expires_at
+        pending.payload["expires_at"] = _iso_or_none(expires_at)
+        pending.payload["localhost_available"] = expires_at is None
+        logger.info(
+            "Permission %s deadline %s",
+            pending.permission_id,
+            "cleared — a local client is back"
+            if expires_at is None
+            else f"armed for {self._no_localhost_timeout:.0f}s — no local client",
+        )
+        try:
+            await self._broadcast(
+                Event(
+                    "permissionDeadline",
+                    {
+                        "permission_id": pending.permission_id,
+                        "request_id": pending.request_id,
+                        "expires_at": pending.payload["expires_at"],
+                        "localhost_available": expires_at is None,
+                    },
+                    turn_scoped=False,
+                )
+            )
+        except Exception:
+            # A dialog with a stale countdown is bad; a request denied
+            # because its own broadcast raised would be worse.
+            logger.exception(
+                "Could not broadcast the deadline change for %s",
+                pending.permission_id,
+            )
 
     async def cancel_all(self, reason: str = DENY_SHUTDOWN_REASON) -> None:
         """Deny everything still pending, so no callback is left waiting.
@@ -1269,6 +1397,45 @@ class PermissionBroker:
             pending.future.set_result({"action": "deny", "reason": reason})
             self._remember(pending.permission_id, "shutdown")
             await self._announce(pending, action="shutdown", reason=reason, rule=None)
+
+    async def cancel_for_turn(
+        self, request_id: str | None, *, reason: str = DENY_TURN_ENDED_REASON
+    ) -> int:
+        """Deny everything still pending for one turn. Returns how many.
+
+        Two callers, for two different reasons:
+
+        - ``ClaudeCodeService.cancel_streaming``, *before* the interrupt
+          reaches the CLI. An unanswered request is exactly what the CLI is
+          blocked on, so releasing it first is what lets the CLI act on the
+          interrupt at all, and lets the drain watchdog see a result inside
+          its window instead of declaring the session lost
+          (``session.py`` § Cancellation).
+        - the end of every turn, as the backstop. A dialog must not outlive
+          the turn it belongs to. Before this it could: an interrupted turn
+          left one on screen until the decision deadline expired, and then
+          announced a denial for a turn that had already finished.
+
+        A request raised outside a turn carries no ``request_id`` and
+        belongs to no turn, so nothing sweeps it but shutdown.
+        """
+        if not request_id:
+            return 0
+        cancelled = 0
+        for pending in list(self._pending.values()):
+            if pending.request_id != request_id:
+                continue
+            if pending.resolved or pending.future.done():
+                continue
+            pending.resolved = True
+            pending.resolved_by = "cancelled"
+            pending.future.set_result({"action": "deny", "reason": reason})
+            self._remember(pending.permission_id, "cancelled")
+            await self._announce(
+                pending, action="cancelled", reason=reason, rule=None
+            )
+            cancelled += 1
+        return cancelled
 
     # ------------------------------------------------------------------
     # Resolution
@@ -1400,7 +1567,7 @@ class PermissionBroker:
         tool_name: str,
         tool_input: dict[str, Any],
         context: Any,
-        expires_at: float,
+        expires_at: float | None,
         localhost: bool,
     ) -> dict[str, Any]:
         tool_class = classify_tool(tool_name)
@@ -1457,7 +1624,9 @@ class PermissionBroker:
             "plan": (
                 build_plan_payload(tool_input) if tool_class == "plan" else None
             ),
-            "expires_at": _iso(expires_at),
+            # ``None`` means no countdown: somebody who can answer is
+            # connected, so the request waits for them (§ Deadline).
+            "expires_at": _iso_or_none(expires_at),
             "localhost_available": localhost,
         }
 
@@ -1608,22 +1777,24 @@ class PermissionBroker:
             logger.exception("Could not build a setMode PermissionUpdate from %r", mode)
             return None
 
-    async def _deny_on_timeout(
-        self, pending: PendingPermission, localhost: bool, timeout: float
-    ) -> Any:
+    async def _deny_on_timeout(self, pending: PendingPermission) -> Any:
+        """The only expiry left: nobody who could answer was connected.
+
+        A request never expires while a localhost client is there, so
+        reaching here means the clock armed when the last one left and ran
+        out before another arrived (§ Deadline).
+        """
         from claude_agent_sdk import PermissionResultDeny
 
-        template = DENY_TIMEOUT_REASON if localhost else DENY_NO_LOCALHOST_REASON
-        reason = template.format(seconds=timeout)
+        reason = DENY_NO_LOCALHOST_REASON.format(seconds=self._no_localhost_timeout)
         pending.resolved = True
         pending.resolved_by = "timeout"
         self._remember(pending.permission_id, "timeout")
         logger.warning(
-            "Permission %s for %s timed out after %.0fs (localhost=%s); denying",
+            "Permission %s for %s expired after %.0fs with no localhost client; denying",
             pending.permission_id,
             pending.tool_name,
-            timeout,
-            localhost,
+            self._no_localhost_timeout,
         )
         await self._announce(pending, action="timeout", reason=reason, rule=None)
         return PermissionResultDeny(message=reason, interrupt=False)

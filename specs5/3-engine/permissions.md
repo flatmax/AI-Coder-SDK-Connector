@@ -137,20 +137,38 @@ This follows the existing restriction policy rather than inventing a new one, an
 stakes application of it: `can_use_tool` authorises arbitrary `Bash`. A remote participant able to
 answer it would make collaboration mode a remote-code-execution grant.
 
-When no localhost client is connected, a request cannot be answered. It is denied after a timeout,
-with a reason recorded in the transcript naming the cause. A headless AC⚡DC therefore cannot be
-driven into running commands by a remote collaborator — it degrades to something like `plan` mode
-rather than to something permissive.
+When no localhost client is connected, a request cannot be answered. It is denied after a short
+deadline, with a reason recorded in the transcript naming the cause. A headless AC⚡DC therefore
+cannot be driven into running commands by a remote collaborator — it degrades to something like
+`plan` mode rather than to something permissive.
 
 Concurrent localhost clients race: the first decision wins and the dialog closes on the others with
 a note saying who answered.
 
-## Timeout
+## Waiting for an Answer
 
-A request with no answer is denied after a bounded wait, with a reason that distinguishes "nobody
-was there" from "the user said no" — the agent should be able to tell that it was not refused on the
-merits. The timeout is generous enough to survive a user reading a diff carefully and short enough
-that a forgotten tab does not wedge a turn indefinitely.
+**A request has no deadline while a localhost client is connected to answer it.** Gating is gating:
+the CLI is holding a complete assistant message and cannot issue its next API call until a tool
+result exists, so a request that waits consumes nothing — no API request is open, no cache is being
+kept warm, nothing accrues. A wall-clock limit on the answer therefore buys nothing, and it costs
+the case that matters most: the user walks away, comes back, and finds the request was denied on
+their behalf by a timer. A request outlives a coffee break.
+
+The escape hatch is a person, not a clock. A dialog nobody wants to answer is closed by Stop, which
+denies the turn's open requests before it interrupts, and the end of a turn sweeps anything still
+open. Both denials say which happened, so the agent can tell it was not refused on the merits.
+
+**The one deadline left runs only when nobody who could answer is there.** A remote collaborator
+cannot grant permissions, so a session whose only participants are remote is not thinking about it —
+it is unattended, and a fast deny beats a stalled turn. Presence is therefore re-sampled for the
+life of every request rather than once at the start, because the answer changes in both directions:
+the last localhost client leaving arms the clock, and one connecting inside the window cancels it.
+Each arm and disarm is broadcast as `permissionDeadline` — session-wide, not turn-scoped, because a
+request outlives the moment it was raised — so a dialog never shows a countdown that is not running or
+hides one that is.
+
+A request raised while nobody is connected starts out counting down, which is what the payload's
+`expires_at` and `localhost_available` say. Both are live for the life of the request.
 
 ## Related Hooks
 
@@ -165,8 +183,13 @@ prompts-per-turn metric that tells us whether the tiering above is working (see
 - No AC⚡DC hook ever returns a `permissionDecision`; `CanUseToolShadowedWarning` never appears in
   our logs.
 - `allowed_tools` is never set by AC⚡DC.
-- Every permission request resolves exactly once — by a localhost decision, by the timeout, or by
-  session teardown — and the SDK always receives a result.
+- Every permission request resolves exactly once — by a localhost decision, by a stopped turn, by
+  the end of its turn, by the no-localhost deadline, or by session teardown — and the SDK always
+  receives a result.
+- No dialog outlives its turn. Stop denies the turn's open requests before it interrupts, and a turn
+  that ends any other way sweeps whatever is left.
+- No request has a wall-clock deadline while a localhost client is connected to answer it, and a
+  request that acquires one loses it again when a localhost client returns.
 - Only localhost clients can resolve a request; a non-localhost attempt is rejected and logged.
 - With no localhost client connected, no permission request is ever allowed.
 - Every file-mutation dialog shows the proposed change as a diff or, where a diff is impossible, the

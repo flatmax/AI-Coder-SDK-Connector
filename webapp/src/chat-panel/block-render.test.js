@@ -885,6 +885,22 @@ describe('renderToolCard', () => {
     expect(text(host.querySelector('.tool-denial-reason'))).toBe('No reason given.');
   });
 
+  it('names the machine that denied it, and no person', () => {
+    // These arrive with `resolved_by` set to the same word as the action,
+    // and none of them is anybody's decision — the generic line rendered
+    // "cancelled by cancelled".
+    for (const [action, label] of [
+      ['cancelled', 'Denied — the turn ended before it was answered'],
+      ['timeout', 'Denied — no host client was connected to answer'],
+      ['shutdown', 'Denied — the session shut down'],
+    ]) {
+      const host = draw(renderToolCard(stubPanel(), toolBlock({
+        denial: { action, reason: 'why', resolvedBy: action },
+      })));
+      expect(text(host.querySelector('.tool-denial-label'))).toBe(label);
+    }
+  });
+
   it('shows the input as JSON when there is no diff in it', () => {
     const panel = stubPanel();
     const block = toolBlock({ result: { status: 'ok' } });

@@ -252,7 +252,9 @@ function execPayload(over = {}) {
       destination: 'localSettings',
       origin: 'cli',
     }],
-    expires_at: expiresIn(300),
+    // The normal case: a host client is connected, so nothing is counting
+    // down. Tests that want a clock pass `expires_at` explicitly.
+    expires_at: null,
     localhost_available: true,
     ...over,
   };
@@ -286,7 +288,9 @@ function writePayload(over = {}) {
       destination: 'localSettings',
       origin: 'derived',
     }],
-    expires_at: expiresIn(300),
+    // The normal case: a host client is connected, so nothing is counting
+    // down. Tests that want a clock pass `expires_at` explicitly.
+    expires_at: null,
     localhost_available: true,
     ...over,
   };
@@ -320,7 +324,9 @@ function planPayload(over = {}) {
       file_path: null,
     },
     suggested_rules: [],
-    expires_at: expiresIn(300),
+    // The normal case: a host client is connected, so nothing is counting
+    // down. Tests that want a clock pass `expires_at` explicitly.
+    expires_at: null,
     localhost_available: true,
     ...over,
   };
@@ -355,7 +361,9 @@ function interactPayload(over = {}) {
       }],
     },
     suggested_rules: [],
-    expires_at: expiresIn(300),
+    // The normal case: a host client is connected, so nothing is counting
+    // down. Tests that want a clock pass `expires_at` explicitly.
+    expires_at: null,
     localhost_available: true,
     ...over,
   };
@@ -414,7 +422,7 @@ describe('with an empty queue', () => {
 // ---------------------------------------------------------------------------
 
 describe('when a request arrives', () => {
-  it('shows the tool, the target, and a countdown', async () => {
+  it('shows the tool and the target', async () => {
     publishRpc();
     const el = mount();
     await settle(el);
@@ -424,7 +432,33 @@ describe('when a request arrives', () => {
     const header = el.shadowRoot.querySelector('header');
     expect(header.textContent).toContain('Bash');
     expect(header.textContent).toContain('ls -la');
-    expect(header.querySelector('.countdown').textContent).toContain('5:00');
+  });
+
+  it('shows no countdown, because a request with a host waits', async () => {
+    // The regression the old 300-second deadline was: a user who walked
+    // away came back to a request denied on their behalf by a timer. An
+    // em dash beside a stopwatch would read as a countdown that failed to
+    // load, so the chip is absent rather than blank.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    broadcast(execPayload());
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.countdown')).toBeNull();
+
+    await tick(el, 10 * 60 * 1000);
+    expect(el.queue).toHaveLength(1);
+    expect(toasts.map((t) => t.message).join(' ')).not.toContain('expired');
+  });
+
+  it('shows a countdown when the payload carries a deadline', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    broadcast(execPayload({ expires_at: expiresIn(300) }));
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.countdown').textContent)
+      .toContain('5:00');
   });
 
   it('shows the command verbatim and its working directory', async () => {
@@ -476,13 +510,15 @@ describe('when a request arrives', () => {
     expect(attribution.textContent).not.toContain('npm test');
   });
 
-  it('says so when no host was connected, because the deadline is shorter', async () => {
+  it('explains the countdown when no host is connected', async () => {
     publishRpc();
     const el = mount();
     await settle(el);
     broadcast(execPayload({ localhost_available: false, expires_at: expiresIn(30) }));
     await settle(el);
-    expect(el.shadowRoot.querySelector('.no-localhost')).not.toBeNull();
+    const note = el.shadowRoot.querySelector('.no-localhost');
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain('counting down');
   });
 
   it('shows why a normally-ungated class is being asked about', async () => {
@@ -1062,7 +1098,10 @@ describe('a resolution from elsewhere', () => {
       .toContain('Allowed by another window (c2)');
   });
 
-  it('says when the clock ran out rather than a person answering', async () => {
+  it('blames the absent host, not the user, when the clock ran out', async () => {
+    // Expiry means one thing now: no host client was connected to answer.
+    // "For want of an answer" would blame the user for a dialog that was
+    // never on their screen.
     publishRpc();
     const el = mount();
     await settle(el);
@@ -1073,8 +1112,23 @@ describe('a resolution from elsewhere', () => {
     });
     await settle(el);
 
-    expect(toasts[0].message).toContain('expired');
+    expect(toasts[0].message).toContain('no host client was connected');
     expect(toasts[0].type).toBe('warning');
+  });
+
+  it('says when a stopped turn denied it', async () => {
+    // The way out of a dialog nobody wants to answer is Stop, not a timer,
+    // so the dialog that Stop closes has to say that is what happened.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+
+    resolveBroadcast({ permission_id: 'perm_exec', action: 'cancelled' });
+    await settle(el);
+
+    expect(el.current).toBeNull();
+    expect(toasts.map((t) => t.message).join(' ')).toContain('the turn it belonged to ended');
   });
 
   it('says when a shutdown denied it', async () => {
@@ -1166,6 +1220,24 @@ describe('the countdown', () => {
     expect(live.textContent).toContain('1 minute left to answer');
   });
 
+  it('never announces a milestone above the time the request has', async () => {
+    // The only deadline left is the 30 s no-host one, and the milestone
+    // list starts at five minutes. Announcing the first threshold the
+    // remaining time falls under would tell a screen-reader user they have
+    // five minutes to answer something that expires in thirty seconds.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    broadcast(execPayload({ expires_at: expiresIn(30) }));
+    await settle(el);
+    const live = el.shadowRoot.querySelector('[aria-live="polite"]');
+    await tick(el, 3_000);
+    expect(live.textContent).not.toContain('minute');
+    // The ten-second milestone is inside the window, so it still fires.
+    await tick(el, 18_000);
+    expect(live.textContent).toContain('10 seconds left to answer');
+  });
+
   it('closes a request whose clock ran out, and says why', async () => {
     publishRpc();
     const el = mount();
@@ -1177,7 +1249,184 @@ describe('the countdown', () => {
 
     expect(el.current).toBeNull();
     expect(toasts.map((t) => t.message).join(' '))
-      .toContain('expired — denied for want of an answer');
+      .toContain('no host client was connected');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Presence-driven deadlines
+//
+// A request has no clock while a host client is connected to answer it, and
+// presence changes during the wait. The server arms and disarms, and says
+// so with `permissionDeadline` — its own event, because re-sending the
+// request would restart the settling interval and throw away a half-typed
+// deny reason (permissions.py § Deadline).
+// ---------------------------------------------------------------------------
+
+describe('a deadline that arms mid-request', () => {
+  function deadline(detail) {
+    window.dispatchEvent(new CustomEvent('permission-deadline', { detail }));
+  }
+
+  it('starts the countdown when the last host client leaves', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+    expect(el.shadowRoot.querySelector('.countdown')).toBeNull();
+
+    deadline({
+      permission_id: 'perm_exec',
+      request_id: 'req_1',
+      expires_at: expiresIn(30),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.countdown').textContent).toContain('0:30');
+    expect(el.shadowRoot.querySelector('.no-localhost')).not.toBeNull();
+  });
+
+  it('cancels the countdown when a host client comes back', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload({
+      expires_at: expiresIn(30), localhost_available: false,
+    }));
+    expect(el.shadowRoot.querySelector('.countdown')).not.toBeNull();
+
+    deadline({
+      permission_id: 'perm_exec',
+      request_id: 'req_1',
+      expires_at: null,
+      localhost_available: true,
+    });
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.countdown')).toBeNull();
+    expect(el.shadowRoot.querySelector('.no-localhost')).toBeNull();
+
+    // And the clock that was armed does not fire after being cancelled.
+    await tick(el, 60_000);
+    expect(el.current?.permission_id).toBe('perm_exec');
+  });
+
+  it('announces the clock starting, with the time it really has', async () => {
+    // A numeral appearing beside a stopwatch glyph is not something a
+    // screen reader picks up, and the first milestone inside a 30 s window
+    // is the ten-second one — too late to be the only notice.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+    const live = el.shadowRoot.querySelector('[aria-live="polite"]');
+
+    deadline({
+      permission_id: 'perm_exec',
+      request_id: 'req_1',
+      expires_at: expiresIn(30),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    expect(live.textContent).toContain('no host client is connected');
+    // "30 seconds left", not the chip's `0:30` — which reads as
+    // "zero colon thirty".
+    expect(live.textContent).toContain('30 seconds left to answer');
+  });
+
+  it('leaves the announcement to the request it promoted', async () => {
+    // When arming a clock changes which dialog is on screen, what the
+    // reader needs is the new request, not its countdown.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    broadcast(execPayload());
+    broadcast(writePayload());
+    await settle(el);
+
+    deadline({
+      permission_id: 'perm_write',
+      request_id: 'req_1',
+      expires_at: expiresIn(30),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    const live = el.shadowRoot.querySelector('[aria-live="polite"]');
+    expect(el.current.permission_id).toBe('perm_write');
+    expect(live.textContent).toContain('permission request');
+    expect(live.textContent).not.toContain('30 seconds left');
+  });
+
+  it('keeps the dialog the user is mid-answer on', async () => {
+    // The settling interval and the deny reason belong to the request, not
+    // to its clock. Re-enqueuing would restart one and discard the other.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+    decision(el, 'deny').click();
+    await settle(el);
+    const field = el.shadowRoot.querySelector('input.deny-reason');
+    field.value = 'not on main';
+    field.dispatchEvent(new Event('input'));
+    await settle(el);
+
+    deadline({
+      permission_id: 'perm_exec',
+      request_id: 'req_1',
+      expires_at: expiresIn(30),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    expect(el._settling).toBe(false);
+    expect(el._denyOpen).toBe(true);
+    expect(el._denyReason).toBe('not on main');
+  });
+
+  it('promotes a counting-down request over an open-ended one', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    broadcast(execPayload());
+    broadcast(writePayload());
+    await settle(el);
+    expect(el.current.permission_id).toBe('perm_exec');
+
+    deadline({
+      permission_id: 'perm_write',
+      request_id: 'req_1',
+      expires_at: expiresIn(30),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    // The one with a clock on it is the one that needs answering first.
+    expect(el.current.permission_id).toBe('perm_write');
+    // And it gets its own settling interval, because a dialog that appeared
+    // under the user's fingers must not be approvable by a keystroke
+    // already in flight.
+    expect(el._settling).toBe(true);
+  });
+
+  it('ignores a deadline for a request it does not have', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+
+    deadline({
+      permission_id: 'perm_someone_else',
+      expires_at: expiresIn(1),
+      localhost_available: false,
+    });
+    await settle(el);
+
+    expect(el.queue).toHaveLength(1);
+    expect(el.shadowRoot.querySelector('.countdown')).toBeNull();
   });
 });
 

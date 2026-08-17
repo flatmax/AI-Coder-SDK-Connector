@@ -87,7 +87,6 @@ def broker(tmp_path, events):
         tmp_path,
         broadcast=events,
         note_prompt=lambda tool_use_id: "req-1",
-        decision_timeout=5.0,
         no_localhost_timeout=1.0,
     )
 
@@ -932,7 +931,6 @@ class TestOurOwnToolsAreUngated:
             tmp_path,
             broadcast=events,
             note_prompt=lambda tool_use_id: noted.append(tool_use_id) or "req-1",
-            decision_timeout=5.0,
         )
         await broker.can_use_tool("mcp__ac-dc__doc_outline", {}, FakeContext())
         assert noted == []
@@ -1046,7 +1044,6 @@ class TestCanUseTool:
             tmp_path,
             broadcast=events,
             note_mode=note_mode,
-            decision_timeout=5.0,
         )
         context = FakeContext(
             suggestions=[FakeSuggestion([], kind="setMode", mode="acceptEdits")]
@@ -1066,7 +1063,7 @@ class TestCanUseTool:
             raise RuntimeError("no")
 
         broker = PermissionBroker(
-            tmp_path, broadcast=events, note_mode=note_mode, decision_timeout=5.0
+            tmp_path, broadcast=events, note_mode=note_mode
         )
         context = FakeContext(
             suggestions=[FakeSuggestion([], kind="setMode", mode="acceptEdits")]
@@ -1175,26 +1172,106 @@ class TestCanUseTool:
         assert result["error"] == "unknown"
         assert "perm-nope" in result["reason"]
 
-    async def test_a_timeout_denies_without_wedging_the_turn(self, tmp_path, events):
+    async def test_a_client_who_is_there_gets_no_deadline(self, tmp_path, events):
+        """The regression the old 300-second deadline was: the user walks
+        away, comes back, and finds the request was denied on their behalf by
+        a timer. Nothing is consumed while a request waits, so it waits."""
         broker = PermissionBroker(
-            tmp_path, broadcast=events, decision_timeout=0.01, no_localhost_timeout=0.01
+            tmp_path,
+            broadcast=events,
+            localhost_available=lambda: True,
+            no_localhost_timeout=0.02,
+            presence_poll=0.005,
         )
-        deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
-        assert type(deny).__name__ == "PermissionResultDeny"
-        assert "denied automatically" in deny.message
-        assert events.only("permissionResolved")["action"] == "timeout"
-        assert broker.pending() == []
+        task = await ask(broker)
+        payload = events.only("permissionRequest")
+        assert payload["expires_at"] is None
+        assert payload["localhost_available"] is True
 
-    async def test_no_localhost_takes_the_short_timeout(self, tmp_path, events):
+        # Many times over the no-localhost window, which never arms here.
+        await asyncio.sleep(0.1)
+        assert not task.done(), "a request nobody has answered yet must keep waiting"
+        assert broker.pending(), "and must still be offered to a client that connects"
+
+        await broker.resolve(payload["permission_id"], {"action": "allow"})
+        assert type(await task).__name__ == "PermissionResultAllow"
+
+    async def test_nobody_who_could_answer_arms_the_clock(self, tmp_path, events):
+        """The only expiry left. A remote collaborator cannot grant
+        permissions, so a session with no local client is not thinking about
+        it — it is unattended, and a fast deny beats a stall."""
         broker = PermissionBroker(
             tmp_path,
             broadcast=events,
             localhost_available=lambda: False,
-            decision_timeout=30.0,
             no_localhost_timeout=0.01,
         )
         deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
+        assert type(deny).__name__ == "PermissionResultDeny"
         assert "No local AC-DC client" in deny.message
+        assert events.only("permissionRequest")["expires_at"] is not None
+        assert events.only("permissionResolved")["action"] == "timeout"
+        assert broker.pending() == []
+
+    async def test_the_clock_arms_when_the_last_client_leaves(self, tmp_path, events):
+        """Presence is re-sampled for the life of the request, because the
+        answer to "is anyone there?" changes during the wait."""
+        present = {"value": True}
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            localhost_available=lambda: present["value"],
+            no_localhost_timeout=0.05,
+            presence_poll=0.005,
+        )
+        task = await ask(broker)
+        pid = events.only("permissionRequest")["permission_id"]
+        assert events.only("permissionRequest")["expires_at"] is None
+
+        present["value"] = False
+        deny = await asyncio.wait_for(task, timeout=5)
+        assert "No local AC-DC client" in deny.message
+
+        armed = events.named("permissionDeadline")[0]
+        assert armed["permission_id"] == pid
+        assert armed["expires_at"] is not None
+        assert armed["localhost_available"] is False
+
+    async def test_a_client_who_comes_back_cancels_the_clock(self, tmp_path, events):
+        """The window is short and a browser reconnects to answer the very
+        dialog it reconnected for. Arming has to be reversible."""
+        present = {"value": False}
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            localhost_available=lambda: present["value"],
+            no_localhost_timeout=0.2,
+            presence_poll=0.005,
+        )
+        task = await ask(broker)
+        payload = events.only("permissionRequest")
+        assert payload["expires_at"] is not None
+
+        present["value"] = True
+        await settle(
+            lambda: any(
+                entry["expires_at"] is None
+                for entry in events.named("permissionDeadline")
+            ),
+            task,
+        )
+        cleared = events.named("permissionDeadline")[-1]
+        assert cleared["localhost_available"] is True
+        # The queue a reconnecting client is served has to agree, or it
+        # renders a countdown that is no longer running.
+        assert broker.pending()[0]["expires_at"] is None
+        assert broker.pending()[0]["localhost_available"] is True
+
+        # Well past the window that was armed when nobody was there.
+        await asyncio.sleep(0.3)
+        assert not task.done(), "a cancelled clock must not fire"
+        await broker.resolve(payload["permission_id"], {"action": "allow"})
+        assert type(await task).__name__ == "PermissionResultAllow"
 
     async def test_an_unknowable_localhost_state_fails_closed(self, tmp_path, events):
         def boom():
@@ -1204,7 +1281,6 @@ class TestCanUseTool:
             tmp_path,
             broadcast=events,
             localhost_available=boom,
-            decision_timeout=30.0,
             no_localhost_timeout=0.01,
         )
         deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
@@ -1229,7 +1305,7 @@ class TestCanUseTool:
             if event.name == "permissionResolved":
                 raise RuntimeError("socket gone")
 
-        broker = PermissionBroker(tmp_path, broadcast=flaky, decision_timeout=5.0)
+        broker = PermissionBroker(tmp_path, broadcast=flaky)
         task = asyncio.create_task(
             broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
         )
@@ -1243,7 +1319,7 @@ class TestCanUseTool:
             raise RuntimeError("no turn")
 
         broker = PermissionBroker(
-            tmp_path, broadcast=events, note_prompt=boom, decision_timeout=5.0
+            tmp_path, broadcast=events, note_prompt=boom
         )
         task = await ask(broker)
         assert events.only("permissionRequest")["request_id"] is None
@@ -1270,6 +1346,112 @@ class TestCanUseTool:
         await task
         await broker.cancel_all()
         assert len(events.named("permissionResolved")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Cancelling a turn's requests
+# ---------------------------------------------------------------------------
+
+
+class TestCancelForTurn:
+    """A dialog must not outlive the turn it belongs to.
+
+    Before this existed, Stop left the request pending: the dialog stayed on
+    screen, the CLI stayed blocked on a control request nobody was going to
+    answer, and the decision deadline was the only thing that ever cleared
+    it — announcing a denial for a turn that had already finished.
+    """
+
+    async def test_it_denies_the_turns_pending_requests(self, broker, events):
+        task = await ask(broker)
+
+        assert await broker.cancel_for_turn("req-1") == 1
+
+        result = await task
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "The turn ended" in result.message
+        assert broker.pending() == []
+
+    async def test_the_stop_reason_says_the_user_stopped_it(self, broker, events):
+        from ac_dc.claude_code.permissions import DENY_CANCELLED_REASON
+
+        task = await ask(broker)
+        await broker.cancel_for_turn("req-1", reason=DENY_CANCELLED_REASON)
+        result = await task
+        assert "stopped this turn" in result.message
+        # Not a refusal on the merits, so the model can tell the difference
+        # between "no" and "never asked".
+        assert "not a refusal on the merits" in result.message
+
+    async def test_it_closes_the_dialog_with_attribution(self, broker, events):
+        task = await ask(broker)
+        await broker.cancel_for_turn("req-1")
+        await task
+
+        resolved = events.only("permissionResolved")
+        assert resolved["action"] == "cancelled"
+        assert resolved["resolved_by"] == "cancelled"
+        assert resolved["request_id"] == "req-1"
+
+    async def test_it_leaves_another_turns_request_alone(self, tmp_path, events):
+        """Two turns can have dialogs open at once; Stop is per turn."""
+        turns = iter(["req-1", "req-2"])
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            note_prompt=lambda tool_use_id: next(turns),
+        )
+        first = await ask(broker)
+        second = asyncio.create_task(
+            broker.can_use_tool("Bash", {"command": "pwd"}, FakeContext("toolu_02"))
+        )
+        await settle(lambda: len(broker.pending()) >= 2)
+
+        assert await broker.cancel_for_turn("req-1") == 1
+
+        await first
+        assert [p["request_id"] for p in broker.pending()] == ["req-2"]
+
+        await broker.cancel_all()
+        await second
+
+    async def test_a_request_with_no_turn_is_never_swept(self, tmp_path, events):
+        """A request raised outside a turn belongs to no turn.
+
+        ``note_permission_prompt`` returns ``None`` when nothing is running,
+        which is legal. Sweeping on a falsy request ID would deny every one
+        of those the first time any turn ended.
+        """
+        broker = PermissionBroker(
+            tmp_path,
+            broadcast=events,
+            note_prompt=lambda tool_use_id: None,
+        )
+        task = await ask(broker)
+
+        assert await broker.cancel_for_turn(None) == 0
+        assert await broker.cancel_for_turn("") == 0
+        assert await broker.cancel_for_turn("req-1") == 0
+        assert len(broker.pending()) == 1
+
+        await broker.cancel_all()
+        await task
+
+    async def test_it_does_not_resolve_a_request_twice(self, broker, events):
+        """The turn-end sweep runs after ``cancel_streaming`` already swept."""
+        task = await ask(broker)
+        assert await broker.cancel_for_turn("req-1") == 1
+        assert await broker.cancel_for_turn("req-1") == 0
+        await task
+        assert len(events.named("permissionResolved")) == 1
+
+    async def test_an_answered_request_is_left_alone(self, broker, events):
+        """A decision already taken is not overwritten by the sweep."""
+        task = await ask(broker)
+        await broker.resolve(broker.pending()[0]["permission_id"], {"action": "allow"})
+        assert await broker.cancel_for_turn("req-1") == 0
+        result = await task
+        assert type(result).__name__ == "PermissionResultAllow"
 
 
 # ---------------------------------------------------------------------------
@@ -1336,23 +1518,40 @@ class TestPayload:
         await task
 
     async def test_pending_is_ordered_by_expiry(self, tmp_path, events):
-        ticks = iter([100.0, 100.0, 100.0, 50.0, 50.0, 50.0] + [200.0] * 50)
+        """Arrival order is not expiry order. A request raised while nobody
+        was there is counting down; one raised while somebody was there is
+        not, and the one with a clock on it is the one that needs answering
+        first — the other will still be there afterwards.
+        """
+        present = {"value": True}
         broker = PermissionBroker(
-            tmp_path, broadcast=events, decision_timeout=5.0, clock=lambda: next(ticks)
+            tmp_path,
+            broadcast=events,
+            localhost_available=lambda: present["value"],
+            no_localhost_timeout=30.0,
         )
-        first = asyncio.create_task(
+        open_ended = asyncio.create_task(
             broker.can_use_tool("Bash", {"command": "a"}, FakeContext("toolu_a"))
         )
         await settle(lambda: bool(broker.pending()))
-        second = asyncio.create_task(
+        # Let the first request take its presence sample while a client is
+        # still there. It will not sample again for `presence_poll` seconds,
+        # which outlasts this test.
+        await asyncio.sleep(0.02)
+
+        present["value"] = False
+        counting = asyncio.create_task(
             broker.can_use_tool("Bash", {"command": "b"}, FakeContext("toolu_b"))
         )
         await settle(lambda: len(broker.pending()) >= 2)
 
         queue = broker.pending()
         assert [entry["input"]["command"] for entry in queue] == ["b", "a"]
+        assert queue[0]["expires_at"] is not None
+        assert queue[1]["expires_at"] is None
+
         await broker.cancel_all()
-        await asyncio.gather(first, second)
+        await asyncio.gather(open_ended, counting)
 
     async def test_ids_are_never_reused(self, broker, events):
         seen = set()

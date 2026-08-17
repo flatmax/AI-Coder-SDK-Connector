@@ -1169,8 +1169,24 @@ export class AppShell extends JRPCClient {
   }
 
   /**
-   * A permission request resolved — by this client, another window, the
-   * timeout, or shutdown. Closes the dialog everywhere with attribution.
+   * A pending request's deadline was armed or cancelled.
+   *
+   * Session-wide, and its own event rather than a re-sent
+   * `permissionRequest`: the dialog on screen must not be rebuilt (the
+   * settling interval would restart and a half-typed deny reason would be
+   * lost) when all that changed is whether a clock is running on it.
+   */
+  permissionDeadline(data) {
+    window.dispatchEvent(new CustomEvent('permission-deadline', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * A permission request resolved — by this client, another window, a
+   * stopped turn, the no-host deadline, or shutdown. Closes the dialog
+   * everywhere with attribution.
    */
   permissionResolved(data) {
     window.dispatchEvent(new CustomEvent('permission-resolved', {

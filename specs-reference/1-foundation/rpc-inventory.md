@@ -349,12 +349,18 @@ What remains here are the events that are not turn-scoped and did not change:
 | `AcApp.sessionChanged` | `data: {session_id: str, messages: list[MessageDict]}` | `true` |
 | `AcApp.startupProgress` | `stage: str, message: str, percent: int` | `true` |
 | `AcApp.navigateFile` | `data: {path: str}` | `true` |
+| `AcApp.permissionDeadline` | `data: {permission_id, request_id, expires_at, localhost_available}` | `true` |
 | `AcApp.admissionRequest` | `data: {client_id, ip, requested_at}` | `true` |
 | `AcApp.admissionResult` | `data: {client_id, ip, admitted, replaced?}` | `true` |
 | `AcApp.clientJoined` | `data: {client_id, ip, role, is_localhost}` | `true` |
 | `AcApp.clientLeft` | `data: {client_id, ip, role}` | `true` |
 | `AcApp.roleChanged` | `data: {role, reason}` | `true` |
 | `AcApp.docConvertProgress` | `data: {...}` — shape varies by progress stage | `true` |
+
+`permissionDeadline` is the one addition to this table rather than a survivor of the conversion. It
+says a request's clock has been armed or cancelled, and it is deliberately *not* turn-scoped even
+though `permissionRequest` is: a request outlives the moment it was raised, and its clock has to reach
+a client that reloaded since. See `specs-reference/3-engine/permissions.md` § `permissionDeadline`.
 
 `MessageDict` is what a transcript entry becomes once it has been parsed for display — built at read
 time, never persisted in this shape ([CC-19](../../specs5/plan/decisions.md#cc-19)). What it can carry

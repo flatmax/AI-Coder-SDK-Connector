@@ -206,13 +206,15 @@ constants, which is authoritative if the two ever disagree.
 
 ```pseudo
 PermissionsConfig:
-    decision_timeout_s: int             // Default 300
     no_client_timeout_s: int            // Default 30
+    presence_poll_s: int                // Default 2
 ```
 
-See `specs-reference/3-engine/permissions.md` § Numeric constants for what each timeout protects
-against. Neither may be configured to zero or negative; those values fall back to the defaults, because
-a zero decision timeout is an auto-deny that looks like a broken dialog.
+There is no decision timeout to configure. A request waits indefinitely while a localhost client is
+connected to answer it — see `specs-reference/3-engine/permissions.md` § Numeric constants — so the
+only deadline is the one that runs when nobody can answer, and `presence_poll_s` is how often that
+condition is re-checked. Neither may be configured to zero or negative; those values fall back to the
+defaults, because a zero no-client timeout is an auto-deny that looks like a broken dialog.
 
 **`history` section:**
 

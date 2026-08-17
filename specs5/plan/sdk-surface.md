@@ -407,8 +407,9 @@ questions". From the bundled binary's tool definition:
   enforces this before the callback, so the payload does not re-check it.
 - There is an AFK path: the setting `askUserQuestionTimeout` (`60s` / `5m` / `10m` / `never`, default
   `never`) auto-continues with whatever is selected, and the CLI tells the model "No response after Ns —
-  the user may be away from keyboard". Ours has its own 300 s decision timeout, so the two must not both
-  be configured to fire.
+  the user may be away from keyboard". Ours has no decision timeout at all while a localhost client is
+  connected, so nothing of ours races it — and the CLI's default is `never`, so left alone neither side
+  answers for the user.
 
 Not built in phase 2, and additive: the freeform `response`, per-option `preview` (a block of
 model-authored HTML — not forwarded into the dialog's shadow DOM incidentally), and `annotations`.

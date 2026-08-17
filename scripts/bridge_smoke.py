@@ -226,7 +226,16 @@ async def _run(args: argparse.Namespace) -> int:
             broker.resolve(str(payload.get("permission_id")), {"action": "allow"})
         )
 
-    broker = PermissionBroker(repo_root, broadcast=dialog, decision_timeout=120.0)
+    # There is no browser here — `dialog` above answers for itself — and no
+    # localhost client either, which is the only thing that puts a clock on a
+    # request now. A generous one, so a resolve that somehow failed shows up
+    # as a deny rather than as a script that never exits.
+    broker = PermissionBroker(
+        repo_root,
+        broadcast=dialog,
+        localhost_available=lambda: False,
+        no_localhost_timeout=120.0,
+    )
 
     config = dataclasses.replace(
         EngineConfig.load(args.config_dir), permission_mode=args.permission_mode

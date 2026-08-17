@@ -107,7 +107,7 @@ When in doubt, read the twin for sequencing and ordering constraints, not just f
 | SDK options assembly | [`3-engine/session.md` § Schemas](../../specs-reference/3-engine/session.md#schemas) (every `ClaudeAgentOptions` field we set, and why) |
 | Streaming and lifecycle event payloads | [`3-engine/session.md` § Service: AcApp](../../specs-reference/3-engine/session.md#service-acapp--server--browser) — the authoritative server-push event set |
 | Permission rule syntax and `PermissionUpdate` shape | [`3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md) (rule content syntax, callback signature, return types, tool classification map) |
-| Permission timeout and ID format | [`3-engine/permissions.md` § Numeric constants](../../specs-reference/3-engine/permissions.md#numeric-constants) |
+| Which permission requests have a deadline, and the ID format | [`3-engine/permissions.md` § Numeric constants](../../specs-reference/3-engine/permissions.md#numeric-constants) |
 | `.ac-dc4/` layout, session keys, engine transcript lines | [`3-engine/history.md` § Byte-level formats](../../specs-reference/3-engine/history.md#byte-level-formats) |
 | Mirrored-store JSONL schema | [`3-engine/history.md` § Schemas](../../specs-reference/3-engine/history.md#schemas) |
 | `SessionStore` conformance harness | [`3-engine/history.md` § Dependency quirks](../../specs-reference/3-engine/history.md#dependency-quirks) |

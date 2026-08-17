@@ -23,6 +23,7 @@ import {
   offersAlwaysAllow,
   orderQueue,
   secondsRemaining,
+  spokenSeconds,
 } from './queue.js';
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,8 @@ describe('expiryMs', () => {
   });
 
   it('treats missing, empty, and non-finite values as infinitely far away', () => {
+    // `null` is the normal case, not a broken one: a request has no
+    // deadline at all while a host client is connected to answer it.
     expect(expiryMs(null)).toBe(Infinity);
     expect(expiryMs(undefined)).toBe(Infinity);
     expect(expiryMs('')).toBe(Infinity);
@@ -87,7 +90,9 @@ describe('orderQueue', () => {
     expect(ordered.map((e) => e.payload.permission_id)).toEqual(['a', 'b', 'c']);
   });
 
-  it('sorts a request with no parseable expiry last', () => {
+  it('sorts an open-ended request behind a counting-down one', () => {
+    // Which is also how a malformed timestamp is treated. The one with a
+    // clock on it needs answering first; the other will still be there.
     const ordered = orderQueue([
       entry('no-expiry', null, 1),
       entry('has-expiry', '2026-08-14T00:09:00Z', 2),
@@ -206,6 +211,23 @@ describe('formatCountdown', () => {
 
   it('has a placeholder rather than rendering nothing', () => {
     expect(formatCountdown(null)).toBe('—');
+  });
+});
+
+describe('spokenSeconds', () => {
+  it('reads as words, not as the chip', () => {
+    // `0:30` announced by a screen reader is "zero colon thirty".
+    expect(spokenSeconds(30)).toBe('30 seconds left');
+    expect(spokenSeconds(10)).toBe('10 seconds left');
+  });
+
+  it('switches to minutes, singular at one', () => {
+    expect(spokenSeconds(60)).toBe('1 minute left');
+    expect(spokenSeconds(300)).toBe('5 minutes left');
+  });
+
+  it('says nothing without a countdown', () => {
+    expect(spokenSeconds(null)).toBe('');
   });
 });
 

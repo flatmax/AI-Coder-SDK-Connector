@@ -18,9 +18,15 @@ import {
 /**
  * Parse an ISO `expires_at` to epoch milliseconds.
  *
- * Returns `Infinity` for anything unparseable, so a malformed timestamp
- * sorts last and renders no countdown rather than sorting first and
- * jumping the queue.
+ * `null` is the *normal* case, not an error: a request has no deadline at
+ * all while a host client is connected to answer it, because nothing is
+ * consumed while it waits (permissions.py § Deadline). It becomes a
+ * timestamp only when the last host leaves, and `null` again if one
+ * returns.
+ *
+ * Returns `Infinity` for that and for anything unparseable, so an
+ * open-ended request — or a malformed timestamp — sorts last and renders
+ * no countdown rather than sorting first and jumping the queue.
  *
  * @param {string|number|null|undefined} value
  * @returns {number}
@@ -37,7 +43,8 @@ export function expiryMs(value) {
  *
  * Answering the request closest to timing out first is the only ordering
  * that does not silently lose one to the clock while the user reads
- * another (permission-dialog.md § Queue).
+ * another (permission-dialog.md § Queue). Requests with no deadline sort
+ * last for the same reason: they will still be there afterwards.
  *
  * `arrivedAt` is a monotonic counter the caller assigns, not a
  * timestamp — two requests can arrive in the same millisecond.
@@ -92,7 +99,7 @@ export function defaultFocusTarget(payload) {
  *
  * @param {object|null} payload
  * @param {number} now — epoch milliseconds
- * @returns {number|null} null when there is no parseable expiry
+ * @returns {number|null} null when there is no deadline to count down to
  */
 export function secondsRemaining(payload, now) {
   const expiry = expiryMs(payload?.expires_at);
@@ -101,8 +108,12 @@ export function secondsRemaining(payload, now) {
 }
 
 /**
- * `m:ss`, or `0:0n` under ten seconds. Never hidden, so it always
- * formats to something.
+ * `m:ss`, or `0:0n` under ten seconds.
+ *
+ * Still total for `null` — a caller that renders the chip anyway gets an
+ * em dash rather than `NaN` — though the header omits the chip entirely
+ * when there is no clock, because an em dash beside a stopwatch reads as a
+ * countdown that failed to load.
  *
  * @param {number|null} seconds
  * @returns {string}
@@ -112,6 +123,23 @@ export function formatCountdown(seconds) {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return `${minutes}:${String(rest).padStart(2, '0')}`;
+}
+
+/**
+ * The same duration as a live region should read it: "30 seconds left",
+ * "5 minutes left".
+ *
+ * `formatCountdown`'s `0:30` is announced as "zero colon thirty", which is
+ * why the chip's string is not reused for the announcements.
+ *
+ * @param {number|null} seconds
+ * @returns {string}
+ */
+export function spokenSeconds(seconds) {
+  if (seconds == null) return '';
+  if (seconds < 60) return `${seconds} seconds left`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} minute${minutes === 1 ? '' : 's'} left`;
 }
 
 /**

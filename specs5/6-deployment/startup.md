@@ -180,7 +180,7 @@ that performs the write.
 | Config file corrupt/missing | Use built-in defaults; log warning; settings panel displays the error |
 | Symbol cache corrupt | Clear in-memory cache, rebuild from source |
 | Transcript mirror append fails | `MirrorErrorMessage` → health banner: the engine's turn succeeded, our repo-local copy has a gap ([`../3-engine/history.md`](../3-engine/history.md)) |
-| Permission request expires unanswered | Denied for want of an answer; the transcript records the timeout; the agent may adapt and continue |
+| Permission request with no host client to answer it | Denied after the no-host deadline; the transcript records the cause; the agent may adapt and continue. A request a connected host is simply taking its time over has no deadline and is not in this table |
 | Review mode crash | Manual recovery via checkout of the original branch; detached HEAD state is safe |
 
 Two entries are gone rather than reworded. **URL fetch failure** has no successor — URL fetching is

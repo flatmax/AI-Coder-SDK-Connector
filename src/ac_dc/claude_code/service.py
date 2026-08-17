@@ -69,6 +69,7 @@ from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers
 from ac_dc.claude_code.mcp_server import SERVER_NAME, McpBridge
 from ac_dc.claude_code.messages import Event
 from ac_dc.claude_code.permissions import (
+    DENY_CANCELLED_REASON,
     PermissionBroker,
     read_denied_read_files,
     write_denied_read_files,
@@ -960,11 +961,22 @@ class ClaudeCodeService:
         Gated because interrupting someone else's turn mid-edit is a way to
         leave the tree half-written, and because a participant who can cancel
         every turn can deny the host the tool entirely.
+
+        Pending permissions are denied *first*, before the interrupt reaches
+        the CLI. An unanswered request is what the CLI is blocked on, so
+        releasing it is what makes the interrupt actionable at all — and it
+        keeps ``_watch_drain`` from expiring and losing the session over a
+        dialog nobody answered. Stop is therefore the way out of a dialog
+        you do not want to answer, which is what lets the request itself
+        wait indefinitely (``permissions.py`` § Deadline).
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
         try:
+            await self.permissions.cancel_for_turn(
+                request_id, reason=DENY_CANCELLED_REASON
+            )
             return await self.session.interrupt(request_id)
         except Exception as exc:
             logger.exception("cancel_streaming failed for %s", request_id)
@@ -1013,6 +1025,17 @@ class ClaudeCodeService:
                 )
             )
         finally:
+            # The backstop for the invariant that no dialog outlives its
+            # turn. `cancel_streaming` normally gets here first; this covers
+            # every other way a turn can end with a request still open — a
+            # lost session, an engine crash, a drain that timed out.
+            try:
+                await self.permissions.cancel_for_turn(turn.request_id)
+            except Exception:
+                logger.exception(
+                    "Could not sweep pending permissions for turn %s",
+                    turn.request_id,
+                )
             await self._post_response(turn.request_id)
 
     async def _post_response(self, request_id: str) -> None:
@@ -1199,8 +1222,11 @@ class ClaudeCodeService:
 
         Without collab there is one client and it is us. With collab, a
         session whose only participants are remote cannot answer anything —
-        the broker uses that to fail fast rather than stalling a turn for
-        five minutes.
+        the broker uses that to fail fast rather than leaving a turn stalled
+        on a dialog nobody can see. It is also the whole of what decides
+        whether a request has a deadline at all: sampled repeatedly for the
+        life of each one, so a host that leaves arms the clock and one that
+        comes back cancels it (permissions.py § Deadline).
         """
         collab = self._collab
         if collab is None:
