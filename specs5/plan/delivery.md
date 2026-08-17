@@ -730,6 +730,8 @@ both held nothing but stale `__pycache__` after their contents were deleted.
   *Closed 2026-08-16; it found five wrong numbers. See the [interlude](#interlude--the-context-panels-meet-a-live-cli-2026-08-16).*
 - **No unit tests for `usage-hud.js` / `context-usage-tab.js`.** *Closed 2026-08-16, same entry.*
 - **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8.
+  *The tab strip half closed 2026-08-17: subagents now open their own live tabs. See the
+  [interlude](#interlude--the-tab-a-subagent-never-got-2026-08-17). CC-12 is unchanged.*
 - **No upgrade notice for a stale `llm.json` or `system.md`.** They are left on disk and ignored.
 - **The doc index still misses the agent's writes.** Phase 4.
 - **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged from phase 2.
@@ -1051,7 +1053,7 @@ Two facts from the live runs worth knowing:
   as a second refresh trigger into panels nobody has watched work.
 - **No `symbol_map` in the Context tab's cost breakdown.** Same reason.
 - **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8, unchanged from
-  phase 3.
+  phase 3. *The tab strip half closed 2026-08-17, same entry as under phase 3.*
 - **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged since phase 2.
 
 ### For whoever picks up phase 5
@@ -2376,3 +2378,259 @@ on a mock that would have accepted either.
   transport-wide change, not this fix.
 - **`max_buffer_size` is still the SDK's 1 MB default** — the other item from the same log, still open on
   the same grounds: it is a decision about memory, not a cleanup.
+
+## Interlude — the tab a subagent never got (2026-08-17)
+
+Not a phase. One sentence from the user: "agents were meant to show their feeds in separate tabs. I saw
+before that they shared the same main tab. can you confirm that and fix it?" Confirmed, and it was not an
+accident — the tab strip was the surface this record kept listing as *mounted and inert by decision*, CC-8.
+The half that was actually missing turned out to be small, and one thing underneath it was broken.
+
+### The row was the whole surface
+
+`onSubagentEvent` folded each `Task` into `turnBlocks.subagents` and the blocks it produced nested under
+the `Task` card that spawned them. That is a real surface and it stays: an indented row inside Main is the
+evidence the delegation happened, and a user watching Main sees the fan-out without switching anywhere. But
+it was the *only* surface. A subagent working for minutes was a second feed competing for one message list,
+and the only tab a subagent ever got was `historical:<agent_id>` — a transcript read off disk, after the
+fact, because the user asked for it.
+
+So the strip was inert for want of a producer, not for want of a strip.
+`webapp/src/chat-panel/subagent-tabs.js` is that producer, and every other change in this interlude is a
+consequence of it.
+
+### One id joins everything, and text had none of it
+
+A block produced inside a subagent carries `agent_id = the parent Task call's tool_use_id`, and a
+`subagentEvent` carries that same id as `tool_use_id`. That single identity is what lets a tab find its own
+blocks with no correlation table — the same identity `groupBlocksByScope` already relied on.
+
+It held for tool cards and for nothing else. `_Block` in `messages.py` had no scope field at all: the
+translator knew which scope was speaking (it passes `scope` around to route chunks) and threw it away on
+the way out, `_chunk_event` emitted no `agent_id`, and `applyReplayBlocks` hardcoded `agent_id: null`. Live,
+this went unnoticed because a subagent's *text* nested nowhere and read as the main conversation's. The
+reconnect test is what failed — a rebuilt tab found none of its own feed — and it was right to.
+
+Fixed end to end rather than at the seam that showed it: `_Block.agent_id`, emitted by `to_dict` and by
+every `streamChunk` / `thinkingChunk`, set from `_open_block(kind, scope)`; `normalizeAgentId(raw.agent_id)`
+on replay. A subagent narrates as well as calling tools, and its narration belongs where its tools are.
+
+The reconnect path needed a second thing the snapshot did not carry: the rows themselves. `_record_subagent`
+accumulates one row per task across the four `Task*` messages — patching only truthy fields, so a progress
+message that omits the description does not blank it, and latching `terminal` once set — and
+`ActiveTurn.to_dict` reports them as `subagents`. A browser that refreshed mid-fan-out rebuilds the strip
+from that list; the blocks it needs are already in the snapshot it replays, so no transcript is read until
+the user opens a tab.
+
+### Mirrored, not copied
+
+A subagent tab's block list holds *the same record objects* Main's does. `blocks.js` mutates records in
+place, so a tool result landing on a card updates both placements at once: one card object, two positions,
+no reconciliation — which is exactly what the spec's "renders in both from one card object" asks for, and
+the cheapest way to get it. `mirrorSubagentBlocks` runs on every fold, every drained chunk frame, and once
+more at `streamComplete` before `resetTurnBlocks` empties the array it reads from.
+
+Two things fall out of it. The mirrored tab's own `subagents` map is left empty on purpose, so
+`groupBlocksByScope` renders the feed flat — no row header wrapping a tab that is entirely about that one
+subagent. And a subagent tab never sets `currentRequestId`: `findTabForRequest` scans that field, so a second
+tab answering to the parent's request would take Main's chunks. The parent id lives in
+`tab.subagent.requestId`, read for settling and nothing else.
+
+### What settles a tab, and what colour it settles on
+
+Tabs are created on first sight of a task, not on `started` — a missed `started` would otherwise mean a
+subagent that runs to completion with no tab at all, and a first event that is already terminal creates and
+settles in the same call. Settling keeps the tab in the strip for the rest of the turn and shares the live
+blocks array with its message rather than freezing it: Main freezes so a late event cannot rewrite history
+the user has read, and a subagent tab has no next turn to protect against, while a tool result landing after
+the terminal status is content the user still wants.
+
+Amber is the state the LED row did not have. `subagentLedState` reads the row, not `lastEditOutcome`
+(nothing on that tab completes *its* turn), and green is reserved for `status === 'completed'`: `stopped`
+and `killed` are neither a success nor a fault, an unrecognised terminal status is a vocabulary the CLI will
+keep growing, and a subagent still live when the turn ends has an outcome nobody reported. Red is only the
+case where the parent turn itself errored while the subagent was live. The tooltip says which — `stopped`,
+or `status unknown at turn end`, rather than a colour with no sentence.
+
+The tabs leave when the turn does, and `clearSubagentTabs` runs *first* in `onSessionChanged`, before
+anything else in it writes: every assignment there goes through the active-tab accessors, so with a
+subagent's feed active the loaded session's messages would land in a tab about to be deleted.
+
+### The chip that was always blank
+
+The subagent row wanted to show tokens and never did. `TaskUsage` is `{total_tokens, tool_uses,
+duration_ms}`, already summed by the CLI, and it shares no field name with the per-model counters
+`turnTokens` sums — so every subagent scored zero and the chip rendered `nothing`, silently and correctly,
+for a subagent that had demonstrably spent tokens. `taskUsage()` in `turn-cost.js` reads the right shape,
+falls back to `turnTokens` for a payload carrying the other one, and treats zero as "not reported" so a
+caller drops the figure instead of printing a claim. It now feeds the row's two chips and the green LED's
+tooltip.
+
+### Tests
+
+- `webapp/src/chat-panel/subagent-tabs.test.js` — **new, 33 tests**: a live subagent gets a read-only tab
+  keyed on its agent id with no `currentRequestId`, labelled `Explore: audit the parser`, seeded with what it
+  was asked to do, idempotent across repeat events and relabelled when a later one supplies a description;
+  the feed holds the *same objects* as Main and does not claim Main's own blocks; it renders flat, with the
+  read-only note and no textarea; a finished subagent keeps its tab and goes green; one still live at turn
+  end goes amber with the status-unknown tooltip, red only if the turn errored; ⏹ Stop replaces 📊, confirms
+  before calling `_stopSubagent`, and is gone once settled; the tabs leave on the next send and on a session
+  change, from the active tab included; and a refresh mid-fan-out rebuilds the strip and mirrors the scoped
+  block.
+- `webapp/src/chat-panel/blocks.test.js` — **+1**: replay keeps the scope that produced each block, text
+  included. This is the assertion whose absence hid the missing field.
+- `tests/test_claude_code_messages.py` — **+6**, plus two assertions on the existing two-scopes-at-once
+  streaming test: a subagent's thinking carries its scope, replayed blocks say which scope produced them,
+  rows accumulate across the four `Task*` messages without a later event blanking an earlier one, a finished
+  subagent stays finished, each task gets its own row, and the snapshot is a copy.
+- `tests/test_claude_code_session.py` — **+1**: a subagent live when the pump is paused is in
+  `active_streams()`, with its `tool_use_id` — the field a rebuilt tab needs to claim its feed.
+
+Both suites green: **3819 webapp tests across 95 files**, **3088 pytest passed / 75 skipped**.
+
+### The live run, and the sixteen tabs nobody asked for
+
+Done the same day, on the user's prompt — "I just restarted python and the webapp. can you test the agent
+mode tabs?" — by driving a real fan-out from the browser and reading the DOM back through
+`evaluate_script`. It closed the item the section below had named as the first to close, and it found the
+thing 33 green tests could not.
+
+**The CLI reports a slow `Bash` command as a task.** `task_type="local_bash"`, its own `b*` task id, one
+per command past the backgrounding threshold (~5 s), announced through the same four `Task*` messages a
+subagent uses — `started` carrying the command as its description, then `notification` with
+`task_type=None`. A turn that delegated four subagents opened **twenty tabs, sixteen of them empty**.
+Reproduced deliberately with `sleep 9; echo slow-probe-done`: two events, one empty tab. The separation is
+exact, and was probed again on the turn that wrote this fix — of 21 subagent tabs in the strip,
+`local_agent/has-blocks: 4, local_bash/empty: 17`, with no tab on either diagonal. A tab whose feed can
+never hold a block is the shape of the bug, and `task_type` is what predicts it.
+
+The rows had been there all along. `_record_subagent` folded *every* task into the turn's subagent
+inventory, so Main's row list had carried sixteen junk entries under a scroll for as long as the rows have
+existed — invisible enough that nobody looked. Giving each row a tab in the strip is what made a
+pre-existing bug impossible to miss, which is the argument for the strip stated backwards.
+
+Filtered in `messages.py` rather than in the browser, because one rule there serves the indented row, the
+tab, its status LED, the reconnect snapshot and the Context tab's subagent inventory at once, and five
+places agreeing by accident is how the next surface disagrees. Two details the shape of the messages
+forces: the check **latches the task id** (`_non_subagent_tasks`), since `TaskProgressMessage` has no
+`task_type` field at all and the trailing `notification` reports `None` — only the first message of a bash
+task says what it is; and the set is an **observation, not a contract** — the SDK types the field
+`str | None` and documents no vocabulary, so an absent or unrecognised type falls through to a visible row
+rather than being dropped silently.
+
+What the run confirmed, none of it previously observed:
+
+- **`agent_id` was null on every single event.** Tabs keyed on `task_id` throughout. The field the spec
+  treats as the identity and `task_id` as a last resort is, live, the one that never arrives — which is
+  why `subagentTabId` records a later `agent_id` on the tab instead of rekeying the Map.
+- **The event order**: `started` → 8 × `progress` → `updated(completed, terminal)` →
+  `notification(completed, terminal)`, with `last_tool_name` present only on `progress`. That is the
+  vocabulary the truthy-only patching in `_record_subagent` and `applySubagentEvent` was written for, and
+  it holds.
+- **The tab contract**: `readOnly: true`, no textarea, the read-only note, `currentRequestId: null`, the
+  `🤖 …` seed line, the LED strip present, the feed flat (`subagentRowsInFeed: 0`), ⏹ Stop only while live
+  and 📊 absent, and the settled feed message sharing the live blocks array.
+- **The counters are real**: `completed (8 tools, 8,991 tokens)` on the green LED and `8 tools` / `9.0k
+  tok` on Main's row — the same chip that rendered blank before `taskUsage()`, now reading a live
+  `TaskUsage`.
+- **Reconnect, live**: a hard reload mid-fan-out rebuilt all three tabs from the snapshot — two green
+  settled, one live and cyan with its ⏹ — off 76 blocks in Main of which 23 carried a subagent scope, and
+  the three feeds refilled by mirroring. This is the path the missing `_Block.agent_id` had broken, now
+  watched rather than asserted.
+
+**Re-verified after the fix**, engine restarted on the same session, in two halves. The negative half:
+three long commands in the main scope — `sleep 9`, a 12-second `pytest`, a 19-second `vitest`, the last two
+being the exact pair that had opened tabs `bua39rv8j` and `bk0br7yxp` before — produced **no tab and no
+row**, the strip staying `["main"]` throughout. The positive half: two delegated subagents, each running a
+`sleep` of its own past the threshold, produced **exactly two tabs**, both `local_agent`, live and
+read-only with ⏹ in the strip and blocks arriving, then settling `completed` with
+`(2 tools, 7,403 tokens)` and `(2 tools, 7,377 tokens)` on green LEDs — and Main's inventory held exactly
+those two rows. A bash task fired *inside* a subagent is where most of the sixteen came from, so the
+subagents were given sleeps precisely to fire them.
+
+Three things the run leaves open, all carried in the README's item 9; the two below it are closed in
+*The strip that could not be read*, and the first is not. **⏹ Stop and the amber path are
+still unverified**, because `stop_task` interrupts the host turn and the host turn was the one doing the
+verifying — it needs its own sitting, deliberately rather than by omission. (That reason turned out to be
+wrong; see below.) **The labels read as noise**:
+`task_type` is `local_agent` for every subagent, eating 13 of 40 characters to say nothing, and
+`description` is the SDK's *live* activity string — so a tab is labelled with whatever the subagent
+happened to be doing when its last event arrived, and one settled here as
+`local_agent: Reading ~/…/delivery.md`, which is not what it was asked to do and not what it did. The
+parent `Task` card already holds the `input.description` and `input.subagent_type` the user actually typed.
+And **one focus anomaly did not reproduce**: after a mid-fan-out reload the active tab was once a live
+subagent feed rather than Main; instrumenting the `_activeTabId` accessor, including before page load,
+recorded nothing.
+
+The run also cost the session. A screenshot returned inline put one JSON line over the CLI's 1 MB stdout
+limit, and the pump for that session ended permanently — open item 1, exercised by accident, its failure
+path working exactly as designed and the conversation over anyway. Everything after it was verified by DOM
+probe, which returns a few hundred bytes.
+
+- `tests/test_claude_code_messages.py` — **+6 more** (`TestNonSubagentTasks`): a backgrounded `Bash`
+  command is neither event nor row, the latch drops its untyped `progress` and `notification`, a
+  `local_agent` subagent and one with no `task_type` at all still get their row, a bash task interleaved
+  with a live subagent disturbs neither its `last_tool_name` nor its terminal flag, and two bash tasks
+  cannot merge. **3094 pytest passed / 75 skipped**; the webapp suite is unchanged at 3819, the fix being
+  entirely engine-side.
+
+### The strip that could not be read
+
+Four tabs into the same fan-out, the strip was a row of near-identical sentences with the ends cut off. The
+label had been `task_type: description` truncated to 40 characters, which for real CLI events means 13
+characters of `local_agent` — identical on every tab — followed by whatever the subagent was doing when its
+last event landed. Two tabs could carry the same words and neither of them what the user asked for.
+
+The label is now an **ordinal plus one keyword**, `1 headings`, `2 test-files`, and the sentence moves to
+the tooltip and to the feed's opening line, which are the two places with room for it. Three decisions are
+worth recording:
+
+- **The ordinal is assigned once, at creation**, and stored on the tab (`sub.ordinal`). Numbering by
+  position in the strip would renumber the tabs under the user's cursor every time an earlier one closed,
+  and a tab that changes its name while being clicked is worse than a long one.
+- **The text comes from the parent `Task` card, not from the event.** `taskCardLabel` reads
+  `ownerTab.turnBlocks.index.get(row.tool_use_id)?.tool?.input` for `description` and `type` — the words
+  the user's own delegation typed. The event's `description` is the SDK's *live activity* string and is
+  only the fallback. The upgrade latches (`labelFromTask`), so a later activity string cannot overwrite the
+  real description once it has been found.
+- **`subagentKeyword` is a heuristic and is commented as one.** English task descriptions put their object
+  last, so the keyword is the last word — reaching back to the nearest word that is not a stopword when the
+  last one identifies nothing (`Count webapp test files` → `test-files`, `check the tests` → `check-tests`
+  rather than `the-tests`), paths collapsed to their basename because the fallback string is full of
+  absolute ones, lowercased because these read as tags, and truncated at 14 characters because the point of
+  the change was the *other* tabs' visibility.
+
+The unreproduced focus anomaly is now **guarded rather than explained**. `rehydrateSubagentTabs` remembers
+the active tab id, and if the rebuild ended with focus on a tab it just created, it puts focus back (or on
+Main if the remembered tab is gone). A rebuilt tab is one nobody chose. The cause is still unknown — this
+does not close that question, it makes the symptom unreachable from this path.
+
+And the reason ⏹ Stop stayed unverified was wrong. `stop_task` is its **own** control subtype, not
+`interrupt`: the SDK sends `{"subtype": "stop_task", "task_id": …}` and the CLI answers with a
+`task_notification` of status `stopped` (or a `task_updated` of `killed`) **in the message stream**. Nothing
+in the SDK supports `service.py:1398`'s claim that it interrupts the host's turn. The amber path is
+therefore reachable without pressing the webapp's ⏹ at all — an agent's own `TaskStop` against a background
+task produces the same terminal status through the same events — and that is the experiment still to run.
+
+- `webapp/src/chat-panel/subagent-tabs.test.js` — **+13** (46 total in the file): the ordinal sticks
+  across a sibling's completion, the strip button and its tooltip carry what they should, `subagentKeyword`
+  over six shapes including stopwords and paths, the `Task`-card label beats the activity string and
+  latches, and a rebuilt tab leaves Main active. **3832 webapp passed / 95 files**, **3094 pytest passed /
+  75 skipped**.
+
+### Deliberately not built
+
+- ~~**No live verification against a real fan-out.**~~ Done the same day — see *The live run* above. It
+  found the `local_bash` tasks, confirmed the event vocabulary and the reconnect rebuild, and left ⏹ Stop,
+  the amber path and the label source open.
+- **`duration_ms` is parsed and unused.** `taskUsage` returns it; nothing renders it. A subagent tab has a
+  run timer of its own that starts when we first hear of the task, and two elapsed figures disagreeing on
+  screen is worse than one.
+- **A live feed and an archived transcript are still two code paths.** `historical:<agent_id>` tabs read
+  from disk and keep their own prefix; a live tab is keyed on the bare id. They are kept from colliding
+  (`onViewSubagentsRequested` skips a subagent that already has a live tab, by row key or task id) rather
+  than unified.
+- **⏹ Stop needs a `task_id`.** `stop_task` takes nothing else, so a live subagent whose events have not yet
+  carried one renders no Stop affordance rather than a button with nothing to send.
+- **Deep linking (`?turn=<request_id>`) is still absent**, as is the strip's per-description menu for a
+  turn that fanned out past the viewport — the generic overflow menu carries the tabs, labelled.

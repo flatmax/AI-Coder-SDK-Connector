@@ -30,6 +30,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     SystemMessage,
+    TaskStartedMessage,
     TextBlock,
 )
 
@@ -969,6 +970,45 @@ class TestActiveStreams:
         release.set()
         await task
         assert engine.active_streams() == []
+
+    async def test_a_live_subagent_is_in_the_snapshot(self, engine):
+        """Otherwise a refresh mid-fan-out loses the tab the subagent lives in."""
+        reached = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause():
+            reached.set()
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [
+            DEFAULT_MESSAGES[0],
+            TaskStartedMessage(
+                subtype="task_started",
+                data={"agent_id": "agent-7"},
+                task_id="task-1",
+                description="Explore the repo",
+                uuid="u",
+                session_id="sess-1",
+                tool_use_id="toolu_1",
+                task_type="Explore",
+            ),
+            pause,
+            *DEFAULT_MESSAGES[1:],
+        ]
+        task = asyncio.create_task(engine.run_turn(text_turn()))
+        await reached.wait()
+
+        subagents = engine.active_streams()[0]["subagents"]
+        assert len(subagents) == 1
+        assert subagents[0]["agent_id"] == "agent-7"
+        assert subagents[0]["description"] == "Explore the repo"
+        # The `Task` call joins the row to the blocks the subagent produced.
+        assert subagents[0]["tool_use_id"] == "toolu_1"
+        assert subagents[0]["terminal"] is False
+
+        release.set()
+        await task
 
     async def test_a_permission_prompt_attaches_to_the_turn_in_flight(self, engine):
         """The broker knows nothing about turns; this is the whole bridge."""

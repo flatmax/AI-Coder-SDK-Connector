@@ -180,6 +180,35 @@ export function makeTabState() {
     // might open under some condition, but none at all. Main defaults to
     // false; only transcript tabs flip this to true.
     readOnly: false,
+    // The subagent this tab is a feed for, or null on every other tab —
+    // Main, an agent tab, an archived transcript. Presence of this field is
+    // what marks a tab as a live subagent's, so the strip, the LED row and
+    // `clearSubagentTabs` all test it rather than parsing the tab id.
+    //
+    // Shape (a copy of the subagent row, plus the tab's own bookkeeping):
+    //   rowKey       the key `blocks.js` filed the row under — stable even
+    //                when a later event supplies an `agent_id` the first
+    //                one lacked, which is why lookups prefer it
+    //   agent_id     the SDK transcript key, once reported
+    //   task_id      what `stop_task` takes
+    //   tool_use_id  the parent `Task` call — the id blocks produced inside
+    //                this subagent carry as their `agent_id`
+    //   requestId    the *parent* turn's request id. Never
+    //                `currentRequestId`: a second tab claiming the parent's
+    //                request would steal Main's chunks in
+    //                `findTabForRequest`.
+    //   description / task_type / status / last_tool_name / usage / summary
+    //                as reported, patched cumulatively across events
+    //   terminal     the engine's own verdict that the task ended
+    //   settled      this tab's feed has stopped
+    //   unknown      the parent turn ended while it was still live, so its
+    //                outcome is unreported — never shown as completed
+    //   errored      that turn also failed, which makes the LED red
+    //   feedMessage  the blocks have been attached to a message already
+    //
+    // Written by `subagent-tabs.js`; read by the strip, the LED row and the
+    // send gate. Per specs5/5-webapp/subagent-browser.md.
+    subagent: null,
   };
 }
 

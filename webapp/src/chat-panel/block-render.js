@@ -25,7 +25,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderEditBody } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
-import { costLabel, modelUsageLines, turnTokens } from '../turn-cost.js';
+import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
 import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
 import { revealHealth } from './health-banner.js';
@@ -795,7 +795,11 @@ function openSubagentTranscript(panel, row) {
 export function renderSubagentRow(panel, row, blocks, candidates, settled) {
   if (!row) return nothing;
   const live = !row.terminal && !settled;
-  const tokens = turnTokens(row.usage);
+  // `TaskUsage`, not the per-model token counters: a task reports
+  // `{total_tokens, tool_uses, duration_ms}`, which shares no field name with
+  // them, so reading it with `turnTokens` scored every subagent at zero and
+  // the chip below never drew. See `taskUsage` in turn-cost.js.
+  const { tokens, toolUses } = taskUsage(row.usage);
   const desc = row.description || row.task_type || 'Subagent';
   return html`
     <div class="subagent-row ${live ? 'live' : 'terminal'}" data-agent-id=${row.agent_id || row.key}>
@@ -819,6 +823,10 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
           : nothing}
         ${row.last_tool_name
           ? html`<span class="subagent-tool">${row.last_tool_name}</span>`
+          : nothing}
+        ${toolUses > 0
+          ? html`<span class="subagent-usage"
+              >${toolUses} ${toolUses === 1 ? 'tool' : 'tools'}</span>`
           : nothing}
         ${tokens > 0
           ? html`<span class="subagent-usage">${formatTokens(tokens)} tok</span>`

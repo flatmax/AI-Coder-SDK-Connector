@@ -86,7 +86,10 @@ quote both halves of the pytest summary line, or quote neither. Dated per-commit
 [`delivery.md`](delivery.md) are a different thing and stay — a number attached to a commit does not go
 stale, it becomes history.
 
-**Nothing is uncommitted.** Read
+**Nothing is uncommitted.** The live subagent tabs, the `local_bash` filter and the ordinal-plus-keyword
+strip labels under item 9 below landed on 2026-08-17 as the head of this branch. The table below stops one
+commit short of the head, as it always does — a row is written by the commit that follows the one it
+names. Read
 [*Interlude — the timer that answered for the user*](delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
 before touching the permission path: a request now waits indefinitely while a host client is connected,
 and Stop is what closes a dialog nobody wants to answer. The commits on this branch, oldest first:
@@ -106,6 +109,7 @@ and Stop is what closes a dialog nobody wants to answer. The commits on this bra
 | `51ea77f` | The per-answer note (`annotations`), and the retraction of the claim that the format env var is what makes a preview possible |
 | `fa66b99` | The dialog's Monaco given the head styles a shadow root cannot see, edit cards that open themselves, `Bash` summaries that wrap |
 | `218f89d` | `repo_root` in the state snapshot, and the one conversion that stops a file chip asking the repo API for an absolute path |
+| `0d80758` | The open items written down, so none of them has to be rediscovered from a log |
 
 `51ea77f` is where the retraction lives: **setting `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is not what
 makes a preview possible**, and this record said otherwise in four places before a live A/B disproved it.
@@ -195,6 +199,40 @@ interlude that found it; this list exists so that none of them has to be redisco
 8. **The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
    supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
    and what it measures is exactly the kind of detail a version bump moves.
+9. ~~**Live subagent tabs have never watched a real fan-out.**~~ **Watched on 2026-08-17**, and it found
+   what 33 green tests could not: **the CLI reports a slow `Bash` command as a task**
+   (`task_type="local_bash"`, one per command past its backgrounding threshold) through the same four
+   `Task*` messages a subagent uses, so a turn that delegated four subagents opened **twenty tabs, sixteen
+   of them empty**. The engine had been folding those into subagent rows since the rows existed — a
+   pre-existing bug that only became visible when each row also became a tab. Fixed in
+   `messages.py` by filtering them where the one rule serves every surface at once, and **re-verified live
+   after a restart**: three long commands in the main scope and two subagents' own sleeps opened nothing,
+   while the two subagents opened exactly two tabs and settled green with their real counters. The run
+   left three things open; two are now closed:
+   - **⏹ Stop and the amber LED path are still unverified** — the one still open. The reason recorded
+     first was wrong: `stop_task` is its own control subtype, *not* `interrupt`, and the CLI answers it
+     with a `stopped`/`killed` task message in the message stream, so it should not end the host turn.
+     `service.py:1398` claims it interrupts the host turn and nothing in the SDK supports that. The
+     amber path can be reached without the webapp's ⏹ at all — an agent's own `TaskStop` on a
+     background task produces the same terminal status — and that experiment has not been run.
+   - ~~**The strip labels read as noise.**~~ **Fixed.** A tab is now `1 headings`, `2 test-files`: an
+     ordinal assigned at creation (it never renumbers under the cursor) plus one keyword, with the whole
+     sentence in the tooltip and in the feed's opening line. The keyword and the sentence come from the
+     parent `Task` card's `input.description`/`input.subagent_type` when it can be found, which is what
+     the user asked for rather than what the subagent happened to be doing when its last event landed;
+     the live activity string is only the fallback. `subagentKeyword` is the heuristic: last word,
+     reaching back past stopwords when that word identifies nothing (`check the tests` → `check-tests`),
+     paths collapsed to their basename, 14 characters.
+   - ~~**One unreproduced focus anomaly.**~~ **Guarded rather than explained.** After a mid-fan-out
+     reload the active tab was once a live subagent feed rather than Main. It never reproduced, so
+     `rehydrateSubagentTabs` now refuses to leave focus on a tab it just created: a rebuilt tab is one
+     nobody chose. The cause is still unknown, which is why this is a guard and not a fix.
+
+   What *was* confirmed live: the tab per `Task`, keyed on `task_id` because **`agent_id` was null on
+   every single event** (the fallback the spec calls a last resort is the normal case); `readOnly: true`
+   with no textarea; `currentRequestId` never set; cyan→green LEDs with real counters from `TaskUsage`;
+   the flat feed; and the reconnect rebuild — a hard reload mid-fan-out came back with all three tabs, two
+   green from the snapshot and one live with its ⏹.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
@@ -254,12 +292,13 @@ The state phase 6 inherits:
   hole; see [`delivery.md`](delivery.md#deviations-from-inventorymd-1). It is now phase 8 with the
   choice left open ([`decisions.md#cc-18`](decisions.md)). The naming half is settled and on disk: the
   persisted event is `files_written_by_file_tools`, and no field may call itself `files_changed`.
-- **Some surfaces are mounted and inert, deliberately.** The code/doc mode toggle and the agent tab
-  strip have no emitter for the pushes that drive them; their replacements are the preset selector
-  (CC-12) and the subagent browser (CC-8), both deferred by decision. They are annotated where they
-  sit rather than half-deleted, because removing a receiver while leaving its consumer mounted moves
-  the break instead of fixing it. `<ac-history-browser>` is no longer among them: phase 5 re-pointed it
-  at the seven `history_*` RPCs and gave it a way in from the chat panel.
+- **One surface is mounted and inert, deliberately**: the code/doc mode toggle, which has no emitter for
+  the pushes that drive it and whose replacement is the preset selector (CC-12), deferred by decision. It
+  is annotated where it sits rather than half-deleted, because removing a receiver while leaving its
+  consumer mounted moves the break instead of fixing it. Two former members of this list have left it.
+  Phase 5 re-pointed `<ac-history-browser>` at the seven `history_*` RPCs and gave it a way in from the
+  chat panel; 2026-08-17 gave the tab strip a producer — a running `Task` opens its own read-only tab
+  (CC-8's live half, see [`delivery.md`](delivery.md#interlude--the-tab-a-subagent-never-got-2026-08-17)).
 - **17 RPCs are localhost-gated, and four do not look it.** `commit_all`, `reset_to_head`,
   `start_review` and `end_review` delegate, so their `_check_localhost_only()` lives in
   `claude_code/commit.py` and `claude_code/review.py`, not in `service.py`.
@@ -316,10 +355,12 @@ in the tree:
   live turn produces and the browser restores them through `restoreMessage`. Anything phase 6 adds to a
   live turn's rendering has to survive arriving that way, or a resumed conversation loses the
   visualisation phase 6 exists to add.
-- **Two surfaces are still mounted and inert by decision**: the code/doc mode toggle and the agent tab
-  strip, whose replacements are the preset selector (CC-12) and the subagent browser (CC-8). The
-  subagent *transcript* reader exists — `list_subagents` / `load_subagent` and read-only
-  `historical:<agent_id>` tabs — so CC-8's browser is a listing over data that is already there.
+- **One surface is still mounted and inert by decision**: the code/doc mode toggle, whose replacement is
+  the preset selector (CC-12). The tab strip is no longer among them — as of 2026-08-17 a running `Task`
+  opens its own read-only tab, mirroring the parent turn's blocks for that scope by reference, and the
+  subagent row inside Main stays as the evidence the delegation happened. What remains of CC-8 is the
+  *listing* over past runs, which the transcript reader already serves: `list_subagents` /
+  `load_subagent`, "View subagents (N)" on a settled turn, and read-only `historical:<agent_id>` tabs.
 
 **The mirror's own health is a verdict, not a threshold.** `mirror_gaps_escalated` is computed on
 `EngineHealth` against `app.json`'s `history.mirror_gap_tolerance`. A second view of mirror health reads

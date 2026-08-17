@@ -236,6 +236,43 @@ export const STYLES = css`
     background: rgba(88, 166, 255, 0.15);
   }
 
+  /* Stop button on a live subagent's tab — the same
+   * fade-in pattern as .tab-context, in the same slot,
+   * because a subagent tab carries one or the other and
+   * never both: there is no context window of its own to
+   * show, and ending it is the only thing a user can do
+   * to a subagent. Red on hover rather than accent blue:
+   * the gesture is irreversible, and the confirmation
+   * that follows should not be the first hint of that.
+   * Per specs5/5-webapp/subagent-browser.md § Tab Strip. */
+  .tab-stop {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 14px;
+    margin-left: 0.4rem;
+    border: none;
+    background: transparent;
+    color: inherit;
+    opacity: 0;
+    cursor: pointer;
+    border-radius: 3px;
+    font-size: 0.75rem;
+    line-height: 1;
+    padding: 0;
+    transition: opacity 100ms ease, background 100ms ease;
+  }
+  .tab-strip-tab:hover .tab-stop,
+  .tab-strip-tab.active .tab-stop,
+  .tab-stop:focus-visible {
+    opacity: 0.7;
+  }
+  .tab-stop:hover {
+    opacity: 1 !important;
+    background: rgba(248, 81, 73, 0.2);
+  }
+
   /* Overflow menu — three-dots button at the right
    * edge, always visible when the strip is visible
    * (at least 2 tabs). Clicking opens a dropdown
@@ -334,11 +371,12 @@ export const STYLES = css`
    * directly under the tab strip in the main tab
    * header. One dot per agent tab; click activates the
    * agent's tab (same effect as clicking the tab).
-   * Three colour variants:
+   * Four colour variants:
    *
    *   .led-cyan  — agent stream is in flight (flashing)
    *   .led-green — last completion clean
    *   .led-red   — last completion errored
+   *   .led-amber — subagent stopped, or outcome unknown
    *
    * The row hides itself by being empty when there are
    * no agent tabs — renderLedRow returns an empty
@@ -405,6 +443,16 @@ export const STYLES = css`
   }
   .led-dot.led-red {
     background: #f85149;
+  }
+  /* Fourth state, subagent tabs only: an outcome that is
+   * neither success nor fault. A subagent the user stopped,
+   * one the engine killed, or one whose outcome the parent
+   * turn never reported. Green would claim work finished
+   * that may not have; red would report a fault where the
+   * user pressed Stop. Per
+   * specs5/5-webapp/subagent-browser.md § Status LEDs. */
+  .led-dot.led-amber {
+    background: #d29922;
   }
   @keyframes led-pulse {
     0%, 100% {

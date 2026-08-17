@@ -534,6 +534,28 @@ class TestStreaming:
         assert main[0].payload["block_id"] != sub[0].payload["block_id"]
         assert main[0].payload["content"] == "main"
         assert sub[0].payload["content"] == "sub"
+        # And each chunk says whose it is. A subagent narrates in text, not
+        # only in tool calls, so the browser needs the scope to render that
+        # text under the subagent's row and in the subagent's own tab
+        # instead of at turn level.
+        assert main[0].payload["agent_id"] is None
+        assert sub[0].payload["agent_id"] == "toolu_task_1"
+
+    def test_a_subagents_thinking_carries_its_scope_too(self, translator):
+        open_stream_block(
+            translator, kind="thinking", message_id="msg_sub", parent="toolu_task_1"
+        )
+        events = translator.translate(
+            stream(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "hmm"},
+                },
+                parent="toolu_task_1",
+            )
+        )
+        assert events[0].payload["agent_id"] == "toolu_task_1"
 
 
 # ---------------------------------------------------------------------------
@@ -1056,6 +1078,135 @@ class TestReplay:
         # Serialisable, because it goes over the wire on reconnect.
         json.dumps(blocks)
 
+    def test_replayed_blocks_say_which_scope_produced_them(self, translator):
+        """Without it a reconnected subagent tab cannot claim its own feed."""
+        translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="Delegating.")],
+                model="m",
+                message_id="msg_1",
+            )
+        )
+        translator.translate(
+            AssistantMessage(
+                content=[
+                    TextBlock(text="reading the parser"),
+                    ToolUseBlock(id="toolu_9", name="Grep", input={}),
+                ],
+                model="m",
+                message_id="msg_2",
+                parent_tool_use_id="toolu_task_1",
+            )
+        )
+        scopes = {b["content"] or b["block_id"]: b["agent_id"]
+                  for b in translator.rendered_blocks()}
+        assert scopes["Delegating."] is None
+        assert scopes["reading the parser"] == "toolu_task_1"
+        assert scopes["toolu_9"] == "toolu_task_1"
+
+    def test_rendered_subagents_accumulate_across_the_task_messages(
+        self, translator
+    ):
+        """The snapshot is the row, not the last event: fields come from all four."""
+        translator.translate(
+            TaskStartedMessage(
+                subtype="task_started",
+                data={"agent_id": "agent-7"},
+                task_id="task-1",
+                description="Explore the repo",
+                uuid="u",
+                session_id="s",
+                tool_use_id="toolu_1",
+                task_type="Explore",
+            )
+        )
+        translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="task-1",
+                description="",
+                usage={"total_tokens": 500, "tool_uses": 2, "duration_ms": 900},
+                uuid="u",
+                session_id="s",
+                last_tool_name="Grep",
+            )
+        )
+        rows = translator.rendered_subagents()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["key"] == "task-1"
+        # The progress message carried no description; the label survives it.
+        assert row["description"] == "Explore the repo"
+        assert row["agent_id"] == "agent-7"
+        assert row["tool_use_id"] == "toolu_1"
+        assert row["last_tool_name"] == "Grep"
+        assert row["usage"]["tool_uses"] == 2
+        assert row["terminal"] is False
+        # Goes over the wire inside `active_streams`.
+        json.dumps(rows)
+
+    def test_a_finished_subagent_stays_finished(self, translator):
+        """A trailing non-terminal message must not revive a task that ended."""
+        translator.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="task-1",
+                status="completed",
+                output_file="/tmp/out.md",
+                summary="Found three call sites",
+                uuid="u",
+                session_id="s",
+            )
+        )
+        translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="task-1",
+                description="",
+                usage=None,
+                uuid="u",
+                session_id="s",
+                last_tool_name="Read",
+            )
+        )
+        row = translator.rendered_subagents()[0]
+        assert row["terminal"] is True
+        assert row["status"] == "completed"
+        assert row["summary"] == "Found three call sites"
+
+    def test_each_task_gets_its_own_row(self, translator):
+        for task_id in ("task-1", "task-2"):
+            translator.translate(
+                TaskStartedMessage(
+                    subtype="task_started",
+                    data={},
+                    task_id=task_id,
+                    description=f"Work on {task_id}",
+                    uuid="u",
+                    session_id="s",
+                )
+            )
+        rows = translator.rendered_subagents()
+        assert [r["key"] for r in rows] == ["task-1", "task-2"]
+
+    def test_the_snapshot_is_a_copy(self, translator):
+        """A caller mutating the payload must not corrupt the turn's own row."""
+        translator.translate(
+            TaskStartedMessage(
+                subtype="task_started",
+                data={},
+                task_id="task-1",
+                description="Explore",
+                uuid="u",
+                session_id="s",
+            )
+        )
+        translator.rendered_subagents()[0]["description"] = "clobbered"
+        assert translator.rendered_subagents()[0]["description"] == "Explore"
+
     def test_permission_prompts_are_recorded_by_the_gate_not_a_message(
         self, translator
     ):
@@ -1063,3 +1214,137 @@ class TestReplay:
         translator.note_permission_prompt()
         events = translator.translate(result_message())
         assert events[0].payload["permission_prompts"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Tasks that are not subagents
+# ---------------------------------------------------------------------------
+
+
+class TestNonSubagentTasks:
+    """A slow ``Bash`` command is a task, and it is not a delegation.
+
+    Found live on 2026-08-17: a turn that delegated four subagents produced
+    twenty rows, sixteen of them shell commands the CLI had backgrounded. Every
+    surface downstream — the indented row, the tab, the LED, the reconnect
+    snapshot — reads one filter, so these assert the filter and not each
+    surface.
+    """
+
+    def _started(self, task_id, task_type, description="sleep 9"):
+        return TaskStartedMessage(
+            subtype="task_started",
+            data={},
+            task_id=task_id,
+            description=description,
+            uuid="u",
+            session_id="s",
+            task_type=task_type,
+        )
+
+    def test_a_backgrounded_bash_command_is_neither_event_nor_row(
+        self, translator
+    ):
+        events = translator.translate(self._started("b1", "local_bash"))
+        assert events == []
+        assert translator.rendered_subagents() == []
+
+    def test_the_task_id_is_latched_because_only_the_first_event_types_it(
+        self, translator
+    ):
+        """`TaskProgressMessage` has no `task_type` field at all."""
+        translator.translate(self._started("b1", "local_bash"))
+        progress = translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="b1",
+                description="",
+                usage={"total_tokens": 12, "tool_uses": 1, "duration_ms": 9000},
+                uuid="u",
+                session_id="s",
+                last_tool_name="Bash",
+            )
+        )
+        # And the notification the CLI sends when the command returns arrives
+        # with `task_type=None` — the shape that reopened this as a tab.
+        notification = translator.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="b1",
+                status="completed",
+                output_file=None,
+                summary=None,
+                uuid="u",
+                session_id="s",
+            )
+        )
+        assert progress == []
+        assert notification == []
+        assert translator.rendered_subagents() == []
+
+    def test_a_real_subagent_is_untouched(self, translator):
+        events = translator.translate(
+            self._started("task-1", "local_agent", description="Explore")
+        )
+        assert names(events) == ["subagentEvent"]
+        assert [r["key"] for r in translator.rendered_subagents()] == ["task-1"]
+
+    def test_a_task_with_no_type_at_all_is_still_a_subagent(self, translator):
+        """The filter names the kinds it drops; anything else stays a row.
+
+        The SDK types `task_type` as `str | None` and documents no vocabulary,
+        so an unrecognised or absent type must fall through to a visible row
+        rather than be silently dropped.
+        """
+        events = translator.translate(self._started("task-1", None, "Explore"))
+        assert names(events) == ["subagentEvent"]
+        assert len(translator.rendered_subagents()) == 1
+
+    def test_a_bash_task_interleaved_with_a_subagent_disturbs_nothing(
+        self, translator
+    ):
+        """The live shape: subagents shell out, so the two streams interleave."""
+        translator.translate(self._started("task-1", "local_agent", "Explore"))
+        translator.translate(self._started("b1", "local_bash"))
+        translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="task-1",
+                description="",
+                usage=None,
+                uuid="u",
+                session_id="s",
+                last_tool_name="Grep",
+            )
+        )
+        translator.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="b1",
+                status="completed",
+                output_file=None,
+                summary=None,
+                uuid="u",
+                session_id="s",
+            )
+        )
+        rows = translator.rendered_subagents()
+        assert [r["key"] for r in rows] == ["task-1"]
+        assert rows[0]["last_tool_name"] == "Grep"
+        assert rows[0]["terminal"] is False
+
+    def test_the_latch_keys_on_the_task_id_not_the_tool_use_id(self, translator):
+        """Two bash tasks under one `Bash` call must not merge or leak.
+
+        `_task_key` prefers `task_id`, which is the only id every `Task*`
+        message carries; the ids here are distinct so a second command's
+        events cannot be filed under the first's.
+        """
+        translator.translate(self._started("b1", "local_bash"))
+        events = translator.translate(self._started("b2", "local_bash"))
+        assert events == []
+        assert translator.rendered_subagents() == []

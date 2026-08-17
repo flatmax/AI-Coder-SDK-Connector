@@ -45,6 +45,11 @@ import {
   probeModeAuthority,
 } from './permission-mode.js';
 import { restoreMessage } from './restore.js';
+import {
+  clearSubagentTabs,
+  mirrorSubagentBlocks,
+  rehydrateSubagentTabs,
+} from './subagent-tabs.js';
 import { clearHistoricalTabs, onChatTabShortcut, onTabClose } from './tabs.js';
 import {
   onAgentsSpawned,
@@ -173,12 +178,13 @@ export function onSpeechPlayerState(panel, event) {
  * log would mean re-applying supersessions in order and hoping none were
  * dropped, for the same end result.
  *
- * There is no ``agent_id`` in the payload, and never more than one entry: the
- * engine runs one CLI session with one turn in flight, so the resumed turn is
- * always the main tab's. Subagent work inside that turn arrives as blocks
- * carrying their parent ``Task`` call's id and nests under its card — it is
- * part of this turn, not a separate stream. (Phase 3's agent tabs are a
- * frontend grouping of the same single stream, not concurrent streams.)
+ * There is never more than one entry: the engine runs one CLI session with one
+ * turn in flight, so the resumed turn is always the main tab's. Subagent work
+ * inside that turn is part of the same stream — its blocks carry their parent
+ * ``Task`` call's id — so it replays with the rest and then fans out to the
+ * tabs the entry's ``subagents`` list rebuilds. Those tabs are a frontend
+ * grouping of one stream, not concurrent streams: nothing here claims a
+ * request id of its own.
  *
  * The engine keeps broadcasting to every connected websocket for the
  * remainder of the turn, so the refreshed browser gets the NEXT chunk
@@ -197,7 +203,15 @@ export function resumeActiveStreams(panel, activeStreams) {
   if (!tab) return;
   let resumed = false;
   for (const entry of activeStreams) {
-    if (resumeStreamBlocks(panel, tab, entry)) resumed = true;
+    if (!resumeStreamBlocks(panel, tab, entry)) continue;
+    resumed = true;
+    // The strip a refreshed browser has to find the way it left it: a subagent
+    // running when the page reloaded is invisible until the turn ends
+    // otherwise. Creation is idempotent, and the replayed blocks mirror across
+    // on the pass below — no transcript is read until the user opens a tab
+    // (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
+    rehydrateSubagentTabs(panel, entry.request_id, entry.subagents, tab);
+    mirrorSubagentBlocks(panel, tab);
   }
   if (!resumed) return;
   if (panel._activeTabId === 'main') panel.requestUpdate();
@@ -485,6 +499,12 @@ export function detachEventListeners(panel) {
 export function onSessionChanged(panel, event) {
   const data = event.detail || {};
   const msgs = Array.isArray(data.messages) ? data.messages : [];
+  // First, before any write below it. A new or resumed session starts from
+  // Main alone (specs5/5-webapp/subagent-browser.md § Tab Lifetime), and every
+  // assignment that follows goes through the active-tab accessors — with a
+  // subagent's feed active, the loaded session's messages would land in that
+  // tab and disappear with it.
+  clearSubagentTabs(panel);
   panel.messages = msgs.map(restoreMessage);
   panel._streaming = false;
   panel._streamingContent = '';

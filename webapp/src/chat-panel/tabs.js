@@ -34,6 +34,7 @@ import {
 } from './helpers.js';
 import { restoreMessage } from './restore.js';
 import { makeTabState } from './state.js';
+import { findSubagentTab, subagentTabTooltip } from './subagent-tabs.js';
 
 // ---------------------------------------------------------------
 // Request-ID → tab routing
@@ -381,6 +382,10 @@ export function renderTabStrip(panel) {
           const tab = panel._tabs.get(tabId);
           const streaming = !!(tab && tab.streaming);
           const readOnly = !!(tab && tab.readOnly);
+          // A live subagent's feed, as opposed to an archived transcript
+          // read off disk. Both are read-only; only this one can still be
+          // stopped, and only this one is a stream rather than a file.
+          const subagent = tab ? tab.subagent : null;
           // Tooltip carries the agent's mode so users
           // can disambiguate at a glance — two agents
           // tasked with similar prose differ only in
@@ -390,9 +395,15 @@ export function renderTabStrip(panel) {
           // appends a hint that it is read-only.
           const mode = panel._tabModes?.get(tabId);
           const baseTooltip = mode ? `${label} (${mode})` : label;
-          const tooltip = readOnly
-            ? `${baseTooltip} — subagent transcript (read-only)`
-            : baseTooltip;
+          let tooltip = baseTooltip;
+          if (subagent) {
+            // Not built from the label: this label is an ordinal and a keyword
+            // by design, and the sentence it dropped is what a tooltip is for
+            // (subagent-tabs.js § Labels).
+            tooltip = subagentTabTooltip(tab);
+          } else if (readOnly) {
+            tooltip = `${baseTooltip} — subagent transcript (read-only)`;
+          }
           const cls = [
             'tab-strip-tab',
             active ? 'active' : '',
@@ -418,7 +429,9 @@ export function renderTabStrip(panel) {
               data-tab-id=${tabId}
               @click=${() => onTabClick(panel, tabId)}
               title=${tooltip}
-            ><span
+            >${subagent
+              ? renderSubagentTabStop(panel, tabId, tab, streaming)
+              : html`<span
               class="tab-context"
               role="button"
               tabindex="0"
@@ -435,7 +448,7 @@ export function renderTabStrip(panel) {
                   onTabContextClick(panel, tabId);
                 }
               }}
-            >📊</span>${streaming
+            >📊</span>`}${streaming
               ? html`<span
                   class="tab-streaming-indicator"
                   aria-hidden="true"
@@ -463,6 +476,58 @@ export function renderTabStrip(panel) {
         : ''}
     </div>
   `;
+}
+
+/**
+ * The ⏹ Stop affordance on a live subagent's tab.
+ *
+ * Stop is the *only* write gesture a subagent tab carries, and it takes the
+ * place of the 📊 Context icon rather than sitting beside it. Two things the
+ * spec asks for and one it forbids:
+ *
+ *   - Live tabs only. A settled feed is an archived transcript, and a Stop
+ *     button on it would offer to end something already over.
+ *   - Confirmation first, because there is no undo: a stopped subagent cannot
+ *     be resumed and its half-finished work stays half-finished.
+ *   - No 📊 and no ✕. A subagent has no context window of its own to show
+ *     (its tokens are the parent turn's), and its tab is not the user's to
+ *     close — it leaves when the turn does
+ *     (specs5/5-webapp/subagent-browser.md § Tab Strip).
+ *
+ * `window.confirm` rather than a custom dialog, matching the other
+ * irreversible gestures in the panel (`permission-mode.js`, `git-actions.js`).
+ *
+ * Rendered empty for a live subagent with no task id: `stop_task` takes the
+ * task id and nothing else, so there would be nothing to send.
+ */
+function renderSubagentTabStop(panel, tabId, tab, streaming) {
+  const taskId = tab?.subagent?.task_id;
+  if (!streaming || typeof taskId !== 'string' || !taskId) return '';
+  // The asked-for description, not the live activity string: a confirmation
+  // naming what the subagent is doing *this second* asks the user to authorise
+  // something other than what they are ending.
+  const desc = tab.subagent.labelDescription
+    || tab.subagent.description
+    || tab.subagent.task_type
+    || 'this subagent';
+  const stop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(`Stop ${desc}? It cannot be resumed.`)) return;
+    panel._stopSubagent?.(tab.subagent);
+  };
+  return html`<span
+    class="tab-stop"
+    role="button"
+    tabindex="0"
+    aria-label="Stop ${desc}"
+    title="Stop this subagent"
+    @click=${stop}
+    @keydown=${(e) => {
+      if (e.key === 'Enter' || e.key === ' ') stop(e);
+    }}
+  >⏹</span>`;
 }
 
 /**
@@ -1046,7 +1111,10 @@ async function onViewSubagentsRequested(panel, event) {
       agent && typeof agent.agent_id === 'string' ? agent.agent_id : '';
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    if (panel._tabs.has(id)) continue;
+    // Its live tab, whether that tab is keyed by the agent id or by the task
+    // id an earlier event arrived with — a subagent must not end up with a
+    // live feed and an archived snapshot of the same work side by side.
+    if (panel._tabs.has(id) || findSubagentTab(panel, id)) continue;
     wanted.push({ agentId: id, label: agent.label });
   }
   if (wanted.length === 0) {

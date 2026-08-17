@@ -838,6 +838,32 @@ describe('applyReplayBlocks', () => {
     expect(turn.blocks[2].result).toBeNull();
   });
 
+  it('keeps the scope that produced each block', () => {
+    // A subagent narrates in text as well as calling tools, and after a
+    // refresh that text still has to render under its row — and in its own
+    // tab — rather than as something Main said.
+    const turn = makeTurnBlocks();
+    applyReplayBlocks(turn, [
+      { block_id: 'r1:b0', kind: 'text', content: 'Delegating.' },
+      {
+        block_id: 'r1:b1',
+        kind: 'text',
+        content: 'reading the parser',
+        agent_id: 'toolu_task',
+      },
+      {
+        block_id: 'toolu_9',
+        kind: 'tool',
+        tool: { tool_use_id: 'toolu_9', name: 'Grep', agent_id: 'toolu_task' },
+      },
+    ]);
+    expect(turn.blocks.map((b) => b.agent_id)).toEqual([
+      null,
+      'toolu_task',
+      'toolu_task',
+    ]);
+  });
+
   it('resolves the latest TodoWrite in one pass', () => {
     const turn = makeTurnBlocks();
     applyReplayBlocks(turn, [

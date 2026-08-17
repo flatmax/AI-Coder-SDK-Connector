@@ -386,6 +386,23 @@ function rowKey(payload) {
   return null;
 }
 
+/**
+ * The row a `subagentEvent` payload belongs to, after it has been folded in.
+ *
+ * `applySubagentEvent` answers "did anything change?", which is all a repaint
+ * needs; a caller that has to *act* on the subagent — open its tab, label it,
+ * decide its LED — needs the accumulated row rather than the one event's
+ * fields. Split rather than returned from the fold because the row object is
+ * replaced on every event (patched into a fresh object), so the only safe way
+ * to hold one is to look it up again.
+ */
+export function subagentRowFor(turn, payload) {
+  if (!turn || !payload || typeof payload !== 'object') return null;
+  const key = rowKey(payload);
+  if (!key) return null;
+  return turn.subagents.get(key) || null;
+}
+
 // ---------------------------------------------------------------
 // Reconnect replay
 // ---------------------------------------------------------------
@@ -451,7 +468,10 @@ export function applyReplayBlocks(turn, blocks) {
       seq: Number.isFinite(raw.seq) ? raw.seq : 0,
       content: typeof raw.content === 'string' ? raw.content : '',
       done: false,
-      agent_id: null,
+      // A subagent narrates in text, not just tool calls, so the scope has to
+      // survive replay: it is what puts the text under the subagent's row and
+      // in the subagent's own tab rather than at turn level.
+      agent_id: normalizeAgentId(raw.agent_id),
     });
   }
   return turn.blocks.length > 0;

@@ -56,7 +56,13 @@ import {
   markAwaitingPermission,
   resetTurnBlocks,
   stageChunk,
+  subagentRowFor,
 } from './blocks.js';
+import {
+  mirrorSubagentBlocks,
+  settleLiveSubagentTabs,
+  syncSubagentTab,
+} from './subagent-tabs.js';
 import { findTabForRequest, spawnAgentTabs } from './tabs.js';
 
 // ---------------------------------------------------------------
@@ -257,11 +263,18 @@ function liveOwner(panel, requestId) {
  * `requestUpdate()` is the correct signal: it schedules unconditionally rather
  * than diffing a property that never changed identity.
  *
- * Only the active tab repaints. A background tab's blocks are still updated;
- * they render when the user switches to it.
+ * Every fold also mirrors the turn's subagent blocks into their own tabs
+ * (`subagent-tabs.js`), because a block belongs to two places at once: the row
+ * inside this turn and the feed the subagent has its own tab for.
+ *
+ * Only the active tab repaints — and the active tab may be a subagent's rather
+ * than the one that owns the request, which is why the mirror pass reports
+ * whether it changed anything on screen. A background tab's blocks are still
+ * updated; they render when the user switches to it.
  */
 function markBlocksDirty(panel, owner) {
-  if (owner.active) panel.requestUpdate();
+  const mirrored = mirrorSubagentBlocks(panel, owner.tab);
+  if (owner.active || mirrored) panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
@@ -328,6 +341,10 @@ export function scheduleFlush(panel) {
     for (const tab of panel._tabs.values()) {
       if (!drainChunks(tab.turnBlocks)) continue;
       if (tab === activeTab) activeChanged = true;
+      // A drained chunk can be the first one for a block produced inside a
+      // subagent, so the mirror runs on the same frame — otherwise the
+      // subagent's tab would sit on "Working…" until the next tool event.
+      if (mirrorSubagentBlocks(panel, tab)) activeChanged = true;
     }
     if (activeChanged) panel.requestUpdate();
   });
@@ -453,14 +470,32 @@ export function onSessionStarted(panel, event) {
  * Folds into the row for its task. Rows are patched, never replaced — fields
  * arrive spread across four message types and a later event with fewer fields
  * must not blank what an earlier one supplied.
+ *
+ * The row is only half of it. Every event also syncs the subagent's own tab in
+ * the strip (`subagent-tabs.js`), so a subagent doing minutes of work has a
+ * feed of its own instead of interleaving with the turn the user is reading —
+ * specs5/5-webapp/subagent-browser.md § Tab Strip. Both views come from this
+ * one event and the same block records; the row is the evidence the delegation
+ * happened, the tab is where its work is legible.
  */
 export function onSubagentEvent(panel, event) {
   const { requestId, data } = event.detail || {};
   const owner = liveOwner(panel, requestId);
   if (!owner || !data) return;
-  if (applySubagentEvent(owner.tab.turnBlocks, data)) {
-    markBlocksDirty(panel, owner);
-  }
+  const turn = owner.tab.turnBlocks;
+  if (!applySubagentEvent(turn, data)) return;
+  const synced = syncSubagentTab(
+    panel,
+    requestId,
+    subagentRowFor(turn, data),
+    owner.tab,
+  );
+  markBlocksDirty(panel, owner);
+  if (!synced) return;
+  // The strip, the LED row and the tab's own label all just changed, and none
+  // of them is a reactive property — `_tabs` is a Map mutated in place.
+  if (synced.created) startStreamTimerTick(panel);
+  panel.requestUpdate();
 }
 
 // ---------------------------------------------------------------
@@ -581,10 +616,13 @@ export function onHookEvent(panel, event) {
 /**
  * Handle an `agents-spawned` window event.
  *
- * Dead on the Claude Code path: nothing emits `agentsSpawned`, because the
- * engine's subagents are internal to a turn and surface as rows rather than
- * tabs. Kept wired until the native engine is deleted in phase 3, so the
- * phase-2 diff is about the new path rather than about removing the old one.
+ * Dead on the Claude Code path: nothing emits `agentsSpawned`. The engine's
+ * subagents are internal to a turn and announce themselves as `subagentEvent`,
+ * which builds their tabs through `subagent-tabs.js` — a different producer for
+ * a strip this one used to fill, and the reason it stays dead rather than being
+ * repointed: an `agentsSpawned` tab is writable, and a subagent's is not.
+ * Kept wired until the native engine is deleted in phase 3, so the phase-2 diff
+ * is about the new path rather than about removing the old one.
  *
  * Payload: ``{turn_id, parent_request_id, agent_blocks}`` where
  * ``agent_blocks`` is ``[{id, task, agent_idx}, ...]``.
@@ -632,6 +670,10 @@ export function onStreamComplete(panel, event) {
     // Drain anything staged but not yet applied: the engine can send the
     // result immediately after its last chunk, before the rAF fires.
     drainChunks(ownerTab.turnBlocks);
+    // Last chance to mirror: `resetTurnBlocks` below empties the list these
+    // blocks are read from, and a subagent's final tool result can arrive on
+    // the same tick as the turn's result.
+    mirrorSubagentBlocks(panel, ownerTab);
 
     const turn = ownerTab.turnBlocks;
     const blocks = freezeBlocks(turn);
@@ -678,6 +720,17 @@ export function onStreamComplete(panel, event) {
     if (result?.deferred_tool_use) emitDeferredToolToast(panel, result);
 
     ownerTab.lastEditOutcome = computeTurnOutcome(result, files);
+    // Every subagent tab still live settles with the turn. A subagent cannot
+    // outlive the turn that spawned it, so one still marked live here is one
+    // whose terminal event never arrived — its outcome is *unknown*, and the
+    // spec is explicit that it must never be reported as completed
+    // (specs5/5-webapp/subagent-browser.md § Status LEDs). The tabs stay in
+    // the strip for the rest of the turn; the next send clears them.
+    settleLiveSubagentTabs(
+      panel,
+      requestId,
+      ownerTab.lastEditOutcome.status === 'error',
+    );
     resetTurnBlocks(turn);
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';

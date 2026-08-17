@@ -145,6 +145,11 @@ class ActiveTurn:
             "session_id": self.translator.session_id,
             "started_at": self.started_at,
             "blocks": self.translator.rendered_blocks(),
+            # The subagents this turn started, so a browser that refreshed
+            # while one was running rebuilds its tab instead of showing the
+            # feed's blocks with nowhere to put them
+            # (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
+            "subagents": self.translator.rendered_subagents(),
         }
 
 

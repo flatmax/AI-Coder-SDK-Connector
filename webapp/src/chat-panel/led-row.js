@@ -18,10 +18,12 @@
 // Three exports:
 //
 //   - `getLedState(tab)` — pure function returning
-//     'cyan' | 'green' | 'red'. Streaming wins over
-//     completion state (a tab that just started a new
+//     'cyan' | 'green' | 'red' | 'amber'. Streaming wins
+//     over completion state (a tab that just started a new
 //     stream after a previous failure should flash
-//     cyan, not stay red). Pinned in tests.
+//     cyan, not stay red). Amber belongs to subagent
+//     tabs alone — a stopped subagent, or one whose
+//     outcome the turn never reported. Pinned in tests.
 //
 //   - `formatLedTooltip(agentId, mode, state, outcome)`
 //     — pure tooltip-string builder, three forms per
@@ -33,6 +35,7 @@
 //     ``tabs.js``.
 
 import { html } from 'lit';
+import { subagentLedState, subagentLedTooltip } from './subagent-tabs.js';
 import { onTabClick } from './tabs.js';
 
 /**
@@ -78,10 +81,18 @@ function scrollTabIntoView(panel, tabId) {
  * completed (defensive — agentsSpawned populates
  * `streaming = true` synchronously) defaults to cyan.
  *
+ * A live subagent's tab is read from its own row instead: it has no
+ * `lastEditOutcome` (nothing here completes *its* turn) and it needs a fourth
+ * state, amber, for the outcomes that are neither success nor fault — stopped,
+ * killed, or a subagent whose outcome the turn never reported. See
+ * `subagentLedState` in subagent-tabs.js, and specs5/5-webapp/subagent-
+ * browser.md § Status LEDs.
+ *
  * Pure function. Caller is responsible for handling
  * `null` / `undefined` tab argument.
  */
 export function getLedState(tab) {
+  if (tab.subagent) return subagentLedState(tab.subagent);
   if (tab.streaming) return 'cyan';
   const outcome = tab.lastEditOutcome;
   if (outcome && outcome.status === 'error') return 'red';
@@ -172,9 +183,12 @@ export function renderLedRow(panel) {
         // the literal string "main" is an internal
         // identifier rather than user-facing copy.
         const label = isMain ? 'Main' : tabId;
-        const tooltip = formatLedTooltip(
-          label, mode, state, tab.lastEditOutcome,
-        );
+        // A subagent's dot names what it was asked to do and what it did with
+        // it — the running tool, the tokens it spent, or why it has no
+        // outcome. An SDK agent id in a tooltip tells the reader nothing.
+        const tooltip = tab.subagent
+          ? subagentLedTooltip(tab.subagent, state)
+          : formatLedTooltip(label, mode, state, tab.lastEditOutcome);
         const active = tabId === panel._activeTabId;
         const classes = [
           'led-dot',

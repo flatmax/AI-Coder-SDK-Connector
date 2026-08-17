@@ -67,7 +67,7 @@ The transport never assumes a singleton stream — every event carries the exact
 ## Thinking Regions
 
 - `thinkingChunk` events render into a collapsed region above the text they precede, labelled `Thinking…` while chunks are arriving and `Thinking` once the block reports `done`
-- **No token count.** An earlier draft asked for one. No payload carries per-block thinking tokens: `thinkingChunk` is `{block_id, seq, content, done}` and the turn's `usage` is a single total covering text, tools and thinking together. The number would have to be invented — a character count dressed up as tokens is worse than no number, so the label carries none
+- **No token count.** An earlier draft asked for one. No payload carries per-block thinking tokens: `thinkingChunk` is `{block_id, seq, content, done, agent_id}` and the turn's `usage` is a single total covering text, tools and thinking together. The number would have to be invented — a character count dressed up as tokens is worse than no number, so the label carries none
 - Expanded state is per-block and remembered for the session; a user who expands one does not get every subsequent one expanded
 - The configured thinking display setting (`summarized`, `omitted`) governs what arrives at all. When it is `omitted`, no region is drawn — not an empty one
 - Thinking content is never included in copy-message or read-aloud output; it is the agent's scratch space, not its answer

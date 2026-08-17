@@ -94,6 +94,37 @@ export function turnTokens(usage) {
 }
 
 /**
+ * What one subagent spent, from the SDK's `TaskUsage`.
+ *
+ * A separate reader because `TaskUsage` shares no field names with the
+ * per-model counters above — it is `{total_tokens, tool_uses, duration_ms}`,
+ * already summed by the CLI — so `turnTokens` returns 0 for every one of them.
+ * That is how the subagent row's "N tok" chip came to be permanently absent
+ * and the completed-LED tooltip had no counters to name.
+ *
+ * `tokens` falls back to `turnTokens` so a payload carrying per-model counters
+ * instead (a transcript listing, a future shape) still reports something.
+ * Zero means "not reported": callers drop the figure rather than print it,
+ * because "0 tokens" is a claim about a subagent that demonstrably ran.
+ *
+ * @param {Object} usage  a `TaskUsage`-shaped payload
+ * @returns {{tokens: number, toolUses: number, durationMs: number}}
+ */
+export function taskUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return { tokens: 0, toolUses: 0, durationMs: 0 };
+  }
+  const total = _num(usage.total_tokens) ?? _num(usage.totalTokens);
+  const uses = _num(usage.tool_uses) ?? _num(usage.toolUses);
+  const duration = _num(usage.duration_ms) ?? _num(usage.durationMs);
+  return {
+    tokens: total !== null && total > 0 ? total : turnTokens(usage),
+    toolUses: uses !== null && uses > 0 ? uses : 0,
+    durationMs: duration !== null && duration > 0 ? duration : 0,
+  };
+}
+
+/**
  * What this turn cost, and how much faith to put in it.
  *
  * @param {Object} result  a `streamComplete` payload

@@ -66,6 +66,44 @@ _FILE_WRITING_TOOLS = {
     "NotebookEdit": "notebook_path",
 }
 
+# Which id names a subagent row, in the order to try. Same precedence the
+# browser uses (`rowKey` in webapp/src/chat-panel/blocks.js) so a replayed
+# row lands on the same key as the live events that follow it: `task_id` is
+# the only id every Task* message carries, `agent_id` names the transcript,
+# and the spawning `Task` call is the last resort.
+_SUBAGENT_KEY_FIELDS = ("task_id", "agent_id", "tool_use_id")
+
+# Task types that are tasks but not subagents, so their Task* messages are
+# dropped instead of becoming rows and tabs.
+#
+# The CLI models a long-running `Bash` command as a task of its own —
+# `task_type="local_bash"`, one per command past its backgrounding threshold —
+# and those tasks arrive through the same four `Task*` messages a subagent
+# does. Observed live on 2026-08-17: a `sleep 9` in the main conversation
+# emitted `started` (with the command as its description) then `notification`,
+# and one turn that delegated four subagents produced sixteen of these. The SDK
+# types the field `str | None` and documents no vocabulary, so this set is an
+# observation rather than a contract — which is why the check latches on the
+# task id below: `TaskProgressMessage` has no `task_type` field at all, so only
+# the first message of a bash task says what it is.
+_NON_SUBAGENT_TASK_TYPES = frozenset({"local_bash"})
+
+# The fields a subagent row accumulates across the four Task* messages.
+# `type` is deliberately absent: it names the *event*, and a snapshot row
+# describes the task rather than the last thing that happened to it.
+_SUBAGENT_FIELDS = (
+    "task_id",
+    "agent_id",
+    "tool_use_id",
+    "description",
+    "task_type",
+    "status",
+    "last_tool_name",
+    "usage",
+    "summary",
+    "output_file",
+)
+
 
 # ---------------------------------------------------------------------------
 # Events
@@ -104,6 +142,13 @@ class _Block:
     # The tool card, for kind == "tool". Held here so a reconnecting
     # client can re-render the card from the block list alone.
     tool: dict[str, Any] | None = None
+    # The subagent that produced this block — the SDK's
+    # `parent_tool_use_id`, i.e. the `Task` call that spawned it. None for
+    # the main scope. Held on the block, not just on the tool card, because
+    # a subagent narrates in text too and that text has to be attributable:
+    # it renders under the subagent's row and in the subagent's own tab
+    # (specs5/5-webapp/chat.md § Streaming State Keyed by Request ID).
+    agent_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The ``RenderedBlock`` replay shape for a reconnecting client."""
@@ -113,6 +158,7 @@ class _Block:
             "seq": max(self.seq, 0),
             "content": self.content,
             "tool": self.tool,
+            "agent_id": self.agent_id,
         }
 
 
@@ -178,6 +224,15 @@ class TurnTranslator:
         self._streaming_message: dict[str, str] = {}
 
         self._tools: dict[str, _ToolCall] = {}
+        # task key → the accumulated row for one subagent. Kept for the same
+        # reason as the blocks: a browser that refreshes mid-turn has to find
+        # the tab strip the way it left it, and a subagent running at that
+        # moment is invisible until the turn ends otherwise
+        # (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
+        self._subagents: dict[str, dict[str, Any]] = {}
+        # task keys of tasks that are not subagents, latched on the one message
+        # that says so. See _NON_SUBAGENT_TASK_TYPES.
+        self._non_subagent_tasks: set[str] = set()
         # tool_use_ids a permission dialog was shown for. Written by
         # note_permission_prompt, read when the card is built.
         self._gated: set[str] = set()
@@ -230,6 +285,25 @@ class TurnTranslator:
     def rendered_blocks(self) -> list[dict[str, Any]]:
         """Replay payload for a client that reconnects mid-turn."""
         return [b.to_dict() for b in self._blocks.values()]
+
+    def rendered_subagents(self) -> list[dict[str, Any]]:
+        """The turn's subagent rows, for a client that reconnects mid-turn.
+
+        Each entry is the same shape a live ``subagentEvent`` carries, so
+        the browser folds it in through the same path and tab creation stays
+        idempotent. Two fields beyond what the spec's snapshot lists:
+
+        ``terminal``
+            The engine's own verdict that the task ended, so the browser
+            need not duplicate the SDK's status vocabulary — which grows —
+            to decide whether a feed is still live.
+        ``tool_use_id``
+            The ``Task`` call that spawned the subagent. Replayed blocks
+            carry it as their ``agent_id``, and it is what joins them to
+            this row; without it the reconnected tab would be created empty
+            beside blocks it could not claim.
+        """
+        return [dict(row) for row in self._subagents.values()]
 
     def response_text(self) -> str:
         """Assistant text for this turn, blocks concatenated in order."""
@@ -416,33 +490,94 @@ class TurnTranslator:
         # hoists it to .status but only when present in the patch.
         status = getattr(message, "status", None) or patch.get("status")
         usage = getattr(message, "usage", None)
-        return [
-            Event(
-                "subagentEvent",
-                {
-                    "type": kind,
-                    "task_id": getattr(message, "task_id", None),
-                    # A task's agent_id is the transcript key; the CLI
-                    # reports it in the payload rather than the dataclass.
-                    "agent_id": data.get("agent_id") or patch.get("agent_id"),
-                    "tool_use_id": getattr(message, "tool_use_id", None),
-                    "description": getattr(message, "description", None)
-                    or patch.get("description")
-                    or "",
-                    "task_type": getattr(message, "task_type", None),
-                    "status": status,
-                    "last_tool_name": getattr(message, "last_tool_name", None),
-                    "usage": dict(usage) if usage else None,
-                    "summary": getattr(message, "summary", None),
-                    "output_file": getattr(message, "output_file", None),
-                    # A task can reach a terminal status via `updated`
-                    # with no `notification` at all — stop_task() reports
-                    # status="killed" that way — so the tab's activity LED
-                    # keys on this flag from either message.
-                    "terminal": bool(status) and status in TERMINAL_TASK_STATUSES,
-                },
-            )
-        ]
+        payload = {
+            "type": kind,
+            "task_id": getattr(message, "task_id", None),
+            # A task's agent_id is the transcript key; the CLI
+            # reports it in the payload rather than the dataclass.
+            "agent_id": data.get("agent_id") or patch.get("agent_id"),
+            "tool_use_id": getattr(message, "tool_use_id", None),
+            "description": getattr(message, "description", None)
+            or patch.get("description")
+            or "",
+            "task_type": getattr(message, "task_type", None),
+            "status": status,
+            "last_tool_name": getattr(message, "last_tool_name", None),
+            "usage": dict(usage) if usage else None,
+            "summary": getattr(message, "summary", None),
+            "output_file": getattr(message, "output_file", None),
+            # A task can reach a terminal status via `updated`
+            # with no `notification` at all — stop_task() reports
+            # status="killed" that way — so the tab's activity LED
+            # keys on this flag from either message.
+            "terminal": bool(status) and status in TERMINAL_TASK_STATUSES,
+        }
+        if self._is_not_a_subagent(payload):
+            return []
+        self._record_subagent(payload)
+        return [Event("subagentEvent", payload)]
+
+    @staticmethod
+    def _task_key(payload: dict[str, Any]) -> str | None:
+        """The id a task is filed under, by ``_SUBAGENT_KEY_FIELDS`` precedence."""
+        return next(
+            (
+                payload[name]
+                for name in _SUBAGENT_KEY_FIELDS
+                if isinstance(payload.get(name), str) and payload[name]
+            ),
+            None,
+        )
+
+    def _is_not_a_subagent(self, payload: dict[str, Any]) -> bool:
+        """Whether this task is one of the kinds that is not a subagent.
+
+        A slow `Bash` command is a task, and every event about it looks like a
+        subagent's until you read ``task_type`` (see
+        ``_NON_SUBAGENT_TASK_TYPES``). Dropping them here rather than in the
+        browser keeps one rule in one place: the row in the turn, the tab in the
+        strip, its status LED, the reconnect snapshot and the Context tab's
+        subagent inventory all read what this method lets through.
+
+        The id is remembered because only the first message carries the type —
+        a bash task's `progress` and `notification` events say nothing about
+        what they belong to, and a row created by one of those would be a
+        subagent tab for half a shell command.
+        """
+        key = self._task_key(payload)
+        if payload.get("task_type") in _NON_SUBAGENT_TASK_TYPES:
+            if key is not None:
+                self._non_subagent_tasks.add(key)
+            return True
+        return key is not None and key in self._non_subagent_tasks
+
+    def _record_subagent(self, payload: dict[str, Any]) -> None:
+        """Fold one ``subagentEvent`` payload into the turn's row for that task.
+
+        The same accumulation the browser does in ``applySubagentEvent``, for
+        the same reason and by the same rules: each of the four ``Task*``
+        messages reports only the fields it knows about, so a later event must
+        patch the row rather than replace it — an ``updated`` carrying just a
+        status would otherwise blank the description the tab is labelled with.
+        Only truthy values patch, and ``terminal`` latches once set: a task
+        that ended stays ended even if a trailing message omits the status.
+        """
+        key = self._task_key(payload)
+        if key is None:
+            return
+        row = self._subagents.get(key)
+        if row is None:
+            row = {"key": key}
+            self._subagents[key] = row
+        for name in _SUBAGENT_FIELDS:
+            value = payload.get(name)
+            if value:
+                row[name] = value
+        row.setdefault("description", "")
+        if payload.get("terminal"):
+            row["terminal"] = True
+        else:
+            row.setdefault("terminal", False)
 
     def _rate_limit(self, message: Any) -> list[Event]:
         info = getattr(message, "rate_limit_info", None)
@@ -647,7 +782,7 @@ class TurnTranslator:
         key = (scope, self._streaming_message.get(scope, ""), index)
         block_id = self._partial_blocks.get(key)
         if block_id is None:
-            block = self._open_block(kind)
+            block = self._open_block(kind, scope)
             self._partial_blocks[key] = block.block_id
             return block
         return self._blocks[block_id]
@@ -669,7 +804,7 @@ class TurnTranslator:
         if block_id is None:
             # No partials for this block — either streaming is off or the
             # block never produced a delta. Open it now.
-            block = self._open_block(kind)
+            block = self._open_block(kind, scope)
             self._partial_blocks[key] = block.block_id
         else:
             block = self._blocks[block_id]
@@ -704,9 +839,13 @@ class TurnTranslator:
             f"```json\n// unrecognised content block: {kind_name}\n{body}\n```",
         )
 
-    def _open_block(self, kind: str) -> _Block:
+    def _open_block(self, kind: str, agent_id: str | None = None) -> _Block:
         """Assign a new block identity: ``{request_id}:b{n}``."""
-        block = _Block(block_id=f"{self.request_id}:b{self._block_counter}", kind=kind)
+        block = _Block(
+            block_id=f"{self.request_id}:b{self._block_counter}",
+            kind=kind,
+            agent_id=agent_id or None,
+        )
         self._block_counter += 1
         self._blocks[block.block_id] = block
         return block
@@ -721,6 +860,10 @@ class TurnTranslator:
                 "seq": block.seq,
                 "content": block.content,
                 "done": block.done,
+                # Which scope said this. Null for the main conversation; a
+                # `Task` call's id when a subagent is speaking, which is what
+                # routes the text under its row and into its tab.
+                "agent_id": block.agent_id,
             },
         )
 
@@ -767,7 +910,11 @@ class TurnTranslator:
         # because the result references it — no correlation table needed
         # on either side.
         self._blocks[tool_use_id] = _Block(
-            block_id=tool_use_id, kind="tool", done=False, tool=card
+            block_id=tool_use_id,
+            kind="tool",
+            done=False,
+            tool=card,
+            agent_id=scope or None,
         )
         return [Event("toolUse", card)]
 

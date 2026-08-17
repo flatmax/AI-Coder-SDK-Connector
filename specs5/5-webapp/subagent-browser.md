@@ -36,11 +36,26 @@ main scope, tagged with its `agent_id` (see [permission-dialog.md](permission-di
 The chat panel keeps a tab strip along its top edge:
 
 - **Main** — always present. The user↔agent conversation, with the full input surface.
-- **One tab per subagent** — appears when a `subagentEvent` of type `started` arrives. Labelled with the subagent's `task_type` and a truncated `description` — "explore: find auth call sites".
+- **One tab per subagent** — appears when a `subagentEvent` of type `started` arrives. Labelled with an ordinal and one keyword — `1 headings`, `2 test-files`.
 
-Tab labels carry the description because SDK agent IDs are opaque and mean nothing to a reader. When the
-strip exceeds the viewport width it scrolls horizontally, with a menu affordance listing all tabs by
-description for direct access.
+This spec originally said the label was the `task_type` and a truncated `description` — "explore: find
+auth call sites". The first live fan-out retired that: the real `task_type` is `local_agent` for every
+subagent, spending 13 identical characters to distinguish nothing, and the event's `description` is the
+SDK's *live activity* string, so a tab ended up named after whatever its subagent was doing when its last
+event landed. Four such labels filled the strip and none of them said what the user had asked for.
+
+So the label is an **ordinal plus one keyword**, and the sentence lives in the tooltip and in the feed's
+opening line, which are the places with room for it. The ordinal is assigned when the tab is created and
+never recomputed: numbering by strip position would rename tabs under the user's cursor as earlier ones
+close. The words come from the spawning `Task` call's `input.description` and `input.subagent_type` — what
+the delegation actually asked for — with the live activity string as the fallback, and the upgrade to the
+real description latches so a later activity string cannot undo it. The keyword itself is a heuristic:
+the last word of the description, since English puts the object last, reaching back past stopwords when
+that word identifies nothing on its own ("check the tests" → `check-tests`), paths reduced to their
+basename, and 14 characters at most — the whole point being the visibility of the *other* tabs.
+
+When the strip exceeds the viewport width it scrolls horizontally, with a menu affordance listing all tabs
+by description for direct access.
 
 Each tab carries two inline affordances, invisible by default and fading in on hover / active / focus:
 
@@ -70,8 +85,9 @@ The old spec's `new_session`-dismisses-the-team rule, its asymmetry argument abo
 
 A refresh rebuilds the chat panel without disturbing the engine. Rehydration is a single read:
 
-- `get_current_state` reports the active turn's subagents in its `active_streams` entry — `{agent_id, task_id, description, task_type, status, last_tool_name, usage}` per subagent. The panel recreates the tabs from that list. Tab creation is idempotent, so a later `subagentEvent` for the same `agent_id` updates rather than duplicates.
-- Each tab's content is fetched with `get_subagent_transcript(agent_id)` when the user opens it, not eagerly. A turn that fanned out to twelve subagents should not cost twelve transcript reads on reconnect.
+- `get_current_state` reports the active turn's subagents in its `active_streams` entry — `{agent_id, task_id, description, task_type, status, last_tool_name, usage}` per subagent. The panel recreates the tabs from that list. Tab creation is idempotent, so a later `subagentEvent` for the same `agent_id` updates rather than duplicates. Each entry also carries `terminal` (the engine's own verdict that the task ended, so the browser need not track the SDK's growing status vocabulary) and `tool_use_id` (the spawning `Task` call, which the replayed blocks name as their `agent_id` — without it a rebuilt tab cannot claim its own feed).
+- A **live** tab needs no read at all: the snapshot's block list is the whole turn, subagent blocks included, so the same mirroring that feeds the tab live refills it on replay. Reading the transcript would fetch a second copy of what is already on screen.
+- A tab read from **disk** fetches with `get_subagent_transcript(agent_id)` when the user opens it, not eagerly. A turn that fanned out to twelve subagents should not cost twelve transcript reads on reconnect.
 - Live status resumes from subsequent `subagentEvent` messages. A subagent that reached a terminal status while the browser was away shows as terminal on reconnect, because status comes from the snapshot rather than from having watched the event go by.
 
 What is lost across refresh: per-tab scroll position, and the in-flight tail of any subagent whose
@@ -228,6 +244,9 @@ records carry.
 - A tab settles on terminal status from either `updated` or `notification`, whichever arrives, and never waits for both.
 - A live subagent at turn end is shown as status-unknown, never as completed.
 - Tool cards with a non-null `agent_id` render in both the subagent's tab and its row in Main, from one card object.
+- A live tab's content is the parent turn's blocks filtered to that `agent_id`, mirrored by reference — not a transcript read and not a copy. Text and thinking are attributed the same way tool cards are, so a subagent's narration lands in its tab and not in Main's.
+- A subagent tab never claims a request ID. Routing selects the turn by request ID first; a second tab answering to the parent's ID would take the main conversation's chunks.
+- A tab rebuilt on reconnect never takes focus. Focus is a choice, and nobody made it; rehydration restores the tab that was active, or Main if it is gone.
 - The LED row always carries one LED for Main plus one per subagent tab currently in the strip; the Main LED is permanent for the panel's lifetime.
 - LED state is a pure function of the latest `subagentEvent` for that subagent plus the parent turn's completion. No separate state machine, no acknowledgement gesture.
 - Clicking a LED activates its tab and scrolls the strip to reveal it.

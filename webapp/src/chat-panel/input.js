@@ -51,6 +51,7 @@ import {
   startStreamTimerTick,
 } from './streaming.js';
 import { setSearchMode } from './search.js';
+import { clearSubagentTabs } from './subagent-tabs.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import { speechPlayer } from '../speech-player.js';
 
@@ -209,6 +210,14 @@ export async function send(panel) {
   // Reset the tab we're sending from, not the whole panel: a background
   // tab's settled turn is history, not staleness.
   if (activeTab) resetTurnBlocks(activeTab.turnBlocks);
+  // Last turn's subagent tabs leave the strip with its blocks, for the same
+  // reason: they are feeds of the turn that just ended, and a strip that
+  // accumulated every turn's delegations would be the user's to clean up by
+  // hand. Their transcripts stay reachable through "View subagents" on the
+  // settled turn (specs5/5-webapp/subagent-browser.md § Tab Lifetime). Safe
+  // here because the read-only gate above has already established that the
+  // tab we are sending from is not one of them.
+  clearSubagentTabs(panel);
   // Stamp the run-timer start the instant the prompt is
   // sent, and kick the panel-level ticker so the live
   // elapsed counter on the streaming card starts moving.
