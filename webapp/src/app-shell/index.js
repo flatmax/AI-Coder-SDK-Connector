@@ -252,6 +252,11 @@ export class AppShell extends JRPCClient {
     // Flipped to 'svg' on navigate-file to an .svg path.
     this._activeViewer = 'diff';
     this._repoName = '';
+    // The repo's absolute root, from get_current_state. Held so
+    // navigate-file can relativise the absolute paths the engine
+    // reports for tool calls — see repo-path.js. Empty until the
+    // first snapshot lands, which leaves such a path as it was.
+    this._repoRoot = '';
     this._initComplete = false;
     // Doc Convert availability — flipped to true when the
     // backend's get_current_state reports markitdown is

@@ -187,6 +187,97 @@ describe('AppShell viewer routing and navigation', () => {
       expect(diff.hasOpenFiles).toBe(false);
     });
 
+    it('opens an absolute path the engine reported as a repo path', async () => {
+      // Claude Code's file tools take absolute paths, so a tool card's file
+      // chip carries one. Every Repo RPC takes a repo-relative path and
+      // refuses an absolute one, which is what a chip click used to earn.
+      const shell = mountShell();
+      shell._repoRoot = '/home/dev/my-repo';
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '/home/dev/my-repo/tests/test_thing.py' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff._file.path).toBe('tests/test_thing.py');
+    });
+
+    it('persists and registers the relative path, not the absolute one', async () => {
+      // The absolute path used to be what got remembered as the last-open
+      // file and handed to the nav grid, so one bad click survived a reload.
+      const shell = mountShell();
+      shell._repoRoot = '/home/dev/my-repo';
+      await settle(shell);
+      const saved = vi.spyOn(shell, '_saveLastOpenFile');
+      const nav = { openFile: vi.fn() };
+      vi.spyOn(shell, '_getFileNav').mockReturnValue(nav);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '/home/dev/my-repo/src/main.js' },
+        }),
+      );
+      await settle(shell);
+      expect(saved).toHaveBeenCalledWith('src/main.js');
+      expect(nav.openFile).toHaveBeenCalledWith('src/main.js');
+    });
+
+    it('leaves a path outside the repo as it found it', async () => {
+      // It has no repo-relative name. Rewriting it would ask for a
+      // different file; the backend refusing it is the correct outcome.
+      const shell = mountShell();
+      shell._repoRoot = '/home/dev/my-repo';
+      await settle(shell);
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '/etc/hosts.py' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff._file.path).toBe('/etc/hosts.py');
+    });
+
+    it('takes the root from the state snapshot', async () => {
+      // The whole chain the fix depends on: the backend sends the absolute
+      // root once, the shell keeps it, and the next chip click is openable.
+      const shell = mountShell();
+      shell.call = {
+        'ClaudeCodeService.get_current_state': async () => ({
+          repo_name: 'my-repo',
+          repo_root: '/home/dev/my-repo',
+        }),
+      };
+      await shell._fetchCurrentState();
+      await settle(shell);
+      expect(shell._repoRoot).toBe('/home/dev/my-repo');
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '/home/dev/my-repo/src/main.js' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff._file.path).toBe('src/main.js');
+    });
+
+    it('leaves an absolute path alone before the root is known', async () => {
+      // No snapshot yet: unchanged is the old behaviour, and measuring
+      // against an empty root would produce a wrong path.
+      const shell = mountShell();
+      await settle(shell);
+      expect(shell._repoRoot).toBe('');
+      window.dispatchEvent(
+        new CustomEvent('navigate-file', {
+          detail: { path: '/home/dev/my-repo/a.py' },
+        }),
+      );
+      await settle(shell);
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      expect(diff._file.path).toBe('/home/dev/my-repo/a.py');
+    });
+
     it('forwards line and searchText to the viewer', async () => {
       // The stub accepts these and ignores them, but the
       // shell must pass them through so Phase 3.1's real

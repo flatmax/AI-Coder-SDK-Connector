@@ -10,6 +10,7 @@
 //   - specs4/5-webapp/svg-viewer.md  (SVG ↔ text-diff swap)
 //   - specs4/5-webapp/file-navigation.md (navigate-file flow)
 
+import { toRepoPath } from '../repo-path.js';
 import { viewerForPath } from '../viewer-routing.js';
 import { rememberDiffViewport } from './viewport.js';
 
@@ -27,7 +28,15 @@ import { rememberDiffViewport } from './viewport.js';
  */
 export function onNavigateFile(host, event) {
   const detail = event.detail || {};
-  const path = detail.path;
+  // Absolute in, repo-relative out. Tool cards and the context tab carry the
+  // paths the engine reports, which are absolute because Claude Code's file
+  // tools require that; the viewers ask `Repo.get_file_content`, which takes
+  // repo-relative paths and refuses absolute ones. Normalising here rather
+  // than at each dispatcher covers every one of them at once, and covers the
+  // two side effects below as well — an absolute path used to be what got
+  // persisted as the last-open file and registered with the nav grid, so the
+  // failure survived a reload.
+  const path = toRepoPath(detail.path, host._repoRoot);
   if (typeof path !== 'string' || !path) return;
   let target = viewerForPath(path);
   if (!target) return;

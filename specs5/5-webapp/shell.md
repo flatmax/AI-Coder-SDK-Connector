@@ -67,6 +67,7 @@ All dispatch to window-level custom events that the relevant child components li
 - On setup-done, fetch a full current-state snapshot via a single RPC call
 - Dispatch a state-loaded event with the full state as detail
 - Browser tab title updated from the repo name in state (no prefix, no branding)
+- The snapshot's `repo_root` — the repo's absolute path — is kept for path normalisation (see [Viewer Background](#viewer-background)). It is the only absolute path the browser is given, and it is given it so it can stop sending them back. Guarded rather than defaulted: a snapshot without it leaves paths untouched instead of measuring them against an empty root
 - Files tab restores messages, hinted files, active-stream blocks, permission posture, and any pending permission requests
 - File picker sync deferred so the picker has loaded its tree before selection is applied
 - Chat panel detects bulk message load and triggers scroll-to-bottom
@@ -114,6 +115,8 @@ permission request has stalled the turn.
 - Only one is visible at a time — CSS class toggle with a short opacity transition
 - Routing by file extension determines which viewer receives each navigate-file event
 - Both viewers keep independent tab state; switching between file types just toggles the layer
+- **Every `navigate-file` path is normalised against `repo_root` before anything else happens.** Claude Code's file tools take absolute paths, so a tool card's file chip, a turn footer's "files modified" list and the context tab all carry absolute paths, while every `Repo` method takes a repo-relative one and rejects an absolute path outright (it resolves nothing, because resolving would be a way around the containment check). One normalisation here rather than one per dispatcher, and it covers the two side effects as well: the path that gets persisted as last-open and registered with the navigation grid is the relative one, so a bad path cannot survive a reload
+- A path outside the repo root is passed through unchanged rather than rewritten. It has no repo-relative name, and the backend refusing it is the correct outcome — a `../..` walk would ask for a different file
 
 ## Dialog Container
 

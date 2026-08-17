@@ -175,7 +175,7 @@ protocol-specific need.
 
 Replaces the edit summary banner. Rendered at the end of the assistant turn, not the top:
 
-- Files modified — the union of every tool result's `files_modified`, deduplicated, each clickable through to the diff viewer. This is the answer to "what did it just do to my repo?" and it is the footer's most important line
+- Files modified — the union of every tool result's `files_modified`, deduplicated, each clickable through to the diff viewer. This is the answer to "what did it just do to my repo?" and it is the footer's most important line. Those paths are absolute — the CLI's file tools require that, and the field reports what the tool was given — so the click relies on the shell relativising them before the viewer asks for one (see [shell.md § Viewer Background](shell.md#viewer-background))
 - Tool calls, and how many needed a permission prompt
 - Duration, engine-internal turn count
 - Usage — per-model token counts. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))

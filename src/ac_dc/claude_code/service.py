@@ -754,6 +754,18 @@ class ClaudeCodeService:
         (``specs5/plan/inventory.md`` § Frontend — KEEP unchanged), and this
         snapshot is the only one the shell fetches once the chat path moves
         off ``LLMService``, so the probe comes with it.
+
+        ``repo_root`` is the one absolute path the browser is given, and it
+        is given it so that it can stop sending absolute paths back. Claude
+        Code's file tools take absolute paths, so every path a tool card
+        attributes to a call is absolute (``files_written_by``), while every
+        ``Repo`` method takes a repo-relative one and rejects an absolute
+        path outright. The browser had no way to convert between the two,
+        which made a click on a tool card's file chip a guaranteed
+        ``Absolute paths not accepted``. The root is not a secret — it is in
+        the window title's repo name and in every exec dialog's working
+        directory — and sending the whole thing once is cheaper than
+        relativising every path in every payload that carries one.
         """
         return {
             "messages": await self._current_messages(),
@@ -761,6 +773,7 @@ class ClaudeCodeService:
             "denied_read_files": self.get_denied_read_files(),
             "session_id": self.session.session_id,
             "repo_name": self._repo_root.name,
+            "repo_root": str(self._repo_root),
             "init_complete": True,
             "engine_ready": self.session.ready,
             "streaming_active": self.session.streaming_active,

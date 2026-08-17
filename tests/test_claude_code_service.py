@@ -1168,6 +1168,7 @@ class TestState:
             "denied_read_files",
             "session_id",
             "repo_name",
+            "repo_root",
             "init_complete",
             "engine_ready",
             "streaming_active",
@@ -1208,6 +1209,20 @@ class TestState:
     async def test_it_falls_back_to_cwd_without_a_repo_root(self, events):
         svc = ClaudeCodeService(FakeConfig(None), event_callback=events)
         assert (await svc.get_current_state())["repo_name"] == Path.cwd().name
+
+    async def test_the_snapshot_carries_the_absolute_root(self, tmp_path, events):
+        """The browser cannot relativise a tool's path without it."""
+        root = tmp_path / "my-project"
+        root.mkdir()
+        svc = ClaudeCodeService(FakeConfig(root), event_callback=events)
+        state = await svc.get_current_state()
+        assert state["repo_root"] == str(root)
+        assert Path(state["repo_root"]).is_absolute()
+
+    async def test_the_root_falls_back_to_cwd_with_the_name(self, events):
+        svc = ClaudeCodeService(FakeConfig(None), event_callback=events)
+        state = await svc.get_current_state()
+        assert state["repo_root"] == str(Path.cwd())
 
 
 class TestSelectedFiles:

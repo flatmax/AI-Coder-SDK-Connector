@@ -2302,3 +2302,77 @@ precondition is visible instead of assumed.
   cloning would be an optimisation to the shared module, measured against nothing.
 - **Three rows is not configurable.** No setting, no per-card override, no "show full command" affordance
   beyond expanding the card — which already shows the command verbatim.
+
+## Interlude — the chip that asked for a path the repo API refuses (2026-08-17)
+
+Not a phase. A bare `Failed: Absolute paths not accepted:` line, repeated in a terminal log the user
+pasted, pointing at a test file nobody had asked to open. Recorded as deliberately-not-built in the
+interlude above and chased on the next turn, because the thing it broke is a click that looks like it
+should work.
+
+### Two contracts that had nowhere to meet
+
+Claude Code's file tools take absolute paths, so every path a tool card attributes to a call is absolute:
+`files_written_by` reports what the tool was given, and `result['files_modified']` is absolute by
+documented contract. Every `Repo` method takes a path relative to the repo root and rejects an absolute
+one *outright* — it deliberately does not resolve it, because resolving would be a route around the
+containment check.
+
+The browser had no way to convert between them, because it was never told the repo root. So a click on a
+tool card's file chip asked `Repo.get_file_content` for `/home/you/repo/tests/thing.py`, the backend
+raised, jrpc-oo printed the exception text as a bare `Failed:` line on the server's stderr, and the
+viewer sat empty. Nothing on screen said why — which is why a bug on the app's most-used affordance was
+reported as a log curiosity rather than as "the chips don't work".
+
+The same held for the turn footer's "files modified" list and the context tab, which carry the same
+paths from the same source.
+
+### The root, once, and one place that uses it
+
+`get_current_state` now carries `repo_root`. It is the only absolute path the browser is given, and it is
+given it so it can stop sending them back — cheaper than relativising every path in every payload that
+carries one, and no more of a disclosure than the repo name already in the window title or the working
+directory in every exec dialog.
+
+`webapp/src/repo-path.js` holds the conversion, and `onNavigateFile` is the only caller: one choke point
+every dispatcher already goes through, rather than a `startsWith` per chip. Normalising there also fixes
+the two side effects that made a bad click outlive the click — the absolute path used to be what got
+persisted as the last-open file and registered with the navigation grid, so it came back on reload.
+
+Three things it refuses to guess. A path outside the root passes through unchanged, because it has no
+repo-relative name and the backend refusing it is the right answer — a `../..` walk would ask for a
+different file. A sibling directory sharing the root's name as a string prefix (`my-repo-backup`) is not
+inside it; the match is on the separator. And with no root yet known, an absolute path is left exactly as
+it was, which is the old behaviour rather than a path measured against an empty string.
+
+### Tests
+
+- `webapp/src/repo-path.test.js` — **new, 9 tests**: relativises inside the root, leaves relative paths
+  alone, tolerates a trailing slash, leaves an outside path absolute, does not mistake a shared-prefix
+  sibling for a child, leaves the root itself alone, passes through with no root, passes non-string input
+  to the caller's own guard, and treats a Windows drive-letter root the same way the backend does.
+- `webapp/src/app-shell/viewers.test.js` — **+5**: an absolute path opens as a repo path, the relative
+  path is what gets persisted and registered, an outside path is left as found, the root arrives from the
+  state snapshot, and an absolute path before the first snapshot is untouched.
+- `tests/test_claude_code_service.py` — **+2**, plus `repo_root` in the snapshot's key-set assertion: the
+  root is absolute and matches the configured repo, and it falls back to the cwd alongside the name.
+
+Verified against the running backend, which is the only place the two contracts actually meet. The
+browser tab was running the pre-fix bundle, which forwards whatever it is given, so the same file was
+opened both ways in one probe: absolute → 0 characters loaded and an empty viewer, repo-relative →
+40 937 characters. That is exactly the conversion the fix performs, measured on the real RPC rather than
+on a mock that would have accepted either.
+
+### Deliberately not built
+
+- **Chips still *display* the absolute path.** Only the navigation is converted. Shortening the label is a
+  display change with its own question — basename, or root-relative, or middle-elided — and it would hide
+  which repo a path belongs to in the one place a multi-root future would need it.
+- **`Repo` still refuses absolute paths.** The alternative fix was to resolve-then-contain inside
+  `_validate_rel_path`, which turns a flat rule into a conditional one at the security boundary for the
+  convenience of one caller. The specs say absolute paths are rejected; they still are.
+- **The bare `Failed:` stderr line is unchanged.** jrpc-oo prints raw exception text with no request
+  context, which is why this took a pasted log to notice. Giving RPC errors a context line is a
+  transport-wide change, not this fix.
+- **`max_buffer_size` is still the SDK's 1 MB default** — the other item from the same log, still open on
+  the same grounds: it is a decision about memory, not a cleanup.

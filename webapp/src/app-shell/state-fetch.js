@@ -62,6 +62,14 @@ export async function fetchCurrentState(host) {
       host._repoName = state.repo_name;
       document.title = state.repo_name;
     }
+    // The absolute repo root, kept so navigate-file can relativise the
+    // absolute paths the engine reports for tool calls (repo-path.js).
+    // Guarded rather than defaulted: an older backend that does not send
+    // it leaves those paths alone instead of having them measured against
+    // an empty string.
+    if (typeof state.repo_root === 'string' && state.repo_root) {
+      host._repoRoot = state.repo_root;
+    }
     host._initComplete = !!state.init_complete;
     // Hydrate mode state from the snapshot. Guarded because
     // `ClaudeCodeService.get_current_state` does not report a
