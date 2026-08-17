@@ -91,6 +91,18 @@ A Monaco diff editor, same configuration as the main viewer (see
 [diff-viewer.md](diff-viewer.md)): left is `original` (current on-disk content), right is `proposed`.
 Read-only until the user asks to edit.
 
+Same configuration means the same shadow-DOM obligation. Monaco writes its theme and font-metric rules into
+`document.head`, and this dialog is a shadow root, which cannot see them — so the editor lays out to
+Monaco's measurements while painting in the host page's font, and the result is the giant, unwrapped,
+undecorated mess this section used to produce. The dialog clones the head's styles into its own shadow root
+and keeps watching for more, via the shared [`webapp/src/shadow-style-sync.js`](../../webapp/src/shadow-style-sync.js)
+the viewer uses; the mechanics and the reason an observer alone is not enough are in diff-viewer.md
+§ [Monaco Shadow DOM Integration](diff-viewer.md#monaco-shadow-dom-integration). The clone runs once before
+construction and again immediately after, because the rules that set the font metrics are added
+*synchronously inside* the constructor — too early for any observer to have fired. The observer is
+disconnected when the editor is disposed, not when the dialog closes, so a dialog that outlives one
+decision does not accumulate watchers.
+
 - **New file** (`is_new_file`) — single pane showing the full proposed content with a "new file" label. Not an empty diff against nothing.
 - **Binary** (`is_binary`) — no editor. Path, size, and an explicit "binary — cannot be shown" label.
 - **Too large** (`too_large`) — diff stats plus the raw input behind the disclosure, labelled "too large to diff". Never a hung Monaco instance and never a silent truncation.

@@ -2432,6 +2432,33 @@ export const STYLES = css`
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Bash is the exception to the one-line rule above, and
+   * the reason is what the row is for: a command is the one
+   * input that cannot be reconstructed from anywhere else on
+   * the card, and an ellipsis eats exactly the tail that says
+   * what it does — which paths, which flags, which test file.
+   * So it wraps. The engine already caps the summary at
+   * TOOL_INPUT_SUMMARY_CHARS on one collapsed line, and the
+   * clamp bounds it again at three rows, so a long command
+   * costs a couple of lines rather than a screen. */
+  .tool-card[data-tool='Bash'] .tool-header {
+    align-items: flex-start;
+  }
+  /* The dot and the caret sit on the first line of the
+   * wrapped summary rather than at the top of the block. */
+  .tool-card[data-tool='Bash'] .tool-dot,
+  .tool-card[data-tool='Bash'] .tool-caret {
+    margin-top: 0.25rem;
+  }
+  .tool-card[data-tool='Bash'] .tool-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
   /* Which MCP server a call went to. Its own chip
    * because "Edit" from a server and the built-in Edit
    * are different tools with the same name. */

@@ -216,6 +216,21 @@ function decision(el, which) {
   return el.shadowRoot.querySelector(`button.decision[data-decision="${which}"]`);
 }
 
+/** A stylesheet in document.head, standing in for one of Monaco's. */
+function headStyle(cssText) {
+  const style = document.createElement('style');
+  style.textContent = cssText;
+  document.head.appendChild(style);
+  return style;
+}
+
+/** Everything the dialog cloned out of document.head, concatenated. */
+function clonedStyleText(el) {
+  return [...el.shadowRoot.querySelectorAll('[data-ac-dc-monaco-clone]')]
+    .map((node) => node.textContent)
+    .join('\n');
+}
+
 function lastResolve() {
   const calls = rpcCalls.filter(
     (c) => c.method === 'ClaudeCodeService.resolve_permission',
@@ -1741,6 +1756,64 @@ describe('an edit', () => {
     }));
     expect(el.shadowRoot.querySelector('pre.new-file-pane').textContent)
       .toBe('print(0)\n');
+  });
+
+  it('gives the editor the Monaco styles that live outside its shadow root', async () => {
+    // Monaco writes its rules to document.head, which a shadow root cannot
+    // see. Without the clones the dialog drew a diff at the dialog's own font
+    // with Monaco's line pitch: line numbers piled onto one row, every line
+    // wrapped, nothing highlighted.
+    const head = headStyle('.monaco-editor { color: red }');
+    try {
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      expect(clonedStyleText(el)).toContain('.monaco-editor { color: red }');
+    } finally {
+      head.remove();
+    }
+  });
+
+  it('picks up a stylesheet added after the editor was built', async () => {
+    // Monaco emits its theme rules during construction and later on a theme
+    // change; a one-shot clone would miss everything after the first pass.
+    const first = headStyle('.first { color: red }');
+    let late = null;
+    try {
+      publishRpc();
+      const el = mount();
+      await settle(el);
+      await ask(el, writePayload());
+
+      late = headStyle('.late { color: blue }');
+      await settle(el);
+      expect(clonedStyleText(el)).toContain('.late { color: blue }');
+    } finally {
+      first.remove();
+      late?.remove();
+    }
+  });
+
+  it('stops watching the head once the editor is gone', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, writePayload());
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(monacoState.editors[0]._disposed).toBe(true);
+
+    const late = headStyle('.after { color: green }');
+    try {
+      await settle(el);
+      // A dialog that opens on twenty requests must not leave twenty
+      // observers on document.head.
+      expect(clonedStyleText(el)).not.toContain('.after');
+    } finally {
+      late.remove();
+    }
   });
 
   it('disposes the editor when the queue moves on to a command', async () => {

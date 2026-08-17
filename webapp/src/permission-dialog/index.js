@@ -150,6 +150,8 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._diffEditor = null;
     this._diffKey = null;
     this._diffSubscriptions = [];
+    /** Watches document.head so Monaco's styles reach this shadow root. */
+    this._styleObserver = null;
 
     this._tickTimer = null;
     this._settleTimer = null;

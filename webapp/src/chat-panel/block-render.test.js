@@ -203,11 +203,15 @@ describe('renderTerminalBadge', () => {
 // ---------------------------------------------------------------------------
 
 describe('blockExpanded', () => {
-  it('starts everything collapsed', () => {
+  it('starts a call whose body only echoes its header collapsed', () => {
     const panel = stubPanel();
     expect(blockExpanded(panel, textBlock())).toBe(false);
     expect(blockExpanded(panel, { kind: 'thinking', block_id: 'b1' })).toBe(false);
     expect(blockExpanded(panel, toolBlock({ result: { status: 'ok' } }))).toBe(false);
+    expect(blockExpanded(panel, toolBlock({
+      tool: { name: 'Read', input: { file_path: 'src/a.js' } },
+      result: { status: 'ok' },
+    }))).toBe(false);
   });
 
   it('opens a call that failed or was denied', () => {
@@ -217,9 +221,38 @@ describe('blockExpanded', () => {
     expect(blockExpanded(panel, toolBlock({ denial: { action: 'deny' } }))).toBe(true);
   });
 
+  it('opens an edit-shaped call, because the diff is what the card is for', () => {
+    // The header names the file and nothing else, so a collapsed Edit row
+    // hides the only part of it anyone is scanning for.
+    const panel = stubPanel();
+    for (const tool of [
+      { name: 'Edit', input: { file_path: 'a.js', old_string: 'a', new_string: 'b' } },
+      { name: 'Write', input: { file_path: 'a.js', content: 'hello\n' } },
+      { name: 'MultiEdit', input: { edits: [{ old_string: 'a', new_string: 'b' }] } },
+      { name: 'NotebookEdit', input: { new_source: 'print(1)' } },
+    ]) {
+      expect(blockExpanded(panel, toolBlock({ tool, result: { status: 'ok' } })))
+        .toBe(true);
+    }
+  });
+
+  it('leaves an edit whose input carries no diff collapsed', () => {
+    // An Edit that reached the panel without its strings has nothing to open
+    // to, and an empty body under a caret reads as a broken card.
+    expect(blockExpanded(stubPanel(), toolBlock({
+      tool: { name: 'Edit', input: { file_path: 'a.js' } },
+      result: { status: 'ok' },
+    }))).toBe(false);
+  });
+
   it('leaves a call waiting on permission collapsed', () => {
     // The dialog is where the user reads it; the card would be a second copy.
+    // True of an edit too, which is the one the dialog is showing a diff of.
     expect(blockExpanded(stubPanel(), toolBlock({ awaiting: true }))).toBe(false);
+    expect(blockExpanded(stubPanel(), toolBlock({
+      tool: { name: 'Edit', input: { file_path: 'a.js', old_string: 'a', new_string: 'b' } },
+      awaiting: true,
+    }))).toBe(false);
   });
 
   it('lets a click beat the auto-expansion, in both directions', () => {
@@ -996,6 +1029,26 @@ describe('renderToolCard', () => {
   it('has no footer when there is nothing to put in it', () => {
     const host = draw(renderToolCard(stubPanel(), toolBlock({ result: { status: 'ok' } })));
     expect(host.querySelector('.tool-footer')).toBeNull();
+  });
+
+  it('shows an edit its diff without a click, and closes on one', () => {
+    const panel = stubPanel();
+    const block = toolBlock({
+      tool: {
+        name: 'Edit',
+        input: { file_path: 'src/a.js', old_string: 'let a', new_string: 'const a' },
+        input_summary: 'file_path=src/a.js',
+      },
+      result: { status: 'ok', preview: 'ok' },
+    });
+    const host = draw(renderToolCard(panel, block));
+    expect(host.querySelector('.tool-header').getAttribute('aria-expanded')).toBe('true');
+    expect(host.querySelector('.tool-body')).not.toBeNull();
+    expect(host.querySelector('.tool-body').textContent).toContain('const a');
+
+    host.querySelector('.tool-header').click();
+    render(renderToolCard(panel, block), host);
+    expect(host.querySelector('.tool-body')).toBeNull();
   });
 });
 

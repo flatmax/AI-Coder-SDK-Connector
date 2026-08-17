@@ -112,18 +112,33 @@ export function renderTerminalBadge(reason) {
 /**
  * Whether a block's body is showing.
  *
- * An explicit click always wins. Absent one, a tool call that failed or was
- * denied opens itself: the status flag drives that, never string-sniffing the
- * result text (specs5/5-webapp/chat.md § Card Anatomy). Everything else starts
- * collapsed, including diffs — the header already names the file, and a turn
- * with nine edits should not open nine diffs at once.
+ * An explicit click always wins. Absent one, three kinds of card open
+ * themselves:
+ *
+ *   - A call that failed or was denied, driven by the status flag and never
+ *     by string-sniffing the result text (specs5/5-webapp/chat.md § Card
+ *     Anatomy).
+ *   - An edit-shaped call, because the diff *is* what the card is about: the
+ *     header names the file and nothing else, so a collapsed `Edit` row hides
+ *     the only part a reader is scanning for. An earlier draft kept these
+ *     collapsed to stop a nine-edit turn opening nine diffs; in practice the
+ *     hunks are small, the pane scrolls, and clicking nine carets to read a
+ *     turn was the worse trade.
+ *   - Nothing else. A `Read` or a `Bash` card's body is a JSON echo of a
+ *     header that already summarises it.
+ *
+ * A call still waiting on permission stays shut whatever its shape: the
+ * dialog is open over the top with the same diff in it, and the card would be
+ * a second copy of a decision the user is in the middle of making.
  */
 export function blockExpanded(panel, block) {
   const explicit = panel?._blockExpansion?.get(block?.block_id);
   if (typeof explicit === 'boolean') return explicit;
   if (block?.kind !== 'tool') return false;
   const status = toolStatus(block);
-  return status === 'error' || status === 'denied';
+  if (status === 'error' || status === 'denied') return true;
+  if (status === 'awaiting') return false;
+  return diffSegments(block).length > 0;
 }
 
 /**

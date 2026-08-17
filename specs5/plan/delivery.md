@@ -2199,3 +2199,106 @@ template had put a CSS class name in backticks, which terminates the template li
 - **The pane is navigable, not announced** (§ Accessibility, unchanged): labelled and reachable, but
   arrow-keying a radio group must not read a whole mockup aloud per keystroke. No screen-reader run was
   done against a question with previews.
+
+## Interlude — the editor that could not see its own stylesheet (2026-08-17)
+
+Not a phase. Three defects the user reported in one message, each with a screenshot: the dialog's edit
+window "looks terrible", edit cards should open by default, and `Bash` summaries should wrap so you can see
+what a command is about to do. Two are preferences. The first was a bug that had been shipping since the
+dialog got a diff, and the specs had been describing the fixed behaviour all along.
+
+### The dialog was showing Monaco with the wrong font
+
+The screenshot was unmistakable once read properly: line numbers stacked into a single row (`506561`),
+every line soft-wrapped, no change highlighting, and acres of empty space. That is not a misconfigured
+editor — it is an editor that measured its layout with Monaco's font metrics and then painted in the host
+page's font, because Monaco writes those rules into `document.head` and a shadow root cannot see them.
+
+The diff viewer had solved this a long time ago; a comment in `monaco-setup.js` naming `_syncAllStyles` was
+what pointed at it. The dialog had simply never been given the same treatment. So the viewer's cloning logic
+moved out into `webapp/src/shadow-style-sync.js` — `syncHeadStyles`, `applyHeadMutations`,
+`observeHeadStyles`, parameterised by the dataset marker each host uses — and both hosts now call it.
+`diff-viewer/shadow-styles.js` keeps its own KaTeX injection and observer lifecycle and lost 50-odd lines of
+duplicate; its behaviour is unchanged, deliberately, because a shared module is only worth having if
+adopting it is not also a rewrite.
+
+The dialog syncs **twice**: once before `createDiffEditor` and once immediately after. Not belt-and-braces —
+the rules that set the font metrics are added synchronously *inside* the constructor, so an observer
+registered before it has not fired yet and one registered after it has already missed them. The observer
+covers everything later (a theme change, a lazily-imported stylesheet). Disposal disconnects it, and does so
+*before* the early return that fires when there is no editor to dispose — put it after, and a dialog whose
+editor was already gone would leak a watcher on `document.head` for the life of the page.
+
+### Cards that open themselves, and only when the body says something new
+
+`blockExpanded` was "collapsed unless clicked, or unless it failed". It is now collapsed unless clicked, or
+unless the body has something the header does not: an error or a denial, or a diff. A `Read` card stays shut
+because its expanded body only restates its own header; an `Edit` opens because the diff *is* the card. An
+`Edit` whose input carries no usable diff stays shut for the same reason `Read` does.
+
+The one case that reads like an exception and is not: a call **awaiting permission** stays collapsed even
+when it is an edit, because the permission dialog is on screen showing that exact diff. Opening the card
+would put the same content twice on one screen and pull the chat log out from under the dialog. An explicit
+click always wins over all of it — the map is keyed per block and remembered for the session, so a user who
+closes a card keeps it closed.
+
+### `Bash` summaries wrap; nothing else does
+
+The engine already caps summaries at 200 characters. The card then elided that to one line, so
+`git diff --stat -- webapp/src/… && npx vitest run …` became a promise that something was happening. The
+fix is scoped to `.tool-card[data-tool='Bash']`: a three-row `-webkit-line-clamp` with `pre-wrap` and
+`overflow-wrap: anywhere`, and the dot and caret nudged to the first line's baseline so a wrapped header
+does not centre them against three rows of text. Three rows and not unbounded, because the value of a
+scannable log is that rows are the same height; three is enough for a long path plus flags.
+
+Every other tool keeps its single elided line. A `Read` is a path, a `Grep` is a pattern — one line is the
+whole summary, and wrapping them would cost the uniform row for nothing.
+
+### What the tests could not tell us
+
+The clone tests prove style text reaches the shadow root and stops arriving once the editor is disposed.
+They cannot prove the editor *looks* right: jsdom does no layout, and the failure being fixed here is
+entirely a layout failure. So the fix was confirmed against the running app — a second tab, a synthetic
+`permission-request` dispatched client-side so the user's live session was never touched, and a DOM probe:
+97 cloned styles, 27 laid-out view lines, 9 change decorations. That is the assertion the suite cannot make.
+
+The wrapping has no test at all, for the same reason and with less excuse: `-webkit-line-clamp` is a
+rendering rule, and asserting the rule exists in `styles.js` would test that the file contains the string we
+just typed into it.
+
+### Tests
+
+Deltas, not totals:
+
+- `webapp/src/chat-panel/block-render.test.js` — **+3** (four new cases, one old name retired). The
+  `blockExpanded` group now says what stays shut and why: a body that only echoes its header (`Bash`,
+  `Read`), an edit-shaped call opening itself (parametrised over `Edit`, `MultiEdit`, `Write`,
+  `NotebookEdit`), an edit with no diff in its input, and an edit awaiting permission. Plus a render test
+  that an edit card arrives with `aria-expanded="true"` and its diff in the DOM, and closes on one click —
+  the default and the override in one assertion.
+- `webapp/src/permission-dialog/dialog.test.js` — **+3**, on the head-style contract: the editor gets the
+  Monaco styles that live outside its shadow root, a stylesheet added *after* construction is picked up, and
+  the head is no longer watched once the editor is disposed.
+
+The third of those failed first, and instructively: written with `deny`, it found the observer still
+connected and was right to. Deny opens a reason flow and leaves the dialog — and its editor — alive. The
+test now uses `allow` and asserts `_disposed` before checking that a later head style is not cloned, so its
+precondition is visible instead of assumed.
+
+### Deliberately not built
+
+- **The `max_buffer_size` default is untouched.** A screenshot returned inline during this work exceeded the
+  SDK's 1 MB stdout line limit (`_DEFAULT_MAX_BUFFER_SIZE`, `subprocess_cli.py`), which raises in the reader
+  and permanently kills the message pump — the session does not recover, and the `get_context_usage`
+  timeouts that follow are the usage HUD polling a corpse. `ClaudeAgentOptions.max_buffer_size` is settable
+  and `src/ac_dc/claude_code/options.py` never sets it. Raising it is a decision about memory, not a
+  cleanup, so it is left open rather than quietly changed.
+- **`Failed: Absolute paths not accepted:` is not chased.** It appeared repeatedly in the same log, comes
+  from `src/ac_dc/repo/paths.py`, and is a separate pre-existing bug — most likely a webapp caller handing
+  the engine's absolute `file_path` to a repo API that takes repo-relative paths. Folding it into a UI
+  polish commit would bury it.
+- **The dialog re-clones the whole head per editor creation.** Same cost the viewer has always paid, same
+  reason (the constructor's own rules), and the dialog builds at most one editor per request. Incremental
+  cloning would be an optimisation to the shared module, measured against nothing.
+- **Three rows is not configurable.** No setting, no per-card override, no "show full command" affordance
+  beyond expanding the card — which already shows the command verbatim.

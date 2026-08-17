@@ -11,6 +11,7 @@
 //     it, and an edit swaps Allow once for Allow with edits.
 
 import { monaco, languageForPath } from '../monaco-setup.js';
+import { observeHeadStyles, syncHeadStyles } from '../shadow-style-sync.js';
 
 /**
  * Create or re-target the diff editor for `payload`.
@@ -43,6 +44,16 @@ export function syncDiffEditor(host, payload) {
   const original = monaco.editor.createModel(diff.original ?? '', language);
   const modified = monaco.editor.createModel(diff.proposed ?? '', language);
 
+  // Monaco's stylesheets are in document.head; this editor is in a shadow
+  // root, which cannot see them. Without this the dialog drew a diff at the
+  // dialog's own font with Monaco's line pitch — line numbers piled onto one
+  // row, every line soft-wrapped, and nothing highlighted as changed. The
+  // sync runs twice on purpose: once so the container is styled before
+  // layout, and once after construction because Monaco emits its theme and
+  // font-metric rules synchronously *inside* the constructor, too late for
+  // the first pass and too early for the observer.
+  syncHeadStyles(host);
+
   if (!host._diffEditor) {
     try {
       host._diffEditor = monaco.editor.createDiffEditor(container, {
@@ -61,6 +72,8 @@ export function syncDiffEditor(host, payload) {
       modified.dispose();
       return;
     }
+    syncHeadStyles(host);
+    if (!host._styleObserver) host._styleObserver = observeHeadStyles(host);
   }
 
   const previous = host._diffEditor.getModel?.();
@@ -157,6 +170,13 @@ export function disposeDiffEditor(host) {
     try { subscription.dispose(); } catch (_) { /* already gone */ }
   }
   host._diffSubscriptions = [];
+  // Before the early return below: the observer outlives an editor that was
+  // never built (a request whose class has no diff host), and a dialog that
+  // opens on twenty requests must not leave twenty observers on the head.
+  if (host._styleObserver) {
+    try { host._styleObserver.disconnect(); } catch (_) { /* already gone */ }
+    host._styleObserver = null;
+  }
   const editor = host._diffEditor;
   if (!editor) return;
   const models = editor.getModel?.();
