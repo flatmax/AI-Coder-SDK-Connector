@@ -406,11 +406,16 @@ PermissionDecision:
 Answer:
     options: list[integer]             // chosen option indices
     text: string                       // the freeform reply, "" when the user typed none
+    notes: string                      // a remark about this answer, "" when none
 ```
 
 An `Answer` may also arrive as a bare `list[integer]`, which is the shape the browser sent before the
-freeform reply existed. It is read as `{options: […], text: ""}`, so a client mid-upgrade still answers
-correctly rather than having its selections dropped.
+freeform reply existed. It is read as `{options: […], text: "", notes: ""}`, so a client mid-upgrade
+still answers correctly rather than having its selections dropped. A missing `notes` on the dict shape
+reads the same way, for the same reason.
+
+`notes` is not an answer. A question whose `Answer` carries nothing but a note is an unanswered
+question, and no key is written for it in either map — see § `annotations` below.
 
 `allow_mode` carries **no mode name**. The engine applies the mode from `suggested_mode` on the
 request it built; a decision that could name its own mode could name `bypassPermissions`.
@@ -437,7 +442,7 @@ Verified against the bundled CLI 2.1.229, whose tool definition is:
 
 - Input: `questions` (1–4, each `{question, header, options: 2–4 × {label, description, preview?},
   multiSelect}`), plus `answers: Record<str, str>` — described in the CLI as "User answers collected by
-  the permission component" — plus `annotations` and `metadata`.
+  the permission component" — plus `annotations` (§ below) and `metadata`.
 - `checkPermissions` returns `{behavior: "ask"}` unconditionally, which is why this class is gated in
   every mode.
 - The tool's `call` destructures `{questions, answers = {}, annotations, response, afkTimeoutMs}` from
@@ -479,7 +484,32 @@ The mapping from indices to labels lives on the engine side for two reasons. The
 verbatim tool input, so the key it writes cannot drift from what the tool was called with; and
 `updated_input` being present on a decision is what marks a call as user-modified in the transcript.
 Answering a question the agent asked is not modifying the call it made, so the browser sends
-`answers` — indices and typed text — and never builds the patch itself.
+`answers` — indices, typed text, and any note — and never builds the patch itself.
+
+### `annotations` — the note on an answer
+
+`annotations` is a sibling of `answers` in the same input, not a nested part of it, and it is keyed the
+same way — by verbatim question text. Verified against the bundled CLI 2.1.233, where the shape is
+`Record<question text, {preview?: string, notes?: string}>` and it appears in the tool's *output* schema
+as well as its input, which is how the model gets to read it back.
+
+```python
+PermissionResultAllow(updated_input={
+    **tool_input,
+    "answers": {"Which layout?": "Fixed left rail"},
+    "annotations": {"Which layout?": {"notes": "as the icon rail, 47px gutter",
+                                     "preview": "FIXED LEFT RAIL\n…"}},
+})
+```
+
+- **`notes` is the user's remark**, and it is why the field is worth having at all: picking an option is a vote for a label the model wrote, and what a user often means is that label with a condition attached. A live round trip against the real CLI (`scripts/question_preview_smoke.py`) had the model quote the note back and revise its own proposal to match it — the note is read, not merely stored.
+- **`preview` is filled only for a single chosen option.** The CLI's own description is "the preview content of the selected option", singular, so the engine sends it when exactly one option was chosen and that option carried an example, and omits it otherwise. Echoing every ticked option's mockup into a field typed as one would be inventing a shape.
+- **A key is written only for a question that answered.** Both maps are keyed by question text, and an annotation on a question with no entry in `answers` would arrive attached to nothing — the CLI reads its result from `answers`, so the note would be unreachable while looking delivered.
+- **The whole key is omitted when nothing filled it.** No note and no single-option preview means no entry, and no entry for any question means no `annotations` key in the patch at all. An empty map is a claim that the user annotated nothing, which is true but noisy, and it makes every allow look user-modified in the transcript.
+
+Not enforced by the CLI, and additive by construction: a call answered with `answers` alone is answered
+correctly. Nothing about the answer depends on the annotation, which is the property that makes it safe
+to send a shape the CLI documents only for itself.
 
 ### `ExitPlanMode` — approving a plan
 

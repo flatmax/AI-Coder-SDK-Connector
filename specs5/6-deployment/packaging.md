@@ -123,7 +123,7 @@ Default sections:
 - Document conversion — enabled, supported extensions, max source size
 - Document index — keyword model, enabled, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback chars, max document frequency
 - Indexing — debounce interval for the re-index hook
-- Permissions — decision timeout, no-localhost timeout, diff ceiling, command display cap
+- Permissions — no-localhost timeout, presence poll interval, diff ceiling, command display cap. No decision timeout; see [configuration.md](../1-foundation/configuration.md#app-config) for why one must not be added back as a default
 - History — mirror policy, session-directory size warning threshold
 - Presets — the named prompt presets offered in the chat panel
 

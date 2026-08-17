@@ -91,6 +91,17 @@ export const DEFAULT_DENY_REASONS = {
  */
 export const OTHER_ANSWER_PLACEHOLDER = 'Other — type your own answer';
 
+/**
+ * Placeholder for the note on an answer.
+ *
+ * Worded to distinguish it from the field above it, which is the harder
+ * part of putting two text inputs on one question: that one is an answer
+ * *instead of* the options, this one is a remark *about* whichever answer
+ * was given. It reaches the model through `annotations`, not `answers`
+ * (permission-dialog.md § interact).
+ */
+export const ANSWER_NOTE_PLACEHOLDER = 'Add a note about this choice (optional)';
+
 /** The reason Escape sends. Named in the spec, so it is a constant. */
 export const ESCAPE_DENY_REASON = 'dismissed by the user';
 

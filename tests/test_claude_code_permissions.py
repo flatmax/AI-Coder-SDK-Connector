@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
@@ -557,6 +556,125 @@ class TestFreeformAnswers:
             self.INPUT, self.question(), [{"text": {"nested": 1}}, [0]]
         )
         assert "Which branch?" not in updated["answers"]
+
+
+class TestAnswerAnnotations:
+    """``annotations`` — the part of an answer a label cannot carry.
+
+    A sibling of ``answers`` in the tool's input schema, keyed by the same
+    question text, each entry ``{"notes"?, "preview"?}``. The CLI's output
+    schema carries it back, so the note reaches the model rather than
+    stopping at the dialog.
+    """
+
+    INPUT = {
+        "questions": [
+            {
+                "question": "Which layout?",
+                "options": [
+                    {"label": "Left rail", "preview": "┌────┐\n│ L  │\n└────┘"},
+                    {"label": "Top strip", "preview": "┌────────┐\n│  T     │"},
+                ],
+            },
+            {
+                "question": "Which files?",
+                "multiSelect": True,
+                "options": [{"label": "a"}, {"label": "b"}, {"label": "c"}],
+            },
+        ]
+    }
+
+    def question(self):
+        return build_question_payload(self.INPUT)
+
+    def test_a_note_travels_keyed_like_its_answer(self):
+        updated = build_answer_input(
+            self.INPUT,
+            self.question(),
+            [{"options": [1], "notes": "narrower content is fine"}, [0]],
+        )
+        assert updated["annotations"]["Which layout?"]["notes"] == (
+            "narrower content is fine"
+        )
+        # Keyed the same way as the answer, or the CLI cannot pair them.
+        assert "Which layout?" in updated["answers"]
+
+    def test_the_chosen_option_carries_its_example_back(self):
+        # The answer map says "Left rail". The artefact the user actually
+        # compared was the mockup, and this is the schema's way of sending
+        # it — "the preview content of the selected option".
+        updated = build_answer_input(self.INPUT, self.question(), [[0], [0]])
+        assert updated["annotations"]["Which layout?"]["preview"] == (
+            "┌────┐\n│ L  │\n└────┘"
+        )
+        # Nothing to annotate on the question whose options have none.
+        assert "Which files?" not in updated["annotations"]
+
+    def test_two_ticks_have_no_single_example(self):
+        # "The selected option" is singular. Picking one of two would be
+        # inventing the answer to a question the user did not answer.
+        multi = {
+            "questions": [
+                {
+                    "question": "Which?",
+                    "multiSelect": True,
+                    "options": [
+                        {"label": "a", "preview": "A"},
+                        {"label": "b", "preview": "B"},
+                    ],
+                }
+            ]
+        }
+        updated = build_answer_input(multi, build_question_payload(multi), [[0, 1]])
+        assert "annotations" not in updated
+        # One tick on the same question does carry it.
+        single = build_answer_input(multi, build_question_payload(multi), [[1]])
+        assert single["annotations"]["Which?"]["preview"] == "B"
+
+    def test_a_typed_reply_has_no_example_but_keeps_its_note(self):
+        updated = build_answer_input(
+            self.INPUT,
+            self.question(),
+            [{"options": [], "text": "a third layout", "notes": "see the sketch"}, [0]],
+        )
+        entry = updated["annotations"]["Which layout?"]
+        assert entry == {"notes": "see the sketch"}
+
+    def test_a_note_on_an_unanswered_question_is_dropped(self):
+        # It would arrive attached to nothing: the CLI reads an annotation
+        # of an answer it cannot find.
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"options": [], "notes": "just a thought"}, [0]]
+        )
+        assert "Which layout?" not in updated["answers"]
+        # It was the only annotation, so the key goes with it rather than
+        # being sent as an empty map.
+        assert "annotations" not in updated
+
+    def test_a_note_alone_is_not_an_answer(self):
+        assert build_answer_input(
+            self.INPUT, self.question(), [{"notes": "hmm"}, {"notes": "also hmm"}]
+        ) is None
+
+    @pytest.mark.parametrize("note", ["", "   \n ", 12, {"text": "x"}, []])
+    def test_a_note_that_is_not_text_is_dropped(self, note):
+        # An empty string is a claim — a note the user wrote and left
+        # blank — so it is omitted rather than sent hollow.
+        updated = build_answer_input(
+            self.INPUT, self.question(), [{"options": [1], "notes": note}, [0]]
+        )
+        assert "notes" not in updated["annotations"].get("Which layout?", {})
+
+    def test_the_key_is_absent_when_nothing_annotated_anything(self):
+        plain = TestAnswerInput.INPUT
+        updated = build_answer_input(plain, build_question_payload(plain), [[0], [1]])
+        # An empty map is a different statement from an absent key.
+        assert "annotations" not in updated
+
+    def test_the_index_only_shape_annotates_nothing_and_still_answers(self):
+        updated = build_answer_input(self.INPUT, self.question(), [[1], [0]])
+        assert updated["answers"]["Which layout?"] == "Top strip"
+        assert updated["annotations"]["Which layout?"]["preview"].startswith("┌")
 
 
 # ---------------------------------------------------------------------------

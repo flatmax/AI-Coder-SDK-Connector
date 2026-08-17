@@ -438,6 +438,31 @@ export const PERMISSION_DIALOG_STYLES = css`
     font-size: 11px;
   }
 
+  /* The note on an answer. Deliberately quieter than the other-answer
+     field directly above it — smaller, borderless until focused, indented —
+     so the two text inputs on one question do not read as a pair of equals.
+     One of them is the answer; this one is a remark about it. */
+  .answer-note {
+    margin: 6px 0 0 22px;
+    width: calc(100% - 22px);
+    box-sizing: border-box;
+    padding: 5px 8px;
+    font-family: inherit;
+    font-size: 12px;
+    color: #c9d1d9;
+    background: #0d1117;
+    border: 1px solid transparent;
+    border-bottom-color: #30363d;
+    border-radius: 4px;
+  }
+
+  .answer-note::placeholder { color: #6e7681; }
+
+  .answer-note:focus {
+    outline: none;
+    border-color: #58a6ff;
+  }
+
   /* plan */
 
   .plan {

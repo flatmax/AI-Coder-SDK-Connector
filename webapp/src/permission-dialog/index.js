@@ -100,6 +100,9 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     _answers: { type: Object, state: true },
     /** `interact` freeform replies: question index → typed answer. */
     _answerTexts: { type: Object, state: true },
+    /** `interact` notes: question index → the note on that answer. Not an
+        answer itself — it annotates one. */
+    _answerNotes: { type: Object, state: true },
     /** Which option's preview the compare pane shows: question index →
         option index. Absent means "whichever the renderer picks". */
     _previewFocus: { type: Object, state: true },
@@ -127,6 +130,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._commandDraft = '';
     this._answers = new Map();
     this._answerTexts = new Map();
+    this._answerNotes = new Map();
     this._previewFocus = new Map();
     this._announcement = '';
 
@@ -371,6 +375,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     this._commandDraft = payload?.command?.command ?? '';
     this._answers = new Map();
     this._answerTexts = new Map();
+    this._answerNotes = new Map();
     this._previewFocus = new Map();
     if (!payload) {
       this._settleUntil = 0;
@@ -786,6 +791,20 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   }
 
   /**
+   * The note on one question's answer.
+   *
+   * Unlike `_onAnswerTextInput` this clears nothing and is cleared by
+   * nothing: a note is about the question, so switching from one option to
+   * another keeps it. It is also never an answer on its own — see
+   * `_answerSelections` — so typing here cannot enable the Answer button.
+   */
+  _onAnswerNotesInput(questionIndex, event) {
+    const notes = new Map(this._answerNotes);
+    notes.set(questionIndex, event.target.value ?? '');
+    this._answerNotes = notes;
+  }
+
+  /**
    * The `updated_input` to send, or null when nothing was edited.
    *
    * Only ever built from an input shape we can express faithfully: a
@@ -814,8 +833,13 @@ export class PermissionDialog extends RpcMixin(LitElement) {
    * present is what marks a call as user-modified in the transcript.
    * Answering a question the agent asked is not modifying the call it made.
    *
-   * @returns {Array<{options: Array<number>, text: string}>|null} null when
-   *   the user chose and typed nothing at all
+   * The note travels here too, as a third field rather than folded into
+   * `text`: the engine sends a reply as the *answer* and a note as an
+   * annotation of one, and merging them would put a remark where the CLI
+   * checks for an option label.
+   *
+   * @returns {Array<{options: Array<number>, text: string, notes: string}>|null}
+   *   null when the user chose and typed nothing at all
    */
   _answerSelections() {
     const questions = interactQuestions(this.current);
@@ -823,7 +847,10 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     const answers = questions.map((_question, index) => ({
       options: [...(this._answers.get(index) || [])].sort((a, b) => a - b),
       text: (this._answerTexts.get(index) || '').trim(),
+      notes: (this._answerNotes.get(index) || '').trim(),
     }));
+    // A note is deliberately not in this test. It annotates an answer, so
+    // a dialog holding nothing but notes has still not been answered.
     return answers.some((answer) => answer.options.length || answer.text)
       ? answers
       : null;

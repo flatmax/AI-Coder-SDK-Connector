@@ -1733,9 +1733,11 @@ exiting 0.
 
 The exit criterion: **the Context tab shows the designed visualisation over those numbers, names the
 `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is
-unknown.** Two of those three clauses are met and were read off a live CLI. The third is met in the code
-and in 60 tests and is *not* live-verified — the reason is structural and is stated below under *Live
-verification*, not buried as a caveat.
+unknown.** All three clauses are met in code and in tests. The first two were read off a live CLI on
+2026-08-17; the third was closed live later the same day for the case that actually occurs — a priced
+turn, verified as a *difference* rather than a running total — while its two remaining renderings
+("nothing extra" and "cost unknown") are still unobserved on screen because no ordinary turn produces
+them. The detail and the reason are under *Live verification*, not buried as a caveat.
 
 The phase divides on which half of it owed a correctness pass. The **context** numbers had already had
 theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
@@ -1836,14 +1838,27 @@ naming the two sections of the panel CC-17 replaced.
 
 ### Tests
 
-Python **3 108 passed, 0 skipped**. Webapp **93 files / 3 724 passed**.
+Python **3 033 passed, 75 skipped** (3 108 collected). Webapp **93 files / 3 724 passed**.
 
-The Python count needs a note, because it looks like 75 tests disappeared. Phase 5's baseline was
-**2 992 passed, 75 skipped**; the skips were the tree-sitter extractor tests, and the venv has the
-grammars installed now, so they run. 2 992 + 75 = 3 067, plus this phase's 41 = 3 108. **Nothing was
-deleted and nothing was waived** — the suite got 75 tests wider without a line changing, worth writing
-down precisely because a future reader would otherwise read the skip count going to zero as someone
-having turned something off.
+**This line originally read "3 108 passed, 0 skipped", and it was wrong** — corrected on 2026-08-17 by
+re-measuring `4efc0f9` in a throwaway worktree, which collects 3 108. The figure quoted as *passed* was
+the **collected total**, and the skip count was not read off the summary at all. Phase 5's baseline
+(**2 992 passed, 75 skipped**, 3 067 collected) is right, because it quotes both halves of the line;
+3 067 + this phase's 41 = 3 108 collected, and 2 992 + 41 = 3 033 passed. Nothing was deleted and
+nothing was waived — but nothing got 75 tests wider either.
+
+**The 75 skips are not the tree-sitter extractor tests, and they have not moved.** They are optional
+document-conversion dependencies that are absent from the venv: PyMuPDF (29), python-pptx (25),
+openpyxl (21). The grammars *are* installed and every extractor test does run — the retracted note
+explained a change in the skip count that never happened, since the count was 75 before this phase and
+75 after. The trap worth naming: **75 is a standing constant of this venv**, so it turns up on both
+sides of any comparison and reads like an accounted-for difference.
+
+The reason a wrong number survived review is that it was flattering and self-consistent. "0 skipped" is
+a stronger claim than the suite has ever supported, and the arithmetic offered to explain it was built
+backwards from the total rather than read off the summary. **Quote both halves of the pytest line, always
+— a total is not a pass count**, and the only way to get a historical count right is to re-run that
+commit.
 
 - `test_claude_code_health.py` — **new**, 41. Credential resolution, above.
 - `test_claude_code_cost.py` — 26. The four bases, and the three cases where a turn's share cannot be
@@ -1852,7 +1867,7 @@ having turned something off.
 - `context-usage-tab.test.js` — **168**. `context-usage.test.js` — **93**. `usage-hud.test.js` — **84**.
   `turn-cost.test.js` — **34**.
 
-### Live verification — the context half done, the cost half still open
+### Live verification — the context half done, the cost half closed on 2026-08-17
 
 Run against a live CLI, and an unusually direct one: **the running app was hosting the very session doing
 the verifying**, so the numbers on screen described the conversation that was reading them. No second app
@@ -1863,17 +1878,53 @@ Verified by reading it: the segmented context bar and its arithmetic; all five D
 is paying for"; `get_mcp_status()` answering `connected`; Debug's `Grid rows` cross-checking the Usage
 section it is derived independently of; and both of the fixes above that have a visible consequence.
 
-**The cost chip and the HUD's appearance are not verified.** Not for want of trying — the structure
-forbids it from inside. A turn's cost arrives only in the `result` push (`get_current_state` has no cost
-key), the HUD is visible for `_AUTO_HIDE_MS` = 8 s plus an 800 ms fade, and **a turn cannot observe its
-own completion**. This is phase 5's lesson in a smaller shape: there, a process could not verify its own
-shutdown and needed a second agent; here, the observation window opens exactly when the observer stops
-running. The method that works is to leave a recorder behind — a `stream-complete` listener plus a
-`MutationObserver` on the HUD's `visible` attribute — which turn N+1 reads to describe turn N. It was
-installed once and lost to a Vite HMR full page reload caused by a later edit in this same phase, and the
-reinstall after the last webapp write went unanswered. **So this stays open, with the method known and
-the ordering constraint now explicit: install the recorder after the final webapp write of the sitting,
-or HMR takes it.**
+**The cost chip and the HUD's appearance were not verifiable from inside the turn.** A turn's cost
+arrives only in the `result` push (`get_current_state` has no cost key), the HUD is visible for
+`_AUTO_HIDE_MS` = 8 s plus an 800 ms fade, and **a turn cannot observe its own completion**. This is
+phase 5's lesson in a smaller shape: there, a process could not verify its own shutdown and needed a
+second agent; here, the observation window opens exactly when the observer stops running. The method is
+to leave a recorder behind — a `stream-complete` listener plus a `MutationObserver` on the HUD's
+`visible` attribute — which turn N+1 reads to describe turn N. It was installed once and lost to a Vite
+HMR full page reload caused by a later edit in this same phase. **The ordering constraint that makes it
+work: install the recorder after the final webapp write of the sitting, or HMR takes it.**
+
+**Closed on 2026-08-17.** The recorder was reinstalled during a turn that wrote nothing under `webapp/`
+— which is what let it survive — and read on the two following turns. What it recorded:
+
+| | turn 1 | turn 2 |
+|---|---|---|
+| `turn_cost_usd` | 1.51561 | 1.210191 |
+| `total_cost_usd` | 1.51561 | 2.725801 |
+| `turn_cost_basis` | `measured` | `measured` |
+| chip on screen | `This turn $1.52 · 37 tool calls · 385.5s` | `This turn $1.21 · 20 tool calls · 247.5s` |
+| HUD `visible` window | 8.796 s | 8.800 s |
+
+**Turn 2 is the whole verification, and turn 1 could not have been.** `1.51561 + 1.210191 = 2.725801`
+exactly, so the wire arithmetic is confirmed cumulative, and the chip rendered **$1.21 rather than
+$2.73** — the pre-fix code would have printed the running total under "This turn". On turn 1 the two
+fields were *equal*, because a session's first turn's difference is its total, so **the bug this phase
+exists to fix is invisible on turn 1**. A single-turn observation would have looked like a pass and
+proved nothing. The HUD's `visible` window measured 8.796 s and 8.800 s against the specified
+8 s + 800 ms, which also closes the interlude's "whether the HUD appears on turn-complete is
+unverified", open across two phases for the same structural reason both times.
+
+The cost span carried `class=""` rather than `muted` and the tooltip "What this turn added to the
+session's cost, now $1.52 in total. An estimate the engine computes, not a billing statement." — the
+`known` branch of `turn-cost.js`, on screen.
+
+**What is still unobserved is the criterion's actual pair.** Both turns were `measured` with a difference
+above zero, so the *priced* rendering is verified and the two that the criterion's third clause names —
+"nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — have never
+been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
+engine never priced, which no ordinary turn produces; an immediate Stop is the cheapest candidate. **The
+clause is met for the case that occurs and unmet for the two that are hard to cause**, which is a more
+useful way to leave it than "verified".
+
+A method note worth keeping, because it cost a re-read: the probe that classified the second chip
+computed `known` by testing the row's HTML for `class="muted"`, and the *bits* span ("· 20 tool calls")
+legitimately carries that class. The regex matched the wrong span and reported `known: false` against a
+chip that was rendering the known branch. **A probe over rendered HTML has to name the element it means**
+— the first read only escaped this because it captured the raw HTML and was read by eye.
 
 Two smaller things the live run settled about method:
 
@@ -1897,11 +1948,12 @@ Two smaller things the live run settled about method:
 
 ### For whoever picks up phase 7
 
-- **Read the recorder.** If `window.__phase6` is present, it holds turn N's `turn_cost_basis`, the HUD's
-  visibility transitions and the rendered chip text. If it is not, reinstall it *after* the last webapp
-  write and read it on the following turn. That closes the criterion's third clause and the interlude's
-  "whether the HUD appears on turn-complete is unverified", which has now been open across two phases for
-  the same reason both times: the window closes before anybody looks.
+- ~~**Read the recorder.**~~ Done on 2026-08-17; see *Live verification*. The HUD's appearance and the
+  priced chip are verified live, and the turn-versus-session differencing is confirmed by arithmetic on
+  two consecutive turns. **If you need the other two chip renderings**, the recorder pattern still
+  applies — reinstall `window.__phase6` after the last webapp write of the sitting and cause a turn that
+  spends nothing. **Two turns minimum, always**: on a session's first turn `turn_cost_usd` and
+  `total_cost_usd` are equal, so it cannot distinguish the fix from the bug.
 - **Cost is cumulative. Every time.** `total_cost_usd` and `modelUsage` are session totals, and the only
   correct per-turn figures on the wire are `turn_cost_usd` / `turn_model_usage`. A new reader that reaches
   for the obvious field name will be wrong upward and monotonically, which is the shape of wrong that
@@ -1998,13 +2050,152 @@ attribution phrase is for a person who decided.
 - `webapp/src/permission-dialog/dialog.test.js` — `describe('a deadline that arms mid-request')` (7),
   covering arm, cancel-and-does-not-fire, the surviving deny reason, promotion, the announcements, and an
   unknown `permission_id`. `queue.test.js` gained `spokenSeconds`.
-- Both suites green: python **3131 passed**; webapp **93 files / 3740 passed**.
+- Both suites green: python **3 056 passed, 75 skipped** (3 131 collected); webapp **93 files / 3 740
+  passed**. This line first read "3131 passed", which was the collected total — the same misreading the
+  phase-6 *Tests* section now retracts, and the 75 skips are the same standing doc-convert ones.
 
 ### Deliberately not built
 
 - **Case A versus Case B is still unverified against a real CLI.** The fix makes the distinction moot — the
   request is released either way, and `test_claude_code_stop_with_permission.py` asserts that over both
   shapes — so nothing depends on knowing which one the CLI is. Nothing establishes it either.
-- **The `permissions` App Config section is still unwired.** `configuration.md` now specifies
+- **The `permissions` App Config section is still unwired.** `configuration.md` specifies
   `no_client_timeout_s` and `presence_poll_s` against `permissions.py`'s two constants, and there is still
   no provider reading them.
+
+  **This bullet claimed that spec edit as done when it had not been made** — corrected 2026-08-17.
+  `configuration.md` still described "the decision timeout and the shorter no-localhost-client timeout",
+  and `6-deployment/packaging.md`'s default-sections list still named a `decision timeout` among the
+  `app.json` keys, so **two specs documented a constant `5fc6fa4` had deleted** while the delivery record
+  asserted they matched the code. Both are reconciled now, and both say the absence of a decision timeout
+  is load-bearing rather than incidental — the failure mode is a later reader restoring a "missing"
+  default. Worth naming as a pattern: a *Deliberately not built* entry that describes work in the perfect
+  tense is indistinguishable from one that describes an intention, and only one of those is checkable by
+  `grep`. It was caught by grepping the specs for `decision_timeout`, which is what should have closed the
+  interlude in the first place.
+
+## Interlude — the examples the question was asking about (2026-08-17)
+
+Not a phase. It started as a one-line observation from the user: the terminal shows an example beside each
+option of an `AskUserQuestion`, and our dialog showed none. It ended up correcting a claim this record and
+three specs had already made in the perfect tense — which is the same failure the interlude above names,
+found again one commit later and from the inside.
+
+### The dialog was dropping the thing being compared
+
+`AskUserQuestion`'s options carry a third field, `preview`: an ASCII mockup, a candidate implementation, a
+config example. The whole point of a question with previews is comparison, and comparison needs both halves
+on screen — so the question switches layout when any option has one. Options in a column, the focused
+option's example beside them, the pane following focus *and* hover with a fallback to the chosen option and
+then the first that has an example. Following focus matters more than it sounds: in a radio group a click is
+an answer, so a pane that needed a click to change would charge the user an answer per comparison.
+
+Two smaller calls in the same shape. The pane names the option it is showing *and* that option is marked in
+the list, because four options beside one pane otherwise ask the reader to work out which row they are
+looking at. And a multi-select renders each example under its own option instead of using the pane — several
+options can be ticked and "which example" has no answer, which is why the tool tells the model previews are
+single-select only. A model that sends one anyway has still authored something the user is deciding about.
+
+### The claim that had to be retracted
+
+The engine sets `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=markdown`, and `options.py`,
+`specs-reference/3-engine/permissions.md`, `specs5/3-engine/session.md` and a test docstring all said, in
+one form or another, that **previews only exist because we ask for them**. That is false, and it took two
+void experiments to find out:
+
+1. The first control asked the model to "give each option a preview" — a prompt that names the field tells
+   the model the field exists, which is the entire variable.
+2. The second and third removed the variable from `options.env` and got previews anyway, which looked like
+   a result. It was not. The SDK spawns the CLI with `{**os.environ, **options.env}`, and the session
+   running the experiment was hosted by an engine that had already exported the variable — so the CLI saw
+   `markdown` on every "without" run. Emptying `options.env` removes nothing that was inherited.
+
+With `os.environ.pop` added, previews still arrived. The binary says why: the `preview` field is in the
+tool's input schema **unconditionally**, and the env var gates only the *"Preview feature" block in the
+tool's prompt* — what previews are for, which format to author, that the UI turns side-by-side, that they
+are single-select only. Unset, the CLI adds that block for a terminal session and omits it for every SDK
+entrypoint; ours is `sdk-py`.
+
+So the value is real but narrower than claimed: the schema's own description defers the format to a tool
+description that then says nothing, and markdown-versus-HTML becomes the model's guess. **Unset, the format
+is nobody's decision.** All five places now say that instead.
+
+The lesson generalises past this field. A control that produces the expected result is not evidence until
+the *absence* of the control has been established, and for anything reaching a subprocess "absence" means
+the environment it inherits, not the dict we passed.
+
+### A note is an answer's footnote
+
+The second half is `input.annotations` — a sibling of `answers` in the same input, keyed the same way,
+carrying `{notes, preview}` per question, and present in the tool's *output* schema too, which is how the
+model reads it back. It is the one place a user can qualify a choice without abandoning it. Picking an
+option votes for a label the model wrote; what a user often means is that label with a condition attached,
+and without a note that condition has to go in the freeform field, where for a single-select it *replaces*
+the choice rather than qualifying it.
+
+Three decisions worth their own lines, all of them about a note not being an answer:
+
+1. **The field appears only once the question is answered.** Two empty text boxes under one unanswered
+   question is a real ambiguity — the first is the answer, and a second beside it invites the answer to be
+   typed into the wrong one.
+2. **A note cannot enable the Answer button.** `_answerSelections()` tests options and typed text only. A
+   dialog holding nothing but notes has not been answered.
+3. **A key is written only for a question that answered.** Both maps key by question text, so an annotation
+   on an unanswered question would arrive attached to nothing — the CLI builds its result from `answers`,
+   so the note would be unreachable while looking delivered. `annotations` is omitted entirely when nothing
+   filled it: an empty map is a claim, and it makes every allow look user-modified in the transcript.
+
+`annotations[…].preview` is filled only when exactly one option was chosen and it had an example, because
+the CLI's own description is "the preview content of *the* selected option", singular. Echoing every ticked
+option's mockup into a field typed as one would be inventing a shape.
+
+### `scripts/question_preview_smoke.py`, and what it proved
+
+The CLI's acceptance of `annotations` is not something a unit test can establish — a `FakeSession` accepts
+any shape we invent — so this is a smoke script, alongside the others: a real CLI, real credentials, real
+tokens. It asks a question, answers option 0 with a note, and reports what the model sent, what survives
+`build_question_payload`, what went back, and what the model said afterwards.
+
+It works. The model quoted the note back verbatim and then **revised its own proposal to match it** — the
+note said "keep the gutter at exactly 47px" against a 240px mockup, and the reply came back "rendered as
+the narrow icon rail (47px, not the ~240px labelled rail I drew)". Nothing is silently dropped: the preview
+counts before and after normalisation match, and the script says so when they do not.
+
+Two things the script's own first run taught, both about how a probe fails:
+
+- **It degraded into a deny.** A `range(list)` typo raised inside the callback, the SDK turned that into a refusal, and the report blamed the CLI for our bug. The callback now catches, prints the traceback, and says the deny was ours.
+- **"No previews" is inconclusive, not failing.** Asked only to *show* the layouts, the model can satisfy that by writing mockups into its reply and leaving the field empty — which is exactly what the first run did. So the script has two prompts: the default names the field, which makes the transport check repeatable, and `--neutral` does not, which is what the `--without` A/B needs. Naming the field there would settle the question in the prompt.
+
+### Tests
+
+Deltas, not totals — this record's per-commit figures are dated, and the rolling status in
+[`README.md`](README.md) deliberately quotes neither:
+
+- `tests/test_claude_code_permissions.py` — **+9**, as `TestAnswerAnnotations`: the note travels keyed like
+  its answer, one chosen option carries its example back and two ticks carry none, a typed reply keeps its
+  note but has no example, a note on an unanswered question is dropped, a note alone is not an answer, a
+  non-text `notes` is dropped (parametrised over five values), the key is absent when nothing annotated
+  anything, and the legacy index-only `Answer` shape annotates nothing and still answers.
+- `webapp/src/permission-dialog/dialog.test.js` — **+7**, as `describe('a note on an answer')`: not offered
+  until answered, offered for a typed reply, travels beside its answer, cannot answer on its own, survives
+  switching options, labelled by its question, forgotten on the next request. Eleven existing assertions
+  gained `notes: ''`, keeping the uniform shape `text: ''` already established.
+- The preview half landed in `aee7b2b` with its own tests in the same two files plus `queue.test.js`.
+
+One failure worth recording because it looked nothing like its cause: the *whole* vitest run stopped
+loading with `ReferenceError: answer is not defined` from `styles.js`. A comment inside the `css` tagged
+template had put a CSS class name in backticks, which terminates the template literal. **No backticks in a
+`css` or `html` template's comments** — the error surfaces as a missing identifier in an unrelated file.
+
+### Deliberately not built
+
+- **The `--without` A/B is not automated.** The script supports it and the specs record its result; nothing
+  re-runs it on a CLI upgrade, and the thing it measures — whether the tool's prompt documents the field —
+  is exactly the kind of detail a version bump moves. Running `--neutral --without` after an upgrade is a
+  judgement call, not a check.
+- **`annotations` on a question answered with prose alone carries the note and no preview.** Correct by the
+  rule above, but it means a user who typed an answer *and* attached a note sends two free-text strings the
+  model must tell apart by key. Nothing tests how well it does.
+- **The pane is navigable, not announced** (§ Accessibility, unchanged): labelled and reachable, but
+  arrow-keying a radio group must not read a whole mockup aloud per keystroke. No screen-reader run was
+  done against a question with previews.

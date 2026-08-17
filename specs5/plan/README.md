@@ -9,12 +9,17 @@ history and moves under `specs5/impl-history/`.
 
 ## Where we are (2026-08-17)
 
-**Phases 0 through 6 are done, with one clause of phase 6's criterion outstanding.** The Context tab has
-had its live run: the visualisation and the `ac-dc` tool inventory were read off a live CLI — the app was
+**Phases 0 through 6 are done, and phase 6's last clause closed on 2026-08-17.** The Context tab had its
+live run: the visualisation and the `ac-dc` tool inventory were read off a live CLI — the app was
 hosting the session doing the verifying — and the run found four things no test could have, all of them
-about what a reader is *told* rather than what is computed. The one clause left is **whether a live turn's
-cost chip distinguishes "nothing extra" from "cost unknown" on screen**, which cannot be observed from
-inside the turn being measured; the method and the ordering constraint are in the
+about what a reader is *told* rather than what is computed. The clause that was outstanding — a live
+turn's cost chip — was closed by leaving a `window.__phase6` recorder behind and reading it on the two
+following turns, since **a turn cannot observe its own completion**. It verified the HUD appearing and
+auto-hiding at the specified 8.8 s, and, more to the point, that the chip prints a *difference*: two
+turns of `1.51561` and `1.210191` against a cumulative `2.725801`, with `$1.21` on screen where the
+pre-fix code would have shown `$2.73`. **A single turn could not have shown that** — a session's first
+turn has difference equal to total, so the bug and the fix look identical. The chip's "nothing extra" and
+"cost unknown" renderings are still unobserved, because no ordinary turn causes them. Details in the
 [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17) under *Live
 verification*. A conversation now outlives the process: `RepoSessionStore` mirrors the CLI's transcript
 under `.ac-dc4/sessions/`,
@@ -62,15 +67,29 @@ after it are the background they assume.
 
 ### Picking phase 7 up cold (as of 2026-08-17)
 
-Both suites are green — python **3131 passed, 0 skipped**; webapp **93 files / 3740 passed**. The skip
-count went to zero because the venv gained the tree-sitter grammars, so 75 previously-skipped extractor
-tests now run: 2 992 + 75 = 3 067, plus phase 6's 41 new credential tests. Nothing was deleted and nothing
-was waived.
+**Both suites are green**, and the totals are deliberately not written here — run them: `pytest -q` and
+`npm test` in `webapp/`. A pass count in a rolling paragraph is stale by the next commit, and a stale
+one invites the reader to treat a difference as a finding. What is worth knowing is the part that does
+*not* move:
+
+**Pytest skips 75, and will keep skipping 75.** They are a standing feature of this venv, not a
+regression and not the tree-sitter extractor tests — those grammars are installed and those tests run.
+The skips are three absent optional document-conversion dependencies: PyMuPDF (29), python-pptx (25),
+openpyxl (21). Install those three and nothing is skipped. Nothing was deleted and nothing was waived,
+and the count has been 75 on both sides of every phase since 5.
+
+That last sentence is the whole reason this paragraph is worded the way it is. It used to claim "3131
+passed, 0 skipped" and explain the zero with the venv gaining the grammars — an explanation for a change
+that had never happened, built on a figure that was the *collected* total quoted as the passing one. See
+the phase-6 [*Tests*](delivery.md#tests-7) section for the retraction and the rule it leaves behind:
+quote both halves of the pytest summary line, or quote neither. Dated per-commit measurements in
+[`delivery.md`](delivery.md) are a different thing and stay — a number attached to a commit does not go
+stale, it becomes history.
 
 **Nothing is uncommitted.** Read
 [*Interlude — the timer that answered for the user*](delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
 before touching the permission path: a request now waits indefinitely while a host client is connected,
-and Stop is what closes a dialog nobody wants to answer. The six commits on this branch, oldest first:
+and Stop is what closes a dialog nobody wants to answer. The commits on this branch, oldest first:
 
 | Commit | What it landed |
 |---|---|
@@ -78,16 +97,29 @@ and Stop is what closes a dialog nobody wants to answer. The six commits on this
 | `fd3963a` | The spec reconciliation: § *Verified field shapes — the result footer*, the cost-is-cumulative correction, the Debug section specified ahead of being built |
 | `02373a2` | The Debug section — Engine, initialize reply, hook traffic, MCP status, `gridRows` — and the segmented control appearing on an error, which used to hide Debug exactly when it was worth the most |
 | `551e169` | `EngineHealth.degradations` and the health banner that reads it, so a bridge or hook that did not start reports the loss instead of writing a log line nobody reads |
+| `97910f5` | The phase-6 entry written before its live run, naming what was built-and-unverified and the three findings to pick up |
 | `4efc0f9` | Phase 6's seven fixes — the credential source that predicted a login prompt for an authenticated session, the hook log that reported working machinery as broken, two wrong labels, the late fetch that could overwrite a push, the initialize reply's own heading, the clipped autocompact mark in both readers |
 | `5fc6fa4` | The permission interlude: Stop denies before it interrupts, the decision timeout is gone, and the one deadline left is armed by absence rather than by a clock |
+| `834aff2` | The delivery record catching up with the interlude it had stopped short of |
+| `092ea58` | The forensic probes moved out of `/tmp` and into `scripts/`, where they run again next time the CLI ships a new build |
+| `aee7b2b` | Option previews: the compare pane, and the correction of what the format env var actually buys |
 
-**The live run is done and the phase-6 entry is written.** The three review findings below are all
-fixed. The live run then found four more, also fixed, and left **one clause of the exit criterion
-outstanding** — the live cost chip. That one is not a loose end anyone can close by reading code: a turn
-cannot observe its own completion, and the HUD's window is 8 s wide. **Do this first**: check for
-`window.__phase6` in the running app; if it is absent, reinstall the recorder described in the
-[phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17) *after* the last webapp
-write of the sitting — a Vite HMR reload took the first one — and read it on the following turn.
+The last row is not the last commit. The one after it carries the per-answer note (`annotations`) and
+this paragraph, and a table row cannot name its own hash — both are in
+[*Interlude — the examples the question was asking about*](delivery.md#interlude--the-examples-the-question-was-asking-about-2026-08-17),
+which is also where the retraction lives: **setting `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` is not what
+makes a preview possible**, and this record said otherwise in four places before a live A/B disproved it.
+
+**The live run is done, the phase-6 entry is written, and the cost chip is verified.** The three review
+findings below are all fixed. The live run then found four more, also fixed. The exit criterion's last
+clause — the live cost chip — **is now closed**: the `window.__phase6` recorder was reinstalled during a
+turn that wrote nothing under `webapp/` (which is why it survived) and read on the two following turns.
+**Phase 7 starts with no verification debt.** Two rules that came out of it and generalise:
+
+- **Two turns minimum when checking anything per-turn.** A session's first turn has `turn_cost_usd`
+  equal to `total_cost_usd`, so it cannot tell a differenced figure from a cumulative one.
+- **Install any browser-side recorder after the last webapp write of the sitting.** Vite HMR does a full
+  page reload and takes it. Doc-only edits under `specs5/` do not, which is what made this sitting work.
 
 The three review findings, all fixed in this phase:
 
@@ -311,7 +343,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
 | **5. History and sessions** ✅ | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run**; the two interludes after it are what that cost, and the criterion was verified live in the second — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. **Met live**: `--resume` on the CLI child, the earlier conversation answered with no tool calls, no fork in the transcript. |
-| **6. Context and cost visualisation** ✅ (one clause outstanding) | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `ac-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. The live run then found four things no test could have, all fixed, and all four about what a reader is *told*: see the [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17). | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. **First two clauses met live**; the third is met in code and in 60 tests but **not observed on screen** — a turn cannot observe its own completion, and the recorder that closes it is phase 7's first task. |
+| **6. Context and cost visualisation** ✅ | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `ac-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. The live run then found four things no test could have, all fixed, and all four about what a reader is *told*: see the [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17). | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. **All three met**; the first two live on 2026-08-17, the third live later that day via the `window.__phase6` recorder — two consecutive turns, `1.51561 + 1.210191 = 2.725801`, chip reading **$1.21 not $2.73**, so the figure is a difference and not the running total. Its "nothing extra" and "cost unknown" renderings hold in 60 tests but remain unobserved, because no ordinary turn causes them. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 | **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
 

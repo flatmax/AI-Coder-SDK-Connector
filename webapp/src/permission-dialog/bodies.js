@@ -14,6 +14,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { renderMarkdown } from '../markdown.js';
 import {
+  ANSWER_NOTE_PLACEHOLDER,
   CLASS_LABELS,
   FLAG_TOOLTIPS,
   OTHER_ANSWER_PLACEHOLDER,
@@ -300,6 +301,11 @@ export function renderInteractBody(host, payload) {
       // The pane is single-select only, for the reason `renderOption`
       // gives. `compare` is therefore the layout test, `hasPreviews` the
       // content test, and they are not the same question.
+      // The note field appears only once there is an answer to annotate.
+      // Two text inputs on an unanswered question is the ambiguity worth
+      // avoiding: the empty one above is the answer, and a second empty box
+      // beside it invites the answer to be typed into the wrong one.
+      const answered = chosen.size > 0 || !!typed.trim();
       const compare = !multi && hasPreviews(question);
       const shown = compare
         ? previewIndex(question, chosen, host._previewFocus.get(questionIndex))
@@ -358,6 +364,20 @@ export function renderInteractBody(host, payload) {
             ? html`<span class="other-note">
                 Sent alongside anything ticked above.
               </span>`
+            : null}
+          ${answered
+            ? html`
+                <input
+                  class="answer-note"
+                  data-question=${questionIndex}
+                  .value=${host._answerNotes.get(questionIndex) || ''}
+                  placeholder=${ANSWER_NOTE_PLACEHOLDER}
+                  aria-label="note on your answer to: ${question.question}"
+                  spellcheck="true"
+                  @input=${(event) =>
+                    host._onAnswerNotesInput(questionIndex, event)}
+                />
+              `
             : null}
         </div>
       `;

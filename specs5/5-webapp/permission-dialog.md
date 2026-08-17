@@ -195,9 +195,19 @@ sending one — it stops anything from saying whether it is markdown or an HTML 
 renders markdown. See
 [`../../specs-reference/3-engine/permissions.md` § `preview`](../../specs-reference/3-engine/permissions.md#preview--the-example-beside-the-option).
 
-One affordance the tool supports remains **not built**: the per-answer notes (`input.annotations`). It
-is additive — a call answered by option label or by prose is answered correctly without it — and it
-belongs with the rest of the dialog's polish.
+**A note is an answer's footnote, and appears only once there is an answer to annotate.** The tool
+carries `input.annotations` alongside `answers`, keyed the same way, and its `notes` field is the one
+place a user can qualify a choice without abandoning it — "this one, but mind the gutter". Picking an
+option is a vote for a label the *model* wrote, and the closest thing to it that a user often means is
+that label with a condition attached. Without a note that condition has to be typed into the freeform
+field, where for a single-select it replaces the choice instead of qualifying it.
+
+- **It is offered only after the question is answered.** Two empty text fields under one unanswered question is the ambiguity worth avoiding: the first is the answer, and a second empty box beside it invites the answer to be typed into the wrong one.
+- **A note cannot answer on its own.** The Answer button still requires an option or a typed reply on every question. A note annotates an answer, so a dialog holding nothing but notes has not been answered — and a note attached to nothing would arrive keyed to a question with no entry in `answers`.
+- **The engine also fills in `annotations[…].preview`**, which the schema describes as the preview content of *the* selected option, singular — so it is sent only when exactly one option was chosen and that option carried an example. See [`../../specs-reference/3-engine/permissions.md` § Answering an `interact` request](../../specs-reference/3-engine/permissions.md#answering-an-interact-request).
+
+The note is read: `scripts/question_preview_smoke.py` round-trips one against the real CLI, and the
+model's reply quoted it back and revised its own proposal to match.
 
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot

@@ -273,7 +273,7 @@ def _iso_or_none(epoch_seconds: float | None) -> str | None:
     return None if epoch_seconds is None else _iso(epoch_seconds)
 
 
-def _expiry_order(pending: "PendingPermission") -> tuple[bool, float]:
+def _expiry_order(pending: PendingPermission) -> tuple[bool, float]:
     """Sort key placing counting-down requests ahead of open-ended ones."""
     return (pending.expires_at is None, pending.expires_at or 0.0)
 
@@ -569,25 +569,65 @@ def build_question_payload(tool_input: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _split_selection(chosen: Any) -> tuple[list[int], str]:
-    """One question's answer, as ``(option indices, freeform reply)``.
+def _split_selection(chosen: Any) -> tuple[list[int], str, str]:
+    """One question's answer, as ``(option indices, freeform reply, note)``.
 
-    Two accepted shapes, because the freeform reply arrived after the
-    indices did: a bare list is indices alone, and a mapping carries both.
+    Two accepted shapes, because the reply and the note each arrived after
+    the indices did: a bare list is indices alone, and a mapping carries
+    whichever of the three it has. A mapping missing a key is the ordinary
+    case rather than a malformed one — most answers have no note.
     """
     if isinstance(chosen, dict):
         raw = chosen.get("options")
         reply = chosen.get("text")
+        note = chosen.get("notes")
     elif isinstance(chosen, list):
-        raw, reply = chosen, None
+        raw, reply, note = chosen, None, None
     else:
-        return [], ""
+        return [], "", ""
     indices = [
         position
         for position in (raw if isinstance(raw, list) else [])
         if isinstance(position, int) and not isinstance(position, bool)
     ]
-    return indices, reply.strip() if isinstance(reply, str) else ""
+    return (
+        indices,
+        reply.strip() if isinstance(reply, str) else "",
+        note.strip() if isinstance(note, str) else "",
+    )
+
+
+def _build_annotation(
+    options: list[Any],
+    chosen: list[int],
+    note: str,
+) -> dict[str, str]:
+    """One question's ``annotations`` entry: the note, and what was picked.
+
+    Both keys are optional in the CLI's schema and both are omitted here
+    when they have nothing in them, because an empty string is a claim: it
+    reads as a note the user wrote and left blank.
+
+    ``preview`` is "the preview content of the selected option", singular,
+    so it is filled only when exactly one option is chosen. A multi-select
+    with two ticks has no answer to "which option's example", and picking
+    one of them would be inventing the answer; a question answered only by
+    a typed reply has no chosen option to take one from.
+
+    Echoing back content the model itself authored looks redundant until
+    the alternative is read: the answer map carries labels, and a label is
+    "Left rail" where the artefact the user actually compared was the
+    mockup. This is the schema's own way of closing that gap.
+    """
+    annotation: dict[str, str] = {}
+    if note:
+        annotation["notes"] = note
+    if len(chosen) == 1 and 0 <= chosen[0] < len(options):
+        option = options[chosen[0]]
+        preview = option.get("preview") if isinstance(option, dict) else None
+        if isinstance(preview, str) and preview:
+            annotation["preview"] = preview
+    return annotation
 
 
 def build_answer_input(
@@ -610,10 +650,21 @@ def build_answer_input(
 
     ``selections`` is one entry per question, in the order the payload's
     ``questions`` list carries them: either a list of option indices, or a
-    mapping ``{"options": [...], "text": "..."}`` when the user typed their
-    own reply. A short list, a missing entry or an out-of-range index is
-    dropped rather than guessed at: an unanswered question reads to the CLI
-    as one the user declined, which is at least true.
+    mapping ``{"options": [...], "text": "...", "notes": "..."}`` when the
+    user typed their own reply or annotated their answer. A short list, a
+    missing entry or an out-of-range index is dropped rather than guessed
+    at: an unanswered question reads to the CLI as one the user declined,
+    which is at least true.
+
+    ``annotations`` rides alongside ``answers`` — the same sibling of
+    ``questions`` in the tool's input schema, keyed by the same question
+    text, each entry ``{"notes"?, "preview"?}``. It is what carries the
+    part of an answer a label cannot: why this one, and which artefact was
+    being looked at when the user chose. The CLI's *output* schema carries
+    it back too, so the model reads the note rather than only the label.
+    Omitted entirely when nothing annotated anything, because an empty map
+    is a different statement from an absent key. See
+    :func:`_build_annotation` for which of the two keys is filled when.
 
     **The freeform reply is an ordinary answer string, not a field of its
     own.** The tool's schema does have a top-level ``response``, but the
@@ -643,10 +694,11 @@ def build_answer_input(
     raw_questions = raw if isinstance(raw, list) else []
 
     answers: dict[str, str] = {}
+    annotations: dict[str, dict[str, str]] = {}
     for index, entry in enumerate(questions):
         if index >= len(selections):
             break
-        chosen, reply = _split_selection(selections[index])
+        chosen, reply, note = _split_selection(selections[index])
         options = entry.get("options") or []
         labels = [
             str(options[position].get("label", ""))
@@ -668,10 +720,20 @@ def build_answer_input(
         if not parts or not isinstance(text, str) or not text:
             continue
         answers[text] = ", ".join(parts)
+        # Keyed the same way as the answer, and only for a question that
+        # produced one: a note on a question the user left unanswered would
+        # arrive attached to nothing, which the CLI reads as an annotation
+        # of an answer it cannot find.
+        annotation = _build_annotation(options, chosen, note)
+        if annotation:
+            annotations[text] = annotation
 
     if not answers:
         return None
-    return {**tool_input, "answers": answers}
+    updated = {**tool_input, "answers": answers}
+    if annotations:
+        updated["annotations"] = annotations
+    return updated
 
 
 # Where an "always allow" grant is written (CC-16).

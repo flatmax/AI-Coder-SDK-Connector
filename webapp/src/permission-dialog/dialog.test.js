@@ -1983,7 +1983,7 @@ describe('a question', () => {
     // One entry per question: the options ticked, plus whatever was typed
     // into that question's own reply field.
     expect(lastResolve().args[1]).toEqual({
-      action: 'allow', answers: [{ options: [1], text: '' }],
+      action: 'allow', answers: [{ options: [1], text: '', notes: '' }],
     });
   });
 
@@ -2003,7 +2003,7 @@ describe('a question', () => {
 
     decision(el, 'allow').click();
     await settle(el);
-    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '' }]);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '', notes: '' }]);
   });
 
   it('lets a multi-select take several', async () => {
@@ -2033,7 +2033,7 @@ describe('a question', () => {
 
     decision(el, 'allow').click();
     await settle(el);
-    expect(lastResolve().args[1].answers).toEqual([{ options: [0, 2], text: '' }]);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [0, 2], text: '', notes: '' }]);
   });
 
   it('renders every question the call asked, not just the first', async () => {
@@ -2115,8 +2115,8 @@ describe('a question', () => {
     await settle(el);
     // One entry per question, in the order the call asked them.
     expect(lastResolve().args[1].answers).toEqual([
-      { options: [1], text: '' },
-      { options: [0], text: '' },
+      { options: [1], text: '', notes: '' },
+      { options: [0], text: '', notes: '' },
     ]);
   });
 
@@ -2213,7 +2213,7 @@ describe('a question the options do not answer', () => {
     decision(el, 'allow').click();
     await settle(el);
     expect(lastResolve().args[1].answers).toEqual([
-      { options: [], text: 'a branch you have not listed' },
+      { options: [], text: 'a branch you have not listed', notes: '' },
     ]);
   });
 
@@ -2244,7 +2244,7 @@ describe('a question the options do not answer', () => {
     decision(el, 'allow').click();
     await settle(el);
     expect(lastResolve().args[1].answers).toEqual([
-      { options: [], text: 'neither' },
+      { options: [], text: 'neither', notes: '' },
     ]);
   });
 
@@ -2263,7 +2263,7 @@ describe('a question the options do not answer', () => {
     decision(el, 'allow').click();
     await settle(el);
     expect(lastResolve().args[1].answers).toEqual([
-      { options: [0], text: '' },
+      { options: [0], text: '', notes: '' },
     ]);
   });
 
@@ -2283,8 +2283,8 @@ describe('a question the options do not answer', () => {
     decision(el, 'allow').click();
     await settle(el);
     expect(lastResolve().args[1].answers).toEqual([
-      { options: [0], text: '' },
-      { options: [2], text: 'and d' },
+      { options: [0], text: '', notes: '' },
+      { options: [2], text: 'and d', notes: '' },
     ]);
   });
 
@@ -2302,6 +2302,169 @@ describe('a question the options do not answer', () => {
     }));
     expect(el.shadowRoot.querySelector('.other-answer').value).toBe('');
     expect(decision(el, 'allow').disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interact — the note on an answer
+// ---------------------------------------------------------------------------
+
+describe('a note on an answer', () => {
+  const twoQuestions = {
+    question: 'Which branch?',
+    multi_select: false,
+    options: [{ label: 'main' }, { label: 'dev5' }],
+    questions: [
+      {
+        question: 'Which branch?',
+        multi_select: false,
+        options: [{ label: 'main' }, { label: 'dev5' }],
+      },
+      {
+        question: 'Which files?',
+        multi_select: true,
+        options: [{ label: 'a' }, { label: 'b' }],
+      },
+    ],
+  };
+
+  const note = (el, group = 0) => el.shadowRoot
+    .querySelector(`.answer-note[data-question="${group}"]`);
+
+  async function choose(el, group, index) {
+    const input = el.shadowRoot
+      .querySelector(`.options[data-question="${group}"]`)
+      .querySelectorAll('input')[index];
+    input.checked = true;
+    input.dispatchEvent(new Event('change'));
+    await settle(el);
+    return input;
+  }
+
+  async function typeNote(el, group, text) {
+    const field = note(el, group);
+    field.value = text;
+    field.dispatchEvent(new Event('input'));
+    await settle(el);
+    return field;
+  }
+
+  async function typeReply(el, group, text) {
+    const field = el.shadowRoot
+      .querySelector(`.other-answer[data-question="${group}"]`);
+    field.value = text;
+    field.dispatchEvent(new Event('input'));
+    await settle(el);
+    return field;
+  }
+
+  it('is not offered until there is an answer to annotate', async () => {
+    // Two empty text inputs on an unanswered question invites the answer
+    // to be typed into the wrong one.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    expect(note(el)).toBeNull();
+    await choose(el, 0, 1);
+    expect(note(el)).not.toBeNull();
+  });
+
+  it('appears for a question answered by a typed reply too', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    await typeReply(el, 0, 'some other branch');
+    expect(note(el)).not.toBeNull();
+  });
+
+  it('travels beside the answer it belongs to', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload({ question: twoQuestions }));
+
+    await choose(el, 0, 1);
+    await choose(el, 1, 0);
+    await typeNote(el, 0, 'the release branch, not the trunk');
+
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers).toEqual([
+      { options: [1], text: '', notes: 'the release branch, not the trunk' },
+      { options: [0], text: '', notes: '' },
+    ]);
+  });
+
+  it('cannot answer the question on its own', async () => {
+    // A note annotates an answer. A dialog holding nothing but notes has
+    // still not been answered, so Answer stays disabled — and the field
+    // only exists once answered, so this is reached the long way round.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    const option = await choose(el, 0, 1);
+    await typeNote(el, 0, 'a thought');
+    option.checked = false;
+    option.dispatchEvent(new Event('change'));
+    await settle(el);
+
+    expect(decision(el, 'allow').disabled).toBe(true);
+    expect(note(el)).toBeNull();
+  });
+
+  it('survives switching from one option to another', async () => {
+    // Unlike the reply field, which is an alternative to the options, a
+    // note is about the question — so changing your mind keeps it.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+
+    await choose(el, 0, 0);
+    await typeNote(el, 0, 'either would do');
+    await choose(el, 0, 1);
+
+    expect(note(el).value).toBe('either would do');
+    decision(el, 'allow').click();
+    await settle(el);
+    expect(lastResolve().args[1].answers[0]).toEqual(
+      { options: [1], text: '', notes: 'either would do' },
+    );
+  });
+
+  it('is labelled by the question it annotates', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload({ question: twoQuestions }));
+    await choose(el, 1, 0);
+
+    expect(note(el, 1).getAttribute('aria-label')).toContain('Which files?');
+    expect(note(el, 1).getAttribute('aria-label')).toContain('note on your answer');
+  });
+
+  it('forgets the note when the next request arrives', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, interactPayload());
+    await choose(el, 0, 1);
+    await typeNote(el, 0, 'carried over would be wrong');
+    decision(el, 'allow').click();
+    await settle(el);
+
+    await ask(el, interactPayload({
+      permission_id: 'perm_ask_2', tool_use_id: 'toolu_ask_2',
+    }));
+    expect(note(el)).toBeNull();
+    await choose(el, 0, 0);
+    expect(note(el).value).toBe('');
   });
 });
 
@@ -2430,7 +2593,7 @@ describe('a question offering examples', () => {
       .toContain('Topbar');
     decision(el, 'allow').click();
     await settle(el);
-    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '' }]);
+    expect(lastResolve().args[1].answers).toEqual([{ options: [1], text: '', notes: '' }]);
   });
 
   it('renders the example as markdown, and keeps its line breaks', async () => {
