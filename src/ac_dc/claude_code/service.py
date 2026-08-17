@@ -1400,7 +1400,15 @@ class ClaudeCodeService:
         **Localhost only.**
 
         Killing a subagent mid-write is a way to leave the tree in a state
-        nobody asked for, and it interrupts the host's turn.
+        nobody asked for. It does *not* interrupt the host's turn: an earlier
+        version of this docstring claimed it did, and nothing in the SDK
+        supports that. ``stop_task`` is its own control subtype
+        (``SDKControlStopTaskRequest``, a sibling of the interrupt request),
+        and the CLI answers it in the *message stream* — a
+        ``task_notification`` of status ``"stopped"``, or a ``task_updated``
+        patch of ``"killed"`` with no notification at all. Hence the
+        ``"stopping"`` below: the terminal word arrives as an event, not as
+        this return value.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:

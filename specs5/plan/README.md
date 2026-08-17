@@ -209,12 +209,18 @@ interlude that found it; this list exists so that none of them has to be redisco
    after a restart**: three long commands in the main scope and two subagents' own sleeps opened nothing,
    while the two subagents opened exactly two tabs and settled green with their real counters. The run
    left three things open; two are now closed:
-   - **⏹ Stop and the amber LED path are still unverified** — the one still open. The reason recorded
-     first was wrong: `stop_task` is its own control subtype, *not* `interrupt`, and the CLI answers it
-     with a `stopped`/`killed` task message in the message stream, so it should not end the host turn.
-     `service.py:1398` claims it interrupts the host turn and nothing in the SDK supports that. The
-     amber path can be reached without the webapp's ⏹ at all — an agent's own `TaskStop` on a
-     background task produces the same terminal status — and that experiment has not been run.
+   - **⏹ Stop and the amber LED path are still unverified** — the one still open, and now for a better
+     reason. The first reason was wrong and the docstring carrying it is corrected: `stop_task` is its own
+     control subtype (`SDKControlStopTaskRequest`, a sibling of the interrupt request), and `client.py:454`
+     says the CLI answers it with a `task_notification` of status `stopped` **in the message stream** — so
+     it does not end the host turn, and `service.py`'s claim that it did had nothing behind it.
+     The cheap substitute was then tried and **failed to reach amber**: an agent's own `TaskStop` against
+     a live background subagent (watched live 2026-08-17) killed it without the CLI emitting any terminal
+     task message at all — engine and browser both still read `status: null, terminal: false`, the LED
+     stayed cyan and the tab kept offering ⏹ for a task that no longer existed. The harness reported
+     `killed`; the SDK message stream said nothing. So the two paths are **not** interchangeable, the
+     webapp's ⏹ (a real `stop_task` control request) is the only thing that can verify itself, and a task
+     that dies quietly is left to the turn-end sweep that shows a still-live subagent as status-unknown.
    - ~~**The strip labels read as noise.**~~ **Fixed.** A tab is now `1 headings`, `2 test-files`: an
      ordinal assigned at creation (it never renumbers under the cursor) plus one keyword, with the whole
      sentence in the tooltip and in the feed's opening line. The keyword and the sentence come from the

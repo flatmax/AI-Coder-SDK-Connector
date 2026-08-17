@@ -2606,11 +2606,34 @@ Main if the remembered tab is gone). A rebuilt tab is one nobody chose. The caus
 does not close that question, it makes the symptom unreachable from this path.
 
 And the reason ⏹ Stop stayed unverified was wrong. `stop_task` is its **own** control subtype, not
-`interrupt`: the SDK sends `{"subtype": "stop_task", "task_id": …}` and the CLI answers with a
-`task_notification` of status `stopped` (or a `task_updated` of `killed`) **in the message stream**. Nothing
-in the SDK supports `service.py:1398`'s claim that it interrupts the host's turn. The amber path is
-therefore reachable without pressing the webapp's ⏹ at all — an agent's own `TaskStop` against a background
-task produces the same terminal status through the same events — and that is the experiment still to run.
+`interrupt`: the SDK sends `{"subtype": "stop_task", "task_id": …}` (`query.py:848`,
+`SDKControlStopTaskRequest` sitting beside `SDKControlInterruptRequest` in `types.py:2352`) and
+`client.py:454` documents the answer arriving **in the message stream** — "a `task_notification` system
+message with status `'stopped'` will be emitted by the CLI". Nothing supports `service.py`'s claim that it
+interrupts the host's turn, so that docstring now says what the SDK says and explains why the RPC returns
+`"stopping"`: the terminal word is an event, not a return value.
+
+### The stop that told nobody
+
+The cheap way to reach amber without pressing the webapp's ⏹ — an agent stopping one of its own background
+subagents with the CLI's `TaskStop` tool — was tried live on 2026-08-17 against a subagent sleeping for 240
+seconds. It killed the subagent and **reported nothing to the message stream**.
+
+Before: `status: running`, cyan LED, tooltip `… running — Bash`, ⏹ offered. After the kill, and six seconds
+later again, the browser read `terminal: false` with no `status` field at all, the LED still cyan, the ⏹
+still offered for a task that no longer existed. `get_current_state` was asked directly, so this is not a
+browser-side miss: the **engine's** own record of the task was `{status: null, terminal: false}`, holding
+only a `usage` patch (`6,963 tokens, 1 tool use, 3,378 ms`) that had arrived while the task was alive. The
+harness that owns the background agent reported `killed`; the CLI's task machinery said nothing.
+
+Three things follow. The two stop paths are **not interchangeable** — the CLI's own `TaskStop` tool and the
+SDK's `stop_task` control request reach the same task by different routes, and only the latter is documented
+to answer with a `stopped` notification, so only the webapp's ⏹ can verify the webapp's ⏹. A task can
+therefore **die without a terminal status**, which is exactly the case the turn-end sweep exists for: a
+subagent still live when its parent turn ends is shown status-unknown and amber, and that sweep is now the
+only thing standing between a quietly-killed subagent and a cyan LED that lies. And the ⏹ affordance is
+offered on the strength of non-terminal status alone, so it will happily send a `stop_task` for a task the
+CLI has already forgotten.
 
 - `webapp/src/chat-panel/subagent-tabs.test.js` — **+13** (46 total in the file): the ordinal sticks
   across a sibling's completion, the strip button and its tooltip carry what they should, `subagentKeyword`

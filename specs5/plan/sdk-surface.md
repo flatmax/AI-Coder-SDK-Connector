@@ -132,6 +132,17 @@ per-model — a turn that used a subagent on a cheaper model reports both.
 `TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})` — the subagent
 tab LED uses exactly this set to decide when to stop showing activity.
 
+**A task can end without ever naming one of them.** `stop_task` is its own control subtype
+(`SDKControlStopTaskRequest`, sibling of the interrupt request, sent by `query.py:848`), and
+`client.py:454` promises that after it resolves "a `task_notification` system message with status
+`'stopped'` will be emitted by the CLI in the message stream" — the terminal word arrives as an event, not
+as a return value. But that promise covers only *that* request. Watched live on 2026-08-17: a subagent
+killed through the CLI's **own** `TaskStop` tool produced no terminal task message whatsoever — the
+engine's record of it stayed `{status: null, terminal: false}`, holding only the `usage` patch that had
+arrived while it was alive. Two routes to the same task, and only one of them reports. Any surface that
+waits for a terminal status therefore needs a fallback that does not (ours is the turn-end sweep, which
+shows a still-live subagent as status-unknown).
+
 ---
 
 ## `get_context_usage()` return shape
