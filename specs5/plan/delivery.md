@@ -2947,3 +2947,73 @@ this entry is 3873, not the 3864 the entry above records — two commits landed 
 - **`cli_stderr` in the health *problem* set.** The whole design above depends on it staying out. If a
   particular stderr line ever needs to raise the banner, the thing to add is a recogniser for *that line*,
   not a rule that any output is a fault.
+
+## Interlude — the empty repo that wasn't, and an app served from last week (2026-08-18)
+
+Reported as *I tried to start on an empty repo and it doesn't work*, with a console to match: every RPC
+the webapp made failed, `LLMService.get_history_status is not a function` and
+`rpcCall('LLMService.set_selected_files') failed: method not found on proxy`. `LLMService` was deleted in
+phase 3. The obvious reading is that something in the webapp still calls it — and something does, which is
+the open item this entry leaves behind — but that was not this. **The backend was current and the tab was
+not.**
+
+### The bundle that existed nowhere
+
+The console named `index-B68mnaSQ.js`. `webapp/dist/index.html` named `index-CcF1pKq8.js`, and
+`B68mnaSQ` was not on disk at all: not in `dist/assets`, not anywhere. A file the browser had loaded and
+the filesystem had never heard of is only one thing. The entry document had come from the browser's own
+HTTP cache, and had brought the bundle it used to name with it.
+
+`_start_static_server` served `SimpleHTTPRequestHandler` unmodified, which sends `Last-Modified` and no
+`Cache-Control`. That leaves the freshness lifetime to the browser's heuristic, and for a URL as stable as
+`/index.html` the heuristic is free to reuse its copy without ever asking. So a rebuilt webapp could stay
+invisible for as long as the browser felt like it — and what came up instead was an app from before phase
+3, calling a service phase 3 deleted.
+
+Two rules, in `end_headers`. `/assets/**` is `immutable` for a year: Vite puts a content hash in every
+asset name, so a changed file is a changed URL and there is nothing to go stale. Everything else —
+above all the entry document that *names* those hashes — is `no-store, must-revalidate`. The split matters
+in both directions: `no-store` on the assets too would re-fetch ~5 MB of Monaco and KaTeX on every reload,
+and `immutable` on `index.html` would be the bug with a header on it.
+
+### The same drift, on disk
+
+Correct headers deliver whatever is in `dist` faithfully, and `dist` has its own way of being wrong.
+`--preview` rebuilds before serving and the comment on that branch in `main.py` already says
+why — a stale bundle means old code, and if the RPC contract moved since the build, the app calls methods
+the backend no longer has. That is the paragraph that describes this bug, written before it happened,
+guarding the one path it could not happen on. Plain `ac-dc` serves whatever `npm run build` last left
+behind, however long ago that was.
+
+`_warn_if_dist_is_stale` compares `dist/index.html`'s mtime against the newest file under `webapp/src` and
+says so. It deliberately does **not** rebuild: that would put Node on the critical path of every launch,
+including the ones where the user only wanted to read a diff. It is silent for an installed package, where
+`webapp_dist` ships with no sources beside it — nothing to compare with is not evidence of staleness, and a
+warning every installed user can do nothing about is noise.
+
+### What the empty repo actually did
+
+Nothing wrong, which is worth recording because the report named it. A launch in a fresh `git init` with
+one untracked file rendered the tree, and a sent message connected the engine — bundled CLI 2.1.229,
+`session connected (cwd=…)`, turn streaming. No commits is not a state anything on the startup path minds.
+
+### Tests
+
+- `tests/test_main_static_cache.py` — **new, 7 cases.** Four drive a real socket against a real server
+  rather than calling `end_headers` on a constructed handler, because the thing under test is what arrives
+  at a client: `index.html`, the SPA fallback (a separate branch — it rewrites `self.path`, which is what
+  the rule reads), the `?port=` URL the browser is actually handed, and a hashed asset. Three cover the
+  staleness warning on explicitly aged mtimes, including the installed-package silence.
+
+The four `ruff` findings in `main.py` (`shutil` and `node_modules` unused in the dev branch, import order,
+missing final newline) pre-date this entry and are left alone.
+
+### Deliberately not built
+
+- **Rebuilding on the bundled path.** Named above: a warning costs nothing and a build costs Node on every
+  launch. The user who wants the rebuild has `--preview`, which is exactly what it is for.
+- **A build-id handshake between webapp and backend.** The honest fix for "the app in the tab is not the
+  app on disk" in general, and far more than this needs: the cache header closes the path that produced it,
+  and the mtime check covers the disk half. Worth revisiting only if a third variant of this appears.
+- **A favicon.** `/favicon.ico` 404s on every load. It is one line of noise in the network panel and
+  nothing reads it.

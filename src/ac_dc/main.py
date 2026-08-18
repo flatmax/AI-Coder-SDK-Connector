@@ -409,6 +409,51 @@ def _find_webapp_dist() -> Path | None:
     return None
 
 
+def _warn_if_dist_is_stale(webapp_dist: Path) -> None:
+    """Warn when the bundled webapp is older than its sources.
+
+    ``--preview`` rebuilds before serving, and the comment on that
+    branch says why: a stale bundle means the user is looking at old
+    code, and if the RPC contract moved since the build, the app calls
+    methods the backend no longer has. The plain path has no such
+    guard — it serves whatever ``npm run build`` last left behind,
+    however long ago that was — so the same failure arrives with no
+    hint of its cause. This does not rebuild (that would put Node on
+    the critical path of every launch); it just refuses to let the
+    drift be silent.
+
+    Only meaningful against a source tree. An installed package ships
+    ``webapp_dist`` with no ``webapp/src`` beside it to compare, and
+    absent sources are not evidence of staleness, so that case says
+    nothing.
+    """
+    src_dir = webapp_dist.parent / "src"
+    if not src_dir.is_dir():
+        return
+
+    index = webapp_dist / "index.html"
+    if not index.is_file():
+        return
+
+    try:
+        built = index.stat().st_mtime
+        newest = max(
+            (p.stat().st_mtime for p in src_dir.rglob("*") if p.is_file()),
+            default=0.0,
+        )
+    except OSError:
+        # A file that vanished mid-walk is not worth failing startup
+        # over; the warning is a convenience, not a precondition.
+        return
+
+    if newest > built:
+        logger.warning(
+            "webapp/dist is older than webapp/src — you are being served "
+            "a stale webapp. Rebuild with `cd webapp && npm run build`, or "
+            "launch with `ac-dc --preview` to rebuild automatically.",
+        )
+
+
 def _write_not_a_repo_page(repo_path: str) -> str:
     """Write a self-contained HTML instruction page and return path."""
     import tempfile
@@ -596,6 +641,38 @@ def _start_static_server(
 
         def log_message(self, format: str, *args: Any) -> None:
             pass  # Silent
+
+        def end_headers(self) -> None:
+            # Cache policy, and it is not cosmetic. Field incident:
+            # a browser served a fresh tab an `index.html` from its
+            # own cache, and with it the hashed bundle that
+            # index.html used to name — a bundle that no longer
+            # existed on disk. The app that came up was weeks old
+            # and called RPC methods this backend has since
+            # deleted, so every call failed with "method not found
+            # on proxy". It looked like a broken backend. It was a
+            # cached frontend.
+            #
+            # SimpleHTTPRequestHandler sends Last-Modified and no
+            # Cache-Control, which leaves the freshness lifetime to
+            # the browser's heuristic. For a URL as stable as
+            # `/index.html` that heuristic can reuse the cached
+            # copy without ever asking us, so a rebuilt webapp
+            # stays invisible.
+            #
+            # Two rules. Vite gives every asset a content hash in
+            # its name, so `/assets/**` is immutable by
+            # construction — a changed file is a changed URL, and
+            # caching it for a year is free. Everything else, above
+            # all the entry document that names those hashes, must
+            # be revalidated on every load.
+            if self.path.startswith("/assets/"):
+                self.send_header(
+                    "Cache-Control", "public, max-age=31536000, immutable",
+                )
+            else:
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+            super().end_headers()
 
         def do_GET(self) -> None:
             # SPA fallback — requests without extension that don't
@@ -832,6 +909,7 @@ async def run(
                 "  - Use: ac-dc --dev (for development)"
             )
             return
+        _warn_if_dist_is_stale(webapp_dist)
         _start_static_server(webapp_dist, webapp_port, bind_host)
 
     # Step 5: Create the engine adapter.

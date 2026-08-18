@@ -283,6 +283,38 @@ interlude that found it; this list exists so that none of them has to be redisco
     type-satisfied, behaviour-wrong case that no reflection would have caught. And **nothing runs it on a
     schedule**: it fires with the suite, so a `pip install --upgrade` with no commits after it leaves a
     window where the report is stale and does not say so.
+11. **Six `LLMService.*` method names survive in `webapp/src` across seven call sites, and one of them
+    fires on every connect.** Found
+    while diagnosing something else — a stale cached bundle whose failures *looked* exactly like this
+    ([`delivery.md`](delivery.md#interlude--the-empty-repo-that-wasnt-and-an-app-served-from-last-week-2026-08-18)),
+    which is the reason this item is worth having: the next person to see `method not found on proxy` will
+    have two candidate causes and no way to tell them apart. `LLMService` was deleted in phase 3 and
+    `ClaudeCodeService` has none of these names.
+
+    They are **not one group**, and that is the whole point:
+    - **Deliberately inert, do not touch.** `switch_mode` in `app-shell/mode.js:61` and
+      `chat-panel/events.js:896` is the code/doc mode toggle, already recorded in the paragraph below on
+      the surface that is mounted and inert by decision (CC-12). Both guard properly — `mode.js` checks
+      `typeof fn !== 'function'` and returns; nothing calls the `events.js` one at all.
+    - **Dead, and calling every connect.** `rehydrateLiveAgents` (`events.js:1204`) runs from
+      `chat-panel/index.js:515` on every `onRpcReady` and fires `LLMService.list_live_agents`, which
+      cannot succeed; `events.js:1213` swallows the failure by matching on `'method not found'`. That
+      filter is what has kept it quiet. It cites `specs4/5-webapp/agent-browser.md`, a spec from before
+      the conversion, and its `onAgentsRehydrated` trigger (`events.js:1162`) waits on an
+      `agents-rehydrated` broadcast that `load_session_into_context` used to send and nothing sends now.
+      Downstream of it, `rehydrateAgentTabs` (`tabs.js:675`) and `loadAgentHistory` →
+      `LLMService.get_agent_history` are dead with it.
+    - **Dead, on paths a user can still reach.** `close_agent_context` (`tabs.js:328`, on tab close),
+      `set_agent_selected_files` (`files-tab/selection.js:102`, the agent-tab branch of the file picker)
+      and `switch_agent_mode` (`events.js:928`).
+
+    What makes this a cleanup rather than a fix is that **CC-8's live half already landed with its own
+    mechanism** on 2026-08-17 (item 9): `rehydrateSubagentTabs` (`subagent-tabs.js:576`) driven off the
+    stream's own `entry.subagents`, plus `ClaudeCodeService.list_subagent_transcripts` and
+    `get_subagent_transcript`. So there are now **two agent-tab rehydration paths, and the older one can
+    never work** — the same "two mechanisms answer one question" shape as item 3, except here one half is
+    already unreachable. The replacement having shipped is what makes deletion the answer; the risk is
+    only that a reader deletes the CC-12 pair in the same sweep.
 
 **The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
@@ -345,7 +377,9 @@ The state phase 6 inherits:
 - **One surface is mounted and inert, deliberately**: the code/doc mode toggle, which has no emitter for
   the pushes that drive it and whose replacement is the preset selector (CC-12), deferred by decision. It
   is annotated where it sits rather than half-deleted, because removing a receiver while leaving its
-  consumer mounted moves the break instead of fixing it. Two former members of this list have left it.
+  consumer mounted moves the break instead of fixing it. **Its two `LLMService.switch_mode` call sites are
+  the pair open item 11 exempts** — that item deletes the other five names, and this is the one that stays.
+  Two former members of this list have left it.
   Phase 5 re-pointed `<ac-history-browser>` at the seven `history_*` RPCs and gave it a way in from the
   chat panel; 2026-08-17 gave the tab strip a producer — a running `Task` opens its own read-only tab
   (CC-8's live half, see [`delivery.md`](delivery.md#interlude--the-tab-a-subagent-never-got-2026-08-17)).
