@@ -2778,3 +2778,172 @@ A drift detector that has never been observed detecting drift is a decoration.
 - **The tab does not link to source.** A pending option's row names the field and the argument for it; it
   cannot open `options.py` at the line that would set it. That is the obvious next affordance and it needs a
   line number the probe does not currently record.
+
+---
+
+## Interlude — the ceiling that ended conversations, and the diagnostics nobody could read (2026-08-18)
+
+Asked of the probe built an hour earlier: *looking at the SDK surface coverage. do you think that there
+are items which should be implemented?* The answer had to come from the wheel rather than from the notes
+next to it, because the notes are the thing being asked about. Three items survived that reading, all
+three now built: `max_buffer_size`, `stderr`, and the `PreCompact` hook. What makes them one entry rather
+than three is what they have in common — each is a case where **the failure is already implemented and
+only the report is missing**.
+
+### One line of stdout, and the conversation is over
+
+[Open item 1](README.md#open-items-carried-forward-as-of-2026-08-18) had been sitting on a number since
+2026-08-17, when a returned inline screenshot exceeded the SDK's own 1 MiB per-line ceiling and
+`CLIJSONDecodeError` was raised inside the transport's reader. Everything downstream of that worked
+exactly as designed and none of it helped: `_is_connection_failure` matched, the turn failed, the session
+was marked lost, `engineHealth` went out. The conversation was still over.
+
+The number fell out of the asymmetry rather than out of a benchmark. The ceiling exists to bound memory;
+the overflow ends a conversation. One session's pending buffer at 16 MiB is nothing on a single-user
+localhost host, and covers a ~12 MB raw image. So `DEFAULT_MAX_BUFFER_SIZE = 16 * 1024 * 1024`, and
+`engine.json` can raise it further for a payload nobody has met yet — a pathological case should cost a
+config edit, not a release.
+
+Two decisions inside that are worth the words:
+
+- **It is set unconditionally, against `options.py`'s own null-means-omit rule.** That rule exists so we
+  never pin today's CLI default into our code, and it is right for `model` and `effort`. It is wrong here
+  for one reason: the dependency's default is the *known-fatal* value, so deferring to it is not humility,
+  it is choosing the broken option. `system_prompt` was the first exception (omitting it deletes the CLI's
+  own prompt); this is the second, and the docstring now says two rather than one.
+- **A configured value below the SDK's default is dropped with a warning.** The field's whole purpose is
+  to *raise* the ceiling. Below 1 MiB it could only make the session-ending overflow arrive sooner, which
+  is a misconfiguration and not a preference. `MIN_MAX_BUFFER_SIZE` reads
+  `subprocess_cli._DEFAULT_MAX_BUFFER_SIZE` from the installed wheel rather than hardcoding 1 MiB, so an
+  SDK that raises its own default leaves the floor merely low rather than wrong. A *float* is rejected
+  outright rather than truncated: a byte count written `1.5` is a units mistake, and reading it as one and
+  a half bytes would be the worst available reading of it.
+
+### Registering a stderr callback is what pipes stderr
+
+`ClaudeAgentOptions.stderr` looked like the smallest of the three and carried the one trap. The SDK pipes
+the CLI's stderr **only when a callback is registered**; unset, the subprocess inherits the server's and
+its diagnostics reach the terminal. So a callback that merely stored lines for the browser would have
+*taken away* what the server log has today. `EngineSession._note_cli_stderr` therefore logs the line at INFO
+with a `claude CLI stderr:` prefix — the CLI's words, attributable to the subprocess that wrote them —
+and *then* records it. It catches everything: this is a diagnostic path, and a diagnostic that can end a
+turn is worse than none.
+
+The browser end is a 20-line tail on `EngineHealth`, each line capped at 500 characters, trimmed from the
+front so a chatty session keeps its most recent output. Unlike `note_degradation` it does **not**
+deduplicate: a warning repeating forty times is the fact worth seeing, and collapsing it would hide a
+loop.
+
+The display decision is the load-bearing one. `cli_stderr` is deliberately absent from both
+`hasHealthProblem` and `healthKey` in `health-banner.js`, which means the tail **can neither open the
+banner nor undo a dismissal**. The CLI writes routine chatter to stderr; a session that says "Fetching
+latest version" must not wear a warning banner for it, and a user who dismissed a version-skew warning
+must not have it return because the subprocess printed another line. It renders underneath whatever *did*
+open the banner — including a banner forced open from the turn footer on a perfectly healthy engine,
+which still says the engine reports nothing wrong and then shows what the CLI has been saying. The case
+it was added for is the one where this matters most: a connect that fails, where the CLI's own words are
+the only diagnosis available and the banner is open already. `service.py` broadcasts `engineHealth` after
+a failed connect, so that path reaches the browser.
+
+### A compaction pause announced before the pause
+
+`PreCompact` was the single pending hook, and the client had been ready for it for some time:
+`onSystemEvent` already had a `pre_compact` branch and nothing registered the matcher, so the branch was
+unreachable. Registering it makes the toast arrive *before* the pause. The stream's own `compact_boundary`
+→ `compactionEvent` arrives when compaction has **finished**, which means it can only explain a stall the
+user has already read as a hang — that asymmetry is the entire reason this is a hook and not a translated
+message.
+
+The matcher carries no matcher string, because that field filters on a tool name and this event has none.
+The hook stays inside the repo's standing rule that **hooks are observational**: it returns `{}` always,
+never a `decision` or `continue: False`, and never raises.
+
+Removing a latent double-toast came with it. `streaming.js`'s `onHookEvent` had its own
+`hook_event_name === 'PreCompact'` branch, and `HookEventMessage` arrives **twice** per hook run
+(`hook_started`, then `hook_response`) — so with a hook actually registered, that branch would have
+toasted twice for one compaction. It is gone, with a docstring saying where the toast comes from now and
+why a branch here would double up.
+
+### The bucket `stale` structurally cannot fill
+
+Implementing two pending options exposed a hole in the day-old probe. `sdk_surface.py` claimed that
+closing a pending option would make its `PENDING_OPTIONS` note "become `stale` and be reported as such",
+and it cannot: `stale` is `(declined | pending) − fields`, so it fires only for names the *SDK* removed,
+and a note about an option we just implemented names a field that still exists. The note would have sat
+there indefinitely, and a leftover pending note is worse than no note — it is an argument for *not doing*
+the thing that has been done, which reads to the next person as a reason to undo it.
+
+Hence a fourth bucket, `resolved` = `(declined | pending) ∩ assigned`, rendered beside `stale` in the tab
+with the same *Delete the entries* instruction and asserted empty by
+`test_nothing_we_set_is_still_argued_against` — with a companion test that monkeypatches a note over
+`cwd` to prove the check can fail, because a check that cannot fail is decoration.
+
+> **Correction to the entry above.** "The declared `PENDING_OPTIONS` entry that described it becomes
+> `stale` and is reported as stale" was wrong, in the direction that matters: it describes a
+> self-maintaining table that was not self-maintaining. The maintenance property it was claiming is real,
+> but it needed the bucket this entry adds. `sdk-surface.md` § *Coverage is read out of the AST* now says
+> which bucket catches which direction and why both are needed.
+>
+> And its "**the 24 pending options stay pending**" held for about an hour. Not a wrong decision at the
+> time — the point of that pass really was to make the list exist rather than to spend it — but the count
+> is 22 now, and the reason is the one the entry hoped for: someone read the arguments it had written down
+> and acted on two of them.
+
+### What the probe now says
+
+`Options 23 / 2 / 22`, `Hooks 2 / 8 / 0` (handled / declined / pending). The hook column is empty for the
+first time. The one remaining item of the original three is `resume_session_at` / `resume_drops_turn`,
+left open on purpose: unlike the other two it is a feature with a UI, not a constructor argument, and it
+is the SDK-side half of the undo story [CC-20](decisions.md) already decided against.
+
+### Tests
+
+- `tests/test_claude_code_engine_config.py` — **+6** (28). The cleaner's own shape: a size is read, a
+  float or a string is not, `true` is not a size, a value below the floor drops *with a warning*, exactly
+  the floor is accepted, and the floor is asserted equal to the SDK's private constant rather than to
+  1 MiB — so a wheel that raises its own default fails here and says so.
+- `tests/test_claude_code_options.py` — **+5** (48). The ceiling is set even under a null config, it
+  exceeds what the SDK would have used (read from the wheel), it covers an 8 MB screenshot's base64
+  expansion, a configured value wins, and — the one that documents the trap —
+  `test_stderr_is_omitted_when_nobody_will_read_it`, because absence has to mean *inherit*.
+- `tests/test_claude_code_session.py` — **+11** (122). `TestCliStderr`: the callback the session hands the
+  SDK **is** `_note_cli_stderr` (`options.stderr` compared by identity), a line reaches the health record
+  *and* is logged as the CLI's own, a quiet CLI reports nothing, only the last 20 are kept, a repeated line
+  is not collapsed, an enormous line is cut, blanks are dropped, `to_dict` hands over a copy, and our own
+  failure inside the recording path is logged rather than swallowed.
+- `tests/test_claude_code_hooks.py` — **+9** (37). `TestPreCompact`: the announcement's shape, its
+  `turn_scoped` flag (it must stay true or the shell's `systemEvent(requestId, data)` arity breaks under
+  `_broadcast`'s `request_id=None`), a manual trigger saying so, custom instructions carried, an
+  unexpected payload shape still announcing the pause, `{}` with no decision key of any kind, a broadcast
+  that raises not reaching the caller, and no broadcast at all not being a failure — plus the matcher
+  mapping now subscribing to two events, with no tool matcher on this one.
+- `tests/test_claude_code_sdk_surface.py` — **+4** (42). `PreCompact` handled and the table agreeing,
+  nothing registered without a note recorded, `resolved` empty, and `resolved` able to report.
+- `tests/test_claude_code_service.py` — unchanged count (366), two assertions rewritten: the observational
+  hook subscription is now two events, not one.
+- `webapp/src/chat-panel/health-banner.test.js` — **+9** (44). Output alone cannot open the banner and
+  cannot undo a dismissal; it renders under whatever did open it; a forced banner on a healthy engine says
+  so *and* shows the output; a tail that is a string is read as no tail rather than one letter per line.
+- `webapp/src/chat-panel/streaming.test.js` — **+3** (61). The toast fires on the engine's own
+  announcement, does **not** fire again when the hook reports itself twice, and an unrelated blocking hook
+  still toasts.
+- `webapp/src/sdk-surface-tab.test.js` — **+2** (29). The `resolved` note renders, and neither note
+  appears in a healthy report.
+
+Both suites green: **3887 webapp tests across 96 files**, **3246 pytest passed**. The webapp baseline for
+this entry is 3873, not the 3864 the entry above records — two commits landed between them.
+
+### Deliberately not built
+
+- **`resume_session_at` / `resume_drops_turn`** — named above; a feature, not a flag.
+- **`betas` / the 1M context window** — still declined for the reason `KNOWN_BETAS` records: it changes
+  the cost profile of every turn and the Context tab reads compaction thresholds from the live window, so
+  it is a config decision with a UI consequence rather than a flag flip.
+- **`fallback_model`** — a second model silently answering a turn the user asked the first one for is a
+  disclosure problem before it is a resilience feature. The HUD names the model per turn; a fallback needs
+  that to keep being true.
+- **A byte-count *budget* rather than a ceiling.** 16 MiB is a per-line limit, not an allowance: nothing
+  tracks cumulative buffer use across a session, because the failure mode this closes is one line, once.
+- **`cli_stderr` in the health *problem* set.** The whole design above depends on it staying out. If a
+  particular stderr line ever needs to raise the banner, the thing to add is a recogniser for *that line*,
+  not a rule that any output is a fault.

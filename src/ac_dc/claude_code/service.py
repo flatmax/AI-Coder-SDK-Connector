@@ -517,8 +517,9 @@ class ClaudeCodeService:
             hooks = build_hook_matchers(self.reindexer, self._broadcast)
         except Exception as exc:
             logger.warning(
-                "Post-write re-index hook unavailable; the file tree and the "
-                "indexes will not follow the agent's writes: %s",
+                "Hooks unavailable: the file tree and the indexes will not "
+                "follow the agent's writes, and a compaction pause will go "
+                "unannounced: %s",
                 exc,
             )
             hooks = None

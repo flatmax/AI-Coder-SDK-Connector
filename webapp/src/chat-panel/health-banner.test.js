@@ -29,6 +29,7 @@ function health(overrides = {}) {
     mirror_gaps: 0,
     mirror_gaps_escalated: false,
     last_error: null,
+    cli_stderr: [],
     ...overrides,
   };
 }
@@ -95,6 +96,16 @@ describe('hasHealthProblem', () => {
     expect(hasHealthProblem(null)).toBe(false);
     expect(hasHealthProblem('health')).toBe(false);
   });
+
+  it('the CLI printing something is not by itself a problem', () => {
+    // The sixth field the banner renders, and the only one that cannot
+    // open it. `cli_stderr` is whatever the subprocess wrote, and the CLI
+    // writes routine chatter there — a session that says "Fetching
+    // latest version" would otherwise wear a warning banner for it.
+    expect(hasHealthProblem(health({ cli_stderr: ['node: warning'] }))).toBe(
+      false,
+    );
+  });
 });
 
 // ---------------------------------------------------------------
@@ -149,6 +160,17 @@ describe('healthKey', () => {
   it('answers for a payload it never got', () => {
     expect(healthKey(null)).toBe('');
     expect(healthKey(undefined)).toBe('');
+  });
+
+  it('is unmoved by another line of CLI output', () => {
+    // The tail grows on its own, several lines a turn on a chatty CLI.
+    // In the key, every new line would re-open a banner the user has
+    // dismissed, which is the nag this whole mechanism exists to avoid.
+    expect(healthKey(health({ version_warning: 'skew' }))).toBe(
+      healthKey(
+        health({ version_warning: 'skew', cli_stderr: ['and another'] }),
+      ),
+    );
   });
 });
 
@@ -322,6 +344,89 @@ describe('ChatPanel health banner', () => {
       }),
     );
     expect(p.shadowRoot.querySelector('.health-engine')).toBeNull();
+  });
+
+  it('shows what the CLI printed under whatever opened the banner', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(
+      p,
+      health({
+        last_error: 'Could not start a Claude Code session',
+        cli_stderr: ['Error: ENOSPC', '  at spawn (node:child_process)'],
+      }),
+    );
+    const out = p.shadowRoot.querySelector('.health-stderr-text');
+    // One `<pre>`, so a stack trace reads as the trace the CLI wrote
+    // rather than as separate warnings.
+    expect(out.textContent).toContain('Error: ENOSPC');
+    expect(out.textContent).toContain('at spawn (node:child_process)');
+  });
+
+  it('says nothing about the CLI when the CLI said nothing', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ last_error: 'boom' }));
+    expect(p.shadowRoot.querySelector('.health-stderr')).toBeNull();
+    // And an engine that predates the field is not an engine with an
+    // empty tail to report.
+    await report(p, health({ last_error: 'boom', cli_stderr: undefined }));
+    expect(p.shadowRoot.querySelector('.health-stderr')).toBeNull();
+  });
+
+  it('output alone cannot open the banner', async () => {
+    // The whole reason it is missing from `hasHealthProblem`: the tail
+    // fills up on a perfectly healthy session.
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ cli_stderr: ['Fetching latest version'] }));
+    expect(banner(p)).toBeNull();
+  });
+
+  it('output alone cannot undo a dismissal', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ version_warning: 'skew' }));
+    p.shadowRoot.querySelector('.health-dismiss').click();
+    await settle(p);
+    // The next health push carries a longer tail and the same warning.
+    await report(p, health({ version_warning: 'skew', cli_stderr: ['a', 'b'] }));
+    expect(banner(p)).toBeNull();
+  });
+
+  it('a forced banner on a healthy engine still says so', async () => {
+    // What the footer link is for when the engine is fine and the
+    // question is what the subprocess has been saying.
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ cli_stderr: ['Fetching latest version'] }));
+    revealHealth(p);
+    await settle(p);
+    expect(banner(p).textContent).toContain('nothing wrong');
+    expect(p.shadowRoot.querySelector('.health-stderr-text').textContent).toBe(
+      'Fetching latest version',
+    );
+  });
+
+  it('drops lines that are not lines', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(
+      p,
+      health({ last_error: 'boom', cli_stderr: [null, 0, '', {}, 'real'] }),
+    );
+    expect(p.shadowRoot.querySelector('.health-stderr-text').textContent).toBe(
+      'real',
+    );
+  });
+
+  it('reads a tail that is not a list as no tail at all', async () => {
+    const p = mountPanel();
+    await settle(p);
+    await report(p, health({ last_error: 'boom', cli_stderr: 'Error: ENOSPC' }));
+    // Not character by character: a string is iterable, and rendering
+    // one letter per line is worse than rendering nothing.
+    expect(p.shadowRoot.querySelector('.health-stderr')).toBeNull();
   });
 
   it('dismisses, and stays dismissed for the same problem', async () => {

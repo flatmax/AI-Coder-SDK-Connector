@@ -129,27 +129,23 @@ PENDING_OPTIONS: dict[str, str] = {
     "primitive. Same missing UI as resume_session_at.",
     "strict_mcp_config": "ignores MCP config outside what we pass. Would "
     "cut the repo's own .mcp.json, which CC-11 keeps.",
-    "max_buffer_size": "raises the stdout buffer ceiling. A knob for "
-    "pathological payloads; the default has not been hit.",
     "load_timeout_ms": "how long to wait for CLI startup. health.py "
     "already probes and reports a slow binary, and the SDK's default has "
     "not been the failure.",
-    "debug_stderr": "legacy debug sink, superseded by `stderr`.",
-    "stderr": "a callback for CLI stderr. Genuinely useful for the health "
-    "banner — CLI diagnostics currently go to the SDK's own logger and "
-    "never reach the browser. Closest of these to worth doing.",
+    "debug_stderr": "legacy debug sink, superseded by `stderr` — which we "
+    "now set, so this could only be a second reader of the same lines.",
     "tools": "restricts the tool set wholesale. Same reasoning as "
     "allowed_tools/disallowed_tools: the user should see it in settings.",
 }
 
 #: Every hook event the SDK accepts, and what AC⚡DC does about it.
 #:
-#: ``hooks.build_hook_matchers`` registers exactly one, and its docstring
-#: says every other event is "either already covered by the message pump
-#: or is a permission decision we must not make here". True, but not
-#: checkable and not per-event: it cannot tell a reader which of the two
-#: applies to ``PreCompact``, and it cannot notice an eleventh event.
-#: This is that sentence, itemised.
+#: ``hooks.build_hook_matchers`` registers two, and its docstring says
+#: every other event is "either already covered by the message pump or is
+#: a permission decision we must not make here". True, but not checkable
+#: and not per-event: it cannot tell a reader which of the two applies to
+#: ``Notification``, and it cannot notice an eleventh event. This is that
+#: sentence, itemised.
 HOOK_EVENTS: dict[str, tuple[str, str]] = {
     "PostToolUse": (HANDLED, "broadcasts the write and queues re-indexing"),
     "PreToolUse": (
@@ -190,11 +186,11 @@ HOOK_EVENTS: dict[str, tuple[str, str]] = {
         "toasts driven by events it can already see",
     ),
     "PreCompact": (
-        PENDING,
-        "fires before the CLI compacts the transcript. Nothing else "
-        "announces it, and the mirror keeps pre-compaction history the "
-        "session no longer has — so this is the one hook with a real gap "
-        "behind it: a compaction marker in the transcript.",
+        HANDLED,
+        "broadcasts the compaction as a systemEvent, before the pause "
+        "rather than after it. The stream's own compact_boundary arrives "
+        "when compaction has finished, so it can only explain a stall the "
+        "user has already read as a hang",
     ),
 }
 
@@ -534,6 +530,13 @@ def option_report() -> dict[str, Any]:
         # already fails startup for these when it sets one, but a declined
         # or pending entry for a removed field is just stale prose.
         "stale": sorted((set(declined) | set(PENDING_OPTIONS)) - set(fields)),
+        # Options we now set that a table here still argues about. The
+        # entry is harmless — the assignment wins, so the status is
+        # `handled` either way — but the *note* is a reason not to do the
+        # thing we did, which is worse than no note. `stale` cannot catch
+        # these: the field still exists, so it is only ever the prose that
+        # went out of date.
+        "resolved": sorted((set(declined) | set(PENDING_OPTIONS)) & assigned),
     }
 
 

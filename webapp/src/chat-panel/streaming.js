@@ -591,18 +591,19 @@ export function onSystemEvent(panel, event) {
  * Handle a `hook-event` window event.
  *
  * Hooks are the user's own configuration running, and narrating each one would
- * turn a configured workflow into a stream of notifications. Two cases earn a
- * word: a `PreCompact` hook is the compaction warning arriving through the
- * hook channel rather than the system one, and a hook that *blocked* something
- * explains a tool call the user is about to see fail.
+ * turn a configured workflow into a stream of notifications. One case earns a
+ * word: a hook that *blocked* something explains a tool call the user is about
+ * to see fail.
+ *
+ * `PreCompact` is deliberately not one of them, though the compaction toast is
+ * real — it arrives through `onSystemEvent`, broadcast by our own PreCompact
+ * hook. Toasting here as well would fire it twice for the same compaction, and
+ * more than that in principle: `hookEvent` carries a `phase`, so one hook run
+ * reports itself as `hook_started` and again as `hook_response`.
  */
 export function onHookEvent(panel, event) {
   const { data } = event.detail || {};
   if (!data || typeof data !== 'object') return;
-  if (data.hook_event_name === 'PreCompact') {
-    panel._emitToast('🗜️ Compacting the conversation…', 'info');
-    return;
-  }
   if (data.outcome === 'block' || data.outcome === 'blocked') {
     const tool = data.tool_name ? ` ${data.tool_name}` : '';
     panel._emitToast(`🪝 A hook blocked${tool}`, 'warning');

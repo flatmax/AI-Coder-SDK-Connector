@@ -16,6 +16,11 @@ that fail silently:
 - **It broadcasts, so the file tree follows the agent.** Without this the
   tree silently drifts from the disk for the rest of the session — the
   CLI's ``Write`` never passes through ``Repo``.
+
+The other registration, ``PreCompact``, is one broadcast and the same two
+invariants. It earns a hook because the stream's own ``compact_boundary``
+arrives *after* the compaction pause, so it can only explain a stall the
+user has already read as a hang.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from ac_dc.claude_code.hooks import (
     Reindexer,
     build_hook_matchers,
     build_post_tool_use_hook,
+    build_pre_compact_hook,
     extract_written_paths,
 )
 from ac_dc.claude_code.messages import Event
@@ -146,11 +152,17 @@ class TestItDecidesNothing:
         assert WRITE_TOOL_MATCHER == "Write|Edit|MultiEdit|NotebookEdit"
         assert "Bash" not in WRITE_TOOL_MATCHER
 
-    def test_the_matcher_mapping_subscribes_to_one_event(self, reindexer):
+    def test_the_matcher_mapping_subscribes_to_two_events(self, reindexer):
         matchers = build_hook_matchers(reindexer)
-        assert list(matchers) == ["PostToolUse"]
+        assert sorted(matchers) == ["PostToolUse", "PreCompact"]
         assert matchers["PostToolUse"][0].matcher == WRITE_TOOL_MATCHER
         assert len(matchers["PostToolUse"][0].hooks) == 1
+
+    def test_precompact_registers_without_a_tool_matcher(self, reindexer):
+        """The field filters on a tool name, and this event has none."""
+        matcher = build_hook_matchers(reindexer)["PreCompact"][0]
+        assert matcher.matcher is None
+        assert len(matcher.hooks) == 1
 
     def test_pretooluse_is_not_subscribed_at_all(self, reindexer):
         """The shadowing hazard is specifically PreToolUse's."""
@@ -432,6 +444,96 @@ class TestBroadcast:
             None,
         )
         assert broadcasts.events[0].payload == ["nb.ipynb"]
+
+
+# ---------------------------------------------------------------------------
+# PreCompact — the pause the stream reports too late
+# ---------------------------------------------------------------------------
+
+
+class TestPreCompact:
+    """Why this is a hook at all.
+
+    The stream does announce compaction — ``compact_boundary``, which
+    ``messages.py`` turns into ``compactionEvent`` — but it arrives when
+    compaction has *finished*. On a long session that is tens of seconds
+    after the silence began, so the only thing it can explain is a stall
+    the user has already read as a hang. This fires before the pause.
+    """
+
+    def input_data(self, trigger="auto", **extra):
+        """The shape the CLI hands a ``PreCompact`` callback."""
+        return {
+            "hook_event_name": "PreCompact",
+            "session_id": "sess-1",
+            "transcript_path": "/tmp/sess-1.jsonl",
+            "trigger": trigger,
+            "custom_instructions": None,
+            **extra,
+        }
+
+    async def test_it_announces_the_compaction(self, broadcasts):
+        hook = build_pre_compact_hook(broadcasts)
+        assert await hook(self.input_data(), None, None) == {}
+        event = broadcasts.events[0]
+        assert event.name == "systemEvent"
+        assert event.payload["subtype"] == "pre_compact"
+        assert event.payload["data"]["trigger"] == "auto"
+
+    async def test_it_stays_turn_scoped(self, broadcasts):
+        """Not because it belongs to a turn — because of the arity.
+
+        ``_broadcast`` dispatches a session-wide event as
+        ``systemEvent(payload)`` and a turn-scoped one as
+        ``systemEvent(request_id, payload)``. The shell's handler takes
+        the pair, so a session-wide event here would arrive with the
+        payload bound to ``requestId`` and never reach the toast.
+        """
+        hook = build_pre_compact_hook(broadcasts)
+        await hook(self.input_data(), None, None)
+        assert broadcasts.events[0].turn_scoped is True
+
+    async def test_a_manual_compaction_says_so(self, broadcasts):
+        """`/compact` rather than a full context window."""
+        hook = build_pre_compact_hook(broadcasts)
+        await hook(self.input_data(trigger="manual"), None, None)
+        assert broadcasts.events[0].payload["data"]["trigger"] == "manual"
+
+    async def test_custom_instructions_are_carried(self, broadcasts):
+        hook = build_pre_compact_hook(broadcasts)
+        await hook(
+            self.input_data(custom_instructions="keep the API notes"), None, None
+        )
+        data = broadcasts.events[0].payload["data"]
+        assert data["custom_instructions"] == "keep the API notes"
+
+    async def test_an_unexpected_shape_still_announces_the_pause(self, broadcasts):
+        """A missing trigger is no reason to leave the user with silence."""
+        hook = build_pre_compact_hook(broadcasts)
+        for case in ({}, {"hook_event_name": "PreCompact"}, None, "nonsense"):
+            broadcasts.events.clear()
+            assert await hook(case, None, None) == {}
+            assert broadcasts.events[0].payload["subtype"] == "pre_compact"
+            assert broadcasts.events[0].payload["data"]["trigger"] is None
+
+    async def test_it_decides_nothing(self, broadcasts):
+        """Observational like its neighbour, and for the same reason."""
+        hook = build_pre_compact_hook(broadcasts)
+        assert await hook(self.input_data(), None, None) == {}
+
+    async def test_it_never_raises(self, caplog):
+        async def boom(event):
+            raise RuntimeError("no clients")
+
+        hook = build_pre_compact_hook(boom)
+        with caplog.at_level(logging.WARNING):
+            assert await hook(self.input_data(), None, None) == {}
+        assert "PreCompact" in caplog.text
+
+    async def test_no_broadcast_is_not_a_failure(self):
+        """Constructed without one in tests, and in a headless run."""
+        hook = build_pre_compact_hook(None)
+        assert await hook(self.input_data(), None, None) == {}
 
 
 class TestReindexedTally:

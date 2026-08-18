@@ -11,7 +11,12 @@ test of our own logic:
   together — checkpointing alone fails at rewind time, not connect time
 - neither ships alongside ``session_store``: the SDK refuses that pair at
   connect, so the whole engine fails to start
-- ``allowed_tools``, ``agents``, and ``system_prompt`` are never set
+- ``allowed_tools`` and ``agents`` are never set, and ``system_prompt``
+  carries no text of ours
+- the two exceptions to null-means-omit are set anyway, because for both
+  the SDK's default is the broken option: ``system_prompt`` (omitting it
+  deletes the CLI's prompt) and ``max_buffer_size`` (one line over the
+  SDK's 1 MiB ends the session)
 - ``fork_session`` without ``resume`` is refused rather than silently kept
 - Every key we produce exists on the installed dataclass
 
@@ -28,6 +33,7 @@ import pytest
 from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineStartupError
 from ac_dc.claude_code.options import (
+    DEFAULT_MAX_BUFFER_SIZE,
     NEVER_SET,
     QUESTION_PREVIEW_ENV,
     QUESTION_PREVIEW_FORMAT,
@@ -104,6 +110,39 @@ class TestAlwaysSet:
             "CLAUDE_CODE_QUESTION_PREVIEW_FORMAT": "markdown",
         }
 
+    def test_the_buffer_ceiling_is_set_even_with_a_null_config(self, kwargs):
+        """The second exception to null-means-omit, and the reason for it.
+
+        The SDK's own default is 1 MiB per line of CLI stdout, and one line
+        over it raises inside the reader and ends the session's message
+        pump. Deferring to the dependency is the broken option here, which
+        is what earns the exception.
+        """
+        assert kwargs["max_buffer_size"] == DEFAULT_MAX_BUFFER_SIZE
+
+    def test_the_ceiling_is_higher_than_the_sdk_would_have_used(self):
+        """Read from the wheel, so an SDK that raises its own stays covered."""
+        from claude_agent_sdk._internal.transport import subprocess_cli
+
+        assert DEFAULT_MAX_BUFFER_SIZE > subprocess_cli._DEFAULT_MAX_BUFFER_SIZE
+
+    def test_the_ceiling_covers_an_inline_screenshot(self):
+        """The payload that actually killed a session, on 2026-08-17.
+
+        A base64 image arrives as one JSON line. 8 MB of raw bytes is a
+        large screenshot and encodes to about 10.7 MB, which has to fit
+        with the surrounding message rather than only just fit.
+        """
+        assert DEFAULT_MAX_BUFFER_SIZE > 8 * 1024 * 1024 * 4 / 3
+
+    def test_a_configured_ceiling_wins(self, tmp_path):
+        """The escape hatch for the case the chosen number does not cover."""
+        kwargs = build_option_kwargs(
+            repo_root=tmp_path,
+            config=EngineConfig(max_buffer_size=64 * 1024 * 1024),
+        )
+        assert kwargs["max_buffer_size"] == 64 * 1024 * 1024
+
 
 # ---------------------------------------------------------------------------
 # File checkpointing — and the mirror it cannot share a session with
@@ -164,6 +203,15 @@ class TestNullMeansOmit:
         """The spike runs before permissions, hooks, MCP, and the mirror."""
         for key in ("can_use_tool", "hooks", "mcp_servers", "session_store"):
             assert key not in kwargs
+
+    def test_stderr_is_omitted_when_nobody_will_read_it(self, kwargs):
+        """Not a cosmetic omission: registering a callback *pipes* stderr.
+
+        Unset, the CLI inherits the server's stderr and its diagnostics
+        reach the terminal. Set to something that drops them, the terminal
+        would lose what it has today — so absence has to mean absence.
+        """
+        assert "stderr" not in kwargs
 
     def test_resume_and_fork_are_omitted_for_a_new_session(self, kwargs):
         assert "resume" not in kwargs
@@ -233,6 +281,7 @@ class TestPopulatedConfig:
 
     def test_collaborators_land_when_supplied(self, tmp_path):
         gate, hooks, servers, store = object(), object(), {"ac-dc": object()}, object()
+        sink = object()
         kwargs = build_option_kwargs(
             repo_root=tmp_path,
             config=EngineConfig(),
@@ -240,11 +289,13 @@ class TestPopulatedConfig:
             hooks=hooks,
             mcp_servers=servers,
             session_store=store,
+            stderr=sink,
         )
         assert kwargs["can_use_tool"] is gate
         assert kwargs["hooks"] is hooks
         assert kwargs["mcp_servers"] is servers
         assert kwargs["session_store"] is store
+        assert kwargs["stderr"] is sink
 
 
 # ---------------------------------------------------------------------------

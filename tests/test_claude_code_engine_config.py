@@ -20,6 +20,7 @@ import logging
 
 from ac_dc.claude_code.engine_config import (
     EFFORT_LEVELS,
+    MIN_MAX_BUFFER_SIZE,
     PERMISSION_MODES,
     THINKING_DISPLAYS,
     EngineConfig,
@@ -41,6 +42,7 @@ class TestDefaults:
             "thinking_display": None,
             "max_budget_usd": None,
             "cli_path": None,
+            "max_buffer_size": None,
         }
 
     def test_effective_permission_mode_substitutes_default(self):
@@ -150,6 +152,45 @@ class TestFromDict:
     def test_budget_must_be_positive(self):
         assert EngineConfig.from_dict({"max_budget_usd": 0}).max_budget_usd is None
         assert EngineConfig.from_dict({"max_budget_usd": -1}).max_budget_usd is None
+
+    def test_reads_a_buffer_size(self):
+        raw = {"max_buffer_size": 32 * 1024 * 1024}
+        assert EngineConfig.from_dict(raw).max_buffer_size == 32 * 1024 * 1024
+
+    def test_buffer_size_must_be_a_whole_number(self):
+        """A float here is a units mistake, not one and a half bytes."""
+        for value in ("8388608", 1.5, 8388608.0, None):
+            assert EngineConfig.from_dict({"max_buffer_size": value}).max_buffer_size is None
+
+    def test_buffer_size_rejects_bool(self):
+        assert EngineConfig.from_dict({"max_buffer_size": True}).max_buffer_size is None
+
+    def test_buffer_size_below_the_sdk_default_drops_with_a_warning(self, caplog):
+        """A lower ceiling than doing nothing would give is not a setting.
+
+        The field exists to raise the SDK's 1 MiB limit. Below that it
+        could only make the session-ending overflow arrive sooner, so it is
+        read as the misconfiguration it is.
+        """
+        with caplog.at_level(logging.WARNING):
+            config = EngineConfig.from_dict({"max_buffer_size": 4096})
+        assert config.max_buffer_size is None
+        assert "max_buffer_size" in caplog.text
+
+    def test_buffer_size_accepts_exactly_the_sdk_default(self):
+        floor = MIN_MAX_BUFFER_SIZE
+        assert EngineConfig.from_dict({"max_buffer_size": floor}).max_buffer_size == floor
+
+    def test_the_floor_is_the_sdk_s_own_default(self):
+        """Not a number of ours: the SDK's, so the comparison stays true.
+
+        A wheel that raises its own default leaves the floor here too low
+        rather than wrong, which is why this reads the private constant
+        instead of asserting on 1 MiB.
+        """
+        from claude_agent_sdk._internal.transport import subprocess_cli
+
+        assert MIN_MAX_BUFFER_SIZE == subprocess_cli._DEFAULT_MAX_BUFFER_SIZE
 
     def test_one_bad_field_does_not_lose_the_others(self):
         """The whole point of dropping rather than raising."""

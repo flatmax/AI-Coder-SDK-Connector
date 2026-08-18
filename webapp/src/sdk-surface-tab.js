@@ -626,6 +626,15 @@ export class SdkSurfaceTab extends RpcMixin(LitElement) {
                     </p>
                   `
                 : null}
+              ${section.resolved?.length
+                ? html`
+                    <p class="note">
+                      Resolved — now set, but still carrying a note arguing
+                      against setting it: ${section.resolved.join(', ')}. Delete
+                      the entries.
+                    </p>
+                  `
+                : null}
               ${entries.length
                 ? html`
                     <ul>

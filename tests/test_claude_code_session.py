@@ -933,6 +933,112 @@ class TestStartupDegradation:
 
 
 # ---------------------------------------------------------------------------
+# The CLI's own stderr
+# ---------------------------------------------------------------------------
+
+
+class TestCliStderr:
+    """Diagnostics that existed and reached nobody.
+
+    Unset, ``options.stderr`` leaves the subprocess inheriting the
+    server's stderr, so a failing CLI explains itself into whatever
+    terminal launched AC-DC — which for a desktop launch is nowhere.
+    Registering the callback pipes it instead, which is why the callback
+    both logs and records: the terminal must not *lose* what it had.
+    """
+
+    def health(self, **kwargs):
+        from ac_dc.claude_code.health import EngineHealth
+
+        return EngineHealth(**kwargs)
+
+    def test_a_quiet_cli_has_nothing_to_report(self):
+        assert self.health().to_dict()["cli_stderr"] == []
+
+    def test_a_line_is_carried_to_the_browser(self):
+        h = self.health()
+        h.note_cli_stderr("node: out of memory")
+        assert h.to_dict()["cli_stderr"] == ["node: out of memory"]
+
+    def test_only_the_tail_is_kept(self):
+        from ac_dc.claude_code.health import CLI_STDERR_TAIL
+
+        h = self.health()
+        for i in range(CLI_STDERR_TAIL + 5):
+            h.note_cli_stderr(f"line {i}")
+        lines = h.to_dict()["cli_stderr"]
+        assert len(lines) == CLI_STDERR_TAIL
+        # Trimmed from the front: the newest lines are the ones that
+        # explain what just happened.
+        assert lines[-1] == f"line {CLI_STDERR_TAIL + 4}"
+        assert lines[0] == "line 5"
+
+    def test_a_repeated_line_is_not_collapsed(self):
+        """Unlike a degradation: forty repeats is the fact worth seeing."""
+        h = self.health()
+        for _ in range(3):
+            h.note_cli_stderr("warning: retrying")
+        assert h.cli_stderr == ["warning: retrying"] * 3
+
+    def test_an_enormous_line_is_cut(self):
+        """One minified bundle in a trace must not become the payload."""
+        from ac_dc.claude_code.health import CLI_STDERR_LINE_CHARS
+
+        h = self.health()
+        h.note_cli_stderr("x" * (CLI_STDERR_LINE_CHARS * 3))
+        line = h.cli_stderr[0]
+        assert len(line) == CLI_STDERR_LINE_CHARS + 1
+        assert line.endswith("…")
+
+    def test_blank_lines_are_dropped(self):
+        h = self.health()
+        for empty in ("", "   ", "\n"):
+            h.note_cli_stderr(empty)
+        assert h.cli_stderr == []
+
+    def test_the_dict_hands_over_a_copy(self):
+        h = self.health()
+        h.note_cli_stderr("first")
+        payload = h.to_dict()
+        h.note_cli_stderr("second")
+        assert payload["cli_stderr"] == ["first"]
+
+    async def test_the_session_registers_a_sink_with_the_sdk(self, engine):
+        """Registering it is what makes the SDK pipe stderr at all."""
+        assert client_of(engine).options.stderr == engine._note_cli_stderr
+
+    async def test_a_line_from_the_cli_reaches_the_health_record(self, engine):
+        engine._note_cli_stderr("Error: ENOSPC")
+        assert engine.health.to_dict()["cli_stderr"] == ["Error: ENOSPC"]
+
+    async def test_the_line_is_logged_as_the_clis_own(self, engine, caplog):
+        """The terminal keeps what it had before the callback existed."""
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            engine._note_cli_stderr("node: bad option")
+        assert "node: bad option" in caplog.text
+        assert "CLI stderr" in caplog.text
+
+    async def test_our_own_failure_here_is_not_silent(self, engine, caplog):
+        """The SDK swallows exceptions from this callback at debug level.
+
+        So a bug in it would otherwise be invisible: no log, no lines, and
+        no clue why the banner is empty during exactly the failure it was
+        built for.
+        """
+        import logging
+
+        def boom(_line):
+            raise RuntimeError("no room")
+
+        engine.health.note_cli_stderr = boom
+        with caplog.at_level(logging.WARNING):
+            engine._note_cli_stderr("something")
+        assert "CLI stderr" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # Reconnect replay
 # ---------------------------------------------------------------------------
 

@@ -64,9 +64,11 @@ was in the specs, tested, green, and load-bearing for a reason none of that reco
 `sdk_surface.py` asks the installed SDK what it offers and this repo's own syntax trees what it uses, and
 puts every name in one of three buckets — used, declined with a reason, or pending with an argument. The
 gate fails on a name in **none** of them, which is the only state that means the SDK moved and nobody
-looked; 24 pending options sit green by design, because a gate that fails on unbuilt surface earns an
-ignore-list in a week. It found this list's own [open item 1](#open-items-carried-forward-as-of-2026-08-18)
-from the wheel rather than from the list, and it corrected a belief held in this repo an hour earlier: the
+looked; the 22 still-pending options sit green by design, because a gate that fails on unbuilt surface
+earns an ignore-list in a week. It found this list's own
+[open item 1](#open-items-carried-forward-as-of-2026-08-18) from the wheel rather than from the list — and
+then closed it, along with the other two options and the one hook it had argued were worth doing, inside
+the day. It also corrected a belief held in this repo an hour earlier: the
 `Message` union and the client surface are **fully** consumed, 7 of 7 and 14 of 15. `sdk-surface.md` is
 still where the reasoning lives — reflection reads shape, and every correction in that file was a
 type-satisfied, behaviour-wrong case. What it no longer has to carry alone is the inventory.
@@ -170,15 +172,19 @@ collapse persistence are unwritten — `viewers-hud.md` § *Sections* specifies 
 Known, decided-against-for-now, or awaiting a number. Each one's reasoning is in the `delivery.md`
 interlude that found it; this list exists so that none of them has to be rediscovered from a log.
 
-1. **`max_buffer_size` is still the SDK's 1 MB default** — `src/ac_dc/claude_code/options.py` never sets
-   it, so `_DEFAULT_MAX_BUFFER_SIZE` applies. One stdout line over the limit raises
-   `CLIJSONDecodeError` inside the transport's reader and ends the message pump for that session
-   permanently. The failure path does work as designed — `_is_connection_failure` matches
-   `CLIJSONDecodeError`, so the turn is failed, the session marked lost and `engineHealth` broadcast —
-   but the conversation is over, and **one oversized tool result is enough to do it**: an inline
-   screenshot did exactly that on 2026-08-17. Blocked on a number rather than on design: the buffer is
-   memory held per line, and the question is how large a legitimate result can get. **The SDK probe now
-   reports this one independently** (item 10), having found it from the wheel rather than from this list.
+1. ~~**`max_buffer_size` is still the SDK's 1 MB default**~~ — **set on 2026-08-18, to 16 MiB.** One
+   stdout line over the SDK's own 1 MiB raised `CLIJSONDecodeError` inside the transport's reader and
+   ended the message pump for that session permanently. The failure path did work as designed —
+   `_is_connection_failure` matches `CLIJSONDecodeError`, so the turn was failed, the session marked lost
+   and `engineHealth` broadcast — but the conversation was over, and **one oversized tool result was
+   enough to do it**: an inline screenshot did exactly that on 2026-08-17. It was blocked on a number
+   rather than on design, and the number fell out of the asymmetry: the ceiling exists to bound memory,
+   the overflow ends a conversation, and one session's pending buffer at 16 MiB is nothing on a
+   single-user localhost host while covering a ~12 MB raw image. `engine.json` can raise it further, and
+   is the one field there where null does not mean "let the CLI decide" — see
+   [`../1-foundation/configuration.md`](../1-foundation/configuration.md). **The SDK probe reported this
+   one independently** (item 10), having found it from the wheel rather than from this list, which is
+   also how the other two items closed that day.
 2. **A lost session keeps being polled.** After that pump died, the usage HUD went on calling
    `get_context_usage` — each attempt a control request that ends in a 60-second
    `Control request timeout` traceback, four of them in one log. `get_context_usage` catches
@@ -202,8 +208,9 @@ interlude that found it; this list exists so that none of them has to be redisco
 6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
    three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
    rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the
-   DOM. A screenshot-based regression harness is the only thing that would catch a re-break, and it would
-   have to write files rather than return images inline — see item 1 for why.
+   DOM. A screenshot-based regression harness is the only thing that would catch a re-break, and it should
+   still write files rather than return images inline — item 1 raised the ceiling that made one inline
+   screenshot fatal, but a harness returns many per run and a ceiling is not a budget.
 7. **The permission dialog re-clones the whole document head per editor creation.** The same cost the
    diff viewer has always paid, for the same reason (Monaco's constructor adds rules synchronously), and a
    request builds at most one editor — so it is unmeasured rather than known-cheap. Incremental cloning is
@@ -251,15 +258,25 @@ interlude that found it; this list exists so that none of them has to be redisco
    with no textarea; `currentRequestId` never set; cyan→green LEDs with real counters from `TaskUsage`;
    the flat feed; and the reconnect rebuild — a hard reload mid-fan-out came back with all three tabs, two
    green from the snapshot and one live with its ⏹.
-10. **24 SDK options are known, argued for, and unbuilt** — the pending list the probe maintains
+10. **22 SDK options are known, argued for, and unbuilt** — the pending list the probe maintains
     ([`sdk-surface.md` § The probe](sdk-surface.md#the-probe), Alt+5 in the app). This is a *findings* list,
-    not a defect list: the gate goes red only when the SDK grows a name nobody has triaged, so these 24 sit
-    green by design. Three are worth doing — `max_buffer_size` (item 1, reached independently), `stderr`
-    (the CLI's diagnostics are log-only today), and `resume_session_at` / `resume_drops_turn` (resume from a
-    chosen point, the SDK-side half of the undo story [CC-20](decisions.md) gave up). `sandbox` is on the
-    list as a trap: it reads like a free security win and it changes what the agent may do to the machine,
-    which is the permission dialog's question, not an option's. `PreCompact` is the one pending hook —
-    nothing else announces a compaction *before* it happens.
+    not a defect list: the gate goes red only when the SDK grows a name nobody has triaged, so these 22 sit
+    green by design. It said 24 and three of them were worth doing; **two are now built, on the day the
+    probe first reported them** — `max_buffer_size` (item 1, reached independently) and `stderr` (the CLI's
+    diagnostics were log-only; the last 20 lines now ride on `EngineHealth` into the health banner). The
+    third stays open and is the one that is a feature rather than a constructor argument:
+    `resume_session_at` / `resume_drops_turn`, resume from a chosen point, the SDK-side half of the undo
+    story [CC-20](decisions.md) gave up. `sandbox` is on the list as a trap: it reads like a free security
+    win and it changes what the agent may do to the machine, which is the permission dialog's question,
+    not an option's. The **hook** column is now empty too: `PreCompact` was the one pending event, and it
+    is registered — nothing else announces a compaction *before* it happens, since the stream's own
+    `compact_boundary` arrives once compaction has finished.
+
+    Closing the first two also found a gap in the probe itself: a `PENDING_OPTIONS` note left behind after
+    the option is implemented is *worse* than absent, because it reads as an argument to undo the work, and
+    the `stale` bucket structurally cannot report it (`stale` is names the SDK removed; these names still
+    exist). Hence a `resolved` bucket, `(declined | pending) ∩ assigned`, rendered beside `stale` in the
+    tab and asserted empty by the suite.
 
     Two things the probe cannot do, stated here because a green gate invites the wrong inference.
     **It reads shape, never semantics** — every row in `sdk-surface.md`'s correction tables was a

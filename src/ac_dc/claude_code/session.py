@@ -377,6 +377,30 @@ class EngineSession:
         active.translator.note_permission_prompt(tool_use_id)
         return active.request_id
 
+    def _note_cli_stderr(self, line: str) -> None:
+        """Receive one line of the CLI's own stderr.
+
+        Handed to the SDK as ``options.stderr``, which is what makes the
+        subprocess's stderr *piped* rather than inherited. That inversion is
+        the whole reason this logs as well as records: before this callback
+        existed the text went to the server's terminal, and a callback that
+        only fed the health record would have taken that away from whoever
+        is reading the terminal.
+
+        Called from the SDK's stderr reader task, synchronously, one
+        rstripped non-empty line at a time. The SDK swallows exceptions
+        from here at debug level, so a bug in this method would otherwise
+        be invisible — hence the explicit catch, which reports it once and
+        keeps the reader alive.
+        """
+        try:
+            # The CLI's words, not ours: prefixed so a stack trace in the
+            # server log is attributable to the subprocess that raised it.
+            logger.info("claude CLI stderr: %s", line)
+            self.health.note_cli_stderr(line)
+        except Exception:  # noqa: BLE001 - a diagnostic path, never a turn's
+            logger.exception("Failed to record a line of CLI stderr")
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -418,6 +442,7 @@ class EngineSession:
                 hooks=self._hooks,
                 mcp_servers=self._mcp_servers,
                 session_store=self._session_store,
+                stderr=self._note_cli_stderr,
                 resume=resume,
                 fork_session=fork_session,
                 # Our current posture, not the configured one. They differ

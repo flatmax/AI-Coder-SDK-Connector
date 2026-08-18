@@ -44,6 +44,8 @@ callbacks. The behaviourally load-bearing choices:
 | `session_store` | The transcript is mirrored into `.ac-dc4/`. See [history.md](history.md). |
 | `max_budget_usd` | An optional hard stop. Absent under subscription billing. |
 | `effort`, `thinking` | Reasoning depth and whether thinking is shown, summarised, or hidden. |
+| `max_buffer_size` = 16 MiB | The ceiling on one line of CLI stdout. The SDK's own default is 1 MiB and one line over it raises inside the reader, which kills the message pump for the rest of the session — so this is set unconditionally rather than left to the dependency. A returned inline screenshot is the case that reaches it. Overridable in `engine.json`; see [`../1-foundation/configuration.md`](../1-foundation/configuration.md). |
+| `stderr` | A callback for the CLI's own diagnostics. Registering one *pipes* stderr instead of letting it inherit the server's, so the callback both logs the line and keeps the last 20 on `EngineHealth`, where the health banner shows them. Without it a CLI that explains its own failure explains it to nobody. |
 
 Options that AC⚡DC deliberately does **not** set:
 
@@ -240,6 +242,7 @@ which would silently turn a mistyped command into a question.
 | Budget exceeded | The turn stops with the SDK's terminal reason; the HUD shows the budget state and the settings control. |
 | Rate limited | `RateLimitEvent` is surfaced with reset timing. The turn continues if the engine retries internally. |
 | MCP server (ours) fails to start | Session continues without the `ac-dc` tools; a banner reports the loss, because the agent will otherwise appear inexplicably worse at repo-wide questions. |
+| The CLI writes to stderr | Logged, and the last 20 lines are kept on `EngineHealth` and rendered in the health banner. Deliberately **not** a health problem in itself: the CLI writes routine chatter there, so the tail can neither open the banner nor undo a dismissal — it is context underneath whatever did open it. The case it was added for is a connect that fails, where the CLI's own words are the only diagnosis and the banner is already open. |
 
 ## Invariants
 

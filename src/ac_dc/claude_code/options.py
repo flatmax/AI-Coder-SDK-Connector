@@ -16,9 +16,13 @@ The rules that govern everything here:
   tools. ``agents`` would make subagent definitions AC-DC-only instead of
   shared with the CLI. See ``specs5/3-engine/session.md`` § Session
   Options.
-- **``system_prompt`` is the exception that proves the null rule.** It
-  carries no text of ours, but it must be *set*: ``None`` means an empty
-  prompt, not the CLI's. See ``CLI_SYSTEM_PROMPT``.
+- **Two options are the exceptions that prove the null rule.**
+  ``system_prompt`` carries no text of ours, but it must be *set*:
+  ``None`` means an empty prompt, not the CLI's (see
+  ``CLI_SYSTEM_PROMPT``). ``max_buffer_size`` is set because the SDK's
+  own default ends sessions (see ``DEFAULT_MAX_BUFFER_SIZE``). In both
+  cases deferring to the dependency is the broken option, which is the
+  only argument that earns an exception here.
 - **One pair is mutually exclusive.** ``session_store`` and
   ``enable_file_checkpointing`` cannot both be set — the SDK refuses the
   combination outright, at connect. See
@@ -123,6 +127,32 @@ NEVER_SET = {
 # file the user does not know exists), and this sets no text of ours.
 CLI_SYSTEM_PROMPT: dict[str, str] = {"type": "preset", "preset": "claude_code"}
 
+# How much of one line of CLI stdout the SDK may buffer — 16 MiB.
+#
+# The second option we always set, because the SDK's default is 1 MiB and
+# overflowing it is not a degradation but a session ending. The reader in
+# ``_internal/transport/subprocess_cli.py`` accumulates until it has a
+# newline; past the limit it raises ``CLIJSONDecodeError``, which leaves
+# the anext() loop in ``session.py``'s pump. The conversation is then over
+# with its last message half-parsed, and no amount of retrying gets the
+# rest of it, because the bytes are gone with the reader.
+#
+# It is reachable in normal use. One line here is one JSON message, and a
+# message can carry a whole tool result: an inline screenshot (2026-08-17)
+# did exactly this, base64 crossing 1 MiB on the way to the browser and
+# killing the engine mid-turn. A Read of a large file, a wide grep, or a
+# build log does the same.
+#
+# 16 MiB rather than something larger: the number has to bound memory as
+# well as failure, and the ceiling is per pending line, per session. On the
+# localhost single-user host AC-DC is built for, 16 MiB of pending buffer
+# is nothing, while covering a base64 payload of about 12 MB of raw bytes —
+# well past any screenshot or source file. Beyond that a caller is
+# streaming something that should not be arriving as one JSON line at all,
+# and ``engine.json``'s ``max_buffer_size`` is there for the case that
+# judgement is wrong.
+DEFAULT_MAX_BUFFER_SIZE = 16 * 1024 * 1024
+
 
 def file_checkpointing_available(session_store: Any) -> bool:
     """Whether this session can offer ``rewind_files()``.
@@ -159,6 +189,7 @@ def build_option_kwargs(
     hooks: Any = None,
     mcp_servers: Any = None,
     session_store: Any = None,
+    stderr: Any = None,
     resume: str | None = None,
     fork_session: bool = False,
     permission_mode: str | None = None,
@@ -184,6 +215,12 @@ def build_option_kwargs(
     can_use_tool, hooks, mcp_servers, session_store:
         Injected collaborators, each landing in a later conversion phase.
         Omitted while ``None`` so the spike runs without them.
+    stderr:
+        A one-line-at-a-time sink for the CLI's own stderr. Omitted while
+        ``None``, and the omission is the meaningful case: registering a
+        callback is what makes the SDK *pipe* stderr instead of letting it
+        inherit the server's, so a caller that passes one takes on
+        surfacing it (see :meth:`EngineSession._note_cli_stderr`).
     resume:
         An SDK session ID to resume. Omitted for a new session.
     fork_session:
@@ -215,6 +252,9 @@ def build_option_kwargs(
         # Copied, not shared: the SDK holds the dict for the session's
         # lifetime and one session must not be able to edit another's.
         "env": dict(QUESTION_PREVIEW_ENV),
+        # Set unconditionally, against the null rule, because the SDK's
+        # default is 1 MiB and one line over it ends the session.
+        "max_buffer_size": config.max_buffer_size or DEFAULT_MAX_BUFFER_SIZE,
     }
 
     resolved_cli = cli_path or config.cli_path
@@ -246,6 +286,8 @@ def build_option_kwargs(
         kwargs["hooks"] = hooks
     if mcp_servers:
         kwargs["mcp_servers"] = mcp_servers
+    if stderr is not None:
+        kwargs["stderr"] = stderr
     if session_store is not None:
         kwargs["session_store"] = session_store
         # Batched flushing holds a turn's tail until the result message,

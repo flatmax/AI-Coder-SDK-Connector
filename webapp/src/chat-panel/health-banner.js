@@ -11,7 +11,11 @@
 // What it says is what the engine reports and nothing
 // derived: a count of mirror-append failures, the engine's
 // last error, and the version and credential warnings
-// `health.py` builds at startup. The MCP server list in the
+// `health.py` builds at startup. Once open it also shows the
+// tail of the CLI subprocess's own stderr, which is the one
+// thing here that cannot open it — see `cliStderr`.
+//
+// The MCP server list in the
 // same payload is deliberately left out — that is phase 6's
 // Context tab, which has room for a per-server status detail
 // this strip does not.
@@ -67,6 +71,22 @@ function text(value) {
  */
 function degradations(health) {
   const list = health.degradations;
+  if (!Array.isArray(list)) return [];
+  return list.map((s) => text(s)).filter(Boolean);
+}
+
+/**
+ * The tail of the CLI's own stderr, as lines.
+ *
+ * Read like `degradations`, shown unlike it: this text is not a problem
+ * report, it is whatever the subprocess printed, and the CLI prints routine
+ * chatter there as well as stack traces. So it is absent from
+ * `hasHealthProblem` and from `healthKey` on purpose — it can neither open
+ * the banner nor undo a dismissal the user has already made, and only shows
+ * once something else has opened it or the footer link forced it.
+ */
+function cliStderr(health) {
+  const list = health.cli_stderr;
   if (!Array.isArray(list)) return [];
   return list.map((s) => text(s)).filter(Boolean);
 }
@@ -231,6 +251,12 @@ export function renderHealthBanner(panel) {
       </div>
     `);
   }
+  // Appended after the summary rather than folded into it, so a banner
+  // forced open on a healthy engine still says the engine is healthy and
+  // shows the output underneath. The <pre> is what makes it worth having:
+  // this is terminal output, and a stack trace reflowed as prose is
+  // unreadable exactly when it is needed.
+  const stderr = health ? cliStderr(health) : [];
   const engine = health ? engineLine(health) : '';
 
   // Three appearances for three answers: nothing wrong, something
@@ -242,6 +268,14 @@ export function renderHealthBanner(panel) {
     <div class="health-banner ${tone}" role="status">
       <div class="health-lines">
         ${lines}
+        ${stderr.length
+          ? html`
+              <div class="health-line health-stderr">
+                <span class="health-label">CLI output</span>
+                <pre class="health-stderr-text">${stderr.join('\n')}</pre>
+              </div>
+            `
+          : nothing}
         ${engine
           ? html`<div class="health-line health-engine">${engine}</div>`
           : nothing}

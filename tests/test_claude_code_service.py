@@ -1728,8 +1728,9 @@ class TestBridgeWiring:
         assert list(wired.session._mcp_servers) == [SERVER_NAME]
         assert SERVER_NAME == "ac-dc"
 
-    def test_the_post_write_hook_is_the_only_subscription(self, wired):
-        assert list(wired.session._hooks) == ["PostToolUse"]
+    def test_the_two_observational_hooks_are_the_whole_subscription(self, wired):
+        """Nothing that could decide anything — see hooks.py's invariant."""
+        assert sorted(wired.session._hooks) == ["PostToolUse", "PreCompact"]
 
     def test_the_bridge_and_the_reindex_share_one_flush(self, wired):
         """A tool that flushed a different queue than the hook fills would
@@ -1756,7 +1757,7 @@ class TestBridgeWiring:
         assert svc.session is not None
         assert svc.session._mcp_servers is None
         # And the hook half is unaffected: one failure is not the other's.
-        assert list(svc.session._hooks) == ["PostToolUse"]
+        assert sorted(svc.session._hooks) == ["PostToolUse", "PreCompact"]
         assert "fall back to Glob/Grep/Read" in caplog.text
         # And the browser is told, not just the log. `mcp-bridge.md`
         # § Availability and Degradation: "the session continues without it

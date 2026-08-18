@@ -51,14 +51,16 @@ Every name the SDK exposes is one of three things:
 | `declined` | we know about it and chose not to, with the reason recorded | a declared table |
 | `pending` | we know about it, it is not built, and there is an argument for it | a declared table |
 
-A `pending` name is a **finding, not a failure** — 24 options are pending right now and the suite is green.
+A `pending` name is a **finding, not a failure** — 22 options are pending right now and the suite is green.
 What fails the gate is a name in *none* of the three, because that is the only state that means the SDK
 moved and nobody looked. Closing it costs one table entry with a sentence in it, which is the smallest
 action that leaves a reader better off than a passing test would have.
 
 The distinction matters because the alternative was tried on paper and rejected: a gate that fails on
-unimplemented surface fails on 24 things the day it lands, gets an ignore-list within a week, and the
-ignore-list is the thing nobody reads.
+unimplemented surface would have failed on 24 things the day it landed, got an ignore-list within a week,
+and the ignore-list is the thing nobody reads. Two of those 24 were built the same day *because the report
+argued for them* — which is the finding bucket working, and is not something a red test would have
+achieved faster.
 
 ### Coverage is read out of the AST, and two naive versions had to fail first
 
@@ -74,8 +76,15 @@ Both cheaper designs were built and both lied, and their failures are now pinned
   — it marks unbuilt surface as done. `test_options_named_only_in_comments_are_not_handled`.
 
 The payoff is that adding an option to `options.py` needs **no edit here**: it moves from `pending` to
-`handled` on its own, and the `PENDING_OPTIONS` entry becomes `stale` and is reported as such. The tables
-only ever grow for surface the SDK itself added.
+`handled` on its own. The tables only ever grow for surface the SDK itself added.
+
+The leftover `PENDING_OPTIONS` entry does still have to go, and one edit of this file used to say `stale`
+caught it. It cannot: `stale` is `(declined | pending) − fields`, so it only fires for names the *SDK*
+removed, and a note about an option we just implemented names a field that still exists. That is what the
+`resolved` bucket is for — `(declined | pending) ∩ assigned`, reported next to `stale` in the tab and
+asserted empty by `test_nothing_we_set_is_still_argued_against`. Both directions matter for the same reason:
+a pending note is an argument *for not doing* the thing, so once the thing is done the note reads as a
+reason to undo it.
 
 ### This is the other direction from the existing tripwire
 
@@ -108,8 +117,8 @@ Read on 2026-08-18 against SDK 0.2.137 / CLI pin 2.1.229, nothing untriaged:
 
 | Section | handled | declined | pending |
 |---|---|---|---|
-| Options | 21 | 2 | 24 |
-| Hooks | 1 | 8 | 1 |
+| Options | 23 | 2 | 22 |
+| Hooks | 2 | 8 | 0 |
 | Messages | 7 | 0 | 0 |
 | Client methods | 14 | 1 | 0 |
 | Betas | 0 | 1 | 0 |
@@ -118,15 +127,26 @@ The message taxonomy and the client surface are fully consumed, which is the par
 guessed wrong: this repo renders every message type the union carries and calls every client method but
 `receive_messages` (declined — `receive_response` bounds itself on `ResultMessage`).
 
-Three of the 24 pending options are worth doing rather than merely knowing about, and the first is already
-this plan's own [open item 1](README.md#open-items-carried-forward-as-of-2026-08-18) — the probe found it
-independently, which is the best evidence it is reading something real:
+The hook column reached zero pending the same day the probe first reported it. `PreCompact` was the single
+entry there, and the argument for it was already written down; see below.
 
-- **`max_buffer_size`** — one oversized stdout line ends a session permanently. Blocked on a number, not a
-  design.
-- **`stderr`** — a callback for the CLI's stderr. Diagnostics currently only reachable in the server log.
+Three of the pending options were worth doing rather than merely knowing about, and the first was already
+this plan's own [open item 1](README.md#open-items-carried-forward-as-of-2026-08-18) — the probe found it
+independently, which is the best evidence it is reading something real. Two of the three are now set, and
+the counts above are after that:
+
+- **`max_buffer_size`** — one oversized stdout line ends a session permanently. **Done:** set
+  unconditionally at 16 MiB, overridable through `engine.json`. See
+  [`../1-foundation/configuration.md`](../1-foundation/configuration.md).
+- **`stderr`** — a callback for the CLI's stderr. **Done:** the last 20 lines ride on `EngineHealth` and
+  render in the health banner. See [`../3-engine/session.md`](../3-engine/session.md).
 - **`resume_session_at` / `resume_drops_turn`** — resume from a chosen point rather than the end, which is
-  the SDK-side half of an undo story this repo gave up when the mirror won ([CC-20](decisions.md)).
+  the SDK-side half of an undo story this repo gave up when the mirror won ([CC-20](decisions.md)). Still
+  pending: unlike the other two this is a feature with a UI, not a constructor argument.
+
+And `PreCompact` — the hook the same reading called out — is registered, broadcasting a `systemEvent`
+before the pause rather than after it. The stream's own `compact_boundary` arrives when compaction has
+*finished*, so it can only explain a stall the user has already read as a hang.
 
 And one is a trap worth naming: **`sandbox`**. It reads like a security win and it is not ours to enable
 casually — it changes what the agent can do to the machine, and the permission dialog is this repo's answer
@@ -193,6 +213,8 @@ From `ClaudeAgentOptions`. Fields AC⚡DC uses, and why:
 | `resume` / `fork_session` | on session load | CC-3. |
 | `session_store` | our implementation | CC-3; mirrors the transcript into `.ac-dc4/`. |
 | `session_store_flush` | `"eager"` | Batched flushing holds a turn's tail until the result message. |
+| `max_buffer_size` | 16 MiB, overridable in `engine.json` | The SDK's own 1 MiB default is per *line* of CLI stdout, and one line over it raises inside the reader and kills the session's message pump. An inline screenshot reaches it. Set unconditionally — the one place where deferring to the dependency's default is the broken choice. |
+| `stderr` | `EngineSession._note_cli_stderr` | Registering a callback is what *pipes* the CLI's stderr; unset, it is inherited. So the callback logs the line **and** keeps the last 20 on `EngineHealth`, where the health banner renders them. |
 
 `PermissionMode` is `Literal["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk",
 "auto"]` — six values, not the four the origin brief lists. `"plan"` and `"dontAsk"` both matter to

@@ -45,8 +45,8 @@ There is no "system prompt" for AC⚡DC to own any more. That is the conversion 
 ## The Applies Column Is Load-Bearing
 
 `ClaudeAgentOptions` is assembled once, when the session connects. Only `model` and `permission_mode`
-have live setters. Saving an `effort`, `thinking_display`, `max_budget_usd`, or `cli_path` change writes
-the file correctly and changes nothing about the running session.
+have live setters. Saving an `effort`, `thinking_display`, `max_budget_usd`, `cli_path`, or
+`max_buffer_size` change writes the file correctly and changes nothing about the running session.
 
 So the editor labels each field it cannot apply, and after a save that touched one it offers the only
 thing that would apply it: **restart the session**, with a warning that this ends the current

@@ -1482,6 +1482,28 @@ export const STYLES = css`
     color: var(--text-secondary, #8b949e);
     font-size: 0.75rem;
   }
+  /* The CLI's own stderr. Secondary colour and monospace: it is
+   * the subprocess's words rather than the banner's, and it is
+   * terminal output, so the newlines the CLI wrote are the ones
+   * that make a stack trace readable. Scrolls rather than
+   * grows — twenty lines of trace must not push the composer
+   * off the bottom of the panel. */
+  .health-stderr {
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.75rem;
+  }
+  .health-stderr-text {
+    margin: 0.125rem 0 0;
+    max-height: 8rem;
+    overflow: auto;
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+    font-size: 0.6875rem;
+    line-height: 1.35;
+    /* pre-wrap, not pre: a long line wraps instead of forcing the
+     * whole banner sideways. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
   .health-dismiss {
     flex: 0 0 auto;
     background: none;

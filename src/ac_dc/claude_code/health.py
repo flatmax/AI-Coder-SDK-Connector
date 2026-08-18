@@ -51,6 +51,18 @@ CLI_VERSION_PROBE_TIMEOUT = 15.0
 # relationship `DISK_WARNING_BYTES` has with the threshold beside it.
 DEFAULT_MIRROR_GAP_TOLERANCE = 3
 
+# How much of the CLI's own stderr the health record keeps.
+#
+# A tail rather than a log: this is a record that gets serialised into
+# every ``engineHealth`` broadcast, so it is bounded in both directions.
+# Twenty lines is enough to hold a node stack trace or a burst of warnings
+# — the shapes that actually explain a failed connect — and the per-line
+# cut stops one enormous line (a minified bundle in a trace) from making
+# the broadcast the problem. The server's log has the untruncated text
+# either way; see :meth:`EngineSession._note_cli_stderr`.
+CLI_STDERR_TAIL = 20
+CLI_STDERR_LINE_CHARS = 500
+
 # The floor the SDK itself enforces. Read from the SDK when available so
 # an upgraded floor is honoured without a code change here.
 _FALLBACK_MINIMUM_CLI_VERSION = "2.0.0"
@@ -470,6 +482,19 @@ class EngineHealth:
     #: is told what was lost and what the agent will do instead, for the
     #: reason it is told the disk warning's sentence: one owner of the words.
     degradations: list[str] = field(default_factory=list)
+    #: The last :data:`CLI_STDERR_TAIL` lines the CLI wrote to stderr.
+    #:
+    #: Diagnostics that exist today and reach nobody: without a ``stderr``
+    #: callback the CLI inherits the server's, so the text lands in whatever
+    #: terminal launched AC-DC — which for a desktop launch is nowhere. The
+    #: browser cannot see the one place a failing engine explains itself.
+    #:
+    #: Deliberately *not* part of the banner's problem test. The CLI writes
+    #: routine chatter here as well as failures, and a banner that opens
+    #: itself on chatter is a banner the user learns to dismiss unread. So
+    #: this is what the banner has to show once something else has opened
+    #: it, or the user opened it themselves.
+    cli_stderr: list[str] = field(default_factory=list)
     #: How many failed mirror appends the browser's health banner treats as
     #: bad luck before it treats them as a broken mirror. A callable, not a
     #: number, because it comes from ``app.json`` — which reloads without a
@@ -492,6 +517,23 @@ class EngineHealth:
     def note_mirror_gap(self) -> None:
         """Count a ``MirrorErrorMessage``; the repo-local copy has a hole."""
         self.mirror_gaps += 1
+
+    def note_cli_stderr(self, line: str) -> None:
+        """Record one line of the CLI's stderr, keeping the last few.
+
+        Not deduplicated, unlike :meth:`note_degradation`: a warning
+        repeating forty times is the fact worth seeing, and collapsing it
+        would hide a loop. Blank lines are dropped because the SDK already
+        rstrips and they carry nothing.
+        """
+        text = str(line).rstrip()
+        if not text:
+            return
+        if len(text) > CLI_STDERR_LINE_CHARS:
+            text = text[:CLI_STDERR_LINE_CHARS] + "…"
+        self.cli_stderr.append(text)
+        # Trimmed from the front, so the tail survives a chatty session.
+        del self.cli_stderr[:-CLI_STDERR_TAIL]
 
     def note_degradation(self, sentence: str) -> None:
         """Record a capability this session is running without.
@@ -541,4 +583,5 @@ class EngineHealth:
             "mirror_gaps_escalated": self._escalated(),
             "last_error": self.last_error,
             "degradations": list(self.degradations),
+            "cli_stderr": list(self.cli_stderr),
         }

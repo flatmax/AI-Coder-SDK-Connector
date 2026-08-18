@@ -16,7 +16,7 @@ not through anything in this spec.
 
 | File | Kind | Purpose |
 |---|---|---|
-| `engine.json` | User | Model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override |
+| `engine.json` | User | Model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
 | `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
 | `snippets.json` | Managed | Quick-insert chat buttons, keyed by preset |
 | `commit.md` | Managed | The commit-message request text |
@@ -38,6 +38,7 @@ like any other turn. It is a template, not an instruction to a hidden model.
 - **Effort** and **thinking display** — reasoning depth, and whether thinking is shown, summarised, or hidden.
 - **Budget** — an optional `max_budget_usd` hard stop. Null under subscription billing, where cost is unreported and a budget would be meaningless. See [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap).
 - **CLI path override** — an explicit `claude` binary, for installations where discovery picks the wrong one or the bundled CLI is deliberately not used.
+- **`max_buffer_size`** — the ceiling on one line of CLI stdout, and **the one field where null does not mean "let the CLI decide"**. The SDK's default is 1 MiB and a single line over it raises inside the reader, which ends the session's message pump; deferring to the dependency is the broken option, so null means 16 MiB rather than "unset". A value *below* the SDK's own default is dropped with a warning, because it could only make that failure arrive sooner. The field exists so a pathological payload the chosen number does not cover is a config edit rather than a release.
 
 ### No credentials, and no environment export
 

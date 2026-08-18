@@ -1364,3 +1364,64 @@ describe('ChatPanel stream-start error handling', () => {
     }
   });
 });
+// ---------------------------------------------------------------------------
+// The compaction pause, announced once
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel compaction toast', () => {
+  function toastsOf(panel) {
+    const seen = [];
+    panel._emitToast = (message, type) => seen.push([message, type]);
+    return seen;
+  }
+
+  it('toasts when the engine says it is about to compact', async () => {
+    // The engine's PreCompact hook broadcasts this *before* the pause.
+    // The stream's own compact_boundary arrives after it, by which point a
+    // long silence has already read as a hang.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: null,
+      data: { subtype: 'pre_compact', data: { trigger: 'auto' } },
+    });
+    await settle(p);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0][0]).toContain('Compacting');
+    expect(toasts[0][1]).toBe('info');
+  });
+
+  it('does not toast again when the hook reports itself', async () => {
+    // `hookEvent` fires twice for one hook run — `hook_started` and then
+    // `hook_response` — so a PreCompact branch there would double- or
+    // triple-toast a single compaction now that the hook exists.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    for (const phase of ['hook_started', 'hook_response']) {
+      pushEvent('hook-event', {
+        requestId: null,
+        data: { phase, hook_event_name: 'PreCompact' },
+      });
+    }
+    await settle(p);
+    expect(toasts).toEqual([]);
+  });
+
+  it('still toasts for a hook that blocked something', async () => {
+    // The one hook-channel case that earns a word: it explains a tool call
+    // the user is about to see fail.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('hook-event', {
+      requestId: null,
+      data: { hook_event_name: 'PreToolUse', outcome: 'block', tool_name: 'Bash' },
+    });
+    await settle(p);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0][0]).toContain('Bash');
+    expect(toasts[0][1]).toBe('warning');
+  });
+});

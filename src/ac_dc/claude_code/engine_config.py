@@ -72,6 +72,16 @@ EFFORT_LEVELS = _literal_values(
 # from ``ThinkingConfigAdaptive.__annotations__["display"]`` in 0.2.137.
 THINKING_DISPLAYS = ("summarized", "omitted")
 
+# The floor for ``max_buffer_size``, and the reason it needs one: the field
+# raises a ceiling that ends sessions, so a *small* value is not a mild
+# misconfiguration. One line over the limit raises ``CLIJSONDecodeError``
+# inside the SDK's reader and the message pump for that session is over —
+# see :data:`ac_dc.claude_code.options.DEFAULT_MAX_BUFFER_SIZE`. This is the
+# SDK's own default (``subprocess_cli._DEFAULT_MAX_BUFFER_SIZE``), so a
+# value below it could only make the failure arrive sooner than doing
+# nothing would have. Dropped with a warning like every other bad value.
+MIN_MAX_BUFFER_SIZE = 1024 * 1024
+
 ENGINE_CONFIG_FILENAME = "engine.json"
 
 
@@ -91,6 +101,13 @@ class EngineConfig:
     thinking_display: str | None = None
     max_budget_usd: float | None = None
     cli_path: str | None = None
+    #: Bytes the SDK may buffer for one line of CLI stdout.
+    #:
+    #: The one field where null does **not** mean "let the CLI decide": the
+    #: SDK's default is known to end sessions, so :mod:`options` substitutes
+    #: a ceiling of its own. Present here for the pathological case the
+    #: chosen number does not cover.
+    max_buffer_size: int | None = None
 
     # ------------------------------------------------------------------
     # Construction
@@ -113,6 +130,7 @@ class EngineConfig:
             ),
             max_budget_usd=_clean_positive_float(raw, "max_budget_usd"),
             cli_path=_clean_str(raw, "cli_path"),
+            max_buffer_size=_clean_buffer_size(raw, "max_buffer_size"),
         )
 
     @classmethod
@@ -159,6 +177,7 @@ class EngineConfig:
             "thinking_display": self.thinking_display,
             "max_budget_usd": self.max_budget_usd,
             "cli_path": self.cli_path,
+            "max_buffer_size": self.max_buffer_size,
         }
 
     @property
@@ -201,6 +220,38 @@ def _clean_choice(
             key,
             value,
             ", ".join(allowed),
+        )
+        return None
+    return value
+
+
+def _clean_buffer_size(raw: dict[str, Any], key: str) -> int | None:
+    """A byte count, floored at :data:`MIN_MAX_BUFFER_SIZE`.
+
+    Stricter than the other cleaners in one way and looser in none: a
+    *float* is rejected rather than truncated, because a byte count written
+    with a decimal point is a units mistake (``1.5`` meaning megabytes) and
+    reading it as one and a half bytes would be the worst of the readings.
+    """
+    value = raw.get(key)
+    if value is None:
+        return None
+    # bool is an int subclass, and `true` here is not a size.
+    if isinstance(value, bool) or not isinstance(value, int):
+        logger.warning(
+            "engine.json: %s must be a whole number of bytes (got %r); ignoring",
+            key,
+            value,
+        )
+        return None
+    if value < MIN_MAX_BUFFER_SIZE:
+        logger.warning(
+            "engine.json: %s=%r is below the SDK's own %d-byte default, so it "
+            "would lower the ceiling rather than raise it and end sessions "
+            "sooner; ignoring",
+            key,
+            value,
+            MIN_MAX_BUFFER_SIZE,
         )
         return None
     return value

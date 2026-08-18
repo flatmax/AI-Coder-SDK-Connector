@@ -1,6 +1,11 @@
-"""``PostToolUse`` — what AC⚡DC does after the agent writes a file.
+"""Hooks — the two events AC⚡DC subscribes to, both purely observational.
 
-Three things, all of them bookkeeping:
+``PostToolUse`` is the substantial one: what to do after the agent writes a
+file. ``PreCompact`` is a single broadcast, and it is here because it is the
+one fact about a session that the message stream cannot carry in time — see
+:func:`build_pre_compact_hook`.
+
+**``PostToolUse``.** Three things, all of them bookkeeping:
 
 1. **Tell the browsers.** A ``filesModified`` push makes the files tab
    reload the tree, so a file the agent created appears and git-status
@@ -360,16 +365,73 @@ def build_post_tool_use_hook(
     return post_tool_use
 
 
+def build_pre_compact_hook(
+    broadcast: Callable[[Event], Awaitable[None]] | None = None,
+) -> Callable[[Any, str | None, Any], Awaitable[dict[str, Any]]]:
+    """The ``PreCompact`` callback: say that compaction is starting.
+
+    The only reason this is a hook and not a translated message: timing.
+    Compaction re-summarises the whole conversation, which on a long
+    session is tens of seconds during which the engine emits nothing. The
+    stream does report it — ``compact_boundary``, which
+    :mod:`ac_dc.claude_code.messages` turns into ``compactionEvent`` — but
+    that message arrives when compaction has *finished*, so the only thing
+    it can explain is a stall the user has already sat through and read as
+    a hang. This hook fires before the pause, which is the whole value.
+
+    Observational like its neighbour: returns ``{}``, and a ``PreCompact``
+    hook has nothing it could usefully return anyway — the compaction is
+    happening either way.
+    """
+
+    async def pre_compact(
+        input_data: Any,
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict[str, Any]:
+        try:
+            data = input_data if isinstance(input_data, dict) else {}
+            if broadcast is not None:
+                await broadcast(
+                    Event(
+                        "systemEvent",
+                        {
+                            "subtype": "pre_compact",
+                            "data": {
+                                # "auto" (the context window filled) or
+                                # "manual" (/compact). Read with .get(): this
+                                # is a CLI-owned dict off a wire, and a
+                                # missing trigger is not a reason to skip
+                                # telling the user about the pause.
+                                "trigger": data.get("trigger"),
+                                "custom_instructions": data.get(
+                                    "custom_instructions"
+                                ),
+                            },
+                        },
+                    )
+                )
+        except Exception as exc:
+            logger.warning("PreCompact hook failed: %s", exc)
+        return {}
+
+    return pre_compact
+
+
 def build_hook_matchers(
     reindexer: Reindexer,
     broadcast: Callable[[Event], Awaitable[None]] | None = None,
 ) -> dict[str, list[Any]]:
     """The ``hooks=`` mapping for ``ClaudeAgentOptions``.
 
-    One event, one matcher. Every other hook event AC⚡DC could subscribe
-    to is either already covered by the message pump (which sees the same
-    facts in the stream) or is a permission decision we must not make
-    here.
+    Two events, and both of them only watch. Every other hook event AC⚡DC
+    could subscribe to is either already covered by the message pump (which
+    sees the same facts in the stream, in time to be useful) or is a
+    permission decision we must not make here.
+
+    ``PreCompact`` registers without a ``matcher``: the field filters on a
+    tool name and this event has none, so a matcher string here would be a
+    pattern tested against nothing.
     """
     from claude_agent_sdk import HookMatcher
 
@@ -379,5 +441,6 @@ def build_hook_matchers(
                 matcher=WRITE_TOOL_MATCHER,
                 hooks=[build_post_tool_use_hook(reindexer, broadcast)],
             )
-        ]
+        ],
+        "PreCompact": [HookMatcher(hooks=[build_pre_compact_hook(broadcast)])],
     }

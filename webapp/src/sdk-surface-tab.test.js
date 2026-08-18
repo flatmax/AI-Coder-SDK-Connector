@@ -57,6 +57,11 @@ async function settle(el) {
  * Mirrors the real shape rather than inventing one: the backend test
  * asserts the tab and the pytest gate read the same structure, so a
  * divergence here would be a fixture that lies.
+ *
+ * The *statuses* are chosen to exercise the filters and are not today's
+ * report — `PreCompact` is pending here and handled in the real one. The
+ * tab renders whatever it is handed, so a fixture that tracked every
+ * triage decision would only be a second copy of the table to update.
  */
 function makeReport(overrides = {}) {
   return {
@@ -75,6 +80,7 @@ function makeReport(overrides = {}) {
         ],
         unclassified: [],
         stale: [],
+        resolved: [],
       },
       hooks: {
         entries: [
@@ -248,6 +254,30 @@ describe('ac-sdk-surface-tab', () => {
       await settle(el);
       expect(el.shadowRoot.textContent).toContain('removed_field');
       expect(el.shadowRoot.textContent).toContain('Delete the entries');
+    });
+
+    it('flags a note that still argues against an option we now set', async () => {
+      // The other direction, which `stale` structurally cannot report:
+      // the field still exists, we implemented it, and the pending note
+      // arguing for the deferral now reads as a reason to undo the work.
+      const report = makeReport();
+      report.sections.options.resolved = ['max_buffer_size'];
+      publishReport(report);
+      const el = mountTab();
+      await settle(el);
+      expect(text(el.shadowRoot)).toContain(
+        'Resolved — now set, but still carrying a note arguing against '
+          + 'setting it: max_buffer_size',
+      );
+    });
+
+    it('says nothing about either when there is nothing to say', async () => {
+      // Both notes are absent from a healthy report, including for the
+      // sections whose reports carry no `resolved` key at all.
+      publishReport();
+      const el = mountTab();
+      await settle(el);
+      expect(el.shadowRoot.textContent).not.toContain('Delete the entries');
     });
   });
 

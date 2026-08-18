@@ -174,7 +174,7 @@ class TestCoverageIsDerivedNotGuessed:
             assert name in assigned
 
     def test_registration_is_read_from_hooks_module(self):
-        assert registered_hook_events() == {"PostToolUse"}
+        assert registered_hook_events() == {"PostToolUse", "PreCompact"}
 
 
 # ----------------------------------------------------------------------
@@ -207,6 +207,35 @@ class TestOptionReport:
 
         assert not set(PENDING_OPTIONS) & set(NEVER_SET)
 
+    def test_nothing_we_set_is_still_argued_against(self):
+        """The bucket ``stale`` structurally cannot cover.
+
+        A pending note is an argument for *not* setting an option. Once
+        the option is set the note is worse than absent — it reads as a
+        reason to undo the work. ``stale`` only catches names the SDK
+        removed, and these names still exist.
+        """
+        assert option_report()["resolved"] == []
+
+    def test_a_resolved_entry_is_reported(self, monkeypatch):
+        """The check has to be able to fail, or it is decoration."""
+        monkeypatch.setitem(
+            PENDING_OPTIONS, "cwd", "a note arguing against something we do"
+        )
+        assert option_report()["resolved"] == ["cwd"]
+
+    def test_the_two_new_options_read_as_handled(self):
+        """``max_buffer_size`` and ``stderr``, both closed the same day.
+
+        Named rather than left to the generic sweep because both were
+        pending with an argument, and this is the assertion that the
+        argument is gone rather than merely outvoted.
+        """
+        by_name = {e["name"]: e for e in option_report()["entries"]}
+        for name in ("max_buffer_size", "stderr"):
+            assert by_name[name]["status"] == HANDLED
+            assert name not in PENDING_OPTIONS
+
 
 class TestHookReport:
     def test_every_event_classified(self):
@@ -223,14 +252,30 @@ class TestHookReport:
             if status == DECLINED:
                 assert len(note) > 30, f"{name} needs a reason"
 
-    def test_precompact_is_the_known_gap(self):
-        """Documents today's one real hook gap, so closing it is visible.
+    def test_precompact_is_handled_and_the_table_agrees(self):
+        """The gap this used to document, closed at both ends.
 
-        If somebody registers ``PreCompact``, this test fails and the
-        reminder to move it out of pending is the failure itself.
+        It asserted ``PENDING`` and said "if somebody registers
+        ``PreCompact``, this test fails and the reminder to move it out of
+        pending is the failure itself". Somebody did, and it did.
         """
         by_name = {e["name"]: e for e in hook_report()["entries"]}
-        assert by_name["PreCompact"]["status"] == PENDING
+        assert by_name["PreCompact"]["status"] == HANDLED
+        assert "PreCompact" in registered_hook_events()
+        assert HOOK_EVENTS["PreCompact"][0] == HANDLED
+
+    def test_no_event_is_registered_without_a_reason_recorded(self):
+        """The table is the per-event prose; a registration needs an entry.
+
+        Not caught by ``claimed_unregistered``, which is the other
+        direction. A matcher added with no entry here reads as handled with
+        an empty note, which tells the next reader nothing about why.
+        """
+        for name in registered_hook_events():
+            assert name in HOOK_EVENTS, f"{name} is registered but not described"
+            status, note = HOOK_EVENTS[name]
+            assert status == HANDLED, f"{name} is registered; the table says {status}"
+            assert len(note) > 30, f"{name} needs a real note, not {note!r}"
 
 
 class TestMessageReport:

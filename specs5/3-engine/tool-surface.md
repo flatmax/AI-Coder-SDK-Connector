@@ -65,9 +65,22 @@ entirely, which would silently disable the permission dialog.
 | `Notification` | Surface engine notifications as toasts. |
 | `PermissionRequest` | Debug view and the prompts-per-turn metric. |
 
+**Two of those are registered, and the rest are covered better elsewhere.** The table is what each event
+would be *for*; the implementation subscribes to `PostToolUse` and `PreCompact` only, because most of the
+rows describe facts the message stream already carries — a tool card comes from the assistant message's
+own tool-use block, a failure from the `ToolResultBlock`, the turn's end from `ResultMessage`, subagents
+from the four `Task*` messages, and the prompt from the fact that we sent it. `PreToolUse` and
+`PermissionRequest` are refused on top of that, because a decision returned from either shadows
+`can_use_tool` and silently ungates the session. `PreCompact` is the one row with no equivalent in the
+stream: `compact_boundary` arrives when compaction has *finished*. The per-event reasons are the
+`HOOK_EVENTS` table in `sdk_surface.py`, which the suite checks against what `hooks.py` actually
+registers, in both directions — see [`../plan/sdk-surface.md`](../plan/sdk-surface.md).
+
 `include_hook_events` is enabled so hook activity arrives as `HookEventMessage` and is inspectable in
 the Context tab's debug view. A hook system that cannot be observed is a hook system that gets
-debugged by print statement.
+debugged by print statement. Note that a `HookEventMessage` arrives **twice** per hook run — once as
+`hook_started`, once as `hook_response` — so a browser branch keyed on the event name fires twice, which
+is why the compaction toast is driven by the hook's own broadcast and not by the hook-event stream.
 
 ## Reacting to File Changes
 
