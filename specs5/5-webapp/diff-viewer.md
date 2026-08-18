@@ -6,7 +6,7 @@ Side-by-side diff editor for text file changes. Lives outside the dialog, fillin
 
 For SVG files, see [svg-viewer.md](svg-viewer.md) — a dedicated side-by-side viewer that replaces the Monaco editor for SVG content.
 ## Layout
-- Background layer filling the viewport, sibling of the dialog
+- Background layer filling the viewport to the right of the docked dialog, sibling of the dialog. Monaco's original / modified sides split that uncovered region — see [shell.md § Reserved Strip](shell.md#reserved-strip), which is what keeps the original side out from under the dialog
 - Empty state shows a watermark (brand mark, low opacity)
 - Floating overlay buttons in the top-right corner when a file is open — status LED, preview toggle (for markdown/tex/html), text-diff toggle (for SVG passthroughs)
 ## Status LED

@@ -8,6 +8,8 @@
 //     the active viewer changes.
 //   - Alt+Arrow debounce: rapid key sequences coalesce to
 //     a single viewer fetch; Alt release flushes early.
+//   - The viewer background's left inset, which keeps the
+//     side-by-side viewers out from under the docked dialog.
 //
 // Shared mocks for monaco-editor / svg-pan-zoom and the
 // AppShell prototype patches live in
@@ -19,6 +21,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installAppShellTestSetup, mountShell } from './test-helpers.js';
+import { relayoutViewers, syncViewerInset } from './viewers.js';
 
 describe('AppShell viewer routing and navigation', () => {
   installAppShellTestSetup();
@@ -646,6 +649,149 @@ describe('AppShell viewer routing and navigation', () => {
       }
       await settle(shell);
       expect(openSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('viewer background inset', () => {
+    /**
+     * Give the dialog the rect it would have if layout ran.
+     * jsdom reports zeros for every element, and
+     * `syncViewerInset` treats a zero-width rect as "no
+     * strip to reserve", so without a stub every case here
+     * would pass for the wrong reason.
+     *
+     * `left`/`width` are the inputs; `right` is derived the
+     * way a real rect derives it, because that's the value
+     * the inset is taken from.
+     */
+    function stubDialogRect(shell, { left, width }) {
+      const dialog = shell.shadowRoot.querySelector('.dialog');
+      dialog.getBoundingClientRect = () => ({
+        left, top: 0, width, height: 800,
+        right: left + width, bottom: 800,
+        x: left, y: 0,
+        toJSON() {},
+      });
+      return dialog;
+    }
+
+    function insetOf(shell) {
+      return shell.shadowRoot
+        .querySelector('.viewer-background')
+        .style.getPropertyValue('--viewer-inset-left');
+    }
+
+    it('reserves the docked dialog width', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      // 400 wide plus the 1px border-right: the measured
+      // right edge is what the viewers must clear, which is
+      // why the inset is read from the rect rather than
+      // recomputed from _dockedWidth.
+      stubDialogRect(shell, { left: 0, width: 401 });
+      expect(syncViewerInset(shell)).toBe(true);
+      expect(insetOf(shell)).toBe('401px');
+    });
+
+    it('rounds a fractional right edge', async () => {
+      // A percentage width on an odd viewport gives the
+      // dialog a sub-pixel right edge; an unrounded value
+      // would leave a hairline of the left pane under the
+      // dialog's border.
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 400.6 });
+      syncViewerInset(shell);
+      expect(insetOf(shell)).toBe('401px');
+    });
+
+    it('clears the inset when the dialog is undocked', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 401 });
+      syncViewerInset(shell);
+      expect(insetOf(shell)).toBe('401px');
+      // A floating dialog covers the viewer wherever the
+      // user dropped it — insetting for it would make the
+      // content jump on every drag.
+      shell._undockedPos = {
+        left: 120, top: 60, width: 500, height: 400,
+      };
+      await shell.updateComplete;
+      expect(
+        shell.shadowRoot
+          .querySelector('.dialog')
+          .classList.contains('floating'),
+      ).toBe(true);
+      expect(insetOf(shell)).toBe('0px');
+    });
+
+    it('clears the inset when the dialog is minimized', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 401 });
+      syncViewerInset(shell);
+      expect(insetOf(shell)).toBe('401px');
+      // Minimized collapses to the tab strip, so the whole
+      // viewport goes back to the viewer.
+      shell._minimized = true;
+      await shell.updateComplete;
+      expect(insetOf(shell)).toBe('0px');
+    });
+
+    it('ignores a dialog whose rect has left the edge', async () => {
+      // Mid-drag the dialog's inline left moves before the
+      // `floating` class is guaranteed to be in place. A rect
+      // that no longer starts at the viewport edge isn't
+      // occluding a full-height strip on the left.
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 200, width: 401 });
+      syncViewerInset(shell);
+      expect(insetOf(shell)).toBe('0px');
+    });
+
+    it('reports no change when the inset is unchanged', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 401 });
+      expect(syncViewerInset(shell)).toBe(true);
+      // Callers relayout on `true`; a repeat sync must not
+      // trigger a refit of viewBoxes and Monaco layout.
+      expect(syncViewerInset(shell)).toBe(false);
+    });
+
+    it('commits the inset before the viewers relayout', async () => {
+      // Ordering matters: the viewers measure their own
+      // containers, so a relayout that ran before the
+      // background resized would fit to the old width.
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 401 });
+      const seen = [];
+      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      svg.relayout = () => seen.push(insetOf(shell));
+      diff.relayout = () => seen.push(insetOf(shell));
+      relayoutViewers(shell);
+      expect(seen).toEqual(['401px', '401px']);
+    });
+
+    it('relayouts the viewers when the docked width changes', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      stubDialogRect(shell, { left: 0, width: 401 });
+      const scheduleSpy = vi.spyOn(shell, '_scheduleViewerRelayout');
+      shell._dockedWidth = 600;
+      await shell.updateComplete;
+      expect(insetOf(shell)).toBe('401px');
+      expect(scheduleSpy).toHaveBeenCalled();
+      // A re-render that can't move the dialog's right edge
+      // must not force a layout read.
+      scheduleSpy.mockClear();
+      shell.activeTab = 'files';
+      await shell.updateComplete;
+      expect(scheduleSpy).not.toHaveBeenCalled();
     });
   });
 });

@@ -80,6 +80,18 @@ if (typeof URL !== 'undefined') {
  * real WebSocket.
  */
 class JRPCClient extends LitElement {
+  // Mirrors the real base class's declarations. `serverURI`
+  // has to be reactive for the `updated` dispatch below to
+  // ever fire, which is how the library reaches
+  // serverChanged() in production too.
+  static get properties() {
+    return {
+      serverURI: { type: String },
+      server: { type: Object },
+      remoteTimeout: { type: Number },
+    };
+  }
+
   constructor() {
     super();
     this.remoteTimeout = 60;
@@ -88,6 +100,22 @@ class JRPCClient extends LitElement {
   addClass(_instance, _name) {
     // Real library registers RPC methods. Tests that need
     // to observe registrations spy on this method.
+  }
+  // `updated` is not decoration here — in the real base class
+  // it is the only thing that opens the WebSocket, watching
+  // `serverURI` and calling serverChanged(). An AppShell
+  // override that forgets `super.updated()` therefore leaves
+  // the app on the startup overlay forever, connecting to
+  // nothing, and no amount of lifecycle-hook stubbing catches
+  // it. Mirroring the dispatch here gives that regression a
+  // test (connection.test.js § base-class lifecycle).
+  updated(changed) {
+    if (changed.has('serverURI') && this.serverURI) {
+      this.serverChanged();
+    }
+  }
+  serverChanged() {
+    // Real library constructs the WebSocket here.
   }
   setupDone() {}
   setupSkip() {}

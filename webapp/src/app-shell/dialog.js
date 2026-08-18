@@ -173,6 +173,13 @@ export function onPointerMove(host, event) {
     dialog.style.width = `${host._drag.originWidth}px`;
     dialog.style.height = `${host._drag.originHeight}px`;
     dialog.classList.add('floating');
+    // Undocking frees the strip the docked dialog reserved
+    // on the viewer background. The relayout picks that up
+    // via `syncViewerInset`, which reads the `floating`
+    // class we just added — `_undockedPos` isn't committed
+    // until pointerup, so state alone would lag the whole
+    // drag behind.
+    host._scheduleViewerRelayout();
     return;
   }
 

@@ -67,6 +67,7 @@ import {
 import {
   onNavigateFile, onLoadDiffPanel, onLoadSvgPanel, onToggleSvgMode,
   onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
+  syncViewerInset,
 } from './viewers.js';
 import {
   saveViewportState, saveSvgViewportState, loadViewportState,
@@ -1588,6 +1589,40 @@ export class AppShell extends JRPCClient {
 
   render() {
     return renderTemplate(this);
+  }
+
+  firstUpdated(changed) {
+    super.firstUpdated?.(changed);
+    // The dialog exists from the first paint, so the viewer
+    // background needs its inset before either viewer opens
+    // a file — including the docked width restored from
+    // localStorage, which is applied by the same render.
+    syncViewerInset(this);
+  }
+
+  updated(changed) {
+    // JRPCClient.updated is what opens the WebSocket — it
+    // watches `serverURI` and calls serverChanged(). Skipping
+    // the super call leaves the app on the startup overlay
+    // forever, connecting to nothing.
+    super.updated(changed);
+    // Dialog geometry drives the background's left inset.
+    // Only re-measure when something that can move the
+    // dialog's right edge changed: the shell re-renders for
+    // plenty of reasons that cannot (toasts, tab switches,
+    // stream flags) and every sync forces a layout read.
+    //
+    // The drag / resize / window-resize paths don't come
+    // through here at all — they mutate the dialog's inline
+    // style directly and go via `_scheduleViewerRelayout`,
+    // which syncs the inset on its own RAF.
+    if (
+      changed.has('_dockedWidth')
+      || changed.has('_undockedPos')
+      || changed.has('_minimized')
+    ) {
+      if (syncViewerInset(this)) this._scheduleViewerRelayout();
+    }
   }
 }
 

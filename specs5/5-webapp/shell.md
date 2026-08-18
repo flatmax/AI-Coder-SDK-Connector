@@ -111,12 +111,29 @@ permission request has stalled the turn.
 
 ## Viewer Background
 
-- Full-viewport background layer hosts the diff viewer and SVG viewer as siblings
+- Background layer hosts the diff viewer and SVG viewer as siblings, filling the viewport to the right of the docked dialog
 - Only one is visible at a time — CSS class toggle with a short opacity transition
 - Routing by file extension determines which viewer receives each navigate-file event
 - Both viewers keep independent tab state; switching between file types just toggles the layer
 - **Every `navigate-file` path is normalised against `repo_root` before anything else happens.** Claude Code's file tools take absolute paths, so a tool card's file chip, a turn footer's "files modified" list and the context tab all carry absolute paths, while every `Repo` method takes a repo-relative one and rejects an absolute path outright (it resolves nothing, because resolving would be a way around the containment check). One normalisation here rather than one per dispatcher, and it covers the two side effects as well: the path that gets persisted as last-open and registered with the navigation grid is the relative one, so a bad path cannot survive a reload
 - A path outside the repo root is passed through unchanged rather than rewritten. It has no repo-relative name, and the backend refusing it is the correct outcome — a `../..` walk would ask for a different file
+
+### Reserved Strip
+
+The background layer's left edge is inset by the width the docked dialog occupies, published as the
+`--viewer-inset-left` custom property on the layer.
+
+Without the inset the layer spanned the whole viewport and lost its left half. Both viewers divide their
+width in two — Monaco's original / modified sides, the SVG viewer's Original / Modified panes — so the
+"before" side of every side-by-side view landed exactly underneath the opaque dialog. It was rendered,
+correctly sized, and holding the right content; it was simply invisible. Presentation mode had the mirror
+version of the same bug: a full-width right pane spilled its left half under the dialog.
+
+- The inset is **measured** from the dialog's own rect, not recomputed from the stored docked width. The measured right edge already accounts for the CSS `min-width`, the 1px border, and a resize drag that has written an inline width without yet committing it to state — three ways a recomputation drifts
+- Zero whenever the dialog isn't occluding a full-height strip at the left edge: undocked (it floats over the layer, and insetting for it would make viewer content jump on every drag frame) or minimized. Minimizing therefore hands the whole viewport to the viewer, which is what a user reaching for presentation mode wants
+- A dialog whose rect has left the viewport edge is treated as floating even if the `.floating` class hasn't landed yet, so a mid-drag frame can't inset the layer by a strip the dialog no longer covers
+- Synced on first render (the docked width restored from localStorage applies on that same render), on any state change that can move the dialog's right edge, and ahead of every viewer relayout. Renders that can't move that edge — toasts, tab switches, stream flags — don't re-measure, because each sync forces a layout read
+- The sync reports whether the value changed, and a relayout is scheduled only when it did. The viewers' relayout refits viewBoxes and Monaco layout, which is wasted work at an unchanged width
 
 ## Dialog Container
 
@@ -314,7 +331,8 @@ possible moment.
 - Both throttled to one call per animation frame
 - Without throttling, rapid resize events cause feedback loops (layout shift → resize event → layout call → forced reflow → visible jank)
 - Throttle handle cancelled on component unmount to prevent stale callbacks
-- Viewer relayout is also scheduled on every dialog-resize pointermove frame — the viewer sits behind the dialog, so a dialog getting wider shrinks the visible viewer area. Monaco caches scrollbar / minimap dimensions; the SVG viewer's editors run with `preserveAspectRatio="none"` and rely on explicit `fitContent()` calls. Without this hook, both viewers leave stale layout until the user clicks into them.
+- Viewer relayout is also scheduled on every dialog-resize pointermove frame, and on the frame an undock drag adds the `.floating` class — a dialog getting wider shrinks the strip left for the viewer, and undocking hands it back. Monaco caches scrollbar / minimap dimensions; the SVG viewer's editors run with `preserveAspectRatio="none"` and rely on explicit `fitContent()` calls. Without this hook, both viewers leave stale layout until the user clicks into them.
+- Every relayout re-syncs the background's reserved strip first, then calls each viewer. The viewers measure their own containers, so the layer's new width has to be committed before they read it.
 - Window-resize and dialog-resize relayouts use separate RAF handles so they don't cancel each other's pending frames.
 
 ## Toast System

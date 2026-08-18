@@ -375,11 +375,77 @@ export function scheduleViewerRelayout(host) {
 }
 
 /**
+ * Keep the viewer background clear of the docked dialog by
+ * publishing `--viewer-inset-left` on the background layer.
+ *
+ * The background spans the full viewport while the dialog
+ * is an opaque panel docked to the left edge at 50% width.
+ * Both viewers split their width 50/50, so the "original"
+ * side of every side-by-side view used to sit exactly
+ * underneath the dialog — the SVG viewer's left pane was
+ * present, visible per CSS, correctly holding HEAD content,
+ * and impossible to see. Presentation mode had the mirror
+ * problem: its full-width right pane spilled its left half
+ * under the dialog too.
+ *
+ * The inset is measured from the dialog's own rect rather
+ * than recomputed from `_dockedWidth` or the stylesheet's
+ * `width: 50%`. The measured right edge already accounts
+ * for `min-width`, the 1px border, and an in-flight resize
+ * drag that has written `dialog.style.width` without yet
+ * committing it to reactive state — three ways a
+ * recomputation would drift.
+ *
+ * Zero whenever the dialog isn't occluding a full-height
+ * strip: undocked (it floats over the layer, so there's no
+ * strip to reserve — moving the viewer for it would make
+ * the content jump on every drag) or minimized (collapsed
+ * to its tab strip at the top). Minimizing therefore hands
+ * the whole viewport to the viewer, which is what a user
+ * reaching for presentation mode wants.
+ *
+ * @returns {boolean} whether the value changed. Callers use
+ *   this to relayout only when the available width actually
+ *   moved — the viewers' `relayout()` refits viewBoxes and
+ *   Monaco layout, which is wasted work otherwise.
+ */
+export function syncViewerInset(host) {
+  const bg = host.shadowRoot?.querySelector('.viewer-background');
+  if (!bg) return false;
+  const dialog = host.shadowRoot?.querySelector('.dialog');
+  let value = '0px';
+  if (
+    dialog
+    && !host._minimized
+    && !dialog.classList.contains('floating')
+  ) {
+    const rect = dialog.getBoundingClientRect();
+    // Docked means flush against the left edge. The `left`
+    // guard keeps a mid-drag dialog that hasn't picked up
+    // the `floating` class yet from insetting the viewer by
+    // a rect that no longer starts at the edge.
+    if (rect.width > 0 && rect.left <= 0) {
+      value = `${Math.round(rect.right)}px`;
+    }
+  }
+  if (bg.style.getPropertyValue('--viewer-inset-left') === value) {
+    return false;
+  }
+  bg.style.setProperty('--viewer-inset-left', value);
+  return true;
+}
+
+/**
  * Call `relayout()` on both viewers if they're mounted
  * and the method exists. Safe to call in tests where
  * the viewers haven't been constructed yet.
+ *
+ * The inset sync runs first: the viewers measure their own
+ * containers, so the background's width has to be committed
+ * before they read it.
  */
 export function relayoutViewers(host) {
+  syncViewerInset(host);
   const diff = host.shadowRoot?.querySelector('ac-diff-viewer');
   const svg = host.shadowRoot?.querySelector('ac-svg-viewer');
   if (diff && typeof diff.relayout === 'function') {

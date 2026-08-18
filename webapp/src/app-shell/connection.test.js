@@ -44,6 +44,22 @@ describe('AppShell connection lifecycle', () => {
     });
   });
 
+  describe('base-class lifecycle', () => {
+    it('forwards updated() to JRPCClient so the socket opens', async () => {
+      // The shell overrides `updated` for its own layout
+      // bookkeeping. JRPCClient.updated is what watches
+      // `serverURI` and opens the WebSocket, so an override
+      // that drops the super call leaves every client stuck
+      // on "Connecting…" with nothing in the console.
+      const shell = mountShell();
+      await shell.updateComplete;
+      const spy = vi.spyOn(shell, 'serverChanged');
+      shell.serverURI = 'ws://127.0.0.1:65001';
+      await shell.updateComplete;
+      expect(spy).toHaveBeenCalled();
+    });
+  });
+
   describe('setupDone', () => {
     // TODO(phase-2d): files-tab silencing — delete this
     // beforeEach/afterEach pair when Phase 2d work adds proper

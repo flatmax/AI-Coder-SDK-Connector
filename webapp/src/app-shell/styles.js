@@ -31,10 +31,25 @@ export const APP_SHELL_STYLES = css`
      * position:fixed (Monaco editor) can escape and
      * cover the dialog entirely — their position:fixed
      * anchors to the nearest ancestor with a transform
-     * or will-change, or the viewport otherwise. */
+     * or will-change, or the viewport otherwise.
+     *
+     * The --viewer-inset-left custom property reserves the
+     * strip the docked dialog occupies. Both viewers split
+     * their width 50/50 (Monaco's original/modified sides,
+     * the SVG viewer's Original/Modified panes), so with a
+     * full-viewport background the left half of every
+     * side-by-side view landed exactly underneath the
+     * left-docked dialog — rendered, sized, and entirely
+     * invisible. The property is written by syncViewerInset
+     * in viewers.js; the default keeps the layer full-width
+     * for an undocked or minimized dialog.
+     *
+     * (No backticks in this comment — the whole stylesheet
+     * is a tagged template literal, so one would end it.) */
     .viewer-background {
       position: absolute;
       inset: 0;
+      left: var(--viewer-inset-left, 0px);
       overflow: hidden;
       z-index: 0;
     }

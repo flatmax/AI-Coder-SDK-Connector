@@ -30,6 +30,12 @@ The viewer's `active-file-changed` event still fires when virtual content is loa
 ### Image Href Resolution in Virtual Mode
 Relative `<image>` href resolution uses the right pane's label as the base path when the virtual slot is active (falling back to the left pane's label). Labels are typically basenames, which resolves hrefs against the repo root — sufficient for the common case where the two compared SVGs reference siblings of the original file. Mismatched directory contexts on the two sides may produce broken hrefs on whichever side disagrees with the chosen label; this is acceptable given that ad-hoc visual comparison is the intended use case.
 ## Layout
+
+Both layouts below fill the viewer background layer, which is inset from the left by the strip the docked
+dialog occupies — see [shell.md § Reserved Strip](shell.md#reserved-strip). The 50/50 split is taken
+across that uncovered region, not across the viewport; a split of the full viewport would put the original
+panel entirely underneath the dialog.
+
 ### Normal Layout (Select / Pan Mode)
 - Two side-by-side SVG panels with a resizable splitter
 - Left — original SVG (HEAD version), always read-only, pan/zoom navigation
