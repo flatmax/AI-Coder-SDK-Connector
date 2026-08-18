@@ -37,7 +37,8 @@ export function loadActiveTab(_host) {
     if (stored === 'search') return 'files';
     if (stored === 'files' || stored === 'context'
         || stored === 'settings'
-        || stored === 'doc-convert') {
+        || stored === 'doc-convert'
+        || stored === 'sdk-surface') {
       return stored;
     }
   } catch (_) {}

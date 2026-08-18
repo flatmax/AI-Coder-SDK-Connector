@@ -2188,6 +2188,48 @@ describe('ContextUsageTab debug', () => {
     expect(debugText(el)).toContain('4 — past tolerance');
   });
 
+  describe('the link to SDK Surface', () => {
+    // The dialog has no rendered tab strip, so `sdk-surface` is reachable
+    // only by Alt+5 or by an event like this one. That makes this link the
+    // only pointer to the tab anywhere in the UI, which is why it is
+    // tested rather than left as decoration.
+
+    function sdkLink(el) {
+      return [...el.shadowRoot.querySelectorAll('.link')].find((b) =>
+        b.textContent.includes('features this build wired up'),
+      );
+    }
+
+    it('asks the shell for the sdk-surface tab', async () => {
+      const { el } = await openDebug();
+      const seen = [];
+      el.addEventListener('request-dialog-tab', (e) => seen.push(e.detail?.tab));
+      sdkLink(el).click();
+      expect(seen).toEqual(['sdk-surface']);
+    });
+
+    it('escapes the shadow root so the shell can hear it', async () => {
+      // `composed` and `bubbles` both matter: app-shell listens on the
+      // element, not inside this component's tree.
+      const { el } = await openDebug();
+      const seen = [];
+      document.addEventListener('request-dialog-tab', (e) => seen.push(e.detail?.tab));
+      sdkLink(el).click();
+      document.removeEventListener('request-dialog-tab', () => {});
+      expect(seen).toEqual(['sdk-surface']);
+    });
+
+    it('names the shortcut, since that is the only other way in', async () => {
+      const { el } = await openDebug();
+      expect(debugText(el)).toContain('Alt+5');
+    });
+
+    it('is a button, so it is reachable by keyboard', async () => {
+      const { el } = await openDebug();
+      expect(sdkLink(el).tagName).toBe('BUTTON');
+    });
+  });
+
   it('takes a pushed health record over the one it fetched', async () => {
     // `mirror_gaps` moves during a turn, so a section showing the count
     // from when it was opened would report a clean mirror over a broken one.

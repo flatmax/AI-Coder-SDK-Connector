@@ -29,6 +29,7 @@ import '../diff-viewer/index.js';
 import '../svg-viewer.js';
 import '../settings-tab.js';
 import '../context-usage-tab.js';
+import '../sdk-surface-tab.js';
 import '../doc-convert-tab.js';
 import '../file-nav.js';
 import '../usage-hud.js';

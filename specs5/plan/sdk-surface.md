@@ -16,6 +16,10 @@ failing startup, because a private name can move in a patch release.
 > **Do not re-derive this by guessing.** When implementing, re-read the installed wheel — the SDK
 > moves fast and this file is a snapshot, not a contract the SDK owes us.
 
+**Since 2026-08-18 the snapshot has a machine-checked half** — see § [The probe](#the-probe). This file
+still carries the reasoning, which no reflection can produce; what it no longer has to carry alone is the
+*inventory*, which drifts silently every time the wheel moves.
+
 **Re-verified 2026-08-13** against 0.2.137 installed in the project venv (the first pass read an
 unpacked wheel). The surface held: `ContextUsageResponse` carries every field CC-4 assumes,
 `ResultMessage.terminal_reason` is real, `SessionStore` and the conformance harness exist, and the
@@ -24,6 +28,109 @@ now fixed — the four `Task*Message` classes were written without their `Messag
 pin had moved to 2.1.229. One thing was nearly "corrected" wrongly: `__cli_version__` is absent from
 the *public* namespace but present in `claude_agent_sdk._cli_version`, so a `dir(claude_agent_sdk)`
 check alone will tell you it does not exist. It does.
+
+---
+
+## The probe
+
+`src/ac_dc/claude_code/sdk_surface.py` asks the installed wheel what it offers and this repo's own source
+what it uses, and reports the difference in five sections: **options**, **hooks**, **messages**, **client
+methods**, **betas**. `tests/test_claude_code_sdk_surface.py` is the gate; `ClaudeCodeService.get_sdk_surface`
+is the RPC; `webapp/src/sdk-surface-tab.js` is the reader's view of it (Alt+5, linked from the Context tab's
+Debug section).
+
+Everything below this heading is what building it cost to learn.
+
+### It fails on *untriaged*, not on *unimplemented*
+
+Every name the SDK exposes is one of three things:
+
+| Bucket | Meaning | Where it comes from |
+|---|---|---|
+| `handled` | this repo demonstrably uses it | **derived** from our own syntax trees |
+| `declined` | we know about it and chose not to, with the reason recorded | a declared table |
+| `pending` | we know about it, it is not built, and there is an argument for it | a declared table |
+
+A `pending` name is a **finding, not a failure** — 24 options are pending right now and the suite is green.
+What fails the gate is a name in *none* of the three, because that is the only state that means the SDK
+moved and nobody looked. Closing it costs one table entry with a sentence in it, which is the smallest
+action that leaves a reader better off than a passing test would have.
+
+The distinction matters because the alternative was tried on paper and rejected: a gate that fails on
+unimplemented surface fails on 24 things the day it lands, gets an ignore-list within a week, and the
+ignore-list is the thing nobody reads.
+
+### Coverage is read out of the AST, and two naive versions had to fail first
+
+`handled` is computed by walking this package's own syntax trees — `ast.Subscript` targets for
+`kwargs["model"]`, `ast.Assign` / `ast.AnnAssign`, `ast.Return` dict literals, `ast.Call` attribute names.
+Both cheaper designs were built and both lied, and their failures are now pinned as regression tests:
+
+- **A runtime diff of `build_option_kwargs()` reported 36 false gaps.** `model`, `hooks`, `resume` and
+  `thinking` are set *conditionally*, so a probe that inspects one call's output sees whichever branch that
+  call took and calls the rest missing. `test_conditionally_set_options_count_as_handled`.
+- **A text grep of `options.py` reported `skills` as handled.** The word appears in a comment about
+  `.claude/skills/`. A grep cannot tell a mention from a use, and the failure direction is the dangerous one
+  — it marks unbuilt surface as done. `test_options_named_only_in_comments_are_not_handled`.
+
+The payoff is that adding an option to `options.py` needs **no edit here**: it moves from `pending` to
+`handled` on its own, and the `PENDING_OPTIONS` entry becomes `stale` and is reported as such. The tables
+only ever grow for surface the SDK itself added.
+
+### This is the other direction from the existing tripwire
+
+`test_claude_code_options.py` asserts every key we emit exists on the installed dataclass — it catches the
+SDK **removing** something under us. This one asserts every field on the dataclass is accounted for — it
+catches the SDK **adding** something. Neither subsumes the other, and the removal one is the more urgent of
+the two; it stays where it is.
+
+### What it cannot see
+
+Reflection reads shape, never semantics. `include_partial_messages=True` is `handled` because the key is
+set; that a `StreamEvent`'s deltas are keyed correctly is [phase 1's correction](#corrections-found-while-implementing-phase-1)
+and no probe would have found it. The same goes for every row in the correction tables below — each is a
+case where the *types* were satisfied and the *behaviour* was not. A green gate means nobody is unaware of a
+name. It does not mean the name is used properly.
+
+Two more limits worth stating:
+
+- **`get_server_info()` is diffed separately** (`diff_server_info`), because the CLI ships on its own
+  release train and can gain a command or a tool without any Python type changing. It is a live read, so it
+  is absent when no engine is connected — the static half renders regardless, which is the point, since a
+  diagnostic panel is most often opened when something is broken.
+- **`KNOWN_BETAS` exists so the gate fails only on a *new* beta.** Without it, the one beta we have declined
+  (`context-1m-2025-08-07`) failed the gate as untriaged — a test that goes red for a thing already decided
+  is a test that gets deleted.
+
+### What it says today
+
+Read on 2026-08-18 against SDK 0.2.137 / CLI pin 2.1.229, nothing untriaged:
+
+| Section | handled | declined | pending |
+|---|---|---|---|
+| Options | 21 | 2 | 24 |
+| Hooks | 1 | 8 | 1 |
+| Messages | 7 | 0 | 0 |
+| Client methods | 14 | 1 | 0 |
+| Betas | 0 | 1 | 0 |
+
+The message taxonomy and the client surface are fully consumed, which is the part that would have been
+guessed wrong: this repo renders every message type the union carries and calls every client method but
+`receive_messages` (declined — `receive_response` bounds itself on `ResultMessage`).
+
+Three of the 24 pending options are worth doing rather than merely knowing about, and the first is already
+this plan's own [open item 1](README.md#open-items-carried-forward-as-of-2026-08-18) — the probe found it
+independently, which is the best evidence it is reading something real:
+
+- **`max_buffer_size`** — one oversized stdout line ends a session permanently. Blocked on a number, not a
+  design.
+- **`stderr`** — a callback for the CLI's stderr. Diagnostics currently only reachable in the server log.
+- **`resume_session_at` / `resume_drops_turn`** — resume from a chosen point rather than the end, which is
+  the SDK-side half of an undo story this repo gave up when the mirror won ([CC-20](decisions.md)).
+
+And one is a trap worth naming: **`sandbox`**. It reads like a security win and it is not ours to enable
+casually — it changes what the agent can do to the machine, and the permission dialog is this repo's answer
+to that question.
 
 ---
 

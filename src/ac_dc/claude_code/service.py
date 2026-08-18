@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ac_dc.claude_code import sdk_surface
 from ac_dc.claude_code.cost import UNPRICED
 from ac_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
 from ac_dc.claude_code.events_log import (
@@ -1530,6 +1531,37 @@ class ClaudeCodeService:
             logger.exception("get_server_info failed")
             return {"error": f"Could not read server info: {exc}"}
         return info or {}
+
+    async def get_sdk_surface(self) -> dict[str, Any]:
+        """What the installed SDK offers versus what AC⚡DC reaches for.
+
+        Never answers ``{"error": ...}``, unlike its neighbours here. The
+        static half of the report — options, hook events, message types,
+        client methods, beta gates — is pure reflection over the installed
+        wheel and this package's own source, so it is exactly as available
+        with the engine down as up. Refusing the whole report because the
+        CLI is not running would withhold the part that still holds at the
+        moment somebody is most likely to be reading it.
+
+        The live half degrades on its own instead: a failed
+        ``get_server_info`` leaves ``cli.available`` false and the static
+        sections intact. That call is a control request against the
+        subprocess, so it fails for the ordinary reasons — no session yet,
+        session lost mid-read — and none of them are worth an error banner
+        over a diagnostic tab.
+        """
+        server_info: Any = None
+        try:
+            server_info = await self.session.get_server_info()
+        except (EngineNotReadyError, SessionLostError) as exc:
+            logger.debug("SDK surface: no live CLI to probe (%s)", exc)
+        except Exception:  # noqa: BLE001 - a diagnostic, never a control path
+            logger.warning(
+                "SDK surface: could not read server info; reporting the "
+                "static surface only",
+                exc_info=True,
+            )
+        return sdk_surface.surface_report(server_info)
 
     # ------------------------------------------------------------------
     # Indexing — AC-DC's own, not the engine's

@@ -141,6 +141,9 @@ export function renderTemplate(host) {
         <div class="tab-panel ${host.activeTab === 'settings' ? 'active' : ''}">
           <ac-settings-tab></ac-settings-tab>
         </div>
+        <div class="tab-panel ${host.activeTab === 'sdk-surface' ? 'active' : ''}">
+          <ac-sdk-surface-tab></ac-sdk-surface-tab>
+        </div>
         ${host._docConvertAvailable ? html`
           <div class="tab-panel ${host.activeTab === 'doc-convert' ? 'active' : ''}">
             <ac-doc-convert-tab></ac-doc-convert-tab>

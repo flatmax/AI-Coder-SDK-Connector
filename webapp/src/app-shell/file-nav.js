@@ -249,16 +249,21 @@ export function onGlobalKeyDown(host, event) {
     host._toggleMinimize();
     return;
   }
-  // Alt+1..4 — tab switch. event.key is the digit
+  // Alt+1..5 — tab switch. event.key is the digit
   // character ('1', '2', …), not KeyboardEvent.code
   // which would be 'Digit1'. The digit form matches
   // physical layout on non-US keyboards where the
   // keycap's primary label might differ.
+  //
+  // SDK Surface takes 5 rather than slotting in before
+  // Convert: the first four are muscle memory by now,
+  // and a diagnostic tab is not worth renumbering them.
   const tabMap = {
     '1': 'files',
     '2': 'context',
     '3': 'settings',
     '4': 'doc-convert',
+    '5': 'sdk-surface',
   };
   const targetTab = tabMap[event.key];
   if (!targetTab) return;

@@ -137,9 +137,9 @@ meant "hide a view", it meant "kill a scope AC⚡DC owned". See
 
 **Doc Convert**: lives in the file picker's top toolbar (a 📄 button rendered only when the backend reports markitdown is installed). Clicking dispatches `request-dialog-tab` with `{tab: 'doc-convert'}`. Same toolbar pattern as Settings — both buttons replaced earlier dialog-header / FAB iterations and now live in the picker so the dialog has no header at all.
 
-**Minimize button**: ▾ button rendered at the right edge of each dialog tab's toolbar — the chat panel's tab strip (after the overflow ⋯ menu), and each overlay tab's toolbar/nav-bar (Context, Settings, Convert). Right-edge placement is consistent across all four tabs so the affordance lives in the same spatial location regardless of which tab is active.
+**Minimize button**: ▾ button rendered at the right edge of each dialog tab's toolbar — the chat panel's tab strip (after the overflow ⋯ menu), and each overlay tab's toolbar/nav-bar (Context, Settings, Convert, SDK Surface). Right-edge placement is consistent across all five tabs so the affordance lives in the same spatial location regardless of which tab is active.
 
-All four dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Each tab carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button) — overlay tabs are sibling tab-panels inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay is active.
+All five dispatch `request-dialog-minimize` which the shell catches and routes through `_toggleMinimize`. Each tab carries its own minimize button rather than relying on a single top-right FAB (an earlier FAB iteration shadowed the Context tab's refresh button) — overlay tabs are sibling tab-panels inside `dialog-body`, so the chat panel's tab strip is unreachable when an overlay is active.
 
 **Expand FAB**: ▴ button at the dialog's top-right, rendered ONLY when the dialog is minimized. The minimized state hides the dialog body, so all in-tab minimize buttons are unreachable; the expand FAB takes over as the only way to restore the dialog.
 
@@ -168,6 +168,14 @@ with a progress bar (see [chat.md § Engine Event Routing](chat.md#engine-event-
 **Read-aloud transport overlay**: an `ac-speech-controls` component rendered at viewport scope. Unlike the progress overlays, it is **draggable** and remembers its position across sessions. It listens for the text-to-speech player's state-change window event and is visible only while a message is being read aloud, offering play/pause, a speed slider, and a per-sentence position bar. It holds no playback state — it is a remote control for the shared synthesis player and reflects its state. See [speech.md § Floating Transport](speech.md#floating-transport-controls-overlay) for the full specification.
 
 Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
+
+**The back-arrow is load-bearing, and the dialog gives it no backup.** There is no rendered tab bar — the
+strip at the top of the dialog body belongs to the *chat panel* and is unreachable while an overlay is
+active — so an overlay tab without its own `← Chat` is a dead end escapable only by knowing Alt+1. The SDK
+Surface tab shipped that way and was reported as such within the hour. Two rules follow: the arrow is part
+of a toolbar rendered **outside** any state branch, because a failed fetch or an empty panel is exactly
+when a reader wants out; and a new overlay tab is not finished when its content renders, it is finished
+when it can be left.
 
 **Layout history note**: the journey here started from a draft that kept a dialog header and tried to project the chat tab strip up into it via absolute positioning — that failed due to shadow-DOM stacking-context constraints. A second iteration removed the header but kept a full-width LED row at the top with Context/minimize icons attached. The current layout is a third pass: the LED row collapses into a compact strip at the bottom of the chat panel, Context lives per-tab, and minimize joins Convert as a corner FAB. The tab strip absorbs the drag-handle role.
 
@@ -246,7 +254,7 @@ Four localStorage keys, all repo-scoped implicitly via the URL-derived WebSocket
 
 | Key | Type | Purpose |
 |---|---|---|
-| `ac-dc-active-tab` | string | Last-selected tab — one of `files`, `context`, `settings`, `doc-convert`. Unknown values fall back to `files`. A stored `search` value (from a pre-integrated-search-tab build) also falls back to `files`. |
+| `ac-dc-active-tab` | string | Last-selected tab — one of `files`, `context`, `settings`, `doc-convert`, `sdk-surface`. Unknown values fall back to `files`. A stored `search` value (from a pre-integrated-search-tab build) also falls back to `files`. |
 | `ac-dc-minimized` | string `"true"` / `"false"` | Minimize state. |
 | `ac-dc-dialog-width` | string (integer px) | Docked-mode width override. Absent until the user resizes the right edge while docked. Ignored while undocked. |
 | `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle. Absent until the user drags the header past the drag threshold or resizes from the bottom / corner. |
@@ -277,10 +285,16 @@ available to the agent as tools, so there is nothing to switch.
 - Alt+2 opens Context
 - Alt+3 opens Settings
 - Alt+4 opens Convert (when available; the keystroke is consumed but no-op when Convert is unavailable)
+- Alt+5 opens SDK Surface — a maintenance view, reached in normal use from the Context tab's Debug
+  section rather than from a keystroke ([`../plan/sdk-surface.md`](../plan/sdk-surface.md#the-probe))
 - Alt+M toggles dialog minimize
 - Ctrl+Shift+F activates file search in the chat panel, prefilling from the current selection
 
 Alt+1 always returns to Chat regardless of which overlay is currently shown — same effect as clicking the back arrow. Alt+3 is fixed on Settings regardless of whether Convert is installed, so muscle memory survives stripped-down deployments.
+
+Alt+5 is bound even though nothing in the chrome advertises it, for the same reason Alt+4 is consumed when
+Convert is absent: a bound-but-obscure key is a stable escape, and an unbound digit that silently does
+nothing is indistinguishable from a broken one. Alt+6 and above are unmapped and pass through.
 
 Every shortcut is suppressed while the permission dialog is open. It is modal, its focus is trapped, and
 Alt+2 opening the Context tab behind a pending `Bash` approval would be a distraction at the worst

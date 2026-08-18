@@ -1403,6 +1403,42 @@ class TestLiveControls:
         service.session.get_server_info = lambda: _none()
         assert await service.get_server_info() == {}
 
+    async def test_sdk_surface_reports_static_and_live_halves(self, service):
+        report = await service.get_sdk_surface()
+        assert report["sdk_available"] is True
+        assert report["sections"]["options"]["entries"]
+        # The live half arrives from the same payload get_server_info returns.
+        assert report["cli"]["available"] is True
+        assert report["cli"]["commands"] == ["review"]
+
+    async def test_sdk_surface_survives_a_dead_engine(self, service):
+        """The static half is the half somebody reads when things are broken.
+
+        Refusing the whole report because the CLI is not answering would
+        withhold reflection over the installed wheel, which does not depend
+        on the CLI at all — see ``get_sdk_surface``'s docstring.
+        """
+
+        async def _boom():
+            raise EngineNotReadyError("no engine")
+
+        service.session.get_server_info = _boom
+        report = await service.get_sdk_surface()
+        assert "error" not in report
+        assert report["sections"]["options"]["entries"]
+        assert report["cli"]["available"] is False
+
+    async def test_sdk_surface_survives_an_unexpected_failure(self, service):
+        """An unexpected error degrades the same way, loudly in the log."""
+
+        async def _boom():
+            raise RuntimeError("transport exploded")
+
+        service.session.get_server_info = _boom
+        report = await service.get_sdk_surface()
+        assert "error" not in report
+        assert report["cli"]["available"] is False
+
 
 # ---------------------------------------------------------------------------
 # Shutdown
@@ -1547,6 +1583,11 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "get_context_usage": (),
     "get_mcp_status": (),
     "get_server_info": (),
+    # Reflection over the installed wheel and this package's own source.
+    # It reads no session state, changes nothing, and reveals nothing about
+    # the repo — a participant asking which SDK features this build wired
+    # up is asking about the software, not about the host's work.
+    "get_sdk_surface": (),
     # Reading the review, the graph and a diff is the reviewing part of
     # collaboration; withholding it would leave a participant unable to see
     # what they were invited to look at.

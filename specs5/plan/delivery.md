@@ -2657,3 +2657,124 @@ CLI has already forgotten.
   carried one renders no Stop affordance rather than a button with nothing to send.
 - **Deep linking (`?turn=<request_id>`) is still absent**, as is the strip's per-description menu for a
   turn that fanned out past the viewport — the generic overflow menu carries the tabs, labelled.
+
+## Interlude — asking the SDK what we have not built (2026-08-18)
+
+Not a phase. It started as a feasibility question from the user: *is there a way to get the py and webapp
+to probe the claude SDK to look for new features or unimplemented features, which we should program in to
+keep up with SDK changes?* The answer is yes, and the interesting part is that the first two ways of doing
+it both produced confident wrong numbers.
+
+The result is `src/ac_dc/claude_code/sdk_surface.py`, the gate in
+`tests/test_claude_code_sdk_surface.py`, `ClaudeCodeService.get_sdk_surface`, and an Alt+5 tab linked
+from the Context tab's Debug section. The design reasoning lives in
+[`sdk-surface.md` § The probe](sdk-surface.md#the-probe); this entry records what it cost and what it
+found.
+
+### Two probes that lied, and why the third reads syntax trees
+
+The obvious probe compares `dataclasses.fields(ClaudeAgentOptions)` against the keys
+`build_option_kwargs()` actually returns. Built, run, **36 false gaps** — because `model`, `hooks`,
+`resume` and `thinking` are set conditionally, so one call's output is one branch's output and the
+prober calls every other branch missing.
+
+The second obvious probe greps `options.py` for each field name. Built, run, and it reported **`skills` as
+handled**: the word occurs in a comment about `.claude/skills/`. That failure is the dangerous direction —
+it marks unbuilt surface as done, so nobody ever looks again.
+
+So coverage is derived from the package's **own AST**: `ast.Subscript` targets, `ast.Assign` /
+`ast.AnnAssign`, `ast.Return` dict literals, `ast.Call` attribute names, all `lru_cache`d and all cleared
+by an autouse fixture so a test that patches the source is not answered from the cache. Both failures are
+now pinned as tests, because the next person to think "a grep would do" deserves to find out in two
+seconds rather than in an afternoon.
+
+The payoff is the maintenance property the user's question was really about: **adding an option to
+`options.py` requires no edit to the probe.** It moves from `pending` to `handled` on its own, and the
+declared `PENDING_OPTIONS` entry that described it becomes `stale` and is reported as stale. The tables
+grow only when the SDK itself grows.
+
+### The gate fails on untriaged, never on unimplemented
+
+24 options are pending and the suite is green, which is the whole design. A name in *none* of `handled` /
+`declined` / `pending` is the only failure, because that is the only state meaning the wheel moved and
+nobody looked; closing it costs one table entry with a sentence in it. The alternative — fail on anything
+unbuilt — fails on 24 things the day it lands, earns an ignore-list inside a week, and the ignore-list is
+the file nobody reads.
+
+Two smaller judgements in the same spirit. `KNOWN_BETAS` exists because the one beta we have declined
+(`context-1m-2025-08-07`) otherwise failed the gate as untriaged, and a test that goes red for a decided
+thing is a test that gets deleted. And `get_sdk_surface` **never returns `{"error": …}`** — a dead engine
+costs it the live `get_server_info()` diff and nothing else, so the static half renders when the reader
+most wants it, which is when something is broken.
+
+### What it found
+
+Nothing untriaged, and a picture that would have been guessed wrong: **the message taxonomy and the client
+surface are fully consumed** — every one of the 7 `Message` union members is rendered, and 14 of the 15
+public client methods are called, the exception being `receive_messages` (declined; `receive_response`
+bounds itself on `ResultMessage`). An earlier grep of mine said 5 of 14, having matched only the literal
+`client.` prefix; the real call sites reach those methods through several receivers.
+
+Of the 24 pending options, **`max_buffer_size` is this record's own [open item 1](README.md#open-items-carried-forward-as-of-2026-08-18)** —
+found independently by a tool that had never read the README, which is the best evidence available that it
+is reading something real. `stderr` and `resume_session_at` / `resume_drops_turn` are the other two worth
+doing. `PreCompact` is the one pending hook: nothing else announces a compaction before it happens.
+
+### The tab was a dead end, and the spec already said so
+
+Reported by the user within the hour of it landing: *there is no back arrow from the sdk coverage view. I
+had to press alt-1 to get back here.* The panel had put its `Refresh` button in a `<header>` that only the
+loaded branch rendered — so the error state, the state most likely to make someone want out, had no
+toolbar at all.
+
+`shell.md` had specified the arrow all along ("each overlay tab's body carries a back-arrow (`← Chat`) at
+top-left"), which makes this a case of a spec being right and unread rather than of a decision being
+wrong. The toolbar is now `← Chat` / `↻ Refresh` / `▾`, copied from `context-usage-tab.js` so the control
+is where a reader arriving from that tab already expects it, and rendered **outside** all three state
+branches. The spec now says why that placement is load-bearing, in the words the bug supplies: a new
+overlay tab is not finished when its content renders, it is finished when it can be left.
+
+### Tests
+
+- `tests/test_claude_code_sdk_surface.py` — **new, 38**. `TestNothingUntriaged` is parametrized over the
+  five sections and is the gate; it also refuses a stale entry and refuses a table that claims a hook is
+  handled when nothing registers it. `TestCoverageIsDerivedNotGuessed` pins the two naive probes' failures.
+  The rest are per-section — a pending option must carry an argument, a declined one a reason, and the two
+  sets must not overlap — plus `diff_server_info` over junk shapes, a report that is still *shaped* with the
+  SDK absent or the source unreadable (no false coverage from a failed read), and one asserting the whole
+  report is JSON-serialisable, since it crosses an RPC.
+- `tests/test_claude_code_service.py` — **+3**: the report carries both halves, and a dead engine or an
+  unexpected exception costs the live half rather than the call. Plus `get_sdk_surface` in
+  `READ_ONLY_METHODS` — the repo's own `test_every_rpc_is_classified` caught its absence, which is that
+  contract test working exactly as intended, and the entry then extended
+  `TestCollabRestrictions::test_a_participant_may_watch` with a case for free.
+- `webapp/src/sdk-surface-tab.test.js` — **new, 27**: pending is the default filter, untriaged names get a
+  banner naming the test that fails and what closing it looks like, the static half renders with no engine,
+  a stale entry is reported, the filter survives a remount, and — the back-arrow fix — `← Chat` is present
+  and dispatches in the error branch and the pre-report branch, not just the loaded one.
+- `webapp/src/context-usage-tab.test.js` — **+4**: the Debug link dispatches `sdk-surface`, escapes the
+  shadow root, names Alt+5, and is a real `<button>`.
+- `webapp/src/app-shell/window-and-keyboard.test.js` — Alt+5 now switches and Alt+6 is still ignored,
+  replacing the test that asserted Alt+5 was unmapped.
+
+Both suites green: **3864 webapp tests across 96 files**, **3211 pytest passed**.
+
+The gate was also verified by breaking it deliberately — a fake option, hook event and beta value injected
+into the reflected surface each made the shipped test fail with the injected name in the assertion message.
+A drift detector that has never been observed detecting drift is a decoration.
+
+### Deliberately not built
+
+- **No semantic checking, and this is a hard limit rather than a deferral.** Reflection reads shape. Every
+  row in `sdk-surface.md`'s correction tables is a case where the types were satisfied and the behaviour was
+  not — the `StreamEvent` partial-block key, `rewind_files` returning `None`, `get_mcp_status` omitting an
+  in-process server. A green gate means nobody is unaware of a name; it does not mean the name is used
+  correctly, and a reader who takes it for the latter is worse off than with no probe at all.
+- **The 24 pending options stay pending.** The point of this pass was to make the list exist and be
+  maintained, not to spend it. Three of them are named above as worth doing; `sandbox` is named as a trap.
+- **Nothing runs the probe in CI on a schedule.** It runs when the suite runs, which means it fires on the
+  next commit after a wheel bump rather than on the bump itself. A `pip install --upgrade` followed by no
+  commits is a window where the report is stale and says nothing about being stale.
+- **The tab does not link to source.** A pending option's row names the field and the argument for it; it
+  cannot open `options.py` at the line that would set it. That is the obvious next affordance and it needs a
+  line number the probe does not currently record.

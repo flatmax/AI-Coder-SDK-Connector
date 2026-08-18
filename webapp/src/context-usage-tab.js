@@ -877,6 +877,26 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Open the SDK Surface tab.
+   *
+   * Placed in Debug's *Engine* section because that is where the SDK
+   * version and the CLI pin are already reported, and "which features came
+   * with that version" is the next question those two rows raise. The tab
+   * is otherwise reachable only by Alt+5 — the dialog has no rendered tab
+   * strip — so without a link from somewhere it is findable only by
+   * someone who already knows it exists.
+   */
+  _goToSdkSurface() {
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-tab', {
+        detail: { tab: 'sdk-surface' },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   _minimizeDialog() {
     this.dispatchEvent(
       new CustomEvent('request-dialog-minimize', {
@@ -1910,6 +1930,15 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                 : ''}
               ${h.auth_warning ? html`<p class="warn">${h.auth_warning}</p>` : ''}
               ${h.last_error ? html`<p class="error">${h.last_error}</p>` : ''}
+              <p class="note">
+                The SDK row above says which wheel is installed.
+                <button class="link" @click=${this._goToSdkSurface}>
+                  Which of its features this build wired up
+                </button>
+                is the SDK Surface tab (Alt+5) — the same versions, read
+                against what <code>ac_dc.claude_code</code> actually sets,
+                registers and dispatches.
+              </p>
             `
           : html`<p class="note">
               No engine health has arrived yet. It is pushed on connect and

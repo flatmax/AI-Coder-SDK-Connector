@@ -157,6 +157,13 @@ it back on the next visit like the other two. It diagnoses the engine, not the c
 - **MCP server status** from `get_mcp_status()`, verbatim. The Session section renders the same payload
   through `mcpHealth`; the two together are how a reader checks our reading against what arrived.
 - The raw `gridRows` payload, for cross-checking our layout against the CLI's.
+- **A link out to the SDK Surface tab**, sitting under the Engine block's version line. That block already
+  names the SDK and the CLI it pins; *which of their features this build wired up* is the next question a
+  reader has there, and the answer is a whole panel rather than a row
+  ([`../plan/sdk-surface.md`](../plan/sdk-surface.md#the-probe)). It is a `<button>` dispatching
+  `request-dialog-tab` with `{tab: 'sdk-surface'}` — the same mechanism the picker's ⚙️ and 📄 use — and it
+  names Alt+5 in its own sentence, because the destination has no entry in any rendered tab bar and a
+  reader who arrives by link is the only reader who will ever learn the keystroke.
 
 `gridRows` is displayed here and **never used for layout**. It is a terminal's pre-laid-out grid;
 rendering it would couple this tab to a CLI presentation choice that can change under us.

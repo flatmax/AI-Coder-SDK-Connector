@@ -305,11 +305,20 @@ describe('AppShell window resize and keyboard shortcuts', () => {
       expect(ev.defaultPrevented).toBe(false);
     });
 
-    it('Alt+5 and other unmapped digits are ignored', async () => {
+    it('Alt+5 switches to the SDK Surface tab', async () => {
       const shell = mountShell();
       shell.activeTab = 'files';
       await shell.updateComplete;
       const ev = fireKey({ key: '5', altKey: true });
+      expect(shell.activeTab).toBe('sdk-surface');
+      expect(ev.defaultPrevented).toBe(true);
+    });
+
+    it('Alt+6 and other unmapped digits are ignored', async () => {
+      const shell = mountShell();
+      shell.activeTab = 'files';
+      await shell.updateComplete;
+      const ev = fireKey({ key: '6', altKey: true });
       expect(shell.activeTab).toBe('files');
       expect(ev.defaultPrevented).toBe(false);
     });
