@@ -209,26 +209,65 @@ Context continuity is entirely the SDK's. AC⚡DC never reconstructs a conversat
 messages into a prompt — the failure mode of that approach is a session that looks right in the UI
 and is subtly wrong in the model's view. See [history.md](history.md).
 
-## Slash Command Equivalents
+## Slash Commands
 
-Claude Code's built-in slash commands are terminal interface, not SDK features. Custom commands from
-`.claude/commands/` pass through to the engine untouched; the built-ins are mapped here. An unmapped
-`/command` returns an explicit unsupported response — it is never forwarded to the model as prose,
-which would silently turn a mistyped command into a question.
+**A slash command goes to the CLI unless this deployment answers it better.** The CLI dispatches its
+own built-ins in-process, before a model turn is billed — `/compact`, `/cost`, `/agents`, `/mcp` and
+the rest return real answers for zero turns and zero dollars, and `.claude/commands/`, skills and
+plugin commands arrive the same way. Passthrough is therefore the default, and the two tables below
+are the exceptions.
 
-| Command | AC⚡DC equivalent |
+An unknown `/command` is passed through too. The CLI answers `Unknown command: /contxt`, which names
+the mistake; guessing on its behalf is how the refusal table this replaced came to refuse commands
+that had since shipped and would have answered.
+
+**Routed** — passing through would reach a real command whose effect this deployment has a better
+surface for, or would desynchronise the session store. Answered with `{status: "routed", target}`;
+the webapp opens the surface named by `target`.
+
+| Command | Target | Surface |
+|---|---|---|
+| `/context` | `tab:context` | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
+| `/clear` | `new-session` | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
+| `/permissions` | `tab:settings` | The Settings tab's permission-mode control plus the rules list. |
+| `/resume` | `history` | The history browser. Not in the CLI's command list at all. |
+
+**Denied** — passing through would reach for something this deployment does not have, or act on the
+CLI host rather than the conversation. Answered with `{status: "unsupported"}` and the reason; never
+forwarded as prose, which would turn a command into a question.
+
+| Command | Reason |
 |---|---|
-| `/context` | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
-| `/compact` | Not exposed as a command; auto-compact is engine-owned and its boundaries are rendered. A manual compact affordance may be added later. |
-| `/clear` | New Session. |
-| `/model` | `set_model()`, from the Settings tab and a chat-panel model picker. |
-| `/cost` | The usage HUD. |
-| `/rewind` | Nothing, while the transcript is mirrored: the engine will not keep checkpoints alongside a session store (CC-20). Reported as unsupported, naming git. |
-| `/permissions` | The Settings tab's permission-mode control plus the rules list. |
-| `/mcp` | MCP server health in the Context tab, backed by `get_mcp_status()`. |
-| `/agents` | Subagent inventory in the Context tab; live subagents in the tab strip. |
-| `/resume` | The history browser. |
-| `/login`, `/logout`, `/doctor`, `/bug`, `/help`, `/vim`, `/terminal-setup` | Not supported. Reported as CLI-only. |
+| `/rewind` | No file checkpoints while the transcript is mirrored, which is every run with a repo (CC-20). Names git. |
+| `/heapdump` | Writes a heap snapshot to the CLI host's desktop. |
+| `/login`, `/logout` | Credentials are resolved from the environment at startup. |
+| `/vim`, `/terminal-setup` | Terminal editing modes; there is no terminal here. |
+| `/__remote-workflow`, `/workflow-launch-exec` | Belong to server-launched CLI sessions. |
+
+### The `/` Palette
+
+`list_commands()` answers the composer's autocomplete: the CLI's advertised list, minus denied
+commands and minus names starting `_` (the CLI's marker for session plumbing), plus any routed
+command the CLI does not advertise. Each entry carries `action` — `route` or `send` — and a `target`,
+so the webapp holds no second copy of the mapping. Read from the initialize handshake rather than a
+table in the service, which is the only way a newly-authored skill can appear without the engine
+being told it exists.
+
+The palette opens when `/` is the first non-whitespace character in the composer and the cursor is
+still inside that token — the same rule the engine uses to decide a message is a command. Selecting a
+`send` entry completes the text in place; selecting a `route` entry clears the token and opens the
+surface. With nothing matching, Enter is not consumed: a stray `/typo` stays sendable, because the
+CLI's answer about it is better than the palette's.
+
+**Before the engine connects, the answer is the routed commands and `partial: true` — not an error.**
+The engine connects lazily on the first turn, so the entire pre-first-turn window has no handshake to
+read, and that window is exactly when the palette is most wanted: the user is composing that first
+turn, and two of the routes (`/resume`, `/clear`) are what somebody who has not started yet is
+reaching for. Connecting from here instead would spend a 295 MB subprocess on a keystroke, and
+`list_commands` is read-only, so a remote participant typing `/` would spawn the host's engine.
+`partial` is the webapp's signal that the cache is worth replacing once the engine reports itself
+connected; the flag is on the reply rather than inferred from the list's length, since a deployment
+whose CLI advertises nothing is not the same condition.
 
 ## Errors and Degradation
 

@@ -91,33 +91,73 @@ logger = logging.getLogger(__name__)
 EventCallback = Callable[..., Awaitable[Any]]
 
 
-# Claude Code's built-in slash commands are terminal interface, not SDK
-# features. Each maps to the AC-DC affordance that does the same job. An
-# unmapped `/command` is answered explicitly and is **never** forwarded to
-# the model as prose, which would silently turn a typo into a question
-# (specs5/3-engine/session.md § Slash Command Equivalents).
-SLASH_EQUIVALENTS: dict[str, str | None] = {
-    "context": "the Context tab, which is live rather than a one-shot print",
-    "clear": "New Session",
-    "model": "the model picker in the chat panel, or the Settings tab",
-    "cost": "the usage HUD",
-    # Not the undo affordance it used to name: file checkpoints are off
+# What becomes of a leading `/command`. Three outcomes, and the default is
+# the one the old refusal table treated as impossible: pass it through.
+#
+# The premise that table was built on — built-in slash commands are terminal
+# interface, so none of them can work here — turned out to be wrong about
+# the mechanism. The CLI dispatches its own built-ins locally when they
+# arrive as a prompt: no model turn, no cost, and the reply comes back as a
+# synthetic assistant message. `/config`, `/effort`, `/autocompact`,
+# `/reload-skills` and the rest have therefore been working all along,
+# because they were never in the table. What the table did was refuse
+# seventeen commands that mostly would have answered.
+#
+# So the tables below hold only the cases where passing through is actually
+# wrong, and everything absent from both reaches the engine untouched —
+# built-ins, skills, and custom commands from `.claude/commands/` alike
+# (specs5/3-engine/session.md § Slash Commands).
+#
+# SLASH_ROUTES — the command's job is done better by an AC⚡DC surface than
+# by a block of CLI text. The reply names a `target` for the webapp to act
+# on and no turn starts. `surface` completes "…is $surface here"; `palette`
+# is the one-line description the `/` palette shows.
+SLASH_ROUTES: dict[str, dict[str, str]] = {
+    "context": {
+        "target": "tab:context",
+        "surface": "the Context tab, which is live rather than a one-shot print",
+        "palette": "Show context usage in the Context tab",
+    },
+    # Routed rather than passed through because the CLI's own `/clear` would
+    # start a session the store never saw minted, and every other client
+    # would still be rendering the old transcript.
+    "clear": {
+        "target": "new-session",
+        "surface": "New Session",
+        "palette": "Start a new session",
+    },
+    "permissions": {
+        "target": "tab:settings",
+        "surface": "the Settings tab's permission-mode control and rules list",
+        "palette": "Permission mode and rules, in the Settings tab",
+    },
+    "resume": {
+        "target": "history",
+        "surface": "the history browser",
+        "palette": "Browse and resume an earlier session",
+    },
+}
+
+# SLASH_DENIED — passing through would reach for something this deployment
+# does not have, or act on the host rather than the conversation. Answered
+# explicitly; never forwarded as prose, which would turn a command into a
+# question. Also filtered out of the `/` palette, so the only way to reach
+# one is to type it.
+SLASH_DENIED: dict[str, str] = {
+    # Not the undo affordance it once named: file checkpoints are off
     # whenever the transcript is mirrored, which is every run with a repo
     # (specs5/plan/decisions.md CC-20).
-    "rewind": "git — the engine keeps no file checkpoints while the "
-    "transcript is mirrored into the repo",
-    "permissions": "the Settings tab's permission-mode control and rules list",
-    "mcp": "MCP server health in the Context tab",
-    "agents": "the subagent inventory in the Context tab",
-    "resume": "the history browser",
-    "compact": None,
-    "login": None,
-    "logout": None,
-    "doctor": None,
-    "bug": None,
-    "help": None,
-    "vim": None,
-    "terminal-setup": None,
+    "rewind": (
+        "the engine keeps no file checkpoints while the transcript is "
+        "mirrored into the repo — use git"
+    ),
+    "heapdump": "it writes a heap snapshot to the CLI host's desktop",
+    "login": "credentials are resolved from the environment at startup",
+    "logout": "credentials are resolved from the environment at startup",
+    "vim": "it is a terminal editing mode",
+    "terminal-setup": "there is no terminal here to configure",
+    "__remote-workflow": "it belongs to server-launched CLI sessions",
+    "workflow-launch-exec": "it belongs to server-launched CLI sessions",
 }
 
 
@@ -1533,6 +1573,104 @@ class ClaudeCodeService:
             return {"error": f"Could not read server info: {exc}"}
         return info or {}
 
+    async def list_commands(self) -> dict[str, Any]:
+        """The `/` palette's list: what the live CLI advertises, minus dead ends.
+
+        Read from the initialize handshake rather than a table in this file,
+        which is the only way skills, plugin commands and
+        ``.claude/commands/`` entries can appear without this module being
+        told they exist. The CLI's own filtering has already run by then, so
+        what arrives is what it will actually dispatch.
+
+        Two edits on top of that list. Denied commands are dropped, because
+        offering one and then refusing it is worse than never showing it.
+        Routed commands are added if the CLI does not advertise them —
+        ``/permissions`` and ``/resume`` are not in its list at all, and
+        their whole purpose here is to open an AC⚡DC surface.
+
+        ``action`` is what selecting the entry does: ``route`` opens a
+        surface, ``send`` puts the command in the composer for the engine.
+        ``target`` names the surface for a routed entry and is empty
+        otherwise, so the webapp never needs its own copy of the mapping.
+
+        **A disconnected engine answers with the routed commands and
+        ``partial: True``, not an error.** The engine connects on the first
+        turn, so before it there is no handshake to read — and that is
+        precisely when the palette is most wanted, since the user is
+        composing that first turn. Two of the routes are ``/resume`` and
+        ``/clear``, which is what somebody who has not started yet is
+        reaching for. Connecting here instead would spend a 295 MB
+        subprocess on a keystroke, and this method is one a remote
+        participant may call.
+        """
+        try:
+            info = await self.session.get_server_info()
+        except EngineNotReadyError:
+            return {"commands": self._routed_commands(), "partial": True}
+        except SessionLostError as exc:
+            return {"error": str(exc)}
+        except Exception as exc:
+            logger.exception("list_commands failed")
+            return {"error": f"Could not read the command list: {exc}"}
+        commands: list[dict[str, Any]] = []
+        for entry in (info or {}).get("commands") or []:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            # Leading underscore is the CLI's marker for a command that is
+            # session-plumbing rather than something a person invokes.
+            if name.startswith("_") or name in SLASH_DENIED:
+                continue
+            commands.append(
+                {
+                    "name": name,
+                    "aliases": [
+                        alias
+                        for alias in (entry.get("aliases") or [])
+                        if isinstance(alias, str)
+                    ],
+                    "argument_hint": entry.get("argumentHint") or "",
+                    "description": entry.get("description") or "",
+                    "action": "route" if name in SLASH_ROUTES else "send",
+                    "target": SLASH_ROUTES.get(name, {}).get("target", ""),
+                }
+            )
+        advertised = {command["name"] for command in commands}
+        commands.extend(
+            entry
+            for entry in self._routed_commands()
+            if entry["name"] not in advertised
+        )
+        commands.sort(key=lambda command: command["name"])
+        return {"commands": commands}
+
+    @staticmethod
+    def _routed_commands() -> list[dict[str, Any]]:
+        """`SLASH_ROUTES` as palette entries, for the CLI to override.
+
+        These are this deployment's own, not the CLI's to supply: two of
+        them (``/permissions``, ``/resume``) it does not advertise at all,
+        and the rest it describes in terms of what its own version does
+        rather than the surface that opens here. Where it does advertise
+        one, its description wins — it is the more specific answer.
+        """
+        return sorted(
+            (
+                {
+                    "name": name,
+                    "aliases": [],
+                    "argument_hint": "",
+                    "description": route["palette"],
+                    "action": "route",
+                    "target": route["target"],
+                }
+                for name, route in SLASH_ROUTES.items()
+            ),
+            key=lambda command: command["name"],
+        )
+
     async def get_sdk_surface(self) -> dict[str, Any]:
         """What the installed SDK offers versus what AC⚡DC reaches for.
 
@@ -2368,36 +2506,40 @@ class ClaudeCodeService:
         )
 
     def _slash_response(self, message: str) -> dict[str, Any] | None:
-        """Answer a built-in slash command without involving the model.
+        """Intercept a leading `/command` that must not reach the engine.
 
-        Returns ``None`` for anything that should reach the engine —
-        including custom commands from ``.claude/commands/``, which the CLI
-        resolves itself.
+        Returns ``None`` — meaning "send it" — for everything the CLI can
+        answer itself, which is nearly everything. Only the two tables at
+        the top of this module are held back: a routed command, whose job an
+        AC⚡DC surface does better, and a denied one, which would reach for
+        something this deployment does not have.
+
+        A typo is deliberately *not* caught here. It goes to the CLI, which
+        knows the full command list — including skills and
+        ``.claude/commands/`` — and answers ``Unknown command: /xyz`` for
+        free. Guessing on its behalf is how the old table came to refuse
+        `/doctor`, which by then had shipped as a working skill.
         """
         text = (message or "").strip()
         if not text.startswith("/") or len(text) < 2:
             return None
         command = text[1:].split(None, 1)[0].lower()
-        if command not in SLASH_EQUIVALENTS:
-            # Either a custom command from the project's settings sources
-            # or a typo. The CLI knows which; we do not.
-            return None
-        equivalent = SLASH_EQUIVALENTS[command]
-        if equivalent is None:
+        route = SLASH_ROUTES.get(command)
+        if route is not None:
+            return {
+                "status": "routed",
+                "command": command,
+                "target": route["target"],
+                "message": f"/{command} is {route['surface']} here.",
+            }
+        denial = SLASH_DENIED.get(command)
+        if denial is not None:
             return {
                 "status": "unsupported",
                 "command": command,
-                "message": (
-                    f"/{command} is a Claude Code terminal command and has no "
-                    f"equivalent here."
-                ),
+                "message": f"/{command} does not work here: {denial}.",
             }
-        return {
-            "status": "unsupported",
-            "command": command,
-            "message": f"/{command} is available as {equivalent}.",
-            "equivalent": equivalent,
-        }
+        return None
 
     def _emitter(self, request_id: str) -> Callable[[Event], Awaitable[None]]:
         """A per-turn emit callback bound to ``request_id``.

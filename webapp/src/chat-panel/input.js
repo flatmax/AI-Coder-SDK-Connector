@@ -15,6 +15,9 @@
 //   - New session
 //   - File mention detection (the `@filter` bridge
 //     to the picker via `filter-from-chat`)
+//   - Slash-command detection (the `/palette` bridge
+//     to `ac-slash-palette`, and acting on what it
+//     hands back)
 //   - Message text extraction for copy/paste
 //   - File chip click + Add-All accumulation
 //   - Code-block copy-button handling
@@ -52,6 +55,10 @@ import {
 } from './streaming.js';
 import { setSearchMode } from './search.js';
 import { clearSubagentTabs } from './subagent-tabs.js';
+import {
+  completionFor,
+  detectActiveSlash,
+} from '../slash-commands.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import { speechPlayer } from '../speech-player.js';
 
@@ -195,6 +202,12 @@ export async function send(panel) {
   };
   panel.messages = [...panel.messages, optimistic];
   panel._input = '';
+  // The palette is normally already closed by the time Enter
+  // reaches here — it consumes Enter whenever it has a match.
+  // The case this covers is Enter on a `/typo` with no match,
+  // where the overlay is deliberately still up explaining
+  // itself and the message goes to the engine anyway.
+  panel.shadowRoot?.querySelector('ac-slash-palette')?.hide();
   // Draft has been committed — clear the
   // persisted copy so the next refresh starts
   // clean.
@@ -266,13 +279,22 @@ export async function send(panel) {
     //
     //   - `{error, reason}` — engine not ready, turn already in
     //     flight, session lost. The turn never started.
-    //   - `{status: "unsupported", command, message, equivalent?}` —
-    //     a built-in slash command with an AC⚡DC equivalent. Also
-    //     never started, but it isn't an error and must not be
-    //     rendered as one.
+    //   - `{status: "routed", command, target, message}` — a command
+    //     whose job an AC⚡DC surface does better. Nothing was sent;
+    //     the surface opens instead. This is the path for a command
+    //     that was *typed* — selecting it in the palette routes
+    //     locally and never reaches here.
+    //   - `{status: "unsupported", command, message}` — a command that
+    //     cannot work in this deployment. Also never started, but it
+    //     isn't an error and must not be rendered as one.
     if (result && typeof result === 'object') {
       if (result.error) {
         handleStreamStartError(panel, requestId, result.error);
+        return;
+      }
+      if (result.status === 'routed') {
+        rollbackUnstartedTurn(panel, requestId);
+        handleRoutedSlash(panel, result);
         return;
       }
       if (result.status === 'unsupported') {
@@ -501,6 +523,12 @@ export function onInputChange(panel, event) {
   // inside an @word sequence and dispatch
   // edge-triggered `filter-from-chat` events.
   updateMentionFilter(panel, ta);
+  // /-palette detection. Same shape, different
+  // consumer: the palette is a child of this
+  // component rather than a sibling panel, so it
+  // is driven by direct method call instead of an
+  // event.
+  updateSlashPalette(panel, ta);
 }
 
 /**
@@ -579,12 +607,240 @@ export function detectActiveMention(value, cursor) {
   return null;
 }
 
+// ---------------------------------------------------------------
+// Slash commands
+// ---------------------------------------------------------------
+
+// How long to wait before asking for the command list again
+// after a failed attempt, so a broken engine does not get one
+// RPC per keystroke. Only true failures are stamped: a
+// disconnected engine is not one, and answers with the routed
+// commands and `partial: true` (see `list_commands`).
+const _SLASH_RETRY_MS = 5000;
+
+/**
+ * Open, re-filter, or dismiss the `/` palette to match the
+ * cursor. Called on every input event.
+ *
+ * The list is fetched on first use rather than at connect:
+ * it comes from the CLI's initialize handshake, so asking
+ * eagerly would either race the engine coming up or cache
+ * an empty answer from before it did.
+ */
+export function updateSlashPalette(panel, ta) {
+  const palette = panel.shadowRoot?.querySelector('ac-slash-palette');
+  if (!palette) return;
+  const token = detectActiveSlash(ta.value, ta.selectionStart);
+  if (token === null) {
+    palette.hide();
+    return;
+  }
+  if (Array.isArray(panel._slashCommands) && !slashListIsStale(panel)) {
+    // An empty list means the engine advertised nothing —
+    // show no overlay rather than one that says "0 of 0".
+    if (panel._slashCommands.length === 0) palette.hide();
+    else palette.show(panel._slashCommands, token.query);
+    return;
+  }
+  // Serve the stale list meanwhile: it is the routed commands,
+  // which are still correct, and an overlay that appears late
+  // is worse than one that grows.
+  if (panel._slashCommands?.length) {
+    palette.show(panel._slashCommands, token.query);
+  }
+  ensureSlashCommands(panel).then((commands) => {
+    if (commands.length === 0) return;
+    // Re-read the composer: the RPC is a round trip, and the
+    // token may be gone or changed by the time it lands.
+    const current = detectActiveSlash(ta.value, ta.selectionStart);
+    if (current) palette.show(commands, current.query);
+  });
+}
+
+/**
+ * Whether the cached list needs asking again.
+ *
+ * A `partial` list is the routed commands and nothing else: the
+ * engine had not connected, so there was no handshake to read
+ * the CLI's own commands from. The engine connects on the first
+ * turn — which is the turn the user is composing when they open
+ * the palette — so the answer changes underneath the cache
+ * exactly once, and this is the pull-side check for it. Asked
+ * here rather than invalidated from the `engineHealth`
+ * broadcast so there is one place that decides, and nothing to
+ * miss if a broadcast is dropped.
+ */
+function slashListIsStale(panel) {
+  return (
+    panel._slashCommandsPartial === true &&
+    panel._engineHealth?.connected === true
+  );
+}
+
+/**
+ * The command list, fetched on first use and cached.
+ *
+ * Concurrent callers share one in-flight request — every
+ * keystroke of `/con` would otherwise open its own. A partial
+ * reply is cached too, so a disconnected engine costs one RPC
+ * rather than one per keystroke; `slashListIsStale` is what
+ * gets it replaced. A true failure is not cached, only stamped.
+ */
+async function ensureSlashCommands(panel) {
+  if (Array.isArray(panel._slashCommands) && !slashListIsStale(panel)) {
+    return panel._slashCommands;
+  }
+  if (panel._slashCommandsPending) return panel._slashCommandsPending;
+  const lastTry = panel._slashCommandsFailedAt || 0;
+  if (lastTry && Date.now() - lastTry < _SLASH_RETRY_MS) return [];
+  const pending = (async () => {
+    try {
+      const reply = await panel.rpcExtract('ClaudeCodeService.list_commands');
+      if (reply && typeof reply === 'object' && reply.error) {
+        panel._slashCommandsFailedAt = Date.now();
+        return [];
+      }
+      const commands = Array.isArray(reply?.commands) ? reply.commands : [];
+      panel._slashCommands = commands;
+      panel._slashCommandsPartial = reply?.partial === true;
+      panel._slashCommandsFailedAt = 0;
+      return commands;
+    } catch (err) {
+      console.error('[chat] list_commands failed', err);
+      panel._slashCommandsFailedAt = Date.now();
+      return [];
+    } finally {
+      panel._slashCommandsPending = null;
+    }
+  })();
+  panel._slashCommandsPending = pending;
+  return pending;
+}
+
+/**
+ * Handle `command-select` from the palette.
+ *
+ * Two outcomes, and the entry said which in its badge. A
+ * `route` command never becomes text: its surface opens now
+ * and the token is taken back out of the composer, because
+ * leaving `/context` sitting there after the Context tab has
+ * opened invites a second, pointless Enter.
+ *
+ * A `send` command is completed in place and left for the
+ * user to submit — they may still have arguments to add, and
+ * the argument hint is the palette telling them so.
+ */
+export function onSlashCommandSelect(panel, event) {
+  const command = event?.detail?.command;
+  if (!command?.name) return;
+  const ta = panel.shadowRoot?.querySelector('.input-textarea');
+  const value = ta ? ta.value : panel._input || '';
+  const cursor = ta ? ta.selectionStart : value.length;
+  const token = detectActiveSlash(value, cursor);
+  const before = token ? value.slice(0, token.start) : '';
+  const after = token ? value.slice(token.end) : '';
+  if (command.action === 'route') {
+    _setComposerValue(panel, ta, `${before}${after}`.trimStart(), 0);
+    applySlashRoute(panel, command.target);
+    return;
+  }
+  const completion = completionFor(command);
+  _setComposerValue(
+    panel,
+    ta,
+    `${before}${completion}${after}`,
+    before.length + completion.length,
+  );
+}
+
+/**
+ * Replace the composer's contents and put the cursor at
+ * `caret`.
+ *
+ * Writes through the textarea as well as `panel._input`
+ * because the caret has to be set on the live element, and
+ * Lit's next render would otherwise clobber it. Same reason
+ * the draft is saved here: this is a composer edit like any
+ * keystroke, and a refresh should not lose it.
+ */
+function _setComposerValue(panel, ta, value, caret) {
+  panel._input = value;
+  _saveDraft(value);
+  if (!ta) return;
+  ta.value = value;
+  ta.focus();
+  ta.setSelectionRange(caret, caret);
+  ta.style.height = 'auto';
+  ta.style.height = `${Math.min(ta.scrollHeight, 192)}px`;
+}
+
+/**
+ * Open the AC⚡DC surface a routed command names.
+ *
+ * The `target` strings come from `SLASH_ROUTES` in the
+ * service, so the mapping from command to surface lives in
+ * one place and this function only knows how to reach each
+ * surface. An unrecognised target is ignored rather than
+ * guessed at — a service that grows a new route without this
+ * switch learning it should do nothing visible, not the
+ * wrong thing.
+ */
+export function applySlashRoute(panel, target) {
+  switch (target) {
+    case 'tab:context':
+    case 'tab:settings':
+      panel.dispatchEvent(
+        new CustomEvent('request-dialog-tab', {
+          detail: { tab: target.slice('tab:'.length) },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      return true;
+    case 'new-session':
+      onNewSession(panel);
+      return true;
+    case 'history':
+      onOpenHistory(panel);
+      return true;
+    default:
+      console.warn('[chat] unknown slash route target', target);
+      return false;
+  }
+}
+
+/**
+ * A routed command that was typed rather than picked.
+ *
+ * Sits here rather than beside `handleUnsupportedSlash` in
+ * streaming.js because acting on the route needs
+ * `onNewSession` and `onOpenHistory`, which live in this
+ * module — and streaming.js is already imported *by* this
+ * one, so the dependency could only go this way.
+ *
+ * The note is appended even though the surface is opening,
+ * because the surface may be behind the chat dialog or may
+ * already have been open, and a command that appears to do
+ * nothing is worse than one that explains itself.
+ */
+function handleRoutedSlash(panel, result) {
+  applySlashRoute(panel, result.target);
+  const message =
+    typeof result?.message === 'string' && result.message
+      ? result.message
+      : `/${result?.command || 'that'} opens an AC⚡DC surface here.`;
+  panel.messages = [
+    ...panel.messages,
+    { role: 'system', content: message },
+  ];
+}
+
 /**
  * Handle key events on the textarea. Up-arrow at
  * cursor 0 opens history recall; Enter sends
  * (Shift+Enter inserts a newline). The history
- * overlay gets first refusal on navigation keys
- * when open.
+ * overlay and then the slash palette get first
+ * refusal on navigation keys when open.
  *
  * `event.isComposing` guards against premature
  * send during IME input (Japanese/Chinese input
@@ -596,6 +852,16 @@ export function onInputKeyDown(panel, event) {
   );
   if (history && history.isOpen) {
     if (history.handleKey(event)) return;
+  }
+  // The palette is only open while the cursor sits inside a
+  // leading `/token`, so it can never be up at the same time
+  // as history recall (which needs cursor 0, where the token
+  // detection returns null). Ordered after it anyway: history
+  // is the modal one, and "whoever is open wins" is easier to
+  // reason about than a rule about which can't overlap.
+  const palette = panel.shadowRoot?.querySelector('ac-slash-palette');
+  if (palette && palette.isOpen) {
+    if (palette.handleKey(event)) return;
   }
   if (
     event.key === 'ArrowUp' &&

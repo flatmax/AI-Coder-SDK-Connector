@@ -12,8 +12,9 @@ The properties that matter here are the ones a browser depends on:
   the right request ID — the Context tab and file tree wait on it.
 - **The engine connects lazily**, so phase 1 adds no ``claude``
   subprocess to app startup while the native engine still serves the UI.
-- **Slash commands never reach the model.** Forwarding ``/compact`` as
-  prose turns a command into a question.
+- **Slash commands reach the CLI, which dispatches its own.** Only the
+  handful this deployment answers differently — routed to a surface, or
+  refused because the thing it reaches for is not here — are intercepted.
 - **Failures are returned, not raised.** An RPC exception reaches the
   browser as a generic transport error instead of an actionable message.
 """
@@ -30,7 +31,11 @@ import pytest
 from ac_dc.claude_code.engine_config import EngineConfig
 from ac_dc.claude_code.health import EngineHealth, EngineStartupError
 from ac_dc.claude_code.messages import Event
-from ac_dc.claude_code.service import SLASH_EQUIVALENTS, ClaudeCodeService
+from ac_dc.claude_code.service import (
+    SLASH_DENIED,
+    SLASH_ROUTES,
+    ClaudeCodeService,
+)
 from ac_dc.claude_code.session import (
     EngineNotReadyError,
     SessionLostError,
@@ -97,6 +102,11 @@ class FakeSession:
         self.control_error: BaseException | None = None
         self.interrupt_result = {"status": "interrupting"}
         self.context_usage = {"total_tokens": 1000}
+        # The initialize handshake's payload. A bare string entry, which is
+        # not the shape the real CLI sends — `list_commands` tests replace
+        # it with command dicts, and the ones that do not are asserting that
+        # a malformed entry is skipped rather than crashing the palette.
+        self.server_info: dict | None = {"commands": ["review"]}
         # Events the fake pump emits for each turn.
         self.turn_events: list[Event] = [
             Event("streamChunk", {"block_id": f"{REQUEST_ID}:b0", "content": "Hi"}),
@@ -236,7 +246,7 @@ class FakeSession:
     async def get_server_info(self):
         if self.control_error is not None:
             raise self.control_error
-        return {"commands": ["review"]}
+        return self.server_info
 
 
 class Recorder:
@@ -605,40 +615,58 @@ class TestLazyConnect:
 
 
 class TestSlashCommands:
-    @pytest.mark.parametrize(
-        "command", sorted(k for k, v in SLASH_EQUIVALENTS.items() if v)
-    )
-    async def test_a_mapped_command_names_its_equivalent(self, service, command):
+    @pytest.mark.parametrize("command", sorted(SLASH_ROUTES))
+    async def test_a_routed_command_names_its_surface(self, service, command):
+        answer = await service.chat_streaming(REQUEST_ID, f"/{command}")
+        assert answer["status"] == "routed"
+        assert answer["command"] == command
+        assert answer["target"] == SLASH_ROUTES[command]["target"]
+        assert SLASH_ROUTES[command]["surface"] in answer["message"]
+
+    @pytest.mark.parametrize("command", sorted(SLASH_DENIED))
+    async def test_a_denied_command_says_why(self, service, command):
         answer = await service.chat_streaming(REQUEST_ID, f"/{command}")
         assert answer["status"] == "unsupported"
         assert answer["command"] == command
-        assert answer["equivalent"] in answer["message"]
+        assert SLASH_DENIED[command] in answer["message"]
 
-    @pytest.mark.parametrize(
-        "command", sorted(k for k, v in SLASH_EQUIVALENTS.items() if v is None)
-    )
-    async def test_an_unmappable_command_says_there_is_no_equivalent(
-        self, service, command
+    async def test_an_intercepted_command_never_starts_the_engine(
+        self, service, events
     ):
-        answer = await service.chat_streaming(REQUEST_ID, f"/{command}")
-        assert answer["status"] == "unsupported"
-        assert "no equivalent here" in answer["message"]
-        assert "equivalent" not in answer
-
-    async def test_a_slash_command_never_starts_the_engine(self, service, events):
-        """It is answered locally: no connect, no turn, no broadcast."""
-        await service.chat_streaming(REQUEST_ID, "/compact")
+        """Answered locally: no connect, no turn, no broadcast."""
+        await service.chat_streaming(REQUEST_ID, "/clear")
         assert service.session.connect_calls == []
         assert service.session.turns == []
         assert events.calls == []
 
     async def test_arguments_do_not_hide_the_command(self, service):
-        answer = await service.chat_streaming(REQUEST_ID, "/model opus")
-        assert answer["command"] == "model"
+        answer = await service.chat_streaming(REQUEST_ID, "/clear now")
+        assert answer["command"] == "clear"
 
     async def test_case_and_whitespace_do_not_hide_the_command(self, service):
         answer = await service.chat_streaming(REQUEST_ID, "  /CLEAR  ")
         assert answer["command"] == "clear"
+
+    async def test_a_builtin_reaches_the_engine(self, service):
+        """The CLI dispatches its own built-ins, locally and for free.
+
+        ``/compact`` was in the refusal table this replaced, on the premise
+        that forwarding it would ask the model to summarise as prose. It
+        does not: the CLI recognises the command before a turn is billed,
+        so intercepting it withheld a working answer.
+        """
+        await send(service, "/compact")
+        assert service.session.turns[0].message == "/compact"
+
+    async def test_an_unknown_command_reaches_the_engine(self, service):
+        """A typo is the CLI's to answer.
+
+        It replies ``Unknown command: /contxt``, which names the mistake.
+        Guessing on its behalf is how the table this replaced came to
+        refuse commands that had since shipped and would have answered.
+        """
+        await send(service, "/contxt")
+        assert service.session.turns[0].message == "/contxt"
 
     async def test_a_custom_command_reaches_the_engine(self, service):
         """.claude/commands/ is the CLI's business, not ours."""
@@ -652,6 +680,152 @@ class TestSlashCommands:
     async def test_a_mid_message_slash_is_not_a_command(self, service):
         await send(service, "what does /compact do?")
         assert len(service.session.turns) == 1
+
+    def test_no_command_is_both_routed_and_denied(self):
+        """Two tables, one lookup order: an overlap would be unreadable."""
+        assert not set(SLASH_ROUTES) & set(SLASH_DENIED)
+
+    @pytest.mark.parametrize("command", sorted(SLASH_ROUTES))
+    def test_every_route_has_a_palette_description(self, command):
+        """``list_commands`` falls back to it for a route the CLI omits."""
+        assert SLASH_ROUTES[command]["palette"]
+
+
+# ---------------------------------------------------------------------------
+# The `/` palette's command list
+# ---------------------------------------------------------------------------
+
+
+def _commands_by_name(answer):
+    return {command["name"]: command for command in answer["commands"]}
+
+
+class TestListCommands:
+    async def test_it_reports_what_the_cli_advertises(self, service):
+        service.session.server_info = {
+            "commands": [
+                {
+                    "name": "code-review",
+                    "aliases": ["review"],
+                    "argumentHint": "<pr>",
+                    "description": "Review a diff",
+                }
+            ]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["code-review"] == {
+            "name": "code-review",
+            "aliases": ["review"],
+            "argument_hint": "<pr>",
+            "description": "Review a diff",
+            "action": "send",
+            "target": "",
+        }
+
+    async def test_a_routed_command_carries_its_target(self, service):
+        service.session.server_info = {
+            "commands": [{"name": "context", "description": "Visualize context"}]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["context"]["action"] == "route"
+        assert commands["context"]["target"] == "tab:context"
+        # The CLI's own description survives; only the action changes.
+        assert commands["context"]["description"] == "Visualize context"
+
+    async def test_a_denied_command_is_not_offered(self, service):
+        """Offering one and then refusing it is worse than never showing it."""
+        service.session.server_info = {
+            "commands": [{"name": "rewind"}, {"name": "compact"}]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert "rewind" not in commands
+        assert "compact" in commands
+
+    async def test_a_plumbing_command_is_not_offered(self, service):
+        service.session.server_info = {
+            "commands": [{"name": "_internal"}, {"name": "compact"}]
+        }
+        assert "_internal" not in _commands_by_name(await service.list_commands())
+
+    async def test_a_route_the_cli_omits_is_added(self, service):
+        """``/permissions`` and ``/resume`` are not in the CLI's list at all."""
+        service.session.server_info = {"commands": [{"name": "compact"}]}
+        commands = _commands_by_name(await service.list_commands())
+        for name in SLASH_ROUTES:
+            assert commands[name]["action"] == "route"
+        assert commands["resume"]["description"] == SLASH_ROUTES["resume"]["palette"]
+
+    async def test_an_advertised_route_is_not_duplicated(self, service):
+        service.session.server_info = {"commands": [{"name": "context"}]}
+        answer = await service.list_commands()
+        names = [command["name"] for command in answer["commands"]]
+        assert names.count("context") == 1
+
+    async def test_the_list_is_sorted_by_name(self, service):
+        service.session.server_info = {
+            "commands": [{"name": "usage"}, {"name": "agents"}]
+        }
+        names = [command["name"] for command in (await service.list_commands())["commands"]]
+        assert names == sorted(names)
+
+    async def test_a_malformed_entry_is_skipped(self, service):
+        """The default fixture payload: a bare string where a dict belongs."""
+        answer = await service.list_commands()
+        assert [command["name"] for command in answer["commands"]] == sorted(
+            SLASH_ROUTES
+        )
+
+    async def test_an_absent_payload_still_lists_the_routes(self, service):
+        """The routes are this deployment's own, not the CLI's to supply."""
+        service.session.server_info = None
+        answer = await service.list_commands()
+        assert [command["name"] for command in answer["commands"]] == sorted(
+            SLASH_ROUTES
+        )
+
+    async def test_a_disconnected_engine_still_offers_the_routes(self, service):
+        """The engine connects on the first turn, which is the turn the user
+        is composing when they open the palette. Answering with an error
+        there means the palette never opens on a fresh start — which is what
+        it was built for. The routes need no CLI to describe."""
+
+        async def _boom():
+            raise EngineNotReadyError("no engine")
+
+        service.session.get_server_info = _boom
+        answer = await service.list_commands()
+        assert answer["partial"] is True
+        assert [command["name"] for command in answer["commands"]] == sorted(
+            SLASH_ROUTES
+        )
+        assert all(command["action"] == "route" for command in answer["commands"])
+
+    async def test_a_complete_list_is_not_marked_partial(self, service):
+        """The webapp caches on this flag; a false positive would re-fetch
+        for the rest of the session."""
+        service.session.server_info = {"commands": [{"name": "compact"}]}
+        assert "partial" not in await service.list_commands()
+
+    async def test_a_lost_session_is_an_error(self, service):
+        """Unlike a disconnected engine: the session went away mid-flight,
+        which the health banner is already saying, and a palette listing four
+        commands would suggest the other thirty had been withdrawn."""
+
+        async def _boom():
+            raise SessionLostError("session lost")
+
+        service.session.get_server_info = _boom
+        assert await service.list_commands() == {"error": "session lost"}
+
+    async def test_an_unexpected_failure_is_an_error_too(self, service, caplog):
+        async def _boom():
+            raise RuntimeError("transport exploded")
+
+        service.session.get_server_info = _boom
+        with caplog.at_level(logging.ERROR):
+            answer = await service.list_commands()
+        assert "transport exploded" in answer["error"]
+        assert "list_commands failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1583,6 +1757,10 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "get_context_usage": (),
     "get_mcp_status": (),
     "get_server_info": (),
+    # What the `/` palette lists. Reads the handshake payload and nothing
+    # else; a participant who could not see the commands would be typing
+    # into a composer whose autocomplete never opened.
+    "list_commands": (),
     # Reflection over the installed wheel and this package's own source.
     # It reads no session state, changes nothing, and reveals nothing about
     # the repo — a participant asking which SDK features this build wired

@@ -83,6 +83,17 @@ export const PROPERTIES = {
    * Not per-tab — repo-level state, global across tabs.
    */
   repoFiles: { type: Array },
+  /**
+   * The `/` palette's command list, as `list_commands`
+   * returned it. Null until the first `/` is typed — the
+   * list comes from the CLI's initialize handshake, so
+   * fetching it eagerly would either race the engine coming
+   * up or cache an empty answer from before it did.
+   *
+   * Not per-tab: the engine advertises one command list and
+   * every tab composes against the same one.
+   */
+  _slashCommands: { type: Array, state: true },
   /** Current textarea content. Cleared on send. */
   _input: { type: String, state: true, noAccessor: true },
   /**

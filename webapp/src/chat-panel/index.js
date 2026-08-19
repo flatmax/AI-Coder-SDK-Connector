@@ -104,6 +104,7 @@ import { speechPlayer } from '../speech-player.js';
 // WebFetch. See rendering.js.
 import '../history-browser.js';
 import '../input-history.js';
+import '../slash-palette.js';
 import '../speech-to-text.js';
 
 import {
@@ -241,6 +242,23 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Repo files list — pushed by files-tab for file
     // mention detection. Global to the chat panel.
     this.repoFiles = [];
+
+    // The `/` palette's command list. Null means "not asked
+    // yet"; an empty array means the engine answered with
+    // nothing, which is a different state and must not
+    // re-trigger the fetch on every keystroke.
+    this._slashCommands = null;
+    // Whether that list is the routed commands only, because
+    // the engine had not connected when it was asked for. It
+    // connects on the first turn, so this cache is replaced
+    // once — see `slashListIsStale` in input.js.
+    this._slashCommandsPartial = false;
+    // In-flight `list_commands` promise, shared by every
+    // keystroke that arrives while it is pending, and the
+    // timestamp of the last failed attempt. Plain fields,
+    // not reactive: nothing renders from either.
+    this._slashCommandsPending = null;
+    this._slashCommandsFailedAt = 0;
 
     // rAF handle for chunk coalescing. One rAF active
     // at a time across all tabs.

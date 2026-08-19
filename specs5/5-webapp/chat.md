@@ -227,10 +227,20 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 - Undo/redo workaround — native undo is broken in shadow DOM textareas when the framework re-renders set value programmatically; intercept Ctrl+Z and delegate via deprecated exec-command fallback
 - Draft persistence — the in-progress draft is written to `localStorage` on every input event and restored on reconnect / refresh. Cleared on send. Pending images are not persisted. See `specs-reference/5-webapp/chat.md` for the storage key
 ### Slash Commands
-- A leading `/` is not intercepted by the panel. Custom commands from `.claude/commands/` are the engine's and pass through untouched
-- A built-in CLI command that has an AC⚡DC equivalent returns `{status: "unsupported"}` synchronously with the equivalent named; the panel renders that as a system note pointing at the affordance (for example `/context` → the Context tab), and the text is never sent to the model
-- An unmapped `/command` gets the same treatment without an equivalent. A mistyped command must never turn into a question the agent tries to answer
-- See [`../3-engine/session.md` § Slash Command Equivalents](../3-engine/session.md#slash-command-equivalents)
+- A leading `/` is not intercepted by the panel. Commands from `.claude/commands/`, skills, plugin commands and the CLI's own built-ins are the engine's and pass through untouched — including a mistyped one, which the CLI names better than the panel could
+- A routed command returns `{status: "routed", target}` synchronously; the panel opens the surface `target` names and renders the reply as a system note saying where it went. A denied one returns `{status: "unsupported"}` with the reason, rendered the same way. Neither reaches the model
+- See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
+### Slash Palette
+- A separate component hosted inside the chat input area, on the same host/guest contract as [§ Input History](#input-history) — `show`/`hide`/`handleKey`, and the chat panel owns the lifecycle
+- Opens when `/` is the first non-whitespace character in the composer and the cursor is still inside that token; closes once whitespace settles the command or the token is gone. The same rule the engine applies to decide a message is a command, so the palette and the engine never disagree about what will be sent
+- Entries come from `list_commands()`, fetched on first `/` and cached for the session. A failed fetch is not cached as an empty list, but is held off for a few seconds before re-asking, so a broken engine costs one RPC rather than one per keystroke
+- A reply marked `partial` is the routed commands only, because the engine had not connected yet — the state every fresh start is in, since the engine connects on the first turn. It is cached like any other list and re-asked exactly once, when the engine health broadcast reports itself connected. Checked on the next open rather than invalidated from the broadcast, so a dropped broadcast cannot leave the short list up forever. While the refresh is in flight the stale list stays on show: it is still correct, and an overlay that grows beats one that appears late
+- An empty list is not the same as a failure. When the engine genuinely advertises nothing, no overlay opens — one saying "0 of 0" tells the user nothing they cannot see
+- Filter ranks exact names, then name prefixes, then alias prefixes, then substrings. Descriptions are not searched: a row whose reason for being there is invisible in the row is worse than a missing row
+- Up/Down navigate with wrapping; Enter and Tab select; Escape dismisses. Wrapping where history clamps, because this is a short relevance-ordered list being scanned for one known item, not a chronology being read through
+- Selecting a `send` entry completes the command in the composer, replacing the whole token so mid-token completion cannot leave `/contexttext` behind. Selecting a `route` entry clears the token and opens the surface — the row carries an "opens UI" badge, because a command that quietly does something other than its description promises is worse than no palette
+- With nothing matching, the overlay stays up to say so but consumes neither Enter nor the arrows: a stray `/typo` must still be sendable
+- Dismissing never touches the composer, so there is nothing to restore and no cancel event
 ### Paste Suppression
 - When middle-click inserts a path into the textarea, a flag on the chat panel tells the paste handler to suppress the browser's selection-buffer paste
 - Flag is a one-shot — set on insert, consumed by the next paste event
@@ -238,9 +248,10 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 - Typing `@text` activates the file picker filter
 - Escape removes the filter query from the textarea and clears the filter
 ### Escape Priority Chain
-1. @-filter active — remove query, clear filter
-2. Snippet drawer open — close drawer
-3. Default — clear textarea
+1. An open overlay in the input area — the history recall list, or the slash palette — takes it first and closes itself. Whoever is open wins; neither can be open at once, since recall needs cursor 0 and the palette needs the cursor inside a leading `/token`
+2. @-filter active — remove query, clear filter
+3. Snippet drawer open — close drawer
+4. Default — clear textarea
 
 The permission dialog is modal and takes Escape before any of this; Escape there is an explicit deny,
 never a dismiss (see [permission-dialog.md](permission-dialog.md)).
@@ -523,5 +534,5 @@ the UI in two places that must be got right:
 - Passive stream completion always prepends the user message from the result if present
 - A turn's tool cards are never hidden by a global preference; the transcript always shows what the agent did
 - The permission-mode indicator is visible in every layout state of the action bar
-- A slash command with no engine meaning is never sent to the model as prose
+- A slash command the engine answers itself — routed or denied — is never sent to the model as prose. Every other one, including an unrecognized one, reaches the CLI unchanged; the palette never rewrites what the user typed except when they pick an entry from it
 - The panel never re-runs a tool call, never edits a tool input, and never speaks into a subagent

@@ -42,7 +42,8 @@ wire; nothing forwards the old namespace.
 - Sessions — new session, resume session (optionally forking)
 - History — list sessions, load a session's messages, search history, delete a session (localhost-only), fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There are no separate engine-session listing or deletion RPCs: with one store each would be a second answer to a question the history surface already answers
 - Subagents — list subagent transcripts, get a subagent transcript
-- Introspection — context usage, MCP server status, reconnect an MCP server, toggle an MCP server, server info (advertised commands, tools, output styles)
+- Introspection — context usage, MCP server status, reconnect an MCP server, toggle an MCP server, server info (advertised commands, tools, output styles), the SDK surface report
+- Slash commands — list the commands the `/` palette offers: the CLI's advertised list filtered and annotated with what selecting each one does. See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
 - Commit workflow — generate commit message, commit-all (background)
 - Reset — reset-to-HEAD (records a system event)
 - Snippets — current snippets for the active preset, review-specific snippets

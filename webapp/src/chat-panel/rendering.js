@@ -115,6 +115,7 @@ import {
   onLightboxKeyDown,
   onMessagesClick,
   onMessagesScroll,
+  onSlashCommandSelect,
   openLightbox,
   pasteMessageToPrompt,
   reattachImage,
@@ -197,6 +198,7 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
  *   │  snippet drawer (if open)                   │
  *   │  ac-input-history                           │
  *   │  pending images (if any)                    │
+ *   │  ac-slash-palette (when typing a /command)  │
  *   │  input row (textarea + send column)         │
  *   ├─ ac-history-browser (modal) ────────────────┤
  *   └─ lightbox (if open) ───────────────────────┘
@@ -306,6 +308,9 @@ function renderInputSurface(panel) {
       @history-cancel=${(e) => onHistoryCancel(panel, e)}
     ></ac-input-history>
     ${panel._pendingImages.length > 0 ? renderPendingImages(panel) : ''}
+    <ac-slash-palette
+      @command-select=${(e) => onSlashCommandSelect(panel, e)}
+    ></ac-slash-palette>
     <div class="input-row">
       <textarea
         class="input-textarea"
