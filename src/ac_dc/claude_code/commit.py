@@ -10,7 +10,10 @@ blocking provider call against a separately-configured "smaller model".
 Now it is a **stateless one-shot** through :func:`claude_agent_sdk.query`
 — a second, short-lived CLI process with no tools, no settings sources
 and one turn, which cannot touch the repository and cannot see the chat
-session. It is deliberately not routed through the live
+session. Its one loan from the environment is ``settings.json``, handed
+over as a file rather than a source, because that is where the machine
+names its provider and a CLI without one cannot answer at all
+(:func:`_one_shot_options`). It is deliberately not routed through the live
 :class:`~ac_dc.claude_code.session.EngineSession`: sending a diff to the
 chat session would put the whole staged diff in the conversation the user
 is having, and would deadlock behind a turn in flight.
@@ -41,6 +44,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ac_dc.claude_code.events_log import commit_content, reset_content
+from ac_dc.claude_code.health import user_settings_file
 from ac_dc.claude_code.messages import Event
 
 if TYPE_CHECKING:
@@ -53,6 +57,11 @@ logger = logging.getLogger(__name__)
 # the point is to fail with a sentence the user can act on rather than
 # after a 30-second round trip that returns a context-length error.
 MAX_DIFF_CHARS = 400_000
+
+# How much of a failure's own words the toast carries. A reason is either
+# the CLI's one-line refusal or an exception string, and the second can be
+# a paragraph; the server log has the whole of it either way.
+MAX_REASON_CHARS = 200
 
 # How long the one-shot may take before we give up on it. Generous: a
 # large diff on a slow link is a normal case, and the user is watching a
@@ -140,19 +149,27 @@ async def commit_all_background(service: ClaudeCodeService) -> None:
             )
             return
 
-        message = await generate_commit_message(service, diff)
+        message, reason = await generate_commit_message(service, diff)
         if message is None:
             # No fallback message. The user asked for a generated one, and
             # committing "chore: update files" instead hides the failure
             # inside permanent history.
+            #
+            # The reason is carried into the toast because the one-shot is a
+            # second CLI process the health panel does not describe: when it
+            # answered "Not logged in · Please run /login", the panel — which
+            # reads the *live* session's credentials — had nothing wrong to
+            # show, and the generic sentence sent the user to look at it
+            # anyway.
+            detail = f": {reason}" if reason else ""
             await service._broadcast(
                 Event(
                     "commitResult",
                     {
                         "error": (
-                            "Could not generate a commit message. The staged "
-                            "changes are untouched — check the engine health "
-                            "panel, then try again."
+                            f"Could not generate a commit message{detail}. The "
+                            "staged changes are untouched — try again, or "
+                            "commit with a message of your own."
                         )
                     },
                     turn_scoped=False,
@@ -204,12 +221,13 @@ async def commit_all_background(service: ClaudeCodeService) -> None:
 
 async def generate_commit_message(
     service: ClaudeCodeService, diff: str
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Ask a throwaway one-shot session for a commit message.
 
-    Returns the message, or ``None`` when the call failed or produced
-    nothing usable. ``None`` is a hard error to the caller: there is no
-    fallback message, by design.
+    Returns ``(message, reason)`` with exactly one of them set. A ``None``
+    message is a hard error to the caller: there is no fallback message,
+    by design. The reason is for the user, not the log — a one-line
+    account of what went wrong, which the caller puts in the toast.
 
     The option set is minimal on purpose, and each omission is load-bearing:
 
@@ -219,44 +237,73 @@ async def generate_commit_message(
     - ``setting_sources=[]`` — no ``CLAUDE.md``, no skills, no agents, no
       MCP servers. The message format is ours (``config/commit.md``) and a
       project instruction file should not silently redefine it, nor should
-      a diff paid for by the user drag a plugin's startup cost along.
+      a diff paid for by the user drag a plugin's startup cost along. The
+      provider selection those sources also carry is handed over
+      separately — see :func:`_one_shot_options`.
     - ``max_turns=1`` — one response. With no tools there is nothing to
       iterate on.
     """
     prompt = service._config.get_commit_prompt()
     options = _one_shot_options(service, prompt)
     if options is None:
-        return None
+        return None, "the SDK surface moved; see the server log"
 
     try:
         from claude_agent_sdk import AssistantMessage, TextBlock, query
     except ImportError as exc:  # pragma: no cover - the SDK is a hard dep
         logger.error("claude-agent-sdk is not importable: %s", exc)
-        return None
+        return None, "the claude-agent-sdk is not importable"
 
     parts: list[str] = []
+    # What the CLI said when it answered with an error rather than a
+    # message. Kept apart from `parts`, because that answer is a diagnosis
+    # and committing it would put "Not logged in · Please run /login" in
+    # git history — the CLI marks such a turn with `error` and a
+    # `<synthetic>` model, and the text reads like prose either way.
+    refusal: str | None = None
     try:
         async with asyncio.timeout(GENERATE_TIMEOUT_SECONDS):
             async for message in query(prompt=diff, options=options):
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, TextBlock):
-                            parts.append(block.text)
+                if not isinstance(message, AssistantMessage):
+                    continue
+                text = "".join(
+                    block.text
+                    for block in message.content
+                    if isinstance(block, TextBlock)
+                )
+                # `getattr` because the field arrived in a recent SDK and
+                # an older wheel would otherwise turn a failed turn into
+                # an AttributeError here.
+                error = getattr(message, "error", None)
+                if error:
+                    logger.warning(
+                        "The commit-message one-shot answered with an error "
+                        "(%s): %s",
+                        error,
+                        text.strip() or "(no text)",
+                    )
+                    refusal = text.strip() or str(error)
+                    continue
+                parts.append(text)
     except TimeoutError:
         logger.warning(
             "Commit-message generation timed out after %.0fs",
             GENERATE_TIMEOUT_SECONDS,
         )
-        return None
+        return None, f"it timed out after {GENERATE_TIMEOUT_SECONDS:.0f}s"
     except Exception as exc:
         logger.warning("Commit-message generation failed: %s", exc)
-        return None
+        # The refusal first: when the CLI has explained itself, the
+        # exception that follows is the SDK reporting the same failure in
+        # its own vocabulary ("returned an error result"), which names
+        # nothing the user can act on.
+        return None, _one_line(refusal or str(exc))
 
     message = "".join(parts).strip()
     if not message:
         logger.warning("Commit-message generation returned no text")
-        return None
-    return _strip_fence(message)
+        return None, _one_line(refusal) if refusal else "it returned no text"
+    return _strip_fence(message), None
 
 
 def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
@@ -281,6 +328,28 @@ def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
         "max_turns": 1,
         "permission_mode": "plan",
     }
+    # The provider, and only the provider.
+    #
+    # `setting_sources=[]` above is what keeps CLAUDE.md, skills, agents and
+    # plugins out — and it also withheld the one thing in `settings.json`
+    # this session cannot do without. Its `env` block is where a machine
+    # says *which provider to talk to*: `CLAUDE_CODE_USE_BEDROCK` and a
+    # region, a Vertex project, a gateway base URL. Nothing puts those in
+    # the server's own environment for the CLI to inherit, so the one-shot
+    # was launched with no provider at all, fell back to first-party auth it
+    # had no credentials for, and answered "Not logged in · Please run
+    # /login" — while the live session, which loads all three sources, was
+    # working. Passing the file explicitly restores the provider without
+    # restoring any of the instruction sources.
+    #
+    # User scope only: `settings` takes one file, and a provider is a fact
+    # about the machine rather than the checkout. A repo that selects a
+    # provider in `.claude/settings.json` alone is not covered here, and
+    # merging the scopes ourselves would mean reimplementing the CLI's
+    # precedence rules against a diff nobody would see them applied to.
+    settings = user_settings_file()
+    if settings is not None:
+        kwargs["settings"] = str(settings)
     # The same binary the live session version-checked, when there is one.
     cli_path = service.session.health.cli_path or service.engine_config.cli_path
     if cli_path:
@@ -297,6 +366,20 @@ def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
             exc,
         )
         return None
+
+
+def _one_line(reason: str | None) -> str:
+    """A failure's own words, cut down to something a toast can hold.
+
+    First line only, because the tail of a multi-line exception is stack
+    context that means nothing in a toast and the server log has all of it.
+    """
+    text = " ".join((reason or "").split("\n")[0].split()).strip()
+    if not text:
+        return "no reason given"
+    if len(text) > MAX_REASON_CHARS:
+        return text[: MAX_REASON_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def _strip_fence(message: str) -> str:

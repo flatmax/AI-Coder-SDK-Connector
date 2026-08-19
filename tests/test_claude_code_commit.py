@@ -108,10 +108,15 @@ class FakeQuery:
     """
 
     def __init__(self, *, text: str = "feat: add x", error: BaseException | None = None,
-                 delay: float = 0.0):
+                 delay: float = 0.0, answer_error: str | None = None):
         self.text = text
         self.error = error
         self.delay = delay
+        # Set to make the answer an *error* answer — the shape the CLI
+        # returns when it cannot take the turn at all: the text is a
+        # diagnosis, `error` names the kind, and `model` is `<synthetic>`
+        # because no model was asked.
+        self.answer_error = answer_error
         self.calls: list[dict] = []
 
     def __call__(self, *, prompt, options):
@@ -123,8 +128,16 @@ class FakeQuery:
 
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.answer_error is not None:
+            yield AssistantMessage(
+                content=[TextBlock(text=self.text)],
+                model="<synthetic>",
+                error=self.answer_error,
+            )
         if self.error is not None:
             raise self.error
+        if self.answer_error is not None:
+            return
         yield AssistantMessage(content=[TextBlock(text=self.text)], model="opus")
 
     @property
@@ -332,6 +345,85 @@ class TestCommitPipeline:
         assert service._committing is False
         assert "filesModified" not in events.names()
 
+    async def test_an_error_answer_is_never_committed_as_a_message(
+        self, service, repo, events, monkeypatch
+    ):
+        """The observed failure: the CLI's refusal reads like prose.
+
+        A one-shot launched without a provider answers "Not logged in ·
+        Please run /login" in an ``error``-flagged turn. Collected as text
+        it would have gone into permanent history as the commit message.
+        """
+        import claude_agent_sdk
+
+        monkeypatch.setattr(
+            claude_agent_sdk,
+            "query",
+            FakeQuery(
+                text="Not logged in · Please run /login",
+                answer_error="authentication_failed",
+            ),
+        )
+        await commit(service)
+        assert repo.commits == []
+        error = events.payload_of("commitResult")["error"]
+        assert "Could not generate a commit message" in error
+        # And the CLI's own words, which are the whole diagnosis.
+        assert "Not logged in" in error
+        assert "untouched" in error
+        assert service._committing is False
+
+    async def test_the_refusal_beats_the_sdk_s_own_account_of_it(
+        self, service, repo, events, monkeypatch
+    ):
+        """The live shape: the CLI explains, then the SDK raises about it.
+
+        The SDK's wording for an error result names nothing actionable, so
+        the toast must keep the CLI's sentence rather than the exception's.
+        """
+        import claude_agent_sdk
+
+        monkeypatch.setattr(
+            claude_agent_sdk,
+            "query",
+            FakeQuery(
+                text="Not logged in · Please run /login",
+                answer_error="authentication_failed",
+                error=RuntimeError("Claude Code returned an error result: success"),
+            ),
+        )
+        await commit(service)
+        assert repo.commits == []
+        error = events.payload_of("commitResult")["error"]
+        assert "Not logged in" in error
+        assert "error result" not in error
+
+    async def test_a_failure_reason_is_cut_down_to_one_line(
+        self, service, events, monkeypatch
+    ):
+        """A toast holds a sentence, not a stack trace."""
+        import claude_agent_sdk
+
+        monkeypatch.setattr(
+            claude_agent_sdk,
+            "query",
+            FakeQuery(error=RuntimeError("CLI exited 1\n  File one\n  File two")),
+        )
+        await commit(service)
+        error = events.payload_of("commitResult")["error"]
+        assert "CLI exited 1" in error
+        assert "File one" not in error
+
+    async def test_a_wedged_one_shot_says_how_long_it_waited(
+        self, service, events, monkeypatch
+    ):
+        import claude_agent_sdk
+
+        monkeypatch.setattr(commit_mod, "GENERATE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(claude_agent_sdk, "query", FakeQuery(delay=30.0))
+        await commit(service)
+        assert "timed out" in events.payload_of("commitResult")["error"]
+
     async def test_a_fenced_message_is_unwrapped_before_it_is_committed(
         self, service, repo, monkeypatch
     ):
@@ -363,6 +455,37 @@ class TestOneShotOptions:
         assert options.permission_mode == "plan"
         assert options.cwd == str(tmp_path)
         assert options.system_prompt == service._config.get_commit_prompt()
+
+    async def test_the_provider_comes_over_as_a_settings_file(
+        self, service, sdk_query, tmp_path, monkeypatch
+    ):
+        """Without this the one-shot has no provider and cannot answer.
+
+        ``settings.json``'s ``env`` block is where a machine says whether
+        to talk to Bedrock, Vertex or the first-party API. It reaches this
+        session as a file because ``setting_sources=[]`` — which is what
+        keeps CLAUDE.md, skills and plugins out — would otherwise withhold
+        it too.
+        """
+        config_dir = tmp_path / "claude-config"
+        config_dir.mkdir()
+        settings = config_dir / "settings.json"
+        settings.write_text('{"env": {"CLAUDE_CODE_USE_BEDROCK": "true"}}')
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        await commit(service)
+        options = sdk_query.options
+        assert options.settings == str(settings)
+        # And still none of the instruction sources.
+        assert options.setting_sources == []
+
+    async def test_no_settings_file_is_not_an_argument(
+        self, service, sdk_query, tmp_path, monkeypatch
+    ):
+        """A machine with no ``settings.json`` is a working machine."""
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "nothing-here"))
+        await commit(service)
+        assert sdk_query.options.settings is None
 
     async def test_it_uses_the_binary_the_live_session_checked(
         self, service, sdk_query

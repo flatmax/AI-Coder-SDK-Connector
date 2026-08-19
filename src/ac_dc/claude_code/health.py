@@ -415,6 +415,31 @@ def _truthy(value: str | None) -> bool:
     return bool(value) and value.strip().lower() not in ("0", "false", "no", "")
 
 
+def cli_config_dir() -> Path:
+    """The CLI's own user-scope config directory.
+
+    ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude``. One function
+    because two copies of this rule drift: :func:`user_settings_file` and
+    :func:`_credential_base` both need it, and a process that redirected
+    the config dir must not have half of this module still reading home.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+
+
+def user_settings_file() -> Path | None:
+    """The CLI's user-scope ``settings.json``, or ``None`` if absent.
+
+    Read by anything that starts a CLI with no settings *sources* and
+    still needs the machine's provider selection — ``settings.json``'s
+    ``env`` block is where ``CLAUDE_CODE_USE_BEDROCK`` and its region
+    live, and a CLI that never loads it has no provider at all. See
+    :func:`ac_dc.claude_code.commit._one_shot_options`, the one caller.
+    """
+    path = cli_config_dir() / "settings.json"
+    return path if path.is_file() else None
+
+
 def _credential_base() -> Path:
     """The directory the CLI's credential file is looked for in.
 
@@ -424,8 +449,7 @@ def _credential_base() -> Path:
     own (see ``resume_cleanup``), so a session can be authenticated by a
     file this function will never see.
     """
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    return cli_config_dir()
 
 
 def _subscription_credential_path() -> Path | None:
