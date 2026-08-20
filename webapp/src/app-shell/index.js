@@ -887,12 +887,14 @@ export class AppShell extends JRPCClient {
   // inside the subprocess and says nothing about it; the retryable condition
   // it does report is ``rateLimit`` below, which carries a real reset time.
 
-  filesChanged(selectedFiles) {
-    window.dispatchEvent(new CustomEvent('files-changed', {
-      detail: { selectedFiles },
-    }));
-    return true;
-  }
+  // ``filesChanged`` was received here until CC-21. It carried the
+  // authoritative selected-files list after any client changed the picker's
+  // checkboxes, and the files tab applied it to the picker so collaborators
+  // saw one selection. There is no selection to agree about now — a file the
+  // user wants read is named in the prompt — so the service no longer has a
+  // `set_selected_files` to broadcast from. Note that ``filesModified``
+  // below is a different signal that survives: it reports writes to disk,
+  // which the tree still has to reload for.
 
   filesModified(paths) {
     // Backend signals disk changes (created, modified, or
@@ -904,7 +906,7 @@ export class AppShell extends JRPCClient {
     //
     // Note the event-name difference: the server-push hook
     // is camelCase (`filesModified`) to match the existing
-    // `filesChanged` / `commitResult` naming convention;
+    // `commitResult` / `reviewStarted` naming convention;
     // the DOM event is hyphenated (`files-modified`) to
     // match what file-picker.md "Files Tab Orchestration"
     // specifies and what files-tab.js already listens for.

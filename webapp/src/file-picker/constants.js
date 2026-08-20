@@ -34,19 +34,46 @@ export const CTX_ACTION_EXCLUDE = 'exclude';
 export const CTX_ACTION_INCLUDE = 'include';
 export const CTX_ACTION_DELETE = 'delete';
 
+// Path insertion. Two actions rather than one because the
+// two forms cost different things: a bare path is a pointer
+// the agent may follow, an `@path` is a read the CLI performs
+// before the turn starts. Both exist as menu items, and not
+// only as the middle-click gestures, because they are the
+// picker's pointing mechanism now that the checkbox is gone
+// (specs5/plan/decisions.md CC-21) — and because middle-click
+// is awkward or absent on a trackpad.
+export const CTX_ACTION_INSERT_PATH = 'insert-path';
+export const CTX_ACTION_INSERT_MENTION = 'insert-mention';
+
 // Menu items for file rows. Rendered in declaration
 // order; groups separated by null entries which render
 // as horizontal rules. The `showWhen` function gates
 // conditional items (allow vs deny shown based on
 // current state).
 //
-// The action ids stay `exclude` / `include` — they are
+// The action ids stay `exclude` / `include` — they were
 // the third checkbox state's name throughout the picker
-// and its tests. The labels say what the state now does:
-// deny the agent `Read` on the path, per
-// specs5/plan/decisions.md CC-14. Nothing is excluded
-// from an index any more; there is no index.
+// and its tests, and they outlived the checkbox. The labels
+// say what the state does: deny the agent `Read` on the
+// path, per specs5/plan/decisions.md CC-14. Nothing is
+// excluded from an index any more; there is no index.
+//
+// Path insertion leads the menu because it is the primary
+// way a user points the agent at a file (CC-21). It was a
+// middle-click gesture and nothing else, which made the
+// picker's most important verb its least discoverable one.
 export const _CONTEXT_MENU_FILE_ITEMS = [
+  {
+    action: CTX_ACTION_INSERT_PATH,
+    label: 'Insert path in prompt',
+    icon: '⊕',
+  },
+  {
+    action: CTX_ACTION_INSERT_MENTION,
+    label: 'Insert @path — agent reads it',
+    icon: '@',
+  },
+  null,
   { action: CTX_ACTION_STAGE, label: 'Stage', icon: '➕' },
   { action: CTX_ACTION_UNSTAGE, label: 'Unstage', icon: '➖' },
   {
@@ -112,6 +139,17 @@ export const INLINE_MODE_NEW_DIR = 'new-directory';
 // include-all gate via `showWhen` reading the context
 // object's `allExcluded` / `someExcluded` flags.
 export const _CONTEXT_MENU_DIR_ITEMS = [
+  {
+    action: CTX_ACTION_INSERT_PATH,
+    label: 'Insert path in prompt',
+    icon: '⊕',
+  },
+  {
+    action: CTX_ACTION_INSERT_MENTION,
+    label: 'Insert @path — agent reads it',
+    icon: '@',
+  },
+  null,
   {
     action: CTX_ACTION_STAGE_ALL,
     label: 'Stage all',

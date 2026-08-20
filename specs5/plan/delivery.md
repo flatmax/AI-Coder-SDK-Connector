@@ -3017,3 +3017,125 @@ missing final newline) pre-date this entry and are left alone.
   and the mtime check covers the disk half. Worth revisiting only if a third variant of this appears.
 - **A favicon.** `/favicon.ico` 404s on every load. It is one line of noise in the network panel and
   nothing reads it.
+
+---
+
+## Interlude — two ways to point at a file, one of which did nothing (2026-08-20)
+
+Opened as a question, not a bug report: *the claude cli has the "@" char which is used to demarcate files
+or paths of interest. Is the check box the same feature?* It is not, and the difference is the whole
+entry. `@path` in the prompt is expanded by the CLI, which reads the file. The checkbox put a paragraph
+in the turn's framing saying "here is a hint about what the user is pointing at, read them yourself if
+you need them" and then relied on the model to act on it. Same gesture in the user's head, two mechanisms,
+and only one of them did anything.
+
+The follow-up decided it: *do you think the checkbox is useful or should it be dropped?* → **dropped**,
+recorded as [CC-21](decisions.md#cc-21). The reasoning that made it easy is in the decision; what made it
+*safe* is that the third checkbox state had already stopped being a hint. [CC-14](decisions.md#cc-14)
+repurposed it into a real `Read(path)` deny rule the CLI enforces, so the control being deleted was two
+unlike things wearing one widget: a permission, and a suggestion.
+
+### What came out
+
+The hint had a channel of its own from the browser to the framing block, and every segment of it went:
+
+| Layer | Removed |
+|---|---|
+| `service.py` | `_selected_files`, `get_selected_files`, `set_selected_files`, `_clear_selection`, `chat_streaming`'s `files` parameter, `selected_files` from `get_current_state()` and `get_ui_state()`, `files` from the `userMessage` broadcast |
+| `session.py` | `Turn.files`, and the branch of `build_framing()` that listed it |
+| `mcp_server.py` | the selected-files paragraph `ui_state` rendered — including its `"No files are ticked in the file picker."` else-branch |
+| `review.py` | the `on_selection_cleared` hook, and entry's call to it |
+| `AcApp` | the `filesChanged` broadcast and its receiver |
+| `files-tab/` | `selection.js` entire (176 lines), `_selectedFiles`, `_selectedFilesByTab` |
+| `file-picker/` | the checkbox column, the `selectedFiles` prop, three-state rendering |
+| `chat-panel/` | `selectedFiles`, the `files` send argument, the chips' ✓/+ marks, "+ Add All (N)", and input accumulation on add |
+
+50 files, +1713 / −2942. Two test files were renamed to say what they now cover rather than what they
+were written for: `file-picker/selection.test.js` → `deny-read.test.js`, `files-tab/selection-sync.test.js`
+→ `auto-expand.test.js`.
+
+This also closes one of the dead `LLMService` callers the [2026-08-18 interlude](#interlude--the-empty-repo-that-wasnt-and-an-app-served-from-last-week-2026-08-18)
+left open — `set_agent_selected_files`, the agent-tab branch at `files-tab/selection.js:102`, listed in
+[`README.md`](README.md) § CC-8 among the dead calls a user could still reach. The file is gone, so the
+call is. (The console string in that entry, `LLMService.set_selected_files`, was the *cached* bundle's;
+no code at HEAD called it.) The other callers named there — `switch_mode`, `switch_agent_mode`,
+`list_live_agents`, `get_agent_history`, `close_agent_context` — are untouched and still open.
+
+### What stayed, and the test framing now has to pass
+
+Deleting the hint sharpened the rule for what framing is allowed to carry: **could the user reasonably
+have typed it?** The viewer's path and cursor could not — it changes without them acting, every turn.
+A list of paths from a tree they are looking at could, and now does, in the prompt. So `build_framing()`
+keeps the viewer block and the review facts and has nothing else.
+
+Deny-read stayed, and moved. With no checkbox to carry it, it lives on the row: **shift+click** toggles
+the rule for a file, or for every descendant file of a directory or the root. All-or-nothing per subtree —
+if everything under it is already denied, it allows them all, else it denies them all.
+
+Path insertion stayed and was promoted, because middle-click became the only picker→prompt route. Asked
+which form to insert, the answer was **both, on different gestures**: middle-click writes the bare path,
+shift+middle-click writes `@path`. The bare form names a file without forcing a read; the `@` form makes
+the CLI read it. Both, plus both deny verbs, are also context-menu items — asked how a user would ever
+find a middle-click, the answer was a **context-menu item**, so "Insert path in prompt" and "Insert @path
+— agent reads it" lead every file and directory menu.
+
+The cost is stated rather than solved: **`shift` now means two things on one row**, split by mouse button.
+The mitigation is that no gesture is the only route to anything. The alternative was a second modifier,
+and `ctrl`/`cmd`+click belongs to the browser.
+
+### Three drifts the sweep turned up
+
+None caused by this work; all three were spec claiming something the code never did.
+
+- **Denied rows do render a badge.** `specs5/5-webapp/file-picker.md` said "No badge"; the code renders
+  `✕`. Confirmed against `git show HEAD` before correcting the spec, since the checkbox removal touched
+  the same render path.
+- **The Denial Scope Prompt was never built.** A modal asking whether a rule should be session-scoped or
+  written to `.claude/settings.local.json`, specified in full, with an `ac-dc-deny-read-scope` localStorage
+  key no code reads or writes. Every denial goes to `settings.local.json` unconditionally. Marked **Not
+  built** rather than deleted: `specs-reference/3-engine/permissions.md` § There is no runtime rule API
+  already explains what a `session` option would have to mean, and that is worth keeping.
+- **The reference doc's context-menu action IDs were invented.** It listed `deny-read`, `allow-read`,
+  `deny-read-all`, `allow-read-all` and `doc-convert`; the code dispatches `exclude`, `include`,
+  `exclude-all`, `include-all` and has no `doc-convert` row action at all. The IDs kept the old
+  index-exclusion vocabulary and are left alone — renaming them touches a dozen files to say the same
+  thing, and only the labels face the user. Also corrected: a directory deny writes one `Read(<path>)`
+  per descendant file, never a `Read(<dir>/**)` glob, so a file created in a denied directory afterwards
+  is not denied.
+
+And one error of my own, from the phase that removed the checkbox: the binary-row tooltip I wrote said to
+"convert it from the context menu", naming a `Convert with Doc Convert` item that exists nowhere. The
+affordance is the picker toolbar's 📄 button. Fixed in the tooltip and in the spec bullet that matched it.
+
+### Tests
+
+Nothing new was written for a removal, but a lot had to stop asserting the old shape. Notable:
+
+- **`tabs.test.js`** — three send-path tests. One now asserts `chat_streaming` takes **four** arguments
+  (`request_id, message, images, viewer`); one that read the selection off the active tab is deleted with
+  a tombstone naming CC-21; one was repurposed to prove per-tab message routing, which is what it was
+  really guarding.
+- **`files-tab-file-search.test.js`** — "restores selection state on exit" became "restores per-path state
+  on exit", over deny-read. Same hazard, and it is a real one: search swaps the tree out from under the
+  rows, and a rebuild that forgot to re-push the list leaves every strikethrough behind. It has to use the
+  production direct-update pattern (`picker.excludedFiles = …` + `requestUpdate()`) because the tab's
+  setter is deliberately non-reactive — a plain assignment to `t._excludedFiles` never reaches the picker,
+  which is exactly the trap the pattern exists to document.
+- **Three stale RPC stubs** for `ClaudeCodeService.set_selected_files` in `init.test.js` and
+  `status.test.js`, missed by the earlier grep sweeps because they were stubbing a method rather than
+  naming a behaviour.
+
+99 files / 3927 tests green in the webapp, 3268 green in Python, `npm run build` clean.
+
+The pre-existing `ruff` import-order finding in `service.py` (the `resume_cleanup` import) predates this
+work — verified by `git stash` — and is left alone.
+
+### Deliberately not built
+
+- **A "files the agent read this turn" panel.** The obvious thing to offer in place of the checkbox, and
+  it cannot be honest: the `@` expansion is the CLI's, so we learn about the read the same way we learn
+  about any other, as a `Read` tool call in the transcript. The turn footer already lists those.
+- **Renaming `exclude` / `include` to `deny-read` / `allow-read`.** Named above.
+- **A second modifier for path insertion.** The shift collision is real and this was the alternative.
+  Rejected because the remaining modifiers are the browser's, and a chord nobody can guess is worse than
+  an overloaded one that has a menu item beside it.

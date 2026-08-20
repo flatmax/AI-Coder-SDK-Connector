@@ -305,8 +305,9 @@ interlude that found it; this list exists so that none of them has to be redisco
       Downstream of it, `rehydrateAgentTabs` (`tabs.js:675`) and `loadAgentHistory` →
       `LLMService.get_agent_history` are dead with it.
     - **Dead, on paths a user can still reach.** `close_agent_context` (`tabs.js:328`, on tab close),
-      `set_agent_selected_files` (`files-tab/selection.js:102`, the agent-tab branch of the file picker)
-      and `switch_agent_mode` (`events.js:928`).
+      `set_agent_selected_files` (the agent-tab branch of the file picker) and `switch_agent_mode`
+      (`events.js:928`). The middle one is closed: `files-tab/selection.js` was deleted whole by
+      [CC-21](decisions.md#cc-21) along with the checkbox it served.
 
     What makes this a cleanup rather than a fix is that **CC-8's live half already landed with its own
     mechanism** on 2026-08-17 (item 9): `rehydrateSubagentTabs` (`subagent-tabs.js:576`) driven off the
@@ -362,10 +363,12 @@ The state phase 6 inherits:
 - **A revealed tab is told it is on screen.** `_switchTab` notifies the arriving tab's
   `onTabVisible`; the panels refuse to refetch while hidden and mark themselves stale instead. A
   session load is the second staleness path and reuses this contract rather than inventing one.
-- **The file picker's third checkbox state writes a real `Read` deny rule** to
+- **The file picker's deny-read gesture writes a real `Read` deny rule** to
   `.claude/settings.local.json` (CC-14), and says "deny agent read" rather than "exclude from
   index". The L0-invalidation dialog is gone with the cache it asked about; its one honest job —
   the change is not instant — is a once-per-session toast built from the RPC's own `takes_effect`.
+  It was the checkbox's third state until [CC-21](decisions.md#cc-21) dropped the checkbox and moved
+  the gesture onto the row (shift+click) and into the context menu.
 - **The two things that waited on the post-tool-call hook are closed.** The file tree refreshes after
   the agent writes (`filesModified`, session-wide), and the doc index learns about those writes:
   `DocIndexBuilder.note_file_written` now has two callers, `Repo.write_file` for the user's edits and

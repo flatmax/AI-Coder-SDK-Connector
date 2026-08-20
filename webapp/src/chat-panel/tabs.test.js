@@ -1506,39 +1506,35 @@ describe('ChatPanel send path', () => {
     return { panel: p, started, agentTabId };
   }
 
-  it('sends the five arguments chat_streaming takes', async () => {
+  it('sends the four arguments chat_streaming takes', async () => {
+    // A third `files` argument — the picker's checkbox list, taken from
+    // the sending tab — sat between the message and the images until
+    // CC-21. Arity is pinned because every argument here is positional:
+    // a dropped one silently shifts `images` into `viewer`.
     const started = vi.fn().mockResolvedValue({ status: 'started' });
     publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    p._tabs.get('main').selectedFiles = ['main.py'];
     p._input = 'hello from main';
     await p._send();
     await settle(p);
     expect(started).toHaveBeenCalledOnce();
     const args = started.mock.calls[0];
-    expect(args).toHaveLength(5);
+    expect(args).toHaveLength(4);
     expect(args[0]).toBe(p._tabs.get('main').currentRequestId);
     expect(args[1]).toBe('hello from main');
-    expect(args[2]).toEqual(['main.py']);
-    expect(args[3]).toEqual([]);
+    expect(args[2]).toEqual([]);
     // viewer framing — explicitly null rather than omitted, so the arity
     // stays unambiguous for the phase that fills it in.
-    expect(args[4]).toBeNull();
+    expect(args[3]).toBeNull();
   });
 
-  it('the selection list comes from the active tab', async () => {
-    const { panel, started, agentTabId } =
-      await setupWithAgentTab();
-    panel._tabs.get('main').selectedFiles = ['main.py'];
-    panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
-    panel._activeTabId = agentTabId;
-    await settle(panel);
-    panel._input = 'hi';
-    await panel._send();
-    await settle(panel);
-    expect(started.mock.calls[0][2]).toEqual(['agent.py']);
-  });
+  // A test named "the selection list comes from the active tab" lived
+  // here. It seeded a different `selectedFiles` on main and on an agent
+  // tab, sent from the agent tab, and asserted the agent's list went
+  // out. There is no per-tab file list under CC-21; the neighbouring
+  // "the turn is recorded on the sending tab only" still covers the
+  // part that mattered — that a send reads the *active* tab's state.
 
   it('the turn is recorded on the sending tab only', async () => {
     const { panel, started, agentTabId } =
@@ -1587,10 +1583,12 @@ describe('ChatPanel send path', () => {
   });
 
   it('switching back to main sends from main', async () => {
+    // Used to assert on the per-tab selection list that went out as the
+    // third argument (CC-21). What it really guards is that the send
+    // path re-reads the active tab after a switch back rather than
+    // holding a reference to the tab it last sent from.
     const { panel, started, agentTabId } =
       await setupWithAgentTab();
-    panel._tabs.get('main').selectedFiles = ['main.py'];
-    panel._tabs.get(agentTabId).selectedFiles = ['agent.py'];
     panel._activeTabId = agentTabId;
     await settle(panel);
     panel._input = 'from agent';
@@ -1603,7 +1601,13 @@ describe('ChatPanel send path', () => {
     panel._input = 'from main';
     await panel._send();
     await settle(panel);
-    expect(started.mock.calls[1][2]).toEqual(['main.py']);
+    expect(started).toHaveBeenCalledTimes(2);
+    expect(started.mock.calls[1][1]).toBe('from main');
+    expect(panel._tabs.get('main').currentRequestId).toBe(
+      started.mock.calls[1][0],
+    );
+    // The agent tab kept the request id it sent under.
+    expect(started.mock.calls[0][1]).toBe('from agent');
   });
 });
 

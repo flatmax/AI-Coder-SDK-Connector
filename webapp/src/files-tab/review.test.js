@@ -66,9 +66,6 @@ describe('FilesTab review state', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
       'ClaudeCodeService.end_review': endReview,
     });
     const t = mountTab();
@@ -105,29 +102,77 @@ describe('FilesTab review state', () => {
     expect(picker.reviewState.branch).toBe('feature-auth');
   });
 
-  it('review-started clears selection locally', async () => {
-    // Defense-in-depth — server has already cleared,
-    // but we mirror it without waiting for the
-    // `filesChanged` broadcast so the UI stays
-    // consistent immediately.
-    const { t } = await setupTab();
-    // Seed selection first.
-    pushEvent('files-changed', { selectedFiles: ['a.md'] });
+  /**
+   * Mount with a nested tree that starts clean and reports
+   * `src/a.md` as staged from the second load onwards — the
+   * shape the review's soft reset produces on the server.
+   */
+  async function setupTabWithStagedSubdir() {
+    let calls = 0;
+    const getTree = vi.fn().mockImplementation(() => {
+      calls += 1;
+      const staged = calls === 1 ? [] : ['src/a.md'];
+      return Promise.resolve({
+        ...fakeTreeResponse([
+          {
+            name: 'src',
+            path: 'src',
+            type: 'dir',
+            lines: 0,
+            children: [
+              { name: 'a.md', path: 'src/a.md', type: 'file', lines: 5 },
+            ],
+          },
+        ]),
+        staged,
+      });
+    });
+    publishFakeRpc({
+      'Repo.get_file_tree': getTree,
+      'ClaudeCodeService.end_review': vi
+        .fn()
+        .mockResolvedValue({ status: 'ended' }),
+    });
+    const t = mountTab();
     await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(true);
+    return { t, getTree };
+  }
+
+  it('review-started expands the directories the review touches', async () => {
+    // Entering a review should land the user looking at it.
+    // The soft reset stages every branch-tip change, so the
+    // reload's staged set names the review's files and the
+    // expand pass opens their ancestors.
+    //
+    // This slot held two selection tests until CC-21 — review
+    // entry cleared the picker's selection locally so the UI
+    // didn't wait on the server's `filesChanged` broadcast to
+    // agree. Expanding is what review entry does to the
+    // picker now.
+    const { t } = await setupTabWithStagedSubdir();
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    // Nothing staged on first load, so nothing expanded.
+    expect(picker._expanded.has('src')).toBe(false);
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    expect(t._selectedFiles.size).toBe(0);
+    expect(picker._expanded.has('src')).toBe(true);
   });
 
-  it('review-started clears picker selection', async () => {
-    const { t } = await setupTab();
-    pushEvent('files-changed', { selectedFiles: ['a.md'] });
-    await settle(t);
+  it('review entry re-expands even after the one-shot flag is spent', async () => {
+    // The first-load flag exists so a plain reload doesn't
+    // re-open directories the user has since collapsed.
+    // Review entry deliberately bypasses it: the user asked
+    // for the review, so showing them its files is answering
+    // the request rather than overriding a preference.
+    const { t } = await setupTabWithStagedSubdir();
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    // The one-shot is already spent by the first load.
+    expect(t._initialAutoExpand).toBe(false);
+    // User collapses src for good measure.
+    picker._expanded = new Set();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    expect(picker.selectedFiles.size).toBe(0);
+    expect(picker._expanded.has('src')).toBe(true);
   });
 
   it('review-started refreshes the file tree', async () => {
@@ -162,22 +207,26 @@ describe('FilesTab review state', () => {
     expect(picker.reviewState).toBeNull();
   });
 
-  it('review-ended does NOT clear selection', async () => {
-    // Different from review-started — exit leaves
-    // selection alone so the user can continue
-    // with the files they had in context. The
-    // server's end_review likewise doesn't touch
-    // _selected_files.
+  it('review-ended leaves deny-read rules alone', async () => {
+    // Neither end of the review lifecycle touches denials.
+    // A deny rule is a real CLI permission rule written to
+    // settings, not turn state — clearing it on review exit
+    // would let the agent read a file the user had told it
+    // not to, with nothing on screen to say so.
+    //
+    // Selection was the state this test used to guard, and
+    // review-started cleared it while review-ended didn't.
+    // Denials are simpler: nothing clears them.
     const { t } = await setupTab();
+    t._applyExclusion(new Set(['a.md']), /* notifyServer */ false);
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    pushEvent('files-changed', { selectedFiles: ['a.md'] });
-    await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(true);
+    expect(t._excludedFiles.has('a.md')).toBe(true);
     pushEvent('review-ended', {});
     await settle(t);
-    // Selection preserved.
-    expect(t._selectedFiles.has('a.md')).toBe(true);
+    expect(t._excludedFiles.has('a.md')).toBe(true);
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    expect(picker.excludedFiles.has('a.md')).toBe(true);
   });
 
   it('review-ended refreshes the file tree', async () => {
@@ -234,9 +283,6 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
       'ClaudeCodeService.end_review': vi.fn().mockResolvedValue({
         error: 'restricted',
         reason: 'Participants cannot end review',
@@ -279,9 +325,6 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
       'ClaudeCodeService.end_review': vi.fn().mockResolvedValue({
         status: 'partial',
         error: 'could not reattach original branch',
@@ -318,9 +361,6 @@ describe('FilesTab review state', () => {
     );
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
       'ClaudeCodeService.end_review': vi
         .fn()
         .mockRejectedValue(new Error('end_review boom')),

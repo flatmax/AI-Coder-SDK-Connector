@@ -6,7 +6,7 @@
 //   - Toast layer (event subscription, auto-dismiss, defaults,
 //     unsubscribe on disconnect)
 //   - Server-push callbacks (streamChunk, streamComplete,
-//     navigateFile, filesChanged) dispatching window events
+//     navigateFile, sessionDeleted) dispatching window events
 //   - Tab switching via _switchTab
 //   - Enrichment-unavailable one-shot warning toast, including
 //     localStorage suppression across reloads and tolerance for
@@ -117,14 +117,17 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('navigate-file', listener);
     });
 
-    it('filesChanged dispatches window event with selected files', () => {
+    it('filesChanged is no longer a callback', () => {
+      // The backend pushed the authoritative selected-files list
+      // here and the shell re-dispatched it as `files-changed` for
+      // the picker to apply. Nothing sends it since CC-21 — and
+      // because `ExposeClass` publishes whatever public methods a
+      // class has, a leftover receiver would keep advertising an
+      // RPC the frontend can't act on. `filesModified` (a
+      // different event, still live) is the neighbour it is easy
+      // to confuse this with.
       const shell = mountShell();
-      const listener = vi.fn();
-      window.addEventListener('files-changed', listener);
-      shell.filesChanged(['a.md', 'b.md']);
-      const event = listener.mock.calls[0][0];
-      expect(event.detail.selectedFiles).toEqual(['a.md', 'b.md']);
-      window.removeEventListener('files-changed', listener);
+      expect(shell.filesChanged).toBeUndefined();
     });
 
     it('userMessageImages carries the request id and the pointers', () => {
@@ -186,7 +189,6 @@ describe('AppShell events and toasts', () => {
       const shell = mountShell();
       expect(shell.streamChunk('r', 'c')).toBe(true);
       expect(shell.streamComplete('r', {})).toBe(true);
-      expect(shell.filesChanged([])).toBe(true);
       expect(shell.sessionDeleted({ session_id: 's1' })).toBe(true);
       expect(shell.userMessageImages('r', { image_refs: [] })).toBe(true);
     });

@@ -108,9 +108,6 @@ cancelled turn.
 A turn is not only the user's typed text. The server prepends a small, deterministic framing block
 describing UI state the agent cannot otherwise see:
 
-- The files currently selected in the picker, as paths — a hint about what the user is pointing at,
-  not a content injection (see
-  [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract)).
 - The active file in the viewer, and the cursor or selection range when the user invoked from an
   editor gesture.
 - Review-mode facts when review is active (branch, merge-base) — see
@@ -119,6 +116,13 @@ describing UI state the agent cannot otherwise see:
 Framing is small, bounded, and never file content. Everything the agent might want to *read* it
 reads with its own tools; framing exists only to answer "what is the user looking at?", which no
 tool can answer.
+
+The test a candidate fact has to pass is narrower than that, though: **could the user reasonably have
+typed it?** A list of paths from the file picker could — and did, as the framing block's first entry,
+until [CC-21](../plan/decisions.md#cc-21) removed both the checkbox and the block. A path the user
+wants named is named in the prompt, where `@path` makes the CLI actually read it, rather than out here
+where a paragraph asked the model to consider it. What is left is the viewer's live cursor and the
+review's shape, neither of which the user could sensibly retype every turn.
 
 Images are not framing — they are content blocks in the message, passed through `query()`'s verbatim
 dict path. See [`../4-features/images.md`](../4-features/images.md).

@@ -2195,10 +2195,12 @@ describe('ChatPanel send with images', () => {
     p._pendingImages = ['data:image/png;base64,PIC'];
     await p._send();
     await settle(p);
-    const [, message, files, images] = started.mock.calls[0];
+    // Images are the third positional argument since CC-21 dropped the
+    // `files` list that used to sit between them and the message.
+    const [, message, images, viewer] = started.mock.calls[0];
     expect(message).toBe('look at this');
-    expect(files).toEqual([]);
     expect(images).toEqual(['data:image/png;base64,PIC']);
+    expect(viewer).toBeNull();
   });
 
   it('clears pending images after send', async () => {
@@ -2239,7 +2241,7 @@ describe('ChatPanel send with images', () => {
     await p._send();
     await settle(p);
     expect(started).toHaveBeenCalledOnce();
-    const [, message, , images] = started.mock.calls[0];
+    const [, message, images] = started.mock.calls[0];
     expect(message).toBe('');
     expect(images).toEqual(['data:image/png;base64,A']);
   });

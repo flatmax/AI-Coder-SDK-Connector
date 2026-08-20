@@ -47,8 +47,9 @@ describe('ChatPanel per-tab state — structure', () => {
     expect(tab.lastRequestId).toBeNull();
     expect(tab.streams).toBeInstanceOf(Map);
     expect(tab.pendingChunks).toBeInstanceOf(Map);
-    // Selection
-    expect(tab.selectedFiles).toEqual([]);
+    // A `selectedFiles` array sat here until CC-21 — the
+    // per-tab half of the picker's checkbox state.
+    expect('selectedFiles' in tab).toBe(false);
     // Search
     expect(tab.searchQuery).toBe('');
     expect(typeof tab.searchIgnoreCase).toBe('boolean');

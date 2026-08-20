@@ -1,7 +1,13 @@
 // Tests for files-tab navigation routing.
 // Covers: file-clicked → navigate-file dispatch,
-// file-mention-click toggle + navigate semantics, and
+// file-mention-click and file-chip-click navigate semantics, and
 // active-file-changed listener (highlight + cleanup).
+//
+// Mentions and chips used to toggle the picker's selection as
+// well as navigating (chips, in fact, INSTEAD of navigating).
+// CC-21 removed the selection, so both are plain navigation now
+// and the tests below pin that a click on a filename does the one
+// thing the user asked for.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -37,7 +43,6 @@ describe('FilesTab file click → navigate-file', () => {
       const t = mountTab();
       await settle(t);
       const picker = t.shadowRoot.querySelector('ac-file-picker');
-      // Click the name span (not the checkbox).
       picker.shadowRoot.querySelector('.row.is-file .name').click();
       await settle(t);
       expect(listener).toHaveBeenCalledOnce();
@@ -49,10 +54,17 @@ describe('FilesTab file click → navigate-file', () => {
     }
   });
 
-  it('does not dispatch navigate-file on checkbox click', async () => {
-    // The picker's own logic distinguishes these (checkbox
-    // clicks emit selection-changed but not file-clicked),
-    // but we verify the integration end-to-end.
+  it('does not dispatch navigate-file on a deny shift+click', async () => {
+    // Shift+click on a file row writes a deny-read rule; it
+    // must not also open the file. The two gestures share the
+    // row, so the picker's discrimination between them is what
+    // keeps "stop the agent reading this" from yanking the user
+    // into a viewer they didn't ask for. Verified end-to-end
+    // here because the checkbox that used to carry the deny is
+    // gone (CC-21) and the row is now doing double duty.
+    const setDenied = vi
+      .fn()
+      .mockResolvedValue({ denied_read_files: ['a.md'] });
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -61,9 +73,7 @@ describe('FilesTab file click → navigate-file', () => {
             { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
           ]),
         ),
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue(['a.md']),
+      'ClaudeCodeService.set_denied_read_files': setDenied,
     });
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
@@ -71,10 +81,19 @@ describe('FilesTab file click → navigate-file', () => {
       const t = mountTab();
       await settle(t);
       const picker = t.shadowRoot.querySelector('ac-file-picker');
-      picker.shadowRoot
-        .querySelector('.row.is-file .checkbox')
-        .click();
+      picker.shadowRoot.querySelector('.row.is-file').dispatchEvent(
+        new MouseEvent('click', {
+          shiftKey: true,
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+        }),
+      );
       await settle(t);
+      // The deny landed...
+      expect(setDenied).toHaveBeenCalledOnce();
+      expect(setDenied.mock.calls[0][0]).toEqual(['a.md']);
+      // ...and the viewer stayed put.
       expect(listener).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener('navigate-file', listener);
@@ -109,10 +128,16 @@ describe('FilesTab file click → navigate-file', () => {
 });
 
 // ---------------------------------------------------------------------------
-// File mention click → toggle + navigate
+// File mention / chip click → navigate
 // ---------------------------------------------------------------------------
 
 describe('FilesTab file-mention-click handling', () => {
+  /**
+   * Mount with two files and a spy on the picker's deny RPC.
+   * A mention click must reach neither the picker's state nor
+   * the server — the spy is here to prove the click has no
+   * side channel, not because anything is expected to call it.
+   */
   async function setupWithFiles() {
     const getTree = vi.fn().mockResolvedValue(
       fakeTreeResponse([
@@ -120,85 +145,39 @@ describe('FilesTab file-mention-click handling', () => {
         { name: 'b.md', path: 'b.md', type: 'file', lines: 2 },
       ]),
     );
-    const setFiles = vi.fn().mockResolvedValue(['a.md']);
+    const setDenied = vi
+      .fn()
+      .mockResolvedValue({ denied_read_files: [] });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      'ClaudeCodeService.set_selected_files': setFiles,
+      'ClaudeCodeService.set_denied_read_files': setDenied,
     });
     const t = mountTab();
     await settle(t);
-    return { t, setFiles };
+    return { t, setDenied };
   }
 
-  it('adds file to selection on mention click', async () => {
-    const { t, setFiles } = await setupWithFiles();
+  /** Fire the event the chat panel dispatches for a mention. */
+  function clickMention(t, path) {
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    chat.dispatchEvent(
+      new CustomEvent('file-mention-click', {
+        detail: { path },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  it('dispatches navigate-file for the clicked path', async () => {
     // Simulate the chat panel dispatching the event.
     // The `@file-mention-click` binding in the files-tab
     // template routes it to the handler.
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
-    chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'a.md' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-    await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(true);
-    // Server notified with the new selection.
-    expect(setFiles).toHaveBeenCalledOnce();
-    expect(setFiles.mock.calls[0][0]).toEqual(['a.md']);
-    // Picker's prop updated via direct assignment.
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    expect(picker.selectedFiles.has('a.md')).toBe(true);
-  });
-
-  it('removes file from selection when mention clicked while selected', async () => {
-    // Toggle semantics — a mention click on a file
-    // already in the selection removes it. Matches
-    // specs4/5-webapp/file-picker.md's "File Mention
-    // Selection" contract.
-    const { t, setFiles } = await setupWithFiles();
-    // Pre-select a.md via an initial click.
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
-    chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'a.md' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-    await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(true);
-    // Second click — should remove.
-    chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'a.md' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-    await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(false);
-    // Server notified twice — once for add, once for
-    // remove with empty list.
-    expect(setFiles).toHaveBeenCalledTimes(2);
-    expect(setFiles.mock.calls[1][0]).toEqual([]);
-  });
-
-  it('dispatches navigate-file on add', async () => {
     const { t } = await setupWithFiles();
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      const chat = t.shadowRoot.querySelector('ac-chat-panel');
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: { path: 'a.md' },
-          bubbles: true,
-          composed: true,
-        }),
-      );
+      clickMention(t, 'a.md');
       await settle(t);
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail).toEqual({
@@ -209,31 +188,32 @@ describe('FilesTab file-mention-click handling', () => {
     }
   });
 
-  it('dispatches navigate-file on remove too', async () => {
-    // Per spec — navigation is independent of selection
-    // state. User clicked the mention; they want to see
-    // the file. Both add and remove cases open it.
+  it('changes no state and calls no RPC', async () => {
+    // A mention click used to toggle the file's selection,
+    // which meant clicking a filename in prose to read it
+    // silently changed what the next turn claimed the user
+    // wanted. Opening the file is now the whole effect.
+    const { t, setDenied } = await setupWithFiles();
+    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const before = new Set(picker.excludedFiles);
+    clickMention(t, 'a.md');
+    await settle(t);
+    expect(setDenied).not.toHaveBeenCalled();
+    expect(picker.excludedFiles).toEqual(before);
+  });
+
+  it('a second click on the same mention navigates again', async () => {
+    // No toggle. The old handler treated the second click as
+    // "deselect", and the file re-opened only as a side effect
+    // of navigation being selection-independent. Now the
+    // second click means what the first one did.
     const { t } = await setupWithFiles();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
-    chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'a.md' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    clickMention(t, 'a.md');
     await settle(t);
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      // Second click — removes from selection.
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: { path: 'a.md' },
-          bubbles: true,
-          composed: true,
-        }),
-      );
+      clickMention(t, 'a.md');
       await settle(t);
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail).toEqual({
@@ -245,73 +225,122 @@ describe('FilesTab file-mention-click handling', () => {
   });
 
   it('ignores malformed events (no path)', async () => {
-    const { t, setFiles } = await setupWithFiles();
+    const { t, setDenied } = await setupWithFiles();
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
       const chat = t.shadowRoot.querySelector('ac-chat-panel');
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: {},
-          bubbles: true,
-          composed: true,
-        }),
-      );
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: null,
-          bubbles: true,
-          composed: true,
-        }),
-      );
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: { path: '' },
-          bubbles: true,
-          composed: true,
-        }),
-      );
-      chat.dispatchEvent(
-        new CustomEvent('file-mention-click', {
-          detail: { path: 42 },
-          bubbles: true,
-          composed: true,
-        }),
-      );
+      for (const detail of [
+        {},
+        null,
+        { path: '' },
+        { path: 42 },
+      ]) {
+        chat.dispatchEvent(
+          new CustomEvent('file-mention-click', {
+            detail,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
       await settle(t);
-      expect(setFiles).not.toHaveBeenCalled();
+      expect(setDenied).not.toHaveBeenCalled();
       expect(listener).not.toHaveBeenCalled();
-      expect(t._selectedFiles.size).toBe(0);
     } finally {
       window.removeEventListener('navigate-file', listener);
     }
   });
 
   it('handles multiple distinct mention clicks', async () => {
-    const { t, setFiles } = await setupWithFiles();
+    const { t } = await setupWithFiles();
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      clickMention(t, 'a.md');
+      await settle(t);
+      clickMention(t, 'b.md');
+      await settle(t);
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(
+        listener.mock.calls.map((c) => c[0].detail.path),
+      ).toEqual(['a.md', 'b.md']);
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+});
+
+describe('FilesTab file-chip-click handling', () => {
+  /**
+   * The chips in an assistant message's "Files Referenced"
+   * summary. They carried `navigate: false` and toggled the
+   * selection instead of opening anything — curating context
+   * wasn't supposed to move the viewer. With no context to
+   * curate, opening the file is the only thing left to want
+   * from a chip, so they navigate like the prose mentions
+   * they were once distinguished from.
+   */
+  async function setup() {
+    publishFakeRpc({
+      'Repo.get_file_tree': vi.fn().mockResolvedValue(
+        fakeTreeResponse([
+          { name: 'a.md', path: 'a.md', type: 'file', lines: 1 },
+        ]),
+      ),
+    });
+    const t = mountTab();
+    await settle(t);
+    return t;
+  }
+
+  function clickChip(t, path) {
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
     chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'a.md' },
+      new CustomEvent('file-chip-click', {
+        detail: { path },
         bubbles: true,
         composed: true,
       }),
     );
-    await settle(t);
-    chat.dispatchEvent(
-      new CustomEvent('file-mention-click', {
-        detail: { path: 'b.md' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
-    await settle(t);
-    expect(t._selectedFiles.has('a.md')).toBe(true);
-    expect(t._selectedFiles.has('b.md')).toBe(true);
-    // Server saw both selections cumulatively.
-    expect(setFiles).toHaveBeenCalledTimes(2);
-    expect(setFiles.mock.calls[0][0]).toEqual(['a.md']);
-    expect(setFiles.mock.calls[1][0]).toEqual(['a.md', 'b.md']);
+  }
+
+  it('dispatches navigate-file for the clicked chip', async () => {
+    const t = await setup();
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      clickChip(t, 'a.md');
+      await settle(t);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+      });
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
+  });
+
+  it('ignores malformed chip events', async () => {
+    const t = await setup();
+    const listener = vi.fn();
+    window.addEventListener('navigate-file', listener);
+    try {
+      const chat = t.shadowRoot.querySelector('ac-chat-panel');
+      for (const detail of [{}, null, { path: '' }, { path: 42 }]) {
+        chat.dispatchEvent(
+          new CustomEvent('file-chip-click', {
+            detail,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
+      await settle(t);
+      expect(listener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('navigate-file', listener);
+    }
   });
 });
 

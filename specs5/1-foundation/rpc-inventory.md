@@ -33,11 +33,10 @@ browser.
 Replaces `LLMService`. The service class name is the RPC namespace, so the rename is visible on the
 wire; nothing forwards the old namespace.
 
-- State — engine state snapshot (mirrored messages, selected files, denied-read files, session id, repo name, init and engine-ready flags, streaming flag, active streams with per-block replay, permission mode, model, pending permissions, doc-index flags, review state, engine health)
+- State — engine state snapshot (mirrored messages, denied-read files, session id, repo name, init and engine-ready flags, streaming flag, active streams with per-block replay, permission mode, model, pending permissions, doc-index flags, review state, engine health)
 - Engine health — connected flag, CLI path and version, SDK version and its CLI pin, credential source, MCP server health, mirror-gap count, last error
-- File selection — get, set. Selection is a hint carried in turn framing, not a context contract
-- Denied-read files — get, set. The picker's third state, written as `Read(path)` deny rules
-- Turns — start streaming chat (request id, message, optional files, images, viewer framing), cancel streaming
+- Denied-read files — get, set. Written as `Read(path)` deny rules the CLI enforces. The only per-path list the picker owns — there is no file-selection pair beside it ([CC-21](../plan/decisions.md#cc-21))
+- Turns — start streaming chat (request id, message, images, viewer framing), cancel streaming
 - Live controls — set permission mode, set model, rewind files to a checkpoint, stop a subagent task, resolve a permission request
 - Sessions — new session, resume session (optionally forking)
 - History — list sessions, load a session's messages, search history, delete a session (localhost-only), fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There are no separate engine-session listing or deletion RPCs: with one store each would be a second answer to a question the history surface already answers
@@ -56,6 +55,9 @@ Deleted with the native engine: context breakdown by tier, manual cache rebuild,
 mode get/switch/cross-reference, the seven URL methods, `load_session_into_context`,
 `get_history_status`, and the four agent-turn methods (`get_turn_archive`, `get_agent_history`,
 `close_agent_context`, `set_agent_selected_files`).
+
+Deleted later, by [CC-21](../plan/decisions.md#cc-21): `get_selected_files` and `set_selected_files`.
+`chat_streaming` lost its `files` parameter with them.
 
 ## Service: Settings (browser → server)
 

@@ -144,7 +144,7 @@ implementing phase 2:
 | `webapp/src/app-shell/index.js` | The `AcApp` callback surface is re-specified — see [`../1-foundation/rpc-inventory.md`](../1-foundation/rpc-inventory.md). |
 | `webapp/src/app-shell/mode.js` | Mode toggle becomes a preset selector (CC-12). |
 | `webapp/src/settings-tab.js` | Config cards shrink to the surviving files; gains permission-mode, model, effort, and budget controls. |
-| `webapp/src/file-picker/` | Third checkbox state re-labelled from "exclude from index" to "deny agent read" (CC-14). |
+| `webapp/src/file-picker/` | Third checkbox state re-labelled from "exclude from index" to "deny agent read" (CC-14), then the checkbox column deleted outright and the gesture moved to shift+click on the row ([CC-21](decisions.md#cc-21)). `files-tab/selection.js` goes with it. |
 | `webapp/src/history-browser.js` | Reads the one transcript through the parsed shapes; gains resume-vs-fork affordances. Loses the `files_modified`, `edit_results` and "show agents" panels — the records behind them retire with `history_store.py` ([CC-19](decisions.md#cc-19)). |
 
 ## Frontend — NEW

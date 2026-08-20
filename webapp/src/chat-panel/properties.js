@@ -69,8 +69,8 @@ export const PROPERTIES = {
   /**
    * Flat list of repo-relative file paths. The files-tab
    * orchestrator pushes this down via direct assignment
-   * when the file tree loads (matching the selectedFiles
-   * pattern from Phase 2c). Assistant messages are
+   * when the file tree loads (the direct-update pattern —
+   * see files-tab/index.js). Assistant messages are
    * post-processed to wrap matching substrings in
    * clickable `.file-mention` spans; see
    * `_renderAssistantBody`.

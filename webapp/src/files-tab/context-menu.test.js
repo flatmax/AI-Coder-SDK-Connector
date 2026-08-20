@@ -1212,56 +1212,11 @@ describe('FilesTab context-menu action dispatch', () => {
       }
     });
 
-    it('migrates selection to the new path after rename', async () => {
-      // A selected file that gets renamed should stay
-      // selected under its new name — the LLM request
-      // that just finished referred to it, and the
-      // next request probably should too. Server gets
-      // a set_selected_files call with the migrated
-      // set.
-      const setFiles = vi.fn().mockResolvedValue(['b.md']);
-      publishFakeRpc({
-        'Repo.get_file_tree': vi
-          .fn()
-          .mockResolvedValue(
-            fakeTreeResponse([
-              { name: 'a.md', path: 'a.md', type: 'file', lines: 5 },
-            ]),
-          ),
-        'Repo.get_current_branch': vi.fn().mockResolvedValue({
-          branch: 'main',
-          detached: false,
-          sha: null,
-        }),
-        'Repo.rename_file': vi.fn().mockResolvedValue({}),
-        'ClaudeCodeService.set_selected_files': setFiles,
-      });
-      const t = mountTab();
-      await settle(t);
-      // Seed selection via a server broadcast so the
-      // first-load auto-select is already done.
-      pushEvent('files-changed', { selectedFiles: ['a.md'] });
-      await settle(t);
-      expect(t._selectedFiles.has('a.md')).toBe(true);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
-      picker.dispatchEvent(
-        new CustomEvent('rename-committed', {
-          detail: {
-            sourcePath: 'a.md',
-            targetName: 'b.md',
-          },
-          bubbles: true,
-          composed: true,
-        }),
-      );
-      await settle(t);
-      expect(t._selectedFiles.has('a.md')).toBe(false);
-      expect(t._selectedFiles.has('b.md')).toBe(true);
-      // Server notified of the migration.
-      const lastCall = setFiles.mock.calls.at(-1);
-      expect(lastCall[0]).toContain('b.md');
-      expect(lastCall[0]).not.toContain('a.md');
-    });
+    // A selection migrated across a rename here until
+    // CC-21, on the reasoning that a file the last turn
+    // referred to the next one probably would too. The
+    // deny-read migration below is the same mechanism
+    // guarding a claim that survives the turn.
 
     it('migrates exclusion to the new path after rename', async () => {
       publishFakeRpc({
@@ -2265,7 +2220,6 @@ describe('FilesTab context-menu action dispatch', () => {
           ]),
         );
       const setExcluded = vi.fn().mockResolvedValue([]);
-      const setSelected = vi.fn().mockResolvedValue([]);
       publishFakeRpc({
         'Repo.get_file_tree': getTree,
         'Repo.get_current_branch': vi.fn().mockResolvedValue({
@@ -2274,18 +2228,15 @@ describe('FilesTab context-menu action dispatch', () => {
           sha: null,
         }),
         'ClaudeCodeService.set_denied_read_files': setExcluded,
-        'ClaudeCodeService.set_selected_files': setSelected,
       });
       const t = mountTab();
       await settle(t);
-      // Seed initial exclusion state via a broadcast so
-      // we don't need to toggle via the picker.
-      if (excludedFiles.length > 0) {
-        for (const path of excludedFiles) {
-          t._excludedFiles.add(path);
-        }
+      // Seed initial exclusion state directly so we don't
+      // need to toggle via the picker.
+      for (const path of excludedFiles) {
+        t._excludedFiles.add(path);
       }
-      return { t, setExcluded, setSelected };
+      return { t, setExcluded };
     }
 
     it('adds the file to the excluded set', async () => {
@@ -2322,29 +2273,9 @@ describe('FilesTab context-menu action dispatch', () => {
       expect(setExcluded).not.toHaveBeenCalled();
     });
 
-    it('deselects the file when excluding a selected file', async () => {
-      // Exclusion and selection are mutually
-      // exclusive — excluding a selected file
-      // deselects it in the same operation.
-      const { t, setExcluded, setSelected } =
-        await setupExcludeTab();
-      // Seed selection.
-      t._selectedFiles.add('a.md');
-      fireContextAction(t, {
-        action: 'exclude',
-        type: 'file',
-        path: 'a.md',
-        name: 'a.md',
-        isExcluded: false,
-      });
-      await settle(t);
-      expect(t._excludedFiles.has('a.md')).toBe(true);
-      expect(t._selectedFiles.has('a.md')).toBe(false);
-      // Server notified of both changes.
-      expect(setExcluded).toHaveBeenCalledOnce();
-      expect(setSelected).toHaveBeenCalledOnce();
-      expect(setSelected.mock.calls[0][0]).toEqual([]);
-    });
+    // Excluding a selected file also deselected it, in one
+    // operation and two RPCs, because the two states were
+    // mutually exclusive. CC-21 left one state on a row.
 
     it('propagates the new exclusion to the picker', async () => {
       const { t } = await setupExcludeTab();
@@ -2403,23 +2334,10 @@ describe('FilesTab context-menu action dispatch', () => {
       expect(setExcluded.mock.calls[0][0]).toEqual([]);
     });
 
-    it('does NOT add to the selected set (returns to index-only)', async () => {
-      // Per spec — "Include in index" returns the file
-      // to the default index-only state, not to
-      // selected. Users who want to select it can tick
-      // the checkbox after. Matches the shift+click-
-      // from-excluded behaviour in the picker.
-      const { t } = await setupIncludeTab();
-      fireContextAction(t, {
-        action: 'include',
-        type: 'file',
-        path: 'a.md',
-        name: 'a.md',
-        isExcluded: true,
-      });
-      await settle(t);
-      expect(t._selectedFiles.has('a.md')).toBe(false);
-    });
+    // "Allow" returned a row to the default state rather
+    // than to selected — a distinction that mattered while
+    // the middle of three states existed to be landed in by
+    // accident. A row is denied or it isn't.
 
     it('no-op when file is not currently excluded', async () => {
       const { t, setExcluded } = await setupIncludeTab({

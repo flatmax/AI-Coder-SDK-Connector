@@ -84,13 +84,6 @@ describe('FilesTab initial state', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      // Increment 4 runs an auto-select during first load
-      // that calls set_selected_files when any files are
-      // changed. Stub it so the test stays focused on
-      // status-data plumbing.
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
     });
     const t = mountTab();
     await settle(t);

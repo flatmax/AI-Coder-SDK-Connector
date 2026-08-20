@@ -154,22 +154,25 @@ protocol-specific need.
 - Replacement operates only on text segments between HTML tags — tag attributes never touched
 - Matches inside code blocks skipped; matches inside inline code replaced normally
 ### Click Handling
-- Inline text mentions in message body navigate to the diff viewer
-- File summary chips in the "Files Referenced" section only toggle selection — no navigation
-- On add — accumulate input text with natural phrasing
-- On remove — just update selection
-- Selected files display with a muted style
+- Inline text mentions in the message body navigate to the diff viewer
+- File summary chips in the "Files Referenced" section do the same: one click, file open. They dispatch `file-chip-click`, and nothing else happens
 ### File Summary Section
-- Below each assistant message with file references
-- Chips show a check mark (selected) or plus (not selected)
-- "Add All" button when multiple files can be added at once
-- Section only shown for final rendered messages, never during streaming
-- The wording is "selected", never "in context". Selection is a hint about what the user is looking at; it does not put a file in the model's context (see [decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract))
-### Input Accumulation on Add
-- When a file is added via mention click, the chat input text is accumulated using natural phrasing
-- Templates — "The file X added. Do you want to see more files before you continue?" for the first add, updated to join multiple files naturally on subsequent adds
-- Falls back to appending a parenthetical note for non-matching input states
-- Only basename (filename without directory path) used in accumulated text
+- Below each assistant message with file references, shown for final rendered messages only, never during streaming
+- One chip per referenced path, marked `↗`, every chip alike — the list is "what this message named", collected in one place
+- Both sources contribute: edit-block headers (always, since the model named the file as an edit target whether or not it exists yet) and prose mentions matched against the repo file list
+- The wording is never "in context". A chip says the message mentioned the file; nothing about it puts the file in the model's context
+
+Three things stood here and went with the selection ([CC-21](../plan/decisions.md#cc-21)):
+
+- **The ✓/+ mark on each chip**, which said whether the path was in the picker's selection. With one
+  state per chip there is nothing to distinguish, and `↗` says what the click does instead
+- **The "+ Add All (N)" header button**, which added every referenced file to the selection at once
+- **Input accumulation on add** — clicking a chip used to append a sentence to the composer ("The file X
+  added. Do you want to see more files before you continue?"), joining multiple files naturally across
+  clicks. This was the closest the old design came to the current answer, and it is worth being clear
+  about why it is not simply kept: it wrote prose *about* files it had also selected, so the model got
+  a sentence and a hint and no path it could act on. The picker's middle-click writes the path itself,
+  and shift+middle-click writes `@path`, which the CLI expands into a real read
 
 ## Turn Footer
 

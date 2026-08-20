@@ -257,17 +257,30 @@ rules. The consequences are load-bearing and an earlier draft of this file assum
   the CLI for the rules currently in force. The dialog's "always allow" therefore reports what it
   *wrote*, never what the engine now believes.
 
-The file picker's third checkbox state writes:
+The picker's deny gesture therefore writes JSON, not a `PermissionUpdate`. `write_denied_read_files`
+rewrites `permissions.deny` in `.claude/settings.local.json`:
 
-```python
-PermissionUpdate(type="addRules",
-                 rules=[PermissionRuleValue(tool_name="Read", rule_content="<path or glob>")],
-                 behavior="deny",
-                 destination="localSettings")
+```json
+{ "permissions": { "deny": ["Read(src/secrets.py)", "Read(notes/private.md)"] } }
 ```
 
-`localSettings` (`.claude/settings.local.json`, git-ignored) because a per-user exclusion is not a
-project policy.
+Details the shape does not show:
+
+- **One `Read(<path>)` entry per file, never a `Read(<dir>/**)` glob**, even when the user denied a
+  whole directory — the picker expands the subtree and sends every descendant file. A file created in
+  that directory afterwards is not denied.
+- **The list is authoritative for `Read` rules and only for those.** Every entry matching `Read(...)` is
+  dropped and replaced with exactly what was sent; every other deny rule, and every other key in the
+  file, is preserved verbatim. The file is the user's, and the CLI writes to it too.
+- **An unparseable file is refused, not overwritten** — `ValueError`, with the advice to fix it by hand.
+- **`permissions.deny` and `permissions` are removed when they empty out**, rather than left as `[]`
+  and `{}`, so allowing the last denied file leaves a settings file that looks untouched.
+- **Written by rename-then-replace** (`.json.tmp` + `os.replace`), because the CLI may read the file at
+  any moment and a torn write is a settings file it will refuse.
+
+`.claude/settings.local.json` (git-ignored) rather than project settings because a per-user denial is
+not a project policy. It is nonetheless repo-wide by construction: subagents inherit the session's
+setting sources, so there is no per-agent deny rule and no RPC that would write one.
 
 ### `permissionRequest(data)` — server → browser (broadcast)
 

@@ -219,20 +219,25 @@ Continuity is never a replay. AC⚡DC does not read its own transcript back into
 resumption, and the mirrored transcript is a record rather than an input. See
 [`../3-engine/history.md`](../3-engine/history.md).
 
-### File Selection Sync
+### Deny-Read Sync
 
-1. User toggles a checkbox in the file picker
-2. Picker dispatches `selection-changed` up through the files tab
-3. Files tab calls `ClaudeCodeService.set_selected_files(paths)`
-4. Server updates its authoritative selected-files list
-5. Server broadcasts `filesChanged` to all connected clients (including the originator)
-6. Each client's files tab applies it via direct property assignment to the picker, bypassing Lit's
-   reactive re-render, which would reset scroll and interaction state
+1. User shift+clicks a row in the file picker, or picks "Deny agent read" from its context menu
+2. Picker dispatches `exclusion-changed` up through the files tab
+3. Files tab calls `ClaudeCodeService.set_denied_read_files(paths)`
+4. Server replaces every `Read(path)` deny rule it owns in `.claude/settings.local.json` with that
+   list — the list is authoritative, not additive
+5. Each client's files tab applies the result via direct property assignment to the picker, bypassing
+   Lit's reactive re-render, which would reset scroll and interaction state
 
-The mechanism is unchanged; the *meaning* changed. Selection is a hint about what the user is pointing
-at, carried in the turn's framing, not a promise that the files' contents are in the prompt. The
-picker's third checkbox state now denies the agent read access to a path rather than excluding it from
-a map.
+There is no broadcast step and no other sync. Deny rules are localhost-written ([CC-15](../plan/decisions.md#cc-15));
+a collaborator sees them by reading `denied_read_files` out of the state snapshot on load. The rules
+land where the CLI reads settings, so they take effect for the session and for its subagents, which
+inherit the same settings sources.
+
+There is no *file selection* to sync at all. The picker's checkbox column and the whole hint pipeline
+behind it — the `set_selected_files` RPC, the `filesChanged` broadcast, the framing block — were
+removed by [CC-21](../plan/decisions.md#cc-21). A file the user wants read is named in the prompt,
+where the CLI's own `@` expansion sees it; the picker's middle-click inserts the path there.
 
 ### Collaboration Admission
 
@@ -285,8 +290,8 @@ turn framing or through an MCP tool it can call.
 
 ### Localhost-Only vs Shared State
 
-All state is shared across connected clients by default — selected files, the transcript, streaming
-output, tool cards all broadcast to every admitted client. Every mutating operation is guarded:
+All state is shared across connected clients by default — the transcript, streaming output, tool cards
+all broadcast to every admitted client. Every mutating operation is guarded:
 non-localhost participants receive `{error: "restricted", reason: ...}` instead of the normal return
 value. Read operations (file content, symbol queries, history browsing, search) work for everyone. The
 effect is a shared read-only view with write privileges reserved to the host machine.

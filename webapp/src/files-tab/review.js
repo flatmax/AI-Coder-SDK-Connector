@@ -20,8 +20,8 @@
 //
 //   - host._loadFileTree (tree-loader) for refresh
 //     after review state changes
-//   - host._applyInitialAutoSelect (tree-loader) for
-//     auto-selecting changed files on review entry
+//   - host._applyInitialAutoExpand (tree-loader) for
+//     revealing the review's changed files on entry
 //   - host._isRestrictedError, host._showToast,
 //     host._picker, host._chat — class-level helpers
 //
@@ -39,13 +39,7 @@ import { html } from 'lit';
 
 /**
  * Enter review mode. Store the full state dict and
- * push to the picker so the banner appears. The
- * backend's `start_review` has already cleared its
- * own `_selected_files`, but we mirror the clear
- * locally (defense-in-depth, per
- * specs4/4-features/code-review.md) so the UI
- * reflects the empty selection without waiting for
- * the server's `filesChanged` broadcast.
+ * push to the picker so the banner appears.
  *
  * Detail shape matches backend's `get_review_state()`:
  * `{active: true, branch, base_commit, branch_tip,
@@ -54,59 +48,42 @@ import { html } from 'lit';
 export async function onReviewStarted(host, event) {
   const state = event.detail || {};
   host._reviewState = state;
-  // Clear selection — review starts with a clean slate.
-  // Direct-update pattern (not `applySelection` with
-  // `notifyServer=true`) because the server has
-  // already cleared on its side; round-tripping would
-  // be redundant.
-  host._selectedFiles = new Set();
   const picker = host._picker();
   if (picker) {
     picker.reviewState = state;
-    picker.selectedFiles = new Set();
     picker.requestUpdate();
-  }
-  const chat = host._chat();
-  if (chat) {
-    chat.selectedFiles = [];
-    chat.requestUpdate();
   }
   // Refresh file tree so the picker reflects the
   // staged state produced by the soft reset. Wait
-  // for the fetch to settle before the auto-select
-  // pass below — it needs `_latestStatusData` to be
+  // for the fetch to settle before the expand pass
+  // below — it needs `_latestStatusData` to be
   // populated with the review's staged files.
   await host._loadFileTree();
-  // Auto-select every file the review touches so the
-  // user doesn't have to tick them individually to
-  // get diffs into the LLM's context. The review's
-  // soft-reset puts every branch-tip change into the
-  // staged set, which `_loadFileTree` mapped into
-  // `_latestStatusData.staged`. Reuse the same
-  // union-with-existing-selection logic that the
-  // first-load path uses — it handles the "expand
-  // ancestors so the files are visible" step too.
+  // Open the directories holding the files the review
+  // touches, so entering a review lands the user
+  // looking at it. The review's soft-reset puts every
+  // branch-tip change into the staged set, which
+  // `_loadFileTree` mapped into
+  // `_latestStatusData.staged`.
   //
-  // We skip the `_initialAutoSelect` flag entirely
-  // here: that flag governs the first-ever tree load
-  // (so subsequent reloads don't undo user
-  // deselections). Review entry is a distinct event
-  // — the user explicitly asked to review, and every
-  // review starts from an empty selection cleared
-  // above — so re-applying the auto-select rule is
-  // expected, not a regression.
-  host._applyInitialAutoSelect();
+  // Nothing is put into the turn on the user's behalf:
+  // the review's shape reaches the agent through the
+  // framing block's review facts, which is a statement
+  // about the review rather than a claim about what the
+  // user picked (``specs5/plan/decisions.md`` CC-21).
+  //
+  // We skip the `_initialAutoExpand` flag entirely
+  // here: that flag governs the first-ever tree load,
+  // so a plain reload doesn't re-open directories the
+  // user has since collapsed. Review entry is a
+  // distinct event — the user explicitly asked to
+  // review — so re-applying the rule is expected.
+  host._applyInitialAutoExpand();
 }
 
 /**
  * Exit review mode. Clear local state and push null
- * to the picker so the banner disappears. Selection
- * is NOT cleared here — the server's `end_review`
- * doesn't touch `_selected_files`, and the user may
- * want to continue with the files they had in review
- * context. If the server's selection broadcast fires
- * later, the normal `files-changed` handler picks it
- * up.
+ * to the picker so the banner disappears.
  */
 export function onReviewEnded(host) {
   host._reviewState = null;

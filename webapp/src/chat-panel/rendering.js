@@ -105,7 +105,6 @@ import {
   cancel,
   closeLightbox,
   insertSnippet,
-  onAddAllFiles,
   onFileChipClick,
   onHistoryCancel,
   onHistorySelect,
@@ -895,20 +894,19 @@ export function renderEditSummary(panel, msg) {
   // Detect whether a retry prompt was populated.
   // We don't track this as state; re-derive from
   // the same conditions the builder uses.
-  const selected = new Set(
-    Array.isArray(panel.selectedFiles) ? panel.selectedFiles : [],
-  );
+  //
+  // A third condition sat here: an `anchor_not_found`
+  // on a file that was in the picker's selection, which
+  // meant "the model was shown this file and still
+  // missed the anchor". There is no selection to ask
+  // (``specs5/plan/decisions.md`` CC-21), and no
+  // browser-side set that answers the same question —
+  // what the model was shown is the CLI's business now.
   const hasAmbiguous = results.some(
     (r) => r && r.error_type === 'ambiguous_anchor',
   );
-  const hasInContextMismatch = results.some((r) => {
-    if (!r || r.error_type !== 'anchor_not_found') return false;
-    const path = r.file_path || r.file;
-    return typeof path === 'string' && selected.has(path);
-  });
   const hasNotInContext = notInContext > 0;
-  const retryPromptPopulated =
-    hasAmbiguous || hasInContextMismatch || hasNotInContext;
+  const retryPromptPopulated = hasAmbiguous || hasNotInContext;
 
   const stats = [];
   if (applied > 0) {
@@ -1695,11 +1693,16 @@ function onFileSearchHeaderClick(filePath) {
 /**
  * Collect every file path referenced by an
  * assistant message — both edit-block headers
- * and inline prose mentions. Returns
- * `[{path, inContext}]` deduplicated in
- * first-seen order, with `inContext` reflecting
- * whether the path is currently in
- * `selectedFiles`.
+ * and inline prose mentions. Returns `[{path}]`
+ * deduplicated in first-seen order.
+ *
+ * Each entry used to carry an `inContext` flag
+ * saying whether the path was in the picker's
+ * selection, which drove the chips' ✓/+ marks
+ * and the "Add All" button. Both went with the
+ * selection (``specs5/plan/decisions.md``
+ * CC-21); the summary is a list of what this
+ * message named, and every entry is alike.
  *
  * Edit blocks always contribute their
  * `filePath` — the LLM unambiguously named the
@@ -1716,9 +1719,6 @@ export function collectMessageFiles(panel, msg) {
   if (!msg || msg.role !== 'assistant') return [];
   const content =
     typeof msg.content === 'string' ? msg.content : '';
-  const selected = new Set(
-    Array.isArray(panel.selectedFiles) ? panel.selectedFiles : [],
-  );
   const seen = new Set();
   const out = [];
 
@@ -1733,10 +1733,7 @@ export function collectMessageFiles(panel, msg) {
         !seen.has(seg.filePath)
       ) {
         seen.add(seg.filePath);
-        out.push({
-          path: seg.filePath,
-          inContext: selected.has(seg.filePath),
-        });
+        out.push({ path: seg.filePath });
       }
     }
   }
@@ -1759,10 +1756,7 @@ export function collectMessageFiles(panel, msg) {
         if (seen.has(path)) continue;
         if (proseContainsPath(content, path)) {
           seen.add(path);
-          out.push({
-            path,
-            inContext: selected.has(path),
-          });
+          out.push({ path });
         }
       }
     }
@@ -1834,20 +1828,23 @@ function isMentionBoundary(ch, position) {
  *
  * Layout:
  *
- *   📁 Files Referenced       [+ Add All (N)]
- *   [✓ path/to/in.py]  [+ path/to/out.py]
+ *   📁 Files Referenced
+ *   [↗ path/to/a.py]  [↗ path/to/b.py]
  *
- * Chips show ✓ for in-context (muted style) and
- * + for not-in-context (accent style). Clicking
- * a chip dispatches `file-chip-click` with
- * `{path, navigate: false}`. The "Add All"
- * button is shown only when ≥2 files are not
- * currently in context.
+ * Clicking a chip dispatches `file-chip-click`,
+ * which opens the file in the viewer.
+ *
+ * The header carried a "+ Add All (N)" button and
+ * each chip a ✓/+ mark showing whether the file
+ * was in the picker's selection. Both went with
+ * the selection (``specs5/plan/decisions.md``
+ * CC-21). What's left is the part that was always
+ * useful on its own: the files this message
+ * named, collected in one place, one click from
+ * open.
  */
 export function renderFileSummary(panel, files) {
   if (!Array.isArray(files) || files.length === 0) return '';
-  const notInContext = files.filter((f) => !f.inContext);
-  const showAddAll = notInContext.length >= 2;
   return html`
     <div class="file-summary-section" role="group"
       aria-label="Files referenced by this message">
@@ -1855,41 +1852,20 @@ export function renderFileSummary(panel, files) {
         <span class="file-summary-title">
           📁 Files Referenced
         </span>
-        ${showAddAll
-          ? html`<button
-              class="file-summary-add-all"
-              @click=${(e) => {
-                e.stopPropagation();
-                onAddAllFiles(panel, notInContext);
-              }}
-              title="Add all unselected files to context"
-              aria-label="Add all ${notInContext.length} unselected files to context"
-            >
-              + Add All (${notInContext.length})
-            </button>`
-          : ''}
       </div>
       <div class="file-summary-chips">
         ${files.map(
           (file) => html`
             <button
-              class="file-chip ${file.inContext
-                ? 'in-context'
-                : 'not-in-context'}"
+              class="file-chip"
               @click=${(e) => {
                 e.stopPropagation();
                 onFileChipClick(panel, file.path);
               }}
-              title=${file.inContext
-                ? `${file.path} — in context (click to remove)`
-                : `${file.path} — click to add to context`}
-              aria-label=${file.inContext
-                ? `Remove ${file.path} from context`
-                : `Add ${file.path} to context`}
+              title="${file.path} — click to open"
+              aria-label="Open ${file.path}"
             >
-              <span class="file-chip-mark" aria-hidden="true">
-                ${file.inContext ? '✓' : '+'}
-              </span>
+              <span class="file-chip-mark" aria-hidden="true">↗</span>
               <span class="file-chip-path">${file.path}</span>
             </button>
           `,

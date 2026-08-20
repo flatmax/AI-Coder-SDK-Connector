@@ -36,7 +36,7 @@ const CONTEXT_USAGE_TIMEOUT_MS = 90000;
  *     the toggle it fed was retired in phase 4.
  *   - `enrichment_status` — the doc-index KeyBERT probe. Its
  *     one-shot toast stays silent rather than firing wrongly.
- *   - `excluded_index_files` — becomes `denied_read_files`
+ *   - `excluded_index_files` — became `denied_read_files`
  *     under CC-14, read by the picker, not here.
  */
 export async function fetchCurrentState(host) {

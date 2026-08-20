@@ -844,21 +844,25 @@ export function resumeStreamBlocks(panel, tab, stream) {
  * The server broadcasts user messages to every client. If we are the sender we
  * already added it optimistically in `send`, so the echo is ignored. If we are
  * a collaborator (no in-flight request) the message is added so it appears
- * before the streaming response arrives, with the same file hints the sender
- * saw.
+ * before the streaming response arrives.
+ *
+ * The broadcast used to carry a `files` list — the sender's checkbox selection,
+ * echoed so collaborators saw the same file hints. Both ends of that channel
+ * are gone (``specs5/plan/decisions.md`` CC-21); a collaborator who wants to
+ * know which files the turn is about reads the prompt, where they are now
+ * named. Note that the `files` on an *assistant* message is a different thing
+ * entirely — the files the agent modified — and is untouched.
  */
 export function onUserMessage(panel, event) {
   if (panel._currentRequestId) return;
   const data = event.detail || {};
   const content = data.content ?? '';
   if (!content) return;
-  const files = Array.isArray(data.files) ? data.files : undefined;
   panel.messages = [
     ...panel.messages,
     {
       role: 'user',
       content,
-      ...(files && files.length ? { files } : {}),
       ...(data.request_id ? { request_id: data.request_id } : {}),
     },
   ];

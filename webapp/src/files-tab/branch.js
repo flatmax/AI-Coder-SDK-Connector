@@ -63,11 +63,10 @@ export async function onBranchMenuRequested(host) {
  * (belt-and-braces).
  *
  * On success we reload the file tree so the
- * picker reflects the new branch. The backend's
- * post-write callback fires `filesChanged`-adjacent
- * behaviour via LLMService refreshes, but the tree
- * RPC is cheap and a fresh call keeps the UI
- * authoritative.
+ * picker reflects the new branch. A switch can
+ * change every path's git status at once and the
+ * tree RPC is cheap, so we refetch rather than try
+ * to reason about what moved.
  */
 export async function onBranchSwitchRequested(host, event) {
   const name = event.detail?.name;

@@ -79,7 +79,6 @@ export function onFileSearchChanged(host, event) {
     if (prev) {
       picker.restoreExpandedState();
       picker.tree = host._latestTree;
-      picker.selectedFiles = new Set(host._selectedFiles);
       picker.requestUpdate();
     }
     return;

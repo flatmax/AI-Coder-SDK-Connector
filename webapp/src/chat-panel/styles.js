@@ -2034,9 +2034,15 @@ export const STYLES = css`
 
   /* File summary section — renders below the assistant
    * message body, shows every file the message referenced
-   * (via edit blocks or inline mentions) as a chip. The
-   * chips are deliberately NOT styled as links — they're
-   * buttons that toggle selection, not navigation. */
+   * (via edit blocks or inline mentions) as a chip. Every
+   * chip opens its file in the viewer.
+   *
+   * The chips used to carry two presentations — a muted
+   * one for files in the picker's selection and an accent
+   * one for files not in it, with a ✓/+ mark and an
+   * "Add All" button in the header. All of that went with
+   * the selection (specs5/plan/decisions.md CC-21), so
+   * there is one chip style now. */
   .file-summary-section {
     margin-top: 0.75rem;
     padding-top: 0.5rem;
@@ -2055,22 +2061,6 @@ export const STYLES = css`
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-secondary, #8b949e);
-  }
-  .file-summary-add-all {
-    background: rgba(88, 166, 255, 0.1);
-    border: 1px solid rgba(88, 166, 255, 0.3);
-    color: var(--accent-primary, #58a6ff);
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-family: inherit;
-    font-weight: 500;
-    transition: background 120ms ease, border-color 120ms ease;
-  }
-  .file-summary-add-all:hover {
-    background: rgba(88, 166, 255, 0.2);
-    border-color: rgba(88, 166, 255, 0.5);
   }
   .file-summary-chips {
     display: flex;
@@ -2095,36 +2085,13 @@ export const STYLES = css`
     background: rgba(240, 246, 252, 0.06);
     border-color: rgba(240, 246, 252, 0.25);
   }
-  /* In-context files — muted presentation. They're
-   * already selected; no call-to-action needed. */
-  .file-chip.in-context {
-    color: var(--text-secondary, #8b949e);
-    border-color: rgba(126, 231, 135, 0.25);
-  }
-  .file-chip.in-context:hover {
-    color: var(--text-primary, #c9d1d9);
-    border-color: rgba(126, 231, 135, 0.4);
-  }
-  .file-chip.in-context .file-chip-mark {
-    color: #7ee787;
-  }
-  /* Not-in-context files — accent presentation. This
-   * is the action chip; clicking adds the file to
-   * context. */
-  .file-chip.not-in-context {
-    border-color: rgba(88, 166, 255, 0.3);
-  }
-  .file-chip.not-in-context:hover {
-    background: rgba(88, 166, 255, 0.1);
-    border-color: rgba(88, 166, 255, 0.5);
-  }
-  .file-chip.not-in-context .file-chip-mark {
-    color: var(--accent-primary, #58a6ff);
-    font-weight: 600;
-  }
+  /* The ↗ open-affordance glyph. Muted so the path
+   * reads first — the glyph says what the click does,
+   * it isn't the thing being pointed at. */
   .file-chip-mark {
     font-size: 0.875rem;
     line-height: 1;
+    color: var(--text-secondary, #8b949e);
   }
   .file-chip-path {
     /* Truncate very long paths. Full path is in the

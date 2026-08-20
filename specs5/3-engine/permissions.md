@@ -59,8 +59,10 @@ documented failure mode of every permission UI.
 Read-only calls being ungated by default is a deliberate trade. The alternative — gating reads —
 produces the click-through failure, and a read of a file inside the repo the user opened is within
 the authority the user granted by opening it. Users who want reads gated set a deny or ask rule in
-project settings; the file picker's third checkbox state writes exactly such a rule (see
-[decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract)).
+project settings; the file picker's deny-read gesture — shift+click on a row, or its context menu —
+writes exactly such a rule (see [decisions § CC-14](../plan/decisions.md#cc-14), which repurposed the
+checkbox's third state into it, and [CC-21](../plan/decisions.md#cc-21), which moved it onto the row
+when the checkbox went).
 
 **"Ungated" is two different mechanisms, and only one of them is ours.** `Read`, `Glob`, `Grep`,
 `WebFetch`, `WebSearch` and `Task` are ungated because the CLI never raises a permission request for

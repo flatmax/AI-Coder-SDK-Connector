@@ -11,8 +11,8 @@
 // 2. First-call microtask deferral. When `rpc-ready` fires, multiple
 //    components' event listeners dispatch synchronously in registration
 //    order. If component A's listener immediately issues a call that
-//    triggers a broadcast event (e.g. `set_selected_files` which the
-//    server echoes as `filesChanged`), component B — registered later
+//    triggers a broadcast event (e.g. `reset_to_head`, which the server
+//    follows with a `filesModified` push), component B — registered later
 //    in the same tick — might not have run yet, leaving B in an
 //    inconsistent state (receives the broadcast before thinking it's
 //    connected).

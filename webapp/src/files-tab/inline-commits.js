@@ -85,19 +85,18 @@ export async function onRenameCommitted(host, event) {
       return;
     }
     await host._loadFileTree();
-    // Migrate selection and exclusion state to the
-    // new path. For directory renames we migrate
-    // every descendant path's prefix so nested
-    // selections survive.
+    // Carry the deny rule across to the new path. For
+    // directory renames we rewrite every descendant
+    // path's prefix so nested rules survive.
+    //
+    // Renaming a file is not permission to read it. A
+    // rule left behind on the old path would silently
+    // stop applying — the file is still the file, the
+    // user still doesn't want it read, and nothing in
+    // the UI would say the rule had lapsed.
     if (isDir) {
       migrateSubtreeState(host, sourcePath, targetPath);
     } else {
-      if (host._selectedFiles.has(sourcePath)) {
-        const next = new Set(host._selectedFiles);
-        next.delete(sourcePath);
-        next.add(targetPath);
-        host._applySelection(next, /* notifyServer */ true);
-      }
       if (host._excludedFiles.has(sourcePath)) {
         const next = new Set(host._excludedFiles);
         next.delete(sourcePath);
@@ -328,11 +327,16 @@ export function findNodeByPath(host, path) {
 }
 
 /**
- * Migrate every selection and exclusion entry
- * whose path lives under `oldDir` to the
- * equivalent path under `newDir`. Called after a
- * successful directory rename so that per-file
- * state survives the move.
+ * Migrate every deny-read entry whose path lives
+ * under `oldDir` to the equivalent path under
+ * `newDir`. Called after a successful directory
+ * rename so the rules survive the move.
+ *
+ * Still a `migrateSet` closure over one set rather
+ * than a straight loop: there were two sets here
+ * (selection and denial) until CC-21 removed the
+ * first, and a second caller — a git mv the picker
+ * doesn't drive — would want the same rewrite.
  */
 export function migrateSubtreeState(host, oldDir, newDir) {
   const oldPrefix = `${oldDir}/`;
@@ -350,10 +354,6 @@ export function migrateSubtreeState(host, oldDir, newDir) {
     }
     return mutated ? next : null;
   };
-  const nextSelected = migrateSet(host._selectedFiles);
-  if (nextSelected) {
-    host._applySelection(nextSelected, /* notifyServer */ true);
-  }
   const nextExcluded = migrateSet(host._excludedFiles);
   if (nextExcluded) {
     host._applyExclusion(nextExcluded, /* notifyServer */ true);

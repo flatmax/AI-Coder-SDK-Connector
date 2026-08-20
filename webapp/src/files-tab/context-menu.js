@@ -10,9 +10,8 @@
 // Some delegate to host helpers for cross-module
 // concerns:
 //
-//   - host._applySelection / host._applyExclusion —
-//     selection + read-denial paths still live on the
-//     host (stage 3 extracts them)
+//   - host._applyExclusion — the read-denial path,
+//     which still lives on the host
 //   - host._loadFileTree — tree refresh after every
 //     mutation
 //   - host._showToast — user-facing feedback
@@ -284,11 +283,13 @@ export async function dispatchDelete(host, path) {
       return;
     }
     await host._loadFileTree();
-    // Deleted files are also removed from selection /
-    // exclusion if they were there. Server's broadcast
-    // via `filesChanged` will adjust selection; we
-    // clear exclusion locally since there's no
-    // broadcast for that today.
+    // A deleted file drops out of the deny set with it.
+    // Done locally because there is no broadcast for the
+    // deny set today — and worth doing rather than
+    // leaving behind: a `Read` rule naming a path that no
+    // longer exists is a rule the user cannot see to
+    // remove, and it would reattach itself to any file
+    // later created at the same path.
     if (host._excludedFiles.has(path)) {
       const next = new Set(host._excludedFiles);
       next.delete(path);
@@ -330,40 +331,27 @@ export function dispatchDuplicate(host, path) {
 }
 
 /**
- * Add `path` to the excluded set via the standard
- * exclusion path. Idempotent — a file already
- * excluded produces a set-equality short-circuit
+ * Deny the agent `Read` on `path`. Idempotent — a file
+ * already denied produces a set-equality short-circuit
  * inside `_applyExclusion`, and the user sees no
  * server round-trip.
  *
- * Excluding a selected file also deselects it —
- * the two states are mutually exclusive. Mirrors
- * the shift+click behaviour in the picker's
- * `_toggleExclusion` path.
+ * Same effect as the picker's shift+click on the row;
+ * this is the menu route to it.
  */
 export function dispatchExclude(host, path) {
   if (host._excludedFiles.has(path)) return;
   const nextExcluded = new Set(host._excludedFiles);
   nextExcluded.add(path);
   host._applyExclusion(nextExcluded, /* notifyServer */ true);
-  // Deselect if currently selected — denied and
-  // selected can't coexist.
-  if (host._selectedFiles.has(path)) {
-    const nextSelected = new Set(host._selectedFiles);
-    nextSelected.delete(path);
-    host._applySelection(nextSelected, /* notifyServer */ true);
-  }
 }
 
 /**
- * Remove `path` from the excluded set. Returns the
- * file to the default index-only state — NOT to
- * selected. Matches the shift+click-from-excluded
- * semantics in the picker (the "Include in index"
- * menu item is the non-selecting path; users who
- * want to select it can tick the checkbox after).
+ * Allow the agent `Read` on `path` again — drop it from
+ * the deny set. Same effect as shift+clicking a denied
+ * row in the picker.
  *
- * Idempotent — a file not currently excluded
+ * Idempotent — a file not currently denied
  * short-circuits via set-equality.
  *
  * Allowing a read is written the same way as denying
@@ -664,12 +652,12 @@ export function dispatchNewDirectory(host, parentPath) {
 }
 
 /**
- * Add every descendant file to the excluded set.
+ * Deny the agent `Read` on every descendant file.
  * Skips the server round-trip when the union is
  * already the current state (every descendant
- * already excluded). Deselects any descendants
- * that were selected, matching the mutual-
- * exclusion rule between selection and exclusion.
+ * already denied).
+ *
+ * Same effect as shift+clicking the directory row.
  */
 export function dispatchExcludeAll(host, dirPath) {
   const files = collectDescendantFilesFromPath(host, dirPath);
@@ -677,21 +665,11 @@ export function dispatchExcludeAll(host, dirPath) {
   const nextExcluded = new Set(host._excludedFiles);
   for (const p of files) nextExcluded.add(p);
   host._applyExclusion(nextExcluded, /* notifyServer */ true);
-  // Deselect any that were selected. Same rationale
-  // as `dispatchExclude`.
-  const hadSelected = files.some((p) => host._selectedFiles.has(p));
-  if (hadSelected) {
-    const nextSelected = new Set(host._selectedFiles);
-    for (const p of files) nextSelected.delete(p);
-    host._applySelection(nextSelected, /* notifyServer */ true);
-  }
 }
 
 /**
- * Remove every descendant file from the excluded
- * set. Returns them to the plain unticked state —
- * does NOT auto-select, matching the file-level
- * Allow behaviour.
+ * Allow the agent `Read` on every descendant file
+ * again — drop the whole subtree from the deny set.
  */
 export function dispatchIncludeAll(host, dirPath) {
   const files = collectDescendantFilesFromPath(host, dirPath);

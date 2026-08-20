@@ -3,41 +3,38 @@
 // Extracted from index.js. The tree-load lifecycle is
 // the longest single flow in the orchestrator — fetch
 // tree + branch info, build status data, derive flat
-// repo-files, run first-load auto-select, push to
-// children. This module owns it.
+// repo-files, expand what the user was working on, push
+// to children. This module owns it.
 //
 // Cross-module dependencies:
 //
-//   - selection.js's `applySelection` for the
-//     auto-select pass (called via host forwarder so
-//     the modified-file pin and short-circuit run)
 //   - exclusion.js's `applyExclusion` for the
 //     state-loaded restore path
 //
 // Reactive state read here lives on the host:
 // `_latestTree`, `_latestStatusData`,
 // `_latestBranchInfo`, `_repoFiles`, `_treeLoaded`,
-// `_initialAutoSelect`, `_childPropsPushed`,
+// `_initialAutoExpand`, `_childPropsPushed`,
 // `_reviewState`, `_activePath`. Mutations to these
 // fields go through plain assignment — every push to
 // children happens via `pushChildProps` which calls
 // `requestUpdate` on each.
 
 import { applyExclusion } from './exclusion.js';
-import { applySelection } from './selection.js';
 import { EMPTY_TREE } from './constants.js';
 import { flattenTreePaths } from './helpers.js';
 
 /**
  * Walk a file tree and collect every file node's path
- * for which `is_binary === true`. Binary files can't
- * usefully participate in LLM context (the backend
- * silently trims them at sync time), so the picker
- * disables their checkboxes and excludes them from
- * select-all / deselect-all descendant math — without
- * that, root and directory checkboxes could never
- * reach the "fully selected" or "fully unselected"
- * state when binaries were present.
+ * for which `is_binary === true`. The picker dims and
+ * italicises them: a binary is a file the user can open
+ * in the viewer only as bytes, and one whose path is
+ * rarely what they mean to hand the agent.
+ *
+ * It is a display hint and nothing more. Deny-read math
+ * deliberately counts binaries (see the picker's
+ * `_collectDescendantFiles`) — the agent can attempt a
+ * read on a PDF as readily as on a source file.
  */
 function collectBinaryPaths(node) {
   const out = new Set();
@@ -69,8 +66,8 @@ function collectBinaryPaths(node) {
  *   - `_repoFiles` — flat list for chat-panel
  *     mention detection
  *
- * Then runs the first-load auto-select pass (one-shot,
- * gated by `_initialAutoSelect`) and pushes to
+ * Then runs the first-load auto-expand pass (one-shot,
+ * gated by `_initialAutoExpand`) and pushes to
  * children.
  */
 export async function loadFileTree(host) {
@@ -169,23 +166,19 @@ export async function loadFileTree(host) {
   // circuits on empty input, so before the first load
   // the cost is zero.
   host._repoFiles = flattenTreePaths(host._latestTree);
-  // Collect binary paths so the picker can disable
-  // their checkboxes and exclude them from select-all
-  // descendant math. Without this, root checkbox
-  // could never reach all/none state when binaries
-  // are present.
+  // Collect binary paths so the picker can dim them.
   host._binaryFiles = collectBinaryPaths(host._latestTree);
-  // First-load auto-select — picks up every file with
-  // pending changes so the user doesn't have to
-  // re-tick what they were just working on. Runs
-  // exactly once per component lifetime; subsequent
-  // reloads do nothing here. The flag flip happens
-  // synchronously so a re-entrant reload during the
-  // RPC that got us here can't trigger double-auto-
-  // select.
-  if (host._initialAutoSelect) {
-    host._initialAutoSelect = false;
-    applyInitialAutoSelect(host);
+  // First-load auto-expand — opens the directories
+  // holding every file with pending changes, so the work
+  // in progress is on screen without the user walking
+  // the tree to it. Runs exactly once per component
+  // lifetime; subsequent reloads do nothing here. The
+  // flag flip happens synchronously so a re-entrant
+  // reload during the RPC that got us here can't expand
+  // twice.
+  if (host._initialAutoExpand) {
+    host._initialAutoExpand = false;
+    applyInitialAutoExpand(host);
   }
   // Reset the push flag — a fresh tree load means the
   // children need fresh props, even if a previous load
@@ -197,18 +190,19 @@ export async function loadFileTree(host) {
 }
 
 /**
- * Apply the first-load auto-selection rule: union
- * every changed file (modified ∪ staged ∪ untracked
- * ∪ deleted) with the existing selection, then expand
- * the ancestor directories of every selected file so
- * the user can see them in the tree.
+ * Apply the first-load auto-expand rule: open the
+ * ancestor directories of every changed file (modified
+ * ∪ staged ∪ untracked ∪ deleted) so the work in
+ * progress is visible without walking the tree.
  *
- * Union semantics (not replace) preserve any
- * selection the server broadcast during startup —
- * e.g., a prior session's state restored by
- * `_restore_last_session` on the backend, or a collab
- * host's selection received via `files-changed`
- * before our first tree load.
+ * This used to also *select* those files, seeding the
+ * turn-framing hint. It no longer does. Git knowing a
+ * file changed is not the user saying they mean it, and
+ * the framing block said "the user has selected" about a
+ * set the user never touched (``specs5/plan/decisions.md``
+ * CC-21). Showing them is the honest half of that rule:
+ * an expanded directory makes a claim about where to
+ * look, not about what the user wants read.
  *
  * Called exactly once per component lifetime, by
  * `loadFileTree` after status data is built. The
@@ -216,7 +210,7 @@ export async function loadFileTree(host) {
  * mutations and pushes them to the picker in a single
  * render cycle.
  */
-export function applyInitialAutoSelect(host) {
+export function applyInitialAutoExpand(host) {
   const changed = new Set();
   const sd = host._latestStatusData;
   if (sd) {
@@ -234,35 +228,17 @@ export function applyInitialAutoSelect(host) {
     }
   }
   if (changed.size === 0) {
-    // Nothing changed — no selection to union, no
-    // ancestors to expand. Skip entirely so the
-    // `applySelection` short-circuit path isn't
-    // involved in the common "clean working tree"
-    // case.
+    // Clean working tree — nothing to reveal.
     return;
   }
-  // Union with existing selection. If the union is
-  // strictly a superset of what we already have,
-  // applySelection sends the new selection to the
-  // server; if it's equal (every changed file was
-  // already selected), the set-equality short-circuit
-  // inside applySelection makes this a no-op.
-  const union = new Set(host._selectedFiles);
-  for (const p of changed) union.add(p);
-  applySelection(host, union, /* notifyServer */ true);
-  // Expand ancestor directories of every selected
-  // file so they're visible in the tree. The picker
-  // doesn't auto-expand on selection normally —
-  // selection state is independent of expansion — so
-  // we have to do it here.
-  expandAncestorsOf(host, union);
+  expandAncestorsOf(host, changed);
 }
 
 /**
  * Mark every ancestor directory of every path in
  * `paths` as expanded in the picker. Mutates the
  * picker's `_expanded` Set directly. Called from
- * `applyInitialAutoSelect`; safe to call before the
+ * `applyInitialAutoExpand`; safe to call before the
  * first `pushChildProps` because it updates an
  * internal-state Set that the picker consults on its
  * next render.
@@ -278,9 +254,9 @@ export function expandAncestorsOf(host, paths) {
     // The picker's default `_expanded` starts empty;
     // we can't reach into it until it mounts, so in
     // the rare mount-order case (picker not yet
-    // visible when auto-select runs) we just skip
-    // the expansion — the user can still reach the
-    // auto-selected files manually.
+    // visible when auto-expand runs) we just skip
+    // the expansion — the user can still walk the
+    // tree to the changed files manually.
     return;
   }
   const next = new Set(picker._expanded);
@@ -354,24 +330,16 @@ export function onFilesModified(host) {
  * `state-loaded` window event from AppShell — fires
  * after every successful `get_current_state()` fetch
  * (initial connect and reconnects). Restore the
- * server's authoritative selection / exclusion sets so
- * a browser refresh preserves what the user had ticked,
- * even when the working tree is clean (and thus
- * `applyInitialAutoSelect` wouldn't otherwise seed
- * anything).
+ * server's authoritative deny-read set so a browser
+ * refresh preserves the permission rules the user
+ * wrote.
  *
- * Do NOT suppress the first-load auto-select. Per
- * specs4/5-webapp/file-picker.md § Auto-Selection, the
- * git-changed union must "merge with any server-
- * provided selection … rather than replacing" it. The
- * state-loaded snapshot typically arrives before the
- * tree loads (AppShell's `_fetchCurrentState` fires on
- * `setupDone`, before this component's `onRpcReady`
- * microtask defers the tree RPC), so when
- * `applyInitialAutoSelect` runs on tree load it sees
- * the server's selection already installed in
- * `_selectedFiles` and unions the git-changed files on
- * top.
+ * No selection is restored, because none is kept: a
+ * file the user wants read is named in the prompt, and
+ * a sent prompt needs nothing carried across a refresh
+ * (``specs5/plan/decisions.md`` CC-21). Deny rules are
+ * the opposite — they outlive the turn they were
+ * written in, which is exactly why they survive here.
  *
  * Also restores review state so the picker's amber
  * banner reappears after a browser refresh during an
@@ -384,13 +352,14 @@ export function onFilesModified(host) {
 export function onStateLoaded(host, event) {
   const state = event?.detail;
   if (!state || typeof state !== 'object') return;
-  const selected = state.selected_files;
-  if (Array.isArray(selected)) {
-    applySelection(
-      host, new Set(selected), /* notifyServer */ false,
-    );
-  }
-  const excluded = state.excluded_index_files;
+  // `denied_read_files`, not the pre-CC-14
+  // `excluded_index_files` this used to read. The rename
+  // landed on the backend and not here, so the restore
+  // silently did nothing: every refresh dropped the
+  // user's deny rules out of the picker while the CLI
+  // went on honouring them, which reads as the rules
+  // having been forgotten.
+  const excluded = state.denied_read_files;
   if (Array.isArray(excluded)) {
     applyExclusion(
       host, new Set(excluded), /* notifyServer */ false,

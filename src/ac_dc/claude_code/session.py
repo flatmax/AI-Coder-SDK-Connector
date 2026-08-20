@@ -119,7 +119,6 @@ class Turn:
 
     request_id: str
     message: str
-    files: list[str] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     viewer: ViewerFraming | None = None
     # Review-mode facts, when review is active. Shaped by
@@ -167,18 +166,16 @@ def build_framing(turn: Turn) -> str:
     never file content (``specs5/3-engine/session.md`` § Turn framing,
     ``specs5/plan/decisions.md`` CC-14).
 
+    Only facts the user could not reasonably have typed. A file the user
+    wants named is named in the prompt — the picker inserts the path there
+    rather than into a block out here (``specs5/plan/decisions.md`` CC-21),
+    so framing carries the viewer's live cursor and the review's shape and
+    nothing else.
+
     Returns the empty string when there is nothing to say, so an ordinary
     turn is sent exactly as the user typed it.
     """
     lines: list[str] = []
-
-    if turn.files:
-        lines.append(
-            "Files the user has selected in the file picker (a hint about what "
-            "they are pointing at, not their contents — read them yourself if "
-            "you need them):"
-        )
-        lines.extend(f"- {path}" for path in turn.files)
 
     if turn.viewer is not None:
         where = f"- {turn.viewer.path}"

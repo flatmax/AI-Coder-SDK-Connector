@@ -110,10 +110,13 @@ export function _saveDraft(value) {
  * Drops the snippet drawer on send (auto-close —
  * users want vertical space back during streaming).
  *
- * `ClaudeCodeService.chat_streaming` takes five arguments —
- * `(request_id, message, files, images, viewer)`. What the native
- * engine's eight-argument form carried and this one does not:
+ * `ClaudeCodeService.chat_streaming` takes four arguments —
+ * `(request_id, message, images, viewer)`. What the native engine's
+ * eight-argument form carried and this one does not:
  *
+ *   - `files` — the picker's checkbox list, removed in CC-21. A path
+ *     the user wants read is typed (or middle-clicked) into the
+ *     message itself, where the CLI's own `@` expansion sees it.
  *   - `excluded_urls` — the URL-chip feature is gone (rendering.js).
  *     The agent fetches what it wants with WebFetch.
  *   - `agent_tag` — there is one CLI session and one turn in flight.
@@ -262,9 +265,6 @@ export async function send(panel) {
       'ClaudeCodeService.chat_streaming',
       requestId,
       text,
-      Array.isArray(panel.selectedFiles)
-        ? panel.selectedFiles
-        : [],
       images,
       // viewer framing — see the docstring. Explicitly null rather
       // than omitted so the positional arity is unambiguous when a
@@ -1524,152 +1524,41 @@ export async function handleCodeCopy(panel, copyBtn) {
 }
 
 // ---------------------------------------------------------------
-// File chip click + Add-All
+// File chip click
 // ---------------------------------------------------------------
 
 /**
- * Handle a chip click — dispatch
- * `file-chip-click` with `navigate: false` so
- * the files-tab toggles selection without
- * opening the file in the viewer.
+ * Handle a chip click in an assistant message's
+ * "Files Referenced" summary — dispatch
+ * `file-chip-click`, which the files-tab turns
+ * into a `navigate-file`.
  *
- * When adding a not-in-context file (not
- * removing an in-context one), accumulate
- * natural-language text in the chat input per
- * spec.
+ * The chips used to be a context-management
+ * surface: each one toggled the file into or out
+ * of the picker's selection, `navigate: false`
+ * kept the click from moving the viewer, and an
+ * add wrote "The file X added. Do you want to
+ * see more files before you continue?" into the
+ * composer on the user's behalf. All three went
+ * with the selection (``specs5/plan/decisions.md``
+ * CC-21) — writing a sentence into someone's
+ * prompt to describe a state change that no
+ * longer happens is worse than writing nothing.
+ *
+ * The `navigate: false` field went with them. It
+ * existed to distinguish these chips from the
+ * inline prose mentions, and there is nothing left
+ * to distinguish: both open the file.
  */
 export function onFileChipClick(panel, path) {
   if (typeof path !== 'string' || !path) return;
-  const selected = new Set(
-    Array.isArray(panel.selectedFiles) ? panel.selectedFiles : [],
-  );
-  const isAdd = !selected.has(path);
   panel.dispatchEvent(
     new CustomEvent('file-chip-click', {
-      detail: { path, navigate: false },
+      detail: { path },
       bubbles: true,
       composed: true,
     }),
   );
-  if (isAdd) {
-    accumulateAddedFilesInInput(panel, [path]);
-  }
-}
-
-/**
- * Accumulate natural-language text into the chat
- * input announcing files the user just added to
- * context.
- *
- * Per specs4/5-webapp/chat.md §Input
- * Accumulation on Add:
- *   - Templates — "The file X added. Do you
- *     want to see more files before you
- *     continue?" for the first add; updated to
- *     join multiple files naturally on
- *     subsequent adds.
- *   - Only basename used in accumulated text.
- *   - Falls back to appending a parenthetical
- *     note for non-matching input states.
- *
- * The "matching input state" is text that
- * already follows the generated template — we
- * splice additional filenames into the existing
- * phrase. Anything else (the user typed their
- * own message, or the phrasing diverged) falls
- * back to a parenthetical note appended at the
- * end so we don't rewrite user content.
- */
-export function accumulateAddedFilesInInput(panel, paths) {
-  if (!Array.isArray(paths) || paths.length === 0) return;
-  // Basename only per spec — trailing segment
-  // after the last slash. Works for both forward
-  // and back slashes so Windows-style paths
-  // don't slip through.
-  const toBasename = (p) => {
-    const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-    return idx >= 0 ? p.slice(idx + 1) : p;
-  };
-  const newNames = paths
-    .map(toBasename)
-    .filter((n) => typeof n === 'string' && n);
-  if (newNames.length === 0) return;
-
-  const current = panel._input;
-  const trailing =
-    ' Do you want to see more files before you continue?';
-
-  // Detect an existing accumulated phrase we can
-  // extend. Matches both singular ("The file X
-  // added.") and plural ("The files X, Y
-  // added.") forms followed by the trailing
-  // question.
-  const existingRe =
-    /^The files? ([^.]+?) added\. Do you want to see more files before you continue\?\s*$/;
-  const match = current.match(existingRe);
-
-  let next;
-  if (match) {
-    const existing = match[1]
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const seen = new Set(existing);
-    const merged = [...existing];
-    for (const name of newNames) {
-      if (!seen.has(name)) {
-        seen.add(name);
-        merged.push(name);
-      }
-    }
-    const noun = merged.length === 1 ? 'file' : 'files';
-    next = `The ${noun} ${merged.join(', ')} added.${trailing}`;
-  } else if (current.trim() === '') {
-    const noun = newNames.length === 1 ? 'file' : 'files';
-    next = `The ${noun} ${newNames.join(', ')} added.${trailing}`;
-  } else {
-    // Non-matching input — user typed something
-    // of their own. Don't rewrite their text;
-    // append a parenthetical note.
-    const noun = newNames.length === 1 ? 'file' : 'files';
-    const suffix = ` (${noun} added: ${newNames.join(', ')})`;
-    next = current + suffix;
-  }
-
-  panel._input = next;
-  panel.updateComplete.then(() => {
-    const ta = panel.shadowRoot?.querySelector('.input-textarea');
-    if (!ta) return;
-    ta.value = next;
-    ta.setSelectionRange(next.length, next.length);
-    ta.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-}
-
-/**
- * "Add All" button handler. Dispatches
- * `file-chips-add-all` with `{paths: [...]}`
- * carrying the list of not-in-context paths. The
- * files-tab handler batches them into a single
- * `set_selected_files` call.
- *
- * Also accumulates natural-language text in the
- * chat input — same path as single-chip add.
- */
-export function onAddAllFiles(panel, notInContext) {
-  if (!Array.isArray(notInContext) || notInContext.length === 0) return;
-  const paths = notInContext
-    .map((f) => f.path)
-    .filter((p) => typeof p === 'string' && p);
-  if (paths.length === 0) return;
-  panel.dispatchEvent(
-    new CustomEvent('file-chips-add-all', {
-      detail: { paths },
-      bubbles: true,
-      composed: true,
-    }),
-  );
-  accumulateAddedFilesInInput(panel, paths);
 }
 
 // ---------------------------------------------------------------

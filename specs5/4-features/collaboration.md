@@ -87,7 +87,7 @@ Restricted to localhost connections (non-localhost participants get an error):
 | Permissions | **Resolve permission**, set permission mode |
 | Engine lifecycle | Connect the engine, shut the engine down |
 | Session management | New session, resume session (with or without fork), delete engine session |
-| Engine state | Set selected files, set denied-read files, set model, rewind files, stop a subagent task |
+| Engine state | Set denied-read files, set model, rewind files, stop a subagent task |
 | MCP control | Reconnect an MCP server, toggle an MCP server |
 | Review mode | Start review, end review |
 | Git operations | Commit, stage/unstage/discard files, rename/delete/create/write files, reset hard, stage all |
@@ -184,8 +184,7 @@ When collaboration is disabled:
 ## Participant UI Restrictions
 When the calling client is non-localhost, the frontend applies restrictions:
 - Chat input area replaced with a static "Viewing as participant" bar
-- File picker context menu — git-mutating items hidden (rename, delete, new file)
-- File picker checkboxes hidden — selection is the host's attention hint and only the host sets it
+- File picker context menu — git-mutating items hidden (rename, delete, new file). The deny-read items stay visible and are refused at the RPC with a `restricted` toast, because a participant reading that a file is off-limits to the agent is information, not a mutation
 - Commit button hidden
 - Settings tab editing disabled
 - Permission-mode selector shown but read-only — a participant must be able to *see* the posture the agent is operating under, and must not be able to change it
@@ -224,14 +223,23 @@ Remote collaborators open the share link (which uses the host's LAN IP) to load 
 ### Streaming
 
 - The broadcast mechanism reaches all connected remotes automatically
-- Streaming chunks, completions, files-changed events, and all server-push events reach all admitted clients
+- Streaming chunks, completions, `filesModified` events, and all server-push events reach all admitted clients
 - No changes needed to the streaming pipeline
 
-### File Selection Sync
+### Deny-Read Is Not Synced
 
-- When a localhost client changes file selection, the server broadcasts a files-changed event to all clients
-- All browsers show the same checked files in the file picker
-- Only localhost clients can change the selection; everyone sees the result immediately
+A selection sync section stood here: a localhost client toggled a checkbox, the server broadcast
+`filesChanged`, and every browser showed the same ticks. [CC-21](../plan/decisions.md#cc-21) removed
+the selection, so there is nothing left to keep in agreement.
+
+Deny-read, the per-path state that survived, is deliberately **not** given the same treatment:
+
+- The setter is localhost-gated like every other mutation, and returns `restricted` to a participant
+- It broadcasts nothing. A participant learns the current rules from `denied_read_files` in the state
+  snapshot it fetches on load or reconnect
+- So a rule the host writes mid-session does not reach an already-loaded participant's tree until they
+  reload. Accepted: the rules are enforced by the CLI reading `.claude/settings.local.json`, not by any
+  browser, so a stale strikethrough misinforms a spectator without weakening anything
 
 ### File Navigation Sync
 

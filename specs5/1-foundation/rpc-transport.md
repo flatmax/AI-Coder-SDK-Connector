@@ -59,7 +59,7 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 - The guard counts user intent, not engine activity: subagents spawned by the agent's `Task` tool are internal to the turn and are never blocked by it. Their events are correlated by agent ID inside the parent turn's request ID (see [session.md](../3-engine/session.md#message-taxonomy--ui))
 - Request IDs are the multiplexing primitive — the transport never assumes a singleton stream; every server-push event carries the exact ID of the stream it belongs to
 - Non-streaming calls are served concurrently
-- All state is global across connected clients; file selection and streaming are broadcast to all admitted remotes
+- All state is global across connected clients; streaming and turn events are broadcast to all admitted remotes
 
 ## Reconnection Behavior
 

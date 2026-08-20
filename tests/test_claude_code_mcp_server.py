@@ -555,17 +555,28 @@ class TestReviewState:
 
 
 class TestUiState:
-    async def test_it_reports_selection_and_viewer(self):
+    async def test_it_reports_the_viewer_and_the_mode(self):
         bridge = McpBridge(ui_state=lambda: {
-            "selected_files": ["src/a.py"],
             "viewer": {"path": "src/b.py", "start_line": 10, "end_line": 20},
             "permission_mode": "acceptEdits",
         })
         answer = text_of(await bridge.ui_state())
-        assert "src/a.py" in answer
         assert "src/b.py" in answer
         assert "lines 10-20" in answer
         assert "acceptEdits" in answer
+
+    async def test_it_does_not_report_a_picker_selection(self):
+        """There is no selection to report — pointing at a file happens in
+        the prompt now (``specs5/plan/decisions.md`` CC-21). A stray
+        ``selected_files`` key from an older caller is ignored rather than
+        rendered."""
+        bridge = McpBridge(ui_state=lambda: {
+            "selected_files": ["src/a.py"],
+            "viewer": {"path": "src/b.py"},
+        })
+        answer = text_of(await bridge.ui_state())
+        assert "src/a.py" not in answer
+        assert "ticked" not in answer
 
     async def test_a_single_line_cursor_is_not_reported_as_a_range(self):
         bridge = McpBridge(ui_state=lambda: {
@@ -578,7 +589,6 @@ class TestUiState:
     async def test_an_empty_ui_says_nothing_is_open(self):
         """Rather than an empty answer, which reads as a broken tool."""
         answer = text_of(await McpBridge().ui_state())
-        assert "No files are ticked" in answer
         assert "Nothing is open" in answer
 
     async def test_it_points_at_review_state_rather_than_duplicating_it(self):

@@ -394,16 +394,7 @@ class McpBridge:
         state = self._ui_state() or {}
         lines: list[str] = []
 
-        selected = state.get("selected_files") or []
-        if selected:
-            lines.append("Files ticked in the file picker (a hint about what the")
-            lines.append("user is pointing at, not their contents):")
-            lines.extend(f"  {path}" for path in selected)
-        else:
-            lines.append("No files are ticked in the file picker.")
-
         viewer = state.get("viewer")
-        lines.append("")
         if isinstance(viewer, dict) and viewer.get("path"):
             where = f"  {viewer['path']}"
             start = viewer.get("start_line")

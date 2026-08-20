@@ -199,7 +199,7 @@ The engine-facing half of this service is pinned elsewhere and deliberately not 
 
 | Group | Twin |
 |---|---|
-| State (`get_current_state` → `EngineState`), engine health, file selection, denied-read files, turns, live controls, introspection | `specs-reference/3-engine/session.md` § Service: ClaudeCodeService |
+| State (`get_current_state` → `EngineState`), engine health, denied-read files, turns, live controls, introspection | `specs-reference/3-engine/session.md` § Service: ClaudeCodeService |
 | `resolve_permission` and the permission payloads | `specs-reference/3-engine/permissions.md` |
 | Sessions, mirrored history, subagent transcripts | `specs-reference/3-engine/history.md` § RPC surface |
 
@@ -289,6 +289,10 @@ Removed with the native engine, listed so a reader of old code knows nothing rep
 `clear_url_cache`), and the four agent-turn methods (`get_turn_archive`, `get_agent_history`,
 `close_agent_context`, `set_agent_selected_files`).
 
+Removed later by CC-21, same reason for listing them: `get_selected_files`, `set_selected_files`, and
+`chat_streaming`'s `files` parameter. Nothing replaced them either — a path the user wants read is
+named in the prompt, where the CLI's own `@` expansion handles it.
+
 The nearest surviving thing to `get_context_breakdown` is `get_context_usage`, and it is not the same
 shape or the same idea — it reports the engine's own categories, not our tiers. See
 `specs5/3-engine/context-visibility.md`.
@@ -344,7 +348,6 @@ What remains here are the events that are not turn-scoped and did not change:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `AcApp.filesChanged` | `selected_files: list[str]` | `true` |
 | `AcApp.commitResult` | `result: {sha, short_sha, message, status, error?}` | `true` |
 | `AcApp.sessionChanged` | `data: {session_id: str, messages: list[MessageDict]}` | `true` |
 | `AcApp.startupProgress` | `stage: str, message: str, percent: int` | `true` |
@@ -356,6 +359,12 @@ What remains here are the events that are not turn-scoped and did not change:
 | `AcApp.clientLeft` | `data: {client_id, ip, role}` | `true` |
 | `AcApp.roleChanged` | `data: {role, reason}` | `true` |
 | `AcApp.docConvertProgress` | `data: {...}` — shape varies by progress stage | `true` |
+
+`AcApp.filesChanged` (`selected_files: list[str]`) sat in this table until CC-21 and is the one
+*departure* from it. It carried the authoritative selection after any client toggled a checkbox, so
+every picker showed the same ticks; with no selection there is nothing to agree about, and no service
+method left to broadcast from. `filesModified` is a different event and survives — it reports writes
+to disk, which the tree still reloads for.
 
 `permissionDeadline` is the one addition to this table rather than a survivor of the conversion. It
 says a request's clock has been armed or cancelled, and it is deliberately *not* turn-scoped even

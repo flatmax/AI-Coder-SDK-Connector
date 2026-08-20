@@ -502,8 +502,6 @@ class TestRpcSurface:
             "cancel_streaming",
             "get_current_state",
             "get_engine_health",
-            "get_selected_files",
-            "set_selected_files",
             "set_permission_mode",
             "set_model",
             "rewind_files",
@@ -845,18 +843,11 @@ class TestChatStreaming:
         assert turn.request_id == REQUEST_ID
         assert turn.message == "hello"
 
-    async def test_files_default_to_the_picker_selection(self, service, tmp_path):
-        (tmp_path / "a.py").write_text("x")
-        await service.set_selected_files(["a.py"])
-        await send(service)
-        assert service.session.turns[0].files == ["a.py"]
-
-    async def test_an_explicit_empty_list_means_no_files(self, service, tmp_path):
-        """Distinct from omitting the argument, which means "use the picker"."""
-        (tmp_path / "a.py").write_text("x")
-        await service.set_selected_files(["a.py"])
-        await send(service, files=[])
-        assert service.session.turns[0].files == []
+    async def test_a_turn_carries_no_file_list(self, service):
+        """A turn has no file channel to default from: the user names files
+        in the prompt (``specs5/plan/decisions.md`` CC-21)."""
+        await send(service, "hello")
+        assert not hasattr(service.session.turns[0], "files")
 
     async def test_the_viewer_payload_becomes_framing_input(self, service):
         await send(service, viewer={"path": "src/a.py", "start_line": 4})
@@ -1338,7 +1329,6 @@ class TestState:
         state = await service.get_current_state()
         assert set(state) == {
             "messages",
-            "selected_files",
             "denied_read_files",
             "session_id",
             "repo_name",
@@ -1397,47 +1387,6 @@ class TestState:
         svc = ClaudeCodeService(FakeConfig(None), event_callback=events)
         state = await svc.get_current_state()
         assert state["repo_root"] == str(Path.cwd())
-
-
-class TestSelectedFiles:
-    async def test_existing_files_are_kept(self, service, tmp_path):
-        (tmp_path / "a.py").write_text("x")
-        assert await service.set_selected_files(["a.py"]) == ["a.py"]
-        assert service.get_selected_files() == ["a.py"]
-
-    async def test_a_stale_selection_is_dropped(self, service):
-        """A deleted file must not frame a turn with a path that is gone."""
-        assert await service.set_selected_files(["deleted.py"]) == []
-
-    async def test_absolute_paths_are_accepted(self, service, tmp_path):
-        target = tmp_path / "a.py"
-        target.write_text("x")
-        assert await service.set_selected_files([str(target)]) == [str(target)]
-
-    async def test_junk_entries_are_dropped(self, service):
-        assert await service.set_selected_files(["", None, 42]) == []
-
-    async def test_none_clears_the_selection(self, service, tmp_path):
-        (tmp_path / "a.py").write_text("x")
-        await service.set_selected_files(["a.py"])
-        assert await service.set_selected_files(None) == []
-
-    async def test_the_returned_list_is_a_copy(self, service, tmp_path):
-        (tmp_path / "a.py").write_text("x")
-        returned = await service.set_selected_files(["a.py"])
-        returned.append("b.py")
-        assert service.get_selected_files() == ["a.py"]
-
-    async def test_the_new_selection_is_broadcast(self, service, tmp_path, events):
-        """Everyone sees the result immediately, per the collaboration spec.
-
-        Session-wide arity: the filtered list is the only argument. A
-        participant's picker drifting from the host's is the failure this
-        prevents.
-        """
-        (tmp_path / "a.py").write_text("x")
-        await service.set_selected_files(["a.py"])
-        assert events.call_of("filesChanged") == ("filesChanged", ["a.py"])
 
 
 # ---------------------------------------------------------------------------
@@ -1713,7 +1662,6 @@ class TestPermissionRpc:
 GATED_METHODS: dict[str, tuple] = {
     "connect_engine": (),
     "shutdown": (),
-    "set_selected_files": (["a.py"],),
     "chat_streaming": (REQUEST_ID, "hello"),
     "cancel_streaming": (REQUEST_ID,),
     "resolve_permission": ("perm-1", {"action": "allow"}),
@@ -1752,7 +1700,6 @@ GATED_METHODS: dict[str, tuple] = {
 READ_ONLY_METHODS: dict[str, tuple] = {
     "get_engine_health": (),
     "get_current_state": (),
-    "get_selected_files": (),
     "get_denied_read_files": (),
     "get_context_usage": (),
     "get_mcp_status": (),
@@ -1836,7 +1783,6 @@ class TestCollabRestrictions:
         assert service.session.disconnect_calls == 0
         assert service.session.control_calls == []
         assert service.session.turns == []
-        assert service.get_selected_files() == []
         assert service.get_denied_read_files() == []
         assert events_of(service) == []
 
@@ -3439,21 +3385,15 @@ class TestIndexReadiness:
 class TestUiStateSnapshot:
     """What the `ui_state` tool answers with: paths and modes, never content."""
 
-    def test_it_carries_the_four_facts_the_agent_cannot_read_itself(
+    def test_it_carries_the_three_facts_the_agent_cannot_read_itself(
         self, service
     ):
         snapshot = service._ui_state_snapshot()
         assert set(snapshot) == {
-            "selected_files",
             "viewer",
             "review_state",
             "permission_mode",
         }
-
-    async def test_the_picker_selection_shows_up(self, service, tmp_path):
-        (tmp_path / "a.py").write_text("x = 1\n")
-        await service.set_selected_files(["a.py"])
-        assert service._ui_state_snapshot()["selected_files"] == ["a.py"]
 
     def test_the_viewer_is_none_until_a_browser_says_otherwise(self, service):
         assert service._ui_state_snapshot()["viewer"] is None
@@ -3482,9 +3422,7 @@ class TestUiStateSnapshot:
         service.set_viewer_state("src/a.py")
         snapshot = service._ui_state_snapshot()
         snapshot["viewer"]["path"] = "elsewhere.py"
-        snapshot["selected_files"].append("b.py")
         assert service._viewer_state == {"path": "src/a.py"}
-        assert service._selected_files == []
 
     async def test_the_last_push_frames_a_turn_that_sends_no_viewer(
         self, service

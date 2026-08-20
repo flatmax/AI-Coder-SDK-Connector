@@ -155,7 +155,7 @@ For converting an existing installation rather than building fresh, the phase ta
 - Every spec ends with an invariants section; treat these as test property sources.
 - **Unit tests** verify component-level invariants — "the pump routes an unknown block kind to the generic path", "a permission rule is always tool-plus-pattern, never a bare tool grant".
 - **Integration tests** verify cross-layer invariants — "a `PostToolUse` write is reflected in the next `symbol_map` result", "a cancelled turn's transcript ends with a `ResultMessage`".
-- **End-to-end tests** verify user-facing contracts — "file selection change broadcasts to all connected clients", "a restart resumes the previous session".
+- **End-to-end tests** verify user-facing contracts — "a deny-read rule written from the picker survives a browser reload", "a restart resumes the previous session".
 - **Contract tests against the SDK** are their own category and the only defence against version skew: the `SessionStore` conformance harness, the message-taxonomy coverage check, and an options-assembly test that fails when a field we set disappears from `ClaudeAgentOptions`. These are cheap, and they fail loudly on an SDK upgrade instead of quietly at runtime.
 
 Anything that requires a real model call belongs behind a marker and out of the default run. The engine is a subprocess with credentials; a test suite that needs it is a test suite nobody runs.

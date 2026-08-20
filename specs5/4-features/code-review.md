@@ -39,7 +39,10 @@ Ordered operations to transform the repository into review state:
 6. Soft reset to merge-base — HEAD moves, all feature branch changes become staged modifications
 7. Re-index — the symbol and doc indexes now reflect the reviewed code on disk
 8. Switch the permission posture to read-only (see § Read-Only Mode) and remember the previous mode
-9. Clear file selection (frontend and server both perform this; defense in depth)
+
+A ninth step cleared the file selection, on both sides for defence in depth. It went with the selection
+([CC-21](../plan/decisions.md#cc-21)). The picker's deny-read rules are deliberately *not* cleared: they
+are about paths, and a checkout does not make a file the user forbade the agent to read readable.
 
 The old sequence had a step between 4 and 5: build a **pre-change symbol map** while disk sat at the
 merge-base, hold it in memory, and inject it into every prompt. It is gone. The agent reaches the
@@ -63,10 +66,6 @@ After step 6, the repository state:
 ### Branch Tip Checkout by SHA
 - Step 5 checks out by SHA, not by branch name
 - Handles local and remote refs uniformly — remote refs like `origin/foo` would leave HEAD at the ref pointer rather than the actual commit
-### File Selection Clearing
-- Server-side (authoritative) — the engine service clears selected files as part of start-review, via direct property assignment (not the public setter — avoids a redundant broadcast during review entry)
-- Frontend-side (responsive) — files tab clears its own selection state on the review-started event
-- Both are required — the server clear is authoritative if events race; the frontend clear prevents a visual stale-selection window
 ## Git State Machine — Exit Sequence
 1. Soft reset to branch tip — HEAD moves, staging clears
 2. Checkout original branch — HEAD reattaches to the branch the user was on before review
@@ -160,8 +159,10 @@ repository is in AC⚡DC's *soft-reset* arrangement, which changes what `git sta
 HEAD with a hundred staged modifications is otherwise indistinguishable from a user mid-disaster. See
 [`../3-engine/mcp-bridge.md` § `review_state`](../3-engine/mcp-bridge.md#review_state).
 
-**3. Turn framing.** The user's turn carries the review's identity the way it carries selected files —
-as a short hint, not a payload. It never carries diffs.
+**3. Turn framing.** The user's turn carries the review's identity as a short set of facts — branch,
+merge-base — not a payload. It never carries diffs. This is now the only list-shaped thing framing
+carries besides the viewer's position ([CC-21](../plan/decisions.md#cc-21) removed the selected-files
+block that used to head it).
 
 ### What is no longer injected
 
@@ -190,7 +191,8 @@ guards the window is the engine's own compaction. The context HUD reports usage 
 [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md).
 
 A large review is still a large review. The difference is that the agent paces itself through it with
-tool calls instead of the user pacing it through checkbox batches.
+tool calls instead of the user pacing it through batches of files — a pacing control the picker no
+longer offers in any form ([CC-21](../plan/decisions.md#cc-21)).
 
 ## UI Components
 ### Review Mode Banner
@@ -207,17 +209,17 @@ tool calls instead of the user pacing it through checkbox batches.
 ### File Picker in Review Mode
 - Operates unchanged
 - Staged files appear with their normal status badges
-- Filter, selection, context menu, keyboard navigation work as normal
+- Filter, context menu, keyboard navigation, deny-read and path insertion all work as normal
 ### Review Status Bar
 - Slim bar above chat input
 - Shows review summary — branch, commit count, files changed, additions/deletions
 - Changed-file count, additions, deletions
-- No "N of M diffs in context" counter — nothing about the review is injected, so there is no in-context set to count. A counter that reported file selection under that label would be a lie about what the model can see
+- No "N of M diffs in context" counter — nothing about the review is injected, so there is no in-context set to count. A counter reporting a count of *picked* files under that label would be a lie about what the model can see, which is why neither the counter nor the picking survived
 - Exit Review button
-### File Selection in Review
-- No separate chip-per-file UI. Standard file selection — picker checkboxes and file mentions in chat
-- Selection is a hint about attention, not a diff-inclusion switch. The wording in the UI matters here: "files you're looking at", never "files in context"
-- Scales naturally to large reviews because nothing grows with the number of boxes ticked
+### Pointing at a File During Review
+- No chip-per-file UI, no per-file diff-inclusion switch, and since [CC-21](../plan/decisions.md#cc-21) no checkbox either
+- The user names a file in the prompt — typed, or inserted by the picker's middle-click. `@path` makes the CLI read it; a bare path names it without forcing the read
+- Scales naturally to large reviews because nothing about the review grows with what the user points at
 ### Diff Viewer in Review Mode
 - Operates unchanged
 - Left side (original) — file content from HEAD (pre-review state)
@@ -320,7 +322,7 @@ The old "edit blocks still appear for reference" behaviour has no successor and 
 
 - Reviews with hundreds of changed files will not fit in one context window, and no arrangement of ours changes that
 - The agent paces itself: `review_state` for the file list, then diffs in batches of its choosing, with the engine compacting behind it
-- The user's lever is the request ("review the auth changes first"), not the checkbox set
+- The user's lever is the request ("review the auth changes first"), and naming the files it should start with
 
 ### Branch Switching During Review
 
@@ -334,7 +336,7 @@ The old "edit blocks still appear for reference" behaviour has no successor and 
 - No index ever describes the pre-change state; the indexes describe disk
 - Exit always restores the original branch, or leaves HEAD detached with an informative error
 - Clean working tree is enforced before entry — a dirty tree can never enter review mode
-- File selection is cleared on review entry by both server and frontend
+- Review entry leaves the picker's deny-read rules alone; there is no selection for it to clear
 - `review_state` answers with review facts while a review is active and with an explicit not-in-review result otherwise; it never fabricates
 - Review state is never persisted across server restarts
 - `reviewStarted` and `reviewEnded` are broadcast to every connected client whenever the server-side review state changes — frontends never infer entry/exit from the RPC return value alone

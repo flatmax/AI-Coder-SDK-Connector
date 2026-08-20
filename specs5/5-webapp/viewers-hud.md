@@ -25,10 +25,9 @@ about itself. It also answers questions the old tab structurally could not: what
 each MCP server costs, what the system prompt is made of, which model did which part of a turn.
 
 The one real loss is per-file token attribution for selected files, which followed the file-selection
-contract out the door (see
-[decisions § CC-14](../plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract)).
-Files enter context because the agent read them, and `categories` reports the aggregate rather than a
-per-path split.
+contract out the door ([CC-14](../plan/decisions.md#cc-14)) and then the selection itself
+([CC-21](../plan/decisions.md#cc-21)). Files enter context because the agent read them, and
+`categories` reports the aggregate rather than a per-path split.
 
 ## Shared Backend Access
 
@@ -74,7 +73,8 @@ HUD covers the immediate post-turn moment from pushed data; the tab waits for
 `postResponseComplete`, which carries a fresh `context_usage` payload it can adopt without a fetch at
 all.
 
-`files-changed` is no longer a trigger. Selection does not alter context.
+`files-changed` is not a trigger either — and since [CC-21](../plan/decisions.md#cc-21) there is no
+such event to trigger on. It announced a selection change, and a selection never altered context.
 
 ### Refresh Queue
 

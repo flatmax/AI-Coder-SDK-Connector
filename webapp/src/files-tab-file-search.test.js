@@ -429,14 +429,23 @@ describe('FilesTab file-search-changed handling', () => {
     expect(t._fileSearchActive).toBe(false);
   });
 
-  it('restores selection state on exit', async () => {
+  it('restores per-path state on exit', async () => {
+    // Was 'restores selection state on exit', over the checkbox list
+    // CC-21 removed. Deny-read is the per-path state the picker still
+    // carries, and it has the same hazard: search swaps the tree out
+    // from under the rows, and a rebuild that forgot to re-push the
+    // list would leave every strikethrough behind on exit.
     const t = await setupTabWithTree();
     const picker = t.shadowRoot.querySelector('ac-file-picker');
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
-    // Pre-select a file.
-    t._selectedFiles = new Set(['README.md']);
-    picker.selectedFiles = new Set(['README.md']);
+    // Pre-deny a file, by the direct-update pattern the tab's own
+    // handlers use — the setter is deliberately non-reactive, so a
+    // plain assignment would not reach the picker.
+    t._excludedFiles = new Set(['README.md']);
+    picker.excludedFiles = new Set(t._excludedFiles);
+    picker.requestUpdate();
     await settle(t);
+    expect(picker.excludedFiles.has('README.md')).toBe(true);
     // Enter and exit search.
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
@@ -454,8 +463,8 @@ describe('FilesTab file-search-changed handling', () => {
       }),
     );
     await settle(t);
-    // Selection preserved.
-    expect(picker.selectedFiles.has('README.md')).toBe(true);
+    // Deny-read preserved.
+    expect(picker.excludedFiles.has('README.md')).toBe(true);
   });
 });
 

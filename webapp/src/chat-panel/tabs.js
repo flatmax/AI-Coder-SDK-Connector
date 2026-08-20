@@ -661,12 +661,13 @@ export function renderOverflowMenu(panel, tabs) {
  * ``spawnAgentTabs`` which seeds the task text). The
  * archive load handles message population.
  *
- * The selection list is left empty — the agent's actual
- * file context lives on the backend, the frontend
- * picker per-tab list is UI state that's lost across
- * refresh. Users can read the tab's conversation and
- * see which files the agent worked on; they don't need
- * to redrive the picker checkboxes.
+ * A per-tab selection list was rehydrated empty here for
+ * the same reason: the agent's file context lived on the
+ * backend and the picker's list was UI state that a
+ * refresh lost. The list is gone entirely under CC-21, so
+ * there is nothing to leave empty — the tab's conversation
+ * still shows which files the agent worked on, which was
+ * always the part users read.
  *
  * @returns {Array<object>} entries that produced new tabs
  *   (same shape as input, filtered to those that didn't
@@ -776,18 +777,10 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
     panel._spawnedParentRequestIds.add(parentRequestId);
   }
   let anySpawned = false;
-  // Snapshot of the main tab's selection. Each new
-  // agent tab gets its own copy so mutations on one
-  // don't leak into another. Reading from _tabs
-  // directly (not via the ``selectedFiles`` getter)
-  // because the getter would return the ACTIVE
-  // tab's list — which is main here, but being
-  // explicit keeps the spawn path robust against
-  // future changes to the getter.
-  const mainTab = panel._tabs.get('main');
-  const mainSelection = Array.isArray(mainTab?.selectedFiles)
-    ? [...mainTab.selectedFiles]
-    : [];
+  // A snapshot of the main tab's file selection used to
+  // be seeded into each new agent tab here. There is no
+  // selection to seed (CC-21), and a subagent does not
+  // read the picker anyway.
   for (const block of agentBlocks) {
     if (!block || typeof block !== 'object') continue;
     const agentIdx = block.agent_idx;
@@ -820,10 +813,8 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
       // agent tab even though the backend is doing
       // the work.
       //
-      // Preserved: existing.messages (history
-      // accumulates across turns) and
-      // existing.selectedFiles (per-tab file selection
-      // survives).
+      // Preserved: existing.messages — history
+      // accumulates across turns.
       if (task) {
         existing.messages = [
           ...existing.messages,
@@ -857,7 +848,6 @@ export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
     // Fresh spawn — tab doesn't exist yet.
     const state = makeTabState();
     state.messages = [{ role: 'user', content: task }];
-    state.selectedFiles = [...mainSelection];
     if (childId) {
       state.currentRequestId = childId;
       state.streaming = true;

@@ -203,39 +203,40 @@ describe('FilePicker component', () => {
       expect(p._focusedPath).toBe('src');
     });
 
-    it('Enter on file toggles selection', async () => {
+    it('Enter on file opens it', async () => {
+      // Enter toggled selection until CC-21. It now does what a
+      // plain click does, so the keyboard and the mouse offer the
+      // same verbs on the same row.
       const tree = rootOf([file('a.md')]);
-      const p = mountPicker({
-        tree,
-        selectedFiles: new Set(),
-      });
+      const p = mountPicker({ tree });
       await p.updateComplete;
       const listener = vi.fn();
-      p.addEventListener('selection-changed', listener);
+      p.addEventListener('file-clicked', listener);
       p._focusedPath = 'a.md';
       keyDown(p, 'Enter');
       await p.updateComplete;
       expect(listener).toHaveBeenCalledOnce();
-      expect(
-        listener.mock.calls[0][0].detail.selectedFiles,
-      ).toEqual(['a.md']);
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+      });
     });
 
-    it('Enter on selected file deselects', async () => {
+    it('Enter on file is idempotent — it never toggles', async () => {
+      // A second press re-opens the same file rather than undoing
+      // the first. Selection was a toggle; opening is not.
       const tree = rootOf([file('a.md')]);
-      const p = mountPicker({
-        tree,
-        selectedFiles: new Set(['a.md']),
-      });
+      const p = mountPicker({ tree });
       await p.updateComplete;
       const listener = vi.fn();
-      p.addEventListener('selection-changed', listener);
+      p.addEventListener('file-clicked', listener);
       p._focusedPath = 'a.md';
       keyDown(p, 'Enter');
+      keyDown(p, 'Enter');
       await p.updateComplete;
-      expect(listener.mock.calls[0][0].detail.selectedFiles).toEqual(
-        [],
-      );
+      expect(listener).toHaveBeenCalledTimes(2);
+      expect(listener.mock.calls[1][0].detail).toEqual({
+        path: 'a.md',
+      });
     });
 
     it('Enter on dir toggles expansion', async () => {
@@ -254,13 +255,10 @@ describe('FilePicker component', () => {
 
     it('Space works identically to Enter', async () => {
       const tree = rootOf([file('a.md')]);
-      const p = mountPicker({
-        tree,
-        selectedFiles: new Set(),
-      });
+      const p = mountPicker({ tree });
       await p.updateComplete;
       const listener = vi.fn();
-      p.addEventListener('selection-changed', listener);
+      p.addEventListener('file-clicked', listener);
       p._focusedPath = 'a.md';
       keyDown(p, ' ');
       await p.updateComplete;
@@ -399,11 +397,12 @@ describe('FilePicker component', () => {
     // its options dict; the @auxclick handler reads
     // event.button to filter out other non-primary
     // buttons.
-    function middleClick(row) {
+    function middleClick(row, shiftKey = false) {
       const event = new MouseEvent('auxclick', {
         bubbles: true,
         cancelable: true,
         button: 1,
+        shiftKey,
       });
       row.dispatchEvent(event);
       return event;
@@ -420,6 +419,7 @@ describe('FilePicker component', () => {
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail).toEqual({
         path: 'a.md',
+        mention: false,
       });
     });
 
@@ -438,7 +438,56 @@ describe('FilePicker component', () => {
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail).toEqual({
         path: 'src',
+        mention: false,
       });
+    });
+
+    it('shift+middle-click asks for the @path form', async () => {
+      // The two forms are not cosmetic variants: a bare path is a
+      // pointer the agent may or may not follow, while `@path` is
+      // a read the CLI performs before the turn starts. The
+      // picker only reports which was asked for; `mentions.js`
+      // puts the `@` on.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), true);
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+        mention: true,
+      });
+    });
+
+    it('shift+middle-click on a directory row also asks for @path', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      middleClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+        true,
+      );
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'src',
+        mention: true,
+      });
+    });
+
+    it('shift+middle-click does not write a deny rule', async () => {
+      // Shift means two things on the same row now — deny with the
+      // left button, `@path` with the middle one. This pins that
+      // they stay apart: the deny path is on `click`, the insert
+      // path on `auxclick`, and neither answers the other's event.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree, excludedFiles: new Set() });
+      await p.updateComplete;
+      const exclusion = vi.fn();
+      p.addEventListener('exclusion-changed', exclusion);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), true);
+      expect(exclusion).not.toHaveBeenCalled();
     });
 
     it('calls preventDefault to suppress selection-buffer paste', async () => {

@@ -333,7 +333,6 @@ class ClaudeCodeService:
         for sentence in self._degradations:
             self.session.health.note_degradation(sentence)
 
-        self._selected_files: list[str] = []
         # Last-known viewer state, pushed by the browser on navigation.
         # Held on the service rather than passed per turn because a tool
         # call can ask for it mid-turn, long after the prompt was composed.
@@ -371,7 +370,6 @@ class ClaudeCodeService:
             set_permission_mode=self._set_review_permission_mode,
             current_permission_mode=lambda: self.session.permission_mode,
             restricted=self._check_localhost_only,
-            on_selection_cleared=self._clear_selection,
         )
         self.review.doc_builder = self.doc_builder
 
@@ -610,9 +608,12 @@ class ClaudeCodeService:
         Paths and modes only — never file content. The agent reads files
         with its own tools; this answers the one question those cannot
         (``specs5/plan/decisions.md`` CC-14).
+
+        No file list: pointing at a file is something the user does in the
+        prompt now, where the agent already sees it, so there is no
+        browser-side set for this to report (CC-21).
         """
         return {
-            "selected_files": list(self._selected_files),
             "viewer": dict(self._viewer_state) if self._viewer_state else None,
             "review_state": self.get_review_state(),
             "permission_mode": self.session.permission_mode,
@@ -811,7 +812,6 @@ class ClaudeCodeService:
         """
         return {
             "messages": await self._current_messages(),
-            "selected_files": list(self._selected_files),
             "denied_read_files": self.get_denied_read_files(),
             "session_id": self.session.session_id,
             "repo_name": self._repo_root.name,
@@ -875,45 +875,6 @@ class ClaudeCodeService:
             return None
         return await self._most_recent_session_id()
 
-    def get_selected_files(self) -> list[str]:
-        return list(self._selected_files)
-
-    async def set_selected_files(
-        self, files: list[str] | None
-    ) -> list[str] | dict[str, Any]:
-        """Record the picker's selection, dropping paths that do not exist.
-        **Localhost only.**
-
-        The selection is a *hint* about what the user is pointing at, not a
-        context contract — the agent reads whatever it needs with its own
-        tools (``specs5/plan/decisions.md`` CC-14). Filtering here keeps a
-        stale selection from framing a turn with a path that was deleted.
-
-        Gated and broadcast for the reasons
-        ``specs5/4-features/collaboration.md`` § File Selection gives: only
-        localhost clients can change the selection, and everyone sees the
-        result immediately. The broadcast is what makes a participant's
-        picker agree with the host's rather than drift silently.
-        """
-        restricted = self._check_localhost_only()
-        if restricted is not None:
-            return restricted
-        resolved: list[str] = []
-        for entry in files or []:
-            if not isinstance(entry, str) or not entry:
-                continue
-            path = Path(entry)
-            absolute = path if path.is_absolute() else self._repo_root / path
-            if absolute.exists():
-                resolved.append(entry)
-            else:
-                logger.debug("Dropping selected file that does not exist: %s", entry)
-        self._selected_files = resolved
-        await self._broadcast(
-            Event("filesChanged", list(resolved), turn_scoped=False)
-        )
-        return list(resolved)
-
     # ------------------------------------------------------------------
     # Turns
     # ------------------------------------------------------------------
@@ -922,7 +883,6 @@ class ClaudeCodeService:
         self,
         request_id: str,
         message: str,
-        files: list[str] | None = None,
         images: list[str] | None = None,
         viewer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -960,7 +920,6 @@ class ClaudeCodeService:
         turn = Turn(
             request_id=request_id,
             message=message,
-            files=list(files) if files is not None else list(self._selected_files),
             images=list(images or []),
             # The browser may send the viewer with the turn; when it does
             # not, the last `set_viewer_state` push stands in. Same fact,
@@ -995,7 +954,6 @@ class ClaudeCodeService:
                 {
                     "content": message,
                     "request_id": request_id,
-                    "files": list(turn.files),
                     "image_refs": [],
                 },
                 turn_scoped=False,
@@ -2365,15 +2323,6 @@ class ClaudeCodeService:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
-
-    async def _clear_selection(self) -> None:
-        """Drop the file selection and tell every client.
-
-        Review entry's use of this is the point: the selection described
-        the branch you were on, and the tree has just moved.
-        """
-        self._selected_files = []
-        await self._broadcast(Event("filesChanged", [], turn_scoped=False))
 
     async def _set_review_permission_mode(self, mode: str) -> str | None:
         """Apply a posture on review entry or exit, connected or not.

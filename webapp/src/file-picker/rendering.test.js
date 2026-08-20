@@ -403,7 +403,15 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree });
       await p.updateComplete;
       const root = p.shadowRoot.querySelector('.row.is-root');
-      expect(root.getAttribute('title')).toBe('my-repo');
+      const title = root.getAttribute('title');
+      expect(title).toContain('my-repo');
+      // The root row's one gesture, named where a user can find
+      // it. A plain click on the repository name does nothing —
+      // there is no repo-wide open — so the deny rule is all the
+      // tooltip has to advertise.
+      expect(title).toContain(
+        'shift+click to deny the agent read on every file',
+      );
     });
   });
 
@@ -552,6 +560,17 @@ describe('FilePicker component', () => {
   });
 
   describe('tooltips', () => {
+    // A row tooltip is `<identity> — <gestures>`, where the
+    // gesture half lists what click, middle-click and shift+click
+    // do (CC-21 — the row is the whole control surface now, so
+    // the tooltip is where it gets advertised). These tests are
+    // about the identity half; the gesture half is pinned in
+    // deny-read.test.js. Strip it rather than restate it in every
+    // assertion below.
+    function identityOf(row) {
+      return row.getAttribute('title').split(' — click to')[0];
+    }
+
     it('file row has title of "path — name"', async () => {
       const tree = rootOf([
         dir('src', [file('src/deep/main.py')]),
@@ -562,7 +581,7 @@ describe('FilePicker component', () => {
       p.shadowRoot.querySelector('.row.is-dir').click();
       await p.updateComplete;
       const fileRow = p.shadowRoot.querySelector('.row.is-file');
-      expect(fileRow.getAttribute('title')).toBe(
+      expect(identityOf(fileRow)).toBe(
         'src/deep/main.py — main.py',
       );
     });
@@ -590,15 +609,13 @@ describe('FilePicker component', () => {
       );
       // Top-level src has path === name, so the tooltip
       // is just the name (no "src — src" redundancy).
-      expect(treeDirRows[0].getAttribute('title')).toBe('src');
+      expect(identityOf(treeDirRows[0])).toBe('src');
       // Nested row's path differs from its name, so it
       // gets the full `path — name` form.
       const utilsRow = Array.from(treeDirRows).find((r) =>
         r.textContent.includes('utils'),
       );
-      expect(utilsRow.getAttribute('title')).toBe(
-        'src/utils — utils',
-      );
+      expect(identityOf(utilsRow)).toBe('src/utils — utils');
     });
 
     it('directory row has title of "path — name" when they differ', async () => {
@@ -623,15 +640,13 @@ describe('FilePicker component', () => {
       );
       // Top-level src has path === name, so the tooltip is
       // just the name (no redundant "src — src").
-      expect(treeDirRows[0].getAttribute('title')).toBe('src');
+      expect(identityOf(treeDirRows[0])).toBe('src');
       // Nested row's path differs from its name, so it gets
       // the full `path — name` form.
       const utilsRow = Array.from(treeDirRows).find((r) =>
         r.textContent.includes('utils'),
       );
-      expect(utilsRow.getAttribute('title')).toBe(
-        'src/utils — utils',
-      );
+      expect(identityOf(utilsRow)).toBe('src/utils — utils');
     });
     it('top-level file has title of just the name', async () => {
       // path equals name → only the name shows (no
@@ -640,7 +655,7 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree });
       await p.updateComplete;
       const row = p.shadowRoot.querySelector('.row.is-file');
-      expect(row.getAttribute('title')).toBe('a.md');
+      expect(identityOf(row)).toBe('a.md');
     });
 
     it('top-level directory has title of just the name', async () => {
@@ -648,7 +663,7 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree });
       await p.updateComplete;
       const row = p.shadowRoot.querySelector('.row.is-dir');
-      expect(row.getAttribute('title')).toBe('src');
+      expect(identityOf(row)).toBe('src');
     });
   });
 });

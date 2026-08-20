@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -221,15 +222,14 @@ class TestFraming:
         assert build_framing(text_turn()) == ""
         assert compose_prompt(text_turn("hello")) == "hello"
 
-    def test_selected_files_are_named_as_paths_only(self):
-        framing = build_framing(text_turn(files=["src/a.py", "src/b.py"]))
-        assert "src/a.py" in framing
-        assert "src/b.py" in framing
-        assert "read them yourself" in framing
+    def test_a_turn_has_no_file_list_to_frame(self):
+        """CC-21: the picker inserts a path into the prompt rather than
+        handing us a set to describe out here."""
+        assert "files" not in {f.name for f in fields(Turn)}
 
     def test_framing_is_wrapped_so_it_is_distinguishable(self):
         """The model must be able to tell our words from the user's."""
-        framing = build_framing(text_turn(files=["a.py"]))
+        framing = build_framing(text_turn(viewer=ViewerFraming("a.py")))
         assert framing.startswith("<ac-dc-ui-context>")
         assert framing.endswith("</ac-dc-ui-context>")
 
@@ -272,17 +272,19 @@ class TestFraming:
         """CC-14: the agent reads files with its own tools, not through us."""
         framing = build_framing(
             text_turn(
-                files=["src/a.py"],
                 viewer=ViewerFraming("src/a.py", start_line=1, end_line=999),
+                review={"active": True, "branch": "feature"},
             )
         )
         # Every list item is a path and a range, never a file body: the
         # only thing that could smuggle content in is a `- ` line.
         items = [line for line in framing.splitlines() if line.startswith("- ")]
-        assert items == ["- src/a.py", "- src/a.py (lines 1-999 selected)"]
+        assert items == ["- src/a.py (lines 1-999 selected)", "- branch: feature"]
 
     def test_framing_precedes_the_users_words(self):
-        prompt = compose_prompt(text_turn("fix this", files=["a.py"]))
+        prompt = compose_prompt(
+            text_turn("fix this", viewer=ViewerFraming("a.py"))
+        )
         assert prompt.index("<ac-dc-ui-context>") < prompt.index("fix this")
         assert prompt.endswith("fix this")
 
@@ -349,7 +351,9 @@ class TestContentBlocks:
         assert [b["type"] for b in blocks] == ["text"]
 
     def test_framing_still_applies_to_an_image_turn(self):
-        blocks = build_content_blocks(text_turn("hi", images=[PNG], files=["a.py"]))
+        blocks = build_content_blocks(
+            text_turn("hi", images=[PNG], viewer=ViewerFraming("a.py"))
+        )
         assert "<ac-dc-ui-context>" in blocks[-1]["text"]
 
     async def test_an_image_turn_uses_the_verbatim_dict_path(self, engine):

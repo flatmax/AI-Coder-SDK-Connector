@@ -142,8 +142,6 @@ State:
 |---|---|---|
 | `get_current_state` | — | `EngineState` (below) |
 | `get_engine_health` | — | `EngineHealth` (below) |
-| `get_selected_files` | — | `list[str]` |
-| `set_selected_files` | `files: list[str]` | `list[str]` — filtered; non-existent paths removed |
 | `get_denied_read_files` | — | `list[str]` |
 | `set_denied_read_files` | `files: list[str]` | `list[str]` — the resulting deny set after the rules are written |
 
@@ -152,6 +150,11 @@ State:
 from an index any more, and a method whose name describes a subsystem that no longer exists is worse
 than a rename cost paid once. The state is a permission fact rather than an in-memory filter, and the
 CLI honours it in the same repo.
+
+A `get_selected_files` / `set_selected_files` pair sat beside them until CC-21 and is gone with the
+picker's checkbox column. The deny pair is now the only per-path list this service holds, which removes
+a standing ambiguity: two similar-looking setters, one of which wrote a permission the CLI enforced and
+one of which wrote a sentence into turn framing and hoped.
 
 The setter writes `Read(path)` deny rules **into `.claude/settings.local.json` directly**, and returns
 `{denied_read_files: list[str], settings_file: str}`. An earlier draft said it writes them "through a
@@ -164,7 +167,7 @@ Turns:
 
 | Method | Arguments | Return |
 |---|---|---|
-| `chat_streaming` | `request_id: str, message: str, files?: list[str], images?: list[str], viewer?: ViewerFraming` | `{status: "started"}`, `{status: "unsupported", command, message, equivalent?}`, or `{error: str, reason: str}` |
+| `chat_streaming` | `request_id: str, message: str, images?: list[str], viewer?: ViewerFraming` | `{status: "started"}`, `{status: "unsupported", command, message, equivalent?}`, or `{error: str, reason: str}` |
 | `cancel_streaming` | `request_id: str` | `{status: "interrupting"}` or `{error: str}` |
 
 `images` are base64 data URIs, as before. `viewer` carries the active file and range for turn framing:
@@ -212,7 +215,6 @@ Returned by `get_current_state`. Replaces the native engine's `CurrentState`.
 ```pseudo
 EngineState:
     messages: list[MessageDict]           // mirrored-store records, see history twin
-    selected_files: list[string]
     denied_read_files: list[string]
     session_id: string | null             // null before the init message arrives
     repo_name: string
@@ -300,11 +302,12 @@ Each returns `true` as acknowledgement. All turn-scoped events carry the origina
 | `permissionRequest` / `permissionResolved` | see permissions twin |
 | `permissionModeChanged` | `data: {mode: str, by: str}` |
 | `engineHealth` | `data: EngineHealth` |
-| `userMessage` | `data: {content: str, request_id: str, files: list[str], image_refs: list[str]}` |
+| `userMessage` | `data: {content: str, request_id: str, image_refs: list[str]}` |
 
-`userMessage` gains the three metadata fields so a collaborator's transcript matches the sender's.
+`userMessage` gains its metadata fields so a collaborator's transcript matches the sender's. It carried
+a third, `files: list[str]`, until CC-21 removed the selection it echoed.
 
-Retained unchanged: `filesChanged`, `commitResult`, `sessionChanged`, `startupProgress`,
+Retained unchanged: `commitResult`, `sessionChanged`, `startupProgress`,
 `navigateFile`, the collaboration callbacks, `docConvertProgress`. See
 `specs-reference/1-foundation/rpc-inventory.md` § Service: AcApp.
 

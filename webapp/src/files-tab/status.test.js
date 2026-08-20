@@ -94,12 +94,6 @@ describe('FilesTab status data plumbing', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      // Auto-select from Increment 4 notifies the server
-      // when any files are changed. Stub it so the test
-      // stays focused on status-array conversion.
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
     });
     const t = mountTab();
     await settle(t);
@@ -239,12 +233,6 @@ describe('FilesTab status data plumbing', () => {
     });
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
-      // Auto-select from Increment 4 notifies the server
-      // when the first load has changed files. Stub it
-      // to keep this test focused on status refresh.
-      'ClaudeCodeService.set_selected_files': vi
-        .fn()
-        .mockResolvedValue([]),
     });
     const t = mountTab();
     await settle(t);

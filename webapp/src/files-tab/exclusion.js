@@ -11,13 +11,22 @@
 // inspectable, revocable by editing a file.
 //
 // The internal vocabulary stays `excluded` /
-// `_excludedFiles` / `exclusion-changed`. That is the
-// name of a *tree state* — the third position of a
-// three-state checkbox — and it is shared with the
-// picker, its event contract and a dozen tests. What
-// changed is what the state means to the backend, and
-// that lives in `sendExclusionToServer` alone. User-
-// facing wording is the picker's job and says "deny".
+// `_excludedFiles` / `exclusion-changed`. It was the
+// name of a tree state — the third position of a
+// three-state checkbox — and it outlived both the index
+// it named and, under CC-21, the checkbox itself. It is
+// shared with the picker, its event contract and a dozen
+// tests, and renaming it would touch all of them to say
+// the same thing. What changed is what the state means
+// to the backend, and that lives in
+// `sendExclusionToServer` alone. User-facing wording is
+// the picker's job and says "deny".
+//
+// The gesture is now shift+click on a file, directory or
+// root row, plus the two menu items. It survived CC-21
+// unchanged in meaning: a deny rule is a real permission
+// rule that outlives the turn it was written in, which
+// is exactly what the selection hint was not.
 //
 // One RPC, no per-tab dispatch. The agent-tab branch went
 // with the native engine's parallel agents: a per-agent
@@ -65,14 +74,15 @@ export function applyExclusion(host, newExcluded, notifyServer) {
  * return value rather than from an assumption here:
  *
  *   - `error: 'restricted'` — the RPC is localhost-only
- *     (CC-15), so a remote collaborator's tick is
- *     refused. It has to say so, or the checkbox lies.
+ *     (CC-15), so a remote collaborator's shift+click is
+ *     refused. It has to say so, or the struck-through
+ *     row lies.
  *   - `takes_effect` — the CLI reads its settings
  *     sources itself, so a rule written mid-session
  *     applies from its next read of them. Shown once per
  *     session, on the first denial: it is the kind of
  *     caveat a user needs to hear once, not on every
- *     checkbox tick.
+ *     row they deny.
  */
 export async function sendExclusionToServer(host, files) {
   try {
@@ -142,12 +152,12 @@ export async function sendExclusionToServer(host, files) {
 
 /**
  * Picker emits `exclusion-changed` when the user
- * shift+clicks a file checkbox or a directory
- * checkbox (the latter applies to every descendant
- * file). The event carries an array of excluded
- * paths; we update our authoritative state, push to
- * the picker via direct-update, and notify the
- * server.
+ * shift+clicks a file row, or a directory / root row
+ * (the latter two apply to every descendant file), or
+ * picks one of the four Deny/Allow menu items. The
+ * event carries the whole array of denied paths; we
+ * update our authoritative state, push to the picker
+ * via direct-update, and notify the server.
  */
 export function onExclusionChanged(host, event) {
   const incoming = event.detail?.excludedFiles;

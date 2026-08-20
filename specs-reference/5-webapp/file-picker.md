@@ -12,14 +12,15 @@
 | `ac-dc-sort-asc` | `"1"` / `"0"` | `"1"` | Sort direction: 1 = ascending, 0 = descending |
 | `ac-dc-picker-width` | integer px (string) | `280` | Picker pane width within the Files tab |
 | `ac-dc-picker-collapsed` | `"true"` / `"false"` | `"false"` | Picker collapsed state |
-| `ac-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | `"ask"` | Remembered answer to the denial-scope prompt. `session` writes the rule for this session only; `local` writes it to `.claude/settings.local.json`. Resettable from Settings |
+| `ac-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | `"ask"` | **Not written or read by any code.** Belongs to the denial-scope prompt, which was specified and never built — see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt. Every denial goes to `.claude/settings.local.json` unconditionally |
 
 Malformed values fall back to defaults. Storage errors (private-browsing quirks, quota) are swallowed silently.
 
-The hint set is **not** in this table. It is in-memory browser state forwarded to the server for the next
-turn's framing, and it is deliberately not persisted: a hint is "what I am looking at right now", and a
-stale one restored from a previous browsing session would be a lie told to the agent on the user's behalf.
-Deny-read rules do persist, but in `.claude/settings*.json` where the CLI can also see them — not here.
+Neither a hint set nor a selection is in this table, because neither exists (CC-21). The picker holds one
+per-path list — the denied-read set — and does not persist it here either: it is re-read on load from the
+state snapshot's `denied_read_files`, which reflects the effective rules in `.claude/settings*.json` where
+the CLI can also see them. A rule the user wrote by hand therefore shows up in the tree, and a rule the
+picker wrote survives a browser refresh without the frontend storing anything.
 
 ### Panel width constraints
 
@@ -40,29 +41,43 @@ Dispatched via `context-menu-action` events with `detail: { action, type, path, 
 
 | Action ID | Label | Trigger |
 |---|---|---|
+| `insert-path` | Insert path in prompt | Dispatches `insert-path` with `{path, mention: false}` |
+| `insert-mention` | Insert @path — agent reads it | Dispatches `insert-path` with `{path, mention: true}` |
 | `stage` | Stage | Runs `Repo.stage_files([path])` |
 | `unstage` | Unstage | Runs `Repo.unstage_files([path])` |
-| `discard` | Discard Changes… | Confirm → `Repo.discard_changes([path])` |
+| `discard` | Discard changes… | Confirm → `Repo.discard_changes([path])` |
 | `rename` | Rename… | Opens inline input pre-filled with current name |
 | `duplicate` | Duplicate… | Opens inline input pre-filled with full path |
-| `load-left` | Load in Left Panel | Fetches content and dispatches `load-diff-panel` event |
-| `load-right` | Load in Right Panel | Fetches content and dispatches `load-diff-panel` event |
-| `deny-read` | Deny agent reads | Shown only if the path has no deny rule. Writes `Read(<path>)` via the permissions layer |
-| `allow-read` | Allow agent reads | Shown only if the path has a deny rule. Removes it |
-| `doc-convert` | Convert to Markdown… | Shown only for convertible binary types. Opens the Doc Convert tab prefilled with the path |
+| `load-left` | Load in left panel | Fetches content and dispatches `load-diff-panel` event |
+| `load-right` | Load in right panel | Fetches content and dispatches `load-diff-panel` event |
+| `exclude` | Deny agent read | Shown only if the path has no deny rule. Adds it to the denied set → `Read(<path>)` |
+| `include` | Allow agent read | Shown only if the path has a deny rule. Removes it from the denied set |
 | `delete` | Delete… | Confirm → `Repo.delete_file(path)` (destructive class) |
+
+The deny/allow IDs are `exclude` / `include`, not `deny-read` / `allow-read`: they were the third
+checkbox state's name throughout the picker and its tests, they outlived both the index they named and
+(under CC-21) the checkbox itself, and renaming them would touch a dozen files to say the same thing.
+Only the labels say "deny".
+
+No `doc-convert` row action exists. It appears in no menu-item table in the code; the Doc Convert entry
+point is the picker toolbar's 📄 button.
 
 **Directory row actions** (`type: "dir"`):
 
 | Action ID | Label | Trigger |
 |---|---|---|
-| `stage-all` | Stage All | Collects descendant files, runs `Repo.stage_files(paths)` |
-| `unstage-all` | Unstage All | Collects descendants, runs `Repo.unstage_files(paths)` |
+| `insert-path` | Insert path in prompt | Dispatches `insert-path` with `{path, mention: false}` |
+| `insert-mention` | Insert @path — agent reads it | Dispatches `insert-path` with `{path, mention: true}` |
+| `stage-all` | Stage all | Collects descendant files, runs `Repo.stage_files(paths)` |
+| `unstage-all` | Unstage all | Collects descendants, runs `Repo.unstage_files(paths)` |
 | `rename-dir` | Rename… | Opens inline input pre-filled with current name |
-| `new-file` | New File… | Opens inline input as child |
-| `new-directory` | New Directory… | Opens inline input; creates directory + `.gitkeep` |
-| `deny-read-all` | Deny agent reads | Writes one glob rule, `Read(<dir>/**)` — not one rule per descendant |
-| `allow-read-all` | Allow agent reads | Removes the subtree's glob rule and any per-file rules underneath it |
+| `new-file` | New file… | Opens inline input as child |
+| `new-directory` | New directory… | Opens inline input; creates directory + `.gitkeep` |
+| `exclude-all` | Deny agent read on all | Shown unless every descendant is already denied. Adds every descendant **file** to the denied set — one `Read(<path>)` rule each, no `Read(<dir>/**)` glob |
+| `include-all` | Allow agent read on all | Shown when any descendant is denied. Removes every descendant file from the denied set |
+
+Binaries are included in both subtree operations. A deny rule is about a path, and the agent can attempt
+a read on a PDF as readily as on a source file.
 
 **Root row actions** (`type: "root"`):
 
@@ -86,72 +101,86 @@ Key handling: Enter commits, Escape cancels, blur cancels. After commit, the inp
 
 ## Dependency quirks
 
-### Shift+click vs regular click — `preventDefault()` asymmetry
+### `shift` means two things on one row
 
-Regular click on a checkbox: do NOT call `event.preventDefault()`. The browser's native checkbox toggle runs, updating the visual state. Our reactive `.checked` binding re-renders with the authoritative state on the next frame. Result: user sees the expected toggle with no visual glitch.
+The row answers both gestures, and which one `shift` modifies depends on the mouse button:
 
-Shift+click on a checkbox: DO call `event.preventDefault()` immediately. Without this, the browser's native toggle fires first, producing a one-frame visual flip, then our state change applies and the checkbox flips back. The glitch is ~16ms but visually obvious.
-
-### Regular click on a denied file
-
-One gesture performs two state changes:
-1. Remove the `Read` deny rule for the path
-2. Add the path to the hint set
-
-Dispatches `deny-changed` then `hint-changed`. The orchestrator fires both RPCs (restricted guard per
-call; either may fail independently). The ordering matters and is the reverse of the intuitive one:
-removing the rule is the operation with a durable side effect on a settings file, so it goes first. A hint
-that lands against a still-denied file is a harmless inconsistency for one frame; a rule removal that
-silently failed while the checkbox ticked is a user believing they re-allowed a file they did not.
-
-### Directory click with denied descendants
-
-Regular click on a directory row whose subtree carries deny rules:
-1. First removes every deny rule in the subtree — the directory's own glob rule and any per-file rules underneath it
-2. Then applies the normal hint-all-descendants logic
-
-Prevents the confusing state where ticking a parent hints most descendants while some remain unreadable.
-The failure mode is worse than the old excluded-file version: an excluded file still contributed an index
-block, whereas a denied file makes the agent's read fail outright, so a half-applied parent click produces
-a turn where the agent reports it cannot read files the user believes it was just pointed at.
-
-### Three-state checkbox cycle
-
-Shift+click cycles through states based on current state:
-
-| Current | Shift+click result |
+| Gesture | Effect |
 |---|---|
-| Neutral | Denied |
-| Hinted | Denied (also clears the hint) |
-| Denied | Neutral (back to no rule, NOT hinted) |
+| click | Open the file / expand the directory |
+| shift+click | Toggle the `Read` deny rule (subtree, on a directory or the root) |
+| middle-click (button 1) | Insert the bare path into the composer |
+| shift+middle-click | Insert `@path` into the composer |
 
-The "denied → neutral" direction deliberately does NOT jump to hinted, for the same reason as the native
-engine's version: the shift+click gesture meant "change what the agent may read", not "point the agent at
-this". The regular-click-on-denied path covers the "allow AND hint" case in one gesture.
+Accepted with a mitigation rather than resolved: all four verbs are also context-menu items, so no
+gesture is the only route to anything. This is the one collision CC-21 introduced and it is deliberate —
+the alternative was a second modifier, and `ctrl`/`cmd`+click is the browser's.
 
-### The denial-scope prompt runs before the first write, not on every write
+### `preventDefault()` on the deny gestures
 
-The first deny in a session prompts for scope (session-only or `.claude/settings.local.json`) and the
-answer is remembered per `ac-dc-deny-read-scope`. The prompt is modal on the gesture: the checkbox does
-not change state until it resolves, and cancelling leaves the file neutral. Optimistically striking the
-row and then reverting on cancel would make the safer answer look like a failure.
+Shift+click on a file or directory row: DO call `event.preventDefault()` before mutating state. Without
+it the row's plain-click verb also runs — a file opens in the viewer, or a directory's twisty toggles —
+and being handed an expanded tree as a side effect of writing a permission rule reads as two things
+happening at once. The checkbox era needed this call for a different reason (suppressing the browser's
+native toggle to avoid a one-frame visual flip); the call survived the control it was written for.
+
+Middle-click handlers likewise `preventDefault()` **and** `stopPropagation()`, and bail out unless
+`event.button === 1`.
+
+### The root row answers exactly one gesture
+
+`shift`+click denies or allows the whole repository. A plain click on the root row is a deliberate no-op:
+there is no repo-wide open, and the branch pill inside the row handles its own clicks (the handler
+`stopPropagation()`s so the pill never reaches the row). The root context menu carries no insert-path
+item because the root's path is the empty string.
+
+### Denial is all-or-nothing across a subtree
+
+`_toggleSubtreeDenial` reads the current state of every descendant file and picks one direction for all
+of them: if every descendant is already denied it allows them all, otherwise it denies them all. There is
+no per-descendant toggling, and a subtree with zero files is a no-op.
+
+The resulting set is dispatched whole on `exclusion-changed`, and the RPC replaces every `Read` rule the
+picker owns with that set. Consequence worth knowing: a file created inside a denied directory afterwards
+is **not** denied, because there is no glob covering it.
+
+### The denial-scope prompt is not built
+
+`specs5/5-webapp/file-picker.md` § Denial Scope Prompt describes a modal that asks where the rule should
+live before the first write. No such dialog exists, `ac-dc-deny-read-scope` is never read or written, and
+every denial goes straight to `.claude/settings.local.json`. What does reach the user is a
+`takes_effect` toast — the string comes from the RPC's return value, not from an assumption in the
+frontend — shown once per session on the first denial, plus a `restricted` warning toast when a non-local
+collaborator tries to deny (CC-15).
 
 ### Deny rule cleanup on delete
 
-When a file is deleted via the context menu:
-1. If the path carried a deny rule, remove it
-2. If the path was in the hint set, drop it locally
+When a file is deleted via the context menu, and the path carried a deny rule, the rule is removed.
+Local-first: the server does not broadcast rule changes, so without it, re-creating a file at the same
+path would find it mysteriously unreadable — and the symptom is a failed agent read rather than a missing
+index block, which is far harder to attribute to a file that was deleted an hour ago.
 
-Both steps are local-first. The server does not broadcast rule changes, so without step 1 re-creating a
-file at the same path would find it mysteriously unreadable — and unlike the old excluded state, the
-symptom would be a failed agent read rather than a missing index block, which is far harder to attribute
-to a file that was deleted an hour ago.
+A second step used to sit alongside it — dropping the path from the hint set — and went with CC-21.
 
-### Touched markers are turn-scoped and never become hints
+### Deny rules follow a rename
+
+Renaming a file is not permission to read it. `onRenameCommitted` rewrites the rule onto the new path:
+a file rename swaps one entry, a directory rename calls `migrateSubtreeState`, which rewrites every entry
+whose path is `oldDir` or starts with `oldDir/` to the equivalent path under `newDir`. Both paths call
+`_applyExclusion(next, /* notifyServer */ true)`, so the `Read` rules in `.claude/settings.local.json` are
+rewritten too.
+
+Without it the rule would be left behind on a path that no longer exists — silently stopping applying,
+with nothing in the UI to say it had lapsed.
+
+`migrateSubtreeState` still wraps its logic in a `migrateSet` closure over a single set. Two sets went
+through it (selection and denial) until CC-21 removed the first.
+
+### Touched markers are turn-scoped and point at nothing
 
 `PostToolUse` marks a row as touched for the remainder of the turn and auto-expands its parents. The
-marker is cleared on the next user message. It never adds the path to the hint set: the agent already
-read and wrote the file, so a hint would tell it something it knows, about work it has finished.
+marker is cleared on the next user message. It writes into no other channel: there is no list for a
+touched path to join, and nothing about it reaches the next turn.
 
 ## Cross-references
 
@@ -159,4 +188,5 @@ read and wrote the file, so a hint would tell it something it knows, about work 
 - Files tab orchestration and direct-update pattern: `specs5/5-webapp/file-picker.md` § Files Tab Orchestration
 - Middle-click path insertion + chat panel flag: `specs-reference/5-webapp/chat.md` § Cross-component flag
 - `PermissionUpdate` shape for deny rules and their destination files: `specs-reference/3-engine/permissions.md`
-- Why selection is a hint rather than a context contract: `specs5/plan/decisions.md#cc-14--file-selection-becomes-a-hint-not-a-context-contract`
+- Why there is no selection at all: `specs5/plan/decisions.md#cc-21`
+- The hint it superseded, for the history: `specs5/plan/decisions.md#cc-14`

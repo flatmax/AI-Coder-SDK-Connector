@@ -97,8 +97,9 @@ explicit not-in-review result when review is inactive. See
 
 ### `ui_state`
 
-What the user is looking at: selected files, the file open in the viewer, the cursor or selection
-range, the active preset.
+What the user is looking at: the file open in the viewer, the cursor or selection range, the active
+preset. It reported a selected-files list too, until [CC-21](../plan/decisions.md#cc-21) removed the
+selection — a path the user is pointing at now arrives in the prompt, which the agent already has.
 
 *Answers:* "what is the user pointing at?" — unanswerable by any built-in tool, because it is browser
 state. Turn framing carries a snapshot of this at turn start (see

@@ -220,7 +220,6 @@ class TestLifecycle:
 
         # Both events reach every client, with the full state.
         assert events.payload_of("reviewStarted")["active"] is True
-        assert events.payload_of("filesChanged") == []
 
         ended = await service.end_review()
         assert ended["status"] == "restored"
@@ -231,10 +230,14 @@ class TestLifecycle:
         assert run_git(repo_dir, "rev-parse", "--abbrev-ref", "HEAD") == "main"
         assert service.check_review_ready() == {"clean": True}
 
-    async def test_entry_clears_the_selection(self, service, feature_tip):
-        service._selected_files = ["seed.md"]
+    async def test_entry_leaves_deny_rules_alone(self, service, feature_tip):
+        """A review is not a reason to hand the agent access it was denied.
+        The old counterpart to this cleared a picker selection; there is no
+        selection to clear (``specs5/plan/decisions.md`` CC-21), and the
+        standing policy about the repository is untouched either way."""
+        service.set_denied_read_files([".env"])
         await service.start_review("feature", feature_tip)
-        assert service.get_selected_files() == []
+        assert service.get_denied_read_files() == [".env"]
 
     async def test_a_dirty_tree_is_refused_at_entry(self, service, repo_dir):
         (repo_dir / "new.md").write_text("content")

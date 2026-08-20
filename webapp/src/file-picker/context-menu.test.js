@@ -144,10 +144,14 @@ describe('FilePicker component', () => {
       const actions = Array.from(
         p.shadowRoot.querySelectorAll('.menu-item'),
       ).map((el) => el.getAttribute('data-action'));
-      // Shell ships nine items for the not-excluded case:
-      // stage / unstage / discard / rename / duplicate /
-      // load-left / load-right / exclude / delete.
+      // Shell ships eleven items for the not-excluded case.
+      // The two insert actions lead, and deliberately: with the
+      // checkbox gone (CC-21) inserting a path is the picker's
+      // primary verb, and middle-click is a gesture plenty of
+      // trackpads cannot produce.
       expect(actions).toEqual([
+        'insert-path',
+        'insert-mention',
         'stage',
         'unstage',
         'discard',
@@ -166,12 +170,12 @@ describe('FilePicker component', () => {
       await p.updateComplete;
       rightClick(p.shadowRoot.querySelector('.row.is-file'));
       await p.updateComplete;
-      // Four null separators in the catalog → four hr
+      // Five null separators in the catalog → five hr
       // elements in the rendered menu.
       const separators = p.shadowRoot.querySelectorAll(
         '.menu-separator',
       );
-      expect(separators).toHaveLength(4);
+      expect(separators).toHaveLength(5);
     });
 
     it('delete action renders with destructive class', async () => {
@@ -275,6 +279,61 @@ describe('FilePicker component', () => {
       expect(detail.path).toBe('src/a.md');
       expect(detail.name).toBe('a.md');
       expect(detail.isExcluded).toBe(false);
+    });
+
+    it('insert-path item dispatches insert-path, not context-menu-action', async () => {
+      // Answered inside the picker rather than routed through the
+      // files tab's action dispatcher, so the menu and the
+      // middle-click gesture reach the composer by one path.
+      const tree = rootOf([file('src/a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const insert = vi.fn();
+      const menuAction = vi.fn();
+      p.addEventListener('insert-path', insert);
+      p.addEventListener('context-menu-action', menuAction);
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="insert-path"]')
+        .click();
+      expect(insert).toHaveBeenCalledOnce();
+      expect(insert.mock.calls[0][0].detail).toEqual({
+        path: 'src/a.md',
+        mention: false,
+      });
+      expect(menuAction).not.toHaveBeenCalled();
+    });
+
+    it('insert-mention item asks for the @path form', async () => {
+      const tree = rootOf([file('src/a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      const insert = vi.fn();
+      p.addEventListener('insert-path', insert);
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="insert-mention"]')
+        .click();
+      expect(insert.mock.calls[0][0].detail).toEqual({
+        path: 'src/a.md',
+        mention: true,
+      });
+    });
+
+    it('insert item closes the menu', async () => {
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(p.shadowRoot.querySelector('.row.is-file'));
+      await p.updateComplete;
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="insert-mention"]')
+        .click();
+      await p.updateComplete;
+      expect(p._contextMenu).toBeNull();
+      expect(p.shadowRoot.querySelector('.context-menu')).toBeNull();
     });
 
     it('menu item click closes the menu after dispatch', async () => {
@@ -491,10 +550,14 @@ describe('FilePicker component', () => {
       const actions = Array.from(
         p.shadowRoot.querySelectorAll('.menu-item'),
       ).map((el) => el.getAttribute('data-action'));
-      // Stage-all, unstage-all, rename, new-file,
-      // new-directory, exclude-all (no include-all
-      // since nothing is excluded).
+      // The two insert actions, then stage-all, unstage-all,
+      // rename, new-file, new-directory, exclude-all (no
+      // include-all since nothing is excluded). A directory is a
+      // legitimate insertion target — "look at src/" is a
+      // sentence a user writes.
       expect(actions).toEqual([
+        'insert-path',
+        'insert-mention',
         'stage-all',
         'unstage-all',
         'rename-dir',
@@ -587,6 +650,25 @@ describe('FilePicker component', () => {
       expect(detail.name).toBe('src');
     });
 
+    it('dir insert items carry the directory path', async () => {
+      const tree = rootOf([dir('src', [file('src/a.md')])]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      rightClick(
+        p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
+      );
+      await p.updateComplete;
+      const insert = vi.fn();
+      p.addEventListener('insert-path', insert);
+      p.shadowRoot
+        .querySelector('.menu-item[data-action="insert-mention"]')
+        .click();
+      expect(insert.mock.calls[0][0].detail).toEqual({
+        path: 'src',
+        mention: true,
+      });
+    });
+
     it('menu closes after action click', async () => {
       const tree = rootOf([dir('src', [file('src/a.md')])]);
       const p = mountPicker({ tree });
@@ -639,11 +721,15 @@ describe('FilePicker component', () => {
       );
       await p.updateComplete;
       expect(p._contextMenu.type).toBe('dir');
-      // Menu items reflect the new type.
-      const firstAction = p.shadowRoot
-        .querySelector('.menu-item')
-        .getAttribute('data-action');
-      expect(firstAction).toBe('stage-all');
+      // Menu items reflect the new type. Asserted on an action
+      // only one of the two catalogs has — both now lead with
+      // `insert-path`, so the first item can no longer tell them
+      // apart.
+      const actions = Array.from(
+        p.shadowRoot.querySelectorAll('.menu-item'),
+      ).map((el) => el.getAttribute('data-action'));
+      expect(actions).toContain('stage-all');
+      expect(actions).not.toContain('stage');
       // Only one menu DOM instance.
       expect(
         p.shadowRoot.querySelectorAll('.context-menu'),

@@ -21,6 +21,8 @@ import {
   CTX_ACTION_EXCLUDE_ALL,
   CTX_ACTION_INCLUDE,
   CTX_ACTION_INCLUDE_ALL,
+  CTX_ACTION_INSERT_MENTION,
+  CTX_ACTION_INSERT_PATH,
   CTX_ACTION_LOAD_LEFT,
   CTX_ACTION_LOAD_RIGHT,
   CTX_ACTION_NEW_DIR,
@@ -60,7 +62,6 @@ export class FilePicker extends LitElement {
     tree: { type: Object },
     statusData: { type: Object },
     branchInfo: { type: Object },
-    selectedFiles: { type: Object },
     excludedFiles: { type: Object },
     binaryFiles: { type: Object },
     activePath: { type: String },
@@ -107,7 +108,6 @@ export class FilePicker extends LitElement {
       sha: null,
       repoName: '',
     };
-    this.selectedFiles = new Set();
     this.statusData = {
       modified: new Set(),
       staged: new Set(),
@@ -430,9 +430,6 @@ export class FilePicker extends LitElement {
     const allExcluded = this._allDescendantsExcluded(this.tree);
     const someExcluded =
       !allExcluded && this._someDescendantsExcluded(this.tree);
-    const allSelected = this._allDescendantsSelected(this.tree);
-    const someSelected =
-      !allSelected && this._someDescendantsSelected(this.tree);
     const rowClasses = [
       'row',
       'is-root',
@@ -442,24 +439,19 @@ export class FilePicker extends LitElement {
       .filter(Boolean)
       .join(' ');
     const badgeTitle = 'Agent denied read on some files';
-    const checkboxTitle =
-      'Click to select all files, shift+click to deny the agent read on all.';
+    const rowTitle = allExcluded
+      ? `${repoName || 'repository'} — agent denied read on every file, `
+        + 'shift+click to allow all'
+      : `${repoName || 'repository'} — shift+click to deny the agent read on `
+        + 'every file';
     return html`
       <div
         class=${rowClasses}
         role="treeitem"
-        title=${repoName || 'repository'}
+        title=${rowTitle}
+        @click=${this._onRootClick}
         @contextmenu=${this._onRootContextMenu}
       >
-        <input
-          type="checkbox"
-          class="checkbox"
-          .checked=${allSelected}
-          .indeterminate=${someSelected}
-          @click=${this._onRootCheckbox}
-          aria-label="Select all files in repository"
-          title=${checkboxTitle}
-        />
         <span class="name">${repoName || 'repository'}</span>
         ${someExcluded
           ? html`<span
@@ -474,61 +466,15 @@ export class FilePicker extends LitElement {
     `;
   }
 
-  _onRootCheckbox(event) {
+  _onRootClick(event) {
+    // Shift is the only gesture the root row answers. A plain
+    // click on the repository name has nothing to do — there
+    // is no repo-wide open, and the branch pill handles its
+    // own clicks.
+    if (!event.shiftKey) return;
+    event.preventDefault();
     event.stopPropagation();
-    // Selection math walks text-only descendants
-    // (binaries can't be sent to the LLM); exclusion
-    // math walks the full set so a fully-excluded
-    // directory's binary children also leave the
-    // backend's cache. See `_collectDescendantFiles`.
-    const descendants = this._collectDescendantFiles(this.tree);
-    const exclusionDescendants = this._collectDescendantFiles(
-      this.tree, { includeBinaries: true },
-    );
-    if (exclusionDescendants.length === 0) return;
-    if (event.shiftKey) {
-      event.preventDefault();
-      const allExcluded = exclusionDescendants.every((p) =>
-        this.excludedFiles.has(p),
-      );
-      const nextExcluded = new Set(this.excludedFiles);
-      if (allExcluded) {
-        for (const p of exclusionDescendants) nextExcluded.delete(p);
-      } else {
-        for (const p of exclusionDescendants) nextExcluded.add(p);
-      }
-      this._emitExclusionChanged(nextExcluded);
-      if (!allExcluded) {
-        const nextSelected = new Set(this.selectedFiles);
-        let selectionChanged = false;
-        for (const p of descendants) {
-          if (nextSelected.has(p)) {
-            nextSelected.delete(p);
-            selectionChanged = true;
-          }
-        }
-        if (selectionChanged) this._emitSelectionChanged(nextSelected);
-      }
-      return;
-    }
-    const anyExcluded = exclusionDescendants.some((p) =>
-      this.excludedFiles.has(p),
-    );
-    if (anyExcluded) {
-      const nextExcluded = new Set(this.excludedFiles);
-      for (const p of exclusionDescendants) nextExcluded.delete(p);
-      this._emitExclusionChanged(nextExcluded);
-    }
-    const allSelected = descendants.every((p) =>
-      this.selectedFiles.has(p),
-    );
-    const next = new Set(this.selectedFiles);
-    if (allSelected) {
-      for (const p of descendants) next.delete(p);
-    } else {
-      for (const p of descendants) next.add(p);
-    }
-    this._emitSelectionChanged(next);
+    this._toggleSubtreeDenial(this.tree);
   }
 
   _onRootContextMenu(event) {
@@ -1164,14 +1110,6 @@ export class FilePicker extends LitElement {
         <span class="twisty ${hasChildren ? '' : 'empty'}">
           ${isOpen ? '▼' : '▶'}
         </span>
-        <input
-          type="checkbox"
-          class="checkbox"
-          .checked=${this._allDescendantsSelected(node)}
-          .indeterminate=${this._someDescendantsSelected(node)}
-          @click=${(e) => this._onDirCheckbox(e, node)}
-          aria-label="Select all files in ${node.name}"
-        />
         <span class="name">${node.name || '(root)'}</span>
         ${someExcluded
           ? html`<span
@@ -1208,7 +1146,6 @@ export class FilePicker extends LitElement {
         depth,
       });
     }
-    const isSelected = this.selectedFiles.has(node.path);
     const isExcluded = this.excludedFiles.has(node.path);
     const isBinary =
       this.binaryFiles && this.binaryFiles.has(node.path);
@@ -1217,12 +1154,7 @@ export class FilePicker extends LitElement {
     const isActive = node.path === this.activePath;
     const status = this._statusFor(node.path);
     const diff = this._diffStatsFor(node.path);
-    const tooltip = this._tooltipFor(node, isExcluded, diff, isBinary);
-    const checkboxTitle = isBinary
-      ? 'Binary file — cannot be sent to the LLM.'
-      : isExcluded
-        ? 'Agent denied read on this file. Click to allow and select, or shift+click to allow without selecting. Takes effect on the CLI\'s next settings read.'
-        : 'Click to select, shift+click to deny the agent read.';
+    const tooltip = this._tooltipForFile(node, isExcluded, diff, isBinary);
     return html`
       <div
         class="row is-file ${isFocused ? 'focused' : ''} ${isExcluded ? 'is-excluded' : ''} ${isBinary ? 'is-binary' : ''} ${isActive ? 'active-in-viewer' : ''}"
@@ -1247,15 +1179,6 @@ export class FilePicker extends LitElement {
                 : ''}
             </span>`
           : ''}
-        <input
-          type="checkbox"
-          class="checkbox"
-          .checked=${isSelected}
-          ?disabled=${isBinary}
-          @click=${(e) => this._onFileCheckbox(e, node)}
-          aria-label="Select ${node.name}"
-          title=${checkboxTitle}
-        />
         <span class="name">${node.name}</span>
         ${status
           ? html`<span
@@ -1382,6 +1305,15 @@ export class FilePicker extends LitElement {
     return { added: addedRaw, removed: removedRaw };
   }
 
+  /**
+   * The identifying half of a row tooltip — `path — name`, or
+   * just the name where the two are the same, plus the diff
+   * counts when git has some.
+   *
+   * Kept separate from the gesture half because the gestures
+   * differ by row type: a plain click opens a file and expands a
+   * directory. The two callers append their own.
+   */
   _tooltipFor(node, isExcluded = false, diff = null, isBinary = false) {
     if (!node || typeof node !== 'object') return '';
     const name = typeof node.name === 'string' ? node.name : '';
@@ -1394,50 +1326,78 @@ export class FilePicker extends LitElement {
       if (diff.removed > 0) parts.push(`-${diff.removed}`);
       base = `${base} (${parts.join(' ')})`;
     }
-    if (isBinary) return `${base} (binary — cannot be sent to LLM)`;
-    return isExcluded ? `${base} (read denied)` : base;
-  }
-
-  _tooltipForDir(node, { allExcluded = false, someExcluded = false } = {}) {
-    const base = this._tooltipFor(node);
-    if (!base) return '';
-    if (allExcluded) {
-      return `${base} — agent denied read on all files, Shift+click to allow all`;
+    if (isBinary) {
+      // Names the Doc Convert tab, not a context-menu item: the
+      // per-row "Convert with Doc Convert" entry the spec once
+      // described was never built, and the toolbar's 📄 button
+      // is the affordance that actually exists.
+      return `${base} (binary — the agent cannot read this directly; `
+        + 'convert it from the Doc Convert tab)';
     }
-    if (someExcluded) {
-      return `${base} — agent denied read on some files`;
+    if (isExcluded) {
+      return `${base} — agent denied read, shift+click to allow`;
     }
     return base;
   }
 
+  /**
+   * A file row's tooltip.
+   *
+   * Every gesture the row answers is named here, because with
+   * the checkbox gone the row is the whole control surface and
+   * the tooltip is the only place that says so — a middle-click
+   * nobody knows about is a feature nobody has. Binary and
+   * denied rows get their own text from `_tooltipFor` and skip
+   * the list: what a user wants from those rows is an
+   * explanation, not a menu.
+   */
+  _tooltipForFile(node, isExcluded = false, diff = null, isBinary = false) {
+    const base = this._tooltipFor(node, isExcluded, diff, isBinary);
+    if (!base || isBinary || isExcluded) return base;
+    return `${base} — click to open, middle-click to insert the path, `
+      + 'shift+click to deny the agent read';
+  }
+
+  /**
+   * A directory row's tooltip. Same idea as `_tooltipForFile`,
+   * different verbs: a plain click expands rather than opens,
+   * and the deny gesture covers everything in the subtree.
+   */
+  _tooltipForDir(node, { allExcluded = false, someExcluded = false } = {}) {
+    const base = this._tooltipFor(node);
+    if (!base) return '';
+    if (allExcluded) {
+      return `${base} — agent denied read on all files, shift+click to allow all`;
+    }
+    if (someExcluded) {
+      return `${base} — agent denied read on some files`;
+    }
+    return `${base} — click to expand, middle-click to insert the path, `
+      + 'shift+click to deny the agent read on everything inside';
+  }
+
   // ---------------------------------------------------------------
-  // Selection helpers
+  // Subtree helpers
   // ---------------------------------------------------------------
 
-  _collectDescendantFiles(node, { includeBinaries = false } = {}) {
+  /**
+   * Every file path under `node`, binaries included.
+   *
+   * Binaries count. Denying a directory means "the agent may
+   * not read anything under here", and the agent can attempt
+   * a read on a PDF as readily as on a source file — a rule
+   * that skipped `papers/*.pdf` would be a rule the user
+   * thinks they wrote and did not.
+   *
+   * This used to take an `includeBinaries` flag, because
+   * select-all math had to skip binaries (they could not be
+   * put in a prompt) while deny math could not afford to.
+   * Only deny math is left, so the flag went with it.
+   */
+  _collectDescendantFiles(node) {
     const paths = [];
-    const binary = this.binaryFiles || new Set();
     function walk(n) {
       if (n.type === 'file') {
-        // Binary files are excluded from select-all
-        // descendant math: they can't usefully be sent
-        // to the LLM (the backend trims them at sync
-        // time), so toggling them on bulk select would
-        // never let the root or directory checkbox
-        // reach the "fully selected" state. Render-side
-        // they still appear in the tree with disabled
-        // checkboxes — see `_renderFile`.
-        //
-        // Exclusion math is the opposite case: a user
-        // excluding a directory means "this directory
-        // and everything under it should not appear in
-        // the cache," and that absolutely covers binary
-        // files. Without `includeBinaries`, a directory
-        // containing PDFs (e.g. `papers/`) would have
-        // its binary children silently retained in the
-        // backend's plain_files dir-block even though
-        // the user struck it through.
-        if (binary.has(n.path) && !includeBinaries) return;
         paths.push(n.path);
         return;
       }
@@ -1447,37 +1407,14 @@ export class FilePicker extends LitElement {
     return paths;
   }
 
-  _allDescendantsSelected(node) {
-    const descendants = this._collectDescendantFiles(node);
-    if (descendants.length === 0) return false;
-    return descendants.every((p) => this.selectedFiles.has(p));
-  }
-
-  _someDescendantsSelected(node) {
-    const descendants = this._collectDescendantFiles(node);
-    if (descendants.length === 0) return false;
-    const selected = descendants.filter(
-      (p) => this.selectedFiles.has(p),
-    );
-    return selected.length > 0 && selected.length < descendants.length;
-  }
-
   _allDescendantsExcluded(node) {
-    // Binary descendants count for exclusion badging
-    // because exclusion semantics cover them; selection
-    // badging uses the text-only walk via
-    // `_allDescendantsSelected`.
-    const descendants = this._collectDescendantFiles(
-      node, { includeBinaries: true },
-    );
+    const descendants = this._collectDescendantFiles(node);
     if (descendants.length === 0) return false;
     return descendants.every((p) => this.excludedFiles.has(p));
   }
 
   _someDescendantsExcluded(node) {
-    const descendants = this._collectDescendantFiles(
-      node, { includeBinaries: true },
-    );
+    const descendants = this._collectDescendantFiles(node);
     if (descendants.length === 0) return false;
     const excluded = descendants.filter((p) =>
       this.excludedFiles.has(p),
@@ -1505,8 +1442,16 @@ export class FilePicker extends LitElement {
   }
 
   _onDirClick(event, node) {
-    if (event.target.classList.contains('checkbox')) return;
     this._focusedPath = node.path;
+    // Shift denies the subtree instead of expanding it. Checked
+    // first so a shift+click never also toggles the twisty —
+    // being handed an expanded tree as a side effect of writing
+    // a permission rule reads as two things happening at once.
+    if (event.shiftKey) {
+      event.preventDefault();
+      this._toggleSubtreeDenial(node);
+      return;
+    }
     this._toggleExpanded(node.path);
   }
 
@@ -1520,64 +1465,40 @@ export class FilePicker extends LitElement {
     this._expanded = next;
   }
 
-  _onDirCheckbox(event, node) {
-    event.stopPropagation();
-    // See _onRootCheckbox for why exclusion uses the
-    // full descendant list (incl. binaries) while
-    // selection uses the text-only list.
+  /**
+   * Deny or allow the agent `Read` across a subtree.
+   *
+   * All-denied flips to allowed; anything else flips to
+   * fully denied. Binaries are included: a deny rule is
+   * about the path, and the agent can attempt a read on
+   * anything.
+   *
+   * Shared by the root row and every directory row — the
+   * root is a directory whose subtree is the repository.
+   */
+  _toggleSubtreeDenial(node) {
     const descendants = this._collectDescendantFiles(node);
-    const exclusionDescendants = this._collectDescendantFiles(
-      node, { includeBinaries: true },
-    );
-    if (exclusionDescendants.length === 0) return;
-    if (event.shiftKey) {
-      event.preventDefault();
-      const allExcluded = exclusionDescendants.every((p) =>
-        this.excludedFiles.has(p),
-      );
-      const nextExcluded = new Set(this.excludedFiles);
-      if (allExcluded) {
-        for (const p of exclusionDescendants) nextExcluded.delete(p);
-      } else {
-        for (const p of exclusionDescendants) nextExcluded.add(p);
-      }
-      this._emitExclusionChanged(nextExcluded);
-      if (!allExcluded) {
-        const nextSelected = new Set(this.selectedFiles);
-        let selectionChanged = false;
-        for (const p of descendants) {
-          if (nextSelected.has(p)) {
-            nextSelected.delete(p);
-            selectionChanged = true;
-          }
-        }
-        if (selectionChanged) this._emitSelectionChanged(nextSelected);
-      }
-      return;
-    }
-    const anyExcluded = exclusionDescendants.some((p) =>
+    if (descendants.length === 0) return;
+    const allExcluded = descendants.every((p) =>
       this.excludedFiles.has(p),
     );
-    if (anyExcluded) {
-      const nextExcluded = new Set(this.excludedFiles);
-      for (const p of exclusionDescendants) nextExcluded.delete(p);
-      this._emitExclusionChanged(nextExcluded);
+    const nextExcluded = new Set(this.excludedFiles);
+    for (const p of descendants) {
+      if (allExcluded) nextExcluded.delete(p);
+      else nextExcluded.add(p);
     }
-    const allSelected = descendants.every((p) =>
-      this.selectedFiles.has(p),
-    );
-    const next = new Set(this.selectedFiles);
-    if (allSelected) {
-      for (const p of descendants) next.delete(p);
-    } else {
-      for (const p of descendants) next.add(p);
-    }
-    this._emitSelectionChanged(next);
+    this._emitExclusionChanged(nextExcluded);
   }
 
   _onFileClick(event, node) {
-    if (event.target.classList.contains('checkbox')) return;
     this._focusedPath = node.path;
+    // Shift denies the read rather than opening the file, the
+    // same gesture the directory and root rows answer.
+    if (event.shiftKey) {
+      event.preventDefault();
+      this._toggleExclusion(node.path);
+      return;
+    }
     this.dispatchEvent(
       new CustomEvent('file-clicked', {
         detail: { path: node.path },
@@ -1585,40 +1506,6 @@ export class FilePicker extends LitElement {
         composed: true,
       }),
     );
-  }
-
-  _onFileCheckbox(event, node) {
-    event.stopPropagation();
-    // Defensive: binary files render with disabled
-    // checkboxes, but any programmatic dispatch would
-    // bypass that. Skip silently — the backend would
-    // trim them anyway, but a no-op here keeps the
-    // root checkbox's all/none accounting honest.
-    if (this.binaryFiles && this.binaryFiles.has(node.path)) {
-      event.preventDefault();
-      return;
-    }
-    if (event.shiftKey) {
-      event.preventDefault();
-      this._toggleExclusion(node.path);
-      return;
-    }
-    if (this.excludedFiles.has(node.path)) {
-      const nextExcluded = new Set(this.excludedFiles);
-      nextExcluded.delete(node.path);
-      const nextSelected = new Set(this.selectedFiles);
-      nextSelected.add(node.path);
-      this._emitExclusionChanged(nextExcluded);
-      this._emitSelectionChanged(nextSelected);
-      return;
-    }
-    const next = new Set(this.selectedFiles);
-    if (next.has(node.path)) {
-      next.delete(node.path);
-    } else {
-      next.add(node.path);
-    }
-    this._emitSelectionChanged(next);
   }
 
   _onInlineKeyDown(event, mode, sourcePath) {
@@ -1715,26 +1602,10 @@ export class FilePicker extends LitElement {
     const nextExcluded = new Set(this.excludedFiles);
     if (nextExcluded.has(path)) {
       nextExcluded.delete(path);
-      this._emitExclusionChanged(nextExcluded);
-      return;
+    } else {
+      nextExcluded.add(path);
     }
-    nextExcluded.add(path);
     this._emitExclusionChanged(nextExcluded);
-    if (this.selectedFiles.has(path)) {
-      const nextSelected = new Set(this.selectedFiles);
-      nextSelected.delete(path);
-      this._emitSelectionChanged(nextSelected);
-    }
-  }
-
-  _emitSelectionChanged(newSet) {
-    this.dispatchEvent(
-      new CustomEvent('selection-changed', {
-        detail: { selectedFiles: Array.from(newSet) },
-        bubbles: true,
-        composed: true,
-      }),
-    );
   }
 
   _emitExclusionChanged(newSet) {
@@ -1773,30 +1644,35 @@ export class FilePicker extends LitElement {
     );
   }
 
-  _onFileAuxClick(event, node) {
+  /**
+   * Middle-click inserts the path into the composer; shift
+   * makes it an `@path`, which the CLI expands into a read
+   * before the turn starts.
+   *
+   * Both are also context-menu items — see
+   * `_CONTEXT_MENU_FILE_ITEMS`. A gesture that many
+   * trackpads cannot produce is not allowed to be the only
+   * way to reach the picker's primary verb.
+   */
+  _emitInsertPath(event, node) {
     if (event.button !== 1) return;
     event.preventDefault();
     event.stopPropagation();
     this.dispatchEvent(
       new CustomEvent('insert-path', {
-        detail: { path: node.path },
+        detail: { path: node.path, mention: event.shiftKey === true },
         bubbles: true,
         composed: true,
       }),
     );
   }
 
+  _onFileAuxClick(event, node) {
+    this._emitInsertPath(event, node);
+  }
+
   _onDirAuxClick(event, node) {
-    if (event.button !== 1) return;
-    event.preventDefault();
-    event.stopPropagation();
-    this.dispatchEvent(
-      new CustomEvent('insert-path', {
-        detail: { path: node.path },
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    this._emitInsertPath(event, node);
   }
 
   _onDirContextMenu(event, node) {
@@ -1937,6 +1813,28 @@ export class FilePicker extends LitElement {
     event.stopPropagation();
     const ctx = this._contextMenu;
     if (ctx === null) return;
+    // Path insertion is answered here rather than routed
+    // through the files tab's action dispatcher: it emits the
+    // very same `insert-path` the middle-click gesture does, so
+    // menu and gesture reach the composer by one path and there
+    // is one place for the composer's contract to change.
+    if (
+      action === CTX_ACTION_INSERT_PATH ||
+      action === CTX_ACTION_INSERT_MENTION
+    ) {
+      this.dispatchEvent(
+        new CustomEvent('insert-path', {
+          detail: {
+            path: ctx.path,
+            mention: action === CTX_ACTION_INSERT_MENTION,
+          },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      this._closeContextMenu();
+      return;
+    }
     this.dispatchEvent(
       new CustomEvent('context-menu-action', {
         detail: {
@@ -2188,15 +2086,20 @@ export class FilePicker extends LitElement {
         event.preventDefault();
         if (current.type === 'dir') {
           this._toggleExpanded(current.path);
-        } else {
-          const next = new Set(this.selectedFiles);
-          if (next.has(current.path)) {
-            next.delete(current.path);
-          } else {
-            next.add(current.path);
-          }
-          this._emitSelectionChanged(next);
+          return;
         }
+        // Opens the file, which is what a plain click on the
+        // row does. It used to toggle selection; with the
+        // checkbox gone the keyboard matches the mouse rather
+        // than keeping a verb the mouse no longer has.
+        this._focusedPath = current.path;
+        this.dispatchEvent(
+          new CustomEvent('file-clicked', {
+            detail: { path: current.path },
+            bubbles: true,
+            composed: true,
+          }),
+        );
         return;
       }
       case 'Home': {
@@ -2298,6 +2201,8 @@ export {
   CTX_ACTION_EXCLUDE_ALL,
   CTX_ACTION_INCLUDE,
   CTX_ACTION_INCLUDE_ALL,
+  CTX_ACTION_INSERT_MENTION,
+  CTX_ACTION_INSERT_PATH,
   CTX_ACTION_LOAD_LEFT,
   CTX_ACTION_LOAD_RIGHT,
   CTX_ACTION_NEW_DIR,

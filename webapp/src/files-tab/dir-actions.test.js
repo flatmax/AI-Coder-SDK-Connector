@@ -42,10 +42,7 @@ describe('directory actions', () => {
    * two file descendants, plus all the RPCs a dir
    * action might need.
    */
-  async function setupDirTab({
-    selectedFiles = [],
-    excludedFiles = [],
-  } = {}) {
+  async function setupDirTab({ excludedFiles = [] } = {}) {
     const getTree = vi.fn().mockResolvedValue({
       tree: {
         name: 'repo',
@@ -91,7 +88,6 @@ describe('directory actions', () => {
     const unstage = vi.fn().mockResolvedValue({});
     const renameDir = vi.fn().mockResolvedValue({});
     const setExcluded = vi.fn().mockResolvedValue([]);
-    const setSelected = vi.fn().mockResolvedValue([]);
     publishFakeRpc({
       'Repo.get_file_tree': getTree,
       'Repo.get_current_branch': vi.fn().mockResolvedValue({
@@ -103,13 +99,9 @@ describe('directory actions', () => {
       'Repo.unstage_files': unstage,
       'Repo.rename_directory': renameDir,
       'ClaudeCodeService.set_denied_read_files': setExcluded,
-      'ClaudeCodeService.set_selected_files': setSelected,
     });
     const t = mountTab();
     await settle(t);
-    for (const path of selectedFiles) {
-      t._selectedFiles.add(path);
-    }
     for (const path of excludedFiles) {
       t._excludedFiles.add(path);
     }
@@ -120,7 +112,6 @@ describe('directory actions', () => {
       unstage,
       renameDir,
       setExcluded,
-      setSelected,
     };
   }
 
@@ -642,28 +633,9 @@ describe('directory actions', () => {
       expect(call).toHaveBeenCalledOnce();
     });
 
-    it('migrates subtree selection on dir rename', async () => {
-      const { t } = await setupDirTab({
-        selectedFiles: ['src/a.md', 'top.md'],
-      });
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
-      picker.dispatchEvent(
-        new CustomEvent('rename-committed', {
-          detail: {
-            sourcePath: 'src',
-            targetName: 'lib',
-          },
-          bubbles: true,
-          composed: true,
-        }),
-      );
-      await settle(t);
-      // src/a.md → lib/a.md (migrated).
-      expect(t._selectedFiles.has('src/a.md')).toBe(false);
-      expect(t._selectedFiles.has('lib/a.md')).toBe(true);
-      // top.md untouched (not under src/).
-      expect(t._selectedFiles.has('top.md')).toBe(true);
-    });
+    // A twin of the test below migrated the subtree's
+    // *selection* until CC-21 removed it. Exclusion is the
+    // only path-keyed state a dir rename has to carry now.
 
     it('migrates subtree exclusion on dir rename', async () => {
       const { t } = await setupDirTab({
@@ -732,25 +704,10 @@ describe('directory actions', () => {
       expect(setExcluded).toHaveBeenCalledOnce();
     });
 
-    it('deselects descendants when excluding them', async () => {
-      // Mutual exclusion rule — a file can't be
-      // both selected and excluded.
-      const { t, setSelected } = await setupDirTab({
-        selectedFiles: ['src/a.md', 'top.md'],
-      });
-      fireDirAction(t, {
-        action: 'exclude-all',
-        path: 'src',
-        name: 'src',
-      });
-      await settle(t);
-      expect(t._selectedFiles.has('src/a.md')).toBe(false);
-      // top.md stays selected — it's not a
-      // descendant.
-      expect(t._selectedFiles.has('top.md')).toBe(true);
-      // Server told about the deselection.
-      expect(setSelected).toHaveBeenCalled();
-    });
+    // Denying a directory also deselected its descendants
+    // until CC-21 — a file couldn't be both selected and
+    // denied. With one state left on a row, the rule has
+    // nothing to reconcile.
 
     it('empty dir is a no-op', async () => {
       // Builds its own tab because the shared
@@ -818,21 +775,11 @@ describe('directory actions', () => {
       expect(setExcluded).toHaveBeenCalledOnce();
     });
 
-    it('does NOT auto-select the descendants', async () => {
-      // Same rule as the file-level include action —
-      // returns to index-only, not to selected.
-      const { t, setSelected } = await setupDirTab({
-        excludedFiles: ['src/a.md'],
-      });
-      fireDirAction(t, {
-        action: 'include-all',
-        path: 'src',
-        name: 'src',
-      });
-      await settle(t);
-      expect(t._selectedFiles.has('src/a.md')).toBe(false);
-      expect(setSelected).not.toHaveBeenCalled();
-    });
+    // Allowing a directory back did NOT auto-select its
+    // descendants — a test that had to exist while a row
+    // could be in one of three states and the middle one
+    // was ambiguous. Allow now returns a row to plain, and
+    // plain is the only other thing it can be.
 
     it('partially-excluded dir includes only the excluded files', async () => {
       // `src/a.md` excluded, `src/b.md` not. Include-

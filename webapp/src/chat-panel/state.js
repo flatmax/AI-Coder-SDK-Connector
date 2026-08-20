@@ -64,7 +64,6 @@ import {
  *   Streaming    — streaming, streamingContent,
  *                  currentRequestId, lastRequestId,
  *                  streams, pendingChunks
- *   Selection    — selectedFiles
  *   Search       — searchQuery, searchIgnoreCase,
  *                  searchRegex, searchWholeWord,
  *                  searchCurrentIndex, searchMode,
@@ -114,10 +113,6 @@ export function makeTabState() {
     // onto its record at completion (msg.durationMs).
     // null when no stream is in flight on this tab.
     streamStartedAt: null,
-    // Selection (pushed by files-tab for the main tab;
-    // agents will get their own per-tab selection in a
-    // later phase)
-    selectedFiles: [],
     // Search — toggle defaults loaded from localStorage
     // so the user's last chosen search mode survives
     // reload.
@@ -245,11 +240,6 @@ const REACTIVE_FIELDS = [
   ['_fileSearchResults', 'fileSearchResults'],
   ['_fileSearchLoading', 'fileSearchLoading'],
   ['_fileSearchFocusedIndex', 'fileSearchFocusedIndex'],
-  // selectedFiles is pushed by the files-tab via
-  // direct assignment; per-tab because agent tabs
-  // will get their own selection. Reactive because
-  // changes need to drive the picker re-render path.
-  ['selectedFiles', 'selectedFiles'],
 ];
 
 /**

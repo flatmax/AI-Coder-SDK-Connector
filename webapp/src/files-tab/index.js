@@ -1,82 +1,59 @@
 // FilesTab — orchestration hub for the file picker + chat panel.
 //
-// Layer 5 Phase 2c — wires picker and chat together, holds the
-// authoritative selected-files state, drives file-tree loading
-// from the Repo RPC, and routes events between the two child
-// components and the AppShell.
+// Wires picker and chat together, holds the authoritative
+// deny-read state, drives file-tree loading from the Repo RPC,
+// and routes events between the two child components and the
+// AppShell.
 //
 // Responsibilities:
 //
 //   1. Load the repository file tree from `Repo.get_file_tree`
 //      on RPC-ready and on `files-modified` events. The tree
 //      is handed to the picker via direct property assignment
-//      (not template propagation — specs4/5-webapp/file-picker.md
+//      (not template propagation — specs5/5-webapp/file-picker.md
 //      is explicit about why).
-//   2. Hold `selectedFiles` as a Set. Listen for the picker's
-//      `selection-changed` event, update the server via
-//      `ClaudeCodeService.set_selected_files`, update the picker's
-//      `selectedFiles` prop directly. (Agent tabs still write to
-//      `LLMService.set_agent_selected_files` — see selection.js.)
-//   3. Listen for `files-changed` (server broadcast) so
-//      selection changes from the server (auto-add for
-//      not-in-context edits, collab broadcasts) update the
-//      picker without round-tripping through user action.
-//   4. Route `file-clicked` from the picker to a `navigate-file`
-//      window event. Phase 3 wires a viewer to consume it; for
-//      now it's a no-op at the consumer side.
+//   2. Hold `excludedFiles` as a Set — the paths the agent is
+//      denied `Read` on. Listen for the picker's
+//      `exclusion-changed` event and write the whole list back
+//      through `ClaudeCodeService.set_denied_read_files`, which
+//      turns it into real CLI permission rules.
+//   3. Route `file-clicked` from the picker to a `navigate-file`
+//      window event, and `insert-path` into the chat composer.
 //
-// Deferred to Phase 2d (explicit boundaries):
-//
-//   - @-filter bridge — picker's `setFilter` call is public,
-//     but the chat panel needs an input handler that detects
-//     `@foo` in the textarea and dispatches a filter event
-//   - Middle-click path insertion — picker emits `insert-path`
-//     on middle-click (2a); chat panel needs a paste-suppression
-//     handler to consume it
-//   - Context menu on picker rows
-//   - Git status badges (M/S/U/D) — picker rendering update
-//   - Branch badge at the root node
-//
-// Deferred to Phase 3:
-//
-//   - Active-file highlight in the picker (needs viewer's
-//     `active-file-changed` event)
-//   - File navigation grid integration
+// There is no selection here. The picker used to hold a
+// selected-files set that framed each turn as "the user has
+// selected these"; CC-21 removed it, because a file the user
+// wants named is named in the prompt, where the agent already
+// sees it. `insert-path` is what the picker offers instead —
+// see mentions.js.
 //
 // ---------------------------------------------------------------
 //
 // Architectural contract — DIRECT-UPDATE PATTERN (load-bearing):
 //
-// When selection changes, this component updates both the
-// picker's `selectedFiles` and the chat panel's `selectedFiles`
-// **directly** (by assignment + requestUpdate()), NOT by
-// relying on Lit's reactive property propagation through its
-// own re-render.
+// When deny-read state changes, this component updates the
+// picker's `excludedFiles` **directly** (by assignment +
+// requestUpdate()), NOT by relying on Lit's reactive property
+// propagation through its own re-render.
 //
 // Why it matters: changing a property on a parent LitElement
 // triggers a full re-render of its template, which reassigns
 // child component properties. For the chat panel, that would
 // reset scroll position and disrupt in-flight streaming. For
 // the picker, it would collapse interaction state (context
-// menus, inline inputs, focus). Specs4 documents this in
+// menus, inline inputs, focus). Documented in
 // file-picker.md#direct-update-pattern-architectural.
 //
-// The pattern, used for every selection-changing operation:
-//   1. Update our own `_selectedFiles` Set (source of truth)
-//   2. Assign `picker.selectedFiles = new Set(...)` + requestUpdate
-//   3. Assign `chatPanel.selectedFiles = [...]` + requestUpdate
-//   4. Notify server via RPC
-//
-// The chat panel in Phase 2b doesn't yet consume
-// `selectedFiles` (it will in 2d for file mentions), but we
-// preserve the assignment so 2d just works without a refactor.
+// The pattern, used for every state-changing operation:
+//   1. Update our own `_excludedFiles` Set (source of truth)
+//   2. Assign `picker.excludedFiles = new Set(...)` + requestUpdate
+//   3. Notify server via RPC
 
 import { LitElement, html } from 'lit';
 
 import { RpcMixin } from '../rpc-mixin.js';
 import '../file-picker/index.js';
 import '../chat-panel/index.js';
-import { parseAgentTabId } from '../chat-panel/index.js';
 import '../commit-graph.js';
 
 import {
@@ -117,7 +94,6 @@ import {
 } from './inline-commits.js';
 import {
   onFileChipClick,
-  onFileChipsAddAll,
   onFileMentionClick,
   onInsertPath,
 } from './mentions.js';
@@ -143,12 +119,6 @@ import {
   renderReviewSelectorModal,
 } from './review.js';
 import {
-  applySelection,
-  onFilesChanged,
-  onSelectionChanged,
-  sendSelectionToServer,
-} from './selection.js';
-import {
   detachSplitter,
   maxPickerWidth as maxPickerWidthFromModule,
   onSplitterDoubleClick,
@@ -160,7 +130,7 @@ import {
 } from './splitter.js';
 import { FILES_TAB_STYLES } from './styles.js';
 import {
-  applyInitialAutoSelect,
+  applyInitialAutoExpand,
   expandAncestorsOf,
   loadFileTree,
   onFilesModified,
@@ -228,25 +198,18 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   constructor() {
     super();
-    // Authoritative selection state — keyed by tab ID so
-    // agent tabs (Phase C) can each own their own
-    // selection. In Phase A only the main tab exists,
-    // so every read/write flows through the same entry
-    // and behaviour matches pre-refactor byte-for-byte.
-    //
-    // The `_selectedFiles` getter/setter defined below
-    // routes through `this._activeTabId` so existing
-    // call sites (_applySelection, _onSelectionChanged,
-    // etc.) don't need to know about the Map.
     this._activeTabId = 'main';
-    this._selectedFilesByTab = new Map();
-    this._selectedFilesByTab.set('main', new Set());
-    // Authoritative exclusion state — per-tab, parallel to
-    // selection. Per specs4/5-webapp/agent-browser.md §
-    // File Picker Scope: "Excluded-files state is also
-    // per-tab." The `_excludedFiles` getter/setter below
-    // routes through the active tab's entry, matching the
-    // selection pattern.
+    // Authoritative deny-read state — keyed by tab ID, per
+    // specs5/5-webapp/agent-browser.md § File Picker Scope:
+    // "Excluded-files state is also per-tab." The
+    // `_excludedFiles` getter/setter below routes through
+    // the active tab's entry so call sites don't need to
+    // know about the Map.
+    //
+    // A per-tab selection Map sat alongside this one until
+    // CC-21. The tab strip is dormant (no backend emits
+    // `agentsSpawned`), so in practice only 'main' is ever
+    // keyed here.
     this._excludedFilesByTab = new Map();
     this._excludedFilesByTab.set('main', new Set());
     // Path of the file currently active in a viewer, or
@@ -322,7 +285,7 @@ export class FilesTab extends RpcMixin(LitElement) {
     // the loaded tree and pushed to the chat panel so it can
     // detect file mentions in assistant output. Non-reactive
     // because we push directly to the chat panel via property
-    // assignment (same pattern as `_selectedFiles`) rather
+    // assignment (same pattern as `_excludedFiles`) rather
     // than through Lit's template propagation, which would
     // trigger full re-renders and reset scroll / streaming
     // state in the chat panel.
@@ -334,17 +297,16 @@ export class FilesTab extends RpcMixin(LitElement) {
     // in the viewer. Non-reactive; read inside event
     // handlers only.
     this._fileSearchActive = false;
-    // First-load auto-selection flag. The files-tab auto-
-    // selects every file with pending changes (modified,
-    // staged, untracked, deleted) on the FIRST successful
-    // tree load so the user doesn't have to re-tick what
-    // they were clearly just working on. Unions with any
-    // existing selection (server may have echoed a prior
-    // session's state during startup). Flag flips to false
-    // after the first load runs and never resets —
-    // subsequent reloads (files-modified after commit,
-    // explicit refresh) do not re-trigger auto-select.
-    this._initialAutoSelect = true;
+    // First-load auto-expand flag. The files-tab opens the
+    // directories holding every file with pending changes
+    // (modified, staged, untracked, deleted) on the FIRST
+    // successful tree load, so the work in progress is on
+    // screen without the user walking the tree to it. Flag
+    // flips to false after the first load runs and never
+    // resets — subsequent reloads (files-modified after
+    // commit, explicit refresh) must not re-open
+    // directories the user has since collapsed.
+    this._initialAutoExpand = true;
 
     // Doc Convert availability — true when the backend
     // reports markitdown is installed. Gated on the
@@ -382,7 +344,6 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onOpenReviewGraph.bind(this);
     this._onCommitInspectedFromGraph =
       this._onCommitInspectedFromGraph.bind(this);
-    this._onFilesChanged = this._onFilesChanged.bind(this);
     this._onFilesModified = this._onFilesModified.bind(this);
     this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onFileMentionClick = this._onFileMentionClick.bind(this);
@@ -409,10 +370,12 @@ export class FilesTab extends RpcMixin(LitElement) {
     this._onRenameCommitted = this._onRenameCommitted.bind(this);
     this._onDuplicateCommitted =
       this._onDuplicateCommitted.bind(this);
-    // Middle-click path insertion. Picker dispatches
-    // `insert-path` with `{path}` on middle-click of
-    // any row; we insert the path into the chat
-    // panel's textarea at the current cursor.
+    // Path insertion. Picker dispatches `insert-path`
+    // with `{path, mention}` on middle-click of any row
+    // and from its two "Insert…" menu items; we insert
+    // the path into the chat panel's textarea at the
+    // current cursor. This is the picker's primary verb
+    // (CC-21).
     this._onInsertPath = this._onInsertPath.bind(this);
     // Reveal-file-in-picker — diff viewer dispatches
     // this when the user clicks the status LED, so
@@ -423,7 +386,7 @@ export class FilesTab extends RpcMixin(LitElement) {
       this._onRevealFileInPicker.bind(this);
     // Chat panel's active-tab-changed bubbles +
     // composes out to the window (D21 A3). We listen
-    // there so the picker's checkbox state tracks
+    // there so the picker's deny-read state tracks
     // whichever tab is currently visible. Phase A
     // only has the main tab, so the listener never
     // actually swaps — but wiring it now means
@@ -451,16 +414,12 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
-  // Per-tab selection accessors (D21 Phase A4)
+  // Per-tab deny-read accessors (D21 Phase A4)
   // ---------------------------------------------------------------
 
-  // `_selectedFiles` was a plain Set pre-A4; now it's a
-  // getter that routes through the tab-keyed Map. Every
-  // existing call site — _applySelection,
-  // _onSelectionChanged, the initial-auto-select pass,
-  // _sendSelectionToServer — writes or reads
-  // `this._selectedFiles` and gets the active tab's
-  // slot transparently.
+  // `_excludedFiles` reads and writes the active tab's
+  // slot in the tab-keyed Map, so call sites never see
+  // the Map.
   //
   // A missing Map entry for the active tab is created on
   // demand with an empty Set. This defends against a
@@ -468,23 +427,6 @@ export class FilesTab extends RpcMixin(LitElement) {
   // yet but the active tab's slot is queried — the
   // fresh empty Set is the correct starting state for
   // any tab Phase C spawns.
-
-  get _selectedFiles() {
-    let set = this._selectedFilesByTab.get(this._activeTabId);
-    if (set === undefined) {
-      set = new Set();
-      this._selectedFilesByTab.set(this._activeTabId, set);
-    }
-    return set;
-  }
-
-  set _selectedFiles(value) {
-    // Wrap non-Set inputs defensively — the pre-A4 code
-    // always assigned Set instances, but _applySelection
-    // passes whatever it was given.
-    const set = value instanceof Set ? value : new Set(value);
-    this._selectedFilesByTab.set(this._activeTabId, set);
-  }
 
   get _excludedFiles() {
     let set = this._excludedFilesByTab.get(this._activeTabId);
@@ -506,7 +448,6 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   connectedCallback() {
     super.connectedCallback();
-    window.addEventListener('files-changed', this._onFilesChanged);
     window.addEventListener('files-modified', this._onFilesModified);
     window.addEventListener('state-loaded', this._onStateLoaded);
     window.addEventListener(
@@ -545,7 +486,6 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   disconnectedCallback() {
-    window.removeEventListener('files-changed', this._onFilesChanged);
     window.removeEventListener(
       'files-modified',
       this._onFilesModified,
@@ -595,8 +535,8 @@ export class FilesTab extends RpcMixin(LitElement) {
     return loadFileTree(this);
   }
 
-  _applyInitialAutoSelect() {
-    return applyInitialAutoSelect(this);
+  _applyInitialAutoExpand() {
+    return applyInitialAutoExpand(this);
   }
 
   _expandAncestorsOf(paths) {
@@ -636,21 +576,12 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   // ---------------------------------------------------------------
-  // Selection sync
+  // Server-state sync
   // ---------------------------------------------------------------
 
-  // Bodies live in ./selection.js (selection events) and
-  // ./tree-loader.js (state-loaded restore + reload
-  // trigger). Host method names preserved for the event
-  // bindings.
-  _onSelectionChanged(event) {
-    return onSelectionChanged(this, event);
-  }
-
-  _onFilesChanged(event) {
-    return onFilesChanged(this, event);
-  }
-
+  // Bodies live in ./tree-loader.js (state-loaded restore
+  // + reload trigger). Host method names preserved for
+  // the event bindings.
   _onStateLoaded(event) {
     return onStateLoaded(this, event);
   }
@@ -707,7 +638,7 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   /**
    * Chat panel's active-tab-changed event — swap the
-   * picker's selection state to whichever tab is now
+   * picker's deny-read state to whichever tab is now
    * visible. Phase A always has the main tab active,
    * so the handler is reachable but the branch below
    * that swaps picker state only fires in Phase C when
@@ -717,14 +648,14 @@ export class FilesTab extends RpcMixin(LitElement) {
    *
    * The handler has two jobs:
    *
-   *   1. Update `_activeTabId` so the `_selectedFiles`
+   *   1. Update `_activeTabId` so the `_excludedFiles`
    *      getter routes to the right Map slot. Every
-   *      subsequent selection read/write inside this
-   *      component lands on the correct tab.
-   *   2. Push the new tab's selection to the picker
-   *      via direct-update so its checkboxes reflect
-   *      the tab's state without re-rendering the
-   *      orchestrator.
+   *      subsequent read/write inside this component
+   *      lands on the correct tab.
+   *   2. Push the new tab's deny set to the picker via
+   *      direct-update so its struck-through rows
+   *      reflect the tab's state without re-rendering
+   *      the orchestrator.
    *
    * The chat panel is the source of truth for tab
    * activation — its `_activeTabId` setter fires the
@@ -736,25 +667,19 @@ export class FilesTab extends RpcMixin(LitElement) {
     if (typeof tabId !== 'string' || !tabId) return;
     if (tabId === this._activeTabId) return;
     this._activeTabId = tabId;
-    // Ensure the Maps have entries — the getters do
-    // this lazily too, but doing it up front keeps the
+    // Ensure the Map has an entry — the getter does this
+    // lazily too, but doing it up front keeps the
     // subsequent .get() deterministic.
-    if (!this._selectedFilesByTab.has(tabId)) {
-      this._selectedFilesByTab.set(tabId, new Set());
-    }
     if (!this._excludedFilesByTab.has(tabId)) {
       this._excludedFilesByTab.set(tabId, new Set());
     }
-    const tabSelection = this._selectedFilesByTab.get(tabId);
     const tabExclusion = this._excludedFilesByTab.get(tabId);
     // Push to the picker. Direct-update pattern, same as
-    // _applySelection — assign fresh Sets then
-    // requestUpdate so the picker's internal
-    // `selectedFiles` / `excludedFiles` props reflect
-    // the active tab.
+    // _applyExclusion — assign a fresh Set then
+    // requestUpdate so the picker's `excludedFiles` prop
+    // reflects the active tab.
     const picker = this._picker();
     if (picker) {
-      picker.selectedFiles = new Set(tabSelection);
       picker.excludedFiles = new Set(tabExclusion);
       picker.requestUpdate();
     }
@@ -782,18 +707,6 @@ export class FilesTab extends RpcMixin(LitElement) {
 
   _onBranchSwitchRequested(event) {
     return onBranchSwitchRequested(this, event);
-  }
-
-  // Bodies live in ./selection.js. Host method names
-  // preserved as forwarders — tests in
-  // selection-sync.test.js, init.test.js, etc. call
-  // _applySelection directly.
-  _applySelection(newSelection, notifyServer) {
-    return applySelection(this, newSelection, notifyServer);
-  }
-
-  _sendSelectionToServer(files) {
-    return sendSelectionToServer(this, files);
   }
 
   // Bodies live in ./exclusion.js. Host method names
@@ -837,13 +750,9 @@ export class FilesTab extends RpcMixin(LitElement) {
     onFileMentionClick(this, event);
   }
 
-  // Bodies live in ./mentions.js.
+  // Body lives in ./mentions.js.
   _onFileChipClick(event) {
     onFileChipClick(this, event);
-  }
-
-  _onFileChipsAddAll(event) {
-    onFileChipsAddAll(this, event);
   }
 
   // ---------------------------------------------------------------
@@ -1046,9 +955,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           .tree=${this._latestTree}
           .statusData=${this._latestStatusData}
           .branchInfo=${this._latestBranchInfo}
-          .selectedFiles=${this._selectedFiles}
           .excludedFiles=${this._excludedFiles}
-          @selection-changed=${this._onSelectionChanged}
           @exclusion-changed=${this._onExclusionChanged}
           @file-clicked=${this._onFileClicked}
           @context-menu-action=${this._onContextMenuAction}
@@ -1083,7 +990,6 @@ export class FilesTab extends RpcMixin(LitElement) {
         <ac-chat-panel
           @file-mention-click=${this._onFileMentionClick}
           @file-chip-click=${this._onFileChipClick}
-          @file-chips-add-all=${this._onFileChipsAddAll}
           @file-search-changed=${this._onFileSearchChanged}
           @file-search-scroll=${this._onFileSearchScroll}
           @filter-from-chat=${this._onFilterFromChat}

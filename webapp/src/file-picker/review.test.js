@@ -406,22 +406,19 @@ describe('FilePicker component', () => {
       expect(rows[1].classList.contains('active-in-viewer')).toBe(true);
     });
 
-    it('active highlight coexists with selection', async () => {
-      // The three visual states (selected, excluded,
-      // active-in-viewer) are orthogonal. A selected +
-      // active file gets the checkbox ticked AND the
-      // accent highlight.
+    it('active highlight coexists with the focus ring', async () => {
+      // The row's visual states are orthogonal. This paired
+      // `selection` until CC-21; keyboard focus is the state that
+      // took selection's place as the thing that can be true at
+      // the same time as "open in the viewer".
       const tree = rootOf([file('a.md', 5)]);
-      const p = mountPicker({
-        tree,
-        selectedFiles: new Set(['a.md']),
-        activePath: 'a.md',
-      });
+      const p = mountPicker({ tree, activePath: 'a.md' });
+      await p.updateComplete;
+      p._focusedPath = 'a.md';
       await p.updateComplete;
       const row = p.shadowRoot.querySelector('.row.is-file');
-      const cb = row.querySelector('.checkbox');
       expect(row.classList.contains('active-in-viewer')).toBe(true);
-      expect(cb.checked).toBe(true);
+      expect(row.classList.contains('focused')).toBe(true);
     });
 
     it('active highlight coexists with exclusion', async () => {

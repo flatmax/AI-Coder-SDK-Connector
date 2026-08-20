@@ -94,10 +94,6 @@ class ReviewMode:
         has something to put back.
     restricted:
         The localhost gate: ``() -> dict | None``.
-    on_selection_cleared:
-        ``async () -> None``, called after entry clears the selection.
-        Separate from ``broadcast`` because clearing the selection is the
-        service's state, not the review's.
 
     ``symbol_index`` and ``doc_builder`` are attached after construction —
     both are built by the startup path long after this object exists, and
@@ -116,14 +112,12 @@ class ReviewMode:
         set_permission_mode: Callable[[str], Awaitable[str | None]] | None = None,
         current_permission_mode: Callable[[], str | None] | None = None,
         restricted: Callable[[], dict[str, Any] | None] | None = None,
-        on_selection_cleared: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repo = repo
         self._broadcast = broadcast
         self._set_permission_mode = set_permission_mode
         self._current_permission_mode = current_permission_mode
         self._restricted = restricted
-        self._on_selection_cleared = on_selection_cleared
         self.symbol_index: Any = None
         self.doc_builder: Any = None
         self._state = empty_review_state()
@@ -267,8 +261,6 @@ class ReviewMode:
             "permission_mode_at_entry": posture["previous"],
         }
 
-        if self._on_selection_cleared is not None:
-            await self._on_selection_cleared()
         await self._emit("reviewStarted", self.state())
 
         result = {

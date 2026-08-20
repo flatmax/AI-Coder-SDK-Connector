@@ -426,17 +426,18 @@ describe('FilesTab read denial — no L0 prompt', () => {
     }
   });
 
-  it('context-menu deny writes the rule and deselects', async () => {
+  it('context-menu deny writes the rule', async () => {
+    // This test also asserted that denying a file deselected
+    // it — pointing the agent at a file it may not read was a
+    // contradiction the two states could get into. CC-21 left
+    // deny-read as the only state a row carries, so there is
+    // nothing to reconcile it against.
     const { t, setDenied } = await setupTab();
-    t._selectedFiles = new Set(['a.md']);
     t._dispatchExclude('a.md');
     await settle(t);
     expect(setDenied).toHaveBeenCalledOnce();
     expect(setDenied.mock.calls[0][0]).toEqual(['a.md']);
     expect(t._excludedFiles.has('a.md')).toBe(true);
-    // Denied and selected can't coexist — pointing at a
-    // file the agent may not read is a contradiction.
-    expect(t._selectedFiles.has('a.md')).toBe(false);
   });
 
   it('context-menu allow drops the path from the rule', async () => {

@@ -1,23 +1,41 @@
-// Mention / chip click handlers + middle-click path
-// insertion.
+// Mention / chip click handlers + path insertion.
 //
 // Three small handlers extracted from index.js. They share
-// a theme (chat-panel-originated events that mutate
-// selection or the chat textarea) so they live together
-// even though there's no internal coupling between them.
+// a theme (events from the picker or the chat panel that
+// either write into the chat textarea or move the viewer)
+// so they live together even though there's no internal
+// coupling between them.
 //
-// All three rely on `applySelection` from selection.js for
-// state mutation; for stage 1 we keep those calls as
-// host-method calls (`host._applySelection(...)`) so the
-// extraction is independent of the selection-module split.
-// Stage 3 will re-route them to direct module imports.
+// None of them touch selection any more. There is no
+// selection: a file the user wants the agent to read is
+// named in the prompt, and `onInsertPath` is how the
+// picker helps them name it (``specs5/plan/decisions.md``
+// CC-21). What used to be a selection toggle on a mention
+// or a chip is now plain navigation.
 
 /**
  * Handle the picker's `insert-path` event — fired on
- * middle-click of a file or directory row. Inserts
- * the path into the chat panel's textarea at the
- * current cursor position, padded with spaces so it
- * doesn't jam against surrounding prose.
+ * middle-click of a file or directory row, and by the
+ * "Insert path in prompt" / "Insert @path" context-menu
+ * items. Inserts the path into the chat panel's textarea
+ * at the current cursor position, padded with spaces so
+ * it doesn't jam against surrounding prose.
+ *
+ * `detail.mention` picks the form. The two are not
+ * cosmetic variants of each other:
+ *
+ *   - bare `path/to/file.py` — a pointer. The agent
+ *     reads it if the work needs reading it, and the
+ *     turn costs one path's worth of tokens if it
+ *     doesn't.
+ *   - `@path/to/file.py` — a read. The CLI expands the
+ *     mention into the file's full text before the turn
+ *     starts, whether or not the agent would have asked
+ *     for it.
+ *
+ * This is the picker's primary verb now that the
+ * checkbox is gone, which is why it is reachable both by
+ * gesture and by menu — see `_CONTEXT_MENU_FILE_ITEMS`.
  *
  * On Linux, middle-click triggers the selection-
  * buffer paste AFTER focus() is called. We set the
@@ -43,6 +61,10 @@ export function onInsertPath(host, event) {
   // respects encapsulation.
   const ta = chat.shadowRoot?.querySelector('.input-textarea');
   if (!ta) return;
+  // `@` goes on here rather than at either dispatch site,
+  // so the gesture and the menu item cannot drift apart on
+  // what an `@path` looks like.
+  const text = event.detail?.mention === true ? `@${path}` : path;
   // Compute surround-padding from the textarea's
   // current state (not from any reactive property),
   // so the insertion reflects exactly what the user
@@ -53,7 +75,7 @@ export function onInsertPath(host, event) {
     before.length > 0 && !/\s$/.test(before) ? ' ' : '';
   const suffix =
     after.length > 0 && !/^\s/.test(after) ? ' ' : '';
-  const insertion = `${prefix}${path}${suffix}`;
+  const insertion = `${prefix}${text}${suffix}`;
   const next = `${before}${insertion}${after}`;
   // Push through the chat panel's reactive state so
   // the send-button enablement and auto-resize
@@ -83,32 +105,17 @@ export function onInsertPath(host, event) {
  * via the `@file-mention-click` binding on `<ac-chat-panel>`
  * in the template.
  *
- * Per specs4/5-webapp/file-picker.md "File Mention
- * Selection": toggle the file's selection state AND
- * navigate to it in the viewer. The two actions are
- * independent — a user clicking a mention wants to see
- * the file AND make it part of the next LLM request's
- * context, regardless of whether they'd previously
- * selected or deselected it.
+ * Open the file in the viewer, and nothing else. This
+ * used to also toggle the file's selection, which meant
+ * a click meant to read a file the agent had just talked
+ * about silently changed what the next turn claimed the
+ * user wanted (CC-21). Reading is now all a mention
+ * click does, which is all a user clicking a filename in
+ * prose was ever asking for.
  */
 export function onFileMentionClick(host, event) {
   const path = event.detail?.path;
   if (typeof path !== 'string' || !path) return;
-  // Toggle — add if absent, remove if present. Goes
-  // through the same `_applySelection` path as a picker
-  // checkbox click, so the server is notified and the
-  // picker's prop is updated via the direct-update
-  // pattern.
-  const next = new Set(host._selectedFiles);
-  if (next.has(path)) {
-    next.delete(path);
-  } else {
-    next.add(path);
-  }
-  host._applySelection(next, /* notifyServer */ true);
-  // Navigation is independent of selection state. Both
-  // add and remove cases open the file in the viewer —
-  // the user clicked the mention, they want to see it.
   window.dispatchEvent(
     new CustomEvent('navigate-file', {
       detail: { path },
@@ -120,62 +127,25 @@ export function onFileMentionClick(host, event) {
 /**
  * Chat panel emits `file-chip-click` when the user
  * clicks a chip in the "Files Referenced" summary
- * section at the bottom of an assistant message. The
- * chips toggle selection state but do NOT navigate —
- * per specs4/5-webapp/chat.md, summary chips are for
- * context management, distinct from inline prose
- * mentions which also navigate. A user scanning the
- * chip list to curate context shouldn't be yanked
- * into the viewer on every click.
+ * section at the bottom of an assistant message.
  *
- * The `navigate: false` field on the event detail is
- * always set to false by the chat panel, but we
- * preserve the check so a future dispatcher that
- * wants navigation can flip the flag without changing
- * the handler shape.
+ * The chips used to be a context-management surface —
+ * each one toggled the file into or out of the selection,
+ * and carried `navigate: false` so that curating context
+ * didn't yank the user into the viewer. With the
+ * selection gone the summary is a collected index of the
+ * files this message named, and opening one is the only
+ * thing left to want from it. So chips navigate now, the
+ * same as the inline prose mentions they were once
+ * distinguished from.
  */
 export function onFileChipClick(host, event) {
   const path = event.detail?.path;
   if (typeof path !== 'string' || !path) return;
-  const next = new Set(host._selectedFiles);
-  if (next.has(path)) {
-    next.delete(path);
-  } else {
-    next.add(path);
-  }
-  host._applySelection(next, /* notifyServer */ true);
-  // Navigate only when the dispatcher explicitly asks
-  // for it. Summary chips always pass navigate:false;
-  // this branch is here for symmetry and future use.
-  if (event.detail?.navigate === true) {
-    window.dispatchEvent(
-      new CustomEvent('navigate-file', {
-        detail: { path },
-        bubbles: false,
-      }),
-    );
-  }
-}
-
-/**
- * Chat panel emits `file-chips-add-all` with a paths
- * array when the user clicks "+ Add All (N)" in the
- * file summary header. The chat panel has already
- * filtered to unselected paths only, so we just add
- * them all to the selection in one batch — a single
- * `set_selected_files` RPC round-trip instead of N.
- *
- * Idempotent — if any of the paths are somehow
- * already selected (race between render and click,
- * unlikely but defensive), the Set add is a no-op
- * for those entries.
- */
-export function onFileChipsAddAll(host, event) {
-  const paths = event.detail?.paths;
-  if (!Array.isArray(paths) || paths.length === 0) return;
-  const next = new Set(host._selectedFiles);
-  for (const path of paths) {
-    if (typeof path === 'string' && path) next.add(path);
-  }
-  host._applySelection(next, /* notifyServer */ true);
+  window.dispatchEvent(
+    new CustomEvent('navigate-file', {
+      detail: { path },
+      bubbles: false,
+    }),
+  );
 }

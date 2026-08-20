@@ -147,8 +147,9 @@ AC⚡DC's role at edit time becomes:
 
 1. **Before** — `can_use_tool` intercepts the call and renders the proposed change as a Monaco
    diff in the permission dialog. Allow / deny / allow-and-remember.
-2. **After** — a `PostToolUse` hook observes the write, broadcasts `filesChanged` /
-   `filesModified`, re-indexes the touched files, and refreshes the diff viewer.
+2. **After** — a `PostToolUse` hook observes the write, broadcasts `filesModified`, re-indexes the
+   touched files, and refreshes the diff viewer. (This line named `filesChanged` alongside it until
+   [CC-21](#cc-21); that was the selection broadcast, a different signal that no longer exists.)
 
 **Why it matters:** anchored-match edits fail in ways that need retry prompts *because* the model
 was working from a structural map rather than the file. An agent that just read the file does not
@@ -275,6 +276,11 @@ token budget cap on how many diffs fit.
 ---
 
 ## CC-14 — File selection becomes a hint, not a context contract
+
+> **Partly superseded by [CC-21](#cc-21) (2026-08-20).** The hint went, and the checkbox with it —
+> the paragraph below describes a channel that no longer exists. What stands is the last paragraph's
+> repurposing of the third state into `Read(path)` deny rules, which is now the whole of the
+> picker's per-path meaning.
 
 The file picker survives. Its meaning changes from *"these files' full text is in the prompt"* to
 *"these files are what I am pointing at"*. Selection is communicated to the agent as a list of
@@ -536,3 +542,60 @@ changes git already tracks and a working tree the user can already diff.
 - **The revisit trigger is the SDK, not our taste.** One test asserts the constraint still exists
   (`test_the_sdk_still_refuses_the_pair`). When the SDK learns to checkpoint alongside a store, that test
   fails, and undo comes back by deleting a branch. Recorded in `7-future/README.md`.
+
+---
+
+## CC-21 — The selection hint goes, the checkbox with it **(user)**
+
+The picker's checkbox column is deleted, and with it every channel the selection travelled down:
+the frontend's `_selectedFiles` state and its per-tab Map, the `set_selected_files` /
+`get_selected_files` / `set_agent_selected_files` RPCs, the `filesChanged` broadcast, `Turn.files`,
+the framing branch that listed selected paths, the `selected_files` key in the `ui_state` snapshot
+and in `mcp__ac-dc__ui_state`'s rendered block, the `files` key on the user-message history entry,
+and review entry's `on_selection_cleared` callback. `chat_streaming` loses its `files` parameter and
+takes four arguments.
+
+This supersedes the first half of [CC-14](#cc-14--file-selection-becomes-a-hint-not-a-context-contract).
+The second half — the third state repurposed as `Read(path)` deny rules — is kept and is now the
+whole of what the picker's per-path state means.
+
+**Why it matters:** the app had two ways to point at a file and only one of them did anything. `@path`
+in the prompt is the CLI's own mechanism: the CLI expands it, the agent reads the file, and the user
+can see in their own message what they asked for. The checkbox produced a paragraph of framing that
+said "here is a hint" and then relied on the model to act on it — so a user who ticked three boxes and
+asked "fix the bug" had no way to tell whether the files had been read, and the honest answer was
+usually not. Muscle memory was the argument for keeping it (CC-14), but muscle memory for a control
+that mostly does nothing is a liability, not an asset: it teaches users that pointing is free and
+silent when the real mechanism is neither.
+
+**What survives, deliberately:**
+
+- **Deny-read**, moved off the checkbox onto the row: `shift`+click toggles the `Read` rule, and the
+  context menu carries both verbs. This is a real permission written to
+  `.claude/settings.local.json`, which the CLI reads — the one per-path control that changes agent
+  behaviour rather than suggesting it.
+- **Viewer framing** in `build_framing()`. What the user is *looking at* is a fact they could not
+  reasonably type, and it changes without them acting. That is the test framing now has to pass:
+  facts the user could not have typed themselves.
+- **The `@`-filter bridge** in the chat input, which is how a typed `@` finds a path at all.
+- **Path insertion**, promoted rather than merely kept, because it becomes the only picker→prompt
+  route. Middle-click inserts the bare path; `shift`+middle-click inserts `@path`; both are also
+  context-menu items ("Insert path in prompt", "Insert @path — agent reads it"). **(user)** chose
+  both forms on distinct gestures, and chose the context-menu item as the discovery path.
+
+**Consequences:**
+
+- **`shift` now means two things on one row**, split by mouse button: with the left button it denies,
+  with the middle button it inserts a mention. Accepted with a mitigation rather than resolved — all
+  four verbs are context-menu items too, so no gesture is the sole route to anything. The alternative
+  was a second modifier, and `ctrl`/`cmd`+click belongs to the browser.
+- **Nothing about the picker crosses the collaboration boundary any more.** There is no shared
+  selection to keep in agreement, so `4-features/collaboration.md`'s File Selection Sync section
+  describes a channel that no longer exists. Deny rules are host-written and localhost-gated
+  (CC-15); collaborators read them from the state snapshot's `denied_read_files`.
+- **Review entry no longer clears anything.** It cleared the selection because the selection
+  described the branch you had just left; the deny list is about paths, which the checkout does not
+  invalidate.
+- **The `@`-expansion is the CLI's, so we cannot report on it.** No UI can say "these three files
+  were read" — the read shows up as `Read` tool calls in the transcript like any other. That is a
+  loss of a promise we were never keeping.

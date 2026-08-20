@@ -735,7 +735,6 @@ describe('ChatPanel agent tabs', () => {
 
   it('the agentsSpawned broadcast still spawns tabs', async () => {
     const p = mountPanel();
-    p._tabs.get('main').selectedFiles = ['src/auth.py', 'src/db.py'];
     const reqId = await startMainStream(p);
     pushEvent('agents-spawned', {
       turn_id: 'turn_abc',
@@ -761,12 +760,9 @@ describe('ChatPanel agent tabs', () => {
     expect(tab.messages).toEqual([
       { role: 'user', content: 'refactor the auth module' },
     ]);
-    // Selection copied, not shared — an agent tab changing its own picker
-    // must not move the main tab's.
-    expect(tab.selectedFiles).toEqual(['src/auth.py', 'src/db.py']);
-    expect(tab.selectedFiles).not.toBe(
-      p._tabs.get('main').selectedFiles,
-    );
+    // A spawned tab used to inherit a COPY of main's selected-files
+    // list, so that an agent tab ticking its own boxes didn't move the
+    // main tab's. Tab state carries no file list at all now (CC-21).
     // Focus stays where the user left it.
     expect(p._activeTabId).toBe('main');
   });
