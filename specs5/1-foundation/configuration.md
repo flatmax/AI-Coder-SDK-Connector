@@ -16,7 +16,7 @@ not through anything in this spec.
 
 | File | Kind | Purpose |
 |---|---|---|
-| `engine.json` | User | Model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
+| `engine.json` | User | Model, commit-message model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
 | `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
 | `snippets.json` | Managed | Quick-insert chat buttons, keyed by preset |
 | `commit.md` | Managed | The commit-message request text |
@@ -25,15 +25,19 @@ Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`
 `system_extra.md`, `system_agentic_appendix.md`, `review.md`, `compaction.md`, `system_reminder.md`.
 Every one of them existed to shape a prompt AC⚡DC no longer assembles.
 
-`commit.md` survives with a changed nature: it is no longer a system prompt for an auxiliary model
-call, it is the text of a **user turn** sent to the session, and its result appears in the transcript
-like any other turn. It is a template, not an instruction to a hidden model.
+`commit.md` survives as the system prompt for the one auxiliary model call the conversion did not
+remove: a **stateless one-shot** — its own short-lived CLI process, no tools, no settings sources, no
+thinking, one turn — that takes the staged diff and returns a commit message. It is not a user turn
+on the live session, and deliberately so: routing a whole staged diff through the conversation would
+put it in the transcript the user is reading and would queue behind a turn in flight. See
+[`../3-engine/session.md`](../3-engine/session.md).
 
 ## Engine Config
 
 `engine.json`, a user file, never overwritten on upgrade.
 
 - **Model** — an alias or full model name. Null means the CLI's default, which is the right default for us: the CLI tracks model availability more closely than our config does.
+- **Commit model** — the model for the commit-message one-shot, when it should not be the session's. That call is one turn with no tools: a diff in, a paragraph out, nothing to weigh. A small model does it for a fraction of the cost and a little less of the wait, and the conversation keeps the model it was chosen with. Null falls back to **Model** rather than to a model of our choosing, because a default here could only be a full model id and a full model id is provider-specific — a first-party id is a `400` from Bedrock, and the CLI's tier aliases resolve against per-tier defaults a third-party provider may not have. The dialect is the user's to write.
 - **Default permission mode** — the posture a new session starts in. `default` unless the user changes it. Live changes go through `set_permission_mode()` and do not write this file unless the user asks to make them the default.
 - **Effort** and **thinking display** — reasoning depth, and whether thinking is shown, summarised, or hidden.
 - **Budget** — an optional `max_budget_usd` hard stop. Null under subscription billing, where cost is unreported and a budget would be meaningless. See [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap).

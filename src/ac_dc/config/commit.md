@@ -26,7 +26,7 @@ The `<scope>` is the affected module, package, or file group — keep it short (
 ## Rules
 
 1. **Imperative mood** — "add X", "fix Y", "rename Z". Not "added", "adds", or "adding".
-2. **Subject line at most 50 characters.** Count carefully.
+2. **Subject line at most 72 characters** — the width the body wraps at, and the width beyond which hosting UIs truncate it. Aim shorter when the change says itself in fewer; do not pad to fill the line.
 3. **Blank line between subject and body.** No colon after the body, no trailing blank line.
 4. **Body wraps at 72 characters.** Multiple paragraphs allowed, separated by blank lines.
 5. **Body explains *why*, not *what*.** The diff already shows what changed. Say why.

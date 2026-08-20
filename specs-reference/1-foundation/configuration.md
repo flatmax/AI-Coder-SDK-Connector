@@ -123,6 +123,7 @@ means "omit the option and let the CLI decide"** rather than "substitute our own
 ```pseudo
 EngineConfig:
     model: string | null                   // alias or full id, e.g. "claude-opus-5"; null → CLI default
+    commit_model: string | null            // model for the commit-message one-shot; null → `model`
     permission_mode: string | null         // PermissionMode; null → "default"
     effort: string | null                  // reasoning depth; null → CLI default
     thinking_display: string | null        // "summarized" | "omitted"; null → CLI default
@@ -133,11 +134,14 @@ EngineConfig:
 **Field semantics:**
 
 - `model` — no provider prefix. The CLI resolves aliases, and `SessionStartedPayload.model` reports what it actually resolved, which is what the UI displays. A config value and a resolved value can legitimately differ.
+- `commit_model` — read by `_one_shot_options` in `ac_dc.claude_code.commit`, not by the session. Precedence is `commit_model or model`, and both null omits `model` from the one-shot's options. Whatever the user writes goes to the CLI unaltered: on a third-party provider that means the provider's own id (`global.anthropic.claude-haiku-4-5-20251001-v1:0` on Bedrock), and a first-party id there returns `400 The provided model identifier is invalid`, which surfaces as the toast's failure reason. Tier aliases (`haiku`, `sonnet`) resolve through `ANTHROPIC_DEFAULT_*_MODEL`, which a third-party provider only has if the CLI's probe or the user wrote them — on a Bedrock config carrying only an Opus default, `haiku` resolved to `claude-sonnet-4-5`.
 - `permission_mode` — the posture a *new* session starts in, one of the six values listed in `specs-reference/3-engine/permissions.md` § `PermissionMode` has six values. Runtime changes go through `set_permission_mode()` and do not write this file.
 - `effort`, `thinking_display`, `max_budget_usd` — read once, at connect time. Changing them requires a new session; the Settings tab must say so rather than appear to apply.
 - `cli_path` — bypasses discovery. Present for installs where `PATH` holds an unexpected `claude`, or where the bundled binary must be avoided.
 
-There is **no `env` field**, and no `smaller_model`: there is no auxiliary model call left to make.
+There is **no `env` field**. The old `llm.json`'s `smaller_model` comes back as `commit_model` and
+only that: the commit-message one-shot is the single auxiliary model call left to make, and it is the
+only thing that field configures.
 
 ### `app.json`
 

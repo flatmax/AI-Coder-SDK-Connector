@@ -396,20 +396,21 @@ practice: watching a long fan-out and killing one that has gone wrong.
 ### Commit (Server-Driven)
 
 - Commit button calls `commit_all`, which returns immediately with a started status
-- Server performs the pipeline in a background task: stage all → get the staged diff → send `commit.md` plus the diff as a **user turn** on the live session → commit with the response
+- Server performs the pipeline in a background task: stage all → get the staged diff → ask a **stateless one-shot** (its own short-lived CLI process, `commit.md` as its system prompt, the diff as its only input) → commit with the response
 - On completion, server broadcasts the commit result to all connected clients
 - All clients show a toast with the short SHA and first line, add a system event message card, and refresh the file tree
 - A commit-in-progress guard on both client and server prevents concurrent commits
 - Chat panel shows a progress message during the commit, replaced by the result when the broadcast arrives
 
-The message-generation step is now an ordinary turn, which has two visible consequences: it appears in
-the transcript like any other exchange (the user can see what the diff was and what came back), and it
-occupies the single-turn slot, so a commit and a chat turn cannot run at once. Both are improvements
-over a hidden auxiliary model call that left no trace.
+The message-generation step is off to the side rather than in the conversation, which has two visible
+consequences: the staged diff never appears in the transcript the user is reading, and a commit does
+not occupy the single-turn slot, so it neither waits for a streaming turn nor blocks one. What the
+one-shot was asked and what it answered are not invisible — the commit's own record in
+`.ac-dc4/events.jsonl` carries the message, and a failure carries the CLI's reason into the toast.
 
 #### Commit-Result Error Path
 
-Because the RPC returns a started status synchronously, the synchronous error branch only catches pre-launch rejections (no repo, already committing, non-localhost, a turn already in flight). Everything the background pipeline can fail at — staging, **the message-generation turn**, the commit itself — surfaces only through the broadcast `commitResult` event. The broadcast carries an `error` string and, for engine failures, a structured `error_info` dict matching the turn's error shape.
+Because the RPC returns a started status synchronously, the synchronous error branch only catches pre-launch rejections (no repo, already committing, non-localhost, a review in progress). Everything the background pipeline can fail at — staging, **the message-generation one-shot**, the commit itself — surfaces only through the broadcast `commitResult` event. The broadcast carries an `error` string and, for engine failures, a structured `error_info` dict matching the turn's error shape.
 
 Multiple components listen to the broadcast for their own in-flight flag, but exactly one is responsible for surfacing the error:
 

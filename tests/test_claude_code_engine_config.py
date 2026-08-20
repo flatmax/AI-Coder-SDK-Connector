@@ -37,6 +37,7 @@ class TestDefaults:
         config = EngineConfig()
         assert config.to_dict() == {
             "model": None,
+            "commit_model": None,
             "permission_mode": None,
             "effort": None,
             "thinking_display": None,
@@ -108,6 +109,7 @@ class TestFromDict:
         config = EngineConfig.from_dict(
             {
                 "model": "claude-opus-5",
+                "commit_model": "claude-haiku-4-5",
                 "permission_mode": "acceptEdits",
                 "effort": "high",
                 "thinking_display": "summarized",
@@ -116,6 +118,7 @@ class TestFromDict:
             }
         )
         assert config.model == "claude-opus-5"
+        assert config.commit_model == "claude-haiku-4-5"
         assert config.permission_mode == "acceptEdits"
         assert config.effort == "high"
         assert config.thinking_display == "summarized"
@@ -141,6 +144,10 @@ class TestFromDict:
 
     def test_non_string_drops_to_null(self):
         assert EngineConfig.from_dict({"model": 42}).model is None
+
+    def test_a_bad_commit_model_drops_to_null(self):
+        """Which falls back to ``model``, not to a model of our choosing."""
+        assert EngineConfig.from_dict({"commit_model": 42}).commit_model is None
 
     def test_budget_must_be_a_number(self):
         assert EngineConfig.from_dict({"max_budget_usd": "5"}).max_budget_usd is None

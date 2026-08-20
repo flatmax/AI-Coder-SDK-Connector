@@ -20,8 +20,10 @@ The properties worth a test, in the order they can hurt:
   session would put the whole staged diff in the user's conversation and
   deadlock behind a turn in flight.
 - **The one-shot is defanged.** ``tools=[]``, ``setting_sources=[]``,
-  ``max_turns=1``, ``permission_mode="plan"``. Each omission is a thing
-  the throwaway session then cannot do.
+  ``max_turns=1``. Each omission is a thing the throwaway session then
+  cannot do. ``permission_mode`` is *not* one of them: plan mode locked
+  nothing that the empty tool list had left unlocked, and it cost the
+  answer on a small model, so there is a test that it stays off.
 - **An oversized diff fails before the round trip**, with a sentence
   naming the size.
 """
@@ -452,9 +454,32 @@ class TestOneShotOptions:
         assert options.tools == [], "the one-shot was given tools"
         assert options.setting_sources == [], "CLAUDE.md and plugins leaked in"
         assert options.max_turns == 1
-        assert options.permission_mode == "plan"
         assert options.cwd == str(tmp_path)
         assert options.system_prompt == service._config.get_commit_prompt()
+
+    async def test_it_is_not_put_in_plan_mode(self, service, sdk_query):
+        """Plan mode competes with ``commit.md`` for the one turn.
+
+        It used to be set here as a second lock on a session that has no
+        tools to unlock. The CLI pays for it by injecting a reminder to
+        write a plan rather than act, and a small model obeys that reminder
+        — the answer comes back as the opening of a plan file instead of a
+        commit message. ``tools=[]`` is the lock that holds; this one only
+        cost the answer.
+        """
+        await commit(service)
+        assert sdk_query.options.permission_mode == "default"
+
+    async def test_it_does_not_think_about_it(self, service, sdk_query):
+        """One transcription turn, and the user's ``effortLevel`` is not it.
+
+        ``settings.json`` arrives as a file for the provider it names, and
+        the reasoning depth in it comes along. That setting is chosen for
+        conversations; here it is latency and output tokens spent on a diff
+        that has one obvious summary.
+        """
+        await commit(service)
+        assert sdk_query.options.thinking == {"type": "disabled"}
 
     async def test_the_provider_comes_over_as_a_settings_file(
         self, service, sdk_query, tmp_path, monkeypatch
@@ -507,7 +532,9 @@ class TestOneShotOptions:
         await commit(svc)
         assert sdk_query.options.cli_path == "/usr/local/bin/claude"
 
-    async def test_the_configured_model_is_used(self, tmp_path, repo, events, sdk_query):
+    async def test_the_session_model_is_used_when_no_other_is_named(
+        self, tmp_path, repo, events, sdk_query
+    ):
         svc = ClaudeCodeService(
             FakeConfig(tmp_path),
             repo=repo,
@@ -517,6 +544,34 @@ class TestOneShotOptions:
         svc.session = FakeSession()
         await commit(svc)
         assert sdk_query.options.model == "claude-sonnet-5"
+
+    async def test_the_commit_model_beats_the_session_model(
+        self, tmp_path, repo, events, sdk_query
+    ):
+        """A commit message is not the work the session model is chosen for.
+
+        One turn, no tools, a diff in and a paragraph out — cheap enough on
+        a small model to be worth naming one, which is what ``commit_model``
+        is for. It has to win over ``model`` or it could never be smaller.
+        """
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path),
+            repo=repo,
+            event_callback=events,
+            engine_config=EngineConfig(
+                model="claude-opus-5", commit_model="claude-haiku-4-5"
+            ),
+        )
+        svc.session = FakeSession()
+        await commit(svc)
+        assert sdk_query.options.model == "claude-haiku-4-5"
+
+    async def test_neither_model_is_no_model(self, tmp_path, repo, events, sdk_query):
+        """Null means omit, so the CLI keeps picking."""
+        svc = ClaudeCodeService(FakeConfig(tmp_path), repo=repo, event_callback=events)
+        svc.session = FakeSession()
+        await commit(svc)
+        assert sdk_query.options.model is None
 
     async def test_a_moved_sdk_surface_reports_instead_of_raising(
         self, service, repo, events, monkeypatch, caplog

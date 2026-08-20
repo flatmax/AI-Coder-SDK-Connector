@@ -1,9 +1,11 @@
 """Engine configuration — the ``engine.json`` reader.
 
 Holds the session options for the one ``ClaudeSDKClient`` this process
-owns. Deliberately tiny: the engine's own configuration is not ours to
+owns — and one field that belongs to the commit-message one-shot instead
+(``commit_model``), because that call is the only other place AC-DC names
+a model. Deliberately tiny: the engine's own configuration is not ours to
 manage (specs5/1-foundation/configuration.md), so this file carries the
-six knobs AC-DC needs to hand the SDK and nothing else.
+handful of knobs AC-DC needs to hand the SDK and nothing else.
 
 **Null means "omit the option"**, not "substitute our own default" — a
 null model lets the CLI pick, a null effort lets the CLI pick. The
@@ -96,6 +98,25 @@ class EngineConfig:
     """
 
     model: str | None = None
+    #: The model for the commit-message one-shot, when it should not be the
+    #: session's.
+    #:
+    #: Generating a commit message is the one auxiliary model call left
+    #: (:mod:`ac_dc.claude_code.commit`) — one turn, no tools, a diff in and
+    #: a paragraph out — and it does not need the model the conversation
+    #: needs. Naming a small one here is worth roughly 7× on the cost of a
+    #: commit and a few seconds on the wait.
+    #:
+    #: Null falls back to :attr:`model`, so an unset value keeps the
+    #: previous behaviour rather than picking a model on the user's behalf.
+    #: There is no portable way to *default* this: a full id is
+    #: provider-specific (a first-party id is a 400 from Bedrock), and the
+    #: CLI's tier aliases resolve against per-tier defaults that a
+    #: third-party provider only has if something wrote them — asking for
+    #: ``haiku`` on this machine's Bedrock config resolved to Sonnet 4.5.
+    #: So the id is the user's to write, in the dialect their provider
+    #: speaks.
+    commit_model: str | None = None
     permission_mode: str | None = None
     effort: str | None = None
     thinking_display: str | None = None
@@ -123,6 +144,7 @@ class EngineConfig:
         """
         return cls(
             model=_clean_str(raw, "model"),
+            commit_model=_clean_str(raw, "commit_model"),
             permission_mode=_clean_choice(raw, "permission_mode", PERMISSION_MODES),
             effort=_clean_choice(raw, "effort", EFFORT_LEVELS),
             thinking_display=_clean_choice(
@@ -172,6 +194,7 @@ class EngineConfig:
         """Round-trippable mapping, nulls included, for the Settings tab."""
         return {
             "model": self.model,
+            "commit_model": self.commit_model,
             "permission_mode": self.permission_mode,
             "effort": self.effort,
             "thinking_display": self.thinking_display,

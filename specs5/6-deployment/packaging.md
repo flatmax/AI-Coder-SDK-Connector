@@ -107,14 +107,16 @@ Users who customized managed files directly (instead of using the extra prompt) 
 ### Engine Config (`engine.json`, user file)
 
 - Model — a plain alias the CLI resolves, not a provider-prefixed identifier. There is no provider to name
+- Commit model — absent by default, which falls back to the session's model. A shipped default would have to be a full model id, and a full model id is provider-specific
 - Permission mode — `"default"`
 - Effort and thinking display — absent by default, so the CLI's own defaults apply
 - Budget — absent by default. A shipped default here would be a spending cap the user did not choose
 - CLI path — absent by default; set only to override discovery
 - **No environment block.** The field does not exist, and a file carrying one is reported as ignored rather than honoured
 
-There is no smaller-model default because there is no auxiliary model call left to make: commit messages
-come from the live session as an ordinary turn, and topic detection went with the compactor.
+The smaller model has one caller left and no default: commit messages come from a stateless one-shot,
+which `commit_model` may point at a small model but only by full id. Topic detection went with the
+compactor.
 
 ### App Config (`app.json`, managed file)
 
@@ -132,10 +134,10 @@ the engine's, and its threshold is the engine's `autoCompactThreshold` to report
 
 ### Request Templates
 
-One file, `commit.md`: the text of the commit-message *request*, sent as a user turn on the live session.
-It is no longer a system prompt for an auxiliary model, which changes how it should read — it addresses an
-agent that already has the diff in context rather than briefing a fresh model on its role. Conventional-commit
-style guidance is the substance either way.
+One file, `commit.md`: the system prompt for the commit-message one-shot, which is a fresh CLI process
+with nothing in context but this file and the diff. It briefs a model on its role, because that model
+has no other briefing — and possibly a small model, so the guidance carries its own examples rather
+than assuming judgement. Conventional-commit style is the substance.
 
 ### Snippets
 

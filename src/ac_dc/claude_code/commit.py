@@ -8,12 +8,15 @@ working exactly as they did before the conversion.
 What changed is where the commit message comes from. It used to be a
 blocking provider call against a separately-configured "smaller model".
 Now it is a **stateless one-shot** through :func:`claude_agent_sdk.query`
-— a second, short-lived CLI process with no tools, no settings sources
-and one turn, which cannot touch the repository and cannot see the chat
-session. Its one loan from the environment is ``settings.json``, handed
-over as a file rather than a source, because that is where the machine
-names its provider and a CLI without one cannot answer at all
-(:func:`_one_shot_options`). It is deliberately not routed through the live
+— a second, short-lived CLI process with no tools, no settings sources,
+no thinking and one turn, which cannot touch the repository and cannot
+see the chat session. Its one loan from the environment is
+``settings.json``, handed over as a file rather than a source, because
+that is where the machine names its provider and a CLI without one cannot
+answer at all (:func:`_one_shot_options`). The smaller model came back
+too, as ``engine.json``'s ``commit_model``: the call is still an auxiliary
+one, and a diff-to-paragraph turn does not need what a conversation
+needs. It is deliberately not routed through the live
 :class:`~ac_dc.claude_code.session.EngineSession`: sending a diff to the
 chat session would put the whole staged diff in the conversation the user
 is having, and would deadlock behind a turn in flight.
@@ -326,7 +329,28 @@ def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
         "tools": [],
         "setting_sources": [],
         "max_turns": 1,
-        "permission_mode": "plan",
+        # `default`, not `plan`, and the empty tool list is why.
+        #
+        # Plan mode was here as a second lock on a session that already has
+        # no tools to unlock. It is not free: the CLI injects a plan-mode
+        # reminder telling the session not to act yet but to write a plan,
+        # and that instruction competes with `commit.md` for the one turn we
+        # get. A large model shrugs it off. A small one obeys it — asked for
+        # a commit message in plan mode, Haiku 4.5 answered with the opening
+        # of a plan file and burned 4478 output tokens on it, where the same
+        # diff in `default` mode came back as one commit message in a
+        # tenth of that. `tools=[]` is the lock that actually holds; this
+        # was the one that cost us the answer.
+        "permission_mode": "default",
+        # Nothing to reason about, so nothing to reason with. The task is a
+        # transcription — a diff in, a paragraph out, one turn, no choices
+        # to weigh — and the CLI enables thinking by default. On a small
+        # model that showed up as most of the latency and most of the
+        # output tokens for no visible gain in the message. Disabling it
+        # also detaches this call from the user's `effortLevel`, which
+        # arrives with `settings.json` below and is set for conversations
+        # rather than for this.
+        "thinking": {"type": "disabled"},
     }
     # The provider, and only the provider.
     #
@@ -354,8 +378,16 @@ def _one_shot_options(service: ClaudeCodeService, prompt: str) -> Any:
     cli_path = service.session.health.cli_path or service.engine_config.cli_path
     if cli_path:
         kwargs["cli_path"] = cli_path
-    if service.engine_config.model:
-        kwargs["model"] = service.engine_config.model
+    # A smaller model than the conversation's, when `engine.json` names one.
+    # Writing a commit message is not the work the session model is chosen
+    # for: measured against a 19k-char diff on this machine's Bedrock
+    # config, Haiku 4.5 answered in 8.2s for $0.015 where Opus 5 took 10.6s
+    # for $0.109 — and the messages were of a kind. Null falls back to the
+    # session's model, because a default we picked would be a full model id
+    # and a full model id is provider-specific.
+    model = service.engine_config.commit_model or service.engine_config.model
+    if model:
+        kwargs["model"] = model
     try:
         return ClaudeAgentOptions(**kwargs)
     except TypeError as exc:
