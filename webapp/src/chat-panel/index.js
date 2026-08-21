@@ -114,14 +114,12 @@ import {
   loadEngineState,
   loadSnippets,
   onUpdated,
-  rehydrateLiveAgents,
   switchMode,
 } from './events.js';
 import { INITIAL_PERMISSION_MODE, probeModeAuthority } from './permission-mode.js';
 import {
   _AGENT_LABEL_MAX_LENGTH,
   _DRAWER_STORAGE_KEY,
-  _EXPERIMENTAL_ENABLED,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
   _SEARCH_WHOLE_WORD_KEY,
@@ -129,9 +127,7 @@ import {
   _loadSearchToggle,
   _saveDrawerOpen,
   _saveSearchToggle,
-  deriveAgentTabLabel,
   generateRequestId,
-  parseAgentTabId,
 } from './helpers.js';
 import {
   _DRAFT_STORAGE_KEY,
@@ -155,7 +151,7 @@ import {
 } from './search.js';
 import { installReactiveAccessors, makeTabState } from './state.js';
 import { STYLES } from './styles.js';
-import { installTabHandlers, onTabClose } from './tabs.js';
+import { installTabHandlers } from './tabs.js';
 
 export class ChatPanel extends RpcMixin(LitElement) {
   static properties = PROPERTIES;
@@ -327,10 +323,6 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // Bound mode helpers — the search bar's render path
     // calls these via `panel._switchMode(mode)` etc.
     this._switchMode = (mode) => switchMode(this, mode);
-    // Bound tab-close — used by streaming.js's stale-
-    // agent recovery path (it calls `panel._onTabClose`
-    // when the backend reports `agent not found`).
-    this._onTabClose = (tabId) => onTabClose(this, tabId);
   }
 
   // ---------------------------------------------------------------
@@ -523,14 +515,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // gated on the engine answering, or a participant would briefly see an
     // enabled selector.
     probeModeAuthority(this);
-    // Rehydrate live agent tabs from the backend's
-    // _agent_contexts registry. Per spec
-    // specs4/5-webapp/agent-browser.md § Refresh and
-    // Reconnect, the backend's agent registry survives
-    // browser refresh and WebSocket reconnect; the
-    // frontend tab strip does not, so onRpcReady is
-    // the recovery point.
-    rehydrateLiveAgents(this);
+    // A fourth call stood here: `rehydrateLiveAgents`, refilling the tab
+    // strip from the backend's `_agent_contexts` registry, which survived
+    // a refresh the strip did not. There is no registry to read now — a
+    // subagent tab is built from the parent turn's own block records, so
+    // it comes back with the transcript `loadEngineState` restores, and
+    // one that was still running when the socket dropped is reachable
+    // through its transcript on disk (subagent-browser.md § Browsing).
   }
 
   updated(changedProps) {
@@ -634,8 +625,6 @@ customElements.define('aic-chat-panel', ChatPanel);
 
 export {
   generateRequestId,
-  deriveAgentTabLabel,
-  parseAgentTabId,
   _AGENT_LABEL_MAX_LENGTH,
   _loadDrawerOpen,
   _saveDrawerOpen,

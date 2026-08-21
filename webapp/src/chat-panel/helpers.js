@@ -6,11 +6,9 @@
 //
 // Contents:
 //   - generateRequestId: backend-compatible request ID
-//   - parseAgentTabId: tab ID → agent identifier
-//   - deriveAgentTabLabel: tab strip label for an agent
+//   - _AGENT_LABEL_MAX_LENGTH: tab-strip label budget
 //   - localStorage helpers for persisted toggles
 //   - Scroll thresholds
-//   - _EXPERIMENTAL_ENABLED gate
 
 /**
  * Generate a request ID matching the specs3 format so the
@@ -24,84 +22,19 @@ export function generateRequestId() {
   return `${epoch}-${suffix}`;
 }
 
-/** Maximum visible width of an agent tab label, in chars. */
+/**
+ * Maximum visible width of a tab-strip label, in chars.
+ *
+ * Read now by ``tabs.js``'s subagent-transcript labels, which is the only
+ * kind of tab left that names something the user did not type. Its
+ * companion `deriveAgentTabLabel` — `Agent NN: {first line of task}`,
+ * built from a `🟧🟧🟧 AGENT` block's index and task — went with the
+ * protocol, as did `parseAgentTabId`, which mapped a tab id back to the
+ * LLM-chosen agent id that every tagged RPC carried. Subagent tabs are
+ * keyed by the `Task` call's `tool_use_id` and are not writable, so
+ * there is no tagged call to address.
+ */
 export const _AGENT_LABEL_MAX_LENGTH = 40;
-
-/**
- * Map a tab id to its backend agent identifier.
- *
- * Agent identity is the LLM-chosen id from the
- * ``🟧🟧🟧 AGENT`` block (e.g., ``"frontend-trivial"``).
- * Tab ids for agent tabs ARE that id directly; the
- * literal string ``"main"`` denotes the main
- * conversation.
- *
- * Returns the agent id (a non-empty string) for agent
- * tabs, or ``null`` for the main tab and for malformed
- * inputs. ``null`` tells the caller to omit the
- * ``agent_tag`` argument entirely (untagged call =
- * main conversation).
- *
- * @param {string} tabId — the tab's identifier
- * @returns {string | null}
- */
-export function parseAgentTabId(tabId) {
-  if (typeof tabId !== 'string' || !tabId) return null;
-  if (tabId === 'main') return null;
-  return tabId;
-}
-
-/**
- * Derive a tab-strip label for a spawned agent.
- *
- * Format: `Agent NN` for empty / whitespace tasks, or
- * `Agent NN: {first line of task}` for a populated task
- * — truncated to `_AGENT_LABEL_MAX_LENGTH` chars with a
- * trailing `…` when the task text doesn't fit.
- *
- * @param {number} agentIdx — zero-based agent index
- * @param {string | undefined | null} task — the agent's
- *   task text from the spawn block
- * @returns {string}
- */
-export function deriveAgentTabLabel(agentIdx, task) {
-  let idx = Number(agentIdx);
-  if (!Number.isFinite(idx)) idx = 0;
-  idx = Math.max(0, Math.floor(idx));
-  const paddedIdx = String(idx).padStart(2, '0');
-  const prefix = `Agent ${paddedIdx}`;
-
-  if (typeof task !== 'string') return prefix;
-  const firstLine = task
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!firstLine) return prefix;
-
-  const full = `${prefix}: ${firstLine}`;
-  if (full.length <= _AGENT_LABEL_MAX_LENGTH) return full;
-
-  const keep = _AGENT_LABEL_MAX_LENGTH - 1;
-  return `${full.slice(0, keep)}…`;
-}
-
-/**
- * Read the `?experimental=1` URL parameter set by the
- * Python launcher when started with `--experimental`.
- * Cached at module load so every chat-panel instance
- * sees the same value without re-parsing.
- */
-export const _EXPERIMENTAL_ENABLED = (() => {
-  try {
-    const raw = new URLSearchParams(window.location.search).get(
-      'experimental',
-    );
-    if (!raw) return false;
-    return ['1', 'true', 'yes'].includes(raw.toLowerCase());
-  } catch (_err) {
-    return false;
-  }
-})();
 
 /** localStorage key for the snippet drawer's open/closed state. */
 export const _DRAWER_STORAGE_KEY = 'aic-dc-snippet-drawer';

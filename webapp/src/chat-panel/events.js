@@ -50,9 +50,8 @@ import {
   mirrorSubagentBlocks,
   rehydrateSubagentTabs,
 } from './subagent-tabs.js';
-import { clearHistoricalTabs, onChatTabShortcut, onTabClose } from './tabs.js';
+import { clearHistoricalTabs, onChatTabShortcut } from './tabs.js';
 import {
-  onAgentsSpawned,
   onEngineHealth,
   onHookEvent,
   onPermissionModeChanged,
@@ -113,16 +112,12 @@ export function bindEventHandlers(panel) {
   panel._onPermissionResolved = (e) => onPermissionResolved(panel, e);
   panel._onPermissionModeChanged = (e) => onPermissionModeChanged(panel, e);
   panel._onRoleChanged = (e) => onRoleChanged(panel, e);
-  panel._onAgentsSpawned = (e) => onAgentsSpawned(panel, e);
-  panel._onAgentsRehydrated = (e) => onAgentsRehydrated(panel, e);
-  panel._onAgentClosed = (e) => onAgentClosed(panel, e);
   panel._onSessionChanged = (e) => onSessionChanged(panel, e);
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
   panel._onPostResponseComplete = (e) => onPostResponseComplete(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
   panel._onModeOrReviewChanged = () => onModeOrReviewChanged(panel);
   panel._onModeChanged = (e) => onModeChanged(panel, e);
-  panel._onAgentModeChanged = (e) => onAgentModeChanged(panel, e);
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
   panel._onSpeechPlayerState = (e) => onSpeechPlayerState(panel, e);
@@ -330,11 +325,6 @@ export function attachEventListeners(panel) {
   // off), and with it whether this client may set the permission mode.
   window.addEventListener('role-changed', panel._onRoleChanged);
   window.addEventListener('session-changed', panel._onSessionChanged);
-  window.addEventListener('agents-spawned', panel._onAgentsSpawned);
-  window.addEventListener(
-    'agents-rehydrated', panel._onAgentsRehydrated,
-  );
-  window.addEventListener('agent-closed', panel._onAgentClosed);
   // D2 — chat-tab keyboard shortcuts. Alt+`
   // cycles to the next tab, Alt+Shift+` to the
   // previous. Installed at the document level
@@ -366,9 +356,6 @@ export function attachEventListeners(panel) {
   );
   window.addEventListener('mode-changed', panel._onModeOrReviewChanged);
   window.addEventListener('mode-changed', panel._onModeChanged);
-  window.addEventListener(
-    'agent-mode-changed', panel._onAgentModeChanged,
-  );
   window.addEventListener(
     'review-started',
     panel._onModeOrReviewChanged,
@@ -428,11 +415,6 @@ export function detachEventListeners(panel) {
   );
   window.removeEventListener('role-changed', panel._onRoleChanged);
   window.removeEventListener('session-changed', panel._onSessionChanged);
-  window.removeEventListener('agents-spawned', panel._onAgentsSpawned);
-  window.removeEventListener(
-    'agents-rehydrated', panel._onAgentsRehydrated,
-  );
-  window.removeEventListener('agent-closed', panel._onAgentClosed);
   window.removeEventListener('state-loaded', panel._onStateLoaded);
   window.removeEventListener(
     'post-response-complete', panel._onPostResponseComplete,
@@ -446,9 +428,6 @@ export function detachEventListeners(panel) {
     panel._onModeOrReviewChanged,
   );
   window.removeEventListener('mode-changed', panel._onModeChanged);
-  window.removeEventListener(
-    'agent-mode-changed', panel._onAgentModeChanged,
-  );
   window.removeEventListener(
     'review-started',
     panel._onModeOrReviewChanged,
@@ -872,32 +851,23 @@ export function onModeChanged(panel, event) {
 /**
  * Switch primary mode via RPC.
  *
- * Routes by active tab — main targets the
- * orchestrator's ContextManager via
- * ``LLMService.switch_mode``; agent tabs target
- * the per-agent ContextManager via
- * ``LLMService.switch_agent_mode``. Per
- * Increment 4b — per-agent mode is independent
- * of the orchestrator's mode, so the toggle on
- * an agent tab must NOT touch main's state.
+ * Targets the orchestrator via ``LLMService.switch_mode``
+ * and waits for the ``mode-changed`` broadcast rather
+ * than updating local state optimistically.
  *
- * For main: backend broadcasts ``mode-changed``
- * which our handler picks up. For agents: backend
- * broadcasts ``agent-mode-changed`` which
- * :func:`onAgentModeChanged` picks up.
- *
- * The optimistic-update path is the same in
- * both cases — don't mutate local state, wait
- * for the broadcast.
+ * The per-agent branch that stood here routed an agent
+ * tab's toggle to ``switch_agent_mode`` so it would not
+ * touch main's state. Both the writable agent tabs and
+ * that RPC went with the ``🟧🟧🟧 AGENT`` protocol; a
+ * subagent tab is a mirror of main's blocks and has no
+ * mode of its own to switch.
  */
 export async function switchMode(panel, mode) {
   if (mode !== 'code' && mode !== 'doc') return;
   if (!panel.rpcConnected) return;
-  if (panel._activeTabId === 'main') {
-    if (mode === panel._mode) return;
-    return _switchMainMode(panel, mode);
-  }
-  return _switchAgentMode(panel, mode);
+  if (panel._activeTabId !== 'main') return;
+  if (mode === panel._mode) return;
+  return _switchMainMode(panel, mode);
 }
 
 async function _switchMainMode(panel, mode) {
@@ -915,70 +885,6 @@ async function _switchMainMode(panel, mode) {
       'error',
     );
   }
-}
-
-/**
- * Per-agent mode switch.
- *
- * No-op when the new mode equals the current —
- * saves a needless RPC and matches the backend's
- * no-op short-circuit.
- *
- * A ``+xref`` suffix on a mode read out of
- * ``_tabModes`` is dropped rather than preserved:
- * the axis it named was retired in phase 4, and
- * only an archived tab entry can still carry it.
- */
-async function _switchAgentMode(panel, mode) {
-  const agentId = panel._activeTabId;
-  const current = panel._tabModes?.get(agentId) || 'code';
-  if (mode === current) return;
-  try {
-    const result = await panel.rpcExtract(
-      'LLMService.switch_agent_mode', agentId, mode,
-    );
-    if (result && typeof result === 'object' && result.error) {
-      const reason = result.reason || result.error;
-      panel._emitToast(
-        `Agent mode switch failed: ${reason}`,
-        'warning',
-      );
-    }
-  } catch (err) {
-    panel._emitToast(
-      `Agent mode switch failed: ${err?.message || 'RPC error'}`,
-      'error',
-    );
-  }
-}
-
-/**
- * Handle ``agent-mode-changed`` window events.
- *
- * Updates ``_tabModes`` for the affected agent
- * and forces a re-render so the toggle reflects
- * the new state. Detail shape is
- * ``{agent_id, mode, ...}``; only the first two
- * fields are read. Dormant since phase 3 —
- * nothing broadcasts this any more, and the shape
- * is kept for CC-8 rather than half-deleted.
- *
- * Defensive against unknown agent ids — a stale
- * broadcast for an agent the user just closed
- * is silently dropped (the tab no longer
- * exists, so updating its mode would just
- * leave a dangling map entry).
- */
-export function onAgentModeChanged(panel, event) {
-  const detail = event?.detail;
-  if (!detail || typeof detail !== 'object') return;
-  const agentId = detail.agent_id;
-  const mode = detail.mode;
-  if (typeof agentId !== 'string' || !agentId) return;
-  if (typeof mode !== 'string' || !mode) return;
-  if (!panel._tabs.has(agentId)) return;
-  panel._tabModes.set(agentId, mode);
-  panel.requestUpdate();
 }
 
 /**
@@ -1107,273 +1013,19 @@ export async function loadSnippets(panel) {
   }
 }
 
-/**
- * Rehydrate live agent tabs from the backend's
- * ``_agent_contexts`` registry. Called from
- * ``onRpcReady`` so the chat panel reconstructs
- * writable tabs after browser refresh or
- * WebSocket reconnect.
- *
- * Per spec ``specs4/5-webapp/agent-browser.md``
- * § Refresh and Reconnect — the backend's agent
- * registry survives the websocket roundtrip;
- * the frontend tab strip does not. ``onRpcReady``
- * is the recovery point.
- *
- * Two-phase:
- *
- *   1. ``list_live_agents()`` — metadata only,
- *      one entry per registered agent.
- *      Synchronous tab creation (writable, empty
- *      message list).
- *   2. ``get_turn_archive(turn_id)`` per unique
- *      turn — returns conversation content for
- *      every agent in that turn. Filtered per
- *      tab by ``agent_idx``.
- *
- * Tabs render immediately after phase 1 so the
- * user sees the strip without waiting for
- * archive loads. Conversation messages
- * materialise as each archive call returns.
- *
- * Errors are logged but never surfaced as
- * toasts — this runs on every connect and a
- * transient failure shouldn't punish the user
- * with a notification on every reload. An
- * agent's tab without a populated message list
- * still works: the user can reply, and the
- * backend ContextManager has the full context.
- */
-/**
- * Handle ``agents-rehydrated`` window events.
- *
- * Dispatched by the AppShell after the backend's
- * :func:`load_session_into_context` reconstructs agent
- * scopes from the session's archive. The detail carries
- * ``{agent_ids: [...]}`` listing which ids the backend
- * just registered, but the frontend doesn't need to
- * filter — :func:`rehydrateLiveAgents` calls
- * ``list_live_agents()`` and reconstructs every live
- * agent's tab. Tabs already present from the prior
- * connection are skipped idempotently.
- *
- * The ``session-changed`` handler runs before this one
- * (per the broadcast order in
- * :func:`load_session_into_context`), so by the time
- * we materialise tabs the message list and streaming
- * state have already been reset for the new session.
- */
-export function onAgentsRehydrated(panel, event) {
-  // The detail's agent_ids is informational — the
-  // rehydrate path itself queries the backend. We don't
-  // gate on it (an empty list would skip the call but
-  // the handler still runs harmlessly through
-  // list_live_agents → empty entries → no tabs).
-  rehydrateLiveAgents(panel);
-}
-
-/**
- * Handle ``agent-closed`` window events.
- *
- * Dispatched by the AppShell when the backend frees an
- * agent's scope server-side — currently from
- * :func:`new_session` (which closes every live agent
- * per Increment 2 of the "Agents as first-class
- * persistent entities" plan) and from
- * :func:`close_agent_context`.
- *
- * Detail shape: ``{agent_id: string}``. We route the id
- * to :func:`onTabClose` which removes the tab from
- * ``_tabs`` and ``_tabLabels``, switches to main if the
- * closed tab was active, and frees per-tab UI state.
- *
- * Defensive against unknown ids — :func:`onTabClose`
- * already short-circuits when the tab isn't in the
- * registry. Defensive against malformed detail —
- * non-string id silently skipped (matches the agent-
- * mode-changed handler's defensive shape).
- *
- * Note that :func:`onTabClose` itself fires the close-
- * agent-context RPC. That's a no-op when the backend
- * has already freed the scope (the unknown-id branch
- * returns ``{closed: false}``), so the round-trip is
- * harmless even though it's redundant on this path.
- * The alternative (gate the RPC call inside
- * :func:`onTabClose`) would either require a new
- * "from-broadcast" flag or a registry probe; neither
- * pays for itself.
- */
-export function onAgentClosed(panel, event) {
-  const detail = event?.detail;
-  if (!detail || typeof detail !== 'object') return;
-  const agentId = detail.agent_id;
-  if (typeof agentId !== 'string' || !agentId) return;
-  onTabClose(panel, agentId);
-}
-
-export async function rehydrateLiveAgents(panel) {
-  if (!panel.rpcConnected) return;
-  let entries;
-  try {
-    entries = await panel.rpcExtract(
-      'LLMService.list_live_agents',
-    );
-  } catch (err) {
-    const message = err?.message || '';
-    if (!message.includes('method not found')) {
-      console.error('[chat] list_live_agents failed', err);
-    }
-    return;
-  }
-  if (!Array.isArray(entries) || entries.length === 0) return;
-
-  // Lazy import to avoid a tabs.js → events.js cycle.
-  const { rehydrateAgentTabs } = await import('./tabs.js');
-  const created = rehydrateAgentTabs(panel, entries);
-  if (created.length === 0) return;
-
-  // One get_agent_history call per rehydrated agent.
-  // Reads the agent's full reconstructed conversation
-  // from its ContextManager — for session-reconstructed
-  // agents that's the concatenation across every turn
-  // they participated in. The earlier per-turn approach
-  // (get_turn_archive(turn_id) filtered to agent_idx)
-  // only returned the latest turn's messages, so multi-
-  // turn agents lost all but their most recent turn
-  // from the rehydrated tab.
-  for (const entry of created) {
-    loadAgentHistory(panel, entry);
-  }
-}
-
-/**
- * Load full conversation history for one rehydrated
- * agent.
- *
- * Fire-and-forget — kicks off the async fetch and
- * returns. The tab's message list populates when the
- * RPC resolves; Lit's reactive update pipeline
- * handles the UI refresh.
- *
- * Uses ``get_agent_history`` rather than
- * ``get_turn_archive`` so multi-turn agents (those
- * that participated in several turns over the
- * session, reconstructed via the session-load path)
- * surface their full conversation, not just the
- * latest turn's messages. The backend's reconstruction
- * has already concatenated archive content across
- * every participating turn into the agent's
- * ContextManager; this RPC reads from there.
- *
- * Each record matches :class:`ContextManager`'s
- * history shape — ``{role, content, ...}`` plus
- * optional ``system_event``, ``images``, etc.
- * (essentially the same shape ``get_turn_archive``
- * records use, since the reconstruction path
- * sources from those archives).
- */
-async function loadAgentHistory(panel, entry) {
-  if (!panel.rpcConnected) return;
-  const tabId = entry.id;
-  if (typeof tabId !== 'string' || !tabId) return;
-
-  let history;
-  try {
-    history = await panel.rpcExtract(
-      'LLMService.get_agent_history',
-      tabId,
-    );
-  } catch (err) {
-    console.error(
-      `[chat] get_agent_history(${tabId}) failed`, err,
-    );
-    return;
-  }
-  if (!Array.isArray(history) || history.length === 0) return;
-
-  const tab = panel._tabs.get(tabId);
-  if (!tab) return;
-
-  tab.messages = history.map((r) => {
-    const msg = { role: r.role, content: r.content ?? '' };
-    if (Array.isArray(r.images) && r.images.length > 0) {
-      msg.images = r.images;
-    }
-    if (r.system_event) msg.system_event = true;
-    return msg;
-  });
-  // Recompute lastEditOutcome from the loaded history
-  // so the LED row resolves to green/red per spec
-  // § Refresh and Reconnect "What is genuinely lost"
-  // — cyan is never recovered, but green/red is
-  // recomputable.
-  tab.lastEditOutcome = computeOutcomeFromArchive(history);
-  panel.requestUpdate();
-}
-
-/**
- * Recompute a tab's last-completion outcome from its
- * persisted archive records.
- *
- * Mirrors ``computeLastEditOutcome`` in streaming.js
- * but reads from archive records rather than a fresh
- * stream-complete payload. Two signals:
- *
- *   - The last assistant message — if it carries
- *     edit results metadata with any failed entry,
- *     the outcome is red.
- *   - Stream-error metadata persisted on the
- *     assistant message — also red.
- *
- * Otherwise green. Cyan (active stream) is never
- * recovered across refresh per spec.
- *
- * Returns null when no assistant message exists yet
- * (fresh agent that's only seen its initial user
- * message). Null leaves the LED at its rest state
- * rather than asserting a misleading green.
- */
-function computeOutcomeFromArchive(records) {
-  let lastAssistant = null;
-  for (const r of records) {
-    if (r && r.role === 'assistant') lastAssistant = r;
-  }
-  if (!lastAssistant) return null;
-  const editResults = Array.isArray(lastAssistant.edit_results)
-    ? lastAssistant.edit_results
-    : [];
-  const error = lastAssistant.error;
-  let appliedCount = 0;
-  let firstFailure = null;
-  for (const r of editResults) {
-    if (!r || typeof r !== 'object') continue;
-    if (r.status === 'applied') appliedCount += 1;
-    else if (r.status === 'failed' && !firstFailure) {
-      firstFailure = r;
-    }
-  }
-  if (error || firstFailure) {
-    let reason = 'archived failure';
-    if (error) {
-      reason = typeof error === 'string' ? error : 'stream failed';
-    } else if (firstFailure) {
-      const msg = firstFailure.message || '';
-      const file = firstFailure.file || '';
-      if (msg) reason = file ? `${file}: ${msg}` : msg;
-      else reason = firstFailure.error_type || 'edit failed';
-    }
-    return {
-      status: 'error',
-      appliedCount,
-      failureReason: reason,
-    };
-  }
-  return {
-    status: 'clean',
-    appliedCount,
-    failureReason: null,
-  };
-}
+// The writable agent tab strip stood here: `onAgentsRehydrated`,
+// `onAgentClosed`, `rehydrateLiveAgents`, `loadAgentHistory` and
+// `computeOutcomeFromArchive` — a two-phase reconstruction that
+// asked `list_live_agents()` for the backend's `_agent_contexts`
+// registry on every connect and replayed each agent's
+// conversation from `get_agent_history`.
+//
+// None of it has a backend to talk to. `LLMService` went in
+// conversion phase 3 and the registry it kept went with it: a
+// subagent is internal to one turn, its blocks are mirrored into
+// a tab from the parent's own stream, and the reconnect path
+// rebuilds the strip from the turn snapshot's `subagents` list
+// (`rehydrateSubagentTabs`) without reading a transcript.
 
 // ---------------------------------------------------------------
 // Commit result

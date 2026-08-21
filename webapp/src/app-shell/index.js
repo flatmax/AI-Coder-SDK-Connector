@@ -985,95 +985,29 @@ export class AppShell extends JRPCClient {
   }
 
   // ---------------------------------------------------------------
-  // Dormant receivers — no emitter after conversion phase 3
+  // Dormant receiver — no emitter after conversion phase 3
   // ---------------------------------------------------------------
   //
-  // The five callbacks below (`modeChanged`, `agentModeChanged`,
-  // `agentsSpawned`, `agentsRehydrated`, `agentClosed`) have no
-  // sender: the native engine broadcast them and nothing in
-  // `src/aic_dc/claude_code/` does. They are kept, not tombstoned,
-  // because their consumers are kept too and for the same reason —
+  // `modeChanged` has no sender: the native engine broadcast it and
+  // nothing in `src/aic_dc/claude_code/` does. It is kept, not
+  // tombstoned, because its consumer is kept for the same reason —
   // the code/doc mode toggle's replacement is the preset selector
-  // (CC-12) and the agent tab strip's is the subagent browser
-  // (CC-8), both deferred by decision in
-  // specs5/plan/delivery.md. Deleting the receiver while leaving
-  // the tab strip in place would move the break rather than fix
-  // it, and would delete the shape whoever picks up CC-8 needs.
+  // (CC-12), deferred by decision in specs5/plan/delivery.md.
+  // Deleting the receiver while leaving the toggle in place would
+  // move the break rather than fix it.
   //
-  // Nothing user-visible depends on them. No tab can exist without
-  // an `agentsSpawned` push, so every agent-tab code path — the
-  // strip, its per-tab modes, its `LLMService` calls — is
-  // unreachable outside the tests, and the mode toggles came out of
-  // the action bar in phase 2.
+  // Four siblings stood here — `agentModeChanged`, `agentsSpawned`,
+  // `agentsRehydrated` and `agentClosed`, the pushes that drove the
+  // `🟧🟧🟧 AGENT` tab strip. They were held for the same reason
+  // and released on the same terms: CC-8 landed, the subagent
+  // browser is the strip now, and it needs none of them. A subagent
+  // tab is built from block records the parent turn already streams
+  // to this client, so there is no separate spawn broadcast to
+  // receive, no scope to rehydrate after a reconnect, and no
+  // server-side close to mirror.
 
   modeChanged(data) {
     window.dispatchEvent(new CustomEvent('mode-changed', { detail: data }));
-    return true;
-  }
-
-  agentModeChanged(data) {
-    // Per-agent mode change broadcast (Increment 4a).
-    // Carries {agent_id, mode, ...}. Re-dispatched as a
-    // window event so the chat panel's
-    // `_onAgentModeChanged` handler updates `_tabModes`,
-    // which the agent tab strip reads for its tooltips.
-    window.dispatchEvent(
-      new CustomEvent('agent-mode-changed', { detail: data }),
-    );
-    return true;
-  }
-
-  agentsSpawned(data) {
-    // Fired by the backend immediately after the main LLM
-    // finishes and before spawning agents. Carries
-    // {turn_id, parent_request_id, agent_blocks} so the
-    // chat panel can create agent tabs in time to receive
-    // the child streams. See specs4/7-future/
-    // parallel-agents.md § Execution Model.
-    window.dispatchEvent(
-      new CustomEvent('agents-spawned', { detail: data }),
-    );
-    return true;
-  }
-
-  agentsRehydrated(data) {
-    // Fired by the backend after load_session_into_context
-    // reconstructs agent scopes from the session's
-    // archive. Carries {agent_ids: [...]} so the chat
-    // panel can materialise tabs for the rehydrated
-    // agents. Distinct from agentsSpawned because the
-    // reconstructed scopes have full conversation history
-    // (loaded from get_turn_archive, not from a fresh
-    // spawn) — the frontend handler differs accordingly.
-    // See specs4/3-llm/history.md § Session-Load
-    // Reconstruction step 9.
-    window.dispatchEvent(
-      new CustomEvent('agents-rehydrated', { detail: data }),
-    );
-    return true;
-  }
-
-  agentClosed(data) {
-    // Fired by the backend when an agent's scope is freed
-    // server-side — currently from new_session (which
-    // clears every live agent per Increment 2 of the
-    // "Agents as first-class persistent entities" plan)
-    // and from close_agent_context. Carries
-    // {agent_id: str}. Re-dispatched as a window event
-    // so the chat panel removes the tab and frees per-
-    // tab state.
-    //
-    // Without this handler, agents would survive
-    // new_session in the UI even though the backend has
-    // freed their scope — a subsequent RPC routed to the
-    // stale tab would return {error: "agent not found"}
-    // and the chat panel's existing stale-tag handling
-    // would close the tab then. The proactive event makes
-    // the close immediate rather than waiting for the
-    // next user gesture.
-    window.dispatchEvent(
-      new CustomEvent('agent-closed', { detail: data }),
-    );
     return true;
   }
 

@@ -63,7 +63,7 @@ import {
   settleLiveSubagentTabs,
   syncSubagentTab,
 } from './subagent-tabs.js';
-import { findTabForRequest, spawnAgentTabs } from './tabs.js';
+import { findTabForRequest } from './tabs.js';
 
 // ---------------------------------------------------------------
 // Turn outcome (LED row state)
@@ -642,35 +642,6 @@ export function onHookEvent(panel, event) {
     const tool = data.tool_name ? ` ${data.tool_name}` : '';
     panel._emitToast(`🪝 A hook blocked${tool}`, 'warning');
   }
-}
-
-// ---------------------------------------------------------------
-// Pre-spawn agents from broadcast
-// ---------------------------------------------------------------
-
-/**
- * Handle an `agents-spawned` window event.
- *
- * Dead on the Claude Code path: nothing emits `agentsSpawned`. The engine's
- * subagents are internal to a turn and announce themselves as `subagentEvent`,
- * which builds their tabs through `subagent-tabs.js` — a different producer for
- * a strip this one used to fill, and the reason it stays dead rather than being
- * repointed: an `agentsSpawned` tab is writable, and a subagent's is not.
- * Kept wired until the native engine is deleted in phase 3, so the phase-2 diff
- * is about the new path rather than about removing the old one.
- *
- * Payload: ``{turn_id, parent_request_id, agent_blocks}`` where
- * ``agent_blocks`` is ``[{id, task, agent_idx}, ...]``.
- */
-export function onAgentsSpawned(panel, event) {
-  const detail = event.detail || {};
-  const { turn_id, parent_request_id, agent_blocks } = detail;
-  if (typeof turn_id !== 'string' || !turn_id) return;
-  if (typeof parent_request_id !== 'string') return;
-  if (!Array.isArray(agent_blocks)) return;
-  if (agent_blocks.length === 0) return;
-  spawnAgentTabs(panel, turn_id, agent_blocks, parent_request_id);
-  startStreamTimerTick(panel);
 }
 
 // ---------------------------------------------------------------

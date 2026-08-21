@@ -27,11 +27,7 @@
 
 import { html } from 'lit';
 import { withRpcTimeout } from '../rpc.js';
-import {
-  _AGENT_LABEL_MAX_LENGTH,
-  deriveAgentTabLabel,
-  parseAgentTabId,
-} from './helpers.js';
+import { _AGENT_LABEL_MAX_LENGTH } from './helpers.js';
 import { restoreMessage } from './restore.js';
 import { makeTabState } from './state.js';
 import { findSubagentTab, subagentTabTooltip } from './subagent-tabs.js';
@@ -258,95 +254,18 @@ export function onChatTabShortcut(panel, event) {
   panel._activeTabId = tabIds[nextIdx];
 }
 
-/**
- * Close a tab. Removes the tab from ``_tabs`` and
- * ``_tabLabels``; if the closed tab was active,
- * switches to Main. Main tab can never be closed
- * but a defensive guard here makes the intent
- * explicit.
- *
- * Per specs4/5-webapp/agent-browser.md § Tab Strip
- * and § Tab Lifetime, no UI gesture binds to this
- * function. It is the internal primitive the
- * ``agent-closed`` event handler invokes when
- * ``new_session`` (or session load) fans out, one
- * call per dismissed agent. It also runs from
- * ``view-agents-requested`` cleanup paths and from
- * tests asserting the close pathway.
- *
- * Dispatches ``close-tab`` so future backend
- * integrations can hook in. Fires
- * ``LLMService.close_agent_context`` to free the
- * scope server-side; the archive file on disk is
- * preserved.
- *
- * Fire-and-forget — local state is already mutated
- * (optimistic close), and the RPC is idempotent. A
- * failure means the backend scope lingers until
- * session end; the user-visible tab is gone
- * regardless.
- *
- * Restricted-caller errors for non-localhost
- * participants DO surface as a toast because they're
- * actionable: the user can ask the host to close the
- * tab for them.
- */
-export function onTabClose(panel, tabId) {
-  if (typeof tabId !== 'string' || !tabId) return;
-  if (tabId === 'main') return;
-  if (!panel._tabs.has(tabId)) return;
-  const wasActive = panel._activeTabId === tabId;
-  panel._tabs.delete(tabId);
-  panel._tabLabels.delete(tabId);
-  panel._tabModes.delete(tabId);
-  // Switch to Main first (if the closed tab was
-  // active) so the active-tab-changed event fires
-  // with a valid target. Otherwise the render below
-  // would still see _activeTabId pointing at the
-  // deleted tab, and every per-tab getter would
-  // lazy-create a fresh empty state at the stale
-  // key.
-  if (wasActive) {
-    panel._activeTabId = 'main';
-  }
-  // Force a re-render so the strip reflects the
-  // deletion — _tabs mutations don't trigger Lit's
-  // dirty-check on their own.
-  panel.requestUpdate();
-
-  panel.dispatchEvent(
-    new CustomEvent('close-tab', {
-      detail: { tabId },
-      bubbles: true,
-      composed: true,
-    }),
-  );
-
-  const agentTag = parseAgentTabId(tabId);
-  if (agentTag && panel.rpcConnected) {
-    panel
-      .rpcExtract('LLMService.close_agent_context', agentTag)
-      .then((result) => {
-        if (
-          result
-          && typeof result === 'object'
-          && result.error === 'restricted'
-        ) {
-          panel._emitToast(
-            result.reason || 'Restricted operation',
-            'warning',
-          );
-        }
-      })
-      .catch((err) => {
-        // Tab is already gone locally; toasting would
-        // misrepresent the state. Operators debugging
-        // "why did the scope leak" can find the log
-        // entry.
-        console.debug('[chat] close_agent_context failed', err);
-      });
-  }
-}
+// `onTabClose` stood here, with the `close-tab` event it dispatched and
+// the `LLMService.close_agent_context` call it fired to free the agent's
+// server-side scope. It was the primitive the `agent-closed` receiver
+// invoked once per dismissed agent when `new_session` fanned out, and no
+// UI gesture ever bound to it — the writable agent tabs it closed were
+// session-scoped.
+//
+// Both kinds of tab that remain sweep themselves: `clearHistoricalTabs`
+// below drops browsed transcripts on a fresh load or session change, and
+// `subagent-tabs.js` retires a live subagent's tab with the turn that
+// spawned it. Neither has a backend scope to release — a subagent tab is
+// a view onto block records the parent turn already streamed.
 
 // ---------------------------------------------------------------
 // Tab strip rendering
@@ -409,17 +328,13 @@ export function renderTabStrip(panel) {
             active ? 'active' : '',
             readOnly ? 'read-only' : '',
           ].filter(Boolean).join(' ');
-          // No per-tab ✕ close affordance — agent
-          // tabs are session-scoped and dismissed
-          // only by `new_session`, session load, or
-          // server shutdown. See
-          // specs4/5-webapp/agent-browser.md § Tab
-          // Strip and § Tab Lifetime. The
-          // `onTabClose` function below stays as the
-          // internal primitive the `agent-closed`
-          // event handler invokes during
-          // `new_session` fan-out; it is not bound
-          // to any UI element here.
+          // No per-tab ✕ close affordance. A subagent tab is retired
+          // with the turn that spawned it and a browsed transcript by
+          // the next load or session change — neither is the user's to
+          // dismiss one at a time, and a ✕ on a still-streaming
+          // subagent would read as "stop it", which the ⏹ below is
+          // for. See specs5/5-webapp/subagent-browser.md § Tab
+          // Lifetime.
           return html`
             <button
               class=${cls}
@@ -591,295 +506,20 @@ export function renderOverflowMenu(panel, tabs) {
 // Agent tab spawning
 // ---------------------------------------------------------------
 
-/**
- * Create agent tab state for each valid block.
- *
- * Called when the main-tab result carries
- * ``turn_id`` + one or more agent blocks. Creates a
- * ``_tabs`` entry and a ``_tabLabels`` entry per
- * block. Does NOT switch to any of the new tabs —
- * the user's focus stays on the main tab.
- *
- * Tab ID = the agent's LLM-chosen id. Identity is
- * flat at the backend (registry keyed by id alone),
- * and the tab id mirrors that so ``parseAgentTabId``
- * can return the id directly with no parsing. The
- * padded numeric index is still used for the child
- * stream's request id and for the on-disk archive
- * file name (``{turn_id}/agent-NN.jsonl``), but
- * those are routing details and not the agent's
- * identity.
- *
- * Tab state seeding: the agent's initial user
- * message is the task text. Users switching to an
- * agent tab should see what the main LLM asked it
- * to do without having to scroll through the
- * archive — the task IS the prompt. The selection
- * list starts as a copy of the main tab's selection
- * so the agent inherits context per the
- * parallel-agents spec.
- *
- * Idempotent: if a tab for the same agent id
- * already exists, the existing tab is preserved.
- *
- * @param {object} panel — chat-panel instance
- * @param {string} turnId — the backend's turn_id
- * @param {Array<object>} agentBlocks — validated
- *   block entries with {id, task, agent_idx}
- * @param {string} [parentRequestId] — the main
- *   LLM's request ID. The backend streams each
- *   agent on child request IDs of the form
- *   ``{parent}-agent-{NN:02d}``; we seed each new
- *   tab's ``currentRequestId`` + flip its
- *   ``streaming`` flag so ``findTabForRequest``
- *   routes the child's chunks to the correct tab.
- */
-/**
- * Rehydrate writable tabs from a ``list_live_agents()``
- * RPC response. Called on ``onRpcReady`` after browser
- * refresh or WebSocket reconnect.
- *
- * Per spec ``specs4/5-webapp/agent-browser.md`` § Refresh
- * and Reconnect: tabs are writable (not historical) —
- * the backend's ContextManager is still alive and can
- * accept new messages. Per-tab UI state (input draft,
- * scroll position, in-flight stream) is genuinely lost;
- * conversation content is loaded separately via
- * ``get_turn_archive``.
- *
- * Tab creation is idempotent — agents already present in
- * ``_tabs`` (e.g. created by an earlier ``agentsSpawned``
- * event in the same connection) are skipped. This means
- * a stray ``agentsSpawned`` arriving after rehydration
- * won't double-create.
- *
- * Each entry shape::
- *
- *     {id, mode, model, turn_id, agent_idx}
- *
- * We do NOT seed an initial user message (unlike
- * ``spawnAgentTabs`` which seeds the task text). The
- * archive load handles message population.
- *
- * A per-tab selection list was rehydrated empty here for
- * the same reason: the agent's file context lived on the
- * backend and the picker's list was UI state that a
- * refresh lost. The list is gone entirely under CC-21, so
- * there is nothing to leave empty — the tab's conversation
- * still shows which files the agent worked on, which was
- * always the part users read.
- *
- * @returns {Array<object>} entries that produced new tabs
- *   (same shape as input, filtered to those that didn't
- *   already exist). Caller uses this to drive archive loads.
- */
-export function rehydrateAgentTabs(panel, agentEntries) {
-  if (!Array.isArray(agentEntries)) return [];
-  const created = [];
-  for (const entry of agentEntries) {
-    if (!entry || typeof entry !== 'object') continue;
-    const tabId = entry.id;
-    if (typeof tabId !== 'string' || !tabId) continue;
-    if (tabId === 'main') continue;
-    if (panel._tabs.has(tabId)) continue;
-    const state = makeTabState();
-    panel._tabs.set(tabId, state);
-    panel._tabLabels.set(tabId, deriveAgentTabLabelFromEntry(entry));
-    if (typeof entry.mode === 'string' && entry.mode) {
-      panel._tabModes.set(tabId, entry.mode);
-    }
-    created.push(entry);
-  }
-  if (created.length > 0) {
-    panel.requestUpdate();
-  }
-  return created;
-}
-
-/**
- * Derive a label for a rehydrated agent tab.
- *
- * Spawn-time tabs use ``deriveAgentTabLabel(idx, task)``
- * which folds the first line of the task text into the
- * label (e.g. ``Agent 02: refactor auth flow``). On
- * rehydration we don't have the task text — it's the
- * agent's first user message, persisted in the archive
- * and loaded asynchronously. Rather than wait for the
- * archive to land before rendering the tab, we use the
- * agent's id as the label. This matches ``parseAgentTabId``
- * tab-id semantics (the id IS the agent identifier).
- *
- * Falls back to ``Agent NN`` when the entry has an
- * ``agent_idx`` and the id isn't human-readable enough
- * to use directly. Heuristic: ids that look like
- * positional fallbacks (``agent-00``, ``agent-01``) get
- * the ``Agent NN`` treatment for visual consistency
- * with spawn-time labels; descriptive ids
- * (``frontend-chat``, ``streaming-pipeline``) appear
- * verbatim.
- */
-function deriveAgentTabLabelFromEntry(entry) {
-  const id = entry.id;
-  if (typeof id !== 'string' || !id) return 'Agent';
-  // Positional-fallback ids — recognise the ``agent-NN``
-  // pattern and render as ``Agent NN`` to match the
-  // spawn-time label style.
-  const positional = /^agent-(\d+)$/.exec(id);
-  if (positional) {
-    const idx = Number(positional[1]);
-    if (Number.isFinite(idx)) {
-      return `Agent ${String(idx).padStart(2, '0')}`;
-    }
-  }
-  return id;
-}
-
-export function spawnAgentTabs(panel, turnId, agentBlocks, parentRequestId) {
-  if (typeof turnId !== 'string' || !turnId) return;
-  if (!Array.isArray(agentBlocks)) return;
-  // Idempotency: spawnAgentTabs is invoked twice per
-  // turn — once eagerly via the backend's
-  // ``agentsSpawned`` broadcast (which fires BEFORE
-  // child agent streams dispatch, so tabs claim child
-  // request ids in time to route chunks), and once as
-  // a fallback inside main's ``streamComplete``
-  // handler (for older backends that only surface
-  // agent blocks via the completion result).
-  //
-  // Without a memo, the second call hits the retask
-  // branch below for every tab and appends the task
-  // text a second time AND re-arms streaming /
-  // currentRequestId AFTER the agent's stream has
-  // already completed and cleared them. Result: a
-  // duplicate user prompt in the agent tab and a
-  // cursor that never advances because no further
-  // chunks will arrive on a stream that's already
-  // finished.
-  //
-  // Memoising on ``parentRequestId`` distinguishes
-  // turn boundaries: turn 1 and turn 2 have different
-  // parent request ids, so retask appends in turn 2
-  // still happen exactly once. The set is
-  // session-scoped — ``new_session`` doesn't clear it,
-  // but parent request ids carry an epoch prefix and
-  // never collide across sessions in practice.
-  if (!panel._spawnedParentRequestIds) {
-    panel._spawnedParentRequestIds = new Set();
-  }
-  if (
-    typeof parentRequestId === 'string'
-    && parentRequestId
-    && panel._spawnedParentRequestIds.has(parentRequestId)
-  ) {
-    return;
-  }
-  if (typeof parentRequestId === 'string' && parentRequestId) {
-    panel._spawnedParentRequestIds.add(parentRequestId);
-  }
-  let anySpawned = false;
-  // A snapshot of the main tab's file selection used to
-  // be seeded into each new agent tab here. There is no
-  // selection to seed (CC-21), and a subagent does not
-  // read the picker anyway.
-  for (const block of agentBlocks) {
-    if (!block || typeof block !== 'object') continue;
-    const agentIdx = block.agent_idx;
-    if (typeof agentIdx !== 'number' || agentIdx < 0) continue;
-    const agentId = typeof block.id === 'string' ? block.id : '';
-    if (!agentId) continue;
-    const task = typeof block.task === 'string' ? block.task : '';
-    const paddedIdx = String(Math.floor(agentIdx)).padStart(2, '0');
-    const tabId = agentId;
-    // Compute the child request id once — both
-    // fresh-spawn and retask paths route on it.
-    const childId =
-      typeof parentRequestId === 'string' && parentRequestId
-        ? `${parentRequestId}-agent-${paddedIdx}`
-        : null;
-    const existing = panel._tabs.get(tabId);
-    if (existing) {
-      // Retask. The orchestrator reused this id in a
-      // new turn, so the agent's ContextManager
-      // (backend) already has the new task appended;
-      // we mirror that on the frontend by appending a
-      // YOU bubble and re-arming the tab's streaming
-      // surface so child chunks route here.
-      //
-      // Without this, the existing tab's
-      // currentRequestId stays null from the prior
-      // turn's completion, findTabForRequest can't
-      // route the new turn's child chunks to any tab,
-      // and the user sees no streaming or task in the
-      // agent tab even though the backend is doing
-      // the work.
-      //
-      // Preserved: existing.messages — history
-      // accumulates across turns.
-      if (task) {
-        existing.messages = [
-          ...existing.messages,
-          { role: 'user', content: task },
-        ];
-      }
-      if (childId) {
-        existing.currentRequestId = childId;
-        existing.streaming = true;
-        existing.streamingContent = '';
-        // Arm the run timer for the retasked turn so the
-        // agent tab's streaming card shows a live elapsed
-        // counter, same as a main-tab send.
-        existing.streamStartedAt = Date.now();
-      }
-      // Reset prior-turn outcome so the LED reflects
-      // "running again" rather than the previous
-      // completion's green/red state.
-      existing.lastEditOutcome = null;
-      const blockModeRetask =
-        typeof block.mode === 'string' ? block.mode : '';
-      if (blockModeRetask) {
-        panel._tabModes.set(tabId, blockModeRetask);
-      }
-      panel._tabLabels.set(
-        tabId, deriveAgentTabLabel(agentIdx, task, agentId),
-      );
-      anySpawned = true;
-      continue;
-    }
-    // Fresh spawn — tab doesn't exist yet.
-    const state = makeTabState();
-    state.messages = [{ role: 'user', content: task }];
-    if (childId) {
-      state.currentRequestId = childId;
-      state.streaming = true;
-      // Arm the run timer so the freshly-spawned agent
-      // tab's streaming card shows a live elapsed counter.
-      state.streamStartedAt = Date.now();
-    }
-    panel._tabs.set(tabId, state);
-    panel._tabLabels.set(
-      tabId, deriveAgentTabLabel(agentIdx, task),
-    );
-    // Mode comes from the backend's resolved value in
-    // the agentsSpawned payload — empty block.mode on
-    // the orchestrator side has already been resolved
-    // to the inherited orchestrator mode. Defensive
-    // string check tolerates older backends that don't
-    // populate the field.
-    const blockMode =
-      typeof block.mode === 'string' ? block.mode : '';
-    if (blockMode) {
-      panel._tabModes.set(tabId, blockMode);
-    }
-    anySpawned = true;
-  }
-  if (anySpawned) {
-    // Force a re-render so the tab strip appears.
-    // ``_tabs`` is a Map mutation (not a reactive
-    // property assignment) so Lit doesn't observe
-    // the change automatically.
-    panel.requestUpdate();
-  }
-}
+// `spawnAgentTabs`, `rehydrateAgentTabs` and
+// `deriveAgentTabLabelFromEntry` stood here — the writable agent
+// tab strip, filled from a `🟧🟧🟧 AGENT` spawn block's
+// `{id, task, agent_idx}` and re-filled after a reconnect from
+// `list_live_agents()`.
+//
+// A spawned tab was writable because it addressed a sibling
+// conversation with its own `ContextManager`, reachable on a
+// child request id (`{parent}-agent-{NN}`). Claude Code's
+// subagents are internal to a turn: the agent calls `Task`, the
+// output is attributed to that call's `tool_use_id`, and there is
+// nothing to send a message to. `subagent-tabs.js` builds those
+// tabs by mirroring the parent's block records, which is why this
+// producer was never repointed at it.
 
 // ---------------------------------------------------------------
 // Handler binding
@@ -1141,8 +781,7 @@ async function onViewSubagentsRequested(panel, event) {
     state.messages = messages;
     panel._tabs.set(tabId, state);
     panel._tabLabels.set(tabId, _subagentTabLabel(label, agentId));
-    // Map mutations don't trigger Lit's reactivity on their own — same
-    // pattern as spawnAgentTabs.
+    // Map mutations don't trigger Lit's reactivity on their own.
     panel.requestUpdate();
     // Only the first one, and only ever once: a later read landing must not
     // yank the user out of the transcript they started reading.
