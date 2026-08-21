@@ -147,6 +147,7 @@ events.
 | `AssistantMessage` → `TextBlock` | `streamChunk` | Markdown in the assistant bubble. |
 | `AssistantMessage` → `ThinkingBlock` | `thinkingChunk` | A collapsed "thinking" region, expandable. Respects the configured thinking display mode. |
 | `AssistantMessage` → `ToolUseBlock` | `toolUse` | A tool card: name, summarised input, pending state. |
+| `AssistantMessage` → `usage` | `turnUsage` | The live token counter under the streaming card ([`../5-webapp/chat.md`](../5-webapp/chat.md#live-token-counter)). The message carries what its own API call used; the pump sums those into a per-model running total for the turn and pushes `{turn_model_usage}` — the same shape and scope the result message ends with, so one renderer draws the running figure and the final one. Summed and not replaced, because each step of an agentic turn is its own API call and the turn is their sum. Subagent messages are counted too, under their own model. Nothing is emitted when a message reports no usable counter: the payload is the total, so an unchanged one would repaint the counter to say the same thing. |
 | `UserMessage` → `ToolResultBlock` | `toolResult` | Result attached to its card by `tool_use_id`; collapsed by default, expandable, truncated with a "show all" affordance. |
 | `StreamEvent` | `streamChunk` (partial) | Same coalescing path as full blocks. |
 | `SystemMessage(subtype="compact_boundary")` | `compactionEvent` | A divider in the transcript recording that the engine compacted itself, with before/after token counts. |

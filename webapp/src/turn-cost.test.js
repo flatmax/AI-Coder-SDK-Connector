@@ -23,6 +23,7 @@ import {
   reportsUsage,
   turnCost,
   turnTokens,
+  usageSplit,
 } from './turn-cost.js';
 
 /** A priced `streamComplete` payload, both scopes present and different. */
@@ -82,6 +83,86 @@ describe('turnTokens', () => {
       cache_read_input_tokens: -5,
       web_search_requests: 3,
     })).toBe(100);
+  });
+});
+
+describe('usageSplit', () => {
+  it('is all zeroes for a usage dict that is absent or unusable', () => {
+    const zero = {
+      input: 0, output: 0, cacheCreation: 0, cacheRead: 0,
+      cache: 0, prompt: 0, total: 0,
+    };
+    for (const junk of [null, undefined, {}, '12000', 42, []]) {
+      expect(usageSplit(junk)).toEqual(zero);
+    }
+  });
+
+  it('keeps the four counters the engine reports apart', () => {
+    expect(usageSplit({
+      input_tokens: 300,
+      output_tokens: 2000,
+      cache_creation_input_tokens: 1200,
+      cache_read_input_tokens: 40_000,
+    })).toEqual({
+      input: 300,
+      output: 2000,
+      cacheCreation: 1200,
+      cacheRead: 40_000,
+      cache: 41_200,
+      prompt: 41_500,
+      total: 43_500,
+    });
+  });
+
+  it('does not count cache traffic as input', () => {
+    // The pricing fact the whole split exists for: `input_tokens` is the
+    // *uncached remainder*, not the prompt. A cached turn priced at the input
+    // rate is out by roughly 10x on the part that dominates it.
+    const split = usageSplit({
+      input_tokens: 300,
+      cache_read_input_tokens: 40_000,
+    });
+    expect(split.input).toBe(300);
+    expect(split.prompt).toBe(40_300);
+  });
+
+  it('reads either spelling of every counter', () => {
+    // camelCase live from the engine, snake_case from the transcript on disk.
+    // Reading one spelling is a bug this codebase has already shipped once.
+    expect(usageSplit({
+      inputTokens: 300,
+      outputTokens: 2000,
+      cacheCreationInputTokens: 1200,
+      cacheReadInputTokens: 40_000,
+    })).toEqual(usageSplit({
+      input_tokens: 300,
+      output_tokens: 2000,
+      cache_creation_input_tokens: 1200,
+      cache_read_input_tokens: 40_000,
+    }));
+  });
+
+  it('takes a counter once when both spellings are present', () => {
+    expect(usageSplit({ inputTokens: 100, input_tokens: 100 }).input).toBe(100);
+  });
+
+  it('treats junk as unreported rather than propagating NaN', () => {
+    const split = usageSplit({
+      input_tokens: 100,
+      output_tokens: '200',
+      cache_read_input_tokens: -5,
+      cache_creation_input_tokens: true,
+      web_search_requests: 3,
+    });
+    expect(split).toEqual({
+      input: 100, output: 0, cacheCreation: 0, cacheRead: 0,
+      cache: 0, prompt: 100, total: 100,
+    });
+  });
+
+  it('agrees with turnTokens, which is its total', () => {
+    const usage = { input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 900 };
+    expect(turnTokens(usage)).toBe(usageSplit(usage).total);
   });
 });
 
@@ -229,7 +310,51 @@ describe('modelUsageLines', () => {
       turn_model_usage: {
         'claude-opus-5': { inputTokens: 900, outputTokens: 100, costUSD: 0.02 },
       },
-    })).toEqual([{ model: 'claude-opus-5', tokens: 1000, usd: 0.02 }]);
+    })).toEqual([{
+      model: 'claude-opus-5',
+      tokens: 1000,
+      input: 900,
+      output: 100,
+      cacheRead: 0,
+      cacheCreation: 0,
+      cache: 0,
+      prompt: 900,
+      usd: 0.02,
+    }]);
+  });
+
+  it('carries the split, so the renderer does no arithmetic of its own', () => {
+    // The footer chip and the live counter both read these fields; neither
+    // re-derives them, which is how the two came to disagree before.
+    const [line] = modelUsageLines({
+      turn_model_usage: {
+        'claude-opus-5': {
+          inputTokens: 300,
+          outputTokens: 2000,
+          cacheCreationInputTokens: 1200,
+          cacheReadInputTokens: 40_000,
+        },
+      },
+    });
+    expect(line).toMatchObject({
+      input: 300,
+      output: 2000,
+      cacheCreation: 1200,
+      cacheRead: 40_000,
+      cache: 41_200,
+      prompt: 41_500,
+      tokens: 43_500,
+    });
+  });
+
+  it('reads a running mid-turn figure exactly as it reads a final one', () => {
+    // `turnUsage` pushes the same key mid-turn because it is the same scope.
+    // One reader for both is what lets one renderer serve both.
+    expect(modelUsageLines({
+      turn_model_usage: { 'claude-opus-5': { input_tokens: 900, output_tokens: 100 } },
+    })).toEqual(modelUsageLines({
+      turn_model_usage: { 'claude-opus-5': { inputTokens: 900, outputTokens: 100 } },
+    }));
   });
 
   it('prefers the canonical model name over a provider-specific key', () => {

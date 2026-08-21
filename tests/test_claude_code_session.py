@@ -1120,6 +1120,64 @@ class TestActiveStreams:
         release.set()
         await task
 
+    async def test_the_live_token_counter_is_in_the_snapshot(self, engine):
+        """Why the engine accumulates the counter rather than the browser: a
+        client that reloaded mid-turn has no record of the assistant messages
+        already counted, and would otherwise show a blank counter until the
+        next one landed — tens of seconds on a long tool call."""
+        reached = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause():
+            reached.set()
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [
+            DEFAULT_MESSAGES[0],
+            AssistantMessage(
+                content=[TextBlock(text="Hi")],
+                model="claude-opus-5",
+                message_id="msg_1",
+                usage={"input_tokens": 900, "output_tokens": 100},
+            ),
+            pause,
+            DEFAULT_MESSAGES[2],
+        ]
+        task = asyncio.create_task(engine.run_turn(text_turn()))
+        await reached.wait()
+
+        # The same `turn_model_usage` key the pushed event and the result
+        # message use, so one reader in the browser serves all three.
+        assert engine.active_streams()[0]["usage"] == {
+            "turn_model_usage": {
+                "claude-opus-5": {"input_tokens": 900, "output_tokens": 100}
+            }
+        }
+
+        release.set()
+        await task
+
+    async def test_the_snapshot_counter_is_empty_before_any_usage(self, engine):
+        """An empty map, not a missing key: the browser's replay reads the
+        field unconditionally, and a turn can pause before its first message."""
+        reached = asyncio.Event()
+        release = asyncio.Event()
+
+        async def pause():
+            reached.set()
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [DEFAULT_MESSAGES[0], pause, *DEFAULT_MESSAGES[1:]]
+        task = asyncio.create_task(engine.run_turn(text_turn()))
+        await reached.wait()
+
+        assert engine.active_streams()[0]["usage"] == {"turn_model_usage": {}}
+
+        release.set()
+        await task
+
     async def test_a_permission_prompt_attaches_to_the_turn_in_flight(self, engine):
         """The broker knows nothing about turns; this is the whole bridge."""
         reached = asyncio.Event()

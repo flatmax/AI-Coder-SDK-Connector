@@ -39,6 +39,11 @@ import { ALLOW_ACTIONS } from '../permission-dialog/constants.js';
  *
  * `pending` is the rAF staging area: block id → the latest chunk payload not
  * yet applied. `subagents` is agent id → its row.
+ *
+ * `usage` is the turn's running token counters — the latest `turnUsage`
+ * payload, replaced rather than accumulated because the engine sends the total
+ * and not a delta. Null until the first assistant message reports one, which is
+ * why the streaming card draws no counter at all for the first few seconds.
  */
 export function makeTurnBlocks() {
   return {
@@ -46,6 +51,7 @@ export function makeTurnBlocks() {
     index: new Map(),
     pending: new Map(),
     subagents: new Map(),
+    usage: null,
   };
 }
 
@@ -63,6 +69,11 @@ export function resetTurnBlocks(turn) {
   turn.index.clear();
   turn.pending.clear();
   turn.subagents.clear();
+  // The next turn starts from no counter rather than from the last one's
+  // total. It is dropped rather than carried onto the settled message
+  // because the result message's own `turn_model_usage` is already there and
+  // is the authoritative version of the same figure.
+  turn.usage = null;
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   isDiffTool,
   renderBlock,
   renderFileChip,
+  renderLiveUsage,
   renderSubagentRow,
   renderTerminalBadge,
   renderTextBlock,
@@ -1309,9 +1310,42 @@ describe('renderTurnFooter', () => {
       },
     }, []));
     expect([...host.querySelectorAll('.turn-usage')].map((s) => text(s))).toEqual([
-      'claude-opus-5 42.0k tok',
-      'claude-haiku-4-5 800 tok',
+      'claude-opus-5 42.0k tok · 40.0k in · 2.0k out',
+      'claude-haiku-4-5 800 tok · 800 in',
     ]);
+  });
+
+  it('splits cache traffic out of the prompt rather than into "in"', () => {
+    // The whole reason the chip is three-way: `inputTokens` is the *uncached
+    // remainder*, so folding cache reads into it would report a cheap cached
+    // turn at the full-price rate — off by 10x on the part that dominates.
+    const host = draw(renderTurnFooter(stubPanel(), {
+      turn_model_usage: {
+        'claude-opus-5': {
+          inputTokens: 300,
+          outputTokens: 2000,
+          cacheCreationInputTokens: 1200,
+          cacheReadInputTokens: 40_000,
+        },
+      },
+    }, []));
+    const chip = host.querySelector('.turn-usage');
+    expect(text(chip)).toBe('claude-opus-5 43.5k tok · 300 in · 41.2k cache · 2.0k out');
+    // And the tooltip separates the two cache figures, which are priced
+    // differently — a read is ~0.1x input, a write ~1.25x.
+    expect(chip.getAttribute('title')).toContain('40,000 read from the prompt cache');
+    expect(chip.getAttribute('title')).toContain('1,200 written to the cache');
+    expect(chip.getAttribute('title')).toContain('41,500 tokens in all');
+  });
+
+  it('drops a counter it has no measurement for', () => {
+    // "0 cache" reads as a measured zero. The engine simply did not report
+    // one, and the chip must not claim otherwise.
+    const host = draw(renderTurnFooter(stubPanel(), {
+      turn_model_usage: { 'claude-opus-5': { cacheReadInputTokens: 5000 } },
+    }, []));
+    expect(text(host.querySelector('.turn-usage')))
+      .toBe('claude-opus-5 5.0k tok · 5.0k cache');
   });
 
   it('reads the live camelCase counters, not just a transcript’s', () => {
@@ -1325,7 +1359,8 @@ describe('renderTurnFooter', () => {
     const replayed = draw(renderTurnFooter(stubPanel(), {
       turn_model_usage: { 'claude-opus-5': { input_tokens: 900, output_tokens: 100 } },
     }, []));
-    expect(text(live.querySelector('.turn-usage'))).toBe('claude-opus-5 1.0k tok');
+    expect(text(live.querySelector('.turn-usage')))
+      .toBe('claude-opus-5 1.0k tok · 900 in · 100 out');
     expect(text(replayed.querySelector('.turn-usage')))
       .toBe(text(live.querySelector('.turn-usage')));
   });
@@ -1398,5 +1433,63 @@ describe('renderTurnFooter', () => {
     host.querySelector('.turn-mirror-gap').click();
     expect(panel._healthForced).toBe(true);
     expect(panel._healthDismissed).toBeNull();
+  });
+});
+
+describe('renderLiveUsage', () => {
+  it('renders nothing until the engine has counted something', () => {
+    // Every one of these is a moment the streaming card is on screen: before
+    // the first assistant message lands, and on a replayed turn whose stream
+    // snapshot carried no counters. An empty "so far" row would be furniture.
+    for (const usage of [null, undefined, {}, { turn_model_usage: null }]) {
+      expect(draw(renderLiveUsage(usage)).textContent.trim()).toBe('');
+    }
+  });
+
+  it('labels the running figure so it is not read as the total', () => {
+    const host = draw(renderLiveUsage({
+      turn_model_usage: { 'claude-opus-5': { input_tokens: 900, output_tokens: 100 } },
+    }));
+    expect(text(host.querySelector('.turn-live-label'))).toBe('so far');
+    expect(text(host.querySelector('.turn-usage')))
+      .toBe('claude-opus-5 1.0k tok · 900 in · 100 out');
+  });
+
+  it('is the same chip the settled footer draws', () => {
+    // One renderer for both, so the number cannot appear to jump when the
+    // result message replaces the running figure with its own.
+    const payload = {
+      turn_model_usage: {
+        'claude-opus-5': { input_tokens: 300, cache_read_input_tokens: 40_000 },
+      },
+    };
+    expect(text(draw(renderLiveUsage(payload)).querySelector('.turn-usage')))
+      .toBe(text(draw(renderTurnFooter(stubPanel(), payload, [])).querySelector('.turn-usage')));
+  });
+
+  it('gives a subagent its own line', () => {
+    // The engine counts subagent messages under their own model, and a turn
+    // that spawned four Haiku agents spent that money too.
+    const host = draw(renderLiveUsage({
+      turn_model_usage: {
+        'claude-opus-5': { input_tokens: 900 },
+        'claude-haiku-4-5': { input_tokens: 4000 },
+      },
+    }));
+    expect([...host.querySelectorAll('.turn-usage')].map((s) => text(s))).toEqual([
+      'claude-haiku-4-5 4.0k tok · 4.0k in',
+      'claude-opus-5 900 tok · 900 in',
+    ]);
+  });
+
+  it('shows no cost, which cannot be known mid-turn', () => {
+    // Pricing this turn needs the result message's differenced session total;
+    // anything shown before it would be a guess, and chat.md § Turn Footer
+    // forbids numbers AC⚡DC computed itself.
+    const host = draw(renderLiveUsage({
+      turn_model_usage: { 'claude-opus-5': { input_tokens: 900, costUSD: 0.02 } },
+    }));
+    expect(host.querySelector('.turn-cost')).toBeNull();
+    expect(host.textContent).not.toContain('$');
   });
 });

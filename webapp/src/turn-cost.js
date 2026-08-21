@@ -30,6 +30,15 @@
 // One name per scope, so a renderer cannot read a cumulative figure as a
 // per-turn one: `model_usage`/`total_cost_usd` are always the engine's
 // running totals, and nothing in this module touches them.
+//
+// `turn_model_usage` has two producers, both per-turn and therefore both
+// under that one name: the `streamComplete` the engine builds at the end
+// of a turn, and the `turnUsage` it pushes *during* one, as each
+// assistant message reports what it used (`ac_dc/claude_code/messages.py`).
+// `modelUsageLines` reads either. The live one is a running figure —
+// incomplete until the result lands, and replaced by it then — but it is
+// never a session total, which is the only distinction this module
+// polices.
 
 /** A difference in hand. Zero is an answer: the turn cost nothing extra. */
 export const MEASURED = 'measured';
@@ -49,22 +58,6 @@ export const UNRECORDED = 'unrecorded';
 
 const _BASES = new Set([MEASURED, RESET, UNPRICED]);
 
-/**
- * Token counters, camelCase first.
- *
- * The engine sends camelCase (`inputTokens`) because that is what the
- * CLI's wire schema uses, and a replayed transcript sends snake_case
- * (`input_tokens`) because that is what the CLI writes to disk. Reading
- * only one style is how live turns came to render no per-model lines at
- * all while browsed ones rendered fine.
- */
-const _COUNTERS = [
-  ['inputTokens', 'input_tokens'],
-  ['outputTokens', 'output_tokens'],
-  ['cacheCreationInputTokens', 'cache_creation_input_tokens'],
-  ['cacheReadInputTokens', 'cache_read_input_tokens'],
-];
-
 function _num(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -76,6 +69,59 @@ function _cost(value) {
 }
 
 /**
+ * One usage entry's four counters, plus the sums worth naming.
+ *
+ * Each counter is read camelCase first. The engine sends camelCase
+ * (`inputTokens`) because that is what the CLI's wire schema uses, and a
+ * replayed transcript sends snake_case (`input_tokens`) because that is
+ * what the CLI writes to disk. Reading only one style is how live turns
+ * came to render no per-model lines at all while browsed ones rendered
+ * fine.
+ *
+ * The three input-side counters are separate because they are priced an
+ * order of magnitude apart — a cache read is a fraction of full price, a
+ * cache write is a premium over it — and because `input` is **only the
+ * uncached remainder of the prompt**, not the prompt. An agentic turn
+ * resends its whole context on every step, so nearly all of a long
+ * turn's prompt is a cache read, and `input` on its own reports a
+ * fraction of what was sent: "3k in" for a turn that actually submitted
+ * 50k is the wrong number, not a rounded one. `prompt` is the honest
+ * total of what went up; `cache` is the two cache counters together, for
+ * a reader who wants three numbers rather than four.
+ *
+ * Missing counters read as 0 and negatives are ignored, on the same
+ * grounds as a negative cost: a bug upstream, not a credit.
+ *
+ * @param {Object} usage  a per-model usage entry, either spelling
+ * @returns {{input: number, output: number, cacheCreation: number,
+ *            cacheRead: number, cache: number, prompt: number,
+ *            total: number}}
+ */
+export function usageSplit(usage) {
+  const entry = usage && typeof usage === 'object' ? usage : null;
+  const read = (camel, snake) => {
+    if (entry === null) return 0;
+    const value = _num(entry[camel]) ?? _num(entry[snake]);
+    return value !== null && value > 0 ? value : 0;
+  };
+  const input = read('inputTokens', 'input_tokens');
+  const output = read('outputTokens', 'output_tokens');
+  const cacheCreation = read(
+    'cacheCreationInputTokens', 'cache_creation_input_tokens',
+  );
+  const cacheRead = read('cacheReadInputTokens', 'cache_read_input_tokens');
+  return {
+    input,
+    output,
+    cacheCreation,
+    cacheRead,
+    cache: cacheCreation + cacheRead,
+    prompt: input + cacheCreation + cacheRead,
+    total: input + output + cacheCreation + cacheRead,
+  };
+}
+
+/**
  * Every token a usage entry accounts for.
  *
  * Cache reads and writes are included: they are tokens the turn moved,
@@ -84,13 +130,7 @@ function _cost(value) {
  * "nothing to show" rather than "a free turn".
  */
 export function turnTokens(usage) {
-  if (!usage || typeof usage !== 'object') return 0;
-  let total = 0;
-  for (const [camel, snake] of _COUNTERS) {
-    const value = _num(usage[camel]) ?? _num(usage[snake]);
-    if (value !== null && value > 0) total += value;
-  }
-  return total;
+  return usageSplit(usage).total;
 }
 
 /**
@@ -232,8 +272,15 @@ export function costLabel(result) {
  * canonical name beside it. (It does *not* carry a `modelName` — the
  * field this code used to prefer never existed.)
  *
- * @param {Object} result  a `streamComplete` payload
- * @returns {Array<{model: string, tokens: number, usd: number|null}>}
+ * Each line carries the split as well as the total, because one number
+ * cannot say whether a turn's tokens were prompt or completion and the
+ * two differ by 5× in price. See `usageSplit` for why the input side is
+ * three numbers rather than one.
+ *
+ * @param {Object} result  a `streamComplete` or `turnUsage` payload
+ * @returns {Array<{model: string, tokens: number, usd: number|null,
+ *                  input: number, output: number, cacheRead: number,
+ *                  cacheCreation: number, cache: number, prompt: number}>}
  */
 export function modelUsageLines(result) {
   const usage = result?.turn_model_usage;
@@ -241,12 +288,18 @@ export function modelUsageLines(result) {
   const lines = [];
   for (const [key, entry] of Object.entries(usage)) {
     if (!entry || typeof entry !== 'object') continue;
-    const tokens = turnTokens(entry);
-    if (tokens <= 0) continue;
+    const split = usageSplit(entry);
+    if (split.total <= 0) continue;
     const canonical = entry.canonicalModel;
     lines.push({
       model: typeof canonical === 'string' && canonical ? canonical : String(key),
-      tokens,
+      tokens: split.total,
+      input: split.input,
+      output: split.output,
+      cacheRead: split.cacheRead,
+      cacheCreation: split.cacheCreation,
+      cache: split.cache,
+      prompt: split.prompt,
       usd: _cost(entry.costUSD),
     });
   }

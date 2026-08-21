@@ -691,6 +691,187 @@ class TestAssistantMessages:
 
 
 # ---------------------------------------------------------------------------
+# Live token counter
+# ---------------------------------------------------------------------------
+
+
+class TestTurnUsage:
+    """The mid-turn counter, which is `AssistantMessage.usage` and nothing else.
+
+    Its webapp counterparts are `webapp/src/turn-cost.test.js` (the reader)
+    and the live-counter block in `webapp/src/chat-panel/streaming.test.js`
+    (the renderer). Two properties carry the weight here: the payload is a
+    **running total for this turn** — never a per-message delta, never the
+    session's — and it is accumulated server-side, because the browser has no
+    idea which messages it has already seen after a refresh.
+    """
+
+    def message(self, usage, *, message_id="msg_1", model="claude-opus-5", **kw):
+        return AssistantMessage(
+            content=[TextBlock(text="Hi")],
+            model=model,
+            message_id=message_id,
+            usage=usage,
+            **kw,
+        )
+
+    def usage_of(self, events):
+        """The `turnUsage` payload's model map, or None if none was pushed."""
+        pushed = [e for e in events if e.name == "turnUsage"]
+        return pushed[-1].payload["turn_model_usage"] if pushed else None
+
+    def test_an_assistant_message_pushes_what_it_used(self, translator):
+        events = translator.translate(
+            self.message({"input_tokens": 900, "output_tokens": 100})
+        )
+        assert "turnUsage" in names(events)
+        assert self.usage_of(events) == {
+            "claude-opus-5": {"input_tokens": 900, "output_tokens": 100}
+        }
+
+    def test_the_counter_lands_after_the_content_it_priced(self, translator):
+        """The card is on screen before the number under it, not the reverse."""
+        events = translator.translate(
+            AssistantMessage(
+                content=[
+                    TextBlock(text="Let me look."),
+                    ToolUseBlock(id="toolu_1", name="Read", input={"file_path": "a.py"}),
+                ],
+                model="claude-opus-5",
+                message_id="msg_1",
+                usage={"input_tokens": 900},
+            )
+        )
+        assert names(events) == ["streamChunk", "toolUse", "turnUsage"]
+
+    def test_all_four_counters_reach_the_browser(self, translator):
+        """Cache reads and writes are priced differently from input, so the
+        split has to survive the trip — a single total cannot be re-split."""
+        events = translator.translate(
+            self.message(
+                {
+                    "input_tokens": 300,
+                    "output_tokens": 2000,
+                    "cache_creation_input_tokens": 1200,
+                    "cache_read_input_tokens": 40_000,
+                }
+            )
+        )
+        assert self.usage_of(events)["claude-opus-5"] == {
+            "input_tokens": 300,
+            "output_tokens": 2000,
+            "cache_creation_input_tokens": 1200,
+            "cache_read_input_tokens": 40_000,
+        }
+
+    def test_the_payload_is_the_turn_so_far_not_the_message(self, translator):
+        """An agentic turn is many API calls, and the counter must climb
+        across them: pushing one message's usage would make it jump about."""
+        translator.translate(self.message({"input_tokens": 900, "output_tokens": 100}))
+        events = translator.translate(
+            self.message(
+                {"input_tokens": 1000, "output_tokens": 50}, message_id="msg_2"
+            )
+        )
+        assert self.usage_of(events) == {
+            "claude-opus-5": {"input_tokens": 1900, "output_tokens": 150}
+        }
+
+    def test_a_message_seen_twice_is_counted_once(self, translator):
+        """A reconnecting SDK client can re-deliver; the second copy would
+        otherwise double the turn's tokens for the rest of the turn."""
+        translator.translate(self.message({"input_tokens": 900}))
+        events = translator.translate(self.message({"input_tokens": 900}))
+        assert self.usage_of(events) is None
+        assert translator.turn_usage() == {"claude-opus-5": {"input_tokens": 900}}
+
+    def test_a_subagent_is_counted_under_its_own_model(self, translator):
+        """Delegation is the expensive part of a delegating turn. A counter
+        that skipped subagents would sit still through exactly that part."""
+        translator.translate(self.message({"input_tokens": 900}))
+        events = translator.translate(
+            self.message(
+                {"input_tokens": 4000},
+                message_id="msg_2",
+                model="claude-haiku-4-5",
+                parent_tool_use_id="toolu_1",
+            )
+        )
+        assert self.usage_of(events) == {
+            "claude-opus-5": {"input_tokens": 900},
+            "claude-haiku-4-5": {"input_tokens": 4000},
+        }
+
+    def test_no_event_when_the_message_reports_nothing(self, translator):
+        """The payload is a running total, so an unchanged one is a repaint
+        that says the same thing. Every shape here is one the CLI can send."""
+        for index, usage in enumerate(
+            (None, {}, "600", {"web_search_requests": 3}, {"input_tokens": 0})
+        ):
+            events = translator.translate(
+                self.message(usage, message_id=f"msg_{index}")
+            )
+            assert "turnUsage" not in names(events)
+        assert translator.turn_usage() == {}
+
+    def test_junk_counters_are_dropped_rather_than_summed(self, translator):
+        # `bool` is an `int` in Python; True as a token count is an upstream
+        # bug, not one token.
+        events = translator.translate(
+            self.message(
+                {
+                    "input_tokens": 900,
+                    "output_tokens": "100",
+                    "cache_read_input_tokens": -5,
+                    "cache_creation_input_tokens": True,
+                }
+            )
+        )
+        assert self.usage_of(events) == {"claude-opus-5": {"input_tokens": 900}}
+
+    def test_a_model_the_message_does_not_name_is_still_counted(self, translator):
+        """Losing the tokens because the label is missing is the worse of
+        the two failures — the count is what the counter is for."""
+        events = translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="Hi")],
+                model="",
+                message_id="msg_1",
+                usage={"input_tokens": 900},
+            )
+        )
+        assert self.usage_of(events) == {"unknown": {"input_tokens": 900}}
+
+    def test_turn_usage_hands_out_copies(self, translator):
+        """`ActiveTurn.to_dict` and every pushed payload share this dict's
+        contents; a caller that mutated one would corrupt the turn's count."""
+        translator.translate(self.message({"input_tokens": 900}))
+        snapshot = translator.turn_usage()
+        snapshot["claude-opus-5"]["input_tokens"] = 0
+        snapshot["invented"] = {}
+        assert translator.turn_usage() == {"claude-opus-5": {"input_tokens": 900}}
+
+    def test_a_message_with_no_id_is_counted_rather_than_skipped(self, translator):
+        """Nothing to dedupe on. Under-counting a turn is worse than the
+        double it would protect against, so it counts."""
+        events = translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="Hi")],
+                model="claude-opus-5",
+                usage={"input_tokens": 900},
+            )
+        )
+        assert self.usage_of(events) == {"claude-opus-5": {"input_tokens": 900}}
+
+    def test_the_counter_is_turn_scoped_like_every_streaming_event(self, translator):
+        """Without the request ID the browser cannot tell whose turn it is,
+        and a collaborator's tokens would land on this card."""
+        events = translator.translate(self.message({"input_tokens": 900}))
+        pushed = [e for e in events if e.name == "turnUsage"][0]
+        assert pushed.turn_scoped is True
+
+
+# ---------------------------------------------------------------------------
 # Tool cards
 # ---------------------------------------------------------------------------
 

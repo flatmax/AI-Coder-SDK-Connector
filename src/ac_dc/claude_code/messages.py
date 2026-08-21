@@ -15,6 +15,11 @@ Three properties are easy to get wrong and are therefore spelled out:
 - **Nothing is dropped.** An unknown system subtype or an unknown content
   block goes to a generic path. A CLI upgrade that adds a block kind must
   degrade to "shown but not specially styled", never to silence.
+- **Usage is cumulative within the turn, and only within it.** Each
+  assistant message reports what its own API call used; ``turnUsage``
+  carries the running sum for the turn, model by model. Nothing here ever
+  emits a session total — that is ``model_usage``'s scope, and the result
+  message says so where it passes it through.
 - **Chunks are cumulative within a block, not across the turn.** The
   native engine re-sent the whole turn on every token, which made drops
   harmless but is quadratic on long agentic turns. Each event now carries
@@ -102,6 +107,23 @@ _SUBAGENT_FIELDS = (
     "usage",
     "summary",
     "output_file",
+)
+
+# The four token counters an assistant message's `usage` carries, in the
+# API's own snake_case — this dict is the raw one the CLI passes through,
+# not the camelCase the result message's `model_usage` uses. Both spellings
+# are read by the browser (`usageSplit` in webapp/src/turn-cost.js), so
+# they are forwarded as they arrive rather than translated here.
+#
+# Summed, not replaced: each step of an agentic turn is its own API call
+# with its own usage, and the turn's cost is their sum — which is also how
+# the CLI arrives at the running total that `turn_model_usage` is
+# differenced out of, so the live figure converges on the final one.
+_USAGE_COUNTERS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
 )
 
 
@@ -236,6 +258,12 @@ class TurnTranslator:
         # tool_use_ids a permission dialog was shown for. Written by
         # note_permission_prompt, read when the card is built.
         self._gated: set[str] = set()
+        # model → this turn's token counters so far, summed over the
+        # assistant messages that reported them. See _note_usage.
+        self._usage: dict[str, dict[str, int]] = {}
+        # message ids already counted, so a message the pump sees twice
+        # cannot double the turn's tokens.
+        self._usage_counted: set[str] = set()
         self.user_message_id: str | None = None
 
     # ------------------------------------------------------------------
@@ -308,6 +336,23 @@ class TurnTranslator:
     def response_text(self) -> str:
         """Assistant text for this turn, blocks concatenated in order."""
         return "".join(b.content for b in self._blocks.values() if b.kind == "text")
+
+    def turn_usage(self) -> dict[str, dict[str, int]]:
+        """Token counters for this turn so far, per model.
+
+        The same ``turn_model_usage`` shape the result message ends up
+        carrying, so the browser renders a running figure and a final one
+        through one code path — and deliberately the same *name*, because
+        it is the same scope: this turn, never the session
+        (``webapp/src/turn-cost.js`` is the reader, and the distinction it
+        polices is exactly that one).
+
+        Served to two callers: ``_note_usage`` pushes it mid-turn, and
+        ``ActiveTurn.to_dict`` hands it to a client that connects mid-turn,
+        which would otherwise show a blank counter until the next assistant
+        message landed — tens of seconds on a long tool call.
+        """
+        return {model: dict(counters) for model, counters in self._usage.items()}
 
     # ------------------------------------------------------------------
     # Dispatch
@@ -664,6 +709,8 @@ class TurnTranslator:
             else:
                 events.extend(self._unknown_block(scope, message_key, index, block))
 
+        events.extend(self._note_usage(message))
+
         error = getattr(message, "error", None)
         if error:
             # An API-level failure the assistant message reports directly
@@ -680,6 +727,60 @@ class TurnTranslator:
                 )
             )
         return events
+
+    def _note_usage(self, message: Any) -> list[Event]:
+        """A completed assistant message's token counters → ``turnUsage``.
+
+        This is the whole live counter. The CLI reports usage per finished
+        assistant message and nowhere else — partial stream events carry
+        content, not counters — so the browser's figure steps up once per
+        message rather than ticking per token: several times on an agentic
+        turn, once on a one-shot answer. Saying "so far" beside it is the
+        renderer's job (``webapp/src/chat-panel/block-render.js``); getting
+        it out of the SDK at all is this method's.
+
+        Subagent messages are counted with the rest. They carry a
+        ``parent_tool_use_id`` and often a cheaper model, and they are what
+        makes a delegating turn expensive — a counter that skipped them
+        would sit still through the most costly part of the turn. Keying on
+        the model rather than on the scope is what lets the browser show
+        which one did the work.
+
+        No event when the message reports nothing usable: the payload is
+        the running total, so pushing an unchanged one would repaint the
+        counter to say the same thing.
+        """
+        usage = getattr(message, "usage", None)
+        if not isinstance(usage, dict):
+            return []
+        # An id the pump could see twice — a message re-delivered by a
+        # reconnecting SDK client — must not be counted twice. Without an
+        # id there is nothing to dedupe on, and under-counting a turn is
+        # worse than the double it protects against, so it is counted.
+        message_key = getattr(message, "message_id", None) or getattr(
+            message, "uuid", None
+        )
+        if message_key:
+            if message_key in self._usage_counted:
+                return []
+            self._usage_counted.add(message_key)
+        deltas: dict[str, int] = {}
+        for name in _USAGE_COUNTERS:
+            value = usage.get(name)
+            # `bool` is an `int` in Python and a counter of True is a bug
+            # upstream, not one token.
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            if value <= 0:
+                continue
+            deltas[name] = int(value)
+        if not deltas:
+            return []
+        model = str(getattr(message, "model", None) or "unknown")
+        counters = self._usage.setdefault(model, {})
+        for name, value in deltas.items():
+            counters[name] = counters.get(name, 0) + value
+        return [Event("turnUsage", {"turn_model_usage": self.turn_usage()})]
 
     def _user_message(self, message: Any) -> list[Event]:
         """Tool results, plus the replay of the user's own message.

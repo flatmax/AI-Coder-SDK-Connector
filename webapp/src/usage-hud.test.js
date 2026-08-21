@@ -604,6 +604,130 @@ describe('UsageHud turn detail', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Token rows
+// ---------------------------------------------------------------------------
+
+describe('UsageHud token rows', () => {
+  async function showTokens(turn_model_usage) {
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture({ turn_model_usage }));
+    await settle(el);
+    return el;
+  }
+
+  /** Each token row as `model → value`, whitespace collapsed. */
+  function tokenRows(el) {
+    return [...el.shadowRoot.querySelectorAll('.token-model')].map((label) => [
+      label.textContent.trim(),
+      label.parentElement.querySelector('.token-value')
+        .textContent.replace(/\s+/g, ' ').trim(),
+    ]);
+  }
+
+  it('splits the prompt from the completion', async () => {
+    // The row exists to tell a cheap turn from an expensive one at the same
+    // token count: 50k of cache reads and 50k of output differ by ~50x in
+    // price, and one aggregate figure renders them identically.
+    const el = await showTokens({
+      'claude-opus-4-6': {
+        inputTokens: 300,
+        outputTokens: 2000,
+        cacheCreationInputTokens: 1200,
+        cacheReadInputTokens: 40_000,
+      },
+    });
+    expect(tokenRows(el)).toEqual([['claude-opus-4-6', '↑ 41.5K · ↓ 2.0K']]);
+  });
+
+  it('counts the cached part of the prompt in the ↑ figure', async () => {
+    // `inputTokens` alone is the *uncached remainder*; a ↑ built from it
+    // would report a 40k-token prompt as 300 tokens.
+    const el = await showTokens({
+      'claude-opus-4-6': { inputTokens: 300, cacheReadInputTokens: 40_000 },
+    });
+    expect(tokenRows(el)[0][1]).toBe('↑ 40.3K · ↓ 0');
+  });
+
+  it('breaks all four counters out in the tooltip', async () => {
+    // Where the cache split lives, since the row itself has no room: the
+    // read and the write are priced differently (~0.1x and ~1.25x input).
+    const el = await showTokens({
+      'claude-opus-4-6': {
+        inputTokens: 300,
+        outputTokens: 2000,
+        cacheCreationInputTokens: 1200,
+        cacheReadInputTokens: 40_000,
+      },
+    });
+    const title = el.shadowRoot.querySelector('.token-value').title;
+    expect(title).toContain('43,500 tokens');
+    expect(title).toContain('300 input at full price');
+    expect(title).toContain('40,000 cache read');
+    expect(title).toContain('1,200 cache write');
+    expect(title).toContain('2,000 output');
+    expect(title).toContain('whole prompt (41,500)');
+  });
+
+  it('omits a cache counter the engine never reported', async () => {
+    // "0 cache read" in a tooltip claims a measurement that was not made.
+    const el = await showTokens({
+      'claude-opus-4-6': { inputTokens: 300, outputTokens: 100 },
+    });
+    const title = el.shadowRoot.querySelector('.token-value').title;
+    expect(title).not.toContain('cache read');
+    expect(title).not.toContain('cache write');
+  });
+
+  it('gives each model that answered its own row', async () => {
+    // A turn that spawned Haiku subagents spent that money too, and the
+    // model label only has room to say "+1".
+    const el = await showTokens({
+      'claude-opus-4-6': { inputTokens: 900, outputTokens: 100 },
+      'claude-haiku-4-5': { inputTokens: 4000, outputTokens: 200 },
+    });
+    expect(tokenRows(el)).toEqual([
+      ['claude-haiku-4-5', '↑ 4.0K · ↓ 200'],
+      ['claude-opus-4-6', '↑ 900 · ↓ 100'],
+    ]);
+  });
+
+  it('reads this turn’s usage, never the session’s running map', async () => {
+    // `model_usage` grows all session; a row built from it would credit
+    // this turn with every token that came before it.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture({
+      turn_model_usage: { 'claude-opus-4-6': { inputTokens: 100 } },
+      model_usage: { 'claude-opus-4-6': { inputTokens: 400_000 } },
+    }));
+    await settle(el);
+    expect(tokenRows(el)).toEqual([['claude-opus-4-6', '↑ 100 · ↓ 0']]);
+  });
+
+  it('shows no token row for a turn that reported no usage', async () => {
+    // The crash footer is AC⚡DC's own, so it carries no counters at all.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(crashFixture({ tool_calls: 4, response: 'partial answer' }));
+    await settle(el);
+    expect(tokenRows(el)).toEqual([]);
+    // The cost row still stands: the turn did work worth reporting.
+    expect(turnText(el)).toContain('cost unknown');
+  });
+
+  it('reads a replayed turn’s snake_case counters', async () => {
+    const el = await showTokens({
+      'claude-opus-4-6': { input_tokens: 900, output_tokens: 100 },
+    });
+    expect(tokenRows(el)[0][1]).toBe('↑ 900 · ↓ 100');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Model label
 // ---------------------------------------------------------------------------
 

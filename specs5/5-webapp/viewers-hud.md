@@ -184,8 +184,10 @@ Floating overlay on the viewer background, appearing after each turn.
 
 ### Data Flow
 
-One step, not two. The HUD renders entirely from the `streamComplete` payload: `usage`, `model_usage`,
-`total_cost_usd`, `duration_ms`, `num_turns`, `terminal_reason`, `permission_prompts`. Context
+One step, not two. The HUD renders entirely from the `streamComplete` payload: the per-turn
+`turn_cost_usd` / `turn_cost_basis` / `turn_model_usage` (never the cumulative `model_usage` or
+`total_cost_usd` beside them — see § Cost Is Cumulative below), `duration_ms`, `num_turns`,
+`terminal_reason`, `permission_prompts`. Context
 percentage comes from the `context_usage` carried on `postResponseComplete`, which arrives moments
 later and updates that one line in place.
 
@@ -200,7 +202,7 @@ All collapsible; collapse state persisted to `localStorage` as a serialised set 
 |---|---|
 | Header | Model, context percentage badge (colour-coded), dismiss button |
 | This turn | This turn's cost or why there is none, duration, engine-internal turn count, terminal reason, permission-prompt count |
-| Per-model usage | One row per entry in `turn_model_usage` — input, output, cache read, cache creation, cost, context window |
+| Per-model usage | One row per entry in `turn_model_usage`: the model, then `↑ prompt · ↓ output`. `↑` is the **whole** prompt — the uncached part and the cached part added together — because three input-side counters do not fit in 300px beside a model name, and their sum is the one figure that is not misleading on its own (see [chat.md § The Token Split](chat.md#the-token-split)). The tooltip carries all four counters unrounded. Per-row cost and context window belong to the Context tab; this row exists to answer whether a turn's tokens were prompt or completion, which the cost line alone cannot |
 | Context | `totalTokens` / `maxTokens` with the auto-compact mark |
 | Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play |
 | Files modified | The turn's `files_modified`, each clickable to the diff viewer |
@@ -261,8 +263,10 @@ expensive model did a little and the cheap model did a lot" is the shape of a we
 summing it away hides the thing worth seeing. The native engine could not express this at all — it had
 one model per request.
 
-Cache hit rate is derived per row from `cacheReadInputTokens` and `cacheCreationInputTokens`. It is a
-column, not a headline: it was headline-worthy only while AC⚡DC was the thing doing the caching.
+The two cache counters, `cacheReadInputTokens` and `cacheCreationInputTokens`, are reported in the
+row's tooltip and nowhere more prominently. No derived hit rate: a ratio was headline-worthy only
+while AC⚡DC was the thing doing the caching, and computing one now would be the app inventing a
+figure beside four the engine measured. The counters are there for a reader who wants to work it out.
 
 ### Behaviour
 

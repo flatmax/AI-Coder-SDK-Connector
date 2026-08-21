@@ -190,6 +190,93 @@ export function formatTokens(count) {
 // same numbers and got them wrong differently. One owner now.
 
 // ---------------------------------------------------------------
+// Per-model usage chips
+// ---------------------------------------------------------------
+
+/**
+ * One per-model usage line as a chip: the total, then how it split.
+ *
+ * The total leads, because it answers "how big was this turn" and it is the
+ * figure this chip has always shown. The split follows, because the parts are
+ * priced between 0.1× and 5× each other and one number cannot say which kind
+ * of tokens a turn spent — a 50k turn that was almost all cache reads and one
+ * that was almost all output are the same chip otherwise, and about twenty
+ * times apart in cost.
+ *
+ * A zero part is dropped rather than printed. A replayed transcript that
+ * recorded no cache counters would otherwise read "0 cache", which claims a
+ * measurement it never made — the same rule the cost chip follows.
+ *
+ * `in` is deliberately not "input": it counts only the part of the prompt
+ * charged at full price, and the cached part is prompt too. There is no room
+ * on a chip to say that, so the tooltip says it.
+ */
+export function renderUsageChip(line) {
+  const parts = [];
+  if (line.input > 0) parts.push(`${formatTokens(line.input)} in`);
+  if (line.cache > 0) parts.push(`${formatTokens(line.cache)} cache`);
+  if (line.output > 0) parts.push(`${formatTokens(line.output)} out`);
+  const split = parts.length > 0 ? ` · ${parts.join(' · ')}` : '';
+  return html`
+    <span class="turn-stat turn-usage" title=${usageTitle(line)}
+      >${line.model} ${formatTokens(line.tokens)} tok${split}</span
+    >
+  `;
+}
+
+/**
+ * The sentence behind a usage chip: every counter, unrounded, and what the
+ * chip's `in` does not include.
+ *
+ * Cache reads and cache writes are one chip part but two tooltip clauses:
+ * they are the same tokens from the reader's point of view and very different
+ * ones from the bill's, so the detail belongs here rather than in the chip.
+ */
+export function usageTitle(line) {
+  const n = (value) => Math.round(value).toLocaleString();
+  const parts = [`${n(line.input)} input at full price`];
+  if (line.cacheRead > 0) {
+    parts.push(`${n(line.cacheRead)} read from the prompt cache`);
+  }
+  if (line.cacheCreation > 0) {
+    parts.push(`${n(line.cacheCreation)} written to the cache`);
+  }
+  parts.push(`${n(line.output)} output`);
+  return `${line.model} — ${n(line.tokens)} tokens this turn: `
+    + `${parts.join(', ')}. The prompt was ${n(line.prompt)} tokens in all; `
+    + 'the "in" figure counts only the part of it that was not cached.';
+}
+
+/**
+ * The running token counter under a streaming turn.
+ *
+ * The same chips the settled footer draws, from the same `turn_model_usage`
+ * shape: the engine pushes a per-model running total as each assistant
+ * message reports what it used (`turnUsage`), so this is what the engine
+ * measured and not a count of our own — AC⚡DC never counts tokens itself
+ * (specs5/5-webapp/chat.md § Live Token Counter).
+ *
+ * Labelled "so far" because that is what it is. Usage arrives per completed
+ * assistant message rather than per token, so the numbers step up a few times
+ * a turn — several times more on an agentic turn, once on a one-shot answer —
+ * and the result message replaces them with its own when it lands.
+ *
+ * No cost. Pricing a turn means differencing the session's running total
+ * against itself, which only the result message carries; anything else here
+ * would be a guess wearing a dollar sign.
+ */
+export function renderLiveUsage(usage) {
+  const lines = modelUsageLines(usage);
+  if (lines.length === 0) return nothing;
+  return html`
+    <div class="turn-stats turn-live-usage">
+      <span class="turn-stat turn-live-label">so far</span>
+      ${lines.map((line) => renderUsageChip(line))}
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------
 // Compaction boundary
 // ---------------------------------------------------------------
 
@@ -906,9 +993,7 @@ export function renderTurnFooter(panel, summary, files) {
     `);
   }
   for (const line of usage) {
-    stats.push(html`
-      <span class="turn-stat turn-usage">${line.model} ${formatTokens(line.tokens)} tok</span>
-    `);
+    stats.push(renderUsageChip(line));
   }
   // Three renderings, and the tooltip says which: a price, "nothing extra"
   // for a turn the engine's total did not move for, and "cost unknown" when

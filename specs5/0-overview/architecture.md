@@ -162,7 +162,8 @@ fixed by interop.
 6. Server calls `query()` and starts a message pump
 7. Pump translates SDK messages into server-push events, every one carrying the request ID and a
    block identity: text and thinking chunks, tool cards, tool results, subagent lifecycle, compaction
-   boundaries, rate-limit warnings
+   boundaries, rate-limit warnings, and the turn's running token counters as each assistant message
+   reports what it used
 8. Tool calls that require approval suspend inside `can_use_tool` until the permission dialog answers
 9. Hooks fire around each tool call: cards appear on `PreToolUse`, and `PostToolUse` drives
    `filesModified` broadcasts, incremental re-indexing, and viewer refresh

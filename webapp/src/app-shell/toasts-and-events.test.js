@@ -104,6 +104,26 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('stream-complete', listener);
     });
 
+    it('turnUsage dispatches the running counter with its request id', () => {
+      // Turn-scoped like the rest of the streaming channel: the payload says
+      // how many tokens, and only the request id says whose turn they were.
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('turn-usage', listener);
+      const usage = {
+        turn_model_usage: {
+          'claude-opus-5': { input_tokens: 900, output_tokens: 100 },
+        },
+      };
+      expect(shell.turnUsage('req-1', usage)).toBe(true);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        requestId: 'req-1',
+        usage,
+      });
+      window.removeEventListener('turn-usage', listener);
+    });
+
     it('navigateFile flags remote origin', () => {
       // Collaboration echo-prevention — remote-originated
       // navigation must be distinguishable from local.

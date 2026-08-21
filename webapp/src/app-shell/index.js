@@ -845,6 +845,25 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
+  /**
+   * Token counters for the turn so far.
+   *
+   * Pushed as each assistant message reports what it used, so the payload
+   * is a *running* per-model total for this turn — `{turn_model_usage}`,
+   * the same shape and the same scope the final `streamComplete` carries,
+   * which is why it reuses the name. Never a session total; see
+   * `webapp/src/turn-cost.js`.
+   *
+   * Forwarded, not interpreted: the chat panel decides where a live
+   * number belongs and how to say it is still moving.
+   */
+  turnUsage(requestId, usage) {
+    window.dispatchEvent(new CustomEvent('turn-usage', {
+      detail: { requestId, usage },
+    }));
+    return true;
+  }
+
   compactionEvent(requestId, event) {
     window.dispatchEvent(new CustomEvent('compaction-event', {
       detail: { requestId, event },

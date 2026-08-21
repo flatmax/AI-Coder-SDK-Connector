@@ -67,6 +67,7 @@ import {
   onThinkingChunk,
   onToolResult,
   onToolUse,
+  onTurnUsage,
   onUserMessage,
   resumeStreamBlocks,
   startStreamTimerTick,
@@ -101,6 +102,7 @@ export function bindEventHandlers(panel) {
   panel._onThinkingChunk = (e) => onThinkingChunk(panel, e);
   panel._onToolUse = (e) => onToolUse(panel, e);
   panel._onToolResult = (e) => onToolResult(panel, e);
+  panel._onTurnUsage = (e) => onTurnUsage(panel, e);
   panel._onSessionStarted = (e) => onSessionStarted(panel, e);
   panel._onSubagentEvent = (e) => onSubagentEvent(panel, e);
   panel._onHookEvent = (e) => onHookEvent(panel, e);
@@ -240,6 +242,12 @@ export function resumeActiveStreams(panel, activeStreams) {
  *     folds into the owning tab's `turnBlocks`
  *     (see blocks.js) rather than into prose.
  *
+ *   turn-usage — the turn's token counters so far,
+ *     pushed once per assistant message. Same
+ *     routing; lands on the owning tab's
+ *     `turnBlocks.usage`, which the streaming card
+ *     draws as its "so far" footer.
+ *
  *   session-started / engine-health / rate-limit /
  *   system-event / hook-event — engine reports that
  *     are not transcript content. Mostly stashed or
@@ -306,6 +314,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('thinking-chunk', panel._onThinkingChunk);
   window.addEventListener('tool-use', panel._onToolUse);
   window.addEventListener('tool-result', panel._onToolResult);
+  window.addEventListener('turn-usage', panel._onTurnUsage);
   window.addEventListener('session-started', panel._onSessionStarted);
   window.addEventListener('subagent-event', panel._onSubagentEvent);
   window.addEventListener('hook-event', panel._onHookEvent);
@@ -403,6 +412,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('thinking-chunk', panel._onThinkingChunk);
   window.removeEventListener('tool-use', panel._onToolUse);
   window.removeEventListener('tool-result', panel._onToolResult);
+  window.removeEventListener('turn-usage', panel._onTurnUsage);
   window.removeEventListener('session-started', panel._onSessionStarted);
   window.removeEventListener('subagent-event', panel._onSubagentEvent);
   window.removeEventListener('hook-event', panel._onHookEvent);

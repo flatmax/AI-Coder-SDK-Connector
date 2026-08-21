@@ -76,6 +76,7 @@ import { imageRefKey, imageRefsOf } from '../image-refs.js';
 import { renderMarkdown } from '../markdown.js';
 import {
   compactionSummary,
+  renderLiveUsage,
   renderTerminalBadge,
   renderTurnBlocks,
   renderTurnFooter,
@@ -1250,7 +1251,9 @@ function _onAgentCardClick(panel, event) {
  * the CLI, the CLI initialises) and an empty card reads as a hang.
  *
  * The blinking cursor sits after the body so it is visible whatever the last
- * block is.
+ * block is, and the live token counter sits after the cursor: it is the
+ * streaming card's footer, and the same chips land in the same place when the
+ * settled card's real footer replaces them.
  */
 export function renderStreamingMessage(panel) {
   // Live run timer — elapsed since the prompt was sent.
@@ -1278,6 +1281,7 @@ export function renderStreamingMessage(panel) {
             settled: false,
           })}
       <span class="cursor"></span>
+      ${renderLiveUsage(turn?.usage)}
     </div>
   `;
 }

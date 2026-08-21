@@ -351,6 +351,39 @@ export function scheduleFlush(panel) {
 }
 
 // ---------------------------------------------------------------
+// Live token counter
+// ---------------------------------------------------------------
+
+/**
+ * Handle a `turn-usage` window event: the turn's token counters so far.
+ *
+ * The payload is the whole running total (`{turn_model_usage}`), so it replaces
+ * what the tab held rather than adding to it — the engine does the summing,
+ * because it is the side that knows which assistant messages it has already
+ * counted.
+ *
+ * Repaints for the owning tab only, and unlike a chunk it does not go through
+ * the rAF staging: these arrive once per assistant message, a few times a turn,
+ * so there is no burst to coalesce.
+ *
+ * A subagent's tab shows no counter of its own. The figure is the whole turn's,
+ * including the subagent's own tokens, and it belongs on the card that claims
+ * the turn.
+ */
+export function onTurnUsage(panel, event) {
+  const { requestId, usage } = event.detail || {};
+  if (!requestId) return;
+  const owner = liveOwner(panel, requestId);
+  if (!owner) return;
+  const models = usage && typeof usage === 'object'
+    ? usage.turn_model_usage
+    : null;
+  if (!models || typeof models !== 'object') return;
+  owner.tab.turnBlocks.usage = usage;
+  if (owner.active) panel.requestUpdate();
+}
+
+// ---------------------------------------------------------------
 // Tool cards
 // ---------------------------------------------------------------
 
@@ -815,6 +848,14 @@ export function resumeStreamBlocks(panel, tab, stream) {
   const requestId = stream.request_id;
   if (typeof requestId !== 'string' || !requestId) return false;
   applyReplayBlocks(tab.turnBlocks, stream.blocks);
+  // The counter as it stood, for the same reason the blocks come back: the
+  // next push is a whole assistant message away, and a reconnect in the middle
+  // of a long tool call would otherwise read as a turn that had spent nothing.
+  const usage = stream.usage;
+  tab.turnBlocks.usage =
+    usage && typeof usage === 'object' && usage.turn_model_usage
+      ? usage
+      : null;
   tab.streaming = true;
   tab.currentRequestId = requestId;
   tab.streams.set(requestId, { sticky: true });

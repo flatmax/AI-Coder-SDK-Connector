@@ -51,7 +51,7 @@ path rather than treated as an optimisation.
 - Sets current request ID and a passive-stream flag
 - On completion of a passive stream, prepend the user message from the result (since the passive client didn't add it optimistically)
 ### Reconnect Replay
-- On reconnect, `get_current_state` carries `active_streams`, each with the turn's blocks in order and each block's current content
+- On reconnect, `get_current_state` carries `active_streams`, each with the turn's blocks in order and each block's current content, and its `usage` — the turn's token counters so far, in the same shape `turnUsage` pushes
 - The panel renders the block list, then resumes applying live chunks. A user who refreshed mid-turn sees the turn as it stands, not an empty card that fills in from the next token
 - Replay is block state, not a chunk log: superseded thinking content and intermediate renderings are not recoverable, and the panel must not imply otherwise
 - Any `pending_permissions` in the same snapshot are handed to the permission dialog immediately
@@ -181,8 +181,59 @@ Replaces the edit summary banner. Rendered at the end of the assistant turn, not
 - Files modified — the union of every tool result's `files_modified`, deduplicated, each clickable through to the diff viewer. This is the answer to "what did it just do to my repo?" and it is the footer's most important line. Those paths are absolute — the CLI's file tools require that, and the field reports what the tool was given — so the click relies on the shell relativising them before the viewer asks for one (see [shell.md § Viewer Background](shell.md#viewer-background))
 - Tool calls, and how many needed a permission prompt
 - Duration, engine-internal turn count
-- Usage — per-model token counts. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))
+- Usage — one chip per model that answered: the turn's total, then how it split, `N tok · N in · N cache · N out`. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))
 - A mirror-gap marker when the turn failed to append to the repo-local transcript, linking to the health banner. The link *forces* the banner open rather than merely un-dismissing it, because the engine may have recovered or restarted since that turn — a readout with nothing wrong in it is still an answer, and better than a link that lands on nothing
+
+### The Token Split
+
+`turn_model_usage` carries four counters per model, and the chip shows them as three figures — the two
+cache counters share one. Reading a cache write apart from a cache read is a pricing question, and the
+chip answers a coarser one: how much of this turn was prompt the model had to be sent, how much was
+prompt it already had, and how much did it write back.
+
+| Counter | Chip | Priced at |
+|---|---|---|
+| `inputTokens` | `in` | full rate |
+| `cacheReadInputTokens` | `cache` | a fraction of it |
+| `cacheCreationInputTokens` | `cache` | a premium over it |
+| `outputTokens` | `out` | several times the input rate |
+
+Two rules follow, and both have been got wrong before:
+
+- **`in` is not the prompt.** It is the part of the prompt charged at full price; the cached part is
+  prompt too. An agentic turn resends its whole context at every step, so nearly all of a long turn's
+  prompt is a cache read, and a chip that mapped "input" to `inputTokens` alone would report a
+  fraction of what was sent. The prompt's real size is the three input-side counters added up, which
+  is what the chip's tooltip says and what the HUD's `↑` shows
+- **A zero part is not printed.** A replayed transcript that recorded no cache counters would
+  otherwise read `0 cache`, which claims a measurement that was never made — the same rule the cost
+  chip follows for a turn with no basis
+
+The total stays in the chip alongside the split. It is the figure that answers "how big was this
+turn", and the split is what says whether that size was expensive.
+
+### Live Token Counter
+
+The footer's chips have a running twin: while a turn is streaming, the same chips render under the
+streaming card, prefixed `SO FAR` and dimmed.
+
+- The source is `turnUsage`, pushed by the engine as each assistant message reports what it used
+  ([`../3-engine/session.md`](../3-engine/session.md#message-taxonomy--ui)). Same `turn_model_usage`
+  shape as the footer's, so one renderer draws both
+- **It steps, it does not tick.** The CLI reports usage per finished assistant message and nowhere
+  else, so the number moves a few times on an agentic turn and once on a one-shot answer. This is the
+  honest limit of the data, not a throttle of ours
+- **No cost.** Pricing a turn means differencing the session's running total, which only the result
+  message carries. A live dollar figure would be a guess, and this panel does not print guesses
+- Subagent messages count toward it, under their own model. They are what makes a delegating turn
+  expensive; a counter that skipped them would sit still through the costly part of the turn
+- The counter is the turn's, so it renders on the card that owns the turn. A subagent tab shows no
+  counter of its own
+- A browser that reconnects mid-turn gets the counter as it stands, from the `active_streams` entry's
+  `usage` — the next push is a whole assistant message away, and a reconnect during a long tool call
+  would otherwise read as a turn that had spent nothing
+- Still no estimate. Every number here is one the engine measured; AC⚡DC does not count tokens, and
+  a live counter is the most tempting place to start
 
 ### No Retry Prompts
 
@@ -289,7 +340,7 @@ never a dismiss (see [permission-dialog.md](permission-dialog.md)).
 - Lightbox overlay on click (full-size view, Escape to close)
 - Re-attach button on thumbnails and in lightbox (see [images.md](../4-features/images.md))
 - **A restored prompt carries pointers where a live one carries bytes.** A message the user pasted into this session holds its data URIs; the same message reached by resuming or by reconnecting holds `image_refs`, and each is resolved through `history_image` after the transcript is on screen — never before it, so the text is readable while the bytes are still arriving. A resolved pointer becomes the same tile a pasted image gets, lightbox and re-attach included, because re-attaching from a past session is one of the two documented paths into the composer. Unresolved tiles hold their final size, and a pointer that cannot be read keeps a marked tile with the reason rather than vanishing. The fetching is shared with the history browser's — same pointers, same sequential reads, same cache-the-failures rule, one implementation
-- No token estimate is shown. AC⚡DC does not count tokens; the turn footer reports what the engine actually used
+- No token estimate is shown. AC⚡DC does not count tokens; the numbers it shows are the engine's own, reported once the turn is under way ([§ Live Token Counter](#live-token-counter)) and finally in the footer ([§ The Token Split](#the-token-split)). Nothing is shown for a prompt not yet sent, which is the only figure that would have to be guessed
 - Not automatically re-sent on subsequent messages — display-only after original send
 ### Links and URLs
 - A URL in the input is just text. There are no URL chips, no fetch button, no per-turn include/exclude checkboxes, and no URL modal
@@ -467,6 +518,7 @@ Handler routes `compactionEvent` stages and adjacent engine events to appropriat
 | `compact_boundary` | A divider card in the transcript with before/after token counts. **Not** a message-list replacement: the engine compacted its own context, and our mirrored transcript is unchanged |
 | `reindex` | No toast. The file tree and viewers refresh on `postResponseComplete` |
 | Doc enrichment queued / file done / complete / failed | Not rendered as a toast — header progress bar handles these (see [shell.md](shell.md) and [document-index.md](../2-indexing/document-index.md)) |
+| `turnUsage` | No toast and no card: it patches the live turn's counter in place (see [§ Live Token Counter](#live-token-counter)). Routed to the tab that owns the request, like a chunk, but not staged through the rAF coalesce — one arrives per assistant message, so there is no burst to fold |
 | `rateLimit` | Warning toast on `allowed_warning`, error toast on `rejected`, both naming the reset time. The usage HUD carries the persistent version |
 | `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption. The banner sits between the transcript and the input area beside the disconnected note — both are standing conditions about the channel rather than events in the conversation — and shows the count of failed appends, the engine's last error, the version and credential warnings, and one line per capability the session started without. Amber, not the note's red: the conversation works. Red only once the engine reports the gap count past the repo's `history.mirror_gap_tolerance`, at which point the banner says to read the mirror as broken rather than unlucky and where to look; the comparison is the engine's, and the browser is handed the verdict rather than the threshold. Dismissal is keyed to *which* problems are showing, including how many gaps and whether they have escalated, so a warning that has been read stays quiet and the next thing to go wrong — or the same thing getting worse — does not. `connected: false` alone is not a fault: it is the normal state before the first prompt, and a session that loses its engine says so in `last_error`. Underneath the summary lines, the payload's tail of the CLI's own stderr renders as preformatted output — the last thing the subprocess said, which on a failed connect is the only diagnosis there is. It is the one field that can *only* be read and never raise the banner: it is absent from both the problem test and the dismissal key, because the CLI writes routine chatter there and the tail grows on a healthy session, so it must not open a banner and must not undo a dismissal. Appended after the summary, so a banner forced open on a healthy engine still says the engine reports nothing wrong and then shows the output. The payload's MCP server list is left out — that is the Context tab's per-server detail (phase 6) |
 | `disk_warning` (on the state snapshot and on `postResponseComplete`) | A system-event card in the transcript, not a toast: the sentence names a threshold, a cause and what to do about it, which is more reading than a toast's three seconds allow, and the card renders the directory it names as code. Read from *both* carriers, because the server spends one flag on whichever notices first — the snapshot for "checked at startup", a finished turn for a session that crosses the threshold while the browser is open. No request-id filter: the directory belongs to the session, so a collaborator's turn is as good a messenger as our own. The browser adds no one-shot of its own; a second owner of that rule could only disagree with the server's, and would swallow the honest second warning from a restarted server |

@@ -230,7 +230,7 @@ What comes out of `receive_response()`, and where each lands in the UI:
 | Type | Contents | AC⚡DC surface |
 |---|---|---|
 | `SystemMessage(subtype="init")` | Session ID, model, tools, MCP servers, slash commands | Session banner; seeds the request-ID ↔ session-ID map |
-| `AssistantMessage` | `TextBlock`, `ThinkingBlock`, `ToolUseBlock` | Chat message; thinking collapsed by default; tool-use cards |
+| `AssistantMessage` | `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `usage` | Chat message; thinking collapsed by default; tool-use cards. `usage` is this API call's four token counters — the only mid-turn source of them — summed per model into the streaming card's live counter (`turnUsage`) |
 | `UserMessage` | `ToolResultBlock` | Tool-result card attached to its call |
 | `StreamEvent` | Partial deltas | Chunk coalescing at animation-frame rate |
 | `ResultMessage` | `total_cost_usd`, `usage`, `model_usage`, `num_turns`, `duration_ms`, `is_error`, `terminal_reason` | Turn footer + usage HUD |

@@ -4,6 +4,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resumeActiveStreams } from './events.js';
 import { computeTurnOutcome, onStreamRetry } from './streaming.js';
 import {
   mountPanel,
@@ -1420,5 +1421,166 @@ describe('ChatPanel compaction toast', () => {
     expect(toasts).toHaveLength(1);
     expect(toasts[0][0]).toContain('Bash');
     expect(toasts[0][1]).toBe('warning');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live token counter
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel live token counter', () => {
+  async function sendAndGetRequestId(panel) {
+    const started = vi.fn().mockResolvedValue({ status: 'started' });
+    publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    return started.mock.calls[0][0];
+  }
+
+  function liveChips(panel) {
+    const card = panel.shadowRoot.querySelector('.message-card.streaming');
+    return [...(card?.querySelectorAll('.turn-live-usage .turn-usage') ?? [])]
+      .map((s) => s.textContent.replace(/\s+/g, ' ').trim());
+  }
+
+  function usagePayload(reqId, models) {
+    return { requestId: reqId, usage: { turn_model_usage: models } };
+  }
+
+  it('counts under the streaming card as the engine reports', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 900, output_tokens: 100 },
+    }));
+    await settle(p);
+    expect(liveChips(p)).toEqual(['claude-opus-5 1.0k tok · 900 in · 100 out']);
+  });
+
+  it('replaces the running figure rather than adding to it', async () => {
+    // The engine accumulates server-side and pushes the whole turn's total
+    // each time; summing here as well would double-count every step.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 900, output_tokens: 100 },
+    }));
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 1800, output_tokens: 300 },
+    }));
+    await settle(p);
+    expect(liveChips(p)).toEqual(['claude-opus-5 2.1k tok · 1.8k in · 300 out']);
+  });
+
+  it('ignores a counter for someone else’s turn', async () => {
+    // A collaborator's stream carries its own request ID, and its tokens are
+    // not this card's.
+    const p = mountPanel();
+    await sendAndGetRequestId(p);
+    pushEvent('turn-usage', usagePayload('other-request-id', {
+      'claude-opus-5': { input_tokens: 900 },
+    }));
+    await settle(p);
+    expect(liveChips(p)).toEqual([]);
+  });
+
+  it('ignores a payload with no usable counters', async () => {
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    for (const usage of [null, {}, { turn_model_usage: 'claude' }]) {
+      pushEvent('turn-usage', { requestId: reqId, usage });
+    }
+    pushEvent('turn-usage', { usage: { turn_model_usage: { m: { input_tokens: 5 } } } });
+    await settle(p);
+    expect(liveChips(p)).toEqual([]);
+  });
+
+  it('is gone once the settled footer carries the real figure', async () => {
+    // Two counters for one turn, one of them stale, is worse than one.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 900, output_tokens: 100 },
+    }));
+    await settle(p);
+    expect(liveChips(p)).toHaveLength(1);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'final answer',
+        terminal_reason: 'completed',
+        turn_model_usage: { 'claude-opus-5': { inputTokens: 1000, outputTokens: 120 } },
+      },
+    });
+    await settle(p);
+    expect(p.shadowRoot.querySelector('.turn-live-usage')).toBeNull();
+    // The footer's own chip is the engine's final word on the turn.
+    expect(p.shadowRoot.querySelector('.turn-footer .turn-usage').textContent
+      .replace(/\s+/g, ' ').trim())
+      .toBe('claude-opus-5 1.1k tok · 1.0k in · 120 out');
+  });
+
+  it('starts the next turn from zero', async () => {
+    // The counter is per-turn. Carrying it over would open a fresh turn
+    // claiming tokens the previous one spent.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 900, output_tokens: 100 },
+    }));
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    await sendAndGetRequestId(p);
+    await settle(p);
+    expect(liveChips(p)).toEqual([]);
+  });
+
+  it('survives a refresh mid-turn on the stream snapshot', async () => {
+    // `active_streams[].usage` is why the engine accumulates server-side:
+    // a browser that reloaded has no record of the messages already counted.
+    const p = mountPanel();
+    await settle(p);
+    resumeActiveStreams(p, [{
+      request_id: 'req-1',
+      session_id: 'sess-1',
+      started_at: 1,
+      blocks: [{ block_id: 'req-1:b0', kind: 'text', seq: 0, content: 'Working.' }],
+      subagents: [],
+      usage: {
+        turn_model_usage: { 'claude-opus-5': { input_tokens: 900, output_tokens: 100 } },
+      },
+    }]);
+    await settle(p);
+    expect(liveChips(p)).toEqual(['claude-opus-5 1.0k tok · 900 in · 100 out']);
+  });
+
+  it('stops counting once the panel is gone', async () => {
+    // The handler is unbound with the rest of the channel; one left wired
+    // holds the panel and its whole tab map alive after removal.
+    const p = mountPanel();
+    const reqId = await sendAndGetRequestId(p);
+    p.remove();
+    pushEvent('turn-usage', usagePayload(reqId, {
+      'claude-opus-5': { input_tokens: 900 },
+    }));
+    expect(p._tabs.get('main').turnBlocks.usage).toBeNull();
+  });
+
+  it('shows no counter for a snapshot from before the engine counted', async () => {
+    const p = mountPanel();
+    await settle(p);
+    resumeActiveStreams(p, [{
+      request_id: 'req-1',
+      session_id: 'sess-1',
+      started_at: 1,
+      blocks: [{ block_id: 'req-1:b0', kind: 'text', seq: 0, content: 'Working.' }],
+      subagents: [],
+    }]);
+    await settle(p);
+    expect(liveChips(p)).toEqual([]);
   });
 });

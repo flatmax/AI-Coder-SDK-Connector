@@ -2864,6 +2864,19 @@ export const STYLES = css`
   .turn-usage {
     font-family: 'SFMono-Regular', Consolas, monospace;
   }
+  /* The running counter under a streaming turn. Same chips as
+   * the settled footer, dimmer and labelled — the numbers are
+   * still moving, and a live figure that looked identical to a
+   * final one would be read as one. */
+  .turn-live-usage {
+    margin-top: 0.4rem;
+    opacity: 0.7;
+  }
+  .turn-live-label {
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
   /* Green for a figure we measured, including a genuine
    * "nothing extra". */
   .turn-cost {

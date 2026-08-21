@@ -51,7 +51,7 @@ import {
   warningPercent,
   windowPercent,
 } from './context-usage.js';
-import { costLabel, modelNames, reportsUsage } from './turn-cost.js';
+import { costLabel, modelUsageLines, reportsUsage } from './turn-cost.js';
 
 /** Auto-hide delay (ms). Matches the old HUD. */
 const _AUTO_HIDE_MS = 8000;
@@ -94,10 +94,15 @@ export class UsageHud extends RpcMixin(LitElement) {
      */
     _contextError: { type: String, state: true },
     /**
-     * The turn that just finished: `{ cost, models, durationMs,
+     * The turn that just finished: `{ cost, usage, models, durationMs,
      * toolCalls, cancelled }`. Derived from the `streamComplete`
      * payload, which is the only place per-turn numbers exist — the
      * engine does not keep a running session total for us to query.
+     *
+     * `usage` is the per-model lines, split into prompt and completion;
+     * `models` is their names, for the header. The HUD used to carry the
+     * names alone, so the one panel titled "usage" reported a price and
+     * no tokens.
      */
     _turn: { type: Object, state: true },
   };
@@ -179,6 +184,20 @@ export class UsageHud extends RpcMixin(LitElement) {
     }
     .value {
       font-variant-numeric: tabular-nums;
+    }
+    /* A token row in 300px: the model name gives way before the
+     * numbers do. A clipped name is still recognisable and the
+     * tooltip has it in full; a clipped count is a different
+     * number. */
+    .token-model {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .token-value {
+      flex: none;
+      font-size: 0.75rem;
     }
     .muted {
       color: var(--text-secondary, #8b949e);
@@ -328,6 +347,7 @@ export class UsageHud extends RpcMixin(LitElement) {
     const failed = !!(result.error || result.is_error);
     if (failed && !reportsUsage(result)) return;
 
+    const usage = modelUsageLines(result);
     this._turn = {
       // What this turn cost, with the reason attached when there is no
       // figure. Emphatically not `total_cost_usd`, which is the whole
@@ -335,8 +355,10 @@ export class UsageHud extends RpcMixin(LitElement) {
       cost: costLabel(result),
       // From `turn_model_usage`, so a turn that delegated to a subagent
       // on a cheaper model lists both and a turn that did not is not
-      // credited with models the session used earlier.
-      models: modelNames(result),
+      // credited with models the session used earlier. Busiest model
+      // first, which is the order the header's `+n` truncates from.
+      usage,
+      models: usage.map((line) => line.model),
       durationMs: typeof result.duration_ms === 'number'
         ? result.duration_ms
         : null,
@@ -654,7 +676,50 @@ export class UsageHud extends RpcMixin(LitElement) {
             : ''}
         </span>
       </div>
+      ${this._renderTokens()}
     `;
+  }
+
+  /**
+   * Token rows — one per model that answered, prompt and completion apart.
+   *
+   * The split is the point. A price alone cannot be checked against
+   * anything, and one aggregate token count cannot either: 50k tokens is
+   * a cheap turn if they were cache reads and an expensive one if they
+   * were output, and those are the two turns this row tells apart.
+   *
+   * `↑` is the whole prompt — the uncached part and the cached part
+   * together — because in 300px there is no room for three numbers and a
+   * model name, and the sum is the honest one to show. The tooltip
+   * carries the breakdown, and the chat panel's turn footer shows the
+   * cache column in full.
+   */
+  _renderTokens() {
+    const lines = this._turn?.usage;
+    if (!Array.isArray(lines) || lines.length === 0) return '';
+    return lines.map((line) => html`
+      <div class="row">
+        <span class="label token-model" title=${line.model}>${line.model}</span>
+        <span class="value token-value" title=${this._tokenTitle(line)}>
+          ↑ ${_fmtTokens(line.prompt)} · ↓ ${_fmtTokens(line.output)}
+        </span>
+      </div>
+    `);
+  }
+
+  /** Every counter behind one token row, unrounded. */
+  _tokenTitle(line) {
+    const n = (value) => Math.round(value).toLocaleString();
+    const parts = [`${n(line.input)} input at full price`];
+    if (line.cacheRead > 0) {
+      parts.push(`${n(line.cacheRead)} cache read`);
+    }
+    if (line.cacheCreation > 0) {
+      parts.push(`${n(line.cacheCreation)} cache write`);
+    }
+    parts.push(`${n(line.output)} output`);
+    return `${n(line.tokens)} tokens: ${parts.join(', ')}. `
+      + `↑ is the whole prompt (${n(line.prompt)}), cached part included.`;
   }
 }
 

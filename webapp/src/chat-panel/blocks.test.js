@@ -59,6 +59,9 @@ describe('makeTurnBlocks / resetTurnBlocks', () => {
     expect(turn.index.size).toBe(0);
     expect(turn.pending.size).toBe(0);
     expect(turn.subagents.size).toBe(0);
+    // Null, not an empty usage map: the engine has counted nothing yet, and
+    // the live counter renders no chips at all rather than a row of zeroes.
+    expect(turn.usage).toBeNull();
   });
 
   it('resets in place so every holder sees the same empty state', () => {
@@ -69,12 +72,16 @@ describe('makeTurnBlocks / resetTurnBlocks', () => {
     const index = turn.index;
     chunk(turn, 'r1:b0', 'hi');
     applySubagentEvent(turn, { task_id: 't1', description: 'go' });
+    turn.usage = { turn_model_usage: { 'claude-opus-5': { input_tokens: 900 } } };
     resetTurnBlocks(turn);
     expect(turn.blocks).toBe(blocks);
     expect(turn.index).toBe(index);
     expect(turn.blocks).toHaveLength(0);
     expect(turn.index.size).toBe(0);
     expect(turn.subagents.size).toBe(0);
+    // The token counter is per-turn, so it resets with everything else. A
+    // carried-over figure would open the next turn already owing tokens.
+    expect(turn.usage).toBeNull();
   });
 
   it('tolerates a missing turn', () => {

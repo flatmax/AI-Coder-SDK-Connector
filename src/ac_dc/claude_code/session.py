@@ -149,6 +149,12 @@ class ActiveTurn:
             # feed's blocks with nowhere to put them
             # (specs5/5-webapp/subagent-browser.md § Refresh and Reconnect).
             "subagents": self.translator.rendered_subagents(),
+            # This turn's token counters so far, in the `turn_model_usage`
+            # shape the live `turnUsage` pushes. Same reason as the blocks:
+            # the next push is one whole assistant message away, so without
+            # the snapshot a refreshed browser's counter would read empty
+            # through a long tool call.
+            "usage": {"turn_model_usage": self.translator.turn_usage()},
         }
 
 
