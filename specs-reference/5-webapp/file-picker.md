@@ -101,20 +101,23 @@ Key handling: Enter commits, Escape cancels, blur cancels. After commit, the inp
 
 ## Dependency quirks
 
-### `shift` means two things on one row
+### `shift` denies, `ctrl` mentions
 
-The row answers both gestures, and which one `shift` modifies depends on the mouse button:
+Four gestures on one row, and each modifier means exactly one thing across both buttons:
 
 | Gesture | Effect |
 |---|---|
 | click | Open the file / expand the directory |
 | shift+click | Toggle the `Read` deny rule (subtree, on a directory or the root) |
 | middle-click (button 1) | Insert the bare path into the composer |
-| shift+middle-click | Insert `@path` into the composer |
+| ctrl+middle-click | Insert `@path` into the composer |
 
-Accepted with a mitigation rather than resolved: all four verbs are also context-menu items, so no
-gesture is the only route to anything. This is the one collision CC-21 introduced and it is deliberate —
-the alternative was a second modifier, and `ctrl`/`cmd`+click is the browser's.
+`shift`+middle-click is *not* a fifth gesture: `_emitInsertPath` reads `event.ctrlKey` and nothing else,
+so a `shift`-held middle-click inserts the bare path. CC-21 shipped the mention on `shift` and had
+`shift` meaning two things split by mouse button, on the reasoning that `ctrl`/`cmd`+click belongs to the
+browser — true of the *primary* button, which is the one the browser spends `ctrl` on. The middle button
+is free, so the collision is resolved rather than mitigated. All four verbs remain context-menu items, so
+no gesture is the only route to anything.
 
 ### `preventDefault()` on the deny gestures
 

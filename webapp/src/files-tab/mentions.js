@@ -44,12 +44,19 @@
  * one-shot and clears in the paste handler, so a
  * later intentional paste still works.
  *
- * Path padding:
- *   - If cursor is preceded by non-whitespace, prepend a space
- *   - If cursor is followed by non-whitespace, append a space
+ * Path padding — a space either side of the inserted
+ * text, always, so the path is never run together with
+ * what the user has already typed and whatever they type
+ * next starts clear of it. The only thing that removes a
+ * space is a space already being there: adjacent
+ * whitespace is left to do the job rather than doubled.
+ * Nothing already in the textarea is replaced except an
+ * active selection, which the insertion stands in for.
  *
- * Matches the pattern used by `_insertSnippet` on
- * the chat panel side for snippet insertion.
+ * At the very start or end of the composer the space is
+ * still added, which can leave the input with a leading
+ * or trailing space. Harmless — `send()` trims, so it
+ * never reaches the CLI.
  */
 export function onInsertPath(host, event) {
   const path = event.detail?.path;
@@ -71,10 +78,8 @@ export function onInsertPath(host, event) {
   // sees.
   const before = ta.value.slice(0, ta.selectionStart);
   const after = ta.value.slice(ta.selectionEnd);
-  const prefix =
-    before.length > 0 && !/\s$/.test(before) ? ' ' : '';
-  const suffix =
-    after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+  const prefix = /\s$/.test(before) ? '' : ' ';
+  const suffix = /^\s/.test(after) ? '' : ' ';
   const insertion = `${prefix}${text}${suffix}`;
   const next = `${before}${insertion}${after}`;
   // Push through the chat panel's reactive state so

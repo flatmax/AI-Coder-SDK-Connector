@@ -3083,6 +3083,9 @@ The cost is stated rather than solved: **`shift` now means two things on one row
 The mitigation is that no gesture is the only route to anything. The alternative was a second modifier,
 and `ctrl`/`cmd`+click belongs to the browser.
 
+*Amended 2026-08-21:* the mention modifier is `ctrl`+middle-click. The browser's claim on `ctrl` is on the
+primary button only, so the collision above was avoidable — see [decisions § CC-21](decisions.md#cc-21).
+
 ### Three drifts the sweep turned up
 
 None caused by this work; all three were spec claiming something the code never did.

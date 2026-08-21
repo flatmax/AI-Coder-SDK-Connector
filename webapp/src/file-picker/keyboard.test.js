@@ -397,12 +397,13 @@ describe('FilePicker component', () => {
     // its options dict; the @auxclick handler reads
     // event.button to filter out other non-primary
     // buttons.
-    function middleClick(row, shiftKey = false) {
+    function middleClick(row, mods = {}) {
       const event = new MouseEvent('auxclick', {
         bubbles: true,
         cancelable: true,
         button: 1,
-        shiftKey,
+        ctrlKey: mods.ctrlKey === true,
+        shiftKey: mods.shiftKey === true,
       });
       row.dispatchEvent(event);
       return event;
@@ -442,7 +443,7 @@ describe('FilePicker component', () => {
       });
     });
 
-    it('shift+middle-click asks for the @path form', async () => {
+    it('ctrl+middle-click asks for the @path form', async () => {
       // The two forms are not cosmetic variants: a bare path is a
       // pointer the agent may or may not follow, while `@path` is
       // a read the CLI performs before the turn starts. The
@@ -453,14 +454,16 @@ describe('FilePicker component', () => {
       await p.updateComplete;
       const listener = vi.fn();
       p.addEventListener('insert-path', listener);
-      middleClick(p.shadowRoot.querySelector('.row.is-file'), true);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), {
+        ctrlKey: true,
+      });
       expect(listener.mock.calls[0][0].detail).toEqual({
         path: 'a.md',
         mention: true,
       });
     });
 
-    it('shift+middle-click on a directory row also asks for @path', async () => {
+    it('ctrl+middle-click on a directory row also asks for @path', async () => {
       const tree = rootOf([dir('src', [file('src/a.md')])]);
       const p = mountPicker({ tree });
       await p.updateComplete;
@@ -468,7 +471,7 @@ describe('FilePicker component', () => {
       p.addEventListener('insert-path', listener);
       middleClick(
         p.shadowRoot.querySelector('.row.is-dir:not(.is-root)'),
-        true,
+        { ctrlKey: true },
       );
       expect(listener.mock.calls[0][0].detail).toEqual({
         path: 'src',
@@ -476,17 +479,51 @@ describe('FilePicker component', () => {
       });
     });
 
+    it('shift+middle-click inserts the bare path, not @path', async () => {
+      // `shift` used to be the mention modifier, which made it
+      // mean two things on one row split by mouse button. It
+      // means deny-read and only that now, so holding it with
+      // the middle button changes nothing about the insertion.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree });
+      await p.updateComplete;
+      const listener = vi.fn();
+      p.addEventListener('insert-path', listener);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), {
+        shiftKey: true,
+      });
+      expect(listener.mock.calls[0][0].detail).toEqual({
+        path: 'a.md',
+        mention: false,
+      });
+    });
+
     it('shift+middle-click does not write a deny rule', async () => {
-      // Shift means two things on the same row now — deny with the
-      // left button, `@path` with the middle one. This pins that
-      // they stay apart: the deny path is on `click`, the insert
-      // path on `auxclick`, and neither answers the other's event.
+      // The deny gesture is `shift`+left-click. This pins that the
+      // two stay apart: deny is on `click`, insertion is on
+      // `auxclick`, and neither answers the other's event.
       const tree = rootOf([file('a.md')]);
       const p = mountPicker({ tree, excludedFiles: new Set() });
       await p.updateComplete;
       const exclusion = vi.fn();
       p.addEventListener('exclusion-changed', exclusion);
-      middleClick(p.shadowRoot.querySelector('.row.is-file'), true);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), {
+        shiftKey: true,
+      });
+      expect(exclusion).not.toHaveBeenCalled();
+    });
+
+    it('ctrl+middle-click does not write a deny rule either', async () => {
+      // The mention modifier reaches the insertion path only.
+      // Nothing about asking for an `@path` touches permissions.
+      const tree = rootOf([file('a.md')]);
+      const p = mountPicker({ tree, excludedFiles: new Set() });
+      await p.updateComplete;
+      const exclusion = vi.fn();
+      p.addEventListener('exclusion-changed', exclusion);
+      middleClick(p.shadowRoot.querySelector('.row.is-file'), {
+        ctrlKey: true,
+      });
       expect(exclusion).not.toHaveBeenCalled();
     });
 

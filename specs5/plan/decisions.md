@@ -579,16 +579,25 @@ silent when the real mechanism is neither.
   facts the user could not have typed themselves.
 - **The `@`-filter bridge** in the chat input, which is how a typed `@` finds a path at all.
 - **Path insertion**, promoted rather than merely kept, because it becomes the only picker→prompt
-  route. Middle-click inserts the bare path; `shift`+middle-click inserts `@path`; both are also
+  route. Middle-click inserts the bare path; `ctrl`+middle-click inserts `@path`; both are also
   context-menu items ("Insert path in prompt", "Insert @path — agent reads it"). **(user)** chose
-  both forms on distinct gestures, and chose the context-menu item as the discovery path.
+  both forms on distinct gestures, and chose the context-menu item as the discovery path. The
+  mention modifier was `shift` as first shipped; see the amendment below.
 
 **Consequences:**
 
-- **`shift` now means two things on one row**, split by mouse button: with the left button it denies,
-  with the middle button it inserts a mention. Accepted with a mitigation rather than resolved — all
-  four verbs are context-menu items too, so no gesture is the sole route to anything. The alternative
-  was a second modifier, and `ctrl`/`cmd`+click belongs to the browser.
+- **`shift` meant two things on one row** as first shipped, split by mouse button: with the left
+  button it denied, with the middle button it inserted a mention. Accepted with a mitigation rather
+  than resolved, on the reasoning that the alternative was a second modifier and `ctrl`/`cmd`+click
+  belongs to the browser. **(user)** amended this on 2026-08-21: the mention modifier is `ctrl`+middle-click.
+  The browser's claim on `ctrl` is on the *primary* button, so the middle button was free all along, and
+  `shift` now means deny-read and only that whichever button it is held with. `shift`+middle-click
+  inserts the bare path — it is not a distinct gesture. All four verbs stay context-menu items, so no
+  gesture is the sole route to anything.
+- **The insertion is additive, and padded on both sides.** It lands at the cursor (standing in for an
+  active selection) with a space either side unless whitespace is already there, and never replaces
+  what the user has written. Same amendment: a path arriving mid-sentence should read as a word in the
+  prompt, and a half-composed prompt is not the picker's to discard.
 - **Nothing about the picker crosses the collaboration boundary any more.** There is no shared
   selection to keep in agreement, so `4-features/collaboration.md`'s File Selection Sync section
   describes a channel that no longer exists. Deny rules are host-written and localhost-gated

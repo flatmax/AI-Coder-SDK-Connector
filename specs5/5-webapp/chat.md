@@ -172,7 +172,7 @@ Three things stood here and went with the selection ([CC-21](../plan/decisions.m
   clicks. This was the closest the old design came to the current answer, and it is worth being clear
   about why it is not simply kept: it wrote prose *about* files it had also selected, so the model got
   a sentence and a hint and no path it could act on. The picker's middle-click writes the path itself,
-  and shift+middle-click writes `@path`, which the CLI expands into a real read
+  and ctrl+middle-click writes `@path`, which the CLI expands into a real read
 
 ## Turn Footer
 

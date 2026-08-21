@@ -32,11 +32,11 @@ describe('FilesTab middle-click path insertion', () => {
    * file-picker.test.js; here we only exercise the
    * orchestrator's response to the event.
    */
-  function firePickerInsertPath(tab, path) {
+  function firePickerInsertPath(tab, path, mention = false) {
     const picker = tab.shadowRoot.querySelector('ac-file-picker');
     picker.dispatchEvent(
       new CustomEvent('insert-path', {
-        detail: { path },
+        detail: { path, mention },
         bubbles: true,
         composed: true,
       }),
@@ -57,12 +57,16 @@ describe('FilesTab middle-click path insertion', () => {
     return t;
   }
 
-  it('inserts path into empty textarea', async () => {
+  it('inserts path into empty textarea, padded both sides', async () => {
+    // A space either side, always — including at the ends of
+    // the composer, where it leaves a leading and trailing
+    // space nothing minds: `send()` trims before the message
+    // leaves the browser.
     const t = await setupTab();
     firePickerInsertPath(t, 'src/foo.py');
     await settle(t);
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
-    expect(chat._input).toBe('src/foo.py');
+    expect(chat._input).toBe(' src/foo.py ');
   });
 
   it('inserts path at cursor position in non-empty textarea', async () => {
@@ -75,14 +79,42 @@ describe('FilesTab middle-click path insertion', () => {
     ta.setSelectionRange(7, 7); // between "before " and " after"
     firePickerInsertPath(t, 'INSERTED');
     await settle(t);
-    // Spacing rule: prefix space skipped because char
-    // before cursor is already whitespace; suffix space
-    // skipped because char after cursor is already
-    // whitespace. Result: "before INSERTED after".
+    // Spacing rule: a space either side, except where one is
+    // already there. Both are here — whitespace before the
+    // cursor and after it — so neither is doubled. Result:
+    // "before INSERTED after". The prose around it survives
+    // untouched.
     expect(chat._input).toBe('before INSERTED after');
   });
 
-  it('adds prefix space when preceded by non-whitespace', async () => {
+  it('prepends @ when the mention form was asked for', async () => {
+    // `ctrl`+middle-click (and the "Insert @path" menu item)
+    // arrive here as `mention: true`. The `@` goes on in this
+    // one place, so gesture and menu item cannot drift apart
+    // on what an `@path` looks like.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    firePickerInsertPath(t, 'src/foo.py', true);
+    await settle(t);
+    expect(chat._input).toBe(' @src/foo.py ');
+  });
+
+  it('keeps existing prose when inserting an @path', async () => {
+    // The composer's content is never replaced — the mention
+    // joins what the user has already written, padded off it.
+    const t = await setupTab();
+    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const ta = chat.shadowRoot.querySelector('.input-textarea');
+    ta.value = 'review this:';
+    ta.dispatchEvent(new Event('input'));
+    await settle(t);
+    ta.setSelectionRange(12, 12); // end of the prose
+    firePickerInsertPath(t, 'src/foo.py', true);
+    await settle(t);
+    expect(chat._input).toBe('review this: @src/foo.py ');
+  });
+
+  it('pads a path appended after existing prose', async () => {
     const t = await setupTab();
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
@@ -92,10 +124,12 @@ describe('FilesTab middle-click path insertion', () => {
     ta.setSelectionRange(4, 4); // end of "word"
     firePickerInsertPath(t, 'path.py');
     await settle(t);
-    expect(chat._input).toBe('word path.py');
+    // Space before it separates the path from "word"; space
+    // after it means the next thing typed starts clear.
+    expect(chat._input).toBe('word path.py ');
   });
 
-  it('adds suffix space when followed by non-whitespace', async () => {
+  it('pads a path inserted ahead of existing prose', async () => {
     const t = await setupTab();
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
@@ -105,7 +139,7 @@ describe('FilesTab middle-click path insertion', () => {
     ta.setSelectionRange(0, 0); // start, before "trailing"
     firePickerInsertPath(t, 'path.py');
     await settle(t);
-    expect(chat._input).toBe('path.py trailing');
+    expect(chat._input).toBe(' path.py trailing');
   });
 
   it('adds both spaces when jammed between non-whitespace', async () => {
@@ -146,10 +180,11 @@ describe('FilesTab middle-click path insertion', () => {
     ta.setSelectionRange(0, 0);
     firePickerInsertPath(t, 'path.py');
     await settle(t);
-    // Inserted "path.py" into empty textarea at pos 0 —
-    // no padding needed, cursor ends at 7.
-    expect(ta.selectionStart).toBe(7);
-    expect(ta.selectionEnd).toBe(7);
+    // Inserted " path.py " into an empty textarea at pos 0 —
+    // the cursor sits past the trailing space, at 9, so the
+    // next keystroke is already separated from the path.
+    expect(ta.selectionStart).toBe(9);
+    expect(ta.selectionEnd).toBe(9);
   });
 
   it('sets _suppressNextPaste flag before focus', async () => {
@@ -255,21 +290,21 @@ describe('FilesTab middle-click path insertion', () => {
     await settle(t);
     firePickerInsertPath(t, 'c.py');
     await settle(t);
-    // Each insertion lands at the cursor, which is now
-    // at the end of the previously-inserted path.
-    // Trailing whitespace from the prior insertion would
-    // suppress the new prefix space; here there's no
-    // trailing whitespace, so spaces are added.
-    expect(chat._input).toBe('a.py b.py c.py');
+    // Each insertion lands at the cursor, which the previous
+    // one left past its own trailing space — so that space
+    // does the separating and the next prefix is skipped
+    // rather than doubled. Every path from the first is kept.
+    expect(chat._input).toBe(' a.py b.py c.py ');
   });
 
   it('preserves directory paths verbatim', async () => {
-    // Directories are legitimate insertion targets.
+    // Directories are legitimate insertion targets. The path
+    // itself is untouched; only the padding is ours.
     const t = await setupTab();
     const chat = t.shadowRoot.querySelector('ac-chat-panel');
     firePickerInsertPath(t, 'src/utils');
     await settle(t);
-    expect(chat._input).toBe('src/utils');
+    expect(chat._input).toBe(' src/utils ');
   });
 });
 

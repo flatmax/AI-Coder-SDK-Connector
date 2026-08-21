@@ -7,7 +7,7 @@ Tree view of repository files with git status and a context menu. Left panel of 
 Two things the checkbox carried survive, moved off it:
 
 - **Deny-read** — shift+click on the row, or a context-menu item. It was the checkbox's third state and it was never a hint: it writes a real `Read` deny rule the CLI enforces. See [decisions § CC-14](../plan/decisions.md#cc-14).
-- **Pointing at a file** — middle-click inserts the path into the prompt, shift+middle-click inserts `@path`, and both are context-menu items. This is the picker's primary verb now, so it is no longer a gesture and nothing else.
+- **Pointing at a file** — middle-click inserts the path into the prompt, ctrl+middle-click inserts `@path`, and both are context-menu items. This is the picker's primary verb now, so it is no longer a gesture and nothing else.
 
 The tree, the git status, the sorting, the context menu, the resizer, and every navigation affordance are untouched by the conversion.
 ## Tree Rendering
@@ -46,7 +46,7 @@ The tree, the git status, the sorting, the context menu, the resizer, and every 
 ### Tooltip
 - Every row displays a native browser tooltip on hover
 - Format — full path and node name, then the diff counts when git has some, then the gestures the row answers
-- The gesture list is load-bearing, not decoration: with the checkbox gone the row *is* the control surface, and the tooltip is the only place that says a middle-click inserts the path or a shift+click denies the read. The verbs differ by row type — a file's plain click opens, a directory's expands, and a directory's deny covers everything inside
+- The gesture list is load-bearing, not decoration: with the checkbox gone the row *is* the control surface, and the tooltip is the only place that says a middle-click inserts the path, a ctrl+middle-click inserts `@path`, or a shift+click denies the read. The verbs differ by row type — a file's plain click opens, a directory's expands, and a directory's deny covers everything inside
 - Binary and denied rows replace the gesture list with an explanation instead. What a user wants from those rows is to know why they look that way
 - Root node falls back to repo name
 ## Toolbar Layout
@@ -256,20 +256,23 @@ Two forms, because they cost different things:
 | Gesture | Inserts | Meaning |
 |---|---|---|
 | Middle-click a row | `path/to/file.py` | A pointer. The agent reads it if the work needs reading it, and the turn costs one path's worth of tokens if it doesn't |
-| Shift+middle-click a row | `@path/to/file.py` | A read. The CLI expands the mention into the file's full text before the turn starts, whether or not the agent would have asked for it |
+| Ctrl+middle-click a row | `@path/to/file.py` | A read. The CLI expands the mention into the file's full text before the turn starts, whether or not the agent would have asked for it |
 
 - Both are also context-menu items, on file and directory rows. A gesture many trackpads cannot produce is not allowed to be the only way to reach the picker's primary verb
 - `@` is applied in one place — the files tab's insertion handler — so the gesture and the menu item cannot drift apart on what an `@path` looks like
-- The path lands at the cursor position, space-padded before and after only where it would otherwise jam against existing prose
+- `shift` held with the middle button is not the mention modifier and does nothing: it inserts the bare path, the same as a plain middle-click
+- The path lands at the cursor position (replacing an active selection) with a space either side, always. Nothing else in the composer is touched — a half-written prompt survives the insertion intact
+- The only thing that suppresses a padding space is a space already being there; adjacent whitespace does the separating rather than being doubled. At the start or end of the composer the space is still added, and the leading or trailing space it leaves never reaches the CLI because send trims
 - Insertion pushes through the chat panel's reactive input state as well as the textarea value, so send-button enablement and textarea auto-resize both respond
 - Only button 1 (middle) triggers the gesture; the handler ignores every other `auxclick` button
 - Browser's selection-buffer paste is suppressed via a one-shot flag on the chat panel (set by the path-insertion path, consumed by the paste handler)
 - Cross-component flag pattern — the flag lives on the chat panel (which owns the textarea and paste event), not on the picker or a shared singleton
 - Flag must be set before the textarea receives focus, or the browser may dispatch the paste before the handler sees the flag
 
-`shift` therefore means two different things on one row — deny on a left-click, `@path` on a middle-click.
-That is accepted with a mitigation rather than resolved: both insertion forms and both denial verbs are
-context-menu items, so no gesture is load-bearing on its own.
+`shift` means one thing on a row, whichever button it is held with: deny the agent's read. The mention
+modifier is `ctrl`, which the row is free to claim because the browser only spends `ctrl` on the primary
+button. Both insertion forms and both denial verbs are context-menu items regardless, so no gesture is
+load-bearing on its own.
 
 ## Active File Highlight
 

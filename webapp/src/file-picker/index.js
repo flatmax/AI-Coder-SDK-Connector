@@ -1355,6 +1355,7 @@ export class FilePicker extends LitElement {
     const base = this._tooltipFor(node, isExcluded, diff, isBinary);
     if (!base || isBinary || isExcluded) return base;
     return `${base} — click to open, middle-click to insert the path, `
+      + 'ctrl+middle-click to insert @path, '
       + 'shift+click to deny the agent read';
   }
 
@@ -1373,6 +1374,7 @@ export class FilePicker extends LitElement {
       return `${base} — agent denied read on some files`;
     }
     return `${base} — click to expand, middle-click to insert the path, `
+      + 'ctrl+middle-click to insert @path, '
       + 'shift+click to deny the agent read on everything inside';
   }
 
@@ -1645,9 +1647,14 @@ export class FilePicker extends LitElement {
   }
 
   /**
-   * Middle-click inserts the path into the composer; shift
+   * Middle-click inserts the path into the composer; `ctrl`
    * makes it an `@path`, which the CLI expands into a read
    * before the turn starts.
+   *
+   * `ctrl` rather than `shift` so that `shift` means exactly
+   * one thing on a row — deny the agent's read — whichever
+   * button it is held with. A shift+middle-click therefore
+   * inserts the bare path, the same as a plain one.
    *
    * Both are also context-menu items — see
    * `_CONTEXT_MENU_FILE_ITEMS`. A gesture that many
@@ -1660,7 +1667,7 @@ export class FilePicker extends LitElement {
     event.stopPropagation();
     this.dispatchEvent(
       new CustomEvent('insert-path', {
-        detail: { path: node.path, mention: event.shiftKey === true },
+        detail: { path: node.path, mention: event.ctrlKey === true },
         bubbles: true,
         composed: true,
       }),

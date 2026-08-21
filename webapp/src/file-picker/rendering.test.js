@@ -561,9 +561,10 @@ describe('FilePicker component', () => {
 
   describe('tooltips', () => {
     // A row tooltip is `<identity> — <gestures>`, where the
-    // gesture half lists what click, middle-click and shift+click
-    // do (CC-21 — the row is the whole control surface now, so
-    // the tooltip is where it gets advertised). These tests are
+    // gesture half lists what click, middle-click,
+    // ctrl+middle-click and shift+click do (CC-21 — the row is
+    // the whole control surface now, so the tooltip is where it
+    // gets advertised). These tests are
     // about the identity half; the gesture half is pinned in
     // deny-read.test.js. Strip it rather than restate it in every
     // assertion below.

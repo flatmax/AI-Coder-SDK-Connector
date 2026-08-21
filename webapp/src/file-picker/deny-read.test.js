@@ -199,12 +199,12 @@ describe('FilePicker component', () => {
       expect(title).toContain('shift+click to allow');
     });
 
-    it('normal file tooltip names all three gestures', async () => {
+    it('normal file tooltip names every gesture', async () => {
       // The row is now the whole control surface — open, insert,
-      // deny — and the tooltip is the only place that says so.
-      // If a gesture stops being advertised it stops being
-      // discoverable, which is how the checkbox got built in the
-      // first place.
+      // insert as a mention, deny — and the tooltip is the only
+      // place that says so. If a gesture stops being advertised
+      // it stops being discoverable, which is how the checkbox
+      // got built in the first place.
       const tree = rootOf([file('a.md', 5)]);
       const p = mountPicker({ tree, excludedFiles: new Set() });
       await p.updateComplete;
@@ -213,6 +213,7 @@ describe('FilePicker component', () => {
         .getAttribute('title');
       expect(title).toContain('click to open');
       expect(title).toContain('middle-click to insert the path');
+      expect(title).toContain('ctrl+middle-click to insert @path');
       expect(title).toContain('shift+click to deny');
     });
 
