@@ -151,6 +151,14 @@ export function renderTemplate(host) {
         ` : null}
       </div>
       <ac-doc-index-progress></ac-doc-index-progress>
+      <!--
+        Directly above the capacity bar, and the pairing is the point: the
+        bar says how close a compaction is, this says when it is happening.
+        Indeterminate by construction — the engine reports the start (our
+        PreCompact hook) and the end (compact_boundary) and nothing in
+        between, so there is no percentage to be had.
+      -->
+      <ac-compaction-progress></ac-compaction-progress>
       ${renderContextBar(host)}
       <div
         class="resize-handle right"
@@ -190,12 +198,12 @@ export function renderTemplate(host) {
     </div>
 
     <!--
-      Two overlays left with the native engine. ac-compaction-progress
-      covered the 10-30s blocking call AC⚡DC made to find a topic
-      boundary; the engine compacts on its own and reports a
-      compact_boundary after the fact, which renders as a divider in
-      the transcript instead. ac-cache-warmup-progress tracked a
+      ac-cache-warmup-progress left with the native engine: it tracked a
       warmer that pre-heated prompt tiers this app no longer builds.
+      ac-compaction-progress left with it too and has since come back,
+      inline in the dialog above the capacity bar rather than floating
+      here — the engine's compaction stalls the session just as visibly
+      as ours did, and compact_boundary only says so afterwards.
     -->
     <ac-speech-controls></ac-speech-controls>
 

@@ -34,6 +34,7 @@ import '../doc-convert-tab.js';
 import '../file-nav.js';
 import '../usage-hud.js';
 import '../doc-index-progress.js';
+import '../compaction-progress.js';
 import '../speech-controls.js';
 // Rendered last in the template and at the top of the z-order: a
 // permission request has stalled a turn, and it must not render

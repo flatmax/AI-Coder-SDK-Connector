@@ -566,22 +566,22 @@ export function onEngineHealth(panel, event) {
 /**
  * Handle a `system-event` window event.
  *
- * Almost all of these are diagnostics with no user-facing consequence. Two
- * are not:
+ * Almost all of these are diagnostics with no user-facing consequence. One is
+ * not: `conversation_reset` — the engine dropped the conversation underneath
+ * us. The user's next turn will start from nothing, so saying so is the
+ * difference between a surprise and an explanation.
  *
- *   - `pre_compact` — the engine is about to compact its context, which looks
- *     like a stall if unannounced. Transient local toast.
- *   - `conversation_reset` — the engine dropped the conversation underneath
- *     us. The user's next turn will start from nothing, so saying so is the
- *     difference between a surprise and an explanation.
+ * `pre_compact` used to toast here and no longer does. The compaction it
+ * announces runs for tens of seconds; the toast expired after three, so the
+ * stall it existed to explain was unexplained for most of its duration.
+ * `ac-compaction-progress` reads the same event off the same window channel
+ * and holds an indicator until `compact_boundary` retracts it — see
+ * compaction-progress.js. Toasting as well would announce one compaction
+ * twice, in two places, with two lifetimes.
  */
 export function onSystemEvent(panel, event) {
   const { data } = event.detail || {};
   const subtype = data?.subtype;
-  if (subtype === 'pre_compact') {
-    panel._emitToast('🗜️ Compacting the conversation…', 'info');
-    return;
-  }
   if (subtype === 'conversation_reset') {
     panel._emitToast('The engine reset the conversation', 'warning');
   }
@@ -595,11 +595,12 @@ export function onSystemEvent(panel, event) {
  * word: a hook that *blocked* something explains a tool call the user is about
  * to see fail.
  *
- * `PreCompact` is deliberately not one of them, though the compaction toast is
- * real — it arrives through `onSystemEvent`, broadcast by our own PreCompact
- * hook. Toasting here as well would fire it twice for the same compaction, and
- * more than that in principle: `hookEvent` carries a `phase`, so one hook run
- * reports itself as `hook_started` and again as `hook_response`.
+ * `PreCompact` is deliberately not one of them, though the compaction notice is
+ * real — the `systemEvent` our own PreCompact hook broadcasts drives
+ * `ac-compaction-progress`. Toasting here as well would announce one compaction
+ * twice over, and more than that in principle: `hookEvent` carries a `phase`,
+ * so one hook run reports itself as `hook_started` and again as
+ * `hook_response`.
  */
 export function onHookEvent(panel, event) {
   const { data } = event.detail || {};

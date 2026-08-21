@@ -1371,10 +1371,13 @@ describe('ChatPanel compaction toast', () => {
     return seen;
   }
 
-  it('toasts when the engine says it is about to compact', async () => {
-    // The engine's PreCompact hook broadcasts this *before* the pause.
-    // The stream's own compact_boundary arrives after it, by which point a
-    // long silence has already read as a hang.
+  it('leaves the compaction pause to the progress overlay', async () => {
+    // This used to toast. A toast lives 3 seconds and the compaction it
+    // announces runs for tens, so the stall went unexplained for most of its
+    // duration — the notice expired while the condition continued.
+    // `ac-compaction-progress` listens to this same window event and holds an
+    // indicator until `compact_boundary`; a toast on top of it would announce
+    // one compaction twice with two different lifetimes.
     const p = mountPanel();
     await settle(p);
     const toasts = toastsOf(p);
@@ -1383,9 +1386,7 @@ describe('ChatPanel compaction toast', () => {
       data: { subtype: 'pre_compact', data: { trigger: 'auto' } },
     });
     await settle(p);
-    expect(toasts).toHaveLength(1);
-    expect(toasts[0][0]).toContain('Compacting');
-    expect(toasts[0][1]).toBe('info');
+    expect(toasts).toEqual([]);
   });
 
   it('does not toast again when the hook reports itself', async () => {

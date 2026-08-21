@@ -178,9 +178,29 @@ and could only approximate.
 
 **Doc index progress overlay**: an `ac-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. It also carries the doc-enrichment stages, which arrive on the compaction-event channel during a session rather than at startup. Exists so background indexing surfaces without re-showing the startup overlay or stalling chat interaction.
 
-The separate viewport-scope compaction-progress overlay is gone. Compaction is the engine's now, it is
-fast, and it is reported as a boundary divider in the transcript rather than as a multi-stage pipeline
-with a progress bar (see [chat.md § Engine Event Routing](chat.md#engine-event-routing)).
+**Compaction progress indicator**: an `ac-compaction-progress` component rendered inline in the dialog
+directly above the context-capacity bar, and the pairing is the point — the bar says how close a
+compaction is, the indicator says when one is happening. Appears on the `pre_compact` `systemEvent` our
+own `PreCompact` hook broadcasts, holds a spinner, a label naming the trigger, an indeterminate sweeping
+bar and an elapsed-seconds counter for as long as the pause lasts, then reports the boundary's token
+counts — phrased by the same `compactionSummary` builder the transcript divider uses — and fades. Unlike
+the body and the capacity bar it is **not** hidden in minimized mode: a user who collapsed the dialog and
+is waiting on a turn has no other way to tell a compaction from a hang.
+
+**Indeterminate by construction.** The engine reports the start (the hook) and the end
+(`compact_boundary`) and nothing in between, so there is no percentage to be had and the component never
+implies one — no `aria-valuenow`, no modelled fill. The earlier viewport-scope overlay of this name was
+deleted with the native engine on the reasoning that a progress bar over someone else's compaction would
+be an animation rather than a measurement. The reasoning holds; the conclusion did not. The pause is real
+and the only thing announcing it was a 3-second toast, which expires long before the condition it
+describes — so the honest half of a progress bar came back, and the toast went (see
+[chat.md § Engine Event Routing](chat.md#engine-event-routing)).
+
+A boundary with no start ahead of it is **ignored**, not flashed: microcompaction can report one without
+the hook ever firing, and by the time it lands there is no pause left to explain — the divider records it.
+The reverse case is bounded rather than trusted: a spinner is a claim only `compact_boundary` can retract,
+so after 3 minutes with no boundary the component says it lost track and gets out of the way, because a
+spinner that runs forever is worse than the toast it replaced.
 
 **Read-aloud transport overlay**: an `ac-speech-controls` component rendered at viewport scope. Unlike the progress overlays, it is **draggable** and remembers its position across sessions. It listens for the text-to-speech player's state-change window event and is visible only while a message is being read aloud, offering play/pause, a speed slider, and a per-sentence position bar. It holds no playback state — it is a remote control for the shared synthesis player and reflects its state. See [speech.md § Floating Transport](speech.md#floating-transport-controls-overlay) for the full specification.
 
@@ -357,3 +377,4 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - Global keyboard shortcuts are inert while the permission dialog is open
 - The permission-mode indicator remains visible in every dialog layout state, including minimized
 - The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC
+- The compaction indicator never displays a percentage or an `aria-valuenow`, and never stays active longer than its ceiling: the engine reports only the start and the end of a compaction, so anything between the two would be invented, and a spinner nothing retracts is worse than no notice at all

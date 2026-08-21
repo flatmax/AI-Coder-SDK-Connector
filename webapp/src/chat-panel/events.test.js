@@ -1032,7 +1032,8 @@ describe('ChatPanel compact_boundary', () => {
 
   it('says nothing in a toast', async () => {
     // A boundary is a fact to record, not an interruption to announce. The
-    // `pre_compact` hook already toasted that compaction was coming.
+    // `pre_compact` hook already said compaction was coming, and the progress
+    // overlay it drives is what clears itself on this event.
     const p = mountPanel();
     const reqId = await sendAndGetId(p);
     const toasts = vi.fn();

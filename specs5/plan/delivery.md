@@ -589,7 +589,7 @@ Beyond the two replaced panels:
 
 | Deleted | Lines | Why |
 |---|---|---|
-| `compaction-progress.js` + test | 758 | The CLI compacts itself and reports one `compact_boundary`. A progress bar over someone else's compaction would be an animation, not a measurement — the transcript divider is the replacement |
+| `compaction-progress.js` + test | 758 | The CLI compacts itself and reports one `compact_boundary`. A progress bar over someone else's compaction would be an animation, not a measurement — the transcript divider is the replacement *(reversed later: the file is back, inline in the dialog and indeterminate. The argument against a **measurement** stood; what it missed is that the pause still needs to be visible while it lasts, and the 3-second `pre_compact` toast that was left holding that job expired while the stall continued. See [shell.md § Layout](../5-webapp/shell.md#layout))* |
 | `cache-warmup-progress.js` | 322 | There is no cache to warm, and the four `cacheWarmup*` receivers went with it |
 
 Also removed: the **retry banner** (the successor is the `rateLimit` push, which reports the CLI's own
