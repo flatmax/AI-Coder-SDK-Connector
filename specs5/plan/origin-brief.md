@@ -33,7 +33,7 @@ This is **not** an alternative provider behind `LLMService`, and framing it that
 
 Claude Code owns its own context management, its own prompt caching, its own tool loop, and its own edit application. Adopting it means the entire native engine — roughly 15.7k lines across `src/ac_dc/llm_service.py` and `src/ac_dc/llm/` — does not participate:
 
-- the four-tier stability cache (`_stability.py`, `_cache_warmer.py`) — Claude Code caches on its own terms
+- the four-tier stability cache (`_stability.py`) — Claude Code caches on its own terms
 - tree-sitter symbol maps and doc outlines — replaced by on-demand grep and read
 - the deterministic anchored edit protocol (`3-llm/edit-protocol.md`) — replaced by the built-in `Edit` tool's matching
 - prompt assembly and breakdown (`_assembly.py`, `_breakdown.py`)

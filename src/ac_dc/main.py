@@ -728,8 +728,7 @@ async def run(
     # schedule a background coroutine — placed here, at the
     # top of run(), so every background task spawned by
     # subsequent code (doc-index build, enrichment loop,
-    # cache warmer, agent streams, post-write hooks) is
-    # covered.
+    # agent streams, post-write hooks) is covered.
     try:
         _loop = asyncio.get_running_loop()
         _loop.set_exception_handler(_asyncio_exception_handler)

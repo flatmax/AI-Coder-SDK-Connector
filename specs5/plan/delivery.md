@@ -450,7 +450,7 @@ coverage, and it is the honest reading of the number.
 | Deleted | Lines | What it was |
 |---|---|---|
 | `llm_service.py` | 2043 | The RPC face of the native engine |
-| `llm/` (20 modules) | 13,704 | Streaming, prompt assembly, the cache warmer, breakdown, agents, the RPC mixins |
+| `llm/` (20 modules) | 13,704 | Streaming, prompt assembly, breakdown, agents, the RPC mixins |
 | `stability_tracker.py` + `cache_membrane.py` | 1977 | Four-tier cache assignment and its flux controller |
 | `context_manager.py` | 1393 | The central session state holder |
 | `edit_protocol.py` + `edit_pipeline.py` | 1640 | The emoji edit protocol and its applier |
@@ -470,8 +470,8 @@ file that stayed (+12/−10): it is a message *format*, handed to the agent per 
 installed as a system prompt, and `config.py` keeps it out of the editable-file whitelist for that
 reason.
 
-`config.py` lost 896 lines and gained 55: the provider table, the model catalogue, the tier budgets,
-the cache-warmup knobs and the prompt-file loaders all described the deleted engine. **Nothing in the
+`config.py` lost 896 lines and gained 55: the provider table, the model catalogue, the tier budgets
+and the prompt-file loaders all described the deleted engine. **Nothing in the
 config layer writes `os.environ`.** The `claude` CLI resolves its own credentials, and injecting a
 key or a region silently changes which account a turn bills to — that is left as a deliberate
 absence, not an oversight.

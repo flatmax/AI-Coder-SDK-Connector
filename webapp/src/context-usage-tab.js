@@ -2,10 +2,10 @@
 //
 // Replaces `context-tab.js`, which had two sub-views (Budget and Cache)
 // built entirely on AC⚡DC's own prompt assembly: category allocations it
-// chose, L0-L3 cache tiers it maintained, a stability tracker that
-// decided when a tier could graduate, and a warmer that pre-heated them.
-// None of that survives the conversion, and none of it had an analogue
-// to port — the CLI assembles its own prompt and manages its own cache.
+// chose, L0-L3 cache tiers it maintained, and a stability tracker that
+// decided when a tier could graduate. None of that survives the
+// conversion, and none of it had an analogue to port — the CLI
+// assembles its own prompt and manages its own cache.
 //
 // So this tab answers the one question the old tab answered that still
 // has an answer: what is filling the context window, and how much room

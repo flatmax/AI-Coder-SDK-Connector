@@ -357,7 +357,7 @@ by SDK agent ID.
 
 Named explicitly, because their absence is a design position rather than an omission: prompt assembly
 and cache-control placement · the four-tier stability cache, its N-values, and the membrane/flux
-controller · the cache warmer · the token counter · the `🟧🟧🟧 EDIT` protocol and its anchored-match
+controller · the token counter · the `🟧🟧🟧 EDIT` protocol and its anchored-match
 apply pipeline · the LLM-driven history compactor · URL detection, fetching, caching, and
 summarisation · the `🟧🟧🟧 AGENT` spawn protocol · per-mode and per-review system prompts · `litellm`
 and its transitive dependency tree.

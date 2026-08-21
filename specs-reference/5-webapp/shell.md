@@ -111,9 +111,10 @@ The permission dialog is the only surface above the startup overlay. A resume th
 `can_use_tool` can produce a request while startup is still running, and a dialog rendered underneath the
 overlay would deadlock the session behind an invisible prompt.
 
-`<ac-cache-warmup-progress>` and `<ac-compaction-progress>` are deleted from this ladder. Neither has a
-backend: there is no cache warmer, and compaction is the engine's own, announced after the fact via
-`compactionEvent` stage `compact_boundary` rather than driven through a progress UI of ours.
+`<ac-compaction-progress>` is deleted from this ladder. It has no floating overlay to place: compaction
+is the engine's own, announced after the fact via `compactionEvent` stage `compact_boundary` rather than
+driven through a progress UI of ours, and what it does report renders inline in the dialog above the
+capacity bar.
 
 `binaryFilesSkipped` is also gone. It was fired from `sync_file_context` when a selected file failed
 binary detection, and both halves of that sentence are obsolete — there is no turn-start materialisation

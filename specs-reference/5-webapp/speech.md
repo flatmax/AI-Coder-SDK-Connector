@@ -59,7 +59,7 @@ Role mapping from the message:
 | `MAX_SEGMENT_CHARS` | `240` | Soft ceiling above which a sentence is sub-split |
 | Panel width | `248px` | Fixed width of the floating transport |
 | `_EDGE_MARGIN` | `8px` | Minimum gap kept between the panel and every viewport edge when clamping |
-| Overlay `z-index` | `600` | Above the cache-warmup overlay (`500`); below modals |
+| Overlay `z-index` | `600` | Above the usage HUD (`500`); below the toast layer (`900`) and every modal |
 | Default position X | `innerWidth − 248 − 16` (min `_EDGE_MARGIN`) | First-appearance horizontal offset (lower-right) |
 | Default position Y | `innerHeight − 180` (min `_EDGE_MARGIN`) | First-appearance vertical offset |
 | Progress-fill ratio | `(index + 1) / total` | Width percentage of the position bar |

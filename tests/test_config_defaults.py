@@ -70,8 +70,8 @@ def test_app_config_has_only_the_live_sections() -> None:
     """app.json is the two indexes, the history thresholds, and nothing else.
 
     Five sections went with the native engine — ``url_cache``,
-    ``history_compaction``, ``agents``, ``reasoning``, ``cache_warmup``
-    and ``cache_tiering``. A section nothing reads is a knob that lies:
+    ``history_compaction``, ``agents``, ``reasoning`` and
+    ``cache_tiering``. A section nothing reads is a knob that lies:
     the user edits it, the app accepts the edit, and nothing changes.
     """
     assert set(_load_json("app.json")) == {"doc_convert", "doc_index", "history"}

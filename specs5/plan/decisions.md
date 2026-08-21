@@ -25,8 +25,8 @@ rendering, context tab, HUD, history, settings) has to support two shapes foreve
 engine is cheaper than maintaining the seam.
 
 **Consequence:** `litellm` leaves the dependency set. So do the four-tier cache, the membrane /
-flux controller, the cache warmer, the prompt assembler, the context manager, the history
-compactor, the token counter, and the emoji edit protocol.
+flux controller, the prompt assembler, the context manager, the history compactor, the token
+counter, and the emoji edit protocol.
 
 ---
 

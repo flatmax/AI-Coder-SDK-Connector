@@ -157,7 +157,7 @@ AppConfig:
     presets: dict[string, PresetConfig]
 ```
 
-Deleted sections: `url_cache`, `history_compaction`, `cache_warmup`, `cache_tiering` (including
+Deleted sections: `url_cache`, `history_compaction`, `cache_tiering` (including
 `flux_variant`, `flux_threshold`, and the three `membranes` entries), and `agents`.
 
 **`doc_convert` section:**

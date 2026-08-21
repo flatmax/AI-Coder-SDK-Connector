@@ -198,12 +198,10 @@ export function renderTemplate(host) {
     </div>
 
     <!--
-      ac-cache-warmup-progress left with the native engine: it tracked a
-      warmer that pre-heated prompt tiers this app no longer builds.
-      ac-compaction-progress left with it too and has since come back,
-      inline in the dialog above the capacity bar rather than floating
-      here — the engine's compaction stalls the session just as visibly
-      as ours did, and compact_boundary only says so afterwards.
+      ac-compaction-progress left with the native engine and has since
+      come back, inline in the dialog above the capacity bar rather than
+      floating here — the engine's compaction stalls the session just as
+      visibly as ours did, and compact_boundary only says so afterwards.
     -->
     <ac-speech-controls></ac-speech-controls>
 

@@ -73,9 +73,8 @@ The consequences to preserve:
 - **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
 
 Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux
-parameter), `cache_warmup`, and `agents`. The first two describe subsystems the engine now owns; the
-third and fourth describe a cache that no longer exists; the last gated a spawn protocol replaced by
-the `Task` tool.
+parameter), and `agents`. The first two describe subsystems the engine now owns; the third describes a
+cache that no longer exists; the last gated a spawn protocol replaced by the `Task` tool.
 
 ## Snippets
 

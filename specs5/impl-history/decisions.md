@@ -790,55 +790,6 @@ In two-turn sessions the bug compounded — turn 2's pair of calls each hit the 
 
 ---
 
-### D34 — Cache warmer isolated to dedicated executor; interval shortened; circuit breaker added
-
-Field observation in 15-file doc-mode sessions: the cache warmer was firing +54 to +170 seconds past its scheduled 270s interval, producing 0% cache hit rate on every warm-up. The cached prefix had already expired by the time the LiteLLM call landed, so each "warm-up" was actually a full cache write at 1.25× input pricing — pure cost, no payoff.
-
-Diagnostic logs showed symmetric ~2-minute gaps between four points in the warmer's lifecycle: (1) `cacheWarmerFiring` event broadcast, (2) `litellm.completion` start, (3) `litellm.completion` return, (4) next-cycle scheduling. The symmetry ruled out provider-side latency (the call itself completed quickly when it eventually ran) and pointed at executor saturation: the warmer's `loop.run_in_executor(_aux_executor, _completion_sync, ...)` was queueing behind something else.
-
-Root cause: KeyBERT keyword enrichment runs in `_aux_executor` (2 workers) per `_doc_index_background.run_enrichment_background`. A 15-file doc-mode session enriches 15 sections sequentially, each taking ~10–60 seconds depending on section size. With both workers occupied by enrichment and the warmer's submission joining the queue, the warmer's actual provider call landed only after both workers finished their current enrichment tasks — a delay of ~2 minutes that shifted every subsequent firing later by the same amount, accumulating into the observed +170s drift.
-
-**Three coordinated fixes shipped in one decision.**
-
-1. **Dedicated single-worker executor for the warmer.** New `_warmer_executor: ThreadPoolExecutor(max_workers=1, thread_name_prefix="ac-dc-warmer")` on `LLMService`. `CacheWarmer._fire_warmup` switches from `_aux_executor` to this pool. Single worker is correct: only one warm-up is ever in flight at a time (the cancel-on-stream-start path guarantees serialisation), so a single worker matches the actual concurrency. Isolating to a dedicated pool removes the queueing path entirely — KeyBERT enrichment, URL fetches, commit-message generation, and topic detection continue to share `_aux_executor` as before.
-
-2. **Interval shortened from 270s to 240s; clamp tightened from `TTL - 30` to `TTL - 60`.** The 30s margin (covering only `_COUNTDOWN_SECONDS = 30s`) left no budget for system-level drift. Field observation showed +50 to +170s of drift in cycles where the 30s margin produced 100% miss rate. Raising the margin to 60s absorbs the observed drift range without consecutive warm-ups overlapping. The interval default also drops correspondingly: 240s = 4:00 with a 60s margin to the 5-minute TTL.
-
-3. **Circuit breaker after 3 consecutive drift-past-TTL cycles.** Even with the dedicated executor, system-level drift (laptop sleep, container freezer, NTP step) can push individual firings past the TTL. A single drift can be a transient pause and shouldn't disable the warmer. Three in a row is the clear "this execution environment is broken" signal — the warmer auto-disables via `disable("circuit breaker — drift exceeded TTL N times")` and broadcasts `cacheWarmupComplete` with `success=false`. Reset to zero on any in-TTL cycle so a recovered session doesn't accumulate strikes from earlier transient pauses. Operators see the strike count in per-cycle WARNING logs (`strikes=N/3`) before the breaker trips.
-
-**Queue-duration instrumentation.** `_completion_sync` accepts a `queue_submitted: float | None` parameter (the `time.monotonic()` timestamp from the moment `loop.run_in_executor` was called) and logs `queue_duration = entry - queue_submitted` on entry. With the dedicated single-worker pool this should always be ~0; a non-trivial reading is the load-bearing diagnostic signal that something has accidentally been routed onto the warmer pool, or the previous firing is somehow still in flight. Logged at INFO when ≤1.0s, WARNING with explanatory tail when >1.0s.
-
-**What this does NOT do.** KeyBERT enrichment is still in `_aux_executor` (2 workers). A future change may move it to a `ProcessPoolExecutor` for true GIL-free parallelism, but that's a separate decision — the warmer-isolation fix removes the immediate user-visible problem (cache misses) without touching enrichment's concurrency model. Enrichment's 10-60s per file is acceptable while it's not blocking cache warming.
-
-**Backwards compatibility.** Tests that don't invoke `LLMService.shutdown` continue to pass — the executor closure is best-effort (`wait=False`) and Python's process exit cleans up unreferenced thread pools. The `_rpc_lifecycle.shutdown` cleanup uses `getattr` to tolerate older test fixtures without `_warmer_executor`. Configurations with `interval_seconds: 600` (or any value above `TTL - 60`) get clamped to 240s with a WARNING log explaining the change; the warning recommends updating `app.json` to silence it.
-
-**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (Lifecycle and Configuration subsections); `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table; default config values).
-
----
-
-### D34a — Cache warmer deadline anchoring uses wall-clock time, not monotonic
-
-D34's executor-isolation fix removed the queueing path that was producing 2-minute broadcast stalls. Field testing afterwards still showed +44s and +84s firing drifts on a 240-second interval with 5-second polling cadence. Diagnostic instrumentation around the broadcast calls confirmed broadcasts were sub-millisecond — the drift was inside the silent-phase polling loop itself, not in any code path that could be GIL-contended or executor-saturated.
-
-Root cause: the polling loop used `time.monotonic()` deadlines. On the operator's macOS laptop, `time.monotonic()` was pausing during system-level process suspension (App Nap or similar), then resuming with the monotonic clock having advanced by less than the wall-clock duration of the suspension. The polling loop's wake-up logic — "if `silent_deadline - time.monotonic() <= 0`, exit" — kept seeing the deadline as still in the future, sleeping another 5-second polling chunk, repeating. By the time the firing landed, the actual elapsed wall-clock time was 280-320 seconds, well past the 300-second cache TTL.
-
-The fix swaps both the silent-phase and visible-phase deadlines to `time.time()` (wall-clock epoch). After resume, the next polling wake sees the deadline as already passed and exits the loop immediately — firing happens within `_DRIFT_POLL_SECONDS` of resume rather than `suspension_duration + _DRIFT_POLL_SECONDS` later. NTP step magnitudes are bounded well below the 60-second TTL margin at the 240-second-interval scale, so the wall-clock anchor's theoretical sensitivity to clock adjustments is not observable in practice.
-
-The TTL-exceeded path also changed shape. Pre-fix, drifts past the TTL still fired the warmup ("writing a fresh cache primes the next 5-minute window"). Post-fix, TTL-exceeded firings are skipped — writing a fresh cache here at provider cost is the same outcome as letting the next user turn do it, at the same provider cost, with no benefit. The skip path still increments the circuit-breaker strike counter so repeated long suspensions trip the breaker.
-
-Two-cycle field test post-fix:
-
-```
-13:33:31 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
-13:37:34 firing: planned=240.0s, actual=240.0s, drift=+0.0s — cache_read=111161, 100% hit
-```
-
-Diagnostic instrumentation removed after confirmation. The `Cache warmer firing: planned=Xs, actual=Ys, drift=±Zs` log line stays as the load-bearing signal — a future regression in deadline anchoring will surface as drift-line WARNINGs.
-
-**Spec authority.** `specs-reference/3-llm/cache-tiering.md` § Cache warmer — "Wall-clock deadline anchoring" paragraph appended to the "Executor isolation" discussion.
-
----
-
 ### D33 — Stream resumption on reconnect via `active_streams` snapshot
 
 User-observed bug: refreshing the browser mid-stream produced an opaque "Another stream is active (request {id})" rejection on the next send attempt. The single-stream guard correctly identified that the prior stream was still running server-side (worker thread independent of WebSocket lifecycle, by design — D10's guard scoping covers this), but the originating client had no way to discover the in-flight stream's identity, observe its accumulated content, or recover gracefully. The user's only options were waiting for an unknown duration or starting a new session and losing the in-flight response.
@@ -923,7 +874,7 @@ The original tune ran bidirectional (`allow_negative_flux=True`); for the rectif
 
 **What changes structurally vs the N-counter spec.**
 
-- `n` is now a pure age counter (turns since last seen at `n=0`), not "consecutive unchanged appearances." The Active→L3 membrane is **admission_only** (`n_admit=3`, `pick_mode="oldest"`) — no flux equation, just an age gate. Higher membranes use the flux controller alone. The `cache-warmup` semantics survive unchanged.
+- `n` is now a pure age counter (turns since last seen at `n=0`), not "consecutive unchanged appearances." The Active→L3 membrane is **admission_only** (`n_admit=3`, `pick_mode="oldest"`) — no flux equation, just an age gate. Higher membranes use the flux controller alone.
 
   **Why Active→L3 falls back to admission semantics.** The flux model treats V (token-mass differential) as the driving force, which is right for inter-cache balancing but degenerate at the admission boundary: in AC-DC4, active is structurally lighter than the cached tiers — items live there only until they age past the gate, after which they leave for L3+ — so `t_active < t_L3` is the steady state and rectified Φ is permanently zero. An earlier revision of this decision used flux uniformly (`n_admit=2` as a soft prefer-aged rule with retry-without-floor). It produced a hard regression: active items never graduated, the cache stalled with a permanently-occupied active tier, and the L3 cache hit rate fell off the cliff once the synthetic startup churn ended. The fix is to recognise that admission is fundamentally a gating problem (has this file proven stable enough to commit to cache?) not a balancing problem (which tier is overfull?), and treat it as such — `n ≥ n_admit` is the entire criterion on this membrane.
 
@@ -940,7 +891,6 @@ An earlier revision of this decision exposed all three (linear / rectified-GHK /
 
 **What this decision does NOT change.**
 
-- The cache-warmer (D34, D34a) is independent of the cascade and is not touched.
 - L0 content-typed contract (D27, D28) is preserved.
 - Cross-reference activation, deletion markers, manual rebuild, history piggyback graduation, and the integration with `StabilityTracker.update()`'s call sites all preserve their contract; only the internals of `_run_cascade` change shape.
 - Test contracts at the public-API layer (`pin_file`, `unpin_file`, `mark_deleted`, `is_deleted`, the lifecycle through `update()`) hold; lower-level tests that read `_TIER_CONFIG.promote_n` directly need to be rewritten to assert flux-controller invariants instead.
@@ -1016,7 +966,6 @@ D27/D28 were a correct response to the N-counter cascade: the cascade had no glo
 **What this decision does NOT change.**
 
 - The system prompt is still hashed and rendered as the prefix head; nothing about the system prompt's role changes.
-- The cache warmer (D34, D34a) is independent of the membrane geometry and is not touched.
 - The Active tier semantics (full-file selection, edit invariant, pin flag for in-flight edits) are unchanged.
 - D35's flux equation, parameters, admission_only Active→L3 membrane, and history-protection rule all carry forward unchanged. The per-membrane geometry is unchanged: Active→L3 (admission_only), L3→L2, L2→L1, plus L1→L0 now **enabled** as a flux membrane (was disabled under D27).
 - Mode switching (code ↔ doc) still swaps the primary index; under D36 the swap rebuilds the dir-blocks from the new primary index rather than swapping the L0 aggregate map.
@@ -1079,61 +1028,3 @@ These differ in semantics and shouldn't be merged. Pinning says "can't move"; ba
 **Spec authority.** `specs4/3-llm/cache-tiering.md` (§4.1, § History Graduation, §4.5, § Invariants); `specs4/0-overview/glossary.md` (N value, admission gate, ripple promotion, history isolation); `specs4/impl-history/layer-3.md` (per-tier config narrative).
 
 **Superseded artefacts.** None outright. D37 refines D27's history rule and D35's admission rule rather than replacing them; the piggyback admission path is preserved; only the post-admission V/c contribution changes. The "L3 → L2 at N=6 / L2 → L1 at N=9 / L1 → L0 at N=12" wording, already removed from runtime by D35, is now removed from `_TIER_CONFIG` and from the glossary.
-
-### D38 — Cache warmer re-plugged with bounded broadcasts and runtime reasoning tracking
-
-D34 isolated the warmer's executor and added wall-clock-anchored deadlines; D34a fixed the polling-loop drift on suspended-process resume. Both shipped with the warmer in a "currently unplugged" state — field observation revealed a separate failure mode where `await self._broadcast_event_async(...)` calls inside `_run` stalled the event loop for ~120 seconds per cycle. Broadcasts that ran sub-millisecond on user-turn events took 2 minutes when the warmer issued them. Root cause was not diagnosed; the warmer was disabled at its entry point pending investigation.
-
-D38 plugs the warmer back in by mitigating the stall structurally rather than root-causing the WebSocket / jrpc-oo behaviour, and simultaneously fixes a separate design defect where the warmer's reasoning posture was read from config instead of from runtime user state.
-
-**Bounded broadcast waits.** Each `cacheWarmup*` broadcast is wrapped in `asyncio.wait_for(..., timeout=_BROADCAST_TIMEOUT_SECONDS)` (5 seconds). A hung send logs at WARNING with explanatory text and continues — the rest of `_run` proceeds, the next cycle gets a fresh timeout budget. The diagnostic heartbeat task runs independently of the broadcast loop, so even when a broadcast's own log line is delayed by the timeout, the heartbeat's "event loop stalled" WARNING surfaces the underlying gap on its normal cadence. A stall affects one broadcast for at most 5 seconds, not the warmer's whole timer.
-
-**Tightened polling cadence.** The silent-phase polling loop now wakes every 1 second (was 5). Two jobs:
-
-- **Drift resistance.** Same role as under D34a — short polling chunks against a wall-clock deadline mean the worst-case overshoot from OS suspension is bounded by the poll cadence plus the suspension duration. Lowering the cadence directly tightens the bound.
-- **OS idle-throttling resistance.** macOS App Nap and similar mechanisms aggressively park processes that look idle. Once parked, timer wakes can slip by tens of seconds even when nothing is suspended. A 1-second poll keeps the process visibly active to the kernel — the OS doesn't park a process running a coroutine every second. Cost is ~270 awaits per interval, well below any workload's measurable CPU floor.
-
-The constant was renamed from `_DRIFT_POLL_SECONDS` to `_HEARTBEAT_POLL_SECONDS` to reflect the broader role.
-
-**Runtime reasoning state tracking.** The original warmer disabled reasoning unconditionally on every firing, on the theory that warm-ups never benefit from hidden thinking. That was correct in isolation but wrong in context: Bedrock and Anthropic key the prompt cache against the request shape, and `thinking={"type": "adaptive", "effort": ...}` produces a different cache slot than a non-thinking call. A warmer firing without thinking writes a different slot than the next reasoning user turn would read from — so reasoning user calls landed cold-writes regardless of whether the warmer recently fired the same prefix.
-
-A second-iteration fix read `config.reasoning_enabled` and matched the warmer's call shape to the config default. That worked for users who configured reasoning at config-level but not for users who toggled reasoning per-request via the chat-panel UI (the dominant pattern). Field observation: a session with `reasoning.enabled: false` in `app.json` but reasoning ON in the UI showed warm-ups firing without `thinking`, user calls firing with `thinking`, and 0% cache hit on every reasoning user turn despite 99% warmer drift compliance. The config flag was vestigial — its only consumer was the warmer, which was reading it for the wrong reason.
-
-D38 retires the config read in the warmer's hot path. The streaming pipeline writes `service._last_reasoning_used = bool(thinking_kwargs)` after every user call's reasoning resolution. The warmer's `_completion_sync` reads that flag on each firing:
-
-```python
-last_used = getattr(self._service, "_last_reasoning_used", False)
-thinking_kwargs = (
-    build_thinking_kwargs(config, True) if last_used
-    else {}
-)
-```
-
-Effects:
-
-- The UI toggle is the single user-facing control. Users toggle reasoning per-request via the chat panel; the warmer mirrors automatically.
-- Config-level `reasoning.enabled` is no-longer-load-bearing in the live path. Could be removed in a follow-up but harmless to leave — the field still exists in `ConfigManager.reasoning_config` for the test suite and any future consumer that needs a config default.
-- Defaults to False on startup. Warm-ups fired before any user call are cheap (no reasoning tokens burned).
-- One-cycle adaptation lag, worst case. If the user toggles reasoning OFF mid-session, the next warmer firing (within `interval_seconds`) still uses reasoning shape; the firing after that is correct. Negligible — toggle changes are rare and a single mismatched warm-up costs at most one reasoning ping (a few hundred tokens for adaptive models bound by a "respond with ok" prompt).
-- Reasoning warm-ups use `config.reasoning_request_timeout_seconds` (default 1200s) rather than the aux-call timeout (60s). Adaptive thinking can spend several minutes server-side on the reasoning pass before any byte streams; a 60s timeout would abort the call before output.
-- For legacy (non-adaptive) thinking models, `_WARMUP_MAX_TOKENS` is raised to `budget_tokens + 100` so the call has room for the reasoning pass plus a minimal completion. Adaptive models keep `_WARMUP_MAX_TOKENS=2` because they bound their own reasoning internally. The branch reads `payload.get("type") == "adaptive"` rather than testing the model name, so it follows `_model_uses_adaptive_thinking` automatically. (An earlier revision of this entry named the adaptive set as "Opus 4.5+, Haiku 4.5+, Sonnet 4.5+"; the real cut-over is **Claude 4.6 and later** — the 4.5 generation is legacy-only. See `specs4/7-future/reasoning.md` § Context.)
-
-**`enable()` method added.** D34's circuit breaker disabled the warmer on three consecutive TTL-drift cycles but provided no path back to enabled state without application restart. D38 adds `enable()` for operator-driven re-enable: clears the disabled-reason, restarts the heartbeat, schedules the next firing. No-op when `cache_warmup.enabled: false` in config — config-level disable still requires editing `app.json`.
-
-**Reset semantics pinned to user-call start.** D38 also pins `reset()` to the START of every `stream_chat` invocation only (not also at end). Each user-call cycle gets a fresh diagnostic-heartbeat window anchored to a specific call's boundary, so any "event loop stalled" WARNING is attributable to work that call did rather than aggregated noise from earlier idle periods. Previous revisions called `reset()` at both start and end as defensive coverage; D38 narrows to start-only because the heartbeat-restart side effect was producing redundant cycles on every stream completion.
-
-**Field validation.** Two-cycle test post-fix on a reasoning-enabled session:
-
-```
-21:36:54 (user reasoning call): write 19,572 / read 0
-21:37:08 (warmer fire #1): "reasoning shape matched (max_tokens=2, timeout=1200s)"
-21:37:10 (warmer cycle #1):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
-21:41:11 (warmer fire #2): "reasoning shape matched (max_tokens=2, timeout=1200s)"
-21:41:15 (warmer cycle #2):     write 0 / read 19,572 (99.2% hit) — drift +0.0s
-```
-
-Session ROI flipped from −100% (cold start, write-only) through 0% (read = write after one warm-up) to +100% (two reads × one write). Reasoning user calls now hit a warmer-primed cache instead of paying the full cache-write cost on every interactive pause longer than 5 minutes.
-
-**Spec authority.** `specs4/3-llm/cache-tiering.md` § Cache Warmer (status updated, lifecycle section updated, warm-up call shape updated, configuration defaults updated). `specs-reference/3-llm/cache-tiering.md` § Cache warmer (constants table updated for renamed/added constants, runtime reasoning tracking paragraph added, bounded broadcast waits paragraph added, config defaults note updated for `enable()`).
-
-**Open questions.** The original ~120s broadcast stall under D34a remains undiagnosed. D38's bounded waits make the stall non-fatal; they do not explain it. A future investigation pass into the WebSocket / jrpc-oo serialisation path during warmer cycles may identify the actual cause and let the timeout be relaxed or removed. Until then the timeout is the structural safety net.

@@ -69,7 +69,7 @@ The whole native engine. Nothing here has a consumer after phase 3.
 | File | Lines | Change |
 |---|---:|---|
 | `src/ac_dc/main.py` | 856 | Construct `ClaudeCodeService` instead of `LLMService`; drop stability init, doc-index-for-prompt scheduling, and the `_post_write_callback` into the engine. Keep symbol/doc index build, static server, collab wiring. |
-| `src/ac_dc/config.py` | 1485 | Loses every prompt-composition helper and the whole prompt file set (CC-11); loses cache tuning, compaction config, agent gate, warmup config. Keeps config-dir resolution, version-aware upgrade, managed/user split, snippets. Expect ~600 lines. |
+| `src/ac_dc/config.py` | 1485 | Loses every prompt-composition helper and the whole prompt file set (CC-11); loses cache tuning, compaction config, agent gate. Keeps config-dir resolution, version-aware upgrade, managed/user split, snippets. Expect ~600 lines. |
 | `src/ac_dc/settings.py` | 428 | Config whitelist shrinks to the surviving files; `refresh_system_prompt` removed. |
 | `src/ac_dc/llm/_review.py` | 504 | Git-side review state moves to `src/ac_dc/repo/review.py`; the prompt-swap and review-context-assembly halves are deleted (CC-13). |
 | `src/ac_dc/llm/_rpc_history.py` | 466 | Session and history RPCs re-pointed at the SDK's session functions and the `*_from_store` parsers. Method names survive; every return shape changes ([CC-19](decisions.md#cc-19)). |
@@ -113,7 +113,6 @@ transport — ~29,700 lines, untouched.
 |---|---|
 | `webapp/src/edit-blocks.js` (+ tests) | Emoji edit-block parsing (CC-7). Replaced by tool-use cards and the permission diff. |
 | `webapp/src/agent-block-render.js` | `🟧🟧🟧 AGENT` block rendering (CC-8). |
-| `webapp/src/cache-warmup-progress.js` | Cache warmer progress bar. |
 | `webapp/src/compaction-progress.js` (+ test) | Our compaction toast. Replaced by a transcript divider driven by `SystemMessage(subtype="compact_boundary")`. |
 | `webapp/src/url-chips.js` (+ test) | URL curation UI (CC-9). |
 | `webapp/src/token-hud.js` | Tier bars, N/threshold labels, stability bars. Rebuilt from scratch (CC-4). |

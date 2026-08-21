@@ -873,15 +873,6 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
-  // The four ``cacheWarmup*`` server-push receivers lived here until
-  // conversion phase 3. They re-dispatched the warmer's countdown,
-  // firing, completion and cancellation as window events for the
-  // <ac-cache-warmup-progress> overlay. The warmer pre-heated the
-  // prompt tiers AC⚡DC assembled; the engine manages its own cache and
-  // has no equivalent to announce, so nothing will ever call them.
-  // Keeping them would leave the shell advertising a callback the
-  // server cannot invoke.
-
   // ``streamRetry`` was received here until conversion phase 3. AC⚡DC's own
   // completion wrapper pushed it before each backoff sleep so the chat panel
   // could draw a countdown and prove the UI hadn't frozen. The CLI retries

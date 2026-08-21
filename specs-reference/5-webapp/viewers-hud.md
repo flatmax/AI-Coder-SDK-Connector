@@ -23,8 +23,8 @@ state they keep.
 | Hover behavior | Pauses timer; mouse leave restarts auto-hide |
 | Dismiss button | Hides immediately (no fade) |
 
-The cache-warmup HUD variant is deleted — there is no warmer, so there is no synthetic two-token request
-to report. With it goes the whole "per-warmup vs per-turn" column table: every HUD is now a turn.
+There is one HUD variant and every HUD is a turn, so the constants above apply to all of them without a
+per-variant column.
 
 ### HUD geometry
 
@@ -137,8 +137,8 @@ try to price it separately.
 | Adopt-without-fetch | A `postResponseComplete` carrying `context_usage` is adopted directly; no RPC is issued |
 | Staleness threshold | `fetched_at` older than the most recent `postResponseComplete` marks the view stale and triggers a refresh on next visibility |
 
-Polling is absent from every surface. The native engine's 1 Hz cache-warmer status poll is deleted along
-with the warmer, and nothing replaced it: `get_context_usage()` is fetched on state change only.
+Polling is absent from every surface. The native engine's 1 Hz status poll is deleted and nothing
+replaced it: `get_context_usage()` is fetched on state change only.
 
 ### Terminal HUD format
 

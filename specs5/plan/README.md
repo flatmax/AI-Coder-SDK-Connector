@@ -463,8 +463,8 @@ AC⚡DC keeps its skin and loses its brain. The browser UI, the jrpc-oo transpor
 repository layer, the file picker, the Monaco diff viewer, the SVG editor, the document
 converter, collaboration admission, and the tree-sitter indexes all survive. Everything that
 existed to *assemble a prompt and pay for it efficiently* is deleted: prompt assembly, the
-four-tier stability cache and its membrane/flux controller, the cache warmer, the token
-counter, the emoji edit protocol, the LLM-driven history compactor, URL fetching, and the
+four-tier stability cache and its membrane/flux controller, the token counter, the emoji
+edit protocol, the LLM-driven history compactor, URL fetching, and the
 `🟧🟧🟧 AGENT` spawn protocol. In their place sits one `ClaudeSDKClient` per repo, and
 AC⚡DC's job becomes *rendering* an agent session rather than *constructing* one.
 
