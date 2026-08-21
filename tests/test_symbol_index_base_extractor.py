@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.base — Layer 2.2.
+"""Tests for aic_dc.symbol_index.extractors.base — Layer 2.2.
 
 Scope: the plumbing helpers on BaseExtractor — text decoding,
 range extraction, child lookup, tree walking.
@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.base import BaseExtractor
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.base import BaseExtractor
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 # ---------------------------------------------------------------------------

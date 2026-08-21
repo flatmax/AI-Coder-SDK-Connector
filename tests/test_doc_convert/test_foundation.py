@@ -1,4 +1,4 @@
-"""Foundation tests for ``ac_dc.doc_convert.DocConvert``.
+"""Foundation tests for ``aic_dc.doc_convert.DocConvert``.
 
 Covers the pieces that don't depend on a particular conversion
 backend:
@@ -26,7 +26,7 @@ import hashlib
 
 import pytest
 
-from ac_dc.doc_convert import (
+from aic_dc.doc_convert import (
     DocConvert,
     ProvenanceHeader,
     _DEFAULT_EXTENSIONS,
@@ -115,7 +115,7 @@ class TestIsAvailable:
         with patch.object(
             DocConvert, "_probe_import",
             side_effect=lambda name: {"markitdown": True, "fitz": True}.get(name, False),
-        ), patch("ac_dc.doc_convert.shutil.which", return_value="/usr/bin/soffice"):
+        ), patch("aic_dc.doc_convert.shutil.which", return_value="/usr/bin/soffice"):
             result = doc_convert.is_available()
         assert result["pdf_pipeline"] is True
 
@@ -123,7 +123,7 @@ class TestIsAvailable:
         with patch.object(
             DocConvert, "_probe_import",
             side_effect=lambda name: {"markitdown": True, "fitz": True}.get(name, False),
-        ), patch("ac_dc.doc_convert.shutil.which", return_value=None):
+        ), patch("aic_dc.doc_convert.shutil.which", return_value=None):
             result = doc_convert.is_available()
         assert result["pymupdf"] is True
         assert result["libreoffice"] is False
@@ -133,7 +133,7 @@ class TestIsAvailable:
         with patch.object(
             DocConvert, "_probe_import",
             side_effect=lambda name: {"markitdown": True, "fitz": False}.get(name, False),
-        ), patch("ac_dc.doc_convert.shutil.which", return_value="/usr/bin/soffice"):
+        ), patch("aic_dc.doc_convert.shutil.which", return_value="/usr/bin/soffice"):
             result = doc_convert.is_available()
         assert result["libreoffice"] is True
         assert result["pymupdf"] is False
@@ -143,14 +143,14 @@ class TestIsAvailable:
         with patch.object(
             DocConvert, "_probe_import",
             side_effect=lambda name: False,
-        ), patch("ac_dc.doc_convert.shutil.which", return_value=None):
+        ), patch("aic_dc.doc_convert.shutil.which", return_value=None):
             result = doc_convert.is_available()
         assert result["available"] is False
 
     def test_all_deps_missing(self, doc_convert):
         with patch.object(
             DocConvert, "_probe_import", return_value=False,
-        ), patch("ac_dc.doc_convert.shutil.which", return_value=None):
+        ), patch("aic_dc.doc_convert.shutil.which", return_value=None):
             result = doc_convert.is_available()
         assert result == {
             "available": False,
@@ -269,8 +269,8 @@ class TestScanExclusions:
         paths = {r["path"] for r in results}
         assert paths == {"visible.docx"}
 
-    def test_ac_dc_directory_excluded(self, doc_convert, scan_root):
-        _write_source(scan_root, ".ac-dc4/history.docx", b"x")
+    def test_aic_dc_directory_excluded(self, doc_convert, scan_root):
+        _write_source(scan_root, ".aic-dc/history.docx", b"x")
         _write_source(scan_root, "visible.docx", b"x")
         results = doc_convert.scan_convertible_files()
         assert {r["path"] for r in results} == {"visible.docx"}

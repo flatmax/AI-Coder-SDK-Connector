@@ -7,7 +7,7 @@ order the browser calls them.
 
 It found the bug that two thousand nine hundred green tests agreed with —
 every session row previewing the same 100 characters of
-``<ac-dc-ui-context>`` boilerplate, because the CLI truncates the
+``<aic-dc-ui-context>`` boilerplate, because the CLI truncates the
 sidecar's ``first_prompt`` to 200 characters and the truncation lands
 inside the framing block. Then, on the run after that fix shipped, it
 found the same bug from a second source: a *compacted* session previewed
@@ -45,14 +45,14 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ac_dc.claude_code.history import (  # noqa: E402
+from aic_dc.claude_code.history import (  # noqa: E402
     list_sessions,
     load_session,
     strip_framing,
 )
-from ac_dc.claude_code.session_store import RepoSessionStore  # noqa: E402
+from aic_dc.claude_code.session_store import RepoSessionStore  # noqa: E402
 
-FRAMING_OPEN = "<ac-dc-ui-context>"
+FRAMING_OPEN = "<aic-dc-ui-context>"
 
 # The other prose every session shares. Check 4 printed this as a preview
 # and passed, because it only knew to look for the framing tag — a human
@@ -152,7 +152,7 @@ def _human_texts(entry: dict) -> list[str]:
 
 async def run(repo: Path, session: str | None, verbose: bool) -> int:
     report = Report()
-    store = RepoSessionStore(repo / ".ac-dc4" / "sessions")
+    store = RepoSessionStore(repo / ".aic-dc" / "sessions")
     directory = str(repo)
 
     from claude_agent_sdk import (  # noqa: PLC0415
@@ -320,7 +320,7 @@ def main() -> int:
         "--repo",
         type=Path,
         default=Path(__file__).resolve().parent.parent,
-        help="repo whose .ac-dc4/sessions mirror to read (default: this one)",
+        help="repo whose .aic-dc/sessions mirror to read (default: this one)",
     )
     parser.add_argument(
         "--session",
@@ -334,8 +334,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     repo = args.repo.resolve()
-    if not (repo / ".ac-dc4" / "sessions").is_dir():
-        print(f"No session mirror at {repo / '.ac-dc4' / 'sessions'}.")
+    if not (repo / ".aic-dc" / "sessions").is_dir():
+        print(f"No session mirror at {repo / '.aic-dc' / 'sessions'}.")
         print("Hold a conversation in this repo first — the mirror is written")
         print("by the engine, not by this script.")
         return 2

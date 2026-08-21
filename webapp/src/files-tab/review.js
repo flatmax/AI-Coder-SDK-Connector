@@ -344,11 +344,11 @@ export function renderReviewSelectorModal(host) {
           against its merge-base with your current
           branch (or main / master).
         </div>
-        <ac-commit-graph
+        <aic-commit-graph
           .rpcCall=${(method, ...args) => host.rpcExtract(method, ...args)}
           @commit-selected=${(e) => onCommitSelectedFromGraph(host, e)}
           @graph-error=${(e) => onGraphError(host, e)}
-        ></ac-commit-graph>
+        ></aic-commit-graph>
         <div class="review-action-bar">
           <div class="review-action-summary">
             ${selected
@@ -517,14 +517,14 @@ export function renderReviewGraphModal(host) {
           green ring = branch tip (${tipShort}).
           Click any commit to see its diff in the left panel.
         </div>
-        <ac-commit-graph
+        <aic-commit-graph
           .rpcCall=${(method, ...args) => host.rpcExtract(method, ...args)}
           .readOnly=${true}
           .highlightedCommits=${highlighted}
           includeRemote
           @commit-inspected=${(e) => onCommitInspectedFromGraph(host, e)}
           @graph-error=${(e) => onGraphError(host, e)}
-        ></ac-commit-graph>
+        ></aic-commit-graph>
       </div>
     </div>
   `;

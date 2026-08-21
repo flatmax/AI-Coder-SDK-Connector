@@ -1,10 +1,10 @@
-// <ac-permission-dialog> — the browser surface for `can_use_tool`.
+// <aic-permission-dialog> — the browser surface for `can_use_tool`.
 //
 // This is the component that justifies a browser frontend over a
 // terminal: what the user sees is the consequence of the call, not its
 // name. Governing spec: specs5/5-webapp/permission-dialog.md. The
 // engine-side contract is specs5/3-engine/permissions.md, implemented in
-// src/ac_dc/claude_code/permissions.py.
+// src/aic_dc/claude_code/permissions.py.
 //
 // The invariants that shape the code, in the order they cost most to get
 // wrong:
@@ -980,9 +980,9 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     }
   }
 
-  /** AppShell listens for `ac-toast` window events; see toasts.js. */
+  /** AppShell listens for `aic-toast` window events; see toasts.js. */
   _toast(message, type = 'info') {
-    window.dispatchEvent(new CustomEvent('ac-toast', {
+    window.dispatchEvent(new CustomEvent('aic-toast', {
       detail: { message, type },
     }));
   }
@@ -1124,4 +1124,4 @@ export class PermissionDialog extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-permission-dialog', PermissionDialog);
+customElements.define('aic-permission-dialog', PermissionDialog);

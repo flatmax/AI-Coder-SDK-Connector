@@ -27,7 +27,7 @@ describe('directory actions', () => {
    * matches production.
    */
   function fireContextAction(tab, detail) {
-    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    const picker = tab.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('context-menu-action', {
         detail,
@@ -120,7 +120,7 @@ describe('directory actions', () => {
    * picker carrying a dir-type detail.
    */
   function fireDirAction(tab, detail) {
-    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    const picker = tab.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('context-menu-action', {
         detail: { type: 'dir', ...detail },
@@ -165,7 +165,7 @@ describe('directory actions', () => {
 
     it('shows a success toast with count and dir name', async () => {
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupDirTab();
         fireDirAction(t, {
@@ -181,7 +181,7 @@ describe('directory actions', () => {
         expect(successes.at(-1).message).toContain('2');
         expect(successes.at(-1).message).toContain('src');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -250,7 +250,7 @@ describe('directory actions', () => {
        * production.
        */
       function fireFilterFromChat(tab, detail) {
-        const chat = tab.shadowRoot.querySelector('ac-chat-panel');
+        const chat = tab.shadowRoot.querySelector('aic-chat-panel');
         chat.dispatchEvent(
           new CustomEvent('filter-from-chat', {
             detail,
@@ -277,7 +277,7 @@ describe('directory actions', () => {
 
       it('forwards a non-empty query to picker.setFilter', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
         fireFilterFromChat(t, { query: 'bar' });
         await settle(t);
@@ -287,7 +287,7 @@ describe('directory actions', () => {
 
       it('empty string clears the filter', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
         fireFilterFromChat(t, { query: 'bar' });
         await settle(t);
@@ -299,7 +299,7 @@ describe('directory actions', () => {
 
       it('filter changes propagate visually to the picker', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         // Use a query that matches multiple files by
         // subsequence to pin the filter's actual behaviour.
         // `ba` matches both bar.md (b,a...) and baz.md
@@ -316,7 +316,7 @@ describe('directory actions', () => {
 
       it('non-string query is silently dropped', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
         fireFilterFromChat(t, { query: 42 });
         fireFilterFromChat(t, { query: null });
@@ -328,9 +328,9 @@ describe('directory actions', () => {
 
       it('missing detail is silently dropped', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
-        const chat = t.shadowRoot.querySelector('ac-chat-panel');
+        const chat = t.shadowRoot.querySelector('aic-chat-panel');
         chat.dispatchEvent(
           new CustomEvent('filter-from-chat', {
             bubbles: true,
@@ -343,7 +343,7 @@ describe('directory actions', () => {
 
       it('detail without query field is silently dropped', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
         fireFilterFromChat(t, {});
         fireFilterFromChat(t, { other: 'field' });
@@ -366,9 +366,9 @@ describe('directory actions', () => {
 
       it('event bubbles across the shadow boundary (from textarea)', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
-        const chat = t.shadowRoot.querySelector('ac-chat-panel');
+        const chat = t.shadowRoot.querySelector('aic-chat-panel');
         const textarea = chat.shadowRoot.querySelector('.input-textarea');
         textarea.dispatchEvent(
           new CustomEvent('filter-from-chat', {
@@ -384,7 +384,7 @@ describe('directory actions', () => {
 
       it('repeated identical queries forward (no bridge dedup)', async () => {
         const t = await setupBridgeTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         const spy = vi.spyOn(picker, 'setFilter');
         fireFilterFromChat(t, { query: 'bar' });
         fireFilterFromChat(t, { query: 'bar' });
@@ -435,7 +435,7 @@ describe('directory actions', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
@@ -450,7 +450,7 @@ describe('directory actions', () => {
           .filter((d) => d.type === 'warning');
         expect(warnings.length).toBeGreaterThan(0);
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -558,7 +558,7 @@ describe('directory actions', () => {
   describe('rename-dir action', () => {
     it('calls beginRename on the picker', async () => {
       const { t } = await setupDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       const spy = vi.spyOn(picker, 'beginRename');
       fireDirAction(t, {
         action: 'rename-dir',
@@ -577,7 +577,7 @@ describe('directory actions', () => {
       // rename_file. The picker's beginRename
       // doesn't carry that discriminator.
       const { t, renameDir } = await setupDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -598,7 +598,7 @@ describe('directory actions', () => {
       // Regression check — the new dir-detection
       // logic must not misroute file renames.
       const { t } = await setupDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       const call = vi.fn().mockResolvedValue({});
       // Re-publish with a rename_file spy that's
       // identifiable in this test.
@@ -641,7 +641,7 @@ describe('directory actions', () => {
       const { t } = await setupDirTab({
         excludedFiles: ['src/a.md', 'src/b.md'],
       });
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -662,9 +662,9 @@ describe('directory actions', () => {
     it('rejects target with path separators', async () => {
       const { t, renameDir } = await setupDirTab();
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('rename-committed', {
             detail: {
@@ -678,7 +678,7 @@ describe('directory actions', () => {
         await settle(t);
         expect(renameDir).not.toHaveBeenCalled();
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
   });
@@ -848,7 +848,7 @@ describe('directory actions', () => {
       // `beginCreateDirectory` was called after
       // `beginCreateFile`, and the two states are
       // mutually exclusive.
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       expect(picker._creating).toEqual({
         mode: 'new-directory',
         parentPath: 'src',

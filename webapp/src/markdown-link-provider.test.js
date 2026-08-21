@@ -216,9 +216,9 @@ describe('findLinks', () => {
     expect(result[0].range.startLineNumber).toBe(3);
   });
 
-  it('emits ac-navigate URIs', () => {
+  it('emits aic-navigate URIs', () => {
     const result = findLinks('[x](other.md)');
-    expect(result[0].url).toBe('ac-navigate:///other.md');
+    expect(result[0].url).toBe('aic-navigate:///other.md');
   });
 
   it('emits tooltip with original path', () => {
@@ -235,7 +235,7 @@ describe('findLinks', () => {
     ].join('\n');
     const result = findLinks(text);
     expect(result).toHaveLength(1);
-    expect(result[0].url).toBe('ac-navigate:///actually-rel.md');
+    expect(result[0].url).toBe('aic-navigate:///actually-rel.md');
   });
 
   it('handles empty lines correctly', () => {
@@ -253,37 +253,37 @@ describe('findLinks', () => {
 describe('buildNavigateUri', () => {
   it('constructs a URI from a path', () => {
     expect(buildNavigateUri('other.md')).toBe(
-      'ac-navigate:///other.md',
+      'aic-navigate:///other.md',
     );
   });
 
   it('preserves path separators', () => {
     expect(buildNavigateUri('a/b/c.md')).toBe(
-      'ac-navigate:///a/b/c.md',
+      'aic-navigate:///a/b/c.md',
     );
   });
 
   it('preserves fragments', () => {
     expect(buildNavigateUri('x.md#sec')).toBe(
-      'ac-navigate:///x.md#sec',
+      'aic-navigate:///x.md#sec',
     );
   });
 });
 
 describe('parseNavigateUri', () => {
   it('parses our scheme from a string URI', () => {
-    expect(parseNavigateUri('ac-navigate:///x.md')).toBe('x.md');
+    expect(parseNavigateUri('aic-navigate:///x.md')).toBe('x.md');
   });
 
   it('parses deep paths', () => {
-    expect(parseNavigateUri('ac-navigate:///a/b/c.md')).toBe(
+    expect(parseNavigateUri('aic-navigate:///a/b/c.md')).toBe(
       'a/b/c.md',
     );
   });
 
   it('parses from a Monaco Uri object', () => {
     const uri = {
-      scheme: 'ac-navigate',
+      scheme: 'aic-navigate',
       path: '/x.md',
     };
     expect(parseNavigateUri(uri)).toBe('x.md');
@@ -291,7 +291,7 @@ describe('parseNavigateUri', () => {
 
   it('strips leading slash from Monaco Uri path', () => {
     const uri = {
-      scheme: 'ac-navigate',
+      scheme: 'aic-navigate',
       path: '/a/b.md',
     };
     expect(parseNavigateUri(uri)).toBe('a/b.md');
@@ -383,14 +383,14 @@ describe('buildMarkdownLinkOpener', () => {
   it('dispatches relative paths via onNavigate', () => {
     const onNavigate = vi.fn();
     const opener = buildMarkdownLinkOpener(onNavigate);
-    const result = opener.open('ac-navigate:///x.md');
+    const result = opener.open('aic-navigate:///x.md');
     expect(onNavigate).toHaveBeenCalledWith('x.md');
     expect(result).toBe(true);
   });
 
-  it('claims the event (returns true) for ac-navigate URIs', () => {
+  it('claims the event (returns true) for aic-navigate URIs', () => {
     const opener = buildMarkdownLinkOpener(() => {});
-    expect(opener.open('ac-navigate:///x.md')).toBe(true);
+    expect(opener.open('aic-navigate:///x.md')).toBe(true);
   });
 
   it('passes on (returns false) for other schemes', () => {
@@ -405,7 +405,7 @@ describe('buildMarkdownLinkOpener', () => {
     const onNavigate = vi.fn();
     const opener = buildMarkdownLinkOpener(onNavigate);
     const uri = {
-      scheme: 'ac-navigate',
+      scheme: 'aic-navigate',
       path: '/docs/spec.md',
     };
     expect(opener.open(uri)).toBe(true);
@@ -415,7 +415,7 @@ describe('buildMarkdownLinkOpener', () => {
   it('strips fragment before dispatching', () => {
     const onNavigate = vi.fn();
     const opener = buildMarkdownLinkOpener(onNavigate);
-    opener.open('ac-navigate:///spec.md#intro');
+    opener.open('aic-navigate:///spec.md#intro');
     expect(onNavigate).toHaveBeenCalledWith('spec.md');
   });
 
@@ -424,7 +424,7 @@ describe('buildMarkdownLinkOpener', () => {
     const opener = buildMarkdownLinkOpener(onNavigate);
     // URI with only a fragment part — path becomes
     // empty after stripping the fragment.
-    const uri = { scheme: 'ac-navigate', path: '/#x' };
+    const uri = { scheme: 'aic-navigate', path: '/#x' };
     expect(opener.open(uri)).toBe(false);
     expect(onNavigate).not.toHaveBeenCalled();
   });
@@ -439,7 +439,7 @@ describe('buildMarkdownLinkOpener', () => {
       });
       const opener = buildMarkdownLinkOpener(onNavigate);
       // Doesn't throw, still claims the event.
-      expect(opener.open('ac-navigate:///x.md')).toBe(true);
+      expect(opener.open('aic-navigate:///x.md')).toBe(true);
       expect(debugSpy).toHaveBeenCalled();
     } finally {
       debugSpy.mockRestore();
@@ -493,7 +493,7 @@ describe('installMarkdownLinkProvider', () => {
     const onNavigate = vi.fn();
     installMarkdownLinkProvider(monaco, () => '', onNavigate);
     const opener = monaco.__registry.openers[0];
-    opener.open('ac-navigate:///test.md');
+    opener.open('aic-navigate:///test.md');
     expect(onNavigate).toHaveBeenCalledWith('test.md');
   });
 

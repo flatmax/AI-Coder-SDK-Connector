@@ -107,7 +107,7 @@ export function onInsertPath(host, event) {
  * clicks a `.file-mention` span inside a rendered
  * assistant message. The event bubbles up through the
  * shadow DOM boundary (composed: true) and reaches us
- * via the `@file-mention-click` binding on `<ac-chat-panel>`
+ * via the `@file-mention-click` binding on `<aic-chat-panel>`
  * in the template.
  *
  * Open the file in the viewer, and nothing else. This

@@ -713,4 +713,4 @@ export class FileNav extends LitElement {
   }
 }
 
-customElements.define('ac-file-nav', FileNav);
+customElements.define('aic-file-nav', FileNav);

@@ -43,7 +43,7 @@ describe('FilesTab exclusion sync', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.excludedFiles).toBeInstanceOf(Set);
     expect(picker.excludedFiles.size).toBe(0);
   });
@@ -64,7 +64,7 @@ describe('FilesTab exclusion sync', () => {
     await settle(t);
     // Simulate the picker dispatching the event (same path
     // the real shift+click flow uses).
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: ['a.md'] },
@@ -96,7 +96,7 @@ describe('FilesTab exclusion sync', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: ['a.md'] },
@@ -128,7 +128,7 @@ describe('FilesTab exclusion sync', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: ['a.md'] },
@@ -167,11 +167,11 @@ describe('FilesTab exclusion sync', () => {
         }),
     });
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exclusion-changed', {
           detail: { excludedFiles: ['a.md'] },
@@ -184,7 +184,7 @@ describe('FilesTab exclusion sync', () => {
       expect(detail.type).toBe('warning');
       expect(detail.message).toContain('Participants');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -205,11 +205,11 @@ describe('FilesTab exclusion sync', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => {});
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exclusion-changed', {
           detail: { excludedFiles: ['a.md'] },
@@ -222,7 +222,7 @@ describe('FilesTab exclusion sync', () => {
       expect(detail.type).toBe('error');
       expect(detail.message).toContain('exclusion boom');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
       consoleSpy.mockRestore();
     }
   });
@@ -237,7 +237,7 @@ describe('FilesTab exclusion sync', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Defensive — malformed events shouldn't reach the
     // RPC or mutate state.
     picker.dispatchEvent(
@@ -288,7 +288,7 @@ describe('FilesTab exclusion sync', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Exclude a.md.
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
@@ -324,7 +324,7 @@ describe('FilesTab exclusion sync', () => {
 describe('FilesTab read denial — no L0 prompt', () => {
   /** Dispatch an exclusion-changed event from the picker. */
   function fireExclusionChanged(tab, paths) {
-    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    const picker = tab.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: paths },
@@ -383,13 +383,13 @@ describe('FilesTab read denial — no L0 prompt', () => {
     fireExclusionChanged(t, ['a.md']);
     await settle(t);
     expect(
-      localStorage.getItem('ac-dc-l0-exclude-pref'),
+      localStorage.getItem('aic-dc-l0-exclude-pref'),
     ).toBeNull();
   });
 
   it('reports the takes-effect caveat once per session', async () => {
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const { t } = await setupTab();
       fireExclusionChanged(t, ['a.md']);
@@ -405,7 +405,7 @@ describe('FilesTab read denial — no L0 prompt', () => {
       await settle(t);
       expect(toastListener.mock.calls.length).toBe(countAfterFirst);
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -416,13 +416,13 @@ describe('FilesTab read denial — no L0 prompt', () => {
     fireExclusionChanged(t, ['a.md']);
     await settle(t);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       fireExclusionChanged(t, []);
       await settle(t);
       expect(toastListener).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -495,7 +495,7 @@ describe('FilesTab read denial — no L0 prompt', () => {
     // over a file the agent can still read.
     const { t } = await setupTab({ error: 'path escapes the repo' });
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       fireExclusionChanged(t, ['../outside.md']);
       await settle(t);
@@ -503,7 +503,7 @@ describe('FilesTab read denial — no L0 prompt', () => {
       expect(detail.type).toBe('error');
       expect(detail.message).toContain('escapes the repo');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 });

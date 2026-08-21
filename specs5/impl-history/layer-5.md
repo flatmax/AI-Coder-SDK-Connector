@@ -19,9 +19,9 @@ Layer 5 (webapp) is the largest remaining surface. Delivering in sub-phases to k
 - Lifecycle hooks override `setupDone` (publishes `this.call` to `SharedRpc`, flips state to `connected`, shows "Reconnected" toast on subsequent connects), `remoteDisconnected` (clears SharedRpc, schedules exponential-backoff reconnect), and `setupSkip` (schedules reconnect on first-connect failure without wedging the startup overlay).
 - Startup overlay driven by `startupProgress(stage, message, percent)` RPC callback. Brand mark + progress bar + message. On `stage === 'ready'`, a 400ms delay lets the user see 100% before the CSS fade-out. Reconnects bypass the overlay entirely.
 - Reconnect schedule — `[1000, 2000, 4000, 8000, 15000]` ms capped, per specs4. Attempt counter increments across disconnects; reset to 0 on successful `setupDone`. Reconnect re-triggers by nulling + restoring `serverURI` (JRPCClient's setter tears down + reopens the socket).
-- Toast system — subscribes to `ac-toast` window events via `connectedCallback` / `disconnectedCallback`. 3-second auto-dismiss. Default type `info`; success/error/warning supported. Components dispatch via `window.dispatchEvent(new CustomEvent('ac-toast', {...}))` rather than calling a method on the shell directly.
+- Toast system — subscribes to `aic-toast` window events via `connectedCallback` / `disconnectedCallback`. 3-second auto-dismiss. Default type `info`; success/error/warning supported. Components dispatch via `window.dispatchEvent(new CustomEvent('aic-toast', {...}))` rather than calling a method on the shell directly.
 - Dialog stub — three tab buttons (Chat, Context, Settings). Each tab renders a placeholder. Phase 2 wires Chat; Phase 3 wires the others.
-- `webapp/src/main.js` updated to import `./app-shell.js` and mount `<ac-app-shell>` into the `#app` element, replacing the boot splash. Port-parse helpers retained for tests and exported.
+- `webapp/src/main.js` updated to import `./app-shell.js` and mount `<aic-app-shell>` into the `#app` element, replacing the boot splash. Port-parse helpers retained for tests and exported.
 - `webapp/src/app-shell.test.js` — 21 tests covering initial state (connecting/overlay/default tab), `setupDone` (SharedRpc publish, state flip, first-connect overlay persistence, reconnect overlay dismissal + toast), `remoteDisconnected` (SharedRpc clear, state flip, reconnect scheduling — only when was-connected), `startupProgress` (stage/message/percent update, 0..100 clamping, ready delay-then-fade), reconnect backoff (attempt increment, 15s cap), toast system (window event subscription, auto-dismiss timing, no-message guard, default type, unsubscribe on disconnect), server-push callbacks (window event translation, navigateFile remote flag, filesChanged payload, jrpc-oo ack return value), tab switching.
 - Test strategy — `@flatmax/jrpc-oo/jrpc-client.js` is mocked via `vi.mock` with a minimal `JRPCClient` class that extends `HTMLElement` and exposes the hook points (setupDone, setupSkip, remoteDisconnected, addClass, serverURI, call). Avoids opening real WebSocket connections during test. Module-mocked import is registered before `app-shell.js` is imported — order matters for vitest's hoisting.
 
@@ -70,7 +70,7 @@ Deferred to later Phase 2 sub-phases:
 - Active-file highlight — needs `active-file-changed` events from the viewer (Phase 2c)
 - File search integration (swap to pruned tree) — Phase 2e when search is wired up
 
-Phase 2a does NOT yet wire the picker into `main.js` or the shell. The component self-registers via `customElements.define('ac-file-picker', ...)` but nothing imports it yet. Phase 2c imports it from the `files-tab` component.
+Phase 2a does NOT yet wire the picker into `main.js` or the shell. The component self-registers via `customElements.define('aic-file-picker', ...)` but nothing imports it yet. Phase 2c imports it from the `files-tab` component.
 
 Next up — Phase 2b: chat panel (basic) — message rendering, input area, streaming display, markdown. No edit blocks or file mentions yet; those ride in Phase 2d.
 
@@ -109,7 +109,7 @@ Standalone chat panel component. Message list, input area, streaming display, ba
 
 Marked added as a dependency — `"marked": "^14.1.0"`. No syntax highlighting library yet; code blocks render as plain `<pre><code>` with a `language-{lang}` class so Phase 2d can wire highlight.js without changing the chat panel's output shape.
 
-Not wired into `main.js` yet. The component self-registers via `customElements.define('ac-chat-panel', ...)` but no caller imports it. Phase 2c imports it from the `files-tab` component.
+Not wired into `main.js` yet. The component self-registers via `customElements.define('aic-chat-panel', ...)` but no caller imports it. Phase 2c imports it from the `files-tab` component.
 
 Deferred to later sub-phases — explicit boundaries:
 
@@ -145,7 +145,7 @@ Closes out Phase 2e by adding the per-message interactions the initial history-b
   - Context menu on right-click. Four items — "◧ Load in Left Panel", "◨ Load in Right Panel", "📋 Copy", "↩ Paste to Prompt". Positioned at viewport coordinates via `position: fixed` + style bindings. Dismiss paths: click outside the menu (document-level click listener with `composedPath()` check for menu containment), Escape key (first press closes menu only, second closes modal), modal close (context menu state cleared via the existing `_close` path and the `updated()` reset block).
   - `load-diff-panel` event dispatch carrying `{content, panel, label}` — bubbles and composes out of the shadow DOM so chat panel's event listener (Phase 3.1 will wire this to diff viewer's `loadPanel`) can route it. `label` is `"{role} (history)"` so the floating panel label in the diff viewer tells the user where the content came from.
   - Extracted text for all actions goes through `_extractMessageText(msg)` which delegates to `normalizeMessageContent` — multimodal messages have text blocks joined with `\n`, image blocks dropped. Empty-text messages (image-only) produce a no-op for copy / paste / load-in-panel rather than emitting an empty toast.
-  - Copy path reuses the clipboard-write-or-warning-toast pattern from chat panel's `_copyMessageText` with `ac-toast` window-event dispatch (the browser is modal, so local toast would be overkill; the app shell's global toast layer is already listening).
+  - Copy path reuses the clipboard-write-or-warning-toast pattern from chat panel's `_copyMessageText` with `aic-toast` window-event dispatch (the browser is modal, so local toast would be overkill; the app shell's global toast layer is already listening).
 
 - `webapp/src/history-browser.test.js` — three new test blocks covering:
   - **Image thumbnails** (4 tests) — renders for `images` field, renders for multimodal content arrays, absent image renders no section, renders alongside text.
@@ -184,14 +184,14 @@ Floating transient overlay showing per-request token breakdown after each LLM re
   - Fetches full `get_context_breakdown` asynchronously for tier data, budget, changes, totals
   - Auto-hide: 8s → 800ms CSS opacity fade → hidden. Hover pauses; mouse leave restarts
   - Five collapsible sections: Cache Tiers (per-tier bar chart with lock icon), This Request (prompt/completion/cache read/write), History Budget (usage bar with percentage), Tier Changes (promotions/demotions), Session Totals (cumulative)
-  - Section collapse state persisted to `ac-dc-hud-collapsed` as JSON-serialized Set
+  - Section collapse state persisted to `aic-dc-hud-collapsed` as JSON-serialized Set
   - Cache hit rate badge in header with color coding (≥50% green, ≥20% amber, <20% red)
   - Prefers `provider_cache_rate` over local `cache_hit_rate` when available
   - `visible` attribute reflected manually for CSS `:host([visible])` selector
   - Tier colors follow warm-to-cool spectrum (L0 green, L1 teal, L2 blue, L3 amber, active orange)
   - Handles missing/partial data gracefully (placeholder text for each section)
 
-- `webapp/src/app-shell.js` — imports `token-hud.js`, renders `<ac-token-hud>` after the toast layer
+- `webapp/src/app-shell.js` — imports `token-hud.js`, renders `<aic-token-hud>` after the toast layer
 
 ## Layer 5 — Phase 3 complete
 
@@ -227,7 +227,7 @@ Implements the 2D spatial file navigation grid with Alt+Arrow traversal and full
   - File type colors following visible spectrum by language family
   - Click-to-teleport on any node (dispatches navigate-file with `_fromNav` flag)
 - `webapp/src/app-shell.js` — integration:
-  - Imports `file-nav.js`, renders `<ac-file-nav>` before the dialog
+  - Imports `file-nav.js`, renders `<aic-file-nav>` before the dialog
   - `_onGridKeyDown` (capture phase) — Alt+Arrow consumed when grid has nodes, navigates direction, shows HUD, routes to viewer; Escape hides HUD
   - `_onGridKeyUp` — Alt release hides HUD
   - `_onNavigateFile` — registers files with the grid unless `_fromNav` or `_refresh` flags are set
@@ -251,11 +251,11 @@ Cache sub-view shows:
 - Per-item rows within expanded tiers: type icon (⚙️/📖/📦/📝/📄/🔗/💬), name/path, stability bar (N/threshold with tier-colored fill), and token count
 - Unmeasured items collapsed into a summary line ("N pre-indexed symbols/documents (awaiting measurement)")
 - Empty tiers show "Empty tier" placeholder
-- Tier expand/collapse state persisted to `ac-dc-cache-expanded` localStorage key (defaults: L0 and active expanded)
+- Tier expand/collapse state persisted to `aic-dc-cache-expanded` localStorage key (defaults: L0 and active expanded)
 - Footer with model name and total token count
 
 - `webapp/src/context-tab.js` — `ContextTab(RpcMixin(LitElement))` component:
-  - `_subview` persisted to `ac-dc-context-subview` localStorage key
+  - `_subview` persisted to `aic-dc-context-subview` localStorage key
   - `_refresh()` fetches via `get_context_breakdown`, guarded by loading flag
   - `_isTabActive()` checks parent `.tab-panel.active` class
   - Stale detection on `stream-complete` / `files-changed` / `mode-changed` when hidden
@@ -265,7 +265,7 @@ Cache sub-view shows:
   - `_COLORS` map for category segments
   - Budget sub-view handles missing/partial backend data gracefully (empty state, field defaults)
   - Cache sub-view:
-    - `_cacheExpanded` Set persisted to `ac-dc-cache-expanded` (defaults: L0, active)
+    - `_cacheExpanded` Set persisted to `aic-dc-cache-expanded` (defaults: L0, active)
     - `_TIER_COLORS` map (L0 green → L1 teal → L2 blue → L3 amber → active orange)
     - `_TYPE_ICONS` map for per-item type classification
     - `_renderCacheTier(block)` — collapsible tier group with measured/unmeasured item split
@@ -274,7 +274,7 @@ Cache sub-view shows:
     - Recent changes section (promotions/demotions) rendered above tier groups
     - Footer with model name and total tokens
 
-- `webapp/src/app-shell.js` — imports `context-tab.js`, renders `<ac-context-tab>` when `activeTab === 'context'`. Removes the last placeholder tab fallback.
+- `webapp/src/app-shell.js` — imports `context-tab.js`, renders `<aic-context-tab>` when `activeTab === 'context'`. Removes the last placeholder tab fallback.
 
 ### 5.26 — Phase 3.3 Settings tab — **delivered**
 
@@ -287,9 +287,9 @@ Wires the Settings dialog tab to the `Settings` RPC service (Layer 4.5). Card gr
   - `_save()` — writes via `save_config_content`, surfaces advisory JSON warnings, auto-triggers reload for reloadable types.
   - `_reload()` — dispatches to `reload_llm_config` or `reload_app_config` based on the active key.
   - `_onEditorKeyDown` — Ctrl+S shortcut within the textarea.
-  - Toast feedback for all success/error/warning paths via `ac-toast` window events.
+  - Toast feedback for all success/error/warning paths via `aic-toast` window events.
 
-- `webapp/src/app-shell.js` — imports `settings-tab.js`, renders `<ac-settings-tab>` when `activeTab === 'settings'`. Context tab remains a placeholder.
+- `webapp/src/app-shell.js` — imports `settings-tab.js`, renders `<aic-settings-tab>` when `activeTab === 'settings'`. Context tab remains a placeholder.
 
 ### 5.25 — Phase 3.2e SVG embedded image resolution — **delivered**
 
@@ -309,7 +309,7 @@ Adds four features to the SVG viewer surface:
 
 2. **Context menu** — right-click on the right panel shows a "📋 Copy as PNG" item. Positioned at click coordinates via `position: fixed`. Dismissed on click outside (document-level listener with `composedPath()` containment check) or on Escape.
 
-3. **Copy as PNG** — renders the current modified SVG to a canvas with white background and quality scaling (up to 4× for small SVGs, capped at 4096px). Clipboard write via `ClipboardItem` with a promise-of-blob (preserves user-gesture context across async). Download fallback when clipboard API unavailable. Toast feedback via `ac-toast` window event.
+3. **Copy as PNG** — renders the current modified SVG to a canvas with white background and quality scaling (up to 4× for small SVGs, capped at 4096px). Clipboard write via `ClipboardItem` with a promise-of-blob (preserves user-gesture context across async). Download fallback when clipboard API unavailable. Toast feedback via `aic-toast` window event.
 
 4. **SVG ↔ text diff mode toggle** — `</>` button on the SVG viewer dispatches `toggle-svg-mode` with `target: 'diff'`. `🎨 Visual` button on the diff viewer dispatches `toggle-svg-mode` with `target: 'visual'`. App shell handler orchestrates the swap: captures content + savedContent from the source viewer, closes the file on both viewers, opens on the target with carried state so dirty tracking survives the transition.
 
@@ -321,7 +321,7 @@ Adds four features to the SVG viewer surface:
   - `_onContextMenu` / `_onContextDismiss` — context menu lifecycle
   - `_copyAsPng()` — full pipeline: parse dimensions → scale → canvas → clipboard or download
   - `_switchToTextDiff()` — captures editor content and dispatches `toggle-svg-mode`
-  - `_emitToast` routes through `ac-toast` window event (matches app shell's toast layer)
+  - `_emitToast` routes through `aic-toast` window event (matches app shell's toast layer)
   - F11 and Escape keyboard handling in `_onKeyDown`
   - Ctrl+Shift+C for copy-as-PNG
   - Presentation mode skips left-panel SVG injection and pan-zoom init
@@ -883,18 +883,18 @@ Closes out Phase 3.1. Makes `[text](relative-path)` links Ctrl+clickable inside 
 
 - `webapp/src/markdown-link-provider.js` — pure module with `installMarkdownLinkProvider(monaco, getActivePath, onNavigate)`, `buildMarkdownLinkProvider(getText)`, `buildMarkdownLinkOpener(onNavigate)`, plus helpers `findLinks`, `findLinksInLine`, `buildNavigateUri`, `parseNavigateUri`, `shouldSkip`. Idempotent install guard via module-scoped `WeakSet` (same pattern as `lsp-providers.js`). No Monaco mount required for testing.
 - `webapp/src/diff-viewer.js` — imports `installMarkdownLinkProvider`, calls it from `_createEditor` alongside `installLspProviders`. The `onNavigate` callback reads the active file's path via closure, resolves relative paths via the existing `resolveRelativePath` helper, and dispatches `navigate-file` events with `bubbles: true, composed: true` so the app shell's handler catches them.
-- `webapp/src/markdown-link-provider.test.js` — 48 tests across 8 describe blocks covering `shouldSkip` (http/data/blob/mailto/tel/protocol-relative/fragment/root-anchored/empty/null → true; relative paths → false), `findLinksInLine` (empty/null handling, simple link, 1-indexed columns, multiple per line, skip absolute URLs, skip fragment-only, accept relative+fragment, accept parent dirs, empty link text, reference-style links skipped), `findLinks` multi-line (line numbers 1-indexed, ac-navigate URI emission, tooltip preservation, mixed absolute+relative filtering, empty-line tolerance), `buildNavigateUri` + `parseNavigateUri` round-trips (path preservation, fragment preservation, Monaco Uri object form, wrong scheme → null, type guards), `buildMarkdownLinkProvider` (callback dispatch, model passthrough, getValue fallback), `buildMarkdownLinkOpener` (ac-navigate dispatch, other schemes pass through, Monaco Uri objects, fragment strip, error swallow, null/undefined guards), and `installMarkdownLinkProvider` (registers for markdown language, registers opener, idempotent, `registerOpener` fallback for older Monaco versions, individual registration failures don't block others).
-- `webapp/src/diff-viewer.test.js` — extended Monaco mock with `registerLinkProvider` + `registerEditorOpener`; new `monacoState.linkProviders` and `monacoState.linkOpeners` arrays; `_resetLinkGuard` imported and called in the global `beforeEach`. New `DiffViewer markdown link provider` describe block with 8 integration tests: provider registered on first editor build, opener registered, no re-registration on file switch, opener resolves relative path + dispatches navigate-file with bubbles+composed, opener handles parent-directory references via active-file context, opener ignores non-ac-navigate URIs, opener no-op when no active file, provider finds links in markdown content, provider skips absolute URLs.
+- `webapp/src/markdown-link-provider.test.js` — 48 tests across 8 describe blocks covering `shouldSkip` (http/data/blob/mailto/tel/protocol-relative/fragment/root-anchored/empty/null → true; relative paths → false), `findLinksInLine` (empty/null handling, simple link, 1-indexed columns, multiple per line, skip absolute URLs, skip fragment-only, accept relative+fragment, accept parent dirs, empty link text, reference-style links skipped), `findLinks` multi-line (line numbers 1-indexed, aic-navigate URI emission, tooltip preservation, mixed absolute+relative filtering, empty-line tolerance), `buildNavigateUri` + `parseNavigateUri` round-trips (path preservation, fragment preservation, Monaco Uri object form, wrong scheme → null, type guards), `buildMarkdownLinkProvider` (callback dispatch, model passthrough, getValue fallback), `buildMarkdownLinkOpener` (aic-navigate dispatch, other schemes pass through, Monaco Uri objects, fragment strip, error swallow, null/undefined guards), and `installMarkdownLinkProvider` (registers for markdown language, registers opener, idempotent, `registerOpener` fallback for older Monaco versions, individual registration failures don't block others).
+- `webapp/src/diff-viewer.test.js` — extended Monaco mock with `registerLinkProvider` + `registerEditorOpener`; new `monacoState.linkProviders` and `monacoState.linkOpeners` arrays; `_resetLinkGuard` imported and called in the global `beforeEach`. New `DiffViewer markdown link provider` describe block with 8 integration tests: provider registered on first editor build, opener registered, no re-registration on file switch, opener resolves relative path + dispatches navigate-file with bubbles+composed, opener handles parent-directory references via active-file context, opener ignores non-aic-navigate URIs, opener no-op when no active file, provider finds links in markdown content, provider skips absolute URLs.
 
 Design points pinned by tests:
 
 - **Line-by-line scanning, not multi-line regex.** `findLinks` splits on `\n` and processes each line independently. Alternative (single regex with `gm` flags) would need multi-line handling for line-number computation; line-by-line gives natural 1-indexed line/column construction with no offset bookkeeping.
 
-- **ac-navigate scheme.** Deliberately non-standard (`ac-navigate:///{path}`) so Monaco's default link handler never accidentally hands these to the OS. The scheme is unique to our app; no external URI handler registration could intercept them. Pinned by `test_returns_false_for_wrong_scheme` (the opener doesn't claim non-ac-navigate URIs) and by `test_link_opener_ignores_non-ac-navigate_URIs` (integration test proving fallthrough works).
+- **aic-navigate scheme.** Deliberately non-standard (`aic-navigate:///{path}`) so Monaco's default link handler never accidentally hands these to the OS. The scheme is unique to our app; no external URI handler registration could intercept them. Pinned by `test_returns_false_for_wrong_scheme` (the opener doesn't claim non-aic-navigate URIs) and by `test_link_opener_ignores_non-aic-navigate_URIs` (integration test proving fallthrough works).
 
 - **Resolution at click time, not scan time.** The provider emits the verbatim relative path inside the URI; the opener resolves it against the currently-active file's directory when the user clicks. Alternative (pre-resolving during `provideLinks`) would couple the provider to file state and force re-scans on every file switch. Callback-based resolution means the provider is registered once and works across arbitrary file switches.
 
-- **Fragment stripping at open time, not scan time.** The scan preserves fragments in the URI (`buildNavigateUri('x.md#sec')` → `'ac-navigate:///x.md#sec'`) so the tooltip shows them correctly, but the opener strips `#section` before dispatching `navigate-file` because the app shell navigates by path only. A future enhancement could forward the fragment for scroll-to-heading support.
+- **Fragment stripping at open time, not scan time.** The scan preserves fragments in the URI (`buildNavigateUri('x.md#sec')` → `'aic-navigate:///x.md#sec'`) so the tooltip shows them correctly, but the opener strips `#section` before dispatching `navigate-file` because the app shell navigates by path only. A future enhancement could forward the fragment for scroll-to-heading support.
 
 - **Error swallow in the opener.** `onNavigate` wrapped in try/catch — a broken callback shouldn't crash Monaco's opener chain and leave every subsequent link click dead. Debug-log + continue is the right shape here (same pattern as the LSP providers).
 
@@ -910,7 +910,7 @@ Open carried over:
 
 Adds four Monaco language-service providers wired to the backend's `Repo.lsp_*` RPCs. Hover, definition, references, completions. Registered once against the `'*'` wildcard selector — one provider per type handles every language, with backend-side dispatch by file extension via the symbol index.
 
-- `webapp/src/lsp-providers.js` — pure provider module. Exports `installLspProviders(monaco, getActivePath, getCall)` (idempotent install with a `monaco.__acDcLspInstalled` guard), four `build*Provider` functions, plus helpers `unwrapEnvelope`, `pathFromModel`, and the test-only `_resetInstallGuard`. Separated from the viewer so the coordinate / path / shape transformation logic is unit-testable without mounting an editor. Mirrors the layering pattern of `markdown-preview.js` and `tex-preview.js`.
+- `webapp/src/lsp-providers.js` — pure provider module. Exports `installLspProviders(monaco, getActivePath, getCall)` (idempotent install with a `monaco.__aicDcLspInstalled` guard), four `build*Provider` functions, plus helpers `unwrapEnvelope`, `pathFromModel`, and the test-only `_resetInstallGuard`. Separated from the viewer so the coordinate / path / shape transformation logic is unit-testable without mounting an editor. Mirrors the layering pattern of `markdown-preview.js` and `tex-preview.js`.
 - `webapp/src/diff-viewer.js` — imports `installLspProviders`, calls it from `_createEditor` with callbacks that read the currently-active file's path and the SharedRpc call proxy. The install function's guard prevents re-registration across editor recreations and viewer remounts.
 - `webapp/src/lsp-providers.test.js` — 68 tests across 8 describe blocks covering `unwrapEnvelope` (null/undefined/primitive/array pass-through, single-key-with-object-inner unwrap, multi-key non-unwrap, primitive-inner non-unwrap, array-inner non-unwrap), `pathFromModel` (leading-slash strip, no-slash pass-through, missing model/uri/path defensive), hover provider (no-path / no-RPC returns null, 1-indexed coordinate passthrough, string-vs-array contents wrapping, empty-string filter, envelope unwrap, RPC error swallow), definition provider (shape validation, snake_case range normalisation, clamp-to-1 for negative/zero coordinates, cross-file URI construction, malformed-payload rejection, envelope unwrap, error swallow), references provider (null → [], non-array → null, malformed entries skipped, envelope unwrap, error swallow), completion provider (trigger character declaration, word-at-position range derivation, fallback empty range, insertText defaults, kind validation + clamping, documentation preservation, malformed entry skip, error swallow), and `installLspProviders` (all four registered, wildcard selector, idempotent, disposable return, null/missing-languages guards, callbacks wired correctly, individual registration failures don't block others).
 - `webapp/src/diff-viewer.test.js` — extended with an `LSP integration` describe block: providers installed on first editor build, wildcard selector, not re-registered on file switch, hover dispatches with active path, hover reflects file switches (same provider instance, fresh state per invocation), no-RPC graceful degradation, definition builds cross-file location, references empty for null, completions empty when no active path, install guard survives viewer dispose/reuse cycles.
@@ -921,7 +921,7 @@ Design points pinned by tests:
 
 - **Wildcard registration matches every language.** Single registration of each provider type handles all languages. Backend's symbol index dispatches by file extension; the provider layer doesn't need to know about language IDs at all. Alternative (per-language registration) would require maintaining a list in sync with `monaco-setup.js`'s extension map — more brittle for no benefit.
 
-- **Idempotent install guard lives on the monaco namespace.** `monaco.__acDcLspInstalled` is set on the first install call. Re-calling from a recreated editor, remounted viewer, or any other retry path is a no-op. Pinned by multiple tests — three consecutive installs produce one registration each; viewer dispose/reuse cycles similarly only produce one.
+- **Idempotent install guard lives on the monaco namespace.** `monaco.__aicDcLspInstalled` is set on the first install call. Re-calling from a recreated editor, remounted viewer, or any other retry path is a no-op. Pinned by multiple tests — three consecutive installs produce one registration each; viewer dispose/reuse cycles similarly only produce one.
 
 - **Envelope unwrap is heuristic, not universal.** `unwrapEnvelope` unwraps single-key objects only when the inner value is a non-array object. This matches the jrpc-oo envelope shape (UUID → payload object) without clobbering legitimate single-key payloads like `{file: "path"}` (inner is a primitive) or `{items: [1,2,3]}` (inner is an array). Pinned by three explicit tests for the non-unwrap cases.
 
@@ -939,7 +939,7 @@ Design points pinned by tests:
 
 Open carried over for later sub-layers:
 
-- **Markdown link provider (3.1e).** Separate Monaco registration for `.md` files that matches `[text](relative-path)` patterns and emits `ac-navigate:///` URIs with a companion LinkOpener intercepting that scheme. The preview pane's click-based link navigation already works (delivered in 3.1b); 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also navigates.
+- **Markdown link provider (3.1e).** Separate Monaco registration for `.md` files that matches `[text](relative-path)` patterns and emits `aic-navigate:///` URIs with a companion LinkOpener intercepting that scheme. The preview pane's click-based link navigation already works (delivered in 3.1b); 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also navigates.
 
 ### 5.8 — Phase 3.1c TeX preview — **delivered** (see separate commit)
 
@@ -964,7 +964,7 @@ Replaces the Phase 3 groundwork stub with a real Monaco-based side-by-side diff 
   - **Viewport state.** `_viewportStates: Map<path, {scrollTop, scrollLeft, lineNumber, column}>` captured before switching away, restored after diff computation settles. `_waitForDiffReady()` registers a one-shot `onDidUpdateDiff` listener with a 2-second fallback timeout (identical-content files never fire the event). Session-only — not persisted. Cleared when the file closes.
   - **loadPanel(content, panel, label).** Three behaviour modes: (a) no files open → create `virtual://compare` with content on the target side; (b) existing `virtual://compare` → update only the target side so both accumulate independently; (c) real file open → overwrite the target panel of that file. Panel labels stored per-file in `_panelLabels` and rendered as floating overlays when non-empty.
   - **Virtual files.** `virtual://` prefix. Content held in `_virtualContents` Map. Never RPC-fetched. Always read-only. Cleared from the map when closed. Used by loadPanel and by Phase 2e.4's history browser's context menu.
-  - **Shadow DOM style sync.** Two mechanisms per specs4. `_syncAllStyles()` runs on every editor creation/recreation — removes prior clones (tagged with `data-ac-dc-monaco-clone` attribute via the `_CLONED_STYLE_MARKER` dataset key) and re-clones all current `document.head` styles and linked stylesheets. Full re-sync catches Monaco's synchronous style insertion during construction. `_ensureStyleObserver()` installs a MutationObserver on `document.head` once per component lifetime for styles added/removed after initial construction (e.g., when a new language grammar loads).
+  - **Shadow DOM style sync.** Two mechanisms per specs4. `_syncAllStyles()` runs on every editor creation/recreation — removes prior clones (tagged with `data-aic-dc-monaco-clone` attribute via the `_CLONED_STYLE_MARKER` dataset key) and re-clones all current `document.head` styles and linked stylesheets. Full re-sync catches Monaco's synchronous style insertion during construction. `_ensureStyleObserver()` installs a MutationObserver on `document.head` once per component lifetime for styles added/removed after initial construction (e.g., when a new language grammar loads).
   - **Keyboard shortcuts.** Document-level `keydown` listener. Ctrl+S saves active file. Ctrl+W closes active file. Ctrl+PageDown / Ctrl+PageUp cycle through open files. All shortcuts gated on `_eventTargetInsideUs` check (via `composedPath()`) so focus outside the viewer doesn't trigger them.
   - **Code editor service patching.** `monacoEditor._codeEditorService.openCodeEditor` is intercepted so cross-file Go-to-Definition lands files in the tab system rather than spawning a standalone editor. Patch guarded by a component-level `_editorServicePatched` flag — not per-editor, so repeated editor creations don't chain override closures. Specs4 calls this out explicitly.
   - **Search-text scroll.** `_scrollToSearchText(text)` tries progressively shorter prefixes (full text, first two lines, first line only) via `model.findMatches` so whitespace drift between anchor text and file content still locates the edit. Highlighted match gets a `deltaDecorations` call with `isWholeLine: true` + overview-ruler marker, cleared after 3 seconds.
@@ -1037,14 +1037,14 @@ Open carried over for Phase 3.1 follow-ups:
 
 - **3.1d — LSP integration.** Four Monaco providers: hover, definition, references, completions. Each dispatches to the corresponding Repo.lsp_* RPC. Coordinate system is already 1-indexed on both sides (Monaco's convention, specs4's convention); no conversion needed. Cross-file go-to-definition already wired via the code-editor-service patch; this adds the provider side.
 
-- **3.1e — Markdown link provider.** Monaco LinkProvider for `.md` language. Matches `[text](relative-path)` patterns, skips absolute URLs and `#` anchors. Maps matched links to `ac-navigate:///` URIs; a companion LinkOpener intercepts that scheme and dispatches `navigate-markdown-link` events. The preview pane's click-based link navigation is already delivered in 3.1b — 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also works.
+- **3.1e — Markdown link provider.** Monaco LinkProvider for `.md` language. Matches `[text](relative-path)` patterns, skips absolute URLs and `#` anchors. Maps matched links to `aic-navigate:///` URIs; a companion LinkOpener intercepts that scheme and dispatches `navigate-markdown-link` events. The preview pane's click-based link navigation is already delivered in 3.1b — 3.1e adds the Monaco-side equivalent so Ctrl+click inside the editor also works.
 
 ### 5.6 — Phase 3 groundwork Viewer background routing — **delivered**
 
 Lays the integration surface between `navigate-file` events and the file viewers. Phase 3.1 (diff viewer) and 3.2 (SVG viewer) can now be built against a fully-tested routing contract — each real viewer just swaps in for its stub without app-shell changes.
 
 - `webapp/src/viewer-routing.js` — pure `viewerForPath(path)` function. Returns `'svg'` for `.svg` paths (case-insensitive), `'diff'` for everything else, `null` for malformed input. Extracted as a standalone module so the routing rule is testable without mounting the shell and evolvable without editing the shell's render logic.
-- `webapp/src/diff-viewer.js` — Phase 3 stub. LitElement with reactive `_files` / `_activeIndex` state. Public API (`openFile({path, line?, searchText?})`, `closeFile(path)`, `refreshOpenFiles()`, `getDirtyFiles()`, `hasOpenFiles` getter) matches the shape Phase 3.1's Monaco-backed viewer will inherit. Dispatches `active-file-changed` events (bubbles, composed) on open/close/switch. Same-file suppression: re-opening the current file produces no event. Empty state renders the AC⚡DC watermark; populated state shows a placeholder `.stub-content` naming the active file.
+- `webapp/src/diff-viewer.js` — Phase 3 stub. LitElement with reactive `_files` / `_activeIndex` state. Public API (`openFile({path, line?, searchText?})`, `closeFile(path)`, `refreshOpenFiles()`, `getDirtyFiles()`, `hasOpenFiles` getter) matches the shape Phase 3.1's Monaco-backed viewer will inherit. Dispatches `active-file-changed` events (bubbles, composed) on open/close/switch. Same-file suppression: re-opening the current file produces no event. Empty state renders the AIC⚡DC watermark; populated state shows a placeholder `.stub-content` naming the active file.
 - `webapp/src/svg-viewer.js` — same contract as diff-viewer, just for `.svg` files. Phase 3.2's real SVG viewer (side-by-side pan/zoom) will replace the stub. Identical public API + event surface so the app shell treats both uniformly.
 - `webapp/src/app-shell.js` — integration:
   - Imports both viewers and the routing helper
@@ -1093,8 +1093,8 @@ Standalone orchestrator component that combines the file picker (2a) and chat pa
   - Listens on `window` for `files-changed` (server broadcast) and `files-modified` (commit/reset reload signal dispatched by the streaming handler or the commit RPC after mutation)
   - Listens on itself for `selection-changed` (picker event, bubbles up) and `file-clicked` (picker event, bubbles up)
   - Dispatches `navigate-file` on `window` for Phase 3's viewer
-  - Dispatches `ac-toast` on `window` for error/warning surfacing (AppShell's toast layer catches these)
-- **AppShell integration.** `app-shell.js` imports `./files-tab.js` and renders `<ac-files-tab>` when `activeTab === 'files'`. The dialog-body's CSS changed from `padding: 1rem` with `overflow: auto` to `display: flex; flex-direction: column; overflow: hidden` so the files tab can flex-grow to fill the container. The `.tab-placeholder` class retains its own padding for the remaining stub tabs (context, settings).
+  - Dispatches `aic-toast` on `window` for error/warning surfacing (AppShell's toast layer catches these)
+- **AppShell integration.** `app-shell.js` imports `./files-tab.js` and renders `<aic-files-tab>` when `activeTab === 'files'`. The dialog-body's CSS changed from `padding: 1rem` with `overflow: auto` to `display: flex; flex-direction: column; overflow: hidden` so the files tab can flex-grow to fill the container. The `.tab-placeholder` class retains its own padding for the remaining stub tabs (context, settings).
 
 - `webapp/src/files-tab.test.js` — 14 tests across 6 describe blocks:
   - Initial state — picker and chat children render, `_treeLoaded` stays false until RPC is ready, RPC-ready triggers file-tree load with real tree data reaching the picker, rejection surfaces as error toast.
@@ -1149,7 +1149,7 @@ The multi-file design also supported features the user does not need:
 
 - Single Monaco editor instance, reused across opens (disposal only when returning to empty state). Editor construction is expensive; the rewrite preserves the reuse pattern.
 - `loadPanel` for ad-hoc comparison. Uses a dedicated virtual-comparison slot separate from the active-file slot. Two successive `loadPanel` calls accumulate across the slot's left and right sides, preserving the history-browser workflow.
-- File navigation grid (`ac-file-nav`). The grid becomes pure navigation history — it tracks visited paths and supports Alt+Arrow traversal, but the diff viewer refetches on every navigation. Alt+Arrow is debounced (on Alt release or a short pause) so rapid sequences coalesce to a single fetch for the final target.
+- File navigation grid (`aic-file-nav`). The grid becomes pure navigation history — it tracks visited paths and supports Alt+Arrow traversal, but the diff viewer refetches on every navigation. Alt+Arrow is debounced (on Alt release or a short pause) so rapid sequences coalesce to a single fetch for the final target.
 - Status LED, save pipeline, LSP, markdown/TeX preview, markdown link provider, Ctrl+S, Ctrl+F find widget.
 
 **What goes:**
@@ -1180,7 +1180,7 @@ Wires the frontend counterpart for Layer 4.1's URL service. The backend's in-str
 - `webapp/src/url-chips.js` — new `URLChips` LitElement. Holds a `Map<url, chipState>` keyed by URL. Four states — `detected` (fetch button + dismiss), `fetching` (spinner), `fetched` (include/exclude checkbox + clickable label + remove), `errored` (error message + dismiss). Public API: `updateDetected(list)`, `clearDetected()`, `reset()`, `markFetching(url)`, `markFetched(url, content)`, `markErrored(url, message)`, `remove(url)`, `getActiveFetchedUrls()`. Dispatches four bubbling events — `url-fetch-requested`, `url-remove-requested`, `url-view-requested`, `url-exclusion-changed` — that the chat panel handles.
 
 - `webapp/src/chat-panel.js` — additions:
-  - Imports `./url-chips.js` and registers `<ac-url-chips>` in the template between the pending-images strip and the input row.
+  - Imports `./url-chips.js` and registers `<aic-url-chips>` in the template between the pending-images strip and the input row.
   - `_onInputChange` calls `_scheduleUrlDetection` which debounces (300ms, matching the file-search pattern) and calls `LLMService.detect_urls` on the debounce fire. Stale responses discarded via `_urlDetectGeneration` counter.
   - `_onUrlFetchRequested` transitions the chip through `fetching` → `fetched` / `errored` via `LLMService.fetch_url(url, true, true)`. Distinguishes RPC rejection (toast + errored chip with "Network error") from backend-reported errors on the URLContent payload (errored chip with the payload's error message) from restricted-caller errors (errored chip + warning toast).
   - `_onUrlRemoveRequested` optimistically removes the chip, then calls `LLMService.remove_fetched_url` — the backend's `removed: false` for unknown URLs makes the call safely idempotent.
@@ -1196,7 +1196,7 @@ Design points:
 - **Two detection paths, one truth.** The backend's `_stream_chat` runs its own URL detection on the outgoing user message — that's the authoritative path for injecting URL content into the LLM context. The frontend chip detection is awareness + control; it doesn't tell the backend what to fetch during streaming. Consequence: a URL fetched via the chip's fetch button IS in the backend's `_fetched` dict when the next stream fires, so the backend's own detection skips the re-fetch (session memoization in the URL service). Chip fetches and stream fetches converge on the same state.
 - **Exclusion checkbox is UX-only today.** Toggling the checkbox updates local chip state and dispatches `url-exclusion-changed`, but the backend's `format_url_context` call in `_stream_chat` doesn't take an exclusion list. Threading the exclusion set through to the streaming handler is a separate increment. Users who toggle a fetched chip to "excluded" see the UI change but the backend still includes the URL in the next prompt. Acceptable for a first pass — the common case (user wants to see what was fetched) is fully served, and the less-common case (user wants to exclude after fetching) needs backend plumbing we can add without changing the chip UI.
 - **Errored chips stay visible until dismissed.** Matches the pending-images pattern — users need to see that a fetch failed and decide whether to retry (future enhancement) or dismiss. Auto-clearing after a timeout would hide real problems.
-- **Component decoupling.** The chip component doesn't know about RPC, the chat panel doesn't know about chip state shape. Pattern matches `ac-input-history` + chat-panel host and `ac-file-picker` + files-tab host. Makes chip testing straightforward (drive via public methods, observe rendered DOM) and chat-panel testing simpler (no chip-state bookkeeping).
+- **Component decoupling.** The chip component doesn't know about RPC, the chat panel doesn't know about chip state shape. Pattern matches `aic-input-history` + chat-panel host and `aic-file-picker` + files-tab host. Makes chip testing straightforward (drive via public methods, observe rendered DOM) and chat-panel testing simpler (no chip-state bookkeeping).
 
 ## Remaining Layer 5 work
 

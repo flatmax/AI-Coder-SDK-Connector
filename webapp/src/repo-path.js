@@ -7,7 +7,7 @@
 // (`specs5/plan/README.md`). And every `Repo` RPC takes a path relative to
 // the repo root, rejecting an absolute one outright rather than resolving it,
 // because resolving would be a way around the containment check
-// (`src/ac_dc/repo/paths.py`).
+// (`src/aic_dc/repo/paths.py`).
 //
 // Nothing used to convert between them, so clicking a tool card's file chip
 // asked the backend for `/home/you/repo/tests/thing.py`, got

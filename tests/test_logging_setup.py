@@ -1,4 +1,4 @@
-"""Tests for ac_dc.logging_setup.
+"""Tests for aic_dc.logging_setup.
 
 Covers:
 - idempotent configuration (no duplicate handlers)
@@ -12,11 +12,11 @@ import logging
 
 import pytest
 
-from ac_dc.logging_setup import configure
+from aic_dc.logging_setup import configure
 
 
 @pytest.fixture(autouse=True)
-def reset_ac_dc_handler():
+def reset_aic_dc_handler():
     """Isolate our own handler from other tests.
 
     ``configure()`` mutates the process-wide root logger. We want each
@@ -39,7 +39,7 @@ def reset_ac_dc_handler():
     # Snapshot everything we might perturb.
     saved_handlers = list(root.handlers)
     saved_level = root.level
-    saved_sentinel = getattr(root, "_ac_dc_logging_configured", False)
+    saved_sentinel = getattr(root, "_aic_dc_logging_configured", False)
     saved_noisy_levels = {
         name: logging.getLogger(name).level
         for name in (
@@ -51,14 +51,14 @@ def reset_ac_dc_handler():
     }
 
     # Clear our sentinel so ``configure()`` runs fresh.
-    if hasattr(root, "_ac_dc_logging_configured"):
-        delattr(root, "_ac_dc_logging_configured")
+    if hasattr(root, "_aic_dc_logging_configured"):
+        delattr(root, "_aic_dc_logging_configured")
 
     # Defensively remove any stray handlers of ours that leaked from a
     # prior test — identified by the unique marker attribute set in
     # ``configure()``. Pytest's own caplog handlers are left in place.
     root.handlers = [
-        h for h in root.handlers if not getattr(h, "_ac_dc_handler", False)
+        h for h in root.handlers if not getattr(h, "_aic_dc_handler", False)
     ]
 
     try:
@@ -71,17 +71,17 @@ def reset_ac_dc_handler():
         root.handlers = saved_handlers
         root.setLevel(saved_level)
         if saved_sentinel:
-            setattr(root, "_ac_dc_logging_configured", True)
-        elif hasattr(root, "_ac_dc_logging_configured"):
-            delattr(root, "_ac_dc_logging_configured")
+            setattr(root, "_aic_dc_logging_configured", True)
+        elif hasattr(root, "_aic_dc_logging_configured"):
+            delattr(root, "_aic_dc_logging_configured")
         for name, lvl in saved_noisy_levels.items():
             logging.getLogger(name).setLevel(lvl)
 
 
-def _ac_dc_handlers():
+def _aic_dc_handlers():
     """Return the handlers ``configure()`` installed on the root logger.
 
-    Identified by the ``_ac_dc_handler`` attribute we set when
+    Identified by the ``_aic_dc_handler`` attribute we set when
     constructing the handler. Format-string matching turned out to be
     unreliable — pytest's caplog machinery produced handlers whose
     formatters shared our format string under some configurations.
@@ -90,7 +90,7 @@ def _ac_dc_handlers():
     return [
         h
         for h in logging.getLogger().handlers
-        if getattr(h, "_ac_dc_handler", False)
+        if getattr(h, "_aic_dc_handler", False)
     ]
 
 
@@ -101,11 +101,11 @@ def test_configure_installs_single_handler():
     for every test — we only assert about the handlers that belong to
     us (identified by our formatter's format string).
     """
-    assert _ac_dc_handlers() == []
+    assert _aic_dc_handlers() == []
 
     configure(verbose=False)
 
-    ours = _ac_dc_handlers()
+    ours = _aic_dc_handlers()
     assert len(ours) == 1
     assert isinstance(ours[0], logging.StreamHandler)
 
@@ -121,7 +121,7 @@ def test_configure_is_idempotent():
     configure(verbose=False)
     configure(verbose=True)
 
-    assert len(_ac_dc_handlers()) == 1
+    assert len(_aic_dc_handlers()) == 1
 
 
 def test_verbose_false_sets_info_level():
@@ -180,7 +180,7 @@ def test_the_cap_list_names_only_libraries_we_still_load():
     logger and is left uncapped deliberately: when a turn misbehaves, the
     SDK's DEBUG lines are the ones we actually want ``--verbose`` for.
     """
-    from ac_dc.logging_setup import _NOISY_LIBRARIES
+    from aic_dc.logging_setup import _NOISY_LIBRARIES
 
     assert set(_NOISY_LIBRARIES) == {
         "websockets",
@@ -200,7 +200,7 @@ def test_handler_emits_to_stderr():
     import sys
 
     configure(verbose=False)
-    ours = _ac_dc_handlers()
+    ours = _aic_dc_handlers()
     assert len(ours) == 1
     assert ours[0].stream is sys.stderr
 
@@ -217,7 +217,7 @@ def test_log_format_includes_level_name_and_logger_name():
     formatter = root.handlers[0].formatter
 
     sample = logging.LogRecord(
-        name="ac_dc.something",
+        name="aic_dc.something",
         level=logging.INFO,
         pathname=__file__,
         lineno=1,
@@ -228,5 +228,5 @@ def test_log_format_includes_level_name_and_logger_name():
     formatted = formatter.format(sample)
 
     assert "INFO" in formatted
-    assert "ac_dc.something" in formatted
+    assert "aic_dc.something" in formatted
     assert "hello world" in formatted

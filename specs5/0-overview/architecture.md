@@ -1,18 +1,18 @@
 # Architecture
 
-The big-picture view of AC⚡DC. A new reader should understand the complete system from this file
+The big-picture view of AIC⚡DC. A new reader should understand the complete system from this file
 alone, then dive into specific specs for detail.
 
 ## System Overview
 
-AC⚡DC is a browser frontend for Claude Code. It runs as a local terminal process and presents its UI
+AIC⚡DC is a browser frontend for Claude Code. It runs as a local terminal process and presents its UI
 in the browser. A single Python process hosts all backend services; a Lit-based single-page webapp
 connects to it over one WebSocket. The process drives **one Claude Code session per repository**
 through the Claude Agent SDK, which in turn owns a `claude` CLI subprocess.
 
 The division of labour is the whole design. Claude Code owns the conversation, the context window,
 prompt caching, tool use, bash execution, web fetch, subagents, compaction, file checkpointing, and
-the application of edits. AC⚡DC owns everything a terminal cannot do: spatial navigation over the
+the application of edits. AIC⚡DC owns everything a terminal cannot do: spatial navigation over the
 code the agent touches, a permission dialog with a rendered diff in it, live context and cost
 visualisation, document tooling, multi-client collaboration, and — its one piece of genuine
 intelligence — tree-sitter symbol and document indexes, offered to the agent as MCP tools and to the
@@ -40,7 +40,7 @@ editor as language features.
 │  │  SessionStore mirror      │   └─────────────┬─────────────┘   │
 │  └────────────┬──────────────┘                 │                 │
 │               │             ┌──────────────────┴─────────────┐   │
-│               │             │ In-process MCP server "ac-dc"  │   │
+│               │             │ In-process MCP server "aic-dc"  │   │
 │               │             └──────────────────┬─────────────┘   │
 │               │  ClaudeSDKClient               │ tool calls      │
 │               └───────────────┬────────────────┘                 │
@@ -51,12 +51,12 @@ editor as language features.
               └─────────────────┬───────────────┘
                                 │ its own tools: Read, Edit, Bash, Grep, Task, WebFetch …
        ┌────────────────┬───────┴─────────────┬─────────────────────┐
-       │ git repo       │ filesystem          │ .ac-dc4/            │
+       │ git repo       │ filesystem          │ .aic-dc/            │
        │ (worktree)     │ (agent tool calls)  │ (sessions, history) │
        └────────────────┴─────────────────────┴─────────────────────┘
 ```
 
-Note what the diagram does *not* show: a path from AC⚡DC to a model provider. AC⚡DC never calls an
+Note what the diagram does *not* show: a path from AIC⚡DC to a model provider. AIC⚡DC never calls an
 LLM. Everything that reaches a model goes through the CLI subprocess, which authenticates with its
 own configuration.
 
@@ -72,9 +72,9 @@ own configuration.
 | **DocConvert** | Document format conversion (docx, pdf, pptx, xlsx, … → markdown) |
 | **Symbol index** | Tree-sitter parsing, cross-file reference graph, compact structural map |
 | **Doc index** | Markdown + SVG outline extraction, keyword enrichment, doc reference graph |
-| **MCP bridge** | In-process MCP server `ac-dc` exposing six read-only repo-intelligence tools to the agent |
+| **MCP bridge** | In-process MCP server `aic-dc` exposing six read-only repo-intelligence tools to the agent |
 | **History store** | Append-only JSONL mirror of the rendered transcript — what the user browses and searches |
-| **SessionStore adapter** | Mirrors the engine's own transcript into `.ac-dc4/sessions/`, and is what resume reads back |
+| **SessionStore adapter** | Mirrors the engine's own transcript into `.aic-dc/sessions/`, and is what resume reads back |
 | **App shell** | WebSocket client, server-push routing, dialog host, global shortcuts |
 | **Dialog tabs** | Chat, Context, Settings, Doc Convert |
 | **Permission dialog** | The `can_use_tool` surface: tool name, input, a Monaco diff for edit tools, allow / deny / remember |
@@ -92,7 +92,7 @@ One Python process hosts everything:
   enrichment, and document conversion. The streaming executor is gone — the SDK is async, so there is
   no blocking provider call to isolate
 
-The `claude` CLI runs as a child process owned by the SDK client. AC⚡DC never spawns it directly, and
+The `claude` CLI runs as a child process owned by the SDK client. AIC⚡DC never spawns it directly, and
 never re-creates the client behind the user's back to recover from an error — a fresh session would
 have no context, and the conversation would appear to develop amnesia.
 
@@ -172,7 +172,7 @@ fixed by interop.
 11. Post-turn housekeeping (mirror flush, re-index settle, context-usage refetch) completes and emits
     `postResponseComplete`
 
-Steps 5 and 6 are the whole of AC⚡DC's contribution to what the model sees. There is no prompt
+Steps 5 and 6 are the whole of AIC⚡DC's contribution to what the model sees. There is no prompt
 assembly, no token budget, and no context reconstruction. See
 [`../3-engine/session.md`](../3-engine/session.md).
 
@@ -201,7 +201,7 @@ See [`../3-engine/permissions.md`](../3-engine/permissions.md).
 3. Touched paths are incrementally re-indexed, dispatched to the symbol or document index by
    extension, debounced because an agent mid-refactor writes many files in quick succession
 4. Document files are queued for background keyword enrichment
-5. A pending re-index is **flushed synchronously** before any `ac-dc` index-reading tool returns — our
+5. A pending re-index is **flushed synchronously** before any `aic-dc` index-reading tool returns — our
    own tool must never describe code as it was before the agent's last edit
 
 See [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md).
@@ -216,7 +216,7 @@ See [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md).
 | New Session | Connect without `resume` | Nothing |
 | Undo a file change | `rewind_files(user_message_id)` | Unchanged — files rewind, the conversation does not |
 
-Continuity is never a replay. AC⚡DC does not read its own transcript back into a prompt; the SDK owns
+Continuity is never a replay. AIC⚡DC does not read its own transcript back into a prompt; the SDK owns
 resumption, and the mirrored transcript is a record rather than an input. See
 [`../3-engine/history.md`](../3-engine/history.md).
 
@@ -285,7 +285,7 @@ Four places errors reach the user:
    each one silently degrades capability in a way the user would otherwise attribute to the model.
 
 The old fourth category — LLM-visible system events fed back into the prompt — has no equivalent.
-Claude Code owns its context; AC⚡DC cannot inject a note into it and does not try. Where the agent
+Claude Code owns its context; AIC⚡DC cannot inject a note into it and does not try. Where the agent
 genuinely needs to know an operational fact (that review mode is active, for instance), it arrives as
 turn framing or through an MCP tool it can call.
 
@@ -307,7 +307,7 @@ short-circuits to "allowed" and every caller is treated as localhost.
 ### Credentials Belong to the CLI
 
 The CLI authenticates with its own configuration — a subscription login or an API key in its own
-environment. AC⚡DC does not manage credentials, does not read them, and **never exports provider
+environment. AIC⚡DC does not manage credentials, does not read them, and **never exports provider
 credentials into the process environment**. The native engine's `env` block in `llm.json` did exactly
 that, and under Claude Code it would silently redirect the CLI to a different account or a Bedrock
 endpoint. Startup reports which CLI binary and which credential source were resolved, because a
@@ -327,7 +327,7 @@ Optional dependencies can be missing without breaking core functionality:
 | **openpyxl** | Colour-aware xlsx conversion | Xlsx falls back to markitdown (no cell colour preservation) |
 | **make4ht** + LaTeX | TeX preview (`.tex`/`.latex` in the diff viewer) | Preview button replaced with an install-hint pane |
 | **tree-sitter language grammars** | Per-language symbol extraction | That language produces no symbols; files still editable |
-| **`ac-dc` MCP server** | Repo intelligence as agent tools | Session continues; a banner reports the loss, because the agent otherwise looks inexplicably worse at repo-wide questions |
+| **`aic-dc` MCP server** | Repo intelligence as agent tools | Session continues; a banner reports the loss, because the agent otherwise looks inexplicably worse at repo-wide questions |
 
 The `claude` CLI is **not** in this table. It is the one hard prerequisite: without it there is no
 engine, and startup fails with an actionable message naming the searched locations rather than
@@ -335,13 +335,13 @@ degrading into a UI that cannot answer anything.
 
 ### Per-Repo Working Directory
 
-Each repository gets a `.ac-dc4/` directory at its root, auto-created on first run and added to the
+Each repository gets a `.aic-dc/` directory at its root, auto-created on first run and added to the
 repo's `.gitignore`:
 
 | Path | Contents |
 |---|---|
 | `sessions/` | The engine's own transcripts, mirrored via the SDK `SessionStore`, plus summary sidecars and per-subagent transcripts. The one transcript: the engine resumes from it and the history browser reads it |
-| `events.jsonl` | AC⚡DC's own operational events — commit, reset, review entry and exit, preset switch, permission-mode change. No message content |
+| `events.jsonl` | AIC⚡DC's own operational events — commit, reset, review entry and exit, preset switch, permission-mode change. No message content |
 | `index/` | Derived search / summary / request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Keyword-enriched outline cache sidecars |
 | `tex_preview/` | Transient TeX compilation workspace |

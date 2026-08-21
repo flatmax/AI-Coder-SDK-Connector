@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.messages — conversion phase 1.
+"""Tests for aic_dc.claude_code.messages — conversion phase 1.
 
 The pump's translation layer, fed real SDK message objects. Everything
 here is offline: constructing an ``AssistantMessage`` needs no CLI, which
@@ -44,7 +44,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from ac_dc.claude_code.messages import (
+from aic_dc.claude_code.messages import (
     TOOL_INPUT_SUMMARY_CHARS,
     TOOL_RESULT_PREVIEW_CHARS,
     TOOL_RESULT_PREVIEW_LINES,
@@ -258,7 +258,7 @@ class TestSystemMessages:
                     "model": "claude-opus-5",
                     "cwd": "/repo",
                     "tools": ["Read", "Edit"],
-                    "mcp_servers": [{"name": "ac-dc", "status": "connected"}],
+                    "mcp_servers": [{"name": "aic-dc", "status": "connected"}],
                     "slash_commands": ["review"],
                     "permissionMode": "plan",
                     "somethingNew": 1,
@@ -922,8 +922,8 @@ class TestToolCards:
         assert self._use(translator)[0].payload["gated"] is False
 
     def test_mcp_tools_name_their_server(self, translator):
-        events = self._use(translator, name="mcp__ac-dc__symbol_map", input={})
-        assert events[0].payload["server"] == "ac-dc"
+        events = self._use(translator, name="mcp__aic-dc__symbol_map", input={})
+        assert events[0].payload["server"] == "aic-dc"
 
     def test_builtin_tools_have_no_server(self, translator):
         assert self._use(translator)[0].payload["server"] is None
@@ -1112,7 +1112,7 @@ class TestResult:
     def test_a_missing_cost_stays_missing_rather_than_becoming_zero(self, translator):
         """The CLI's wire schema types ``total_cost_usd`` as a plain number
         with no null branch, so a live result always carries a figure — but
-        the translator also replays turns AC⚡DC wrote itself, where cost was
+        the translator also replays turns AIC⚡DC wrote itself, where cost was
         never recorded. Defaulting that to 0.0 would render as "free"."""
         events = translator.translate(result_message(total_cost_usd=None))
         assert events[0].payload["total_cost_usd"] is None

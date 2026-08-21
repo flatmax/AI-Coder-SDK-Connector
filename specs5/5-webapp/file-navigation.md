@@ -242,7 +242,7 @@ Capturing only on the Alt+Arrow path is the specific bug this rules out: the mos
 
 **Ordering.** Capture MUST be synchronous, before the target's `openFile` swaps the Monaco model — a read afterwards returns the incoming file's zero scroll. Restore waits for `openFile` to resolve, then applies preview mode **before** the scroll offsets: toggling preview rebuilds the editor at half width, and offsets captured against the split layout would land wrong if applied to the full-width pane first.
 
-**Scope.** Session-only; the map does not survive a page reload. Reload restores a single file — the last-opened one — from `ac-last-viewport` in localStorage (see [shell.md](shell.md)). Bounded at 200 paths, evicting least-recently-touched, so a long-lived tab that browses thousands of files doesn't grow without limit.
+**Scope.** Session-only; the map does not survive a page reload. Reload restores a single file — the last-opened one — from `aic-last-viewport` in localStorage (see [shell.md](shell.md)). Bounded at 200 paths, evicting least-recently-touched, so a long-lived tab that browses thousands of files doesn't grow without limit.
 ## Component Architecture
 ### Role
 A component that manages the grid state and renders the HUD overlay. Hosted in the app shell as a sibling of the viewer layer.

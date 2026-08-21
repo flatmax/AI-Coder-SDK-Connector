@@ -367,7 +367,7 @@ export function syncSubagentTab(panel, requestId, row, ownerTab) {
  * lacked, so the tab does not keep an opaque id as its only content.
  *
  * Shaped as a system event, like a commit notice or the unreadable-transcript
- * marker: this is AC⚡DC describing the subagent, not anything the subagent
+ * marker: this is AIC⚡DC describing the subagent, not anything the subagent
  * said.
  */
 function seedDescription(tab) {

@@ -62,7 +62,7 @@ function type(panel, text) {
   return ta;
 }
 
-const palette = (panel) => panel.shadowRoot.querySelector('ac-slash-palette');
+const palette = (panel) => panel.shadowRoot.querySelector('aic-slash-palette');
 
 /** Let the list_commands round trip land and the palette re-render. */
 async function landFetch(panel) {

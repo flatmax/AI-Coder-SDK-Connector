@@ -291,7 +291,7 @@ describe('DiffViewer markdown preview — KaTeX CSS injection', () => {
     el.shadowRoot.querySelector('.preview-button').click();
     await settle(el);
     const katexStyle = el.shadowRoot.querySelector(
-      '[data-ac-dc-katex-css]',
+      '[data-aic-dc-katex-css]',
     );
     expect(katexStyle).toBeTruthy();
     expect(katexStyle.tagName).toBe('STYLE');
@@ -309,7 +309,7 @@ describe('DiffViewer markdown preview — KaTeX CSS injection', () => {
     el.shadowRoot.querySelector('.preview-button').click();
     await settle(el);
     const all = el.shadowRoot.querySelectorAll(
-      '[data-ac-dc-katex-css]',
+      '[data-aic-dc-katex-css]',
     );
     expect(all.length).toBe(1);
   });
@@ -331,7 +331,7 @@ describe('DiffViewer markdown preview — KaTeX CSS injection', () => {
     el.shadowRoot.querySelector('.preview-button').click();
     await settle(el);
     const katexStyle = el.shadowRoot.querySelector(
-      '[data-ac-dc-katex-css]',
+      '[data-aic-dc-katex-css]',
     );
     expect(katexStyle).toBeTruthy();
   });

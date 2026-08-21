@@ -2,7 +2,7 @@
 //
 // Conversion phase 5. Every RPC behind this modal belonged to the
 // native engine and now belongs to `ClaudeCodeService`, reading the
-// CLI's own transcript mirrored under `.ac-dc4/sessions/` rather than
+// CLI's own transcript mirrored under `.aic-dc/sessions/` rather than
 // the native engine's `history.jsonl`. Two consequences reach the UI:
 //
 //   - **The reads answer a union.** `history_list`, `history_load` and
@@ -22,7 +22,7 @@
 //     offered. A session whose transcript did not survive comes back
 //     `resumable: false` and is labelled rather than failed on click.
 //   - **Deleting is irreversible and takes three files with it.** The
-//     transcript is the one thing under `.ac-dc4/` that does not
+//     transcript is the one thing under `.aic-dc/` that does not
 //     rebuild, and it holds the session's pasted images; the events
 //     log and the derived index lose their rows for it too. So Delete
 //     arms on the first click and acts on the second, and the row
@@ -175,7 +175,7 @@ function isResumable(session) {
  * `description` and `agent_type` are the good name and they are the two
  * fields a row may not have: they reach the store as a synthetic
  * `agent_metadata` entry the CLI sends to a *live* mirror, so a session
- * AC⚡DC watched has them and one imported from disk does not
+ * AIC⚡DC watched has them and one imported from disk does not
  * (specs5/3-engine/history.md § Subagent Transcripts). `preview` — the
  * opening words of the prompt the subagent was given — is always there and
  * says much the same thing, so it is the fallback rather than the id, which
@@ -294,7 +294,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
     /**
      * The session id whose Delete button is armed, or null. Deleting
      * a transcript is the one thing in this modal that cannot be
-     * undone — it is also the one thing under `.ac-dc4/` that does
+     * undone — it is also the one thing under `.aic-dc/` that does
      * not rebuild — so it takes two clicks on the same session.
      */
     _confirmDelete: { type: String, state: true },
@@ -1531,7 +1531,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
    * Delete the selected session — first click arms, second confirms.
    *
    * Two clicks because this is the only irreversible thing in the
-   * modal: the transcript is the one file under `.ac-dc4/` that does
+   * modal: the transcript is the one file under `.aic-dc/` that does
    * not rebuild, and it takes the session's pasted images, its
    * operational events and its index rows with it. An arming step is
    * cheaper than an undo that cannot exist.
@@ -1634,7 +1634,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
   /**
    * Copy a message's raw text to the clipboard. Emits a
-   * toast on success via the ac-toast window event so the
+   * toast on success via the aic-toast window event so the
    * app shell's toast layer can render it — the history
    * browser is modal, so a local toast layer here would
    * be overkill.
@@ -1705,7 +1705,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
   _emitToast(message, type = 'info') {
     window.dispatchEvent(
-      new CustomEvent('ac-toast', {
+      new CustomEvent('aic-toast', {
         detail: { message, type },
         bubbles: false,
       }),
@@ -2228,7 +2228,7 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-history-browser', HistoryBrowser);
+customElements.define('aic-history-browser', HistoryBrowser);
 
 // Exported for tests.
 export { formatRelativeTime, SEARCH_DEBOUNCE_MS };

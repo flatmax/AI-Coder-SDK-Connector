@@ -13,34 +13,34 @@ the open question about context visibility has been **answered** — `get_contex
 
 Original status line, as written: *future — not implemented. This document captures the design
 thinking from an exploratory conversation. Revisit when token cost on the native engine becomes the
-dominant complaint, or when a user asks for Claude Code's tool loop against an AC⚡DC repo.*
+dominant complaint, or when a user asks for Claude Code's tool loop against an AIC⚡DC repo.*
 
 Sibling in spirit to `mcp-integration.md`: both describe adopting an external Anthropic surface. The difference in scope matters and is the central caveat of this document — MCP *extends* the native LLM engine, whereas this design *replaces* it. See [What this is not](#what-this-is-not).
 
 ## Motivation
 
-AC⚡DC's native engine is token-expensive. The four-tier stability cache (`3-llm/cache-tiering.md`) and structural maps (`2-indexing/`) exist precisely to mitigate that, and they work — but the strategy is *pre-ingest the repo's structure, then cache it hard*. Cost scales with repo structure, not with the size of the turn.
+AIC⚡DC's native engine is token-expensive. The four-tier stability cache (`3-llm/cache-tiering.md`) and structural maps (`2-indexing/`) exist precisely to mitigate that, and they work — but the strategy is *pre-ingest the repo's structure, then cache it hard*. Cost scales with repo structure, not with the size of the turn.
 
-Claude Code takes the opposite approach: ingest nothing up front, then grep and read on demand. For a large repo and a narrow edit, this is dramatically cheaper. For broad cross-file reasoning over a warm cache, AC⚡DC's approach may well win. The two are genuinely different bets, not better and worse.
+Claude Code takes the opposite approach: ingest nothing up front, then grep and read on demand. For a large repo and a narrow edit, this is dramatically cheaper. For broad cross-file reasoning over a warm cache, AIC⚡DC's approach may well win. The two are genuinely different bets, not better and worse.
 
 Separately — and probably more significant than any context strategy — Claude Code can be billed against a Claude subscription rather than metered API tokens. That is a step change in cost rather than a percentage improvement. **Confirm against the Agent SDK documentation and terms whether subscription auth is permitted for embedded/programmatic use before treating this as available.** If it is not, the cost case rests entirely on the on-demand-read argument above, which is real but far more modest.
 
-The goal of this design is therefore: **Claude Code behaving exactly as it does under the CLI, with every prompt, response, and question rendered in and answered from the AC⚡DC browser UI.** Not a terminal embedded in a web page — the actual agent loop driving AC⚡DC's existing widgets.
+The goal of this design is therefore: **Claude Code behaving exactly as it does under the CLI, with every prompt, response, and question rendered in and answered from the AIC⚡DC browser UI.** Not a terminal embedded in a web page — the actual agent loop driving AIC⚡DC's existing widgets.
 
 ## What this is not
 
 This is **not** an alternative provider behind `LLMService`, and framing it that way will mislead implementation.
 
-Claude Code owns its own context management, its own prompt caching, its own tool loop, and its own edit application. Adopting it means the entire native engine — roughly 15.7k lines across `src/ac_dc/llm_service.py` and `src/ac_dc/llm/` — does not participate:
+Claude Code owns its own context management, its own prompt caching, its own tool loop, and its own edit application. Adopting it means the entire native engine — roughly 15.7k lines across `src/aic_dc/llm_service.py` and `src/aic_dc/llm/` — does not participate:
 
 - the four-tier stability cache (`_stability.py`) — Claude Code caches on its own terms
 - tree-sitter symbol maps and doc outlines — replaced by on-demand grep and read
 - the deterministic anchored edit protocol (`3-llm/edit-protocol.md`) — replaced by the built-in `Edit` tool's matching
 - prompt assembly and breakdown (`_assembly.py`, `_breakdown.py`)
 
-What *is* reused is the entire browser surface, which is the expensive half to build and the half AC⚡DC is good at.
+What *is* reused is the entire browser surface, which is the expensive half to build and the half AIC⚡DC is good at.
 
-So this is a **second engine sharing the UI shell** — closer to "AC⚡DC as a Claude Code frontend" than "AC⚡DC with a new backend." That is a product decision, not a refactor, and it should be made deliberately rather than discovered partway through implementation. The native engine remains the default; this is a mode.
+So this is a **second engine sharing the UI shell** — closer to "AIC⚡DC as a Claude Code frontend" than "AIC⚡DC with a new backend." That is a product decision, not a refactor, and it should be made deliberately rather than discovered partway through implementation. The native engine remains the default; this is a mode.
 
 ## Why it is feasible: the async permission callback
 
@@ -54,9 +54,9 @@ CanUseTool = Callable[
 ]
 ```
 
-AC⚡DC's transport (`1-foundation/rpc-transport.md`) is symmetric bidirectional JSON-RPC over WebSocket via jrpc-oo — the browser publishes its own callback interface, and the backend can call into it and await a result.
+AIC⚡DC's transport (`1-foundation/rpc-transport.md`) is symmetric bidirectional JSON-RPC over WebSocket via jrpc-oo — the browser publishes its own callback interface, and the backend can call into it and await a result.
 
-Composing the two: when Claude Code needs permission, the backend calls the browser, the browser renders a dialog, and the agent loop suspends until the user clicks. No polling, no state machine, no out-of-band queue. The primitive required for "all questions answered in the browser" already exists in AC⚡DC and needs no transport work.
+Composing the two: when Claude Code needs permission, the backend calls the browser, the browser renders a dialog, and the agent loop suspends until the user clicks. No polling, no state machine, no out-of-band queue. The primitive required for "all questions answered in the browser" already exists in AIC⚡DC and needs no transport work.
 
 ## The programmatic surface
 
@@ -67,7 +67,7 @@ Two options exist for driving Claude Code:
 | **Claude Agent SDK** | `claude-agent-sdk` (Python) | In-process. Claude Code packaged as a library: full agent loop, built-in tools, context management, hooks, subagents, permissions, sessions. **This is the one to use** — the backend is already a single Python process. |
 | **Headless CLI** | `claude -p --output-format stream-json` | Subprocess over stdio. Same harness, coarser control, smaller blast radius. Useful as a throwaway feasibility probe; not the destination. |
 
-Both are **harness-only — AC⚡DC hosts and deploys them**, which suits the local-first posture (loopback bind, state under `.ac-dc4/`, no cloud round-trip for repo contents).
+Both are **harness-only — AIC⚡DC hosts and deploys them**, which suits the local-first posture (loopback bind, state under `.aic-dc/`, no cloud round-trip for repo contents).
 
 Docs: `code.claude.com/docs/en/agent-sdk`
 
@@ -147,11 +147,11 @@ class PermissionResultDeny:
 
 `ToolPermissionContext` carries the fields a dialog needs rendered without the frontend having to know tool semantics: `title` (e.g. `"Claude wants to read foo.txt"`), `display_name` (e.g. `"Read file"`), `description`, `suggestions: list[PermissionUpdate]`, `tool_use_id`, `agent_id`, `blocked_path`, `decision_reason`, `signal`.
 
-Returning a `suggestions` entry in `updated_permissions` with destination `localSettings` persists the rule to `.claude/settings.local.json` — i.e. the "don't ask again" checkbox has a real backing mechanism and requires no AC⚡DC-side storage.
+Returning a `suggestions` entry in `updated_permissions` with destination `localSettings` persists the rule to `.claude/settings.local.json` — i.e. the "don't ask again" checkbox has a real backing mechanism and requires no AIC⚡DC-side storage.
 
 ## Mapping to existing browser surfaces
 
-| Claude Code behaviour | Agent SDK hook | AC⚡DC surface |
+| Claude Code behaviour | Agent SDK hook | AIC⚡DC surface |
 |---|---|---|
 | Streaming assistant text | `include_partial_messages` → `StreamEvent` | `webapp/src/chat-panel/streaming.js` |
 | Tool calls (Read/Edit/Bash) | `AssistantMessage` tool-use blocks | chat panel renderer |
@@ -168,7 +168,7 @@ Returning a `suggestions` entry in `updated_permissions` with destination `local
 | Checkpoint / rewind | `rewind_files(user_message_id)` | new control near git actions |
 | Background task notifications | `TaskNotificationMessage`, `stop_task()` | toasts (`app-shell/toasts.js`) |
 
-The subagent row is the standout: AC⚡DC's agent-mode tab machinery (`4-features/`, `chat-panel/tabs.js`) already implements per-agent chat views with archives and re-attach across reconnects. Claude Code subagents land on a UI concept that is already built and tested.
+The subagent row is the standout: AIC⚡DC's agent-mode tab machinery (`4-features/`, `chat-panel/tabs.js`) already implements per-agent chat views with archives and re-attach across reconnects. Claude Code subagents land on a UI concept that is already built and tested.
 
 The Token HUD row is worth noting too — combined with `max_budget_usd`, the HUD becomes a genuine cost display with an enforced ceiling, which is better instrumentation than the native engine currently offers.
 
@@ -190,7 +190,7 @@ After interrupting, the interrupted turn's messages — including its `ResultMes
 
 ### 3. Do not `break` out of the message iterator
 
-The SDK documentation explicitly warns this causes asyncio cleanup issues; use flags and let iteration complete. This matters more here than in a CLI context, because a browser client disconnecting mid-turn is the normal case, not an edge case. Reconciling this with AC⚡DC's existing reconnect logic (`app-shell/reconnect.js`) needs thought.
+The SDK documentation explicitly warns this causes asyncio cleanup issues; use flags and let iteration complete. This matters more here than in a CLI context, because a browser client disconnecting mid-turn is the normal case, not an edge case. Reconciling this with AIC⚡DC's existing reconnect logic (`app-shell/reconnect.js`) needs thought.
 
 ### 4. Built-in slash commands are CLI UI, not SDK features
 
@@ -210,10 +210,10 @@ Deliberately small, because most of the work is already done in the webapp.
 
 **Backend**
 
-- `src/ac_dc/claude_code/session.py` — a `ClaudeCodeSession` wrapping `ClaudeSDKClient`: builds `ClaudeAgentOptions`, owns the receive loop, translates SDK messages into the existing streaming/progress/file-broadcast callbacks.
-- `src/ac_dc/claude_code/permissions.py` — the `can_use_tool` implementation plus the `PreToolUse` display hook.
-- RPC surface mirroring the existing mixin split (`src/ac_dc/llm/_rpc_*.py`) so the webapp contract is unchanged where possible.
-- Engine selection in `src/ac_dc/config/llm.json`, hot-reloadable via the settings tab like every other config value.
+- `src/aic_dc/claude_code/session.py` — a `ClaudeCodeSession` wrapping `ClaudeSDKClient`: builds `ClaudeAgentOptions`, owns the receive loop, translates SDK messages into the existing streaming/progress/file-broadcast callbacks.
+- `src/aic_dc/claude_code/permissions.py` — the `can_use_tool` implementation plus the `PreToolUse` display hook.
+- RPC surface mirroring the existing mixin split (`src/aic_dc/llm/_rpc_*.py`) so the webapp contract is unchanged where possible.
+- Engine selection in `src/aic_dc/config/llm.json`, hot-reloadable via the settings tab like every other config value.
 
 **One genuinely new RPC pair**
 

@@ -27,8 +27,8 @@ tests construct their own fixtures inline.
 
 from __future__ import annotations
 
-from ac_dc.doc_index.formatter import DocFormatter
-from ac_dc.doc_index.models import (
+from aic_dc.doc_index.formatter import DocFormatter
+from aic_dc.doc_index.models import (
     DocHeading,
     DocLink,
     DocOutline,
@@ -987,7 +987,7 @@ class TestIntegration:
             incoming=3,
             outgoing=[
                 DocSectionRef(
-                    target_path="src/ac_dc/context.py",
+                    target_path="src/aic_dc/context.py",
                     target_heading=None,
                 )
             ],
@@ -1028,7 +1028,7 @@ class TestIntegration:
             links=[
                 _link("cache_tiering.md"),
                 _link("prompt_assembly.md"),
-                _link("src/ac_dc/context.py"),
+                _link("src/aic_dc/context.py"),
             ],
         )
 
@@ -1046,12 +1046,12 @@ class TestIntegration:
         assert "(FileContext, token budget)" in out
         assert "[code]" in out
         assert "←3" in out
-        assert "→src/ac_dc/context.py" in out
+        assert "→src/aic_dc/context.py" in out
         assert "### Topic Detection" in out
         assert (
             "→cache_tiering.md#History-Compaction" in out
         )
         assert (
             "links: cache_tiering.md, prompt_assembly.md, "
-            "src/ac_dc/context.py"
+            "src/aic_dc/context.py"
         ) in out

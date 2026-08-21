@@ -396,7 +396,7 @@ Browser-side has two calling mechanisms:
 - `this.server['ClassName.method'](args)` — calls one remote, returns the direct result. Fails with "More than one remote has this RPC" when multiple remotes expose the same method.
 - `this.call['ClassName.method'](args)` — calls every connected remote that has the method, returns `{uuid: result, ...}`.
 
-The AC⚡DC codebase uses `this.call` exclusively via the `rpcExtract` helper. The `this.server` path is legacy and unreliable when collaboration mode has multiple connected clients (which is always, from the server's perspective — it sees one remote per browser).
+The AIC⚡DC codebase uses `this.call` exclusively via the `rpcExtract` helper. The `this.server` path is legacy and unreliable when collaboration mode has multiple connected clients (which is always, from the server's perspective — it sees one remote per browser).
 
 ### `addClass(this, 'AcApp')` name is load-bearing
 
@@ -431,5 +431,5 @@ The Python side's `ExposeClass` unwraps this — the handler sees normal paramet
 - Engine method and event shapes (`EngineState`, `ChunkPayload`, `StreamCompleteResult`, `compactionEvent` stages): `specs-reference/3-engine/session.md`
 - Permission request, decision, and rule shapes: `specs-reference/3-engine/permissions.md`
 - Mirrored-store record schema, session listing, subagent keys: `specs-reference/3-engine/history.md`
-- MCP tool argument and result shapes for the `ac-dc` server: `specs5/3-engine/mcp-bridge.md`
+- MCP tool argument and result shapes for the `aic-dc` server: `specs5/3-engine/mcp-bridge.md`
 - Collaboration restriction policy and admission flow: `specs5/4-features/collaboration.md`

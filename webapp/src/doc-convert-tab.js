@@ -1324,4 +1324,4 @@ export class DocConvertTab extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-doc-convert-tab', DocConvertTab);
+customElements.define('aic-doc-convert-tab', DocConvertTab);

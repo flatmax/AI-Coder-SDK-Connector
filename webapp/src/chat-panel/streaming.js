@@ -607,7 +607,7 @@ export function onEngineHealth(panel, event) {
  * `pre_compact` used to toast here and no longer does. The compaction it
  * announces runs for tens of seconds; the toast expired after three, so the
  * stall it existed to explain was unexplained for most of its duration.
- * `ac-compaction-progress` reads the same event off the same window channel
+ * `aic-compaction-progress` reads the same event off the same window channel
  * and holds an indicator until `compact_boundary` retracts it — see
  * compaction-progress.js. Toasting as well would announce one compaction
  * twice, in two places, with two lifetimes.
@@ -630,7 +630,7 @@ export function onSystemEvent(panel, event) {
  *
  * `PreCompact` is deliberately not one of them, though the compaction notice is
  * real — the `systemEvent` our own PreCompact hook broadcasts drives
- * `ac-compaction-progress`. Toasting here as well would announce one compaction
+ * `aic-compaction-progress`. Toasting here as well would announce one compaction
  * twice over, and more than that in principle: `hookEvent` carries a `phase`,
  * so one hook run reports itself as `hook_started` and again as
  * `hook_response`.
@@ -868,7 +868,7 @@ export function resumeStreamBlocks(panel, tab, stream) {
   return true;
 }
 
-// The retry banner lived here until conversion phase 3. AC⚡DC's own
+// The retry banner lived here until conversion phase 3. AIC⚡DC's own
 // completion wrapper slept between attempts and pushed `streamRetry` before
 // each sleep, so the panel drew a countdown bar to prove the UI hadn't
 // frozen. The CLI retries inside the subprocess and never narrates it; what

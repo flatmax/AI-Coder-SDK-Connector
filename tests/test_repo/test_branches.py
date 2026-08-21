@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ac_dc.repo import Repo
+from aic_dc.repo import Repo
 
 from .conftest import _run_git
 
@@ -322,8 +322,8 @@ class TestBranches:
     def test_is_clean_ignores_untracked_files(self, repo: Repo) -> None:
         """Untracked files don't make the tree dirty — ``-uno`` is passed.
 
-        Users run AC-DC in repos that routinely have editor scratch
-        files and ``.ac-dc4/`` itself lives in the working tree.
+        Users run AIC-DC in repos that routinely have editor scratch
+        files and ``.aic-dc/`` itself lives in the working tree.
         Review-mode and doc-convert gating would be unusable if every
         untracked file tripped them.
         """

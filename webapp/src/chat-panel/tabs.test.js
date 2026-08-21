@@ -1305,7 +1305,7 @@ describe('ChatPanel close-tab backend wiring', () => {
     p.requestUpdate();
     await settle(p);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       p._onTabClose(agentTabId);
       await settle(p);
@@ -1315,7 +1315,7 @@ describe('ChatPanel close-tab backend wiring', () => {
       expect(warnings.length).toBeGreaterThan(0);
       expect(warnings[0].message).toContain('Participants');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -1338,13 +1338,13 @@ describe('ChatPanel close-tab backend wiring', () => {
       p.requestUpdate();
       await settle(p);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         p._onTabClose(agentTabId);
         await settle(p);
         expect(toastListener).not.toHaveBeenCalled();
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       debugSpy.mockRestore();

@@ -1,8 +1,8 @@
 {
-  "name": "ac-dc-webapp",
+  "name": "aic-dc-webapp",
   "private": true,
   "version": "0.0.0-dev",
-  "description": "AC-DC (AI Coder - DeCoder) browser frontend. Built with Vite + Lit.",
+  "description": "AIC-DC (AI-Coder-SDK-Connector) browser frontend. Built with Vite + Lit.",
   "type": "module",
   "engines": {
     "node": ">=20"

@@ -1,7 +1,7 @@
 // ContextUsageTab — what is in the engine's context window right now.
 //
 // Replaces `context-tab.js`, which had two sub-views (Budget and Cache)
-// built entirely on AC⚡DC's own prompt assembly: category allocations it
+// built entirely on AIC⚡DC's own prompt assembly: category allocations it
 // chose, L0-L3 cache tiers it maintained, and a stability tracker that
 // decided when a tier could graduate. None of that survives the
 // conversion, and none of it had an analogue to port — the CLI
@@ -83,7 +83,7 @@ const _SECTIONS = [
 ];
 
 /** localStorage key for the section the user was last reading. */
-const _SECTION_KEY = 'ac-dc-context-section';
+const _SECTION_KEY = 'aic-dc-context-section';
 
 function _loadSection() {
   try {
@@ -557,7 +557,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      * Set in place never trips that, so `_toggleGroup` asks for the
      * render itself. Collapsed is the default because the header carries
      * the counts — the summary is the thing most readers want, and 35
-     * `ac-dc` rows expanded on arrival bury every other section.
+     * `aic-dc` rows expanded on arrival bury every other section.
      */
     this._openGroups = new Set();
 
@@ -1336,7 +1336,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   /**
    * Which tools the conversation is paying for, and for what.
    *
-   * This is the section that answers the spec's "names the `ac-dc` tools
+   * This is the section that answers the spec's "names the `aic-dc` tools
    * it is paying for": the rows carry the engine's own tool names, so
    * the bridge's tools appear here under the names they were registered
    * with, alongside every built-in they compete with for the window.
@@ -1543,13 +1543,13 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * Every tool the session can reach, grouped by where it comes from.
    *
    * One section with collapsible groups rather than three flat tables.
-   * The flat `mcpTools` table this replaces listed 35 `ac-dc` rows next
+   * The flat `mcpTools` table this replaces listed 35 `aic-dc` rows next
    * to two from another server, which made "what does each server cost
    * me" — the question a per-server view exists to answer — a
    * subtraction the reader had to do, and buried the rest of the section
    * under it.
    *
-   * Our own `ac-dc` server appears here like any other. That is a
+   * Our own `aic-dc` server appears here like any other. That is a
    * deliberate spec invariant, not an accident of iteration: the bridge
    * competes for the same window as everything else and this is the one
    * place that keeps us honest about its price.
@@ -1936,7 +1936,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
                   Which of its features this build wired up
                 </button>
                 is the SDK Surface tab (Alt+5) — the same versions, read
-                against what <code>ac_dc.claude_code</code> actually sets,
+                against what <code>aic_dc.claude_code</code> actually sets,
                 registers and dispatches.
               </p>
             `
@@ -1953,7 +1953,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * The initialize reply: summarised by key, then printed verbatim.
    *
    * Its own section rather than a second table under *Engine*, because the
-   * provenance is the other way round — everything above is what AC⚡DC
+   * provenance is the other way round — everything above is what AIC⚡DC
    * resolved, and everything here is what the engine answered. A diagnosis
    * that cannot tell those apart is reading one table as both.
    */
@@ -2042,7 +2042,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           ? html`<p class="note">
               Nothing announced since this panel was mounted. This shows what
               the CLI puts in the message stream, which does not include
-              AC⚡DC's own re-index hook — that one is an SDK callback,
+              AIC⚡DC's own re-index hook — that one is an SDK callback,
               answered over the control channel. So an empty table is the
               normal state here, and it is not evidence that the re-index
               did not run.
@@ -2168,4 +2168,4 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-context-usage-tab', ContextUsageTab);
+customElements.define('aic-context-usage-tab', ContextUsageTab);

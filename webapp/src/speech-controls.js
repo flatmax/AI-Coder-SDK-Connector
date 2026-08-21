@@ -11,7 +11,7 @@
 //   - a close button that stops playback
 //
 // It's a sibling overlay (mounted by the app shell, same
-// as ac-usage-hud) rather than living inside
+// as aic-usage-hud) rather than living inside
 // the chat panel, so it floats above the whole app and
 // survives tab switches. It holds no playback state of its
 // own — it reflects the `speech-player-state` window event
@@ -33,7 +33,7 @@ import {
 } from './speech-player.js';
 
 /** localStorage key for the remembered panel position. */
-const _POS_KEY = 'ac-dc-speech-controls-pos';
+const _POS_KEY = 'aic-dc-speech-controls-pos';
 
 /** Margin (px) kept between the panel and the viewport edge. */
 const _EDGE_MARGIN = 8;
@@ -444,4 +444,4 @@ function _clampToViewport(pos, rect) {
   };
 }
 
-customElements.define('ac-speech-controls', SpeechControls);
+customElements.define('aic-speech-controls', SpeechControls);

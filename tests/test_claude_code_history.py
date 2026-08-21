@@ -23,8 +23,8 @@ from typing import Any
 
 import pytest
 
-from ac_dc.claude_code import history
-from ac_dc.claude_code.history import render_messages, strip_framing, summarise_session
+from aic_dc.claude_code import history
+from aic_dc.claude_code.history import render_messages, strip_framing, summarise_session
 
 SESSION = "sess-1"
 
@@ -385,10 +385,10 @@ class TestToolBlocks:
             human("u1", "go"),
             assistant(
                 "a1",
-                {"type": "tool_use", "id": "t1", "name": "mcp__ac-dc__ui_state", "input": {}},
+                {"type": "tool_use", "id": "t1", "name": "mcp__aic-dc__ui_state", "input": {}},
             ),
         )
-        assert rendered[1]["blocks"][0]["tool"]["server"] == "ac-dc"
+        assert rendered[1]["blocks"][0]["tool"]["server"] == "aic-dc"
 
     def test_a_server_tool_is_flagged_as_one(self):
         rendered = render(
@@ -758,26 +758,26 @@ class TestCompaction:
 
 class TestFramingIsStripped:
     def test_the_ui_context_block_goes(self):
-        """AC-DC wrote it, not the user; leaving it in would bury every
+        """AIC-DC wrote it, not the user; leaving it in would bury every
         historical prompt under a context blob."""
-        framed = "<ac-dc-ui-context>\nSelected: a.py\n</ac-dc-ui-context>\n\nfix the bug"
+        framed = "<aic-dc-ui-context>\nSelected: a.py\n</aic-dc-ui-context>\n\nfix the bug"
         assert strip_framing(framed) == "fix the bug"
 
     def test_an_unframed_prompt_is_untouched(self):
         assert strip_framing("just a prompt") == "just a prompt"
 
     def test_a_prompt_that_merely_mentions_the_tag_is_untouched(self):
-        text = "why does <ac-dc-ui-context> appear in my prompt?"
+        text = "why does <aic-dc-ui-context> appear in my prompt?"
         assert strip_framing(text) == text
 
     def test_unclosed_framing_is_left_alone(self):
         """Truncating at a guess could cut into the user's own words."""
-        text = "<ac-dc-ui-context>\nSelected: a.py\nfix it"
+        text = "<aic-dc-ui-context>\nSelected: a.py\nfix it"
         assert strip_framing(text) == text
 
     def test_stripping_happens_on_the_rendered_prompt(self):
         rendered = render(
-            human("u1", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n\nreal question")
+            human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nreal question")
         )
         assert rendered[0]["content"] == "real question"
 
@@ -958,12 +958,12 @@ class TestTheSessionSummary:
 
 
 # The framing as the CLI's sidecar actually holds it: `first_prompt` is
-# truncated to 200 characters, and AC-DC's context block is longer than
+# truncated to 200 characters, and AIC-DC's context block is longer than
 # that, so the closing tag is not in the field. Taken from a real
 # transcript rather than shortened for the test — the shortening is the
 # reason the original tests passed while every row on screen was wrong.
 _TRUNCATED_FRAMING = (
-    "<ac-dc-ui-context> Files the user has selected in the file picker (a "
+    "<aic-dc-ui-context> Files the user has selected in the file picker (a "
     "hint about what they are pointing at, not their contents — read them "
     "yourself if you need them): - specs5/0-overview/glossary.md -…"
 )
@@ -973,7 +973,7 @@ class TestThePreviewIsWhatTheUserTyped:
     """The session list's only distinguishing field.
 
     Found by rendering a real CLI-written transcript: every row read as the
-    same 100 characters of AC-DC's own framing, because the sidecar's
+    same 100 characters of AIC-DC's own framing, because the sidecar's
     ``first_prompt`` is truncated before the closing tag that
     ``strip_framing`` needs.
     """
@@ -981,7 +981,7 @@ class TestThePreviewIsWhatTheUserTyped:
     def test_the_truncated_framing_does_not_become_the_preview(self):
         summary = summarise_session(
             FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="Some title"),
-            [human("u1", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n\nwhat is next ?")[0]],
+            [human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nwhat is next ?")[0]],
         )
         assert summary["preview"] == "what is next ?"
 
@@ -993,9 +993,9 @@ class TestThePreviewIsWhatTheUserTyped:
             FakeInfo(first_prompt=_TRUNCATED_FRAMING),
         ):
             summary = summarise_session(
-                info, [human("u1", _TRUNCATED_FRAMING + "\n</ac-dc-ui-context>\n\nask")[0]]
+                info, [human("u1", _TRUNCATED_FRAMING + "\n</aic-dc-ui-context>\n\nask")[0]]
             )
-            assert not summary["preview"].startswith("<ac-dc-ui-context>")
+            assert not summary["preview"].startswith("<aic-dc-ui-context>")
 
     def test_the_prompt_is_preferred_over_the_generated_title(self):
         """Both are available and specific; the user's own words win."""
@@ -1032,7 +1032,7 @@ class TestThePreviewIsWhatTheUserTyped:
         """Nothing but framing: the title is better than our own prose."""
         summary = summarise_session(
             FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="A title"),
-            [human("u1", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n")[0]],
+            [human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n")[0]],
         )
         assert summary["preview"] == "A title"
 
@@ -1064,7 +1064,7 @@ class TestACompactedSessionPreviewsTheHumansWords:
             FakeInfo(summary="Determine next phase after phase 5"),
             [
                 human("u1", _COMPACT_SUMMARY)[0],
-                human("u2", "<ac-dc-ui-context>\nctx\n</ac-dc-ui-context>\n\nyes cleanup")[0],
+                human("u2", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nyes cleanup")[0],
             ],
         )
         assert summary["preview"] == "yes cleanup"

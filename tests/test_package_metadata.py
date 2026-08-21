@@ -1,6 +1,6 @@
 """Tests for package metadata and bundled defaults.
 
-Guards the contract that ac_dc is importable, exposes a version string,
+Guards the contract that aic_dc is importable, exposes a version string,
 and ships all the default configuration files that later layers depend on.
 A packaging regression (missing force-include, renamed file, broken VERSION
 read) surfaces here rather than in a downstream layer's tests.
@@ -12,10 +12,10 @@ import json
 import re
 from pathlib import Path
 
-import ac_dc
+import aic_dc
 
 
-CONFIG_DIR = Path(ac_dc.__file__).parent / "config"
+CONFIG_DIR = Path(aic_dc.__file__).parent / "config"
 
 
 def test_version_is_non_empty_string() -> None:
@@ -25,11 +25,11 @@ def test_version_is_non_empty_string() -> None:
     file. Release builds bake a timestamp+SHA string. Either way, reading
     it must succeed and yield something printable.
     """
-    assert isinstance(ac_dc.__version__, str)
-    assert ac_dc.__version__ != ""
+    assert isinstance(aic_dc.__version__, str)
+    assert aic_dc.__version__ != ""
     # Version should be ASCII printable — no surprise control chars from a
     # mis-encoded VERSION file.
-    assert ac_dc.__version__.isprintable()
+    assert aic_dc.__version__.isprintable()
 
 
 def test_version_file_is_shipped() -> None:
@@ -38,7 +38,7 @@ def test_version_file_is_shipped() -> None:
     This is the file _read_version() consults. Absence would mean the
     package was installed without its data files.
     """
-    version_file = Path(ac_dc.__file__).parent / "VERSION"
+    version_file = Path(aic_dc.__file__).parent / "VERSION"
     assert version_file.is_file()
     content = version_file.read_text(encoding="utf-8").strip()
     # Source tree ships 'dev'; release builds bake a timestamp+SHA string
@@ -169,7 +169,7 @@ def test_snippets_json_has_all_three_modes() -> None:
 def test_the_commit_prompt_is_non_empty() -> None:
     """The one surviving prompt ships real content, not a zero-byte stub.
 
-    It survives because generating a commit message is a request AC⚡DC
+    It survives because generating a commit message is a request AIC⚡DC
     makes on its own behalf — a one-shot query with its own instructions,
     not a turn in the user's conversation with the agent.
     """
@@ -182,7 +182,7 @@ def test_no_shipped_file_describes_an_edit_protocol() -> None:
     """No bundled file teaches an edit-block format any more.
 
     The emoji delimiters (🟧🟧🟧 EDIT / 🟨🟨🟨 REPL / 🟩🟩🟩 END) were
-    AC⚡DC's own protocol: the model emitted them in prose and a parser
+    AIC⚡DC's own protocol: the model emitted them in prose and a parser
     turned them into writes. The CLI edits files with its own ``Write``
     and ``Edit`` tools, so a shipped file still specifying the markers
     would be instructing the agent to route edits through a parser that

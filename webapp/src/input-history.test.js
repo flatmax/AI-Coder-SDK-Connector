@@ -17,7 +17,7 @@ import { MAX_ENTRIES } from './input-history.js';
 const _mounted = [];
 
 function mountHistory() {
-  const h = document.createElement('ac-input-history');
+  const h = document.createElement('aic-input-history');
   document.body.appendChild(h);
   _mounted.push(h);
   return h;

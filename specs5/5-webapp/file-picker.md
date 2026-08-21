@@ -162,12 +162,12 @@ not because it ships. What the code does today is write every denial straight to
 `.claude/settings.local.json` (the "Save for this checkout" branch below) with no dialog and no
 preference key, and report the one thing the dropped L0 dialog was honest about — that the rule is not
 instant — through a `takes_effect` toast shown once per session. A reader comparing this section against
-the picker will find no scope dialog and no `ac-dc-deny-read-scope` in `localStorage`.
+the picker will find no scope dialog and no `aic-dc-deny-read-scope` in `localStorage`.
 
 - Denying a file or directory opens a small dialog asking where the rule should live: **This session only** (dropped when the session ends) or **Save for this checkout** (written to `.claude/settings.local.json`, git-ignored, survives restarts)
 - Two buttons plus Cancel. A "Don't ask again" checkbox persists the chosen scope as the default for future denials; Cancel never persists a preference
 - Removing a denial never prompts. The user explicitly wants the agent to see the file again, and there is no scope question to answer — every rule the picker wrote for that path is removed
-- Preference stored in `localStorage` under `ac-dc-deny-read-scope` with values `ask` (default), `session`, or `local`. Resettable from Settings
+- Preference stored in `localStorage` under `aic-dc-deny-read-scope` with values `ask` (default), `session`, or `local`. Resettable from Settings
 - The dialog states the destination file by name. A rule the user cannot find is a rule the user cannot revoke
 
 This replaces the old L0-invalidation prompt, which asked a question about our cache. The question is now
@@ -176,7 +176,7 @@ be asking, and one with a consequence the user can inspect afterwards.
 
 ### Binary Files
 - The picker rejects nothing on a binary row (xlsx, pdf, png, zip). Its path can be inserted and its read can be denied like any other, because neither operation puts content anywhere
-- The consequence lands on the agent instead. A `Read` of a binary fails back to the agent with a reason, inside its own turn, and it adapts. AC⚡DC does not intervene. (An inserted `@path` on a binary is the one case where the failure is the CLI's expansion rather than the agent's tool call — still a message about that file, still not a turn AC⚡DC has to police)
+- The consequence lands on the agent instead. A `Read` of a binary fails back to the agent with a reason, inside its own turn, and it adapts. AIC⚡DC does not intervene. (An inserted `@path` on a binary is the one case where the failure is the CLI's expansion rather than the agent's tool call — still a message about that file, still not a turn AIC⚡DC has to police)
 - Because the failure is the agent's rather than ours, the old machinery is gone: no turn-start binary detection, no trimming of a selected list, no `binaryFilesSkipped` broadcast, and no toast
 - What survives is the useful part. A binary row's tooltip explains that the agent cannot read this file directly and names the Doc Convert tab, in place of the usual gesture list. The explanation is on the row the user is already hovering, rather than in a toast after a turn began. (A per-row **Convert with Doc Convert** context item was specified here and never built; the toolbar's 📄 button, shown when the backend reports markitdown is installed, is the entry point that exists)
 - After conversion the user points at the produced sibling markdown, which the agent can read
@@ -300,7 +300,7 @@ No-op when the path is missing, non-string, or not found in the current tree. Sa
 - Vertical 4px splitter between the file picker and chat panel, widening to a ~20px affordance strip with a `▸` glyph when the picker is collapsed
 - Drag to resize: width clamped to [180px, 50% of the host width]. Minimum prevents the picker from collapsing below readable size; maximum keeps the chat pane at least half the dialog
 - Double-click to toggle collapsed state. Collapsed renders at a fixed ~24px affordance width regardless of the stored drag width; the stored width survives so expand restores the user's prior size
-- Width persists to `ac-dc-picker-width` in localStorage; collapsed flag persists to `ac-dc-picker-collapsed`
+- Width persists to `aic-dc-picker-width` in localStorage; collapsed flag persists to `aic-dc-picker-collapsed`
 - Malformed stored values fall back to a sensible default rather than rendering at a sub-readable size
 - In collapsed mode the splitter is a click target for expand (via double-click); pointerdown does not start a drag since the origin width would be meaningless
 

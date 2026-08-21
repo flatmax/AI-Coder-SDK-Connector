@@ -42,8 +42,8 @@ from contextlib import suppress
 
 import pytest
 
-from ac_dc.claude_code import resume_cleanup
-from ac_dc.main import (
+from aic_dc.claude_code import resume_cleanup
+from aic_dc.main import (
     _child_exited,
     _kill_cli_children,
     _kill_vite,
@@ -517,7 +517,7 @@ class TestPurgingTheResumeDirs:
         """Registered, never discovered by prefix.
 
         Sweeping the temp dir for ``claude-resume-`` would also match the
-        live directory of another AC⚡DC or a plain ``claude`` running
+        live directory of another AIC⚡DC or a plain ``claude`` running
         beside us. Deleting that is a worse bug than the leak.
         """
         ours = _resume_dir(tmp_path, "claude-resume-ours")
@@ -556,6 +556,6 @@ class TestPurgingTheResumeDirs:
 
     def test_mains_wrapper_survives_a_broken_import(self, monkeypatch):
         """An import failure at shutdown must not block the exit."""
-        monkeypatch.setitem(sys.modules, "ac_dc.claude_code.resume_cleanup", object())
+        monkeypatch.setitem(sys.modules, "aic_dc.claude_code.resume_cleanup", object())
 
         _purge_resume_dirs()  # must not raise

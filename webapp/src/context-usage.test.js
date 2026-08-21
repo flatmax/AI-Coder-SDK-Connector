@@ -790,13 +790,13 @@ describe('context-usage derivations', () => {
     it('keys each server by name with a label and a colour', () => {
       const h = mcpHealth({
         mcpServers: [
-          { name: 'ac-dc', status: 'connected' },
+          { name: 'aic-dc', status: 'connected' },
           { name: 'other', status: 'pending' },
         ],
       });
-      expect([...h.keys()]).toEqual(['ac-dc', 'other']);
-      expect(h.get('ac-dc').label).toBe('connected');
-      expect(h.get('ac-dc').color).toBe('#7ee787');
+      expect([...h.keys()]).toEqual(['aic-dc', 'other']);
+      expect(h.get('aic-dc').label).toBe('connected');
+      expect(h.get('aic-dc').color).toBe('#7ee787');
       // "pending" is what the wire says; "connecting" is what it means.
       expect(h.get('other').label).toBe('connecting');
     });
@@ -821,16 +821,16 @@ describe('context-usage derivations', () => {
       const h = mcpHealth({
         mcpServers: [
           {
-            name: 'ac-dc',
+            name: 'aic-dc',
             status: 'connected',
             scope: 'project',
             config: { type: 'sse', url: 'http://localhost:9000' },
-            serverInfo: { name: 'ac-dc', version: '0.4.1' },
+            serverInfo: { name: 'aic-dc', version: '0.4.1' },
             tools: [{ name: 'symbol_map' }, { name: 'ui_state' }],
           },
         ],
       });
-      expect(h.get('ac-dc')).toMatchObject({
+      expect(h.get('aic-dc')).toMatchObject({
         scope: 'project',
         transport: 'sse',
         version: '0.4.1',
@@ -876,14 +876,14 @@ describe('context-usage derivations', () => {
 
   describe('serverGroups', () => {
     const tools = [
-      { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
-      { name: 'doc_outline', serverName: 'ac-dc', tokens: 700, isLoaded: false },
+      { name: 'symbol_map', serverName: 'aic-dc', tokens: 900 },
+      { name: 'doc_outline', serverName: 'aic-dc', tokens: 700, isLoaded: false },
       { name: 'search', serverName: 'other', tokens: 4000 },
     ];
 
     it('groups tools under the server that provides them', () => {
       const g = serverGroups({ mcpTools: tools });
-      expect(g.map((x) => x.name)).toEqual(['other', 'ac-dc']);
+      expect(g.map((x) => x.name)).toEqual(['other', 'aic-dc']);
       expect(g[1].tools.map((t) => t.name)).toEqual([
         'symbol_map',
         'doc_outline',
@@ -893,8 +893,8 @@ describe('context-usage derivations', () => {
     it('counts loaded and deferred separately', () => {
       // Summing them would report a cost the session is not paying: a
       // deferred tool's schema is not in the window until first use.
-      const [, acdc] = serverGroups({ mcpTools: tools });
-      expect(acdc).toMatchObject({
+      const [, aicdc] = serverGroups({ mcpTools: tools });
+      expect(aicdc).toMatchObject({
         tokens: 1600,
         loadedTokens: 900,
         deferredTokens: 700,
@@ -916,10 +916,10 @@ describe('context-usage derivations', () => {
 
     it('joins health onto the group', () => {
       const health = mcpHealth({
-        mcpServers: [{ name: 'ac-dc', status: 'connected' }],
+        mcpServers: [{ name: 'aic-dc', status: 'connected' }],
       });
       const g = serverGroups({ mcpTools: tools }, health);
-      expect(g.find((x) => x.name === 'ac-dc').health.label).toBe('connected');
+      expect(g.find((x) => x.name === 'aic-dc').health.label).toBe('connected');
       expect(g.find((x) => x.name === 'other').health).toBeNull();
     });
 
@@ -941,24 +941,24 @@ describe('context-usage derivations', () => {
       // row that needs acting on.
       const health = mcpHealth({
         mcpServers: [
-          { name: 'ac-dc', status: 'failed' },
+          { name: 'aic-dc', status: 'failed' },
           { name: 'other', status: 'connected' },
         ],
       });
       expect(serverGroups({ mcpTools: tools }, health).map((x) => x.name))
-        .toEqual(['ac-dc', 'other']);
+        .toEqual(['aic-dc', 'other']);
     });
 
     it('does not promote a disabled or connecting server', () => {
       // Disabled is a choice somebody made, and pending resolves itself.
       const health = mcpHealth({
         mcpServers: [
-          { name: 'ac-dc', status: 'disabled' },
+          { name: 'aic-dc', status: 'disabled' },
           { name: 'other', status: 'pending' },
         ],
       });
       expect(serverGroups({ mcpTools: tools }, health).map((x) => x.name))
-        .toEqual(['other', 'ac-dc']);
+        .toEqual(['other', 'aic-dc']);
     });
 
     it('breaks a token tie by name, so the order is stable', () => {
@@ -982,7 +982,7 @@ describe('context-usage derivations', () => {
       expect(serverGroups({})).toEqual([]);
       expect(serverGroups({ mcpTools: 'nope' })).toEqual([]);
       expect(serverGroups({ mcpTools: [null, 'x'] })).toEqual([]);
-      expect(serverGroups({ mcpTools: tools }, { 'ac-dc': {} })).toHaveLength(2);
+      expect(serverGroups({ mcpTools: tools }, { 'aic-dc': {} })).toHaveLength(2);
     });
   });
 

@@ -30,7 +30,7 @@ export function getWebSocketPort() {
   }
   const parsed = parseInt(raw, 10);
   if (Number.isNaN(parsed) || parsed <= 0 || parsed > 65535) {
-    console.warn(`ac-dc: ignoring invalid ?port=${raw}; using default`);
+    console.warn(`aic-dc: ignoring invalid ?port=${raw}; using default`);
     return DEFAULT_WS_PORT;
   }
   return parsed;

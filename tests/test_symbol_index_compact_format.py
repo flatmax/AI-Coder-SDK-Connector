@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.compact_format — Layer 2.6.
+"""Tests for aic_dc.symbol_index.compact_format — Layer 2.6.
 
 Scope: the concrete CompactFormatter that renders code
 symbol maps. Pins the exact byte-stable output shape that
@@ -36,8 +36,8 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.compact_format import CompactFormatter
-from ac_dc.symbol_index.models import (
+from aic_dc.symbol_index.compact_format import CompactFormatter
+from aic_dc.symbol_index.models import (
     CallSite,
     FileSymbols,
     Import,
@@ -933,15 +933,15 @@ class TestPathAliases:
         """File headers use the alias when one matches."""
         fmt = CompactFormatter(include_line_numbers=False)
         files = [
-            _fs("src/ac_dc/symbol_index/a.py", symbols=[_sym("a")]),
-            _fs("src/ac_dc/symbol_index/b.py", symbols=[_sym("b")]),
-            _fs("src/ac_dc/symbol_index/c.py", symbols=[_sym("c")]),
-            _fs("src/ac_dc/symbol_index/d.py", symbols=[_sym("d")]),
+            _fs("src/aic_dc/symbol_index/a.py", symbols=[_sym("a")]),
+            _fs("src/aic_dc/symbol_index/b.py", symbols=[_sym("b")]),
+            _fs("src/aic_dc/symbol_index/c.py", symbols=[_sym("c")]),
+            _fs("src/aic_dc/symbol_index/d.py", symbols=[_sym("d")]),
         ]
         result = fmt.format_files(files)
         assert "@1/a.py:" in result
         # Legend declares the alias.
-        assert "# @1/=src/ac_dc/symbol_index/" in result
+        assert "# @1/=src/aic_dc/symbol_index/" in result
 
     def test_no_qualifying_prefix_no_alias(self) -> None:
         """Short or single-use prefixes don't produce aliases."""

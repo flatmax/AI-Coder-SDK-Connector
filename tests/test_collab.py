@@ -1,4 +1,4 @@
-"""Tests for ac_dc.collab — Layer 4.4.1.
+"""Tests for aic_dc.collab — Layer 4.4.1.
 
 Scope:
 
@@ -48,7 +48,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ac_dc.collab import (
+from aic_dc.collab import (
     Collab,
     CollabServer,
     ConnectedClient,
@@ -178,7 +178,7 @@ class TestIsLocalhostIp:
         """A LAN IP matching a local interface counts as localhost."""
         # Spoof the interface set to include a known LAN IP.
         monkeypatch.setattr(
-            "ac_dc.collab._local_interface_ips",
+            "aic_dc.collab._local_interface_ips",
             lambda: {"192.168.1.50", "10.0.0.1"},
         )
         assert is_localhost_ip("192.168.1.50") is True
@@ -188,7 +188,7 @@ class TestIsLocalhostIp:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "ac_dc.collab._local_interface_ips",
+            "aic_dc.collab._local_interface_ips",
             lambda: {"192.168.1.50"},
         )
         assert is_localhost_ip("192.168.1.99") is False

@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.cache — Layer 2.3.
+"""Tests for aic_dc.symbol_index.cache — Layer 2.3.
 
 Scope: the SymbolCache signature-hash logic. Most behaviour
 (get/put/invalidate/clear/has/cached_paths) is inherited from
@@ -15,8 +15,8 @@ what SymbolCache actually implements:
 
 from __future__ import annotations
 
-from ac_dc.symbol_index.cache import SymbolCache
-from ac_dc.symbol_index.models import (
+from aic_dc.symbol_index.cache import SymbolCache
+from aic_dc.symbol_index.models import (
     CallSite,
     FileSymbols,
     Import,

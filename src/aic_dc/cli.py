@@ -1,0 +1,145 @@
+"""Command-line entry point for ``aic-dc``.
+
+Layer 0 stub — prints a startup banner, parses arguments, and exits. Full
+startup orchestration (port selection, WebSocket server, webapp serving,
+deferred indexing) lands in Layer 6 per specs4/6-deployment/startup.md.
+
+Exposed via the ``aic-dc`` console script declared in pyproject.toml.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+
+from aic_dc import __version__
+from aic_dc.logging_setup import configure as configure_logging
+
+logger = logging.getLogger(__name__)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the argparse parser.
+
+    The flag set matches specs4/6-deployment/startup.md#cli-arguments so that
+    flags are stable from day one. Layer 0 only honours --version and --help;
+    other flags are accepted but currently produce a not-implemented banner.
+    """
+    parser = argparse.ArgumentParser(
+        prog="aic-dc",
+        description="AIC-DC — AI-Coder-SDK-Connector. A browser UI over AI coding-agent SDKs.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"aic-dc {__version__}",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=18080,
+        help="RPC WebSocket server port (default: 18080)",
+    )
+    parser.add_argument(
+        "--webapp-port",
+        type=int,
+        default=18999,
+        help="Webapp static/dev server port (default: 18999)",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not auto-open the browser on startup",
+    )
+    parser.add_argument(
+        "--repo-path",
+        default=".",
+        help="Path to the git repository to operate on (default: current directory)",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Run the Vite dev server instead of the bundled webapp",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Build and run the Vite preview server instead of the bundled webapp",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable debug-level logging",
+    )
+    parser.add_argument(
+        "--collab",
+        action="store_true",
+        help="Enable collaboration mode (bind all interfaces, admission-gated)",
+    )
+    parser.add_argument(
+        "--experimental",
+        action="store_true",
+        help="Unlock experimental features in the UI (e.g. agentic coding)",
+    )
+    return parser
+
+
+def _print_banner() -> None:
+    """Print the startup banner to stderr.
+
+    Uses ASCII only so it works over ssh and in plain terminals. Version
+    reads the baked VERSION file via ``__version__``. Release builds have
+    the VERSION file baked with a real timestamp+SHA; source installs show
+    "dev".
+    """
+    banner = f"""
+  AIC-DC  —  AI-Coder-SDK-Connector
+  version {__version__}
+"""
+    print(banner, file=sys.stderr)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point.
+
+    Parameters
+    ----------
+    argv:
+        Optional argument list for testing. When ``None`` the default
+        ``sys.argv[1:]`` is used.
+
+    Returns
+    -------
+    int
+        Process exit code. 0 on success.
+    """
+    parser = _build_parser()
+    # Parse (and validate) arguments — argparse will exit on --help/--version
+    # or on parse errors.
+    args = parser.parse_args(argv)
+    # Install logging before anything else that might want to log.
+    configure_logging(verbose=args.verbose)
+    logger.debug("aic-dc invoked with args=%s", args)
+    _print_banner()
+
+    # Launch the full startup orchestrator.
+    import asyncio
+    from aic_dc.main import run
+
+    asyncio.run(run(
+        repo_path=args.repo_path,
+        server_port=args.server_port,
+        webapp_port=args.webapp_port,
+        no_browser=args.no_browser,
+        dev=args.dev,
+        preview=args.preview,
+        verbose=args.verbose,
+        collab=args.collab,
+        experimental=args.experimental,
+    ))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

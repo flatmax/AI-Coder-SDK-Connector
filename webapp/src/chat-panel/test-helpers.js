@@ -37,9 +37,9 @@ import {
 
 export const _mounted = [];
 
-/** Mount a fresh `ac-chat-panel` with optional initial props. */
+/** Mount a fresh `aic-chat-panel` with optional initial props. */
 export function mountPanel(props = {}) {
-  const p = document.createElement('ac-chat-panel');
+  const p = document.createElement('aic-chat-panel');
   Object.assign(p, props);
   document.body.appendChild(p);
   _mounted.push(p);

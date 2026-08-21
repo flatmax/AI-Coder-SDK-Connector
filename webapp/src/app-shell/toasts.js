@@ -34,7 +34,7 @@ export function showToast(host, message, type = 'info') {
  * Suppressed after the first successful display within a
  * browser session via a localStorage flag. Rationale: the
  * condition is effectively permanent for the session
- * (user has to install `ac-dc[docs]` and restart the
+ * (user has to install `aic-dc[docs]` and restart the
  * backend to fix it), so repeated toasts would just be
  * noise. A page reload or a new session doesn't re-show
  * — the flag persists.
@@ -56,7 +56,7 @@ export function maybeShowEnrichmentUnavailableToast(host, status) {
   if (alreadyShown) return;
   showToast(
     host,
-    'Keyword enrichment disabled — install ac-dc[docs] '
+    'Keyword enrichment disabled — install aic-dc[docs] '
     + 'for richer document outlines.',
     'warning',
   );

@@ -13,7 +13,7 @@ Verified against `claude-agent-sdk` **0.2.137**.
 ### Working-directory layout
 
 ```
-.ac-dc4/
+.aic-dc/
   sessions/
     <project_key>/
       <session-uuid>.jsonl              — engine transcript, mirrored from the CLI
@@ -21,14 +21,14 @@ Verified against `claude-agent-sdk` **0.2.137**.
       <session-uuid>/
         subagents/
           agent-<agent-id>.jsonl        — subagent transcript
-  events.jsonl                          — AC⚡DC's own operational events
+  events.jsonl                          — AIC⚡DC's own operational events
   index/                                — derived search / summary / request-ID index (rebuildable)
 ```
 
 `history.jsonl` and `images/` are gone — [CC-19](../../specs5/plan/decisions.md#cc-19). A directory
 written by the native engine keeps both; nothing reads them.
 
-The `<project_key>` level exists even though AC⚡DC is single-repo: the SDK's key includes it, and
+The `<project_key>` level exists even though AIC⚡DC is single-repo: the SDK's key includes it, and
 worktrees of the same repo produce different keys. Flattening it would make two worktrees collide.
 
 ### `project_key` derivation
@@ -132,7 +132,7 @@ Result order is unspecified — the SDK sorts by `mtime` descending, so ours nee
 ### Events log (`events.jsonl`) record schema
 
 One record per line, UTF-8, append-only. This file holds **only** what the transcript never contained:
-AC⚡DC's own operational events. Messages, tool calls and turn results are not duplicated here — they
+AIC⚡DC's own operational events. Messages, tool calls and turn results are not duplicated here — they
 are read from the transcript through the SDK's parsers, and their browse rendering is built at read
 time.
 
@@ -288,7 +288,7 @@ or unreadable transcript, which is what `resumable: false` reports.
 
 | Constant | Value | Notes |
 |---|---|---|
-| Disk-usage warning threshold | 1 GiB over `.ac-dc4/sessions/` | One-shot per server lifetime, dismissible, never blocking. Checked at startup and after each turn — carried by `EngineState.disk_warning` and `PostResponsePayload.disk_warning`, sharing one flag so it is delivered once whichever notices first. The measurement is a directory walk in the executor, and a size that cannot be read is silent rather than a failed turn. Carried over from the agent-archive warning; only the measured path changed |
+| Disk-usage warning threshold | 1 GiB over `.aic-dc/sessions/` | One-shot per server lifetime, dismissible, never blocking. Checked at startup and after each turn — carried by `EngineState.disk_warning` and `PostResponsePayload.disk_warning`, sharing one flag so it is delivered once whichever notices first. The measurement is a directory walk in the executor, and a size that cannot be read is silent rather than a failed turn. Carried over from the agent-archive warning; only the measured path changed |
 | `session_store_flush` | `"eager"` | Batched flushing (the default) can hold a turn's tail until the result message, which makes a crash lose the visible tail of an in-progress turn |
 | Mirror append retries | 3 attempts, short backoff | SDK-side. Then dropped and surfaced as `MirrorErrorMessage` |
 | `load_timeout_ms` | 60 000 | Per `load()` / `list_subkeys()` during resume materialization |
@@ -447,7 +447,7 @@ Consequences:
 
 - **No pre-acknowledgement durability exists anywhere.** The parent spec's old invariant leaned on our
   own `history.jsonl`, written before the turn was acknowledged; with that store retired
-  ([CC-19](../../specs5/plan/decisions.md#cc-19)) the earliest a message is durable in `.ac-dc4/` is
+  ([CC-19](../../specs5/plan/decisions.md#cc-19)) the earliest a message is durable in `.aic-dc/` is
   the first eager flush *during* the turn. The browser's `input-history.js` covers the window.
 - `MirrorErrorMessage` (a `SystemMessage` subclass, `subtype: "mirror_error"`, fields `key` and
   `error`) must be surfaced — it means the repo-local copy has a hole. `EngineHealth.mirror_gaps`
@@ -504,7 +504,7 @@ fails and the fault is ambiguous between our store and our reading of the protoc
 
 The SDK never deletes from the store unless `delete_session_via_store()` is called. Retention is the
 adapter's responsibility; local transcripts under `CLAUDE_CONFIG_DIR` are swept independently by the
-CLI's `cleanupPeriodDays` setting. AC⚡DC does not expire sessions automatically — it warns at the
+CLI's `cleanupPeriodDays` setting. AIC⚡DC does not expire sessions automatically — it warns at the
 threshold above and offers explicit deletion.
 
 Deleting a main-transcript key also removes that session's summary sidecar and its subagent directory:

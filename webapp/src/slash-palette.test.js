@@ -43,7 +43,7 @@ const COMMANDS = [
 const _mounted = [];
 
 function mountPalette() {
-  const el = document.createElement('ac-slash-palette');
+  const el = document.createElement('aic-slash-palette');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;

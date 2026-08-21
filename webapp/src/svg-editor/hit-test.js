@@ -179,7 +179,7 @@ export default {
    * bug only reproduces on click-then-delete.
    *
    * We walk `activeElement` across shadow roots so the
-   * chat panel's nested textarea (inside <ac-chat-panel>'s
+   * chat panel's nested textarea (inside <aic-chat-panel>'s
    * shadow) is found. Non-editable focus (body, a
    * button) is left alone — it isn't the cause.
    */

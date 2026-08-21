@@ -411,7 +411,7 @@ describe('reportsUsage', () => {
   });
 
   it('is true for a crash footer once the turn had done work', () => {
-    // The footer is AC⚡DC's own, so it carries no usage whatsoever; that the
+    // The footer is AIC⚡DC's own, so it carries no usage whatsoever; that the
     // turn ran tools or answered is the only evidence it spent money.
     expect(reportsUsage({ turn_cost_basis: UNPRICED, tool_calls: 4 })).toBe(true);
     expect(reportsUsage({ turn_cost_basis: UNPRICED, response: 'partial' })).toBe(true);

@@ -290,9 +290,9 @@ export async function onResetToHead(host) {
     // Refresh open viewers so the stale post-edit
     // content is replaced with the HEAD state.
     const diffViewer =
-      host.shadowRoot?.querySelector('ac-diff-viewer');
+      host.shadowRoot?.querySelector('aic-diff-viewer');
     const svgViewer =
-      host.shadowRoot?.querySelector('ac-svg-viewer');
+      host.shadowRoot?.querySelector('aic-svg-viewer');
     if (diffViewer?.refreshOpenFiles) {
       diffViewer.refreshOpenFiles().catch(() => {});
     }

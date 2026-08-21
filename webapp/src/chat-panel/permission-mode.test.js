@@ -53,10 +53,10 @@ async function choose(panel, value) {
 
 function captureToasts() {
   const toasts = vi.fn();
-  window.addEventListener('ac-toast', toasts);
+  window.addEventListener('aic-toast', toasts);
   return {
     toasts,
-    done: () => window.removeEventListener('ac-toast', toasts),
+    done: () => window.removeEventListener('aic-toast', toasts),
   };
 }
 

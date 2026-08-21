@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.matlab — Layer 2.2.
+"""Tests for aic_dc.symbol_index.extractors.matlab — Layer 2.2.
 
 Scope: the MatlabExtractor — a regex-based, tree-optional
 extractor. classdef + inheritance, functions / methods, imports,
@@ -19,9 +19,9 @@ Strategy:
 
 from __future__ import annotations
 
-from ac_dc.symbol_index.extractors.matlab import MatlabExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import language_for_file
+from aic_dc.symbol_index.extractors.matlab import MatlabExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import language_for_file
 
 
 def _extract(source: str, path: str = "test.m") -> FileSymbols:

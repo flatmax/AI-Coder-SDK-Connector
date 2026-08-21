@@ -89,11 +89,11 @@ Canonical ownership is the one place where topical thinking survives in the mirr
 ## No Synced Mirror
 
 An earlier revision of this tree carried `specs-reference/3-llm/prompts/` — byte-exact copies of the
-prompt files under `src/ac_dc/config/`, kept in step by `scripts/sync_prompts.py`. It existed because
+prompt files under `src/aic_dc/config/`, kept in step by `scripts/sync_prompts.py`. It existed because
 prompt text was LLM-interop: a careless edit could break compaction JSON parsing, edit-block
 reliability, or commit-message conventions.
 
-It is gone, along with the prompts, the sync script, and the reason for either. AC⚡DC assembles no
+It is gone, along with the prompts, the sync script, and the reason for either. AIC⚡DC assembles no
 LLM-facing prompt text, so no file in this repository is interop-critical in that way, and nothing here
 mirrors source. The one surviving file with prompt-shaped content is `commit.md`, and it is the text of
 an ordinary user turn — if it is wrong, the user reads a poor commit message and edits it, which needs

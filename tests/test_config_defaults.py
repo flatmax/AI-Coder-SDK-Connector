@@ -13,10 +13,10 @@ import dataclasses
 import json
 from pathlib import Path
 
-import ac_dc
+import aic_dc
 
 
-CONFIG_DIR = Path(ac_dc.__file__).parent / "config"
+CONFIG_DIR = Path(aic_dc.__file__).parent / "config"
 
 
 def _load_json(name: str) -> dict:
@@ -31,7 +31,7 @@ def test_engine_defaults_are_all_null() -> None:
 
     ``engine.json`` replaced ``llm.json``, and the shape of the question
     changed with it. The old file named a provider-qualified model and an
-    env dict because AC⚡DC called the provider itself. The CLI resolves
+    env dict because AIC⚡DC called the provider itself. The CLI resolves
     its own credentials and its own default model, so a shipped value
     here would override the user's own ``claude`` configuration with a
     guess made at packaging time
@@ -49,7 +49,7 @@ def test_engine_defaults_cover_every_field() -> None:
     A key the loader ignores is a setting the user can edit with no
     effect; a field absent from the file is one they will not discover.
     """
-    from ac_dc.claude_code.engine_config import EngineConfig
+    from aic_dc.claude_code.engine_config import EngineConfig
 
     fields = {f.name for f in dataclasses.fields(EngineConfig)}
     assert set(_load_json("engine.json")) == fields
@@ -57,7 +57,7 @@ def test_engine_defaults_cover_every_field() -> None:
 
 def test_engine_defaults_survive_the_loader() -> None:
     """Loading the shipped file yields an all-null config, not a warning."""
-    from ac_dc.claude_code.engine_config import EngineConfig
+    from aic_dc.claude_code.engine_config import EngineConfig
 
     loaded = EngineConfig.load(CONFIG_DIR)
     assert loaded == EngineConfig()
@@ -91,8 +91,8 @@ def test_history_defaults_match_the_code() -> None:
     Two owners of one number is one too many when the file is the one the
     user edits and the constant is the one that answers when they have not.
     """
-    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
-    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+    from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from aic_dc.claude_code.session_store import DISK_WARNING_BYTES
 
     cfg = _load_json("app.json")["history"]
     assert cfg["session_dir_warning_bytes"] == DISK_WARNING_BYTES
@@ -203,7 +203,7 @@ def test_commit_prompt_mentions_conventional_commit_style() -> None:
 def test_commit_prompt_asks_for_a_bare_message() -> None:
     """No fencing, no preamble — the output goes straight into git.
 
-    ``ac_dc.claude_code.commit`` strips a wrapping fence defensively, but
+    ``aic_dc.claude_code.commit`` strips a wrapping fence defensively, but
     the prompt is where the contract is stated: anything the model adds
     around the message would otherwise land in permanent history.
     """

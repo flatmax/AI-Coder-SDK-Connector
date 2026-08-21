@@ -14,7 +14,7 @@
 # Version string format (specs-reference/6-deployment/build.md):
 #     {YYYY.MM.DD}-{HH.MM}-{short_sha}
 # Date/time UTC, short_sha is the first 8 chars of HEAD.
-# Written to src/ac_dc/VERSION before PyInstaller runs so the
+# Written to src/aic_dc/VERSION before PyInstaller runs so the
 # baked binary self-identifies. Dev checkouts leave VERSION as
 # the literal "dev".
 #
@@ -25,7 +25,7 @@
 #                    (large, ~250MB+, NOT bundled; pip-install path)
 #
 # Users missing docs-enrich get a visible "install with
-# pip install 'ac-dc[docs-enrich]'" toast per decision D1.
+# pip install 'aic-dc[docs-enrich]'" toast per decision D1.
 
 name: Release
 
@@ -57,15 +57,15 @@ jobs:
         include:
           - os: ubuntu-latest
             label: linux
-            binary-name: ac-dc-linux
+            binary-name: aic-dc-linux
             pyinstaller-sep: ":"
           - os: windows-latest
             label: windows
-            binary-name: ac-dc-windows.exe
+            binary-name: aic-dc-windows.exe
             pyinstaller-sep: ";"
           - os: macos-latest
             label: macos
-            binary-name: ac-dc-macos
+            binary-name: aic-dc-macos
             pyinstaller-sep: ":"
     runs-on: ${{ matrix.os }}
     outputs:
@@ -105,7 +105,7 @@ jobs:
         run: |
           VERSION="$(date -u +%Y.%m.%d-%H.%M)-$(git rev-parse --short=8 HEAD)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "$VERSION" > src/ac_dc/VERSION
+          echo "$VERSION" > src/aic_dc/VERSION
           echo "Baked version: $VERSION"
 
       - name: Install webapp dependencies
@@ -125,7 +125,7 @@ jobs:
         run: uv sync --no-dev --extra build --extra docs-convert --frozen
 
       # PyInstaller command. Hidden-imports list enumerates every
-      # ac_dc submodule; PyInstaller's static analysis misses
+      # aic_dc submodule; PyInstaller's static analysis misses
       # modules registered dynamically via add_class() or imported
       # by string. Belt-and-braces — extra entries cost nothing.
       - name: Build PyInstaller binary
@@ -137,9 +137,9 @@ jobs:
           # groups (re-adding dev, dropping the extras).
           uv run --no-sync pyinstaller --onefile \
             --name "${{ matrix.binary-name }}" \
-            --add-data "src/ac_dc/VERSION${SEP}ac_dc" \
-            --add-data "src/ac_dc/config${SEP}ac_dc/config" \
-            --add-data "webapp/dist${SEP}ac_dc/webapp_dist" \
+            --add-data "src/aic_dc/VERSION${SEP}aic_dc" \
+            --add-data "src/aic_dc/config${SEP}aic_dc/config" \
+            --add-data "webapp/dist${SEP}aic_dc/webapp_dist" \
             --collect-all=litellm \
             --collect-all=tiktoken \
             --collect-all=tiktoken_ext \
@@ -157,62 +157,62 @@ jobs:
             --hidden-import=boto3 \
             --hidden-import=botocore \
             --hidden-import=jrpc_oo \
-            --hidden-import=ac_dc \
-            --hidden-import=ac_dc.base_cache \
-            --hidden-import=ac_dc.base_formatter \
-            --hidden-import=ac_dc.cli \
-            --hidden-import=ac_dc.collab \
-            --hidden-import=ac_dc.config \
-            --hidden-import=ac_dc.context_manager \
-            --hidden-import=ac_dc.doc_convert \
-            --hidden-import=ac_dc.edit_pipeline \
-            --hidden-import=ac_dc.edit_protocol \
-            --hidden-import=ac_dc.file_context \
-            --hidden-import=ac_dc.history_compactor \
-            --hidden-import=ac_dc.history_store \
-            --hidden-import=ac_dc.llm_service \
-            --hidden-import=ac_dc.logging_setup \
-            --hidden-import=ac_dc.main \
-            --hidden-import=ac_dc.repo \
-            --hidden-import=ac_dc.rpc \
-            --hidden-import=ac_dc.settings \
-            --hidden-import=ac_dc.stability_tracker \
-            --hidden-import=ac_dc.token_counter \
-            --hidden-import=ac_dc.doc_index \
-            --hidden-import=ac_dc.doc_index.cache \
-            --hidden-import=ac_dc.doc_index.formatter \
-            --hidden-import=ac_dc.doc_index.index \
-            --hidden-import=ac_dc.doc_index.keyword_enricher \
-            --hidden-import=ac_dc.doc_index.models \
-            --hidden-import=ac_dc.doc_index.reference_index \
-            --hidden-import=ac_dc.doc_index.extractors \
-            --hidden-import=ac_dc.doc_index.extractors.base \
-            --hidden-import=ac_dc.doc_index.extractors.markdown \
-            --hidden-import=ac_dc.doc_index.extractors.svg \
-            --hidden-import=ac_dc.doc_index.extractors.svg_geometry \
-            --hidden-import=ac_dc.symbol_index \
-            --hidden-import=ac_dc.symbol_index.cache \
-            --hidden-import=ac_dc.symbol_index.compact_format \
-            --hidden-import=ac_dc.symbol_index.import_resolver \
-            --hidden-import=ac_dc.symbol_index.index \
-            --hidden-import=ac_dc.symbol_index.models \
-            --hidden-import=ac_dc.symbol_index.parser \
-            --hidden-import=ac_dc.symbol_index.reference_index \
-            --hidden-import=ac_dc.symbol_index.extractors \
-            --hidden-import=ac_dc.symbol_index.extractors.base \
-            --hidden-import=ac_dc.symbol_index.extractors.c \
-            --hidden-import=ac_dc.symbol_index.extractors.cpp \
-            --hidden-import=ac_dc.symbol_index.extractors.javascript \
-            --hidden-import=ac_dc.symbol_index.extractors.python \
-            --hidden-import=ac_dc.symbol_index.extractors.typescript \
-            --hidden-import=ac_dc.url_service \
-            --hidden-import=ac_dc.url_service.cache \
-            --hidden-import=ac_dc.url_service.detection \
-            --hidden-import=ac_dc.url_service.fetchers \
-            --hidden-import=ac_dc.url_service.models \
-            --hidden-import=ac_dc.url_service.service \
-            --hidden-import=ac_dc.url_service.summarizer \
-            src/ac_dc/__main__.py
+            --hidden-import=aic_dc \
+            --hidden-import=aic_dc.base_cache \
+            --hidden-import=aic_dc.base_formatter \
+            --hidden-import=aic_dc.cli \
+            --hidden-import=aic_dc.collab \
+            --hidden-import=aic_dc.config \
+            --hidden-import=aic_dc.context_manager \
+            --hidden-import=aic_dc.doc_convert \
+            --hidden-import=aic_dc.edit_pipeline \
+            --hidden-import=aic_dc.edit_protocol \
+            --hidden-import=aic_dc.file_context \
+            --hidden-import=aic_dc.history_compactor \
+            --hidden-import=aic_dc.history_store \
+            --hidden-import=aic_dc.llm_service \
+            --hidden-import=aic_dc.logging_setup \
+            --hidden-import=aic_dc.main \
+            --hidden-import=aic_dc.repo \
+            --hidden-import=aic_dc.rpc \
+            --hidden-import=aic_dc.settings \
+            --hidden-import=aic_dc.stability_tracker \
+            --hidden-import=aic_dc.token_counter \
+            --hidden-import=aic_dc.doc_index \
+            --hidden-import=aic_dc.doc_index.cache \
+            --hidden-import=aic_dc.doc_index.formatter \
+            --hidden-import=aic_dc.doc_index.index \
+            --hidden-import=aic_dc.doc_index.keyword_enricher \
+            --hidden-import=aic_dc.doc_index.models \
+            --hidden-import=aic_dc.doc_index.reference_index \
+            --hidden-import=aic_dc.doc_index.extractors \
+            --hidden-import=aic_dc.doc_index.extractors.base \
+            --hidden-import=aic_dc.doc_index.extractors.markdown \
+            --hidden-import=aic_dc.doc_index.extractors.svg \
+            --hidden-import=aic_dc.doc_index.extractors.svg_geometry \
+            --hidden-import=aic_dc.symbol_index \
+            --hidden-import=aic_dc.symbol_index.cache \
+            --hidden-import=aic_dc.symbol_index.compact_format \
+            --hidden-import=aic_dc.symbol_index.import_resolver \
+            --hidden-import=aic_dc.symbol_index.index \
+            --hidden-import=aic_dc.symbol_index.models \
+            --hidden-import=aic_dc.symbol_index.parser \
+            --hidden-import=aic_dc.symbol_index.reference_index \
+            --hidden-import=aic_dc.symbol_index.extractors \
+            --hidden-import=aic_dc.symbol_index.extractors.base \
+            --hidden-import=aic_dc.symbol_index.extractors.c \
+            --hidden-import=aic_dc.symbol_index.extractors.cpp \
+            --hidden-import=aic_dc.symbol_index.extractors.javascript \
+            --hidden-import=aic_dc.symbol_index.extractors.python \
+            --hidden-import=aic_dc.symbol_index.extractors.typescript \
+            --hidden-import=aic_dc.url_service \
+            --hidden-import=aic_dc.url_service.cache \
+            --hidden-import=aic_dc.url_service.detection \
+            --hidden-import=aic_dc.url_service.fetchers \
+            --hidden-import=aic_dc.url_service.models \
+            --hidden-import=aic_dc.url_service.service \
+            --hidden-import=aic_dc.url_service.summarizer \
+            src/aic_dc/__main__.py
 
       - name: Upload artefact
         uses: actions/upload-artifact@v4
@@ -246,7 +246,7 @@ jobs:
           SHORT_SHA="$(echo "$VERSION" | rev | cut -d- -f1 | rev)"
           COMMITS_URL="https://github.com/${{ github.repository }}/commits/${SHORT_SHA}"
           cat > release_notes.md <<EOF
-          ## AC-DC ${VERSION}
+          ## AIC-DC ${VERSION}
 
           [View commit history](${COMMITS_URL})
 
@@ -254,9 +254,9 @@ jobs:
 
           | Platform | File | Instructions |
           |----------|------|--------------|
-          | Linux | \`ac-dc-linux\` | \`chmod +x ac-dc-linux && ./ac-dc-linux\` |
-          | macOS | \`ac-dc-macos\` | \`chmod +x ac-dc-macos && ./ac-dc-macos\` |
-          | Windows | \`ac-dc-windows.exe\` | Double-click or run from command prompt |
+          | Linux | \`aic-dc-linux\` | \`chmod +x aic-dc-linux && ./aic-dc-linux\` |
+          | macOS | \`aic-dc-macos\` | \`chmod +x aic-dc-macos && ./aic-dc-macos\` |
+          | Windows | \`aic-dc-windows.exe\` | Double-click or run from command prompt |
 
           ### Requirements
 
@@ -269,7 +269,7 @@ jobs:
           disambiguation when sections repeat), install from source:
 
           \`\`\`
-          pip install "ac-dc[docs-enrich]"
+          pip install "aic-dc[docs-enrich]"
           \`\`\`
           EOF
 

@@ -17,7 +17,7 @@
 // which went with the native engine — the engine compacts its
 // own history and announces the boundary after the fact, so
 // there is nothing left to show a spinner for. This overlay
-// survives because doc-index work is still AC⚡DC's own, and
+// survives because doc-index work is still AIC⚡DC's own, and
 // still slow enough to need one.
 //
 // Event channel: window event `doc-index-progress` with
@@ -391,4 +391,4 @@ export class DocIndexProgress extends LitElement {
   }
 }
 
-customElements.define('ac-doc-index-progress', DocIndexProgress);
+customElements.define('aic-doc-index-progress', DocIndexProgress);

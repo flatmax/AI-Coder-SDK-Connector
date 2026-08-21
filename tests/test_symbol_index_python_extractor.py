@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.python — Layer 2.2.2.
+"""Tests for aic_dc.symbol_index.extractors.python — Layer 2.2.2.
 
 Scope: the PythonExtractor — imports, functions, methods,
 classes, instance vars, decorators, top-level variables, call
@@ -22,9 +22,9 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.python import PythonExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.python import PythonExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 # ---------------------------------------------------------------------------

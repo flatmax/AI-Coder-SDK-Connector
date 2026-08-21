@@ -1,15 +1,15 @@
 // SdkSurfaceTab — which SDK features this build wired up, and which it did not.
 //
 // The other tabs answer questions about the repo or the session. This one
-// answers a question about AC⚡DC itself: the `claude-agent-sdk` wheel and
+// answers a question about AIC⚡DC itself: the `claude-agent-sdk` wheel and
 // the `claude` CLI both ship on their own cadence, adding options, hook
 // events, message types and beta gates, and none of that arrives as a
 // build break. It arrives as a feature we silently do not offer. So the
 // backend reflects over the installed wheel and diffs it against what
-// `ac_dc.claude_code` actually reaches for, and this renders the diff.
+// `aic_dc.claude_code` actually reaches for, and this renders the diff.
 //
 // Data is `ClaudeCodeService.get_sdk_surface` — see
-// `src/ac_dc/claude_code/sdk_surface.py` for how coverage is derived (from
+// `src/aic_dc/claude_code/sdk_surface.py` for how coverage is derived (from
 // the package's own syntax trees, not from a hand-kept list).
 //
 // Three statuses, and the third is the whole point:
@@ -87,7 +87,7 @@ const _STATUS_COLOR = {
 };
 
 /** localStorage key for the filter the reader last used. */
-const _FILTER_KEY = 'ac-dc-sdk-surface-filter';
+const _FILTER_KEY = 'aic-dc-sdk-surface-filter';
 
 function _loadFilter() {
   try {
@@ -711,4 +711,4 @@ export class SdkSurfaceTab extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-sdk-surface-tab', SdkSurfaceTab);
+customElements.define('aic-sdk-surface-tab', SdkSurfaceTab);

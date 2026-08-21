@@ -2,9 +2,9 @@
 
 History splits cleanly in two, and keeping the halves separate is the whole design:
 
-- **What the model sees** — owned entirely by Claude Code. AC⚡DC never assembles it, never counts
+- **What the model sees** — owned entirely by Claude Code. AIC⚡DC never assembles it, never counts
   its tokens, and never compacts it.
-- **What the user browses** — owned by AC⚡DC. The same transcript, mirrored into `.ac-dc4/` by our
+- **What the user browses** — owned by AIC⚡DC. The same transcript, mirrored into `.aic-dc/` by our
   `SessionStore`, surfaced by the history browser, full-text search and session list.
 
 The split is about *roles*, not about copies. One transcript serves both: the engine resumes from it and
@@ -22,8 +22,8 @@ impose a record shape, so a second writer buys a second shape that can disagree 
 
 | | Engine transcript | Derived index | Events log |
 |---|---|---|---|
-| Owner | Claude Code / SDK, stored by us | AC⚡DC | AC⚡DC |
-| Location | `.ac-dc4/sessions/` via our `SessionStore` | `.ac-dc4/` | `.ac-dc4/events.jsonl` |
+| Owner | Claude Code / SDK, stored by us | AIC⚡DC | AIC⚡DC |
+| Location | `.aic-dc/sessions/` via our `SessionStore` | `.aic-dc/` | `.aic-dc/events.jsonl` |
 | Contents | The session record the SDK resumes from — the CLI's own transcript format, opaque to us, stored verbatim | Search terms, session summaries, request ID ↔ session mapping | Our operational events: commit, reset, review entry and exit, session resume and fork, permission-mode change, preset switch |
 | Derived from | Nothing — it is the source | The transcript, entirely | Nothing — the transcript never held these |
 | If deleted | The session is unresumable | Rebuilt on next start | Those events are gone; no session breaks |
@@ -71,8 +71,8 @@ first makes it deletable.
 
 ## `SessionStore`
 
-AC⚡DC implements the SDK's `SessionStore` protocol so a copy of the engine transcript lands inside
-`.ac-dc4/` rather than only under `~/.claude/projects/`. Six methods: `append`, `load`,
+AIC⚡DC implements the SDK's `SessionStore` protocol so a copy of the engine transcript lands inside
+`.aic-dc/` rather than only under `~/.claude/projects/`. Six methods: `append`, `load`,
 `list_sessions`, `list_session_summaries`, `delete`, `list_subkeys`.
 
 The store is a **mirror**, not the primary write path. The CLI writes its transcript to local disk
@@ -83,7 +83,7 @@ it for the subprocess. So the repo-local copy is what makes a session survive.
 That matters because the CLI expires its own transcripts on a retention timer that knows nothing about
 this repo. A session under a global per-user directory is not backed up with the repo, not removed with
 it, not present on a second machine that clones it, and not inspectable alongside the rest of
-`.ac-dc4/`. Putting it in the working directory makes session state a property of the repo, which is
+`.aic-dc/`. Putting it in the working directory makes session state a property of the repo, which is
 what users already assume it is.
 
 Implementation notes that are contracts rather than choices:
@@ -158,7 +158,7 @@ session unreadable. This applies to all three files.
 
 ## The Derived Index
 
-Search, the session list, and request-ID correlation are served by an index under `.ac-dc4/` built from
+Search, the session list, and request-ID correlation are served by an index under `.aic-dc/` built from
 the transcript. It holds no content of its own, which is the point: it can be stale, and a stale index
 is repaired by rebuilding it, whereas a second transcript that disagrees with the first has no repair
 that does not involve choosing a winner.
@@ -195,7 +195,7 @@ only by an engine that no longer exists.
 | Branch from a past session | `fork_session` | A copy; the original stays intact |
 | New Session | Connect without `resume` | Nothing |
 
-Resumption is never a replay. AC⚡DC does not read the mirror and feed messages back into a prompt —
+Resumption is never a replay. AIC⚡DC does not read the mirror and feed messages back into a prompt —
 under the native engine that was the only option, and it is exactly the mechanism that produced
 sessions which looked correct in the UI while the model's view had silently diverged. The SDK owns
 resumption; the mirror is a record, not an input.
@@ -211,7 +211,7 @@ prominently rather than hiding behind a menu.
 
 ## Compaction
 
-Claude Code compacts itself. AC⚡DC's compactor — topic-boundary detection on a smaller model,
+Claude Code compacts itself. AIC⚡DC's compactor — topic-boundary detection on a smaller model,
 verbatim windows, summarise-versus-truncate, minimum-exchange safeguards, tracker re-registration —
 is deleted.
 
@@ -223,7 +223,7 @@ What remains is presentation:
 - The Context tab shows auto-compact state and the threshold, so an imminent compaction is
   predictable rather than a surprise. See [context-visibility.md](context-visibility.md).
 
-Auto-compact can be disabled in project settings; AC⚡DC surfaces the state but does not own it.
+Auto-compact can be disabled in project settings; AIC⚡DC surfaces the state but does not own it.
 
 ## Subagent Transcripts
 
@@ -248,7 +248,7 @@ description summarises. See [`../../specs-reference/3-engine/history.md`](../../
 Disk-usage monitoring carries over unchanged in mechanism — a one-shot warning when the session
 directory crosses a threshold, dismissible, never blocking. Only the measured path moves.
 
-It is a warning and not a cleanup because a transcript is the one thing under `.ac-dc4/` that does not
+It is a warning and not a cleanup because a transcript is the one thing under `.aic-dc/` that does not
 rebuild: deleting one to reclaim space costs a resumable session, which is the user's call and nobody
 else's. The sentence names pasted images, since entries hold them verbatim as base64 and a handful of
 image-heavy sessions is normally the entire figure. It reaches the browser on first paint and after a
@@ -270,10 +270,10 @@ read them.
 
 ## Invariants
 
-- The model's context is never assembled by AC⚡DC; continuity is always `resume` or `fork_session`.
+- The model's context is never assembled by AIC⚡DC; continuity is always `resume` or `fork_session`.
 - **The store is never given an entry the CLI did not write**, and entries are stored byte-faithful:
   `json.loads(json.dumps(entry)) == entry`.
-- There is exactly one transcript. Anything else under `.ac-dc4/` is either derived from it and
+- There is exactly one transcript. Anything else under `.aic-dc/` is either derived from it and
   rebuildable, or holds only what the transcript never contained.
 - Every message reaches the store during the turn that produced it; typed text that has not reached it
   yet is held by the browser's input history, not by a second store.

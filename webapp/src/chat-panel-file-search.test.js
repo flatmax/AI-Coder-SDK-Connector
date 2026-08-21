@@ -31,7 +31,7 @@ import './chat-panel/index.js';
 const _mounted = [];
 
 function mountPanel(props = {}) {
-  const p = document.createElement('ac-chat-panel');
+  const p = document.createElement('aic-chat-panel');
   Object.assign(p, props);
   document.body.appendChild(p);
   _mounted.push(p);
@@ -486,7 +486,7 @@ describe('File search stale response guard', () => {
         .mockRejectedValue(new Error('grep failed'));
       publishFakeRpc({ 'Repo.search_files': searchFn });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       const consoleSpy = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
@@ -512,7 +512,7 @@ describe('File search stale response guard', () => {
         expect(detail.type).toBe('error');
         expect(detail.message).toMatch(/grep failed/i);
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     } finally {

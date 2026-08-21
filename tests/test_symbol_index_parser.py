@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.parser — Layer 2.1.
+"""Tests for aic_dc.symbol_index.parser — Layer 2.1.
 
 Scope:
 
@@ -29,7 +29,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ac_dc.symbol_index.parser import (
+from aic_dc.symbol_index.parser import (
     LANGUAGE_MAP,
     LanguageSpec,
     TreeSitterParser,
@@ -297,7 +297,7 @@ class TestGrammarLoading:
                 raise ImportError("simulated missing grammar")
             return original_import(name, *args, **kwargs)
 
-        with patch("ac_dc.symbol_index.parser.importlib.import_module",
+        with patch("aic_dc.symbol_index.parser.importlib.import_module",
                    side_effect=fake_import):
             assert parser.get_language("python") is None
             assert parser.get_parser("python") is None
@@ -322,7 +322,7 @@ class TestGrammarLoading:
                 raise ImportError("simulated missing grammar")
             return original_import(name, *args, **kwargs)
 
-        with patch("ac_dc.symbol_index.parser.importlib.import_module",
+        with patch("aic_dc.symbol_index.parser.importlib.import_module",
                    side_effect=counting_import):
             parser.get_language("python")
             parser.get_language("python")
@@ -385,7 +385,7 @@ class TestGrammarLoading:
                 raise ImportError("simulated missing")
             return original_import(name, *args, **kwargs)
 
-        with patch("ac_dc.symbol_index.parser.importlib.import_module",
+        with patch("aic_dc.symbol_index.parser.importlib.import_module",
                    side_effect=fake_import):
             parser.get_language("python")
 
@@ -408,7 +408,7 @@ class TestGrammarLoading:
                 raise ImportError("simulated missing")
             return original_import(name, *args, **kwargs)
 
-        with patch("ac_dc.symbol_index.parser.importlib.import_module",
+        with patch("aic_dc.symbol_index.parser.importlib.import_module",
                    side_effect=fake_import):
             assert parser.is_available("python") is False
 
@@ -474,7 +474,7 @@ class TestParseIntegration:
                 raise ImportError("simulated missing")
             return original_import(name, *args, **kwargs)
 
-        with patch("ac_dc.symbol_index.parser.importlib.import_module",
+        with patch("aic_dc.symbol_index.parser.importlib.import_module",
                    side_effect=fake_import):
             tree = parser.parse(b"def foo(): pass\n", "python")
         assert tree is None

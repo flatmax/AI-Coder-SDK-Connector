@@ -16,7 +16,7 @@ import { SharedRpc } from './rpc.js';
 const _mounted = [];
 
 function mountTab() {
-  const el = document.createElement('ac-settings-tab');
+  const el = document.createElement('aic-settings-tab');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;
@@ -74,7 +74,7 @@ function getToggleDescription(el) {
 // Tests
 // -----------------------------------------------------------
 
-describe('ac-settings-tab agentic toggle', () => {
+describe('aic-settings-tab agentic toggle', () => {
   describe('rendering', () => {
     beforeEach(() => {
       publishFakeRpc({
@@ -301,7 +301,7 @@ describe('ac-settings-tab agentic toggle', () => {
 // prompt would be worse than broken: it would tell the user the
 // app still sends a system prompt it composes.
 
-describe('ac-settings-tab config cards', () => {
+describe('aic-settings-tab config cards', () => {
   beforeEach(() => {
     publishFakeRpc({
       'Settings.get_config_info': () => ({ config_dir: '/tmp/config' }),
@@ -395,7 +395,7 @@ describe('ac-settings-tab config cards', () => {
   });
 });
 
-describe('ac-settings-tab info banner', () => {
+describe('aic-settings-tab info banner', () => {
   it('shows the config dir', async () => {
     publishFakeRpc({
       'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),

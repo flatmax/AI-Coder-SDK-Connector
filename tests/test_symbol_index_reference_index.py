@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.reference_index — Layer 2.4.
+"""Tests for aic_dc.symbol_index.reference_index — Layer 2.4.
 
 Scope: the ReferenceIndex class. Input is pre-resolved
 FileSymbols (CallSite.target_file populated; Import objects
@@ -21,13 +21,13 @@ Test design:
 
 from __future__ import annotations
 
-from ac_dc.symbol_index.models import (
+from aic_dc.symbol_index.models import (
     CallSite,
     FileSymbols,
     Import,
     Symbol,
 )
-from ac_dc.symbol_index.reference_index import ReferenceIndex
+from aic_dc.symbol_index.reference_index import ReferenceIndex
 
 
 # ---------------------------------------------------------------------------

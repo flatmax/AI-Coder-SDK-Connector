@@ -29,12 +29,12 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.doc_index.models import (
+from aic_dc.doc_index.models import (
     DocHeading,
     DocLink,
     DocOutline,
 )
-from ac_dc.doc_index.reference_index import (
+from aic_dc.doc_index.reference_index import (
     DocReferenceIndex,
     _parse_link_target,
     _slugify,

@@ -3,7 +3,7 @@
 // Governing spec: specs5/5-webapp/permission-dialog.md.
 // Payload shapes and the server-side numbers are in
 // specs-reference/3-engine/permissions.md and mirrored by
-// src/ac_dc/claude_code/permissions.py.
+// src/aic_dc/claude_code/permissions.py.
 
 /**
  * How long after a dialog appears before any decision control may
@@ -38,7 +38,7 @@ export const ANNOUNCE_AT_SECONDS = [300, 60, 10];
 export const TITLE_MARKER = '⚡';
 
 /** Settings key for the arrival chime. Default on. */
-export const CHIME_SETTING_KEY = 'ac-dc.permission-chime';
+export const CHIME_SETTING_KEY = 'aic-dc.permission-chime';
 
 /** Tool-class glyphs for the header. Text, never colour alone. */
 export const CLASS_GLYPHS = {
@@ -108,7 +108,7 @@ export const ESCAPE_DENY_REASON = 'dismissed by the user';
 /**
  * The `action` values on a `permissionResolved` broadcast that mean the
  * call went ahead. Mirrors `ALLOW_ACTIONS` in
- * src/ac_dc/claude_code/permissions.py.
+ * src/aic_dc/claude_code/permissions.py.
  *
  * Named once and imported by everything that has to tell an approval from a
  * denial, because the alternative is what it replaced: `action === 'allow'`
@@ -153,7 +153,7 @@ export const FLAG_TOOLTIPS = {
 export const ALWAYS_ALLOW_TOOLTIP =
   'Writes a rule to a settings file you can read and revoke. '
   + 'It applies to the claude CLI in this repository too, not just '
-  + 'AC-DC.';
+  + 'AIC-DC.';
 
 export const ALWAYS_ALLOW_SESSION_TOOLTIP =
   'Holds for the rest of this session only. Nothing is written to a '

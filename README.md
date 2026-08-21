@@ -1,355 +1,291 @@
-# AC⚡DC — AI-assisted Code editing tool, De-Coder
-AC⚡DC is an AI pair-programming tool that runs as a terminal application with a browser-based UI. It helps developers navigate codebases, chat with LLMs, and apply structured file edits — all with intelligent prompt caching to minimize costs.
-**Reimplementation in progress.** This tree is a clean-room rebuild of AC⚡DC against a new specification suite. The user-facing feature set below describes the target — individual features land layer by layer and are tracked in [`specs4/impl-history/work-log.md`](specs4/impl-history/work-log.md).
+# AIC⚡DC — AI-Coder-SDK-Connector
 
+AIC⚡DC is a browser UI over AI coding-agent SDKs. It runs as a terminal application in a git repository, opens a browser, and gives the agent a workspace a terminal cannot: a Monaco diff viewer over everything it touches, a git-status file tree, an SVG editor, permission dialogs that render the actual diff before you approve it, and live visibility into what the turn cost.
+
+**Claude Code is the only backend today.** The name says *connector* because the seam is deliberate — the engine layer talks to an agent SDK, not to a model provider — but there is exactly one implementation of that seam right now, the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) driving a local `claude` CLI. Support for other SDKs (antigravity and friends) is the direction, not a shipped feature.
+
+**AIC⚡DC never calls an LLM.** There is no code path from this process to a model provider, no API key it reads, and no token it counts. The `claude` CLI owns credentials, billing, and the whole agent loop. AIC⚡DC never writes provider credentials into the process environment — if it appeared to inject them it would silently redirect billing away from the account you authenticated.
+
+---
+## Division of Labour
+
+The single most useful thing to understand about this project is what it does *not* do.
+
+| Owned by Claude Code | Owned by AIC⚡DC |
+|---|---|
+| The conversation and the context window | The Monaco diff viewer, with LSP, over every file the agent touched |
+| Prompt caching and cache breakpoints | The git-status file tree, search, and 2-D navigation grid |
+| Tool execution — read, write, edit, bash, grep, web fetch | The permission dialog, with the edit rendered as a two-level diff |
+| Subagents (`Task`) and skills | Live context / cost / rate-limit visualisation |
+| Compaction and session persistence | The SVG viewer and visual editor, TeX preview, markdown preview |
+| Applying edits to disk | Document conversion, code review, collaboration |
+| Credentials, retries, token counting | Tree-sitter symbol and document indexes — offered to the agent as MCP tools and to the editor as language features |
+
+The last row is the one piece of genuine intelligence AIC⚡DC contributes. Everything else it owns is presentation over state the agent already produced.
+
+---
 ## Features
 
-- **Chat with any LLM** supported by [LiteLLM](https://docs.litellm.ai/) — Claude, GPT, DeepSeek, Bedrock, local models, and more.
-- **Structured code edits** with anchor-based matching, validation, and automatic git staging.
-- **Side-by-side diff viewer** — Monaco editor with hover, go-to-definition, references, and completions.
-- **SVG viewer & editor** — pan/zoom SVG files with inline editing: drag elements, reshape paths and curves, resize shapes, edit text in place, copy/paste/duplicate objects, and a full-width presentation mode (F11).
-- **File picker** with git status badges, diff stats, context menu, and keyboard navigation.
-- **Any LLM via [LiteLLM](https://docs.litellm.ai/)** — Claude, GPT, Gemini, Bedrock, Ollama, xAI, and 100+ more providers through one unified interface.
-- **Deterministic anchored edits** with emoji-delimited blocks, exact context matching, ambiguity detection, and automatic git staging. No fuzzy patching, no fenced-diff guessing.
-- **Stability-based four-tier prompt cache** (L0–L3 + active) with automatic promotion, demotion, ripple cascade, and provider cache-breakpoint alignment — pay to ingest once, subsequent requests hit cache.
-- **Tree-sitter symbol index** for Python, JavaScript, TypeScript, C, and C++ with cross-file reference graphs and LSP-style hover, go-to-definition, references, and completions inside the diff viewer.
-- **Document index** for markdown and SVG with keyword-enriched headings, containment-aware SVG outlines, and a cross-reference graph between documents.
-- **Cross-reference mode** — optional toggle that layers document outlines into code mode (and vice versa), so the LLM can trace how documentation references code without a full mode switch.
-- **Agent mode** — optional capability (off by default) that lets the main LLM decompose a turn into parallel agent conversations using `🟧🟧🟧 AGENT` / `🟩🟩🟩 AGEND` spawn blocks. Agents run as independent context managers with their own tabs in the chat panel; their archives are persisted under `.ac-dc4/agents/<turn-id>/` and re-attach across reconnects. Per-agent mode (`code`, `doc`, `code+xref`, `doc+xref`) is set in the spawn block.
-- **Monaco-powered diff viewer** with LSP integration, markdown preview, TeX preview, markdown link provider (cross-file navigation), MATLAB syntax, and cross-file go-to-definition.
-- **Visual SVG editor** — click-to-select, drag-to-move, resize handles, path endpoint + control-point editing, inline text edit, marquee multi-selection, copy / paste / duplicate, undo, copy-as-PNG, and a full-width presentation mode.
-- **Code review mode** — pick a commit in a live git graph, soft-reset the branch, and work through the change with reverse diffs in context.
-- **Document conversion** — convert `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown with extracted images and per-page SVG exports. PDFs use [PyMuPDF](https://pymupdf.readthedocs.io/) directly; presentations pipe through [LibreOffice](https://www.libreoffice.org/) → PDF → PyMuPDF, with python-pptx as fallback. Clean working tree required so output appears as reviewable diffs.
-- **URL chips** — paste a link; AC⚡DC detects it, fetches, summarises using the cheaper auxiliary model, and caches the content with per-message inclusion toggles. GitHub repos get a shallow clone + symbol-map summary.
-- **Images** — paste screenshots directly into chat; stored persistently under the per-repo working directory and re-attachable from history.
-- **Voice dictation** via the Web Speech API — toggle on the input, speak, and the transcript streams into the textarea.
-- **KaTeX math rendering** — display blocks via `$$...$$` and inline `$...$` inside chat messages.
-- **TeX preview** — live-rendered LaTeX preview for `.tex` files via make4ht + KaTeX with bidirectional scroll sync.
-- **File picker** with git status badges, diff stats, sort modes (name / mtime / size, each direction-toggleable), three-state exclusion checkboxes, context menus for every row type, inline rename / duplicate / new-file / new-directory, middle-click path insertion, `@`-filter from the chat input, active-file highlight, keyboard navigation, branch badge with detached-HEAD detection, and review-mode banner.
-- **2D file navigation grid** — opened files arrange spatially in a grid overlay; `Alt+Arrow` switches direction-wise without reaching for a tab bar.
-- **Full-text search** — two-panel layout with matching files (left) and line context with highlighting (right); regex, whole-word, case-sensitive modes; bidirectional scroll sync.
-- **Session history browser** — full-text search across JSONL history, per-session preview, load-into-session, and load-into-panel for ad-hoc comparison.
-- **History compaction** with LLM-powered topic boundary detection, a visible progress overlay, system-event messages in chat scrollback, and a live context-capacity bar showing budget pressure.
-- **Token HUD** — floating overlay with per-request and session-total token usage broken down by category.
-- **Copy diff to clipboard** — copy the working diff, or pick any local / remote branch from a fuzzy-searchable dropdown to copy the diff between working tree and that branch.
-- **Settings tab** — edit `llm.json` and `app.json` from the browser with hot-reload support.
-- **Collaboration mode** — multiple browsers connect to one backend over LAN. Host auto-admitted; subsequent clients require explicit approval. Non-localhost participants get a read-only view.
-- **Symmetric bidirectional JSON-RPC** over WebSocket via [jrpc-oo](https://github.com/flatmax/jrpc-oo) — terminal and browser are peers; either side can call the other.
+- **A real editor beside the agent.** Monaco side-by-side diff over the working tree, with hover, go-to-definition, references, and completions backed by the local symbol index — plus markdown preview, TeX preview, and cross-file markdown link navigation.
+- **Permission dialogs that show the change.** An `Edit` or `Write` request renders as a line-and-word-level diff before you approve it, not as raw JSON. Six permission modes, from `default` through `plan` and `acceptEdits` to `bypassPermissions` (which is never the default and warns explicitly). Requests resolve against **localhost clients only**.
+- **Tree-sitter symbol index** for Python, JavaScript, TypeScript/TSX, C, C++, and MATLAB, with cross-file reference graphs — exposed to the agent through an in-process MCP server and to the editor as LSP-style language features.
+- **Document index** for markdown and SVG: heading outlines, containment-aware SVG structure, a cross-reference graph between documents, and optional KeyBERT keyword enrichment.
+- **Six read-only MCP tools** on the `aic-dc` server — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state`, `ui_state`. The agent can ask what the repo's shape is and what the user is currently looking at.
+- **Tool cards** for every call the agent makes: input summary, status, duration, files modified (clickable through to the diff), and a marker on anything that went through a permission prompt. `TodoWrite` renders as one live checklist rather than fifteen snapshots.
+- **Honest cost and context accounting.** A Usage HUD and Context tab render only what the engine measured — per-turn cost when it is priced, nothing when it is not (a subscription turn is never shown as `$0.00`), a context gauge with the auto-compact threshold marked on the bar, and a live token counter that steps as each assistant message lands.
+- **Visual SVG editor** — click-to-select, drag-to-move, resize handles, path endpoint and control-point editing, inline text edit, marquee multi-selection, copy / paste / duplicate, undo, copy-as-PNG, and a full-width presentation mode (F11).
+- **File picker** with git status badges, diff stats, sort modes, context menus for every row type, inline rename / duplicate / new-file / new-directory, `@`-filter from the chat input, branch badge with detached-HEAD detection, keyboard navigation, and shift+click to **deny the agent read access** to a path.
+- **Code review mode** — pick a commit in a live git graph, soft-reset the branch, and work through the change with reverse diffs in context. The current review state is visible to the agent through `review_state`.
+- **Document conversion** — `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp` to markdown with extracted images and per-page SVG exports. PDFs go through [PyMuPDF](https://pymupdf.readthedocs.io/); presentations pipe through [LibreOffice](https://www.libreoffice.org/) → PDF → PyMuPDF with python-pptx as fallback; spreadsheets keep their cell colours as emoji markers.
+- **Slash-command passthrough.** `/` opens a palette; most commands go straight to the CLI and are answered for zero turns and zero dollars. A few are intercepted and routed to the UI that already does the job — `/context` to the Context tab, `/clear` to a new session, `/permissions` to Settings, `/resume` to the history browser.
+- **Session continuity** — restart resumes the last session, the history browser resumes any past one, and branching forks it. There is no undo: the SDK refuses to combine a mirrored transcript with file checkpointing, and the mirror is what makes the repo-local history work, so undo is git's job.
+- **Subagent tabs.** When the agent spawns a `Task`, its transcript appears as a read-only tab with a kill switch. There is no channel to speak into it — it is the agent's subagent, not yours.
+- **Full-text search** — two panels, matching files on the left and highlighted line context on the right, with regex / whole-word / case-sensitive modes and bidirectional scroll sync. Plus in-chat message search.
+- **2-D file navigation grid** — opened files arrange spatially; `Alt+Arrow` moves between them without a tab bar.
+- **Speech** — Web Speech API dictation into the chat input, and sentence-by-sentence read-aloud of assistant messages with a draggable floating transport.
+- **KaTeX math** in chat (`$$…$$` and `$…$`), and live TeX preview for `.tex` files via make4ht with bidirectional scroll sync.
+- **Images** — paste a screenshot into chat and it goes into the transcript.
+- **Collaboration mode** — multiple browsers on one backend over LAN. The host is auto-admitted; later clients need explicit approval within 120 s. Non-localhost participants get a read-only view and cannot answer permission prompts.
+- **Symmetric bidirectional JSON-RPC** over WebSocket via [jrpc-oo](https://github.com/flatmax/jrpc-oo) — terminal and browser are peers, and either side calls the other.
+
 ---
 ## Philosophy
-- **Structural maps beat raw files.** The LLM receives compact, reference-annotated maps instead of full source text for most of the repo:
-  - *Code mode* — tree-sitter symbol map of classes, methods, imports, call sites, and cross-file references
-  - *Document mode* — keyword-enriched outline of markdown headings and SVG containment trees with cross-references
-  - *Cross-reference mode* — both indexes overlaid, so the LLM can trace "this section mentions that function" without switching modes
-- **Pay to ingest once.** Content unchanged across requests promotes through stability tiers and lands on provider cache breakpoints (e.g., Anthropic ephemeral caching). Large repos stop re-ingesting on every turn.
-- **Edits are mechanical.** Anchored blocks with exact-match context. Ambiguous or missing anchors surface as structured errors with retry prompts — never silent or fuzzy.
-- **Git is a first-class citizen.** Every applied edit is staged automatically. Commit messages are LLM-generated from the diff. The file picker shows git status and diff stats natively. Code review runs through soft-reset, not side branches.
-- **Local is the default.** Backend binds to loopback; non-localhost access requires explicit `--collab`. All persistent state lives in the repo's `.ac-dc4/` directory (history, images, doc cache). No cloud sync, no telemetry.
-- **Symmetric RPC.** Terminal and browser both implement the same jrpc-oo surface — streaming, progress events, session sync, file broadcasts all flow through one transport.
+
+- **Do not reimplement the agent.** Every capability the CLI already has — caching, compaction, retries, tool execution, session persistence — is the CLI's. A wrapper that duplicated any of them would be a second, worse copy that drifts.
+- **Structural maps beat raw files.** The agent gets compact, reference-annotated maps of the repo on request: a tree-sitter symbol map of classes, methods, imports and call sites, and a keyword-enriched outline of markdown headings and SVG containment trees. Both are always available as tools, so there is no mode to switch between them.
+- **Show, do not summarise.** A permission prompt renders the diff. A tool card names the files it modified and links to them. A turn footer lists what changed in the repo. The panel's job is to make the agent's actions legible.
+- **Never print a number you did not measure.** Cost with no basis renders as absent, not as zero. A cache counter that was never reported is omitted, not printed as `0`. AIC⚡DC counts no tokens of its own.
+- **Git is a first-class citizen.** The file picker shows git status and diff stats natively, commit messages are generated from the diff, and code review runs through soft-reset rather than side branches.
+- **Local is the default.** The backend binds to loopback; LAN access requires an explicit `--collab`. All persistent state lives in the repo's `.aic-dc/` directory. No cloud sync, no telemetry.
+- **Degrade, do not fail.** Keyword enrichment, document conversion, LibreOffice, make4ht, individual tree-sitter grammars, and even the `aic-dc` MCP server can all be absent, and the rest of the app carries on. The `claude` CLI is the one hard prerequisite.
+
 ---
 ## Architecture
-Single Python process exposes a WebSocket JSON-RPC server; the browser webapp connects and publishes its own callback interface. The process also serves the built webapp (or proxies a Vite dev server) on a separate port.
+
+A single Python process runs an asyncio loop with two listeners: a static HTTP server for the webapp and a jrpc-oo WebSocket server for RPC. One `ThreadPoolExecutor` absorbs the CPU-bound work — tree-sitter parsing, keyword enrichment, document conversion — so the event loop stays free for WebSocket frames. Both listeners bind `127.0.0.1` unless `--collab` is passed.
+
 ```
- ┌────────────────────────────────────────────────────────────┐
- │                     Python backend                         │
- │                                                            │
- │  Repo ─┬─ SymbolIndex ──┐                                  │
- │        │                ├─▶ LLMService ◀─▶ ContextManager  │
- │        ├─ DocIndex ─────┘          │            │          │
- │        ├─ HistoryStore             │            │          │
- │        ├─ URLService               ▼            ▼          │
- │        ├─ DocConvert         StabilityTracker  FileContext │
- │        ├─ EditPipeline         (L0/L1/L2/L3)               │
- │        ├─ Settings                                         │
- │        └─ Collab                                           │
- │                 │                                          │
- │                 ▼  jrpc-oo over WebSocket                  │
- └────────────────────────────────────────────────────────────┘
-                  │
- ┌────────────────────────────────────────────────────────────┐
- │                      Browser webapp (Lit)                  │
- │                                                            │
- │  AppShell ──┬── FilesTab ──┬── FilePicker ─ ChatPanel      │
- │             │                                              │
- │             ├── ContextTab  (budget + cache sub-views)     │
- │             ├── DocConvertTab                              │
- │             ├── SettingsTab                                │
- │             │                                              │
- │             │  Viewer layer (background)                   │
- │             ├── DiffViewer  (Monaco + LSP + MD / TeX prev) │
- │             ├── SvgViewer + SvgEditor                      │
- │             │                                              │
- │             └── Overlays — TokenHUD, FileNavGrid,          │
- │                 CompactionProgress, DocIndexProgress       │
- └────────────────────────────────────────────────────────────┘
+ ┌──────────────────────────────────────────────────────────────────┐
+ │                        Python backend                            │
+ │                                                                  │
+ │   Repo ──┬── SymbolIndex ──┐                                     │
+ │          ├── DocIndex ─────┤                                     │
+ │          ├── DocConvert    ├──▶ MCP server "aic-dc"  (6 tools)   │
+ │          ├── Settings      │            │                        │
+ │          └── Collab        │            ▼                        │
+ │                            └──▶  ClaudeCodeService               │
+ │                                    │  permissions · hooks        │
+ │                                    │  history · cost · review    │
+ │                                    ▼                             │
+ │                              ClaudeSDKClient                     │
+ │                                    │                             │
+ │                 ▼  jrpc-oo/WS      ▼  stdio subprocess           │
+ └─────────────────┬──────────────────┬─────────────────────────────┘
+                   │                  │
+                   │            ┌─────┴──────┐
+                   │            │ claude CLI │ ◀── owns credentials,
+                   │            └────────────┘     context, tool loop
+                   ▼
+ ┌──────────────────────────────────────────────────────────────────┐
+ │                       Browser webapp (Lit)                       │
+ │                                                                  │
+ │   AppShell ──┬── FilesTab ──┬── FilePicker                       │
+ │              │              └── ChatPanel ── tool cards,         │
+ │              │                    subagent tabs, slash palette   │
+ │              ├── ContextTab   (Usage / Session / Debug)          │
+ │              ├── SettingsTab                                     │
+ │              ├── DocConvertTab                                   │
+ │              ├── SdkSurfaceTab                                   │
+ │              │                                                   │
+ │              │  Viewer layer (background)                        │
+ │              ├── DiffViewer  (Monaco + LSP + MD / TeX preview)   │
+ │              ├── SvgViewer + SvgEditor                           │
+ │              │                                                   │
+ │              └── Overlays — PermissionDialog, UsageHUD,          │
+ │                  FileNavGrid, CompactionProgress, SpeechControls │
+ └──────────────────────────────────────────────────────────────────┘
 ```
-See [specs4/0-overview/architecture.md](specs4/0-overview/architecture.md) and the SVG diagram at [specs4/architecture.svg](specs4/architecture.svg) for the full picture.
+
+Startup is split in two so the browser gets feedback immediately. Phase 1 (under a second) validates the git repository, picks ports, **resolves the `claude` binary and reads its version and credential source**, starts the webapp and WebSocket servers, and opens the browser onto a startup overlay. No SDK client and no symbol index yet — and nothing in phase 1 writes `os.environ`. Phase 2 runs as a background task, building the symbol index and wiring it into the MCP bridge with progress pushed to the overlay.
+
+There is no transcript-loading step and no eager resume. Showing the conversation is a disk read; resuming is a `claude` subprocess, and most launches are someone opening AIC⚡DC to read a diff.
+
+See [specs5/0-overview/architecture.md](specs5/0-overview/architecture.md) for the full picture.
+
 ---
 ## Running
-### From source (uv)
+
+### Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Python ≥ 3.10 | |
+| The **`claude` CLI**, authenticated | The one hard prerequisite. Startup fails with an actionable message naming every location it searched. |
+| A git repository | AIC⚡DC refuses to start outside one, and explains how to fix it in the browser. |
+| Node.js ≥ 20 | Only for webapp development (`--dev` / `--preview` / `npm run build`). |
+| [uv](https://docs.astral.sh/uv/) | Recommended for Python dependency management. |
+
+### From source
+
 ```
-git clone https://github.com/flatmax/AI-Coder-DeCoder.git
-cd AI-Coder-DeCoder
-# Install Python dependencies (with dev extras)
+git clone https://github.com/flatmax/AI-Coder-SDK-Connector.git
+cd AI-Coder-SDK-Connector
+
+# Python dependencies (dev group included automatically)
 uv sync
-# Install webapp dependencies
+
+# Webapp dependencies
 cd webapp && npm ci && cd ..
 ```
+
 Run inside any git repository:
+
 ```
 cd /path/to/your/project
-# Development mode — Vite HMR for the webapp
-uv run ac-dc --dev
-# Preview mode — pre-built webapp served locally
-uv run ac-dc --preview
+
+# Development mode — Vite dev server with hot module replacement
+uv run aic-dc --dev
+
+# Preview mode — Vite production build, served locally
+uv run aic-dc --preview
+
+# Bundled mode (default) — built-in static server
+uv run aic-dc
 ```
-Standalone binaries (Linux / macOS / Windows) are a deferred Layer 6 deliverable — see [specs4/6-deployment/build.md](specs4/6-deployment/build.md).
+
+Standalone binaries (Linux / macOS / Windows) are a deferred deliverable — see [specs5/6-deployment/build.md](specs5/6-deployment/build.md).
+
 ### Optional extras
-Document mode works out of the box with heading outlines, SVG containment trees, and cross-references. Richer features pull extras:
+
+The document index works out of the box with heading outlines, SVG containment trees, and cross-references. Richer features pull extras:
+
 ```
 # Document conversion (markitdown, PyMuPDF, python-pptx, openpyxl) — small
 uv sync --extra docs-convert
+
 # Keyword enrichment (KeyBERT, sentence-transformers, torch) — large (~800 MB with CUDA wheels)
 uv sync --extra docs-enrich
+
 # Both
 uv sync --extra docs
 ```
+
 System-level optional tools:
+
 | Tool | Purpose |
 |---|---|
-| [LibreOffice](https://www.libreoffice.org/) (`soffice` on PATH) | `.pptx` / `.odp` → PDF for the document-convert pipeline. Without it, `.pptx` falls back to python-pptx (basic SVG export). |
+| [LibreOffice](https://www.libreoffice.org/) (`soffice` on PATH) | `.pptx` / `.odp` → PDF for document conversion. Without it, `.pptx` falls back to python-pptx (basic SVG export). |
 | [make4ht](https://ctan.org/pkg/make4ht) (part of TeX Live) | Live TeX preview for `.tex` files. Without it, the preview pane shows installation instructions. |
+
 ---
-## Provider Configuration
-On first run, AC⚡DC creates a per-repo working directory at `.ac-dc4/` and a user-level config directory:
+## Configuration
+
+On first run AIC⚡DC creates a per-repo working directory at `.aic-dc/` and a user-level config directory:
+
 | Platform | Config path |
 |---|---|
-| Linux | `~/.config/ac-dc/` (or `$XDG_CONFIG_HOME/ac-dc/`) |
-| macOS | `~/Library/Application Support/ac-dc/` |
-| Windows | `%APPDATA%\ac-dc\` |
-Edit `llm.json` in the user config directory to configure a provider.
-**AWS Bedrock:**
-```json
-{
-  "env": { "AWS_REGION_NAME": "us-east-1" },
-  "model": "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-  "smaller_model": "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
-}
-```
-**Anthropic direct:**
-```json
-{
-  "env": { "ANTHROPIC_API_KEY": "sk-ant-..." },
-  "model": "anthropic/claude-sonnet-4-5-20250929",
-  "smaller_model": "anthropic/claude-haiku-4-5-20251001"
-}
-```
-**OpenAI:**
-```json
-{
-  "env": { "OPENAI_API_KEY": "sk-..." },
-  "model": "openai/gpt-5",
-  "smaller_model": "openai/gpt-5-mini"
-}
-```
-**Local (Ollama):**
-```json
-{
-  "env": {},
-  "model": "ollama/llama3",
-  "smaller_model": "ollama/llama3"
-}
-```
-Any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers) works. The `smaller_model` is used for commit-message generation, URL summarisation, and compaction topic-boundary detection. You can edit the config from the Settings tab inside the browser UI — `llm.json` and `app.json` hot-reload without a restart.
+| Linux | `~/.config/aic-dc/` (or `$XDG_CONFIG_HOME/aic-dc/`) |
+| macOS | `~/Library/Application Support/aic-dc/` |
+| Windows | `%APPDATA%\aic-dc\` |
+
+### There is no provider configuration
+
+This is the biggest change from earlier versions of this project, and it is worth stating flatly: **there is no `llm.json`, no provider list, no API-key field, and no system prompt for AIC⚡DC to own.**
+
+- Credentials belong to the `claude` CLI. Authenticate it however you normally would; AIC⚡DC reports which credential source it found (in the Context tab's Debug section) and otherwise stays out of the way.
+- Agent instructions come from `CLAUDE.md` and `.claude/` in your repository, read by the CLI. Editing them is editing the agent's behaviour.
+- Permission rules live in `.claude/settings.local.json`, which is also where deny-read entries are written.
+
+### Config files
+
+| File | Purpose | Hot-reload |
+|---|---|---|
+| `engine.json` | Engine overrides — model, effort, permission mode, budget cap, CLI path | `model` and `permission_mode` apply to the live session; the rest take effect on the next session |
+| `app.json` | Document conversion, document index, and history settings | Yes |
+| `snippets.json` | Quick-insert prompt buttons, grouped `code` / `review` / `doc` | On next open |
+| `commit.md` | Commit-message generation prompt | Re-read per use |
+
+All of these are editable from the Settings tab in the browser.
+
+#### `engine.json` fields
+
+Every field defaults to `null`, meaning "let the CLI decide".
+
+| Field | Values | Description |
+|---|---|---|
+| `model` | model id | Primary model for the session |
+| `commit_model` | model id | Cheaper model for commit-message generation |
+| `permission_mode` | `default`, `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`, `auto` | Starting permission posture. `bypassPermissions` is never a default and warns explicitly |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max` | Reasoning effort |
+| `thinking_display` | `summarized`, `omitted` | How thinking is surfaced |
+| `max_budget_usd` | number | Hard spend cap for the session |
+| `cli_path` | path | Override `claude` binary resolution |
+| `max_buffer_size` | bytes | Raises the SDK's stdout line-length ceiling; a value that is too *small* ends sessions, so it has a floor |
+
+The permission-mode and effort value sets are read from the SDK's own type aliases at import time, with a built-in fallback — so a new mode added by the SDK is picked up without a code change here.
+
+#### `app.json` sections
+
+| Section | Key fields |
+|---|---|
+| `doc_convert` | `enabled`, `extensions`, `max_source_size_mb` |
+| `doc_index` | `keyword_model`, `keywords_enabled`, `keywords_top_n`, `keywords_ngram_range`, `keywords_min_section_chars`, `keywords_min_score`, `keywords_diversity`, `keywords_tfidf_fallback_chars`, `keywords_max_doc_freq` |
+| `history` | `session_dir_warning_bytes`, `mirror_gap_tolerance` |
+
+Full field reference: [specs5/1-foundation/configuration.md](specs5/1-foundation/configuration.md).
+
 ---
 ## Typical Workflow
-1. **Start** — `uv run ac-dc --dev` (or `--preview`) inside your git repo. Browser opens automatically.
-2. **Observe the startup overlay** — foundation, repository, indexing, and doc-index build in visible phases. The webapp becomes interactive as soon as the backend is reachable; indexing completes in the background.
-3. **Chat** — ask the LLM to understand, modify, or create code. The symbol map tells it which files are relevant without you naming them.
-4. **Add files to context** — click file mentions in the LLM response, or tick the file picker. Three states: selected (in context), unchecked (index-only), excluded (crossed out — omitted from both context and index).
-5. **Review edits** — applied edits appear in the diff viewer with per-line and per-character highlighting. Status badges show pending / applied / failed / ambiguous.
-6. **Commit** — use the header git controls. The smaller model drafts a conventional-commit message from the staged diff.
-7. **Iterate** — cache tiers evolve as you work; stability promotions reduce re-ingestion cost. The Token HUD shows per-request and session totals.
+
+1. `cd` into a git repository and run `uv run aic-dc`. The browser opens on the Files + Chat tab.
+2. Type a request. Point at files with `@` in the chat input, or middle-click a picker row to insert its path.
+3. The agent works. Tool cards appear as it goes; edit-shaped calls open themselves so the diff is visible.
+4. When it wants to do something your permission mode does not pre-approve, a dialog opens with the change rendered as a diff. Approve, deny with a reason the agent will see, or switch mode for the rest of the session.
+5. Click a file chip in a tool card or the turn footer to open it in the diff viewer, with LSP over the symbol index.
+6. Read the turn footer: files modified, tool calls, how many needed a prompt, duration, per-model token split, and cost when it is priced.
+7. Commit from the chat panel's action bar — the message is generated from the diff by a cheaper model.
+
 ### Code review sub-workflow
-1. Click the review button in the header.
-2. Select a commit in the git graph to set the review base.
-3. Click **Start Review** — the repo enters review mode (soft reset).
-4. Select files to include their reverse diffs in context.
-5. Chat with the LLM about the changes. Edits are blocked during review.
-6. Click **Exit Review** to restore the branch tip.
----
-## Feature Tour
-### Chat + edit protocol
-Messages render as markdown with syntax highlighting (highlight.js) and KaTeX math. Responses stream chunk-by-chunk; edit blocks appear as inline diff cards with status badges.
-Edit blocks use a three-marker format — a filename line, an "edit" marker, the original text, a "replace" marker, the new text, and an "end" marker. The exact marker glyphs and contract are documented in [specs4/3-llm/edit-protocol.md](specs4/3-llm/edit-protocol.md) and [specs-reference/3-llm/edit-protocol.md](specs-reference/3-llm/edit-protocol.md) (this README avoids reproducing them inline because the chat-panel parser would interpret them as real edit blocks).
-Failures come with structured retry prompts:
-- **Ambiguous anchor** — matched multiple locations; chat panel auto-populates a retry prompt asking for more context
-- **Anchor not found** — whitespace or partial-match diagnostics
-- **Not in context** — file wasn't in file-context; auto-added and staged
-### Symbol index (code mode)
-Tree-sitter builds a compact symbol map across the repo. Map legend covers abbreviations — `c` class, `m` method, `f` function, `i` import, `i→` local import, `←N` incoming refs, `→` outgoing calls, `?` optional param, `@1/` path alias. The LLM gets this map for files that aren't actively selected; selected files get full content.
-Supported languages: Python, JavaScript, TypeScript (plain + TSX), C, C++.
-LSP-style hover / go-to-definition / references / completions are exposed from the backend and wired into the Monaco diff editor. Cross-file go-to-definition opens the target in the diff viewer automatically.
-### Document index (document mode)
-Markdown files produce a heading tree annotated with content-type markers (tables, code blocks, inline math) and section line counts. SVG files produce containment-aware outlines — nested shapes form a tree, labels come from `aria-label` / Inkscape labels / contained text, with spatial clustering as a fallback for shape-less diagrams.
-Keyword enrichment (optional — requires `docs-enrich` extras) runs KeyBERT with a TF-IDF fallback for short sections, boosting heading disambiguation for repetitive structures.
-Cross-references resolve markdown `[text](path.md#heading)` links and image references, producing a reference graph that feeds cache-tier initialisation.
-Runtime toggle — code mode, document mode, or cross-reference mode (both indexes layered). No restart needed.
-### Agent mode
-Off by default. Enable by setting `"agents": { "enabled": true }` in `app.json` directly, or by ticking the agentic-coding toggle in the Settings tab — note that the in-app toggle is hidden unless ac-dc is launched with `--experimental`. When enabled, an appendix is added to the system prompt explaining the spawn-block protocol; the main LLM may then emit `🟧🟧🟧 AGENT` … `🟩🟩🟩 AGEND` blocks to fan out work across independent agents.
 
-Each spawned agent is a separate context manager with its own conversation history, file context, and stability tracker. Agents stream into their own tabs in the chat panel, run in parallel over the same WebSocket, and apply edits through the same anchor-matched pipeline as the main LLM. Per-tab affordances (cancel, view archive, jump to turn) work the same way for agents as for the main conversation.
+1. Open the commit graph and pick a commit.
+2. AIC⚡DC soft-resets the branch to its parent, so the change appears as uncommitted work.
+3. Work through it with reverse diffs in the viewer. The agent can read the review state through `review_state`, so it knows what is under review without being told.
+4. Re-commit when done.
 
-Spawn-block fields:
-
-- `id` — required; reusing an id retasks an existing agent (preserves its history and trackers), a new id spawns a fresh one
-- `task` — required; the initial natural-language prompt
-- `mode` — optional; one of `code`, `doc`, `code+xref`, `doc+xref`. Omitted means inherit the orchestrator's current mode
-
-Agent archives live under `.ac-dc4/agents/<turn-id>/<NN>-<agent-id>.jsonl` and survive reconnects — refreshing the browser re-attaches live agent tabs and lets you browse historical agent turns from the main chat.
-
-Reproduce the marker bytes (three orange squares + `AGENT`, three green squares + `AGEND`) exactly when authoring spawn blocks. The end marker `AGEND` is intentionally distinct from the edit-block end marker `END` so the parser can dispatch on the literal line.
-
-Full contract: [src/ac_dc/config/system_agentic_appendix.md](src/ac_dc/config/system_agentic_appendix.md) and [specs4/7-future/parallel-agents.md](specs4/7-future/parallel-agents.md).
-
-### Cache tiering
-Content is tracked across categories (files, code symbols, doc outlines, URL context, history, system prompt) and flows through four stability tiers:
-- **Active** — just-added or recently changed; no promotion threshold
-- **L3 → L0** — increasing stability, aligned with provider cache breakpoints
-Content unchanged across N consecutive requests promotes; edited content demotes and ripples downward. Cache targets are model-aware (Opus / Haiku 4.5+ require higher minimums per Anthropic's docs). A manual rebuild rebalances tiers using the reference graph.
-See [specs4/3-llm/cache-tiering.md](specs4/3-llm/cache-tiering.md).
-### History + compaction
-JSONL persistent history per-repo. Sessions are auto-saved and auto-restored on startup. The session browser supports full-text search across all sessions.
-Compaction fires when history exceeds a configurable token threshold (default 24 000). An auxiliary LLM call detects topic boundaries:
-- **Truncate case** — clear boundary found; drop everything before it
-- **Summarise case** — no clear boundary; summarise the older half into a short block, keep the verbatim window
-A capacity bar in the dialog footer shows live budget pressure (green / amber / red). Compaction progress appears as a floating overlay with elapsed-time counter. Successful compactions append a system-event message to the chat scrollback.
-### Diff viewer
-Single-file, refetch-on-every-click, no caching. Monaco-based side-by-side diff editor with:
-- LSP integration (hover / definition / references / completions)
-- Markdown preview with bidirectional scroll sync
-- TeX preview (make4ht + KaTeX) with bidirectional scroll sync
-- Markdown link provider — Ctrl+click internal links to navigate
-- MATLAB syntax highlighting
-- Cross-file go-to-definition — navigates to the target in the same viewer
-- Load-panel — push any file content or commit diff into either side for ad-hoc comparison
-### SVG viewer & editor
-SVG files open in a dedicated viewer. Pan via middle-click-drag, zoom via scroll wheel (cursor-centred), side-by-side layout with synchronised viewports across both panes.
-The editor on the right pane supports:
-- **Select** — click any element; bounding box or control-point handles appear
-- **Drag** — move any selected element (rects, circles, text, groups, paths, lines)
-- **Reshape paths** — draggable endpoint handles (blue circles) and control-point handles (orange diamonds) with guide lines
-- **Resize** — corner / edge handles on rects, circles, ellipses
-- **Line endpoints** — vertex handles on lines, polylines, polygons
-- **Inline text edit** — double-click a `<text>` element; Enter commits, Escape cancels
-- **Multi-selection** — shift-click or marquee-drag
-- **Copy / paste / duplicate** — Ctrl+C / Ctrl+V / Ctrl+D
-- **Delete** — Delete or Backspace
-- **Undo** — per-editor undo stack
-- **Copy as PNG** — rasterise at native resolution into the clipboard
-- **Presentation mode** — full-width single pane via F11
-### TeX preview
-Live preview for `.tex` files via make4ht + KaTeX. Compiles on save (or debounced during typing), strips alt-text artefacts, renders math through KaTeX, injects source-line anchors for bidirectional scroll sync. Images and relative paths resolve through the repo. Graceful degradation when make4ht is missing — the pane shows installation instructions.
-### File picker
-Full keyboard navigation with a deep feature set:
-- **Git status badges** per file, **diff stats** (`+adds / -dels`), **line-count colouring**
-- **Branch badge** on the root node with detached-HEAD detection and SHA tooltip
-- **Sort modes** — name, mtime, size; each direction-toggleable with localStorage persistence
-- **Three-state exclusion** — selected / default / excluded via shift+click or context menu
-- **Active-file highlight** — picker row tracks the viewer's active file
-- **Context menus** — file row: stage / unstage / discard / rename / duplicate / load-left / load-right / include / exclude / delete. Directory row: stage-all / unstage-all / rename / new-file / new-directory / exclude-all / include-all
-- **Inline input** — rename / duplicate / new-file / new-directory all use in-place textboxes
-- **Middle-click** — inserts the file's path at the chat-input cursor
-- **`@`-filter bridge** — typing `@foo` in the chat input filters the picker in real time
-- **Auto-selection** — changed files auto-ticked on first load (union, never overwrite)
-- **Branch switcher** — dropdown with local + remote branches; aborts if the tree is dirty
-- **Review mode banner** — amber banner above the filter bar showing branch, commit count, file count, stats
-### File navigation grid
-Opened files arrange spatially on a 2D grid overlay. `Alt+Arrow` navigates directionally — left / right / up / down between adjacent open files. The HUD fades in while Alt is held. Travel counts track user preferences for replacement. Click-to-teleport, right-click to close a node, clear button to reset.
-### Search
-Global full-text search with two synchronised panels:
-- **Pruned tree** (left) — the file-picker tree filtered to matching files, with per-file match counts
-- **Match overlay** (right) — line-level matches with before / after context, highlighted
-Modes: regex, whole-word, case-sensitive. Bidirectional scroll sync. Enter to open a match in the diff viewer.
-### Session history browser
-Modal overlay listing sessions with token / message counts. Click a session to preview messages. Full-text search across all sessions surfaces individual hits. Actions per message: copy to clipboard, paste into chat input, load into diff viewer left / right panel.
-### Token HUD & Context tab
-**Token HUD** — floating overlay (appears post-stream, auto-hides after a configurable delay). Sections: cache tiers with per-tier content breakdown, current-request tokens, budget with category stacked bar, session totals.
-**Context tab** — two sub-views:
-- **Budget** — stacked bar of token usage by category (symbol map, files, history, URLs, prompt, active), with expandable per-file detail
-- **Cache** — tier breakdown with per-item stability progress, fuzzy search, sort by tier / alphabetical, rebuild-cache action, click-to-view per-item prompt blocks
-### Code review
-Pick a commit from the interactive git graph; backend performs a soft-reset with detached-HEAD checkout. Review mode:
-- Swap system prompt to the review prompt (read-only instructions for the LLM)
-- Symbol map shows pre-change state; file diffs reverse (changes from new → old direction)
-- Selected files contribute reverse diffs to context
-- Edits are blocked; commits are blocked
-- Exit restores the branch tip and original branch
-### Document convert
-Convert documents to markdown from a dedicated tab. Supported formats: `.docx`, `.pdf`, `.pptx`, `.xlsx`, `.csv`, `.rtf`, `.odt`, `.odp`.
-- **Clean working tree required** — conversion results appear as diffs for review
-- **Provenance headers** embedded in output so re-conversions detect source changes
-- **Status badges** — new / current / stale / conflict / over-size / skipped
-- **PDF pipeline** — PyMuPDF extracts text plus per-page SVG with embedded images externalised to sibling files
-- **Presentation pipeline** — LibreOffice → PDF → PyMuPDF (primary); python-pptx fallback when LibreOffice is missing (basic SVG export)
-- **Excel pipeline** — openpyxl with cell-colour clustering, symbolised via emoji markers and a colour legend
-- **DOCX** — markitdown with image extraction from the underlying zip
-### URL content
-Paste any URL in chat; AC⚡DC detects it and shows a chip. Click the fetch button on the chip:
-- **Generic URLs** — trafilatura extracts main content, summarised by the smaller model
-- **GitHub repos** — shallow clone, extract README + symbol map, summary tuned for architecture
-- **GitHub files** — raw file fetch
-- **GitHub issues / PRs** — structured body + comments
-Fetched content is cached under the OS temp directory with a TTL (default 24 h). Chips let you exclude individual URLs from the next message.
-### Images & voice
-- **Image paste** — drop screenshots into the chat input; stored persistently under `.ac-dc4/images/` keyed by SHA-256; auto-reconstructed on session reload; re-attachable from message history via lightbox
-- **Voice dictation** — toggle the microphone in the input area; Web Speech API streams the transcript live; configurable auto-commit mode
-### Collaboration
-Collaboration is disabled by default. Enable with `--collab`:
-```
-uv run ac-dc --collab
-```
-When enabled:
-- The WebSocket server binds to `0.0.0.0` (all network interfaces) instead of loopback
-- The first browser connection is auto-admitted as the **host**
-- Subsequent connections from other IPs are held pending until an admitted user clicks **Admit** in a toast
-- **Localhost clients** (including the host) have full control — chat, edit, commit, switch modes
-- **Non-localhost participants** get a read-only view — browse files, view diffs, watch streaming, read history. Edits, mode changes, and git operations are rejected with a `restricted` error
-- All broadcast events (streaming chunks, file changes, commit results, mode switches, session loads) reach every admitted client
-Connected-users indicator (`👥 N`) appears in the dialog header. Share the URL from the collab popover with LAN peers.
-See [specs4/4-features/collaboration.md](specs4/4-features/collaboration.md) for the full contract.
 ---
 ## CLI Options
+
 | Flag | Default | Description |
 |---|---|---|
 | `--server-port` | `18080` | RPC WebSocket starting port (probes upward if taken) |
-| `--webapp-port` | `18999` | Webapp dev / preview starting port |
+| `--webapp-port` | `18999` | Webapp static / dev / preview starting port |
 | `--no-browser` | off | Don't auto-open the browser |
 | `--repo-path` | `.` | Git repository path |
 | `--dev` | off | Run a local Vite dev server (hot reload) |
-| `--preview` | off | Serve the pre-built webapp locally |
+| `--preview` | off | Build and serve the webapp locally |
 | `--verbose` | off | Debug-level logging |
-| `--collab` | off | Enable collaboration mode (LAN-accessible, multi-browser) |
-| `--experimental` | off | Unlock experimental UI affordances (agent-mode toggle, reasoning toggle) in the Settings tab and chat panel. JSON-config flags work without it; this flag only exposes the in-browser switches. |
+| `--collab` | off | Collaboration mode — bind all interfaces, admission-gated |
+| `--experimental` | off | Unlock experimental UI affordances that are otherwise locked read-only. Editing the underlying JSON config directly works without the flag |
+
 ---
 ## Keyboard Shortcuts
+
 | Shortcut | Context | Action |
 |---|---|---|
 | `Enter` | Chat input | Send message |
 | `Shift+Enter` | Chat input | Newline |
-| `Up` | Chat input (empty) | Open input history |
-| `Escape` | Chat input | Clear `@`-filter → close snippets → clear input |
+| `Up` | Chat input (cursor at start) | Open input history |
+| `/…` | Chat input (leading token) | Slash-command palette, filtering as you type |
 | `@text` | Chat input | Filter file picker live |
-| `Ctrl+S` | Diff viewer / Settings / SVG editor | Save active file |
-| `Ctrl+F` | Diff viewer | Monaco find widget |
-| `Ctrl+Shift+F` | Global | Activate file search (captures current selection) |
-| `Alt+1` .. `Alt+4` | Global | Switch tab (Files / Context / Settings / Doc-Convert) |
+| `Alt+1` … `Alt+5` | Global | Switch tab — Files+Chat / Context / Settings / Convert / SDK Surface |
 | `Alt+M` | Global | Toggle dialog minimize |
 | `Alt+Left/Right/Up/Down` | Global | File navigation grid |
+| `Ctrl+Shift+F` | Global | File search, seeded with the current selection |
+| `Ctrl+S` | Diff viewer / Settings / SVG editor | Save active file |
+| `Ctrl+F` | Diff viewer | Monaco find widget |
 | `Scroll wheel` | SVG viewer | Zoom in / out (cursor-centred) |
 | `Middle-drag` | SVG viewer | Pan |
-| `F11` | SVG viewer | Toggle presentation mode |
-| `Escape` | SVG viewer (presentation) | Exit presentation |
+| `F11` / `Escape` | SVG viewer | Enter / exit presentation mode |
 | `Click` | SVG editor | Select element |
 | `Drag handle` | SVG editor | Move endpoint / vertex / control point |
 | `Double-click` | SVG editor (text) | Edit text inline |
@@ -358,240 +294,232 @@ See [specs4/4-features/collaboration.md](specs4/4-features/collaboration.md) for
 | `Escape` | SVG editor | Deselect / cancel text edit |
 | `Up` / `Down` / `Home` / `End` | File picker | Navigate tree |
 | `Left` / `Right` | File picker | Collapse / expand / traverse |
-| `Space` / `Enter` | File picker | Toggle selection / expand |
-| `F2` | File picker (file row) | Rename focused file (inline input) |
-| `Shift+Click` | File picker checkbox | Toggle exclusion (three-state) |
+| `Space` / `Enter` | File picker | Expand a directory / open a file |
+| `Escape` | File picker | Cancel inline edit / close context menu |
+| `F2` | File picker (file row) | Rename focused file inline |
+| `Shift+Click` | File picker (any row) | Deny the agent read access to that path or subtree |
 | `Middle-click` | File picker (file row) | Insert path into chat input |
----
-## Configuration
-Config files live in the user config directory (platform-specific, see above). A subset can be overridden per-repo under `.ac-dc4/`.
-| File | Purpose | Format |
-|---|---|---|
-| `llm.json` | Provider, model, env vars, cache tuning | JSON |
-| `app.json` | URL cache, history compaction, doc convert, doc index settings | JSON |
-| `system.md` | Main LLM system prompt (code mode) | Markdown |
-| `system_doc.md` | Document mode system prompt | Markdown |
-| `review.md` | Code review system prompt | Markdown |
-| `system_reminder.md` | Edit-format reminder prepended to each user message | Markdown |
-| `system_extra.md` | Project-specific additions (user-owned, never overwritten) | Markdown |
-| `compaction.md` | Topic-boundary detection prompt | Markdown |
-| `commit.md` | Commit-message generation prompt | Markdown |
-| `snippets.json` | Quick-insert prompt buttons for code / review / doc modes | JSON |
-All of these are editable from the Settings tab in the browser UI. `llm.json` and `app.json` hot-reload on save. Prompt files re-read on every request — edits take effect on the next LLM call.
-### LLM config fields
-| Field | Default | Description |
-|---|---|---|
-| `env` | `{}` | Environment variables injected on load (API keys, regions) |
-| `model` | (provider-specific) | Primary LLM model identifier |
-| `smaller_model` | (provider-specific) | Cheaper model for commit messages, URL summaries, compaction |
-| `max_output_tokens` | *(unset)* | User ceiling override for model output tokens |
-| `cache_min_tokens` | `1024` | User-configurable minimum cacheable token count |
-| `cache_buffer_multiplier` | `1.1` | Multiplier applied to the cache minimum for headroom |
-### App config sections
-| Section | Key fields |
-|---|---|
-| `url_cache` | `path`, `ttl_hours` |
-| `history_compaction` | `enabled`, `compaction_trigger_tokens`, `verbatim_window_tokens`, `summary_budget_tokens`, `min_verbatim_exchanges` |
-| `doc_convert` | `enabled`, `extensions`, `max_source_size_mb` |
-| `doc_index` | `keyword_model`, `keywords_enabled`, `keywords_top_n`, `keywords_ngram_range`, `keywords_min_section_chars`, `keywords_min_score`, `keywords_diversity`, `keywords_tfidf_fallback_chars`, `keywords_max_doc_freq` |
-| `agents` | `enabled` (off by default; flips on the agent-spawn capability and the system-prompt appendix). The Settings-tab toggle for this is gated by `--experimental`; editing the JSON directly works without the flag. |
-| `reasoning` | `enabled`, `budget_tokens`, `effort` (experimental — provider-specific extended-thinking support). The chat-panel reasoning toggle is gated by `--experimental`; the JSON section is read regardless. |
-Full field reference: [specs-reference/1-foundation/configuration.md](specs-reference/1-foundation/configuration.md).
+
+Global shortcuts are all suppressed while the permission dialog is open — a keystroke should never move the app out from under a decision you are making.
+
 ---
 ## Per-Repo Working Directory
-A `.ac-dc4/` directory is created at the repo root on first run and added to `.gitignore`:
+
+A `.aic-dc/` directory is created at the repo root on first run and added to `.gitignore`:
+
 | Entry | Contents |
 |---|---|
-| `history.jsonl` | Persistent conversation history (append-only) |
-| `images/` | Pasted-in chat images, keyed by SHA-256 |
+| `sessions/` | Repo-local mirror of the SDK's session transcripts (JSONL) |
+| `events.jsonl` | Append-only engine event log |
+| `index/` | Symbol-index cache |
 | `doc_cache/` | Keyword-enriched document outline cache (mtime-keyed sidecars) |
-| `tex_preview/` | Transient TeX compilation working directory (cleaned on startup) |
-| `snippets.json` | Optional per-repo override of quick-insert snippets |
-The directory name is `.ac-dc4/` (not `.ac-dc/`) deliberately — this reimplementation coexists with the previous AC-DC on the same checkout without state collisions. See [`specs4/impl-history/decisions.md`](specs4/impl-history/decisions.md) decision D17.
+| `tex_preview/` | Transient TeX compilation workspace (cleaned on startup) |
+
+`.gitignore` also carries the two directory names this project used before it was called AIC⚡DC (`.ac-dc4/`, `.ac-dc/`). Nothing reads them; they are there so a checkout still holding old state does not suddenly show tens of megabytes of session JSONL as untracked, and so the file-tree walker and both indexers keep skipping it.
+
+---
+## What the SDK Conversion Removed
+
+If you used an earlier version of this project, these are gone — the CLI does all of them, and better:
+
+| Removed | Now |
+|---|---|
+| LiteLLM and 100+ provider routing, `llm.json` | The CLI resolves its own credentials and provider |
+| Four-tier stability prompt cache (L0–L3), cache-breakpoint placement, cache warmer | The CLI manages prompt caching |
+| `tiktoken` token counter | The CLI reports usage; AIC⚡DC counts nothing |
+| Anchored `🟧🟧🟧 EDIT` block protocol and apply pipeline | The agent's `Edit` / `Write` / `MultiEdit` tools |
+| LLM-driven history compactor | The CLI's compaction, with a progress overlay here |
+| URL detection, fetch, cache, and summarise chips | The agent's `WebFetch` |
+| `🟧🟧🟧 AGENT` spawn protocol and writable agent tabs | The agent's `Task` tool, with read-only subagent tabs |
+| Per-mode and per-review system prompts, `system_extra.md` | `CLAUDE.md` and `.claude/` |
+| Code / doc / cross-reference **modes** | Nothing. Both indexes are permanently available to the agent as tools, so there is nothing to switch. A lightweight preset selector (snippets and UI only) is specified but not yet shipped |
+| File **selection** — choosing what the LLM sees | Deny-read: shift+click a picker row to write a `Read(path)` deny rule |
+| `boto3`, `trafilatura`, `tenacity` | Dropped with their transitive trees |
+
+Retained in full: the symbol index, the document index and its reference graph, the diff viewer and its LSP integration, the SVG viewer and editor, TeX and markdown preview, the file picker, the navigation grid, search, the history browser, document conversion, code review, collaboration, images, and speech.
+
 ---
 ## Development
-### Prerequisites
-- Python ≥ 3.10
-- Node.js ≥ 20 (for webapp development)
-- [uv](https://docs.astral.sh/uv/) recommended for Python dependency management
+
 ### Setup
+
 ```
-git clone https://github.com/flatmax/AI-Coder-DeCoder.git
-cd AI-Coder-DeCoder
-# Python deps (dev group auto-included by uv sync)
-uv sync
-# Webapp deps
-cd webapp && npm ci && cd ..
+git clone https://github.com/flatmax/AI-Coder-SDK-Connector.git
+cd AI-Coder-SDK-Connector
+uv sync                          # Python deps (dev group auto-included)
+cd webapp && npm ci && cd ..     # Webapp deps
 ```
-### Run dev mode
+
+### Run
+
 ```
-uv run ac-dc --dev
+uv run aic-dc --dev
 ```
-Starts the Python backend plus Vite dev server with hot module replacement.
-### Run tests
+
+Starts the Python backend plus the Vite dev server with hot module replacement.
+
+### Tests
+
 ```
-# Python tests
-uv run pytest
-# Lint
-uv run ruff check src tests
-# Webapp tests (vitest)
-cd webapp && npm test
+uv run pytest                    # Backend
+uv run ruff check src tests      # Backend lint
+cd webapp && npm test            # Frontend (vitest)
 ```
-### Build webapp
+
+Smoke scripts under `scripts/` exercise the engine, MCP bridge, and history paths against a real `claude` CLI; they are not part of the pytest run.
+
+### Build the webapp
+
 ```
 cd webapp && npm run build
 ```
+
 ### Tech stack
-**Backend:**
+
+**Backend**
+
 | Package | Purpose |
 |---|---|
+| [claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-python) | The agent engine — session, tools, permissions, compaction, MCP |
 | [jrpc-oo](https://github.com/flatmax/jrpc-oo) | Bidirectional JSON-RPC 2.0 over WebSocket |
-| [LiteLLM](https://docs.litellm.ai/) | Universal LLM provider interface (100+ providers) |
-| [tiktoken](https://github.com/openai/tiktoken) | Token counting (cl100k_base for all models) |
-| [tree-sitter](https://tree-sitter.github.io/) | AST parsing for Python, JS/TS, C, C++ |
-| [trafilatura](https://trafilatura.readthedocs.io/) | Web page content extraction |
-| [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/) | AWS Bedrock support |
+| [tree-sitter](https://tree-sitter.github.io/) | AST parsing for Python, JS, TS/TSX, C, C++, MATLAB |
+| [mcp](https://modelcontextprotocol.io/) | In-process MCP server (pulled in by the SDK) |
 | [markitdown](https://github.com/microsoft/markitdown) (extra) | Document-to-markdown |
 | [PyMuPDF](https://pymupdf.readthedocs.io/) (extra) | PDF text + SVG extraction |
 | [python-pptx](https://python-pptx.readthedocs.io/) (extra) | PowerPoint fallback |
 | [openpyxl](https://openpyxl.readthedocs.io/) (extra) | Excel with colour clustering |
-| [KeyBERT](https://maartengr.github.io/KeyBERT/) (extra) | Keyword enrichment |
-| [sentence-transformers](https://www.sbert.net/) (extra) | Embedding model for KeyBERT |
-**Frontend:**
+| [KeyBERT](https://maartengr.github.io/KeyBERT/) + [sentence-transformers](https://www.sbert.net/) (extras) | Keyword enrichment |
+
+The `claude` CLI is a Node application and is **not** installed by any of these — it is resolved at startup.
+
+**Frontend**
+
 | Package | Purpose |
 |---|---|
 | [Lit](https://lit.dev/) | Web component framework |
 | [@flatmax/jrpc-oo](https://www.npmjs.com/package/@flatmax/jrpc-oo) | Browser JSON-RPC client |
 | [Monaco Editor](https://microsoft.github.io/monaco-editor/) | Diff editor with LSP |
-| [marked](https://marked.js.org/) | Markdown rendering |
-| [highlight.js](https://highlightjs.org/) | Syntax highlighting |
+| [marked](https://marked.js.org/) + [highlight.js](https://highlightjs.org/) | Markdown rendering and syntax highlighting |
 | [KaTeX](https://katex.org/) | Math rendering |
-| [diff](https://github.com/kpdecker/jsdiff) | Edit-block diff computation |
-**Build:**
+| [diff](https://github.com/kpdecker/jsdiff) | Two-level diff computation for tool cards and permission dialogs |
+| [svg-pan-zoom](https://github.com/bumbu/svg-pan-zoom) | SVG viewport control |
+
+**Build**
+
 | Tool | Purpose |
 |---|---|
 | [Vite](https://vitejs.dev/) | Webapp bundler / dev server |
 | [Vitest](https://vitest.dev/) | Webapp test runner |
 | [pytest](https://pytest.org/) | Backend test runner |
 | [ruff](https://docs.astral.sh/ruff/) | Backend linter |
-| [PyInstaller](https://pyinstaller.org/) | Standalone binaries (Layer 6, deferred) |
+| [PyInstaller](https://pyinstaller.org/) | Standalone binaries (deferred) |
+
 ---
 ## Repository Layout
+
 ```
-AI-Coder-DeCoder/
-├── src/ac_dc/                          # Python backend
-│   ├── __main__.py                     # python -m ac_dc entry
-│   ├── cli.py                          # argparse surface
-│   ├── main.py                         # server startup orchestration
-│   ├── config.py                       # configuration + upgrade logic
-│   ├── repo.py                         # git operations, file I/O, search
-│   ├── rpc.py                          # jrpc-oo server transport
-│   ├── collab.py                       # multi-browser admission + restrictions
-│   ├── settings.py                     # config read / write / reload RPC
-│   ├── file_context.py                 # active file context tracking
-│   ├── context_manager.py              # prompt assembly, token budget
-│   ├── history_store.py                # JSONL persistent history
-│   ├── history_compactor.py            # truncation + summarisation
-│   ├── stability_tracker.py            # four-tier cache cascade
-│   ├── token_counter.py                # tiktoken wrapper
-│   ├── edit_protocol.py                # edit block parser
-│   ├── edit_pipeline.py                # apply edits + git staging
-│   ├── llm_service.py                  # streaming, URL, review orchestration
-│   ├── doc_convert.py                  # document-to-markdown
-│   ├── logging_setup.py                # structured stderr logging
-│   ├── base_cache.py                   # mtime-based cache base
-│   ├── base_formatter.py               # compact-map formatter base
-│   ├── config/                         # bundled prompt + config defaults
-│   │   ├── llm.json
-│   │   ├── app.json
-│   │   ├── snippets.json
-│   │   ├── system.md
-│   │   ├── system_doc.md
-│   │   ├── review.md
-│   │   ├── commit.md
-│   │   ├── compaction.md
-│   │   └── system_reminder.md
-│   ├── doc_index/                      # markdown + SVG indexing
-│   │   ├── models.py
-│   │   ├── index.py
-│   │   ├── cache.py
-│   │   ├── formatter.py
-│   │   ├── reference_index.py
-│   │   ├── keyword_enricher.py
-│   │   └── extractors/
-│   │       ├── markdown.py
-│   │       ├── svg.py
-│   │       └── svg_geometry.py
-│   ├── symbol_index/                   # tree-sitter code indexing
-│   │   ├── models.py
-│   │   ├── parser.py
-│   │   ├── index.py
-│   │   ├── cache.py
-│   │   ├── compact_format.py
-│   │   ├── reference_index.py
-│   │   ├── import_resolver.py
-│   │   └── extractors/
-│   │       ├── python.py
-│   │       ├── javascript.py
-│   │       ├── typescript.py
-│   │       ├── c.py
-│   │       └── cpp.py
-│   └── url_service/                    # URL detection + fetch + summarise
-│       ├── detection.py
-│       ├── cache.py
-│       ├── fetchers.py
-│       ├── summarizer.py
-│       ├── models.py
-│       └── service.py
-├── webapp/                             # Lit-based browser webapp
-│   ├── package.json
-│   ├── vite.config.js
+AI-Coder-SDK-Connector/
+├── src/aic_dc/                       # Python backend
+│   ├── __main__.py                  # python -m aic_dc entry
+│   ├── cli.py                       # argparse surface
+│   ├── main.py                      # two-phase startup orchestration
+│   ├── config.py                    # config dirs, bundled defaults, upgrades
+│   ├── rpc.py                       # jrpc-oo server transport
+│   ├── settings.py                  # config read / write / reload RPC
+│   ├── collab.py                    # multi-browser admission + restrictions
+│   ├── logging_setup.py             # structured stderr logging
+│   ├── base_cache.py                # mtime-keyed cache base
+│   ├── base_formatter.py            # compact-map formatter base
+│   ├── claude_code/                 # the engine layer
+│   │   ├── service.py              #   RPC surface the browser calls
+│   │   ├── session.py              #   ClaudeSDKClient lifecycle, resume, fork
+│   │   ├── session_store.py        #   SessionStore integration
+│   │   ├── options.py              #   ClaudeAgentOptions assembly
+│   │   ├── engine_config.py        #   engine.json parsing + SDK literal probing
+│   │   ├── permissions.py          #   can_use_tool, mode rules, deny-read
+│   │   ├── hooks.py                #   PreToolUse / PostToolUse (re-index)
+│   │   ├── mcp_server.py           #   in-process "aic-dc" MCP server (6 tools)
+│   │   ├── messages.py             #   SDK message → UI payload taxonomy
+│   │   ├── cost.py                 #   per-turn cost differencing
+│   │   ├── history.py              #   transcript mirror + reads
+│   │   ├── history_index.py        #   session search index
+│   │   ├── events_log.py           #   events.jsonl writer
+│   │   ├── review.py               #   code-review state
+│   │   ├── commit.py               #   commit-message generation
+│   │   ├── health.py               #   claude binary resolution + version
+│   │   ├── sdk_surface.py          #   which SDK features this build wired up
+│   │   └── resume_cleanup.py       #   stale-session hygiene
+│   ├── repo/                        # git operations, file I/O, search
+│   │   ├── tree.py  files.py  diffs.py  search.py  staging.py
+│   │   ├── branches.py  commits.py  commit_graph.py  review.py
+│   │   ├── paths.py  locks.py  errors.py  subprocess_runner.py
+│   │   └── tex_preview.py
+│   ├── symbol_index/                # tree-sitter code indexing
+│   │   ├── index.py  parser.py  cache.py  models.py
+│   │   ├── compact_format.py  reference_index.py  import_resolver.py
+│   │   └── extractors/  (python, javascript, typescript, c, cpp, matlab)
+│   ├── doc_index/                   # markdown + SVG indexing
+│   │   ├── index.py  cache.py  models.py  formatter.py
+│   │   ├── reference_index.py  keyword_enricher.py  background.py
+│   │   └── extractors/  (markdown, svg, svg_geometry)
+│   ├── doc_convert/                 # document → markdown pipelines
+│   │   ├── service.py  constants.py  provenance.py
+│   │   └── markitdown_pipeline.py  pdf_pipeline.py
+│   │       pptx_pipeline.py  xlsx_pipeline.py
+│   └── config/                      # bundled defaults
+│       └── engine.json  app.json  snippets.json  commit.md
+├── webapp/                          # Lit-based browser frontend
+│   ├── index.html  package.json  vite.config.js
 │   └── src/
-│       ├── app-shell.js                # root component, WebSocket, routing
-│       ├── rpc.js                      # shared RPC proxy
-│       ├── rpc-mixin.js                # RPC access mixin for children
-│       ├── chat-panel.js               # chat messages + streaming + input
-│       ├── files-tab.js                # files + chat split panel
-│       ├── file-picker.js              # file tree with git status
-│       ├── context-tab.js              # budget + cache sub-views
-│       ├── settings-tab.js             # config editor
-│       ├── doc-convert-tab.js          # document conversion UI
-│       ├── diff-viewer.js              # Monaco diff editor
-│       ├── svg-viewer.js               # SVG pan/zoom viewer
-│       ├── svg-editor.js               # SVG element editor
-│       ├── markdown-preview.js         # markdown preview pane
-│       ├── tex-preview.js              # TeX preview pane
-│       ├── lsp-providers.js            # Monaco LSP glue
-│       ├── markdown-link-provider.js   # Ctrl+click markdown links
-│       ├── monaco-setup.js             # Monaco worker config
-│       ├── monaco-worker.js            # Monaco editor worker entry
-│       ├── edit-blocks.js              # edit block segmentation
-│       ├── edit-block-render.js        # inline diff card rendering
-│       ├── markdown.js                 # chat markdown rendering
-│       ├── message-search.js           # chat-local message search
-│       ├── history-browser.js          # session browser modal
-│       ├── input-history.js            # chat input history overlay
-│       ├── speech-to-text.js           # voice dictation
-│       ├── url-chips.js                # URL detection + fetch chips
-│       ├── url-helpers.js              # URL helpers
-│       ├── image-utils.js              # image paste + reattach
-│       ├── file-mentions.js            # file-mention click handling
-│       ├── file-nav.js                 # 2D navigation grid + HUD
-│       ├── viewer-routing.js           # extension → viewer dispatch
-│       ├── token-hud.js                # floating token overlay
-│       ├── compaction-progress.js      # compaction overlay
-│       ├── doc-index-progress.js       # doc-index build overlay
-│       ├── commit-graph.js             # git graph for code review
-│       └── main.js                     # Vite entry
-├── tests/                              # Python backend tests (pytest)
-├── scripts/
-│   └── sync_prompts.py                 # mirror prompts into specs-reference
-├── specs4/                             # Behavioural spec suite
-├── specs-reference/                    # Byte-level reference twin
-├── IMPLEMENTATION_NOTES.md             # Active reimplementation log
-├── pyproject.toml                      # uv / pip / hatch config
+│       ├── main.js                  # Vite entry
+│       ├── rpc.js  rpc-mixin.js     # shared RPC proxy + mixin
+│       ├── app-shell/               # root component, tabs, viewers, reconnect
+│       ├── chat-panel/              # messages, streaming, tool cards,
+│       │                           #   subagent tabs, permission-mode selector
+│       ├── permission-dialog/       # queue, decisions, rendered diffs
+│       ├── file-picker/             # tree with git status
+│       ├── files-tab/               # picker + chat split, review, exclusion
+│       ├── diff-viewer/             # Monaco, LSP, preview, scroll sync, export
+│       ├── svg-editor/              # visual SVG editing
+│       ├── svg-viewer.js            # pan / zoom / presentation mode
+│       ├── context-usage-tab.js     # Usage / Session / Debug sections
+│       ├── usage-hud.js  turn-cost.js
+│       ├── sdk-surface-tab.js       # SDK feature probe
+│       ├── settings-tab.js  doc-convert-tab.js
+│       ├── slash-palette.js  slash-commands.js
+│       ├── history-browser.js  input-history.js  message-search.js
+│       ├── file-nav.js  viewer-routing.js  file-mentions.js
+│       ├── markdown.js  markdown-preview.js  tex-preview.js
+│       ├── lsp-providers.js  monaco-setup.js  markdown-link-provider.js
+│       ├── speech-to-text.js  speech-synthesis.js  speech-player.js
+│       ├── commit-graph.js  image-utils.js  shadow-style-sync.js
+│       └── compaction-progress.js  doc-index-progress.js
+├── tests/                           # Backend tests (pytest)
+├── scripts/                         # Smoke scripts + prompt sync
+├── specs5/                          # Behavioural spec suite (current)
+├── specs-reference/                 # Byte-level reference twin
+├── pyproject.toml                   # uv / pip / hatch config
 └── LICENSE
 ```
+
+---
+## Specs
+
+The behaviour of every feature above is specified in [`specs5/`](specs5/), which is the source of truth for this tree:
+
+| Directory | Contents |
+|---|---|
+| [`0-overview/`](specs5/0-overview/) | Architecture, glossary, implementation guide |
+| [`1-foundation/`](specs5/1-foundation/) | Configuration, repository layer, RPC transport and inventory |
+| [`2-indexing/`](specs5/2-indexing/) | Symbol index, document index, reference graph, keyword enrichment |
+| [`3-engine/`](specs5/3-engine/) | Session, permissions, MCP bridge, tool surface, history, context visibility |
+| [`4-features/`](specs5/4-features/) | Code review, collaboration, document conversion, images |
+| [`5-webapp/`](specs5/5-webapp/) | Every panel, viewer, dialog, and overlay |
+| [`6-deployment/`](specs5/6-deployment/) | Startup, build, packaging |
+| [`plan/`](specs5/plan/) | Conversion decisions, risks, delivery, SDK surface |
+| [`impl-history/`](specs5/impl-history/) | Layer-by-layer implementation log |
+
 ---
 ## License
+
 MIT — see [LICENSE](LICENSE).

@@ -1,7 +1,7 @@
 # Context Visibility
 
 What does the agent currently know, what is it costing, and how close is it to compacting? Under the
-native engine those questions were answered by AC⚡DC's own model of the prompt it had assembled.
+native engine those questions were answered by AIC⚡DC's own model of the prompt it had assembled.
 Under Claude Code they are answered by the engine's own accounting, via
 `ClaudeSDKClient.get_context_usage()` — the same data the CLI's `/context` command renders.
 
@@ -164,7 +164,7 @@ What this session is made of, and what each part costs:
   Code repo and its cost was previously unknowable.
 - **System prompt sections** — what the engine prepended, and how big each part is.
 - **Tools** — built-in, deferred built-in, and per-MCP-server, with token cost and health. Our own
-  `ac-dc` server appears here like any other, which keeps us honest about what the bridge costs (see
+  `aic-dc` server appears here like any other, which keeps us honest about what the bridge costs (see
   [mcp-bridge.md](mcp-bridge.md)).
 - **Agents, skills, slash commands** — the inventory available to this session, sourced from project
   settings.
@@ -218,12 +218,12 @@ carries the running total so far, so read the latest result rather than summing 
 Crash/startup-error results may carry zeroed values, resumed sessions start fresh, and a mid-session
 /clear resets the running total. An estimate, not a billing statement."*
 
-So a null cost never comes from the engine — every one in this codebase is a footer AC⚡DC wrote itself,
+So a null cost never comes from the engine — every one in this codebase is a footer AIC⚡DC wrote itself,
 or a replayed turn whose cost the transcript does not record. Billing mode is not visible here at all;
 `EngineHealth.credential_source` is the only signal for it.
 
 Because the figure is cumulative, **this turn's cost is a difference against the previous result**. The
-baseline outlives the turn, so it lives in `EngineSession` (`ac_dc/claude_code/cost.py`), folded into
+baseline outlives the turn, so it lives in `EngineSession` (`aic_dc/claude_code/cost.py`), folded into
 `streamComplete` by the pump exactly as `engineHealth` already is — a `TurnTranslator` is one turn's
 worth of state and could not hold it, and a browser holding it would lose it on reconnect and disagree
 between clients. Three per-turn fields are added beside the engine's cumulative ones, never replacing
@@ -284,11 +284,11 @@ cache hit rate as a headline metric.
 Cache hit rate deserves a note: the engine still caches, and the per-model usage still reports
 `cacheReadInputTokens` and `cacheCreationInputTokens`, so the ratio is derivable and is shown in the
 per-model rows. What is gone is its status as *the* headline number, because it was headline-worthy
-only when AC⚡DC was the thing doing the caching.
+only when AIC⚡DC was the thing doing the caching.
 
 ## Invariants
 
-- All context figures originate from `get_context_usage()` or `ResultMessage`; AC⚡DC never estimates
+- All context figures originate from `get_context_usage()` or `ResultMessage`; AIC⚡DC never estimates
   or models context composition itself.
 - Category colours come from the engine's payload, not from a local palette.
 - The auto-compact threshold is always marked on the budget gauge when auto-compact is enabled, and its
@@ -303,7 +303,7 @@ only when AC⚡DC was the thing doing the caching.
   whose cost is unknown.
 - The HUD never appears for an empty turn. An errored turn carrying real usage is not an empty turn — a
   turn that fails late has usually spent the most.
-- Memory files, system prompt sections, and every MCP server — including `ac-dc` — appear in the
+- Memory files, system prompt sections, and every MCP server — including `aic-dc` — appear in the
   Session section with their token cost.
 - `gridRows` is never used for layout.
 - The debug section is off by default and never required to understand normal usage.

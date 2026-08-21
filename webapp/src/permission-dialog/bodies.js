@@ -46,7 +46,7 @@ export function renderWriteBody(host, payload) {
   if (!diff) {
     return html`
       <div class="not-shown">
-        AC-DC could not work out which file this call targets. The
+        AIC-DC could not work out which file this call targets. The
         verbatim input is below — read it before deciding.
       </div>
     `;
@@ -84,7 +84,7 @@ export function renderWriteBody(host, payload) {
       <div class="not-shown">
         <div><strong>${diff.path}</strong></div>
         <div>
-          AC-DC could not compute the proposed result — the replacement
+          AIC-DC could not compute the proposed result — the replacement
           text does not match the file on disk.
         </div>
         <div>

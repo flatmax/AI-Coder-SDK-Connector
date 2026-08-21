@@ -8,7 +8,7 @@ What is new, and what most of this module is about:
 
 - **Entry switches the permission posture to ``plan``, and exit puts it
   back.** Read-only used to be structural — edits reached disk only through
-  AC⚡DC's apply step, which review skipped. The agent writes to disk itself
+  AIC⚡DC's apply step, which review skipped. The agent writes to disk itself
   now, so the guarantee has to be the CLI's own posture.
 - **A cold engine still gets the posture.** Nothing connects the CLI until
   the first turn, so a review started before chatting has no live session
@@ -34,11 +34,11 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.review import ReviewMode, compute_review_stats
-from ac_dc.claude_code.service import ClaudeCodeService
-from ac_dc.config import ConfigManager
-from ac_dc.repo import Repo
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.review import ReviewMode, compute_review_stats
+from aic_dc.claude_code.service import ClaudeCodeService
+from aic_dc.config import ConfigManager
+from aic_dc.repo import Repo
 
 from .test_claude_code_service import FakeCollab, FakeSession, Recorder
 
@@ -111,7 +111,7 @@ def feature_tip(repo_dir: Path) -> str:
 
 @pytest.fixture
 def config(tmp_path: Path, repo_dir: Path, monkeypatch) -> ConfigManager:
-    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(tmp_path / "config-home"))
+    monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(tmp_path / "config-home"))
     return ConfigManager(repo_root=repo_dir)
 
 
@@ -439,7 +439,7 @@ class TestPosture:
     async def test_a_lost_session_at_exit_does_not_hide_the_git_result(
         self, service, feature_tip, caplog
     ):
-        from ac_dc.claude_code.session import SessionLostError
+        from aic_dc.claude_code.session import SessionLostError
 
         service.session.ready = True
         await service.start_review("feature", feature_tip)

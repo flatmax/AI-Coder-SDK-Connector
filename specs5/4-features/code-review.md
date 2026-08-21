@@ -141,7 +141,7 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 ## Preset Swap
 
 - On review entry the review preset activates: review snippets, the review turn-framing hint, and the read-only posture
-- No system prompt is swapped, because AC⚡DC has none. A user who wants standing review instructions puts them in `CLAUDE.md`, which the CLI reads through `setting_sources` and which therefore applies in review exactly as it does elsewhere — see [decisions § CC-11](../plan/decisions.md#cc-11--setting_sources-includes-the-project-so-claudemd-is-live)
+- No system prompt is swapped, because AIC⚡DC has none. A user who wants standing review instructions puts them in `CLAUDE.md`, which the CLI reads through `setting_sources` and which therefore applies in review exactly as it does elsewhere — see [decisions § CC-11](../plan/decisions.md#cc-11--setting_sources-includes-the-project-so-claudemd-is-live)
 - A project that wants a genuinely different reviewer persona uses a Claude Code **agent** or **skill**, named in the preset. That is the platform's mechanism for the job and it is versioned in the repo, which the old `review.md` never was
 - Preset state is not persisted. After a crash the next start comes up in the default preset, matching the fact that review git state is not persisted either
 
@@ -155,7 +155,7 @@ commit list. Every one of the agent's own tools sees this without being told.
 
 **2. The `review_state` MCP tool.** Reviewed branch, target branch, merge-base, and the changed-file
 list with status and diff stats. Its real job is narrower than it looks: it tells the agent that the
-repository is in AC⚡DC's *soft-reset* arrangement, which changes what `git status` means. A detached
+repository is in AIC⚡DC's *soft-reset* arrangement, which changes what `git status` means. A detached
 HEAD with a hundred staged modifications is otherwise indistinguishable from a user mid-disaster. See
 [`../3-engine/mcp-bridge.md` § `review_state`](../3-engine/mcp-bridge.md#review_state).
 
@@ -185,7 +185,7 @@ file, the history of the hunk, or the test that covers it, none of which the blo
 ### No token budget to manage
 
 The old spec asked the user to manage a token budget through file selection, and showed "N of M diffs
-in context" to support it. Both are gone: AC⚡DC does not assemble the context and cannot count it.
+in context" to support it. Both are gone: AIC⚡DC does not assemble the context and cannot count it.
 What the status bar shows instead is review shape — changed files, additions, deletions — and what
 guards the window is the engine's own compaction. The context HUD reports usage after the fact; see
 [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md).
@@ -284,7 +284,7 @@ audiences.
 Review is read-only, and enforcing that is now a **permission** problem rather than a pipeline one.
 This is the sharpest single consequence of the conversion in this feature.
 
-The old enforcement was structural and total: edits reached disk only through AC⚡DC's apply step, so
+The old enforcement was structural and total: edits reached disk only through AIC⚡DC's apply step, so
 skipping that step during review made writes impossible. The agent writes to disk itself now, through
 the CLI, and no flag of ours sits between it and the filesystem.
 

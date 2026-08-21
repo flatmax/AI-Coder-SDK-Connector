@@ -35,7 +35,7 @@ describe('AppShell dialog UI', () => {
     });
 
     it('restores active tab from localStorage', () => {
-      localStorage.setItem('ac-dc-active-tab', 'settings');
+      localStorage.setItem('aic-dc-active-tab', 'settings');
       const shell = mountShell();
       expect(shell.activeTab).toBe('settings');
     });
@@ -45,44 +45,44 @@ describe('AppShell dialog UI', () => {
       // integrated into the Files tab. Stored preferences
       // from older builds must not leave the user on an
       // empty tab.
-      localStorage.setItem('ac-dc-active-tab', 'search');
+      localStorage.setItem('aic-dc-active-tab', 'search');
       const shell = mountShell();
       expect(shell.activeTab).toBe('files');
     });
 
     it('ignores unknown tab values', () => {
-      localStorage.setItem('ac-dc-active-tab', 'bogus');
+      localStorage.setItem('aic-dc-active-tab', 'bogus');
       const shell = mountShell();
       expect(shell.activeTab).toBe('files');
     });
 
     it('restores minimized state', () => {
-      localStorage.setItem('ac-dc-minimized', 'true');
+      localStorage.setItem('aic-dc-minimized', 'true');
       const shell = mountShell();
       expect(shell._minimized).toBe(true);
     });
 
     it('restores docked width when valid', () => {
-      localStorage.setItem('ac-dc-dialog-width', '600');
+      localStorage.setItem('aic-dc-dialog-width', '600');
       const shell = mountShell();
       expect(shell._dockedWidth).toBe(600);
     });
 
     it('rejects docked width below the minimum', () => {
-      localStorage.setItem('ac-dc-dialog-width', '50');
+      localStorage.setItem('aic-dc-dialog-width', '50');
       const shell = mountShell();
       expect(shell._dockedWidth).toBe(null);
     });
 
     it('rejects non-numeric docked width', () => {
-      localStorage.setItem('ac-dc-dialog-width', 'wide');
+      localStorage.setItem('aic-dc-dialog-width', 'wide');
       const shell = mountShell();
       expect(shell._dockedWidth).toBe(null);
     });
 
     it('restores undocked rect when within viewport', () => {
       const rect = { left: 100, top: 50, width: 600, height: 400 };
-      localStorage.setItem('ac-dc-dialog-pos', JSON.stringify(rect));
+      localStorage.setItem('aic-dc-dialog-pos', JSON.stringify(rect));
       const shell = mountShell();
       expect(shell._undockedPos).toEqual(rect);
     });
@@ -91,20 +91,20 @@ describe('AppShell dialog UI', () => {
       // left is 10000 — well beyond any viewport in jsdom.
       // Bounds check should reject and fall back to docked.
       const rect = { left: 10000, top: 0, width: 600, height: 400 };
-      localStorage.setItem('ac-dc-dialog-pos', JSON.stringify(rect));
+      localStorage.setItem('aic-dc-dialog-pos', JSON.stringify(rect));
       const shell = mountShell();
       expect(shell._undockedPos).toBe(null);
     });
 
     it('rejects undocked rect with sub-minimum size', () => {
       const rect = { left: 0, top: 0, width: 100, height: 400 };
-      localStorage.setItem('ac-dc-dialog-pos', JSON.stringify(rect));
+      localStorage.setItem('aic-dc-dialog-pos', JSON.stringify(rect));
       const shell = mountShell();
       expect(shell._undockedPos).toBe(null);
     });
 
     it('rejects undocked rect with malformed JSON', () => {
-      localStorage.setItem('ac-dc-dialog-pos', '{not json');
+      localStorage.setItem('aic-dc-dialog-pos', '{not json');
       const shell = mountShell();
       expect(shell._undockedPos).toBe(null);
     });
@@ -112,7 +112,7 @@ describe('AppShell dialog UI', () => {
     it('_switchTab persists the new active tab', () => {
       const shell = mountShell();
       shell._switchTab('context');
-      expect(localStorage.getItem('ac-dc-active-tab'))
+      expect(localStorage.getItem('aic-dc-active-tab'))
         .toBe('context');
     });
   });
@@ -126,10 +126,10 @@ describe('AppShell dialog UI', () => {
       expect(shell._minimized).toBe(false);
       shell._toggleMinimize();
       expect(shell._minimized).toBe(true);
-      expect(localStorage.getItem('ac-dc-minimized')).toBe('true');
+      expect(localStorage.getItem('aic-dc-minimized')).toBe('true');
       shell._toggleMinimize();
       expect(shell._minimized).toBe(false);
-      expect(localStorage.getItem('ac-dc-minimized')).toBe('false');
+      expect(localStorage.getItem('aic-dc-minimized')).toBe('false');
     });
 
     it('renders minimized class when state is minimized', async () => {
@@ -300,7 +300,7 @@ describe('AppShell dialog UI', () => {
       expect(shell._undockedPos).toEqual({
         left: 50, top: 50, width: 500, height: 800,
       });
-      expect(localStorage.getItem('ac-dc-dialog-pos')).toBeTruthy();
+      expect(localStorage.getItem('aic-dc-dialog-pos')).toBeTruthy();
     });
 
     it('cleans up document listeners after pointerup', async () => {
@@ -357,7 +357,7 @@ describe('AppShell dialog UI', () => {
       shell._onPointerUp();
       expect(shell._dockedWidth).toBe(650);
       expect(shell._undockedPos).toBe(null);
-      expect(localStorage.getItem('ac-dc-dialog-width')).toBe('650');
+      expect(localStorage.getItem('aic-dc-dialog-width')).toBe('650');
     });
 
     it('bottom-handle resize auto-undocks', async () => {
@@ -456,8 +456,8 @@ describe('AppShell dialog UI', () => {
       const shell = mountShell();
       await shell.updateComplete;
       stubRect(shell, { left: 0, top: 0, width: 500, height: 800 });
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       const diffRelayout = vi.spyOn(diff, 'relayout');
       const svgRelayout = vi.spyOn(svg, 'relayout');
       shell._onHandlePointerDown(

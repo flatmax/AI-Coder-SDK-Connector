@@ -1,6 +1,6 @@
-"""Tests for ac_dc.config.ConfigManager.
+"""Tests for aic_dc.config.ConfigManager.
 Layer 1 scope — covers:
-- Config directory resolution (AC_DC_CONFIG_HOME override,
+- Config directory resolution (AIC_DC_CONFIG_HOME override,
   platform-specific paths)
 - Version-aware upgrade (first install, upgrade with backup, same-version
   no-op, user file preservation)
@@ -11,7 +11,7 @@ Layer 1 scope — covers:
 - Per-repo working directory creation and .gitignore wiring
 - The commit prompt, which is the one prompt file the config layer
   still loads
-Uses tmp_path + AC_DC_CONFIG_HOME env var to redirect config to
+Uses tmp_path + AIC_DC_CONFIG_HOME env var to redirect config to
 isolated temp dirs. Avoids monkeypatching sys.platform etc. — the
 override env var is the designated test hook.
 """
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 import pytest
-from ac_dc.config import (
+from aic_dc.config import (
     CONFIG_TYPES,
     ConfigManager,
     _bundled_config_dir,
@@ -35,12 +35,12 @@ from ac_dc.config import (
 @pytest.fixture
 def isolated_config_dir(tmp_path, monkeypatch):
     """Redirect the user config dir to an isolated tmp path.
-    Uses the AC_DC_CONFIG_HOME env var — the documented test hook —
+    Uses the AIC_DC_CONFIG_HOME env var — the documented test hook —
     rather than patching platform detection. Yields the dir path so
     tests can inspect its contents.
     """
-    config_home = tmp_path / "ac-dc-config"
-    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(config_home))
+    config_home = tmp_path / "aic-dc-config"
+    monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(config_home))
     yield config_home
 @pytest.fixture
 def repo_root(tmp_path):
@@ -55,33 +55,33 @@ def repo_root(tmp_path):
 # _user_config_dir resolution
 # ---------------------------------------------------------------------------
 def test_user_config_dir_respects_override_env(tmp_path, monkeypatch):
-    """AC_DC_CONFIG_HOME overrides platform detection."""
+    """AIC_DC_CONFIG_HOME overrides platform detection."""
     override = tmp_path / "override"
-    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(override))
+    monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(override))
     assert _user_config_dir() == override
 def test_user_config_dir_linux(monkeypatch):
     """Linux path honours XDG_CONFIG_HOME, then falls back to ~/.config."""
-    monkeypatch.delenv("AC_DC_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("AIC_DC_CONFIG_HOME", raising=False)
     monkeypatch.setattr(sys, "platform", "linux")
     # With XDG_CONFIG_HOME set.
     monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/xdg")
-    assert _user_config_dir() == Path("/custom/xdg/ac-dc")
+    assert _user_config_dir() == Path("/custom/xdg/aic-dc")
     # Without it, falls back to ~/.config.
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    assert _user_config_dir() == Path.home() / ".config" / "ac-dc"
+    assert _user_config_dir() == Path.home() / ".config" / "aic-dc"
 def test_user_config_dir_macos(monkeypatch):
     """macOS path is under ~/Library/Application Support."""
-    monkeypatch.delenv("AC_DC_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("AIC_DC_CONFIG_HOME", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
-    expected = Path.home() / "Library" / "Application Support" / "ac-dc"
+    expected = Path.home() / "Library" / "Application Support" / "aic-dc"
     assert _user_config_dir() == expected
 def test_user_config_dir_windows(monkeypatch):
     """Windows path is under %APPDATA%."""
-    monkeypatch.delenv("AC_DC_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("AIC_DC_CONFIG_HOME", raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setenv("APPDATA", "C:\\Users\\test\\AppData\\Roaming")
     result = _user_config_dir()
-    assert result.name == "ac-dc"
+    assert result.name == "aic-dc"
     assert "Roaming" in str(result)
 # ---------------------------------------------------------------------------
 # _bundled_version
@@ -115,7 +115,7 @@ def test_first_install_writes_version_marker_for_release_builds(
 ):
     """Release builds write a .bundled_version marker on first install."""
     # Simulate a release build by patching _bundled_version.
-    with patch("ac_dc.config._bundled_version", return_value="2025.01.15-a1b2c3d4"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.01.15-a1b2c3d4"):
         ConfigManager()
     marker = isolated_config_dir / ".bundled_version"
     assert marker.exists()
@@ -125,7 +125,7 @@ def test_first_install_writes_dev_marker(isolated_config_dir):
     The code writes any truthy version. A dev install records 'dev',
     and the next real release mismatches it and triggers upgrade.
     """
-    with patch("ac_dc.config._bundled_version", return_value="dev"):
+    with patch("aic_dc.config._bundled_version", return_value="dev"):
         ConfigManager()
     marker = isolated_config_dir / ".bundled_version"
     assert marker.exists()
@@ -135,7 +135,7 @@ def test_first_install_skips_marker_when_version_empty(isolated_config_dir):
     We can't record a version we don't know, so the next run treats
     everything as new again.
     """
-    with patch("ac_dc.config._bundled_version", return_value=""):
+    with patch("aic_dc.config._bundled_version", return_value=""):
         ConfigManager()
     marker = isolated_config_dir / ".bundled_version"
     assert not marker.exists()
@@ -145,7 +145,7 @@ def test_first_install_skips_marker_when_version_empty(isolated_config_dir):
 def test_same_version_startup_is_noop(isolated_config_dir):
     """Second startup with matching version doesn't modify files."""
     version = "2025.01.15-a1b2c3d4"
-    with patch("ac_dc.config._bundled_version", return_value=version):
+    with patch("aic_dc.config._bundled_version", return_value=version):
         # First install.
         ConfigManager()
         # User modifies a managed file.
@@ -161,13 +161,13 @@ def test_same_version_startup_is_noop(isolated_config_dir):
 def test_upgrade_backs_up_and_overwrites_managed_files(isolated_config_dir):
     """On version bump, managed files are backed up and overwritten."""
     # Install at version A.
-    with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
     # User customises a managed file.
     commit_md = isolated_config_dir / "commit.md"
     commit_md.write_text("user-hacked commit prompt", encoding="utf-8")
     # Startup at version B — triggers upgrade.
-    with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     # Original content was backed up somewhere.
     backups = list(isolated_config_dir.glob("commit.md.*"))
@@ -190,7 +190,7 @@ def test_upgrade_preserves_user_files(isolated_config_dir):
     there.
     """
     # Install at version A.
-    with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
     engine_json = isolated_config_dir / "engine.json"
     custom = {
@@ -199,7 +199,7 @@ def test_upgrade_preserves_user_files(isolated_config_dir):
     }
     engine_json.write_text(json.dumps(custom), encoding="utf-8")
     # Upgrade to version B.
-    with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     # User file preserved exactly.
     preserved = json.loads(engine_json.read_text(encoding="utf-8"))
@@ -209,11 +209,11 @@ def test_upgrade_preserves_user_files(isolated_config_dir):
     assert list(isolated_config_dir.glob("engine.json.*")) == []
 def test_backup_name_with_version(isolated_config_dir):
     """Backup filename includes the OLD installed version."""
-    with patch("ac_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.01.01-aaaaaaaa"):
         ConfigManager()
     # Modify a managed file so it gets backed up.
     (isolated_config_dir / "commit.md").write_text("v1 content", encoding="utf-8")
-    with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     backups = list(isolated_config_dir.glob("commit.md.*"))
     assert len(backups) == 1
@@ -223,12 +223,12 @@ def test_backup_name_with_version(isolated_config_dir):
 def test_backup_name_without_version(isolated_config_dir):
     """Backup filename falls back to timestamp-only when no installed version."""
     # First install with empty version — no marker written.
-    with patch("ac_dc.config._bundled_version", return_value=""):
+    with patch("aic_dc.config._bundled_version", return_value=""):
         ConfigManager()
     # User customises a managed file.
     (isolated_config_dir / "commit.md").write_text("custom", encoding="utf-8")
     # Upgrade to a real version — no installed version to stamp into backup.
-    with patch("ac_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
+    with patch("aic_dc.config._bundled_version", return_value="2025.02.01-bbbbbbbb"):
         ConfigManager()
     backups = list(isolated_config_dir.glob("commit.md.*"))
     assert len(backups) == 1
@@ -282,8 +282,8 @@ def test_doc_index_config_defaults(isolated_config_dir):
 
 def test_history_config_defaults(isolated_config_dir):
     """history_config returns the two mirror thresholds."""
-    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
-    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+    from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from aic_dc.claude_code.session_store import DISK_WARNING_BYTES
 
     cfg = ConfigManager()
     hc = cfg.history_config
@@ -309,8 +309,8 @@ def test_history_config_honours_edits(isolated_config_dir):
 
 def test_history_config_rejects_a_silencing_threshold(isolated_config_dir):
     """A zero, a negative or a typo falls back rather than muting the check."""
-    from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
-    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+    from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+    from aic_dc.claude_code.session_store import DISK_WARNING_BYTES
 
     ConfigManager()  # installs the bundled app.json
     app_json = isolated_config_dir / "app.json"
@@ -333,7 +333,7 @@ def test_history_config_rejects_a_silencing_threshold(isolated_config_dir):
 
 def test_history_config_survives_a_non_dict_section(isolated_config_dir):
     """A section written as something other than an object is ignored."""
-    from ac_dc.claude_code.session_store import DISK_WARNING_BYTES
+    from aic_dc.claude_code.session_store import DISK_WARNING_BYTES
 
     ConfigManager()  # installs the bundled app.json
     app_json = isolated_config_dir / "app.json"
@@ -371,37 +371,37 @@ def test_non_dict_json_root_falls_back(isolated_config_dir):
     assert cfg.doc_index_config["keyword_model"]
     assert cfg.doc_convert_config["max_source_size_mb"] > 0
 # ---------------------------------------------------------------------------
-# Per-repo .ac-dc/ working directory
+# Per-repo .aic-dc/ working directory
 # ---------------------------------------------------------------------------
-def test_ac_dc_dir_not_created_without_repo(isolated_config_dir):
+def test_aic_dc_dir_not_created_without_repo(isolated_config_dir):
     """No repo_root argument → no per-repo directory created."""
     cfg = ConfigManager()
-    assert cfg.ac_dc_dir is None
+    assert cfg.aic_dc_dir is None
     assert cfg.repo_root is None
-def test_ac_dc_dir_created_with_repo(isolated_config_dir, repo_root):
-    """When repo_root is given, .ac-dc4/ is created — and nothing inside it."""
+def test_aic_dc_dir_created_with_repo(isolated_config_dir, repo_root):
+    """When repo_root is given, .aic-dc/ is created — and nothing inside it."""
     cfg = ConfigManager(repo_root=repo_root)
     assert cfg.repo_root == repo_root
-    assert cfg.ac_dc_dir == repo_root / ".ac-dc4"
-    assert cfg.ac_dc_dir.is_dir()
+    assert cfg.aic_dc_dir == repo_root / ".aic-dc"
+    assert cfg.aic_dc_dir.is_dir()
     # Subdirectories belong to whoever writes them. `images/` in particular
     # is retired: images live in the transcript now, so an empty one would
     # only look like a place data should be.
-    assert list(cfg.ac_dc_dir.iterdir()) == []
-def test_ac_dc_dir_creation_is_idempotent(isolated_config_dir, repo_root):
-    """Calling ConfigManager twice doesn't fail if .ac-dc4/ already exists."""
+    assert list(cfg.aic_dc_dir.iterdir()) == []
+def test_aic_dc_dir_creation_is_idempotent(isolated_config_dir, repo_root):
+    """Calling ConfigManager twice doesn't fail if .aic-dc/ already exists."""
     ConfigManager(repo_root=repo_root)
     # Add a file inside to prove it isn't re-created (which would delete it).
-    marker = repo_root / ".ac-dc4" / "marker.txt"
+    marker = repo_root / ".aic-dc" / "marker.txt"
     marker.write_text("preserve me", encoding="utf-8")
     ConfigManager(repo_root=repo_root)
     assert marker.read_text(encoding="utf-8") == "preserve me"
 def test_gitignore_created_when_absent(isolated_config_dir, repo_root):
-    """A fresh repo gets a .gitignore containing the .ac-dc4/ entry."""
+    """A fresh repo gets a .gitignore containing the .aic-dc/ entry."""
     assert not (repo_root / ".gitignore").exists()
     ConfigManager(repo_root=repo_root)
     gitignore = (repo_root / ".gitignore").read_text(encoding="utf-8")
-    assert ".ac-dc4/" in gitignore
+    assert ".aic-dc/" in gitignore
 def test_gitignore_entry_appended_when_present(isolated_config_dir, repo_root):
     """Existing .gitignore gets the entry appended, existing content preserved."""
     gitignore = repo_root / ".gitignore"
@@ -410,24 +410,24 @@ def test_gitignore_entry_appended_when_present(isolated_config_dir, repo_root):
     content = gitignore.read_text(encoding="utf-8")
     assert "*.pyc" in content
     assert "__pycache__/" in content
-    assert ".ac-dc4/" in content
+    assert ".aic-dc/" in content
 def test_gitignore_not_duplicated(isolated_config_dir, repo_root):
-    """Running twice doesn't append .ac-dc4/ twice."""
+    """Running twice doesn't append .aic-dc/ twice."""
     ConfigManager(repo_root=repo_root)
     ConfigManager(repo_root=repo_root)
     content = (repo_root / ".gitignore").read_text(encoding="utf-8")
-    assert content.count(".ac-dc4/") == 1
+    assert content.count(".aic-dc/") == 1
 def test_gitignore_recognises_trailing_slashless_entry(
     isolated_config_dir, repo_root
 ):
-    """An existing '.ac-dc4' entry (no slash) is recognised and not duplicated."""
+    """An existing '.aic-dc' entry (no slash) is recognised and not duplicated."""
     gitignore = repo_root / ".gitignore"
-    gitignore.write_text(".ac-dc4\n", encoding="utf-8")
+    gitignore.write_text(".aic-dc\n", encoding="utf-8")
     ConfigManager(repo_root=repo_root)
     content = gitignore.read_text(encoding="utf-8")
-    # The original '.ac-dc4' line remains; no new '.ac-dc4/' line added.
-    assert ".ac-dc4\n" in content
-    assert ".ac-dc4/" not in content
+    # The original '.aic-dc' line remains; no new '.aic-dc/' line added.
+    assert ".aic-dc\n" in content
+    assert ".aic-dc/" not in content
 def test_gitignore_handles_missing_trailing_newline(
     isolated_config_dir, repo_root
 ):
@@ -439,7 +439,7 @@ def test_gitignore_handles_missing_trailing_newline(
     # Appended entry is on its own line.
     lines = content.splitlines()
     assert "*.pyc" in lines
-    assert ".ac-dc4/" in lines
+    assert ".aic-dc/" in lines
 # ---------------------------------------------------------------------------
 # Snippets — fallback chain and format support
 # ---------------------------------------------------------------------------
@@ -476,7 +476,7 @@ def test_get_snippets_legacy_flat_format(isolated_config_dir):
     (isolated_config_dir / ".bundled_version").write_text(
         "seeded", encoding="utf-8"
     )
-    with patch("ac_dc.config._bundled_version", return_value="seeded"):
+    with patch("aic_dc.config._bundled_version", return_value="seeded"):
         cfg = ConfigManager()
     code = cfg.get_snippets("code")
     # Two code entries — explicit and default.
@@ -508,7 +508,7 @@ def test_get_snippets_missing_user_file_falls_back_to_bundle(
     (isolated_config_dir / ".bundled_version").write_text(
         "seeded", encoding="utf-8"
     )
-    with patch("ac_dc.config._bundled_version", return_value="seeded"):
+    with patch("aic_dc.config._bundled_version", return_value="seeded"):
         cfg = ConfigManager()
     # Upgrade was skipped, so the file is still absent from user dir.
     assert not (isolated_config_dir / "snippets.json").exists()
@@ -526,7 +526,7 @@ def test_get_snippets_corrupt_file_returns_empty(isolated_config_dir):
     (isolated_config_dir / "snippets.json").write_text(
         "{not json", encoding="utf-8"
     )
-    with patch("ac_dc.config._bundled_version", return_value="seeded"):
+    with patch("aic_dc.config._bundled_version", return_value="seeded"):
         (isolated_config_dir / ".bundled_version").write_text(
             "seeded", encoding="utf-8"
         )
@@ -539,7 +539,7 @@ def test_get_snippets_per_repo_override_takes_precedence(
     """Per-repo snippets.json is consulted before the user config dir."""
     cfg = ConfigManager(repo_root=repo_root)
     # Write a per-repo override with distinctive content.
-    override_path = repo_root / ".ac-dc4" / "snippets.json"
+    override_path = repo_root / ".aic-dc" / "snippets.json"
     override = {
         "code": [
             {"icon": "REPO", "tooltip": "repo-specific", "message": "from repo"}
@@ -567,7 +567,7 @@ def test_get_snippets_per_repo_corrupt_falls_through(
     """
     cfg = ConfigManager(repo_root=repo_root)
     # Write garbage to the per-repo override.
-    override_path = repo_root / ".ac-dc4" / "snippets.json"
+    override_path = repo_root / ".aic-dc" / "snippets.json"
     override_path.write_text("{not valid json", encoding="utf-8")
     # User-config snippets still deliver defaults for code mode.
     result = cfg.get_snippets("code")
@@ -577,7 +577,7 @@ def test_get_snippets_per_repo_non_object_falls_through(
 ):
     """Per-repo snippets.json whose root is not an object falls through."""
     cfg = ConfigManager(repo_root=repo_root)
-    override_path = repo_root / ".ac-dc4" / "snippets.json"
+    override_path = repo_root / ".aic-dc" / "snippets.json"
     # Valid JSON, but the root is a list — snippets expect a dict.
     override_path.write_text("[]", encoding="utf-8")
     # Falls through to the bundled defaults.
@@ -592,7 +592,7 @@ def test_get_commit_prompt_loads_as_is(isolated_config_dir):
     It used to be one of several prompt files the config layer
     concatenated. There is no assembly left — the system prompt is the
     CLI's now — so this reads ``commit.md`` and nothing else, and the
-    one-shot in ``ac_dc.claude_code.commit`` gets exactly what the user
+    one-shot in ``aic_dc.claude_code.commit`` gets exactly what the user
     sees in the settings editor.
     """
     cfg = ConfigManager()
@@ -654,25 +654,25 @@ def test_config_types_values_are_real_files(isolated_config_dir):
 
 
 def test_bundled_config_dir_uses_module_relative_path():
-    """Outside PyInstaller, config dir is next to the ac_dc module."""
+    """Outside PyInstaller, config dir is next to the aic_dc module."""
     # sys._MEIPASS is unset in normal test runs.
     if hasattr(sys, "_MEIPASS"):
         pytest.skip("running inside PyInstaller bundle")
     bundled = _bundled_config_dir()
     assert bundled.is_dir()
     assert bundled.name == "config"
-    # Parent should be the ac_dc package dir.
-    assert bundled.parent.name == "ac_dc"
+    # Parent should be the aic_dc package dir.
+    assert bundled.parent.name == "aic_dc"
 
 
 def test_bundled_config_dir_prefers_meipass_when_present(monkeypatch, tmp_path):
     """Inside a PyInstaller bundle, _MEIPASS takes precedence.
 
-    We simulate the bundle layout by creating ``<meipass>/ac_dc/config/``
+    We simulate the bundle layout by creating ``<meipass>/aic_dc/config/``
     and setting sys._MEIPASS to point at it.
     """
     fake_meipass = tmp_path / "meipass"
-    fake_config = fake_meipass / "ac_dc" / "config"
+    fake_config = fake_meipass / "aic_dc" / "config"
     fake_config.mkdir(parents=True)
     # Drop a sentinel file so we can verify we actually read this dir
     # (not the real one next to the module).
@@ -687,7 +687,7 @@ def test_bundled_config_dir_prefers_meipass_when_present(monkeypatch, tmp_path):
 def test_bundled_config_dir_falls_back_when_meipass_missing_config(
     monkeypatch, tmp_path, caplog
 ):
-    """If _MEIPASS is set but doesn't contain ac_dc/config, fall back.
+    """If _MEIPASS is set but doesn't contain aic_dc/config, fall back.
 
     Pathological-but-real case — a malformed PyInstaller bundle or a
     misconfigured test harness setting _MEIPASS incorrectly. We log a
@@ -697,10 +697,10 @@ def test_bundled_config_dir_falls_back_when_meipass_missing_config(
     empty_meipass.mkdir()
     monkeypatch.setattr(sys, "_MEIPASS", str(empty_meipass), raising=False)
 
-    with caplog.at_level("WARNING", logger="ac_dc.config"):
+    with caplog.at_level("WARNING", logger="aic_dc.config"):
         resolved = _bundled_config_dir()
     # Fell back to the module-relative dir.
-    assert resolved.parent.name == "ac_dc"
+    assert resolved.parent.name == "aic_dc"
     assert resolved.is_dir()
     # Logged the fallback so operators can see why.
     assert any("MEIPASS" in r.message for r in caplog.records)

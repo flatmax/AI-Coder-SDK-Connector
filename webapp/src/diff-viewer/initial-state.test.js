@@ -13,7 +13,7 @@ describe('DiffViewer initial state', () => {
     await settle(el);
     const empty = el.shadowRoot.querySelector('.empty-state');
     expect(empty).toBeTruthy();
-    expect(empty.textContent).toMatch(/AC.*⚡.*DC/);
+    expect(empty.textContent).toMatch(/AIC.*⚡.*DC/);
   });
 
   it('has no open files initially', async () => {

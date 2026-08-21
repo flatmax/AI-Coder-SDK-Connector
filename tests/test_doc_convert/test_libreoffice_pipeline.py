@@ -52,7 +52,7 @@ class TestLibreOfficeDispatch:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -93,7 +93,7 @@ class TestLibreOfficeDispatch:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -121,7 +121,7 @@ class TestLibreOfficeFallback:
         _require_pptx()
         # soffice not on PATH.
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: None,
         )
         _make_pptx_with_title(scan_root / "deck.pptx", "Title")
@@ -137,7 +137,7 @@ class TestLibreOfficeFallback:
     ):
         """odp falls back to markitdown when soffice missing."""
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: None,
         )
         _write_source(scan_root, "deck.odp", b"fake odp")
@@ -161,7 +161,7 @@ class TestLibreOfficeFallback:
             raise subprocess.TimeoutExpired(cmd, timeout=120)
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -186,7 +186,7 @@ class TestLibreOfficeFallback:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -211,7 +211,7 @@ class TestLibreOfficeFallback:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -227,12 +227,12 @@ class TestLibreOfficeFallback:
         """Missing PyMuPDF falls back even when soffice available."""
         _require_pptx()
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         # Make the PyMuPDF probe report False.
         monkeypatch.setattr(
-            "ac_dc.doc_convert.DocConvert._probe_import",
+            "aic_dc.doc_convert.DocConvert._probe_import",
             lambda self, name: False,
         )
         _make_pptx_with_title(scan_root / "deck.pptx", "Title")
@@ -270,7 +270,7 @@ class TestLibreOfficeProvenance:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -309,7 +309,7 @@ class TestLibreOfficeProvenance:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -341,7 +341,7 @@ class TestLibreOfficeProvenance:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)
@@ -373,7 +373,7 @@ class TestLibreOfficeProvenance:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: "/usr/bin/soffice" if cmd == "soffice" else None,
         )
         monkeypatch.setattr("subprocess.run", fake_run)

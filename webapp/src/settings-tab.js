@@ -9,7 +9,7 @@
 //
 // The card set shrank with the native engine. The five prompt
 // files (system, system extra, doc, review, compaction) were
-// AC⚡DC's own prompt assembly, and llm.json its provider
+// AIC⚡DC's own prompt assembly, and llm.json its provider
 // credentials — neither exists now. What replaced them is
 // engine.json, which is editable but deliberately NOT
 // reloadable: the model, permission mode and CLI path are
@@ -749,7 +749,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
   _emitToast(message, type = 'info') {
     window.dispatchEvent(
-      new CustomEvent('ac-toast', {
+      new CustomEvent('aic-toast', {
         detail: { message, type },
         bubbles: false,
       }),
@@ -969,4 +969,4 @@ export class SettingsTab extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-settings-tab', SettingsTab);
+customElements.define('aic-settings-tab', SettingsTab);

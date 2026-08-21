@@ -1,7 +1,7 @@
-"""Tests for ac_dc.claude_code.cost — conversion phase 6.
+"""Tests for aic_dc.claude_code.cost — conversion phase 6.
 
 The module exists because ``total_cost_usd`` and ``model_usage`` are session
-running totals in a streaming-input session, which is the only kind AC⚡DC
+running totals in a streaming-input session, which is the only kind AIC⚡DC
 runs. Every test here is about the difference between "what the session has
 spent" and "what this turn cost", and about the three cases where the second
 one cannot be recovered from the first.
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.claude_code.cost import MEASURED, RESET, UNPRICED, CostLedger
+from aic_dc.claude_code.cost import MEASURED, RESET, UNPRICED, CostLedger
 
 
 def cents(value):
@@ -102,7 +102,7 @@ class TestWhenTheAnswerIsUnavailable:
         assert ledger.price(result(0.09))["turn_cost_usd"] == 0.04
 
     def test_no_cost_at_all_is_unpriced(self):
-        """AC⚡DC's own synthetic failure footers, and a replayed turn: the
+        """AIC⚡DC's own synthetic failure footers, and a replayed turn: the
         engine never sent a number, so there is nothing to difference."""
         priced = CostLedger().price(result(None))
         assert priced["turn_cost_usd"] is None

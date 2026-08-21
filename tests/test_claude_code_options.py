@@ -1,7 +1,7 @@
-"""Tests for ac_dc.claude_code.options — conversion phase 1.
+"""Tests for aic_dc.claude_code.options — conversion phase 1.
 
 This is the SDK-drift tripwire. ``build_options`` is the only place
-AC⚡DC's assumptions about ``ClaudeAgentOptions`` are written down, so
+AIC⚡DC's assumptions about ``ClaudeAgentOptions`` are written down, so
 these tests are as much a contract test against the installed wheel as a
 test of our own logic:
 
@@ -30,9 +30,9 @@ import logging
 
 import pytest
 
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.health import EngineStartupError
-from ac_dc.claude_code.options import (
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.health import EngineStartupError
+from aic_dc.claude_code.options import (
     DEFAULT_MAX_BUFFER_SIZE,
     NEVER_SET,
     QUESTION_PREVIEW_ENV,
@@ -280,7 +280,7 @@ class TestPopulatedConfig:
         assert "mcp_servers" not in kwargs
 
     def test_collaborators_land_when_supplied(self, tmp_path):
-        gate, hooks, servers, store = object(), object(), {"ac-dc": object()}, object()
+        gate, hooks, servers, store = object(), object(), {"aic-dc": object()}, object()
         sink = object()
         kwargs = build_option_kwargs(
             repo_root=tmp_path,
@@ -352,7 +352,7 @@ class TestNeverSet:
             config=config,
             can_use_tool=object(),
             hooks=object(),
-            mcp_servers={"ac-dc": object()},
+            mcp_servers={"aic-dc": object()},
             session_store=object(),
             resume="abc",
             fork_session=True,
@@ -372,7 +372,7 @@ class TestNeverSet:
         The SDK emits `--system-prompt ""` for `None`, which strips the
         dynamic sections carrying the working directory, the git status and
         the platform. Observed: an agent asked to edit `greet.py` in a repo
-        at `/tmp/ac-dc-live` reached for `/home/flatmax/greet.py`, because
+        at `/tmp/aic-dc-live` reached for `/home/flatmax/greet.py`, because
         nothing had told it where it was. The preset form emits no flag,
         leaving the CLI's own prompt in place.
         """
@@ -414,7 +414,7 @@ class TestSdkContract:
             ),
             can_use_tool=object(),
             hooks={},
-            mcp_servers={"ac-dc": object()},
+            mcp_servers={"aic-dc": object()},
             session_store=object(),
             resume="abc",
             fork_session=True,
@@ -459,7 +459,7 @@ class TestSdkContract:
 
     def test_build_options_names_missing_fields(self, tmp_path, monkeypatch):
         """A removed SDK field must produce a diagnosis, not a TypeError."""
-        import ac_dc.claude_code.options as options_module
+        import aic_dc.claude_code.options as options_module
 
         def _extra(**_: object) -> dict[str, object]:
             return {"cwd": str(tmp_path), "invented_field": True}

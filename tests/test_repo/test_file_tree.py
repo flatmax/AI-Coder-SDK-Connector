@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ac_dc.repo import Repo
+from aic_dc.repo import Repo
 
 from .conftest import _run_git
 

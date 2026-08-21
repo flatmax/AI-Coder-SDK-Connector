@@ -1,4 +1,4 @@
-// Tests for `ac-sdk-surface-tab` — the panel that shows which SDK features
+// Tests for `aic-sdk-surface-tab` — the panel that shows which SDK features
 // this build wired up.
 //
 // The behaviour worth pinning is not the markup but the panel's judgement
@@ -24,7 +24,7 @@ import { totalCounts, untriagedNames } from './sdk-surface-tab.js';
 const _mounted = [];
 
 function mountTab({ active = true } = {}) {
-  const el = document.createElement('ac-sdk-surface-tab');
+  const el = document.createElement('aic-sdk-surface-tab');
   const panel = document.createElement('div');
   panel.className = active ? 'tab-panel active' : 'tab-panel';
   panel.appendChild(el);
@@ -160,7 +160,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('ac-sdk-surface-tab', () => {
+describe('aic-sdk-surface-tab', () => {
   describe('the default view is the actionable one', () => {
     it('opens on pending, not on everything', async () => {
       publishReport();

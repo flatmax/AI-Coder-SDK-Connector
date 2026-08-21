@@ -163,7 +163,7 @@ export function _pairDiffLines(lines) {
  *
  * Backend statuses come from specs4/3-llm/edit-protocol.md's
  * "Per-Block Results" table plus the `EditStatus` enum in
- * src/ac_dc/edit_protocol.py. Frontend-only synthetic statuses
+ * src/aic_dc/edit_protocol.py. Frontend-only synthetic statuses
  * (`pending`, `new`) extend the map — pending segments have no
  * backend result yet, and create blocks are distinguished from
  * modify blocks here rather than by walking the block body.

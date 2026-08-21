@@ -162,7 +162,7 @@ describe('FilesTab repoFiles push', () => {
     // Flat list reached the chat panel via direct
     // assignment (not via Lit template propagation, which
     // would reset the chat panel's internal state).
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     expect(chat.repoFiles).toEqual(['a.md', 'src/main.py']);
   });
 
@@ -173,7 +173,7 @@ describe('FilesTab repoFiles push', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     expect(chat.repoFiles).toEqual([]);
   });
 
@@ -200,7 +200,7 @@ describe('FilesTab repoFiles push', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     expect(chat.repoFiles).toEqual(['a.md']);
     pushEvent('files-modified', {});
     await settle(t);

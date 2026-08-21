@@ -80,7 +80,7 @@ describe('FilesTab review state', () => {
 
   it('picker reviewState prop is null initially', async () => {
     const { t } = await setupTab();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.reviewState).toBeNull();
   });
 
@@ -96,7 +96,7 @@ describe('FilesTab review state', () => {
     const { t } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.reviewState).toBeTruthy();
     expect(picker.reviewState.active).toBe(true);
     expect(picker.reviewState.branch).toBe('feature-auth');
@@ -150,7 +150,7 @@ describe('FilesTab review state', () => {
     // agree. Expanding is what review entry does to the
     // picker now.
     const { t } = await setupTabWithStagedSubdir();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Nothing staged on first load, so nothing expanded.
     expect(picker._expanded.has('src')).toBe(false);
     pushEvent('review-started', reviewStateFixture());
@@ -165,7 +165,7 @@ describe('FilesTab review state', () => {
     // for the review, so showing them its files is answering
     // the request rather than overriding a preference.
     const { t } = await setupTabWithStagedSubdir();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // The one-shot is already spent by the first load.
     expect(t._initialAutoExpand).toBe(false);
     // User collapses src for good measure.
@@ -200,7 +200,7 @@ describe('FilesTab review state', () => {
     const { t } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.reviewState).toBeTruthy();
     pushEvent('review-ended', {});
     await settle(t);
@@ -225,7 +225,7 @@ describe('FilesTab review state', () => {
     pushEvent('review-ended', {});
     await settle(t);
     expect(t._excludedFiles.has('a.md')).toBe(true);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.excludedFiles.has('a.md')).toBe(true);
   });
 
@@ -243,7 +243,7 @@ describe('FilesTab review state', () => {
     const { t, endReview } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exit-review', {
         bubbles: true,
@@ -263,7 +263,7 @@ describe('FilesTab review state', () => {
     const { t } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exit-review', {
         bubbles: true,
@@ -289,13 +289,13 @@ describe('FilesTab review state', () => {
       }),
     });
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
       pushEvent('review-started', reviewStateFixture());
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exit-review', {
           bubbles: true,
@@ -312,7 +312,7 @@ describe('FilesTab review state', () => {
       // server did nothing.
       expect(t._reviewState).toBeTruthy();
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -331,13 +331,13 @@ describe('FilesTab review state', () => {
       }),
     });
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
       pushEvent('review-started', reviewStateFixture());
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exit-review', {
           bubbles: true,
@@ -351,7 +351,7 @@ describe('FilesTab review state', () => {
       expect(warnings.length).toBeGreaterThan(0);
       expect(warnings.at(-1).message).toContain('reattach');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -369,13 +369,13 @@ describe('FilesTab review state', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => {});
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
       pushEvent('review-started', reviewStateFixture());
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('exit-review', {
           bubbles: true,
@@ -389,7 +389,7 @@ describe('FilesTab review state', () => {
       expect(errors.length).toBeGreaterThan(0);
       expect(errors.at(-1).message).toContain('end_review boom');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
       consoleSpy.mockRestore();
     }
   });
@@ -402,7 +402,7 @@ describe('FilesTab review state', () => {
     const { t } = await setupTab();
     pushEvent('review-started', reviewStateFixture());
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.reviewState).toBeTruthy();
     // Simulate a reload.
     pushEvent('files-modified', {});

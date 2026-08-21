@@ -71,7 +71,7 @@ describe('FilesTab first-load auto-expand', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Both ancestors expanded.
     expect(picker._expanded.has('src')).toBe(true);
     expect(picker._expanded.has('src/inner')).toBe(true);
@@ -116,7 +116,7 @@ describe('FilesTab first-load auto-expand', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker._expanded.has('m')).toBe(true);
     expect(picker._expanded.has('s')).toBe(true);
     expect(picker._expanded.has('u')).toBe(true);
@@ -173,7 +173,7 @@ describe('FilesTab first-load auto-expand', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker._expanded.has('src')).toBe(true);
     expect(picker._expanded.has('tests')).toBe(true);
   });
@@ -201,7 +201,7 @@ describe('FilesTab first-load auto-expand', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker._expanded.size).toBe(0);
   });
 
@@ -249,7 +249,7 @@ describe('FilesTab first-load auto-expand', () => {
     // Pre-seed picker expansion (simulating an
     // impossible-in-practice race, just to pin the
     // union contract).
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker._expanded = new Set(['docs']);
     await settle(t);
     // After auto-expand, both docs (user) and src
@@ -300,7 +300,7 @@ describe('FilesTab first-load auto-expand', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker._expanded.has('src')).toBe(true);
     // User collapses it again.
     picker.shadowRoot
@@ -411,7 +411,7 @@ describe('FilesTab first-load auto-expand', () => {
       await settle(t);
       // Second load succeeded → auto-expand ran.
       expect(t._initialAutoExpand).toBe(false);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       expect(picker._expanded.has('src')).toBe(true);
     } finally {
       consoleSpy.mockRestore();
@@ -453,7 +453,7 @@ describe('FilesTab first-load auto-expand', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Expansion happened...
     expect(picker._expanded.has('src')).toBe(true);
     // ...and stopped there.

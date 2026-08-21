@@ -64,7 +64,7 @@ wrong.
 
 **Severity: medium. Likelihood: high — a browser disconnecting mid-turn is normal, not exceptional.**
 
-The SDK warns that breaking out of iteration causes asyncio cleanup problems. AC⚡DC's normal case
+The SDK warns that breaking out of iteration causes asyncio cleanup problems. AIC⚡DC's normal case
 is exactly the provoking case: the user refreshes the tab, the WebSocket drops, and the naive
 handler stops reading.
 
@@ -105,7 +105,7 @@ unsupported-command response. If it is sent to the model as prose, the mapping l
 
 **Severity: high. Likelihood: medium — this is a slow drift, not an event.**
 
-The conversion deletes the parts of AC⚡DC that were distinctively AC⚡DC's, and the remaining
+The conversion deletes the parts of AIC⚡DC that were distinctively AIC⚡DC's, and the remaining
 delta over "Claude Code in a terminal" is a browser UI. If the surviving surfaces are not actively
 good, the honest conclusion becomes "just use the CLI", and the conversion will have removed the
 tool's reason to exist.
@@ -119,7 +119,7 @@ own specs, not as ports:
 4. Spatial navigation — Monaco, SVG editor, nav grid — kept working throughout, which is why CC-2
    keeps the indexes.
 
-**Tripwire:** at the end of each phase, answer in one sentence why a user would open AC⚡DC rather
+**Tripwire:** at the end of each phase, answer in one sentence why a user would open AIC⚡DC rather
 than a terminal. If the answer is only "it looks nicer", the phase did not deliver.
 
 ---
@@ -133,7 +133,7 @@ a terminal HUD after every turn. An agent that reads what it wants is cheaper pe
 far less predictable per turn, and under subscription billing the token counters stop mapping to
 money at all.
 
-**Why it bites:** users who chose AC⚡DC for cost control lose their instrumentation, and the
+**Why it bites:** users who chose AIC⚡DC for cost control lose their instrumentation, and the
 replacement (`total_cost_usd`) may read as zero or meaningless on a subscription — which looks like
 a broken HUD.
 
@@ -154,7 +154,7 @@ shows a real figure or shows "subscription" with the usage figures.
 The `claude-agent-sdk` wheel bundles a ~295 MB platform-specific `claude` binary, making it
 `manylinux_2_17_x86_64` rather than pure Python.
 
-**Why it bites:** AC⚡DC currently ships a modest pure-Python package and a PyInstaller bundle.
+**Why it bites:** AIC⚡DC currently ships a modest pure-Python package and a PyInstaller bundle.
 Both assumptions break. Discovered at release time, this blocks a release.
 
 **Mitigation:** decide the distribution model during phase 0 and specify it, rather than discovering
@@ -194,7 +194,7 @@ that line, we cannot diagnose a skew report.
 
 **Severity: high. Likelihood: medium.**
 
-The SDK honours Claude Code's credential resolution. AC⚡DC's `llm.json` currently exports provider
+The SDK honours Claude Code's credential resolution. AIC⚡DC's `llm.json` currently exports provider
 credentials into the process environment on startup (`apply_llm_env`), which can point the CLI at a
 different account or a Bedrock endpoint. Separately, a coexisting `~/.config/anthropic/` profile and
 a Claude Code `/login` credential produce an auth-conflict warning.

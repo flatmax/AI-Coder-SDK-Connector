@@ -1,4 +1,4 @@
-// Tests for `ac-context-usage-tab` — the Context tab's breakdown of what is
+// Tests for `aic-context-usage-tab` — the Context tab's breakdown of what is
 // filling the engine's context window.
 //
 // The panel landed in phase 3 (CC-17) with no coverage at all, and phase 5
@@ -34,7 +34,7 @@ const _mounted = [];
  *   exercise the `offsetParent` fallback.
  */
 function mountTab({ active = true, bare = false } = {}) {
-  const el = document.createElement('ac-context-usage-tab');
+  const el = document.createElement('aic-context-usage-tab');
   if (bare) {
     document.body.appendChild(el);
     _mounted.push(el);
@@ -124,7 +124,7 @@ afterEach(() => {
   SharedRpc.reset();
   // The selected section persists, so a test that switches would
   // otherwise decide which section the next test opens on.
-  localStorage.removeItem('ac-dc-context-section');
+  localStorage.removeItem('aic-dc-context-section');
 });
 
 // ---------------------------------------------------------------------------
@@ -1179,7 +1179,7 @@ describe('ContextUsageTab message breakdown', () => {
   });
 
   it('names the tools the context is paying for, heaviest first', async () => {
-    // The exit criterion's "names the ac-dc tools it is paying for":
+    // The exit criterion's "names the aic-dc tools it is paying for":
     // these are the engine's own tool names, so a bridge tool appears
     // under the name it was registered with.
     publishUsage(withBreakdown());
@@ -1347,7 +1347,7 @@ describe('ContextUsageTab sections', () => {
     const first = mountTab();
     await settle(first);
     await showSection(first, 'Session');
-    expect(localStorage.getItem('ac-dc-context-section')).toBe('session');
+    expect(localStorage.getItem('aic-dc-context-section')).toBe('session');
 
     const second = mountTab();
     await settle(second);
@@ -1361,7 +1361,7 @@ describe('ContextUsageTab sections', () => {
   it('ignores a stored section it no longer has', async () => {
     // "cache" was the old tab's second sub-view, and a build that had
     // written it is exactly the one that upgrades into this panel.
-    localStorage.setItem('ac-dc-context-section', 'cache');
+    localStorage.setItem('aic-dc-context-section', 'cache');
     publishUsage(usageFixture());
     const el = mountTab();
     await settle(el);
@@ -1625,11 +1625,11 @@ describe('ContextUsageTab system prompt', () => {
 
 describe('ContextUsageTab tools', () => {
   const mcpTools = [
-    { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
-    { name: 'doc_outline', serverName: 'ac-dc', tokens: 700 },
+    { name: 'symbol_map', serverName: 'aic-dc', tokens: 900 },
+    { name: 'doc_outline', serverName: 'aic-dc', tokens: 700 },
     {
       name: 'find_references',
-      serverName: 'ac-dc',
+      serverName: 'aic-dc',
       tokens: 600,
       isLoaded: false,
     },
@@ -1650,14 +1650,14 @@ describe('ContextUsageTab tools', () => {
     expect(heading(el, 'Tools')).toContain(
       '4 tools in 2 groups · 2.7K loaded · 600 deferred',
     );
-    expect(groupNames(el)).toEqual(['Built-in tools', 'ac-dc']);
+    expect(groupNames(el)).toEqual(['Built-in tools', 'aic-dc']);
   });
 
   it('says the section costs nothing when every tool is deferred', async () => {
     publishUsage(
       usageFixture({
         mcpTools: [
-          { name: 'a', serverName: 'ac-dc', tokens: 0, isLoaded: false },
+          { name: 'a', serverName: 'aic-dc', tokens: 0, isLoaded: false },
         ],
       }),
     );
@@ -1677,7 +1677,7 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const meta = groupNamed(el, 'ac-dc')
+    const meta = groupNamed(el, 'aic-dc')
       .querySelector('.group-meta')
       .textContent.trim();
     expect(meta).toBe('3 tools · 1.6K loaded · 600 deferred');
@@ -1700,7 +1700,7 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const group = groupNamed(el, 'ac-dc');
+    const group = groupNamed(el, 'aic-dc');
     expect(group.querySelector('table')).toBeNull();
     expect(group.querySelector('.group-head').getAttribute('aria-expanded'))
       .toBe('false');
@@ -1711,7 +1711,7 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const group = await expandGroup(el, 'ac-dc');
+    const group = await expandGroup(el, 'aic-dc');
     expect(groupRows(group)).toEqual([
       ['symbol_map', '900'],
       ['doc_outline', '700'],
@@ -1726,8 +1726,8 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    await expandGroup(el, 'ac-dc');
-    const group = await expandGroup(el, 'ac-dc');
+    await expandGroup(el, 'aic-dc');
+    const group = await expandGroup(el, 'aic-dc');
     expect(group.querySelector('table')).toBeNull();
   });
 
@@ -1738,7 +1738,7 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    await expandGroup(el, 'ac-dc');
+    await expandGroup(el, 'aic-dc');
     expect(groupNamed(el, 'Built-in tools').querySelector('table')).toBeNull();
   });
 
@@ -1747,7 +1747,7 @@ describe('ContextUsageTab tools', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const group = await expandGroup(el, 'ac-dc');
+    const group = await expandGroup(el, 'aic-dc');
     const dimmed = [...group.querySelectorAll('tr.deferred')];
     expect(dimmed).toHaveLength(1);
     expect(dimmed[0].textContent).toContain('find_references');
@@ -1788,21 +1788,21 @@ describe('ContextUsageTab tools', () => {
 
 describe('ContextUsageTab MCP health', () => {
   const mcpTools = [
-    { name: 'symbol_map', serverName: 'ac-dc', tokens: 900 },
+    { name: 'symbol_map', serverName: 'aic-dc', tokens: 900 },
     { name: 'search', serverName: 'other', tokens: 4000 },
   ];
 
   it('pills each server with its connection state', async () => {
     publishWithStatus(usageFixture({ mcpTools }), {
       mcpServers: [
-        { name: 'ac-dc', status: 'connected' },
+        { name: 'aic-dc', status: 'connected' },
         { name: 'other', status: 'pending' },
       ],
     });
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(pillFor(el, 'ac-dc')).toBe('connected');
+    expect(pillFor(el, 'aic-dc')).toBe('connected');
     expect(pillFor(el, 'other')).toBe('connecting');
   });
 
@@ -1811,14 +1811,14 @@ describe('ContextUsageTab MCP health', () => {
     // that needs acting on.
     publishWithStatus(usageFixture({ mcpTools }), {
       mcpServers: [
-        { name: 'ac-dc', status: 'failed', error: 'spawn ENOENT' },
+        { name: 'aic-dc', status: 'failed', error: 'spawn ENOENT' },
         { name: 'other', status: 'connected' },
       ],
     });
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(groupNames(el)).toEqual(['ac-dc', 'other']);
+    expect(groupNames(el)).toEqual(['aic-dc', 'other']);
   });
 
   it('lists a server that failed before it could offer any tools', async () => {
@@ -1844,11 +1844,11 @@ describe('ContextUsageTab MCP health', () => {
     publishWithStatus(usageFixture({ mcpTools }), {
       mcpServers: [
         {
-          name: 'ac-dc',
+          name: 'aic-dc',
           status: 'connected',
           scope: 'project',
           config: { type: 'sse', url: 'http://localhost:9000' },
-          serverInfo: { name: 'ac-dc', version: '0.4.1' },
+          serverInfo: { name: 'aic-dc', version: '0.4.1' },
           tools: [{ name: 'symbol_map' }, { name: 'ui_state' }],
         },
       ],
@@ -1856,7 +1856,7 @@ describe('ContextUsageTab MCP health', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    const group = await expandGroup(el, 'ac-dc');
+    const group = await expandGroup(el, 'aic-dc');
     expect(group.querySelector('.note').textContent.trim()).toBe(
       'project · sse · v0.4.1 · 2 advertised',
     );
@@ -1868,8 +1868,8 @@ describe('ContextUsageTab MCP health', () => {
       const el = mountTab();
       await settle(el);
       await showSection(el, 'Session');
-      expect(pillFor(el, 'ac-dc')).toBeNull();
-      const group = await expandGroup(el, 'ac-dc');
+      expect(pillFor(el, 'aic-dc')).toBeNull();
+      const group = await expandGroup(el, 'aic-dc');
       expect(group.querySelector('.note').textContent.replace(/\s+/g, ' '))
         .toContain('MCP status was not available');
     });
@@ -1890,14 +1890,14 @@ describe('ContextUsageTab MCP health', () => {
     await settle(el);
     await showSection(el, 'Session');
     expect(el._error).toBe('');
-    expect(groupNames(el)).toEqual(['other', 'ac-dc']);
-    expect(pillFor(el, 'ac-dc')).toBeNull();
+    expect(groupNames(el)).toEqual(['other', 'aic-dc']);
+    expect(pillFor(el, 'aic-dc')).toBeNull();
   });
 
   it('drops a stale pill rather than keeping it past its fetch', async () => {
     // "connected" is a claim about now. Kept from an earlier fetch it is
     // the one field where being out of date is worse than being absent.
-    let status = { mcpServers: [{ name: 'ac-dc', status: 'connected' }] };
+    let status = { mcpServers: [{ name: 'aic-dc', status: 'connected' }] };
     publishFakeRpc({
       'ClaudeCodeService.get_context_usage': () => ({
         usage: usageFixture({ mcpTools }),
@@ -1908,22 +1908,22 @@ describe('ContextUsageTab MCP health', () => {
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(pillFor(el, 'ac-dc')).toBe('connected');
+    expect(pillFor(el, 'aic-dc')).toBe('connected');
 
     status = { error: 'no session' };
     el.shadowRoot.querySelectorAll('.toolbar button')[1].click();
     await settle(el);
-    expect(pillFor(el, 'ac-dc')).toBeNull();
+    expect(pillFor(el, 'aic-dc')).toBeNull();
   });
 
   it('renders an unrecognised status as its raw name', async () => {
     publishWithStatus(usageFixture({ mcpTools }), {
-      mcpServers: [{ name: 'ac-dc', status: 'reticulating' }],
+      mcpServers: [{ name: 'aic-dc', status: 'reticulating' }],
     });
     const el = mountTab();
     await settle(el);
     await showSection(el, 'Session');
-    expect(pillFor(el, 'ac-dc')).toBe('reticulating');
+    expect(pillFor(el, 'aic-dc')).toBe('reticulating');
   });
 });
 
@@ -2062,7 +2062,7 @@ describe('ContextUsageTab slash commands', () => {
 describe('ContextUsageTab debug', () => {
   const HEALTH = {
     connected: true,
-    cli_path: '/opt/ac-dc/bundled/claude',
+    cli_path: '/opt/aic-dc/bundled/claude',
     cli_version: '2.1.4',
     cli_source: 'bundled',
     sdk_version: '0.9.1',
@@ -2155,7 +2155,7 @@ describe('ContextUsageTab debug', () => {
 
   it('names the binary, its version and where it came from', async () => {
     const { el } = await openDebug();
-    expect(debugText(el)).toContain('/opt/ac-dc/bundled/claude');
+    expect(debugText(el)).toContain('/opt/aic-dc/bundled/claude');
     expect(debugText(el)).toContain('2.1.4 (bundled)');
     expect(debugText(el)).toContain('0.9.1 · pins CLI 2.1.4');
   });
@@ -2299,12 +2299,12 @@ describe('ContextUsageTab debug', () => {
 
   it('keeps what we resolved apart from what the engine answered', async () => {
     // Provenance runs opposite ways through these two tables: the binary and
-    // its version are AC⚡DC's resolution, the reply is the engine's own
+    // its version are AIC⚡DC's resolution, the reply is the engine's own
     // claim about itself. Under one heading they read as one source, and
     // telling them apart is most of what this section is for.
     const { el } = await openDebug();
     const engine = sectionFor(el, 'Engine');
-    expect(engine.textContent).toContain('/opt/ac-dc/bundled/claude');
+    expect(engine.textContent).toContain('/opt/aic-dc/bundled/claude');
     expect(engine.textContent).not.toContain('outputStyles');
     expect(engine.querySelector('pre.json')).toBeNull();
     expect(sectionFor(el, 'Initialize reply').textContent).toContain(
@@ -2321,7 +2321,7 @@ describe('ContextUsageTab debug', () => {
     const { el } = await openDebug({ info: { error: 'engine not ready' } });
     expect(debugText(el)).toContain('Server info unavailable: engine not ready');
     // The health table came from a different call and is still there.
-    expect(debugText(el)).toContain('/opt/ac-dc/bundled/claude');
+    expect(debugText(el)).toContain('/opt/aic-dc/bundled/claude');
   });
 
   it('collects hook traffic before Debug is ever opened', async () => {
@@ -2398,14 +2398,14 @@ describe('ContextUsageTab debug', () => {
   it('does not promise that our own re-index hook will fill it', async () => {
     // Verified live in phase 6 against CLI 2.1.229: the empty state used to
     // say "the PostToolUse re-index fires on every file the agent writes, so
-    // a turn with an edit in it fills this", and it never does. AC⚡DC's
+    // a turn with an edit in it fills this", and it never does. AIC⚡DC's
     // re-index hook is an SDK callback the CLI answers over the control
     // channel, and it never reaches the message stream. The hook itself ran —
     // the index had the new file seconds later, and the turn footer listed it —
     // so the old copy pointed a reader at a broken reader that was working.
     const { el } = await openDebug();
     const text = debugText(el);
-    expect(text).toContain("does not include AC⚡DC's own re-index hook");
+    expect(text).toContain("does not include AIC⚡DC's own re-index hook");
     expect(text).toContain('not evidence that the re-index did not run');
     expect(text).not.toContain('fills this');
   });
@@ -2435,9 +2435,9 @@ describe('ContextUsageTab debug', () => {
     // The Session section renders this through `mcpHealth`; the two
     // together are how a reader checks our reading against the payload.
     const { el } = await openDebug({
-      status: { mcpServers: [{ name: 'ac-dc', status: 'connected' }] },
+      status: { mcpServers: [{ name: 'aic-dc', status: 'connected' }] },
     });
-    expect(dumps(el).join('')).toContain('"ac-dc"');
+    expect(dumps(el).join('')).toContain('"aic-dc"');
   });
 
   it('says when the status fetch did not land', async () => {
@@ -2461,7 +2461,7 @@ describe('ContextUsageTab debug', () => {
   it('opens straight onto Debug when that is where the reader left', async () => {
     // `_switchSection` never fires on this path, so the fetch cannot hang
     // off the click alone.
-    localStorage.setItem('ac-dc-context-section', 'debug');
+    localStorage.setItem('aic-dc-context-section', 'debug');
     const { infoHandler } = publishDebug();
     const el = mountTab();
     await settle(el);

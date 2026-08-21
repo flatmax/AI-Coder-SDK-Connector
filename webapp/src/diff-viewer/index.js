@@ -664,7 +664,7 @@ export class DiffViewer extends LitElement {
       return html`
         <div class="empty-state">
           <div class="watermark">
-            <span>AC</span><span class="bolt">⚡</span><span>DC</span>
+            <span>AIC</span><span class="bolt">⚡</span><span>DC</span>
           </div>
         </div>
       `;
@@ -776,4 +776,4 @@ export class DiffViewer extends LitElement {
   }
 }
 
-customElements.define('ac-diff-viewer', DiffViewer);
+customElements.define('aic-diff-viewer', DiffViewer);

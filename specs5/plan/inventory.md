@@ -29,30 +29,30 @@ The whole native engine. Nothing here has a consumer after phase 3.
 
 | File | Lines | Why it goes |
 |---|---:|---|
-| `src/ac_dc/llm_service.py` | 2042 | The service class itself. Replaced by `claude_code/service.py`. |
-| `src/ac_dc/llm/_streaming.py` | 1538 | LiteLLM streaming loop, retry policy, usage extraction, URL fetch during stream. |
-| `src/ac_dc/llm/_breakdown.py` | 1492 | Context breakdown + terminal HUD. Replaced by `get_context_usage()` rendering. |
-| `src/ac_dc/llm/_cache_warmer.py` | 1477 | Idle warm-up calls. No provider cache of ours to keep hot. |
-| `src/ac_dc/stability_tracker.py` | 1436 | Four-tier tracker, N-values, cascade, promotion/demotion log. |
-| `src/ac_dc/context_manager.py` | 1392 | Prompt state holder. Claude Code owns conversation state. |
-| `src/ac_dc/llm/_helpers.py` | 1280 | LiteLLM error classification, finish-reason extraction, agent-tag parsing, max-token resolution. |
-| `src/ac_dc/llm/_agents.py` | 1146 | `🟧🟧🟧 AGENT` spawn/gather/assimilate. Replaced by the SDK `Task` tool (CC-8). |
-| `src/ac_dc/edit_protocol.py` | 973 | Emoji block parser (CC-7). |
-| `src/ac_dc/llm/_rpc_state.py` | 853 | Mode switching, cross-reference, index exclusion, agent selection RPCs. Partially re-homed. |
-| `src/ac_dc/llm/_stability.py` | 711 | Tracker wiring and cross-reference seeding. |
-| `src/ac_dc/url_service/` (4 files) | ~2,180 | Fetchers, cache, service, LiteLLM summariser (CC-9). |
-| `src/ac_dc/edit_pipeline.py` | 665 | Anchored-match application, five failure classes (CC-7). |
-| `src/ac_dc/history_compactor.py` | 657 | Topic-boundary detection, verbatim windows, summarise-vs-truncate (CC-3). |
-| `src/ac_dc/llm/_assembly.py` | 608 | Tiered and flat message assembly, cache-control placement. |
-| `src/ac_dc/llm/_rebuild.py` | 594 | Manual cache rebuild and orphan redistribution. |
-| `src/ac_dc/token_counter.py` | 577 | Model-aware tokenizer wrapper and ceilings. |
-| `src/ac_dc/cache_membrane.py` | 540 | Membrane / flux controller (D35–D37). |
-| `src/ac_dc/llm/_lifecycle.py` | 547 | Post-response housekeeping, file-context sync. Partially re-homed. |
-| `src/ac_dc/llm/_commit.py` | 388 | LLM commit-message generation. Re-homed as an agent prompt, not a direct call. |
-| `src/ac_dc/agent_factory.py` | ~250 | Agent `ContextManager` construction. |
-| `src/ac_dc/file_context.py` | ~300 | In-memory `{path: content}` map. |
-| `src/ac_dc/llm/_rpc_urls.py`, `_rpc_streaming.py`, `_construction.py`, `_types.py`, `__init__.py` | ~1,000 | Remaining engine RPC surface and re-export hub. |
-| `src/ac_dc/history_store.py` | 1148 | Moved here from ADAPT by [CC-19](decisions.md#cc-19). A store cannot impose a record shape on pass-through entries, so this file's schema is not a head start on the `SessionStore` — it is a second one. Its three jobs re-home to a derived index, read-time rendering, and `events.jsonl`. |
+| `src/aic_dc/llm_service.py` | 2042 | The service class itself. Replaced by `claude_code/service.py`. |
+| `src/aic_dc/llm/_streaming.py` | 1538 | LiteLLM streaming loop, retry policy, usage extraction, URL fetch during stream. |
+| `src/aic_dc/llm/_breakdown.py` | 1492 | Context breakdown + terminal HUD. Replaced by `get_context_usage()` rendering. |
+| `src/aic_dc/llm/_cache_warmer.py` | 1477 | Idle warm-up calls. No provider cache of ours to keep hot. |
+| `src/aic_dc/stability_tracker.py` | 1436 | Four-tier tracker, N-values, cascade, promotion/demotion log. |
+| `src/aic_dc/context_manager.py` | 1392 | Prompt state holder. Claude Code owns conversation state. |
+| `src/aic_dc/llm/_helpers.py` | 1280 | LiteLLM error classification, finish-reason extraction, agent-tag parsing, max-token resolution. |
+| `src/aic_dc/llm/_agents.py` | 1146 | `🟧🟧🟧 AGENT` spawn/gather/assimilate. Replaced by the SDK `Task` tool (CC-8). |
+| `src/aic_dc/edit_protocol.py` | 973 | Emoji block parser (CC-7). |
+| `src/aic_dc/llm/_rpc_state.py` | 853 | Mode switching, cross-reference, index exclusion, agent selection RPCs. Partially re-homed. |
+| `src/aic_dc/llm/_stability.py` | 711 | Tracker wiring and cross-reference seeding. |
+| `src/aic_dc/url_service/` (4 files) | ~2,180 | Fetchers, cache, service, LiteLLM summariser (CC-9). |
+| `src/aic_dc/edit_pipeline.py` | 665 | Anchored-match application, five failure classes (CC-7). |
+| `src/aic_dc/history_compactor.py` | 657 | Topic-boundary detection, verbatim windows, summarise-vs-truncate (CC-3). |
+| `src/aic_dc/llm/_assembly.py` | 608 | Tiered and flat message assembly, cache-control placement. |
+| `src/aic_dc/llm/_rebuild.py` | 594 | Manual cache rebuild and orphan redistribution. |
+| `src/aic_dc/token_counter.py` | 577 | Model-aware tokenizer wrapper and ceilings. |
+| `src/aic_dc/cache_membrane.py` | 540 | Membrane / flux controller (D35–D37). |
+| `src/aic_dc/llm/_lifecycle.py` | 547 | Post-response housekeeping, file-context sync. Partially re-homed. |
+| `src/aic_dc/llm/_commit.py` | 388 | LLM commit-message generation. Re-homed as an agent prompt, not a direct call. |
+| `src/aic_dc/agent_factory.py` | ~250 | Agent `ContextManager` construction. |
+| `src/aic_dc/file_context.py` | ~300 | In-memory `{path: content}` map. |
+| `src/aic_dc/llm/_rpc_urls.py`, `_rpc_streaming.py`, `_construction.py`, `_types.py`, `__init__.py` | ~1,000 | Remaining engine RPC surface and re-export hub. |
+| `src/aic_dc/history_store.py` | 1148 | Moved here from ADAPT by [CC-19](decisions.md#cc-19). A store cannot impose a record shape on pass-through entries, so this file's schema is not a head start on the `SessionStore` — it is a second one. Its three jobs re-home to a derived index, read-time rendering, and `events.jsonl`. |
 
 **Tests deleted with them:** `test_context_manager.py`, `test_edit_pipeline.py`,
 `test_edit_protocol.py`, `test_file_context.py`, `test_history_compactor.py`,
@@ -68,13 +68,13 @@ The whole native engine. Nothing here has a consumer after phase 3.
 
 | File | Lines | Change |
 |---|---:|---|
-| `src/ac_dc/main.py` | 856 | Construct `ClaudeCodeService` instead of `LLMService`; drop stability init, doc-index-for-prompt scheduling, and the `_post_write_callback` into the engine. Keep symbol/doc index build, static server, collab wiring. |
-| `src/ac_dc/config.py` | 1485 | Loses every prompt-composition helper and the whole prompt file set (CC-11); loses cache tuning, compaction config, agent gate. Keeps config-dir resolution, version-aware upgrade, managed/user split, snippets. Expect ~600 lines. |
-| `src/ac_dc/settings.py` | 428 | Config whitelist shrinks to the surviving files; `refresh_system_prompt` removed. |
-| `src/ac_dc/llm/_review.py` | 504 | Git-side review state moves to `src/ac_dc/repo/review.py`; the prompt-swap and review-context-assembly halves are deleted (CC-13). |
-| `src/ac_dc/llm/_rpc_history.py` | 466 | Session and history RPCs re-pointed at the SDK's session functions and the `*_from_store` parsers. Method names survive; every return shape changes ([CC-19](decisions.md#cc-19)). |
-| `src/ac_dc/llm/_doc_index_background.py` | 577 | Survives as the doc-index build/enrichment scheduler, moved under `doc_index/`. Loses the "deferred enrichment after edit blocks" coupling. |
-| `src/ac_dc/llm/_rpc_lifecycle.py` | 498 | `get_current_state`, localhost gate, navigate, TeX, snippets survive; deferred-init/stability parts go. |
+| `src/aic_dc/main.py` | 856 | Construct `ClaudeCodeService` instead of `LLMService`; drop stability init, doc-index-for-prompt scheduling, and the `_post_write_callback` into the engine. Keep symbol/doc index build, static server, collab wiring. |
+| `src/aic_dc/config.py` | 1485 | Loses every prompt-composition helper and the whole prompt file set (CC-11); loses cache tuning, compaction config, agent gate. Keeps config-dir resolution, version-aware upgrade, managed/user split, snippets. Expect ~600 lines. |
+| `src/aic_dc/settings.py` | 428 | Config whitelist shrinks to the surviving files; `refresh_system_prompt` removed. |
+| `src/aic_dc/llm/_review.py` | 504 | Git-side review state moves to `src/aic_dc/repo/review.py`; the prompt-swap and review-context-assembly halves are deleted (CC-13). |
+| `src/aic_dc/llm/_rpc_history.py` | 466 | Session and history RPCs re-pointed at the SDK's session functions and the `*_from_store` parsers. Method names survive; every return shape changes ([CC-19](decisions.md#cc-19)). |
+| `src/aic_dc/llm/_doc_index_background.py` | 577 | Survives as the doc-index build/enrichment scheduler, moved under `doc_index/`. Loses the "deferred enrichment after edit blocks" coupling. |
+| `src/aic_dc/llm/_rpc_lifecycle.py` | 498 | `get_current_state`, localhost gate, navigate, TeX, snippets survive; deferred-init/stability parts go. |
 
 ---
 
@@ -90,7 +90,7 @@ transport — ~29,700 lines, untouched.
 
 ## Python — NEW
 
-`src/ac_dc/claude_code/`:
+`src/aic_dc/claude_code/`:
 
 | File | Purpose | Spec |
 |---|---|---|
@@ -99,10 +99,10 @@ transport — ~29,700 lines, untouched.
 | `messages.py` | SDK message taxonomy → server-push events. The one place that knows about `AssistantMessage`, `ToolUseBlock`, `StreamEvent`, `ResultMessage`, the four `Task*Message` subclasses, `SystemMessage(subtype="compact_boundary")`, and `RateLimitEvent`. | [`../3-engine/session.md`](../3-engine/session.md) |
 | `permissions.py` | `can_use_tool` callback, the awaitable browser round-trip, decision persistence, timeout/deny policy. | [`../3-engine/permissions.md`](../3-engine/permissions.md) |
 | `hooks.py` | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` / `PreCompact` / `Stop` / `SubagentStart` / `SubagentStop` handlers that drive UI broadcasts and re-indexing. | [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md) |
-| `mcp_server.py` | In-process SDK MCP server `ac-dc` exposing the indexes, review state, and repo facts as tools. | [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md) |
-| `session_store.py` | `SessionStore` protocol implementation over `.ac-dc4/sessions/`. All six methods, entries verbatim, verified against the SDK's conformance harness. | [`../3-engine/history.md`](../3-engine/history.md) |
-| `events_log.py` | `.ac-dc4/events.jsonl` — our own operational events, append-only, keyed by session and request ID. Separate from the store because the store is never given an entry the CLI did not write. | [`../3-engine/history.md`](../3-engine/history.md) |
-| `history_index.py` | The derived index under `.ac-dc4/index/`: search postings, session summaries, request ID ↔ session mapping. Rebuildable from the transcript, so deleting it is supported. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `mcp_server.py` | In-process SDK MCP server `aic-dc` exposing the indexes, review state, and repo facts as tools. | [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md) |
+| `session_store.py` | `SessionStore` protocol implementation over `.aic-dc/sessions/`. All six methods, entries verbatim, verified against the SDK's conformance harness. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `events_log.py` | `.aic-dc/events.jsonl` — our own operational events, append-only, keyed by session and request ID. Separate from the store because the store is never given an entry the CLI did not write. | [`../3-engine/history.md`](../3-engine/history.md) |
+| `history_index.py` | The derived index under `.aic-dc/index/`: search postings, session summaries, request ID ↔ session mapping. Rebuildable from the transcript, so deleting it is supported. | [`../3-engine/history.md`](../3-engine/history.md) |
 | `context_usage.py` | `get_context_usage()` fetch, shaping, and caching for the Context tab. | [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md) |
 
 ---

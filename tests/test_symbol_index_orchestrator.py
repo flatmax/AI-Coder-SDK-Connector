@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.index — Layer 2.7.
+"""Tests for aic_dc.symbol_index.index — Layer 2.7.
 
 Scope: the SymbolIndex orchestrator that wires parser,
 extractors, cache, resolver, reference index, and formatter
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.symbol_index.index import SymbolIndex
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.index import SymbolIndex
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 @pytest.fixture

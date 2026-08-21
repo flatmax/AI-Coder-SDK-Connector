@@ -1,4 +1,4 @@
-"""Tests for ac_dc.settings.Settings — Layer 1 (deferred) + 4.4.2.
+"""Tests for aic_dc.settings.Settings — Layer 1 (deferred) + 4.4.2.
 
 Covers the RPC surface defined in
 specs5/1-foundation/rpc-inventory.md#service-settings-browser--server
@@ -8,7 +8,7 @@ specs5/1-foundation/rpc-transport.md.
 Strategy mirrors ``test_collab_restrictions.py``:
 
 - Real :class:`ConfigManager` against an isolated user config dir
-  (via the ``AC_DC_CONFIG_HOME`` env var — the documented test hook).
+  (via the ``AIC_DC_CONFIG_HOME`` env var — the documented test hook).
 - Stub collab with a configurable ``is_caller_localhost`` return,
   reusing the same pattern from the repo restriction tests.
 - Two scenarios per write method — localhost allowed, non-localhost
@@ -32,8 +32,8 @@ from typing import Any
 
 import pytest
 
-from ac_dc.config import CONFIG_TYPES, ConfigManager
-from ac_dc.settings import Settings
+from aic_dc.config import CONFIG_TYPES, ConfigManager
+from aic_dc.settings import Settings
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +68,8 @@ class _RaisingCollab:
 @pytest.fixture
 def isolated_config_dir(tmp_path, monkeypatch):
     """Redirect user config dir to tmp. Matches test_config.py's fixture."""
-    home = tmp_path / "ac-dc-config"
-    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(home))
+    home = tmp_path / "aic-dc-config"
+    monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(home))
     return home
 
 
@@ -205,7 +205,7 @@ class TestGetConfigContent:
         # Rebuild ConfigManager against the marker so upgrade is a
         # no-op — the file stays missing.
         from unittest.mock import patch
-        with patch("ac_dc.config._bundled_version", return_value="seeded"):
+        with patch("aic_dc.config._bundled_version", return_value="seeded"):
             fresh_config = ConfigManager()
         fresh_settings = Settings(fresh_config)
         result = fresh_settings.get_config_content("engine")

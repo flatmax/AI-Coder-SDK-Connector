@@ -16,7 +16,7 @@
 //   - File mention detection (the `@filter` bridge
 //     to the picker via `filter-from-chat`)
 //   - Slash-command detection (the `/palette` bridge
-//     to `ac-slash-palette`, and acting on what it
+//     to `aic-slash-palette`, and acting on what it
 //     hands back)
 //   - Message text extraction for copy/paste
 //   - File chip click + Add-All accumulation
@@ -78,7 +78,7 @@ import { speechPlayer } from '../speech-player.js';
 // drafts from earlier tests leak into later
 // mounts via `connectedCallback` and corrupt
 // assertions on `_input`.
-export const _DRAFT_STORAGE_KEY = 'ac-dc.chat.draft';
+export const _DRAFT_STORAGE_KEY = 'aic-dc.chat.draft';
 
 export function _loadDraft() {
   try {
@@ -130,7 +130,7 @@ export function _saveDraft(value) {
  * be worse than sending none.
  *
  * A `/command` is not intercepted. The service answers built-ins that
- * have an AC⚡DC equivalent synchronously with `{status: "unsupported"}`
+ * have an AIC⚡DC equivalent synchronously with `{status: "unsupported"}`
  * and lets custom commands from `.claude/commands/` through — so a
  * mistyped command becomes a system note, never a question the agent
  * tries to answer.
@@ -189,7 +189,7 @@ export async function send(panel) {
   // the up-arrow list.
   if (text) {
     const history = panel.shadowRoot?.querySelector(
-      'ac-input-history',
+      'aic-input-history',
     );
     if (history) history.addEntry(text, images);
   }
@@ -210,7 +210,7 @@ export async function send(panel) {
   // The case this covers is Enter on a `/typo` with no match,
   // where the overlay is deliberately still up explaining
   // itself and the message goes to the engine anyway.
-  panel.shadowRoot?.querySelector('ac-slash-palette')?.hide();
+  panel.shadowRoot?.querySelector('aic-slash-palette')?.hide();
   // Draft has been committed — clear the
   // persisted copy so the next refresh starts
   // clean.
@@ -280,7 +280,7 @@ export async function send(panel) {
     //   - `{error, reason}` — engine not ready, turn already in
     //     flight, session lost. The turn never started.
     //   - `{status: "routed", command, target, message}` — a command
-    //     whose job an AC⚡DC surface does better. Nothing was sent;
+    //     whose job an AIC⚡DC surface does better. Nothing was sent;
     //     the surface opens instead. This is the path for a command
     //     that was *typed* — selecting it in the palette routes
     //     locally and never reaches here.
@@ -628,7 +628,7 @@ const _SLASH_RETRY_MS = 5000;
  * an empty answer from before it did.
  */
 export function updateSlashPalette(panel, ta) {
-  const palette = panel.shadowRoot?.querySelector('ac-slash-palette');
+  const palette = panel.shadowRoot?.querySelector('aic-slash-palette');
   if (!palette) return;
   const token = detectActiveSlash(ta.value, ta.selectionStart);
   if (token === null) {
@@ -775,7 +775,7 @@ function _setComposerValue(panel, ta, value, caret) {
 }
 
 /**
- * Open the AC⚡DC surface a routed command names.
+ * Open the AIC⚡DC surface a routed command names.
  *
  * The `target` strings come from `SLASH_ROUTES` in the
  * service, so the mapping from command to surface lives in
@@ -828,7 +828,7 @@ function handleRoutedSlash(panel, result) {
   const message =
     typeof result?.message === 'string' && result.message
       ? result.message
-      : `/${result?.command || 'that'} opens an AC⚡DC surface here.`;
+      : `/${result?.command || 'that'} opens an AIC⚡DC surface here.`;
   panel.messages = [
     ...panel.messages,
     { role: 'system', content: message },
@@ -848,7 +848,7 @@ function handleRoutedSlash(panel, result) {
  */
 export function onInputKeyDown(panel, event) {
   const history = panel.shadowRoot?.querySelector(
-    'ac-input-history',
+    'aic-input-history',
   );
   if (history && history.isOpen) {
     if (history.handleKey(event)) return;
@@ -859,7 +859,7 @@ export function onInputKeyDown(panel, event) {
   // detection returns null). Ordered after it anyway: history
   // is the modal one, and "whoever is open wins" is easier to
   // reason about than a rule about which can't overlap.
-  const palette = panel.shadowRoot?.querySelector('ac-slash-palette');
+  const palette = panel.shadowRoot?.querySelector('aic-slash-palette');
   if (palette && palette.isOpen) {
     if (palette.handleKey(event)) return;
   }
@@ -1239,7 +1239,7 @@ export function pasteMessageToPrompt(panel, msg) {
  *
  * Playback is delegated to `speechPlayer`, which splits
  * the text into sentences and plays them in sequence so
- * the floating transport (ac-speech-controls) can offer
+ * the floating transport (aic-speech-controls) can offer
  * play/pause, speed, and per-sentence position.
  *
  * `cardEl` is the `.message-card` element — passed from

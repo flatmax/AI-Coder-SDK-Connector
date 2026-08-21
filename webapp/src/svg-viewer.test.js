@@ -30,7 +30,7 @@ import './svg-viewer.js';
 const _mounted = [];
 
 function mountViewer() {
-  const el = document.createElement('ac-svg-viewer');
+  const el = document.createElement('aic-svg-viewer');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;
@@ -87,7 +87,7 @@ describe('SvgViewer initial state', () => {
     await settle(el);
     const empty = el.shadowRoot.querySelector('.empty-state');
     expect(empty).toBeTruthy();
-    expect(empty.textContent).toContain('AC');
+    expect(empty.textContent).toContain('AIC');
   });
 
   it('has no open files initially', async () => {

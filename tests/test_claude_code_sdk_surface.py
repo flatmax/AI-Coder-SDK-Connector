@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.sdk_surface — the SDK-drift gate.
+"""Tests for aic_dc.claude_code.sdk_surface — the SDK-drift gate.
 
 ``test_claude_code_options`` is a tripwire for surface that *moved or
 vanished* under us: it fails when a field we set stops existing. This file
@@ -9,7 +9,7 @@ it is a feature we quietly do not offer, discovered whenever somebody next
 reads the wheel.
 
 The gate is deliberately not "coverage must be complete" — most of this
-surface is for hosts AC⚡DC is not, and a test demanding we set
+surface is for hosts AIC⚡DC is not, and a test demanding we set
 ``output_format`` would be wrong. It is "coverage must be **decided**":
 every name the installed SDK exposes is handled, declined with a reason,
 or listed as pending with what it would buy. Only the undecided fail, and
@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.claude_code import sdk_surface
-from ac_dc.claude_code.sdk_surface import (
+from aic_dc.claude_code import sdk_surface
+from aic_dc.claude_code.sdk_surface import (
     DECLINED,
     HANDLED,
     HOOK_EVENTS,
@@ -92,11 +92,11 @@ class TestNothingUntriaged:
         unclassified = report["unclassified"]
         assert not unclassified, (
             f"The installed claude-agent-sdk exposes {section} surface that "
-            f"AC-DC has not decided about: {', '.join(unclassified)}.\n"
+            f"AIC-DC has not decided about: {', '.join(unclassified)}.\n"
             "This is an SDK release adding something, not a bug in this "
             "test. Implement it, refuse it in NEVER_SET/HOOK_EVENTS with "
             "the reason, or defer it in PENDING_OPTIONS/KNOWN_BETAS with "
-            "what it would buy. See ac_dc/claude_code/sdk_surface.py."
+            "what it would buy. See aic_dc/claude_code/sdk_surface.py."
         )
 
     @pytest.mark.parametrize("section", ("options", "hooks", "betas"))
@@ -203,7 +203,7 @@ class TestOptionReport:
 
     def test_pending_and_never_set_do_not_overlap(self):
         """One owner per decision: refused *or* deferred, not both."""
-        from ac_dc.claude_code.options import NEVER_SET
+        from aic_dc.claude_code.options import NEVER_SET
 
         assert not set(PENDING_OPTIONS) & set(NEVER_SET)
 

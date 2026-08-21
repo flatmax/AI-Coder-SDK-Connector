@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1040" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
-  <title>AC⚡DC Architecture (specs5)</title>
+  <title>AIC⚡DC Architecture (specs5)</title>
   <desc>Layered architecture diagram derived from specs5: Foundation → Indexing → Engine → Features → Webapp, with Deployment and Future layers. A single Python process exposes jrpc-oo over WebSocket to a Lit browser client and drives one Claude Code session through the Claude Agent SDK; the claude CLI runs as an external subprocess owned by the SDK client.</desc>
 
   <defs>
@@ -55,9 +55,9 @@
   </style>
 
   <!-- Title -->
-  <text class="title" x="40" y="36">AC⚡DC — Architecture (specs5)</text>
+  <text class="title" x="40" y="36">AIC⚡DC — Architecture (specs5)</text>
   <text class="subtitle" x="40" y="55">
-    Browser frontend for Claude Code · single Python process · bidirectional JSON-RPC over WebSocket (jrpc-oo) · per-repo <tspan font-family="monospace">.ac-dc4/</tspan> working dir
+    Browser frontend for Claude Code · single Python process · bidirectional JSON-RPC over WebSocket (jrpc-oo) · per-repo <tspan font-family="monospace">.aic-dc/</tspan> working dir
   </text>
 
   <!-- ===================== FUTURE (top) ===================== -->
@@ -184,7 +184,7 @@
     <text class="comp-sub"   x="208" y="682" text-anchor="middle">filesModified · incremental re-index</text>
 
     <rect class="comp" x="372" y="630" width="296" height="64" rx="6"/>
-    <text class="comp-label" x="520" y="650" text-anchor="middle">MCP Bridge — <tspan font-family="monospace">ac-dc</tspan></text>
+    <text class="comp-label" x="520" y="650" text-anchor="middle">MCP Bridge — <tspan font-family="monospace">aic-dc</tspan></text>
     <text class="comp-sub"   x="520" y="666" text-anchor="middle">symbol_map · file_symbols · find_references</text>
     <text class="comp-sub"   x="520" y="682" text-anchor="middle">doc_outline · review_state · ui_state</text>
 
@@ -216,7 +216,7 @@
   <g>
     <rect class="layer-box" x="40" y="730" width="1200" height="110" rx="10" fill="url(#g-indexing)"/>
     <text class="layer-title" x="56" y="752">Layer 2 — Indexing</text>
-    <text class="layer-sub"   x="56" y="768">Consistent snapshots within a tool call, flushed before any <tspan font-family="monospace">ac-dc</tspan> tool answers. Consumers: Monaco language features · MCP bridge · browser navigation.</text>
+    <text class="layer-sub"   x="56" y="768">Consistent snapshots within a tool call, flushed before any <tspan font-family="monospace">aic-dc</tspan> tool answers. Consumers: Monaco language features · MCP bridge · browser navigation.</text>
 
     <rect class="comp" x="60" y="780" width="220" height="50" rx="6"/>
     <text class="comp-label" x="170" y="800" text-anchor="middle">Symbol Index</text>
@@ -262,7 +262,7 @@
     <text class="comp-sub"   x="870" y="948" text-anchor="middle">structured stderr · argparse</text>
 
     <rect class="comp" x="1000" y="910" width="220" height="50" rx="6"/>
-    <text class="comp-label" x="1110" y="930" text-anchor="middle">Per-repo <tspan font-family="monospace">.ac-dc4/</tspan></text>
+    <text class="comp-label" x="1110" y="930" text-anchor="middle">Per-repo <tspan font-family="monospace">.aic-dc/</tspan></text>
     <text class="comp-sub"   x="1110" y="948" text-anchor="middle">sessions · history · images · caches</text>
   </g>
 
@@ -321,6 +321,6 @@
     <polygon points="258,-11 266,-7 258,-3" fill="#888"/>
     <text class="legend-text" x="274" y="-3">push event · cross-layer flow</text>
     <rect class="ext-box" x="470" y="-14" width="22" height="14" rx="3" fill="url(#g-external)"/>
-    <text class="legend-text" x="500" y="-3">process AC⚡DC does not own</text>
+    <text class="legend-text" x="500" y="-3">process AIC⚡DC does not own</text>
   </g>
 </svg>

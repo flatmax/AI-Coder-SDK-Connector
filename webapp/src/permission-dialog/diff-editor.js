@@ -19,7 +19,7 @@ import { observeHeadStyles, syncHeadStyles } from '../shadow-style-sync.js';
  * Idempotent: called from `updated()` on every render, it creates the
  * editor once and afterwards only swaps models when the request changes.
  *
- * @param {object} host — the ac-permission-dialog element
+ * @param {object} host — the aic-permission-dialog element
  * @param {object} payload — the request being shown
  */
 export function syncDiffEditor(host, payload) {

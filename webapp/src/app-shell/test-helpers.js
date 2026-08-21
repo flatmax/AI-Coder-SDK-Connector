@@ -122,7 +122,7 @@ import { AppShell } from './index.js';
  */
 const _mountedShells = [];
 export function mountShell() {
-  const shell = document.createElement('ac-app-shell');
+  const shell = document.createElement('aic-app-shell');
   document.body.appendChild(shell);
   _mountedShells.push(shell);
   return shell;

@@ -24,17 +24,17 @@ Examples:
 - `short_sha` is the first 8 chars of `git rev-parse HEAD`
 - Source installs without a baked version file produce the literal string `dev`
 
-Written to `src/ac_dc/VERSION` at build time. Read by `src/ac_dc/__init__.py` into `__version__`. Also written to `.bundled_version` in the user config directory on first run of a packaged build (see `specs-reference/1-foundation/configuration.md` § Version marker file).
+Written to `src/aic_dc/VERSION` at build time. Read by `src/aic_dc/__init__.py` into `__version__`. Also written to `.bundled_version` in the user config directory on first run of a packaged build (see `specs-reference/1-foundation/configuration.md` § Version marker file).
 
 ### PyInstaller command — release build
 
 Full command as run in CI per platform:
 
 ```bash
-pyinstaller --onefile --name ac-dc-{platform} \
-    --add-data "src/ac_dc/VERSION{sep}ac_dc" \
-    --add-data "src/ac_dc/config{sep}ac_dc/config" \
-    --add-data "webapp/dist{sep}ac_dc/webapp_dist" \
+pyinstaller --onefile --name aic-dc-{platform} \
+    --add-data "src/aic_dc/VERSION{sep}aic_dc" \
+    --add-data "src/aic_dc/config{sep}aic_dc/config" \
+    --add-data "webapp/dist{sep}aic_dc/webapp_dist" \
     --collect-all=claude_agent_sdk \
     --collect-all=tree_sitter \
     --collect-all=tree_sitter_python \
@@ -43,12 +43,12 @@ pyinstaller --onefile --name ac-dc-{platform} \
     --collect-all=tree_sitter_c \
     --collect-all=tree_sitter_cpp \
     --collect-all=trafilatura \
-    --hidden-import=ac_dc \
-    --hidden-import=ac_dc.collab \
-    --hidden-import=ac_dc.doc_convert \
-    --hidden-import=ac_dc.base_cache \
+    --hidden-import=aic_dc \
+    --hidden-import=aic_dc.collab \
+    --hidden-import=aic_dc.doc_convert \
+    --hidden-import=aic_dc.base_cache \
     --hidden-import=jrpc_oo \
-    src/ac_dc/__main__.py
+    src/aic_dc/__main__.py
 ```
 
 Where:
@@ -90,13 +90,13 @@ Modules PyInstaller's static analyzer misses because they're imported dynamicall
 
 | Module | Why missed |
 |---|---|
-| `ac_dc` | Package root — static analyzer sees only the entry point's direct imports |
-| `ac_dc.collab` | Registered via `add_class()` dynamically; not imported directly by `main.py` |
-| `ac_dc.doc_convert` | Same — registered via `add_class()` |
-| `ac_dc.base_cache` | Abstract base; concrete subclasses import it, but analyzer may miss the chain |
+| `aic_dc` | Package root — static analyzer sees only the entry point's direct imports |
+| `aic_dc.collab` | Registered via `add_class()` dynamically; not imported directly by `main.py` |
+| `aic_dc.doc_convert` | Same — registered via `add_class()` |
+| `aic_dc.base_cache` | Abstract base; concrete subclasses import it, but analyzer may miss the chain |
 | `jrpc_oo` | Some submodules imported by string in the jrpc-oo library itself |
 
-The full workflow YAML (`.github/workflows/release.yml`) has additional hidden imports for every `ac_dc.*` submodule — the list in this twin is the minimal set observed to work; the full list is belt-and-braces. Adding new submodules during development typically requires adding a corresponding `--hidden-import` entry before the next release build.
+The full workflow YAML (`.github/workflows/release.yml`) has additional hidden imports for every `aic_dc.*` submodule — the list in this twin is the minimal set observed to work; the full list is belt-and-braces. Adding new submodules during development typically requires adding a corresponding `--hidden-import` entry before the next release build.
 
 ### Vite optimizeDeps exclude
 
@@ -150,7 +150,7 @@ CLI flags `--server-port` and `--webapp-port` override; see `specs5/6-deployment
 
 Runtime search order for the bundled webapp:
 
-1. `{sys._MEIPASS}/ac_dc/webapp_dist/` — PyInstaller-bundled location (temp dir extracted at startup)
+1. `{sys._MEIPASS}/aic_dc/webapp_dist/` — PyInstaller-bundled location (temp dir extracted at startup)
 2. `{repo_root}/webapp/dist/` — development after `npm run build`
 3. `{package_dir}/webapp_dist/` — pip-installed package data directory
 
@@ -161,14 +161,14 @@ First existing path wins. If none exist, the server prints an error and exits wi
 The `--add-data` flag's destination path format matters:
 
 ```
-src/ac_dc/VERSION{sep}ac_dc
+src/aic_dc/VERSION{sep}aic_dc
 ```
 
-- Source: `src/ac_dc/VERSION` (relative to CI working dir)
-- Destination: `ac_dc` (relative path inside the bundle, matches the Python package name)
+- Source: `src/aic_dc/VERSION` (relative to CI working dir)
+- Destination: `aic_dc` (relative path inside the bundle, matches the Python package name)
 - Separator: `:` on Unix, `;` on Windows
 
-The destination matching the package name is load-bearing — `Path(__file__).parent` at runtime resolves to the bundle's `ac_dc` directory, which is where `VERSION`, `config/`, and `webapp_dist/` must land for the package to find them.
+The destination matching the package name is load-bearing — `Path(__file__).parent` at runtime resolves to the bundle's `aic_dc` directory, which is where `VERSION`, `config/`, and `webapp_dist/` must land for the package to find them.
 
 ## Schemas
 
@@ -178,7 +178,7 @@ After extraction (PyInstaller's `--onefile` mode unpacks to a temp directory at 
 
 ```
 {MEIPASS}/
-├── ac_dc/
+├── aic_dc/
 │   ├── VERSION                    # baked version string
 │   ├── config/                    # bundled config defaults — three files plus one template
 │   │   ├── engine.json
@@ -199,7 +199,7 @@ After extraction (PyInstaller's `--onefile` mode unpacks to a temp directory at 
 └── ...
 ```
 
-The `ac_dc/` subtree matches what `pip install ac-dc` produces on disk, so `Path(__file__).parent` resolves consistently between source installs, pip installs, and PyInstaller bundles.
+The `aic_dc/` subtree matches what `pip install aic-dc` produces on disk, so `Path(__file__).parent` resolves consistently between source installs, pip installs, and PyInstaller bundles.
 
 The bundled config directory is now exhaustively listable — four entries, no `└── ...`. The six retired
 prompt files are not bundled, and a user's copies of them survive in the user config directory untouched
@@ -291,7 +291,7 @@ pytest summary and is unrelated to this change.
 An earlier draft of this section asserted the `mcp` floor collided with a `doc_convert` pin of 1.14.1,
 requiring a deliberate co-tested bump. **That was wrong.** `mcp` was absent from `uv.lock` entirely, and
 `markitdown[all]` does not depend on it. The 1.14.1 figure came from `litellm`'s `proxy` extra in an
-unrelated virtualenv (`/home/flatmax/.venv`) that contains neither `ac_dc` nor `markitdown` — an
+unrelated virtualenv (`/home/flatmax/.venv`) that contains neither `aic_dc` nor `markitdown` — an
 environment mistaken for the project's. The lesson worth keeping: read the lockfile, not the interpreter
 that happens to be on `PATH`.
 

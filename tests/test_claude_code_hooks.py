@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.hooks — conversion phase 4.
+"""Tests for aic_dc.claude_code.hooks — conversion phase 4.
 
 The hook is bookkeeping, and the properties worth pinning are the ones
 that fail silently:
@@ -31,7 +31,7 @@ import threading
 
 import pytest
 
-from ac_dc.claude_code.hooks import (
+from aic_dc.claude_code.hooks import (
     DEBOUNCE_SECONDS,
     PATH_KEYS,
     WRITE_TOOL_MATCHER,
@@ -41,7 +41,7 @@ from ac_dc.claude_code.hooks import (
     build_pre_compact_hook,
     extract_written_paths,
 )
-from ac_dc.claude_code.messages import Event
+from aic_dc.claude_code.messages import Event
 
 
 class FakeIndex:

@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.typescript — Layer 2.2.4.
+"""Tests for aic_dc.symbol_index.extractors.typescript — Layer 2.2.4.
 
 Scope: the TypeScriptExtractor — focused on what TS *adds* over
 JS (type annotations, return types, optional params, interfaces,
@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.typescript import TypeScriptExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.typescript import TypeScriptExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ transcripts; adding tabs that cannot be typed into is the entire user-facing cha
 This file replaces the old `agent-browser.md`, and the difference is the whole point of it. That design
 described a **writable** agent team: one interactive chat tab per spawned agent, each with its own
 `ContextManager`, its own file selection, its own input box, retaskable by id across turns, closable
-individually. None of that survives, because AC⚡DC no longer spawns agents.
+individually. None of that survives, because AIC⚡DC no longer spawns agents.
 
 A subagent here is created by the agent's own `Task` tool, inside a turn, for its own reasons. It has no
 seam a third party can speak into. What is left is observation plus a kill switch — which, in practice,
@@ -17,7 +17,7 @@ is what the old design was actually used for.
 
 | | Old agent tabs | Subagent tabs |
 |---|---|---|
-| Who spawns | AC⚡DC, from a parsed `🟧🟧🟧 AGENT` block | The agent, via its `Task` tool |
+| Who spawns | AIC⚡DC, from a parsed `🟧🟧🟧 AGENT` block | The agent, via its `Task` tool |
 | Send a message to it | Yes | **No** — there is no channel |
 | Grant it files | Yes, per-tab selection | **No** — it inherits the agent's tool access |
 | Change its mode | Yes | **No** — there are no modes |
@@ -74,7 +74,7 @@ A subagent tab's life is bounded by the subagent, not by the session:
 - **Terminal status** — the tab stops pulsing and becomes an archived transcript in place. It stays in the strip for the remainder of the turn so a user can read what happened. A terminal status may arrive via `updated` with **no** `notification`; the tab must settle on either (see `specs-reference/3-engine/session.md` § A task can finish without a notification).
 - **Turn end** — on `streamComplete`, live tabs that have not reported terminal status are marked *status unknown* rather than silently completed. The turn is over; a subagent that never reported is a fact worth showing, not a spinner to leave running.
 - **New turn** — the previous turn's subagent tabs leave the strip. Their transcripts remain on disk under the session's `subagents/` directory and stay reachable through the history browser.
-- **New session / session resume** — the strip drops to Main alone. Nothing is torn down on the server, because AC⚡DC owns no subagent state to tear down.
+- **New session / session resume** — the strip drops to Main alone. Nothing is torn down on the server, because AIC⚡DC owns no subagent state to tear down.
 - **Server shutdown** — in-memory tab state is lost; transcripts on disk survive.
 
 The old spec's `new_session`-dismisses-the-team rule, its asymmetry argument about main's
@@ -145,7 +145,7 @@ With no subagents it shows exactly one dot. Insertion order is preserved (main f
 start order).
 
 The old "above the compaction-capacity bar" placement no longer means anything — there is no capacity
-bar, because AC⚡DC does not model the context window as a budget it fills. Context pressure lives in
+bar, because AIC⚡DC does not model the context window as a budget it fills. Context pressure lives in
 the Context tab and the usage HUD.
 
 ## Tab Content
@@ -203,7 +203,7 @@ tab in this spec is read-only, so there is nothing to toggle.
 ## The Agent's View of Its Subagents
 
 Not our concern, and worth stating because the old spec had a whole section on it. The agent reads its
-subagents' results through its own `Task` tool return value. There is no synthesis step for AC⚡DC to
+subagents' results through its own `Task` tool return value. There is no synthesis step for AIC⚡DC to
 trigger, no "Synthesise now" affordance, no system-prompt convention about wrapping up, and no
 in-limbo turn state for the user to resolve. The turn ends when the agent ends it.
 

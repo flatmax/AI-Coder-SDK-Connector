@@ -29,7 +29,7 @@ import './files-tab/index.js';
 const _mounted = [];
 
 function mountTab(props = {}) {
-  const t = document.createElement('ac-files-tab');
+  const t = document.createElement('aic-files-tab');
   Object.assign(t, props);
   document.body.appendChild(t);
   _mounted.push(t);
@@ -68,9 +68,9 @@ async function settle(tab) {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   await tab.updateComplete;
-  const picker = tab.shadowRoot?.querySelector('ac-file-picker');
+  const picker = tab.shadowRoot?.querySelector('aic-file-picker');
   if (picker) await picker.updateComplete;
-  const chat = tab.shadowRoot?.querySelector('ac-chat-panel');
+  const chat = tab.shadowRoot?.querySelector('aic-chat-panel');
   if (chat) await chat.updateComplete;
 }
 
@@ -265,11 +265,11 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('entering file search swaps to pruned tree', async () => {
     const t = await setupTabWithTree();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Before: full tree — 2 top-level nodes.
     expect(picker.tree.children).toHaveLength(2);
     // Dispatch the event as the chat panel would.
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
         detail: {
@@ -296,8 +296,8 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('expands all directories on entry', async () => {
     const t = await setupTabWithTree();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
         detail: {
@@ -321,7 +321,7 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('sets _fileSearchActive flag on entry', async () => {
     const t = await setupTabWithTree();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     expect(t._fileSearchActive).toBe(false);
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
@@ -336,8 +336,8 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('exiting restores full tree', async () => {
     const t = await setupTabWithTree();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     // Enter, then exit.
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
@@ -372,8 +372,8 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('exit restores expanded state', async () => {
     const t = await setupTabWithTree();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     // User expands src before entering search.
     picker._expanded = new Set(['src']);
     await settle(t);
@@ -409,7 +409,7 @@ describe('FilesTab file-search-changed handling', () => {
 
   it('clears _fileSearchActive flag on exit', async () => {
     const t = await setupTabWithTree();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-changed', {
         detail: { active: true, results: [] },
@@ -436,8 +436,8 @@ describe('FilesTab file-search-changed handling', () => {
     // from under the rows, and a rebuild that forgot to re-push the
     // list would leave every strikethrough behind on exit.
     const t = await setupTabWithTree();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     // Pre-deny a file, by the direct-update pattern the tab's own
     // handlers use — the setter is deliberately non-reactive, so a
     // plain assignment would not reach the picker.
@@ -480,8 +480,8 @@ describe('FilesTab file-search-scroll handling', () => {
     await settle(t);
     // Simulate file-search active state.
     t._fileSearchActive = true;
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-scroll', {
         detail: { filePath: 'src/foo.py' },
@@ -499,9 +499,9 @@ describe('FilesTab file-search-scroll handling', () => {
     const t = mountTab();
     await settle(t);
     t._fileSearchActive = true;
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker._expanded = new Set();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-scroll', {
         detail: { filePath: 'src/utils/helpers.py' },
@@ -522,8 +522,8 @@ describe('FilesTab file-search-scroll handling', () => {
     await settle(t);
     // NOT active.
     expect(t._fileSearchActive).toBe(false);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-search-scroll', {
         detail: { filePath: 'src/foo.py' },
@@ -542,8 +542,8 @@ describe('FilesTab file-search-scroll handling', () => {
     const t = mountTab();
     await settle(t);
     t._fileSearchActive = true;
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     // Empty string, null, missing — all silently dropped.
     chat.dispatchEvent(
       new CustomEvent('file-search-scroll', {
@@ -587,11 +587,11 @@ describe('FilesTab file-clicked intercept', () => {
     await settle(t);
     // Simulate file search active.
     t._fileSearchActive = true;
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     // Spy on the chat panel's public method.
     const spy = vi.spyOn(chat, 'scrollFileSearchToFile');
     // Dispatch file-clicked as the picker would.
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('file-clicked', {
         detail: { path: 'a.md' },
@@ -612,7 +612,7 @@ describe('FilesTab file-clicked intercept', () => {
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('file-clicked', {
           detail: { path: 'a.md' },
@@ -637,7 +637,7 @@ describe('FilesTab file-clicked intercept', () => {
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('file-clicked', {
           detail: { path: 'a.md' },

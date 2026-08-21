@@ -358,7 +358,7 @@ Import path for raw CSS (Vite): `katex/dist/katex.min.css?raw`. The package's CS
 
 The `TEXINPUTS` environment variable set by the TeX preview compile path **must end with an OS path separator** (`:` on Unix, `;` on Windows). Without the trailing separator, an explicit `TEXINPUTS` value replaces the TeX engine's default search paths entirely rather than being prepended to them. System packages installed in the standard TeX trees — most notably `tex4ht.sty` itself — become unresolvable mid-compile, producing a `File `tex4ht.sty' not found` error even when `kpsewhich tex4ht.sty` from a shell resolves it correctly.
 
-The separator rule is a property of every TeX engine (pdfTeX, XeTeX, LuaTeX, htlatex), not something AC-DC chose. It's documented in kpathsea's search-path rules but easy to miss when implementing the compile wrapper. Reimplementers should handle three cases: no existing `TEXINPUTS` → `"${scratch}:"`; existing `TEXINPUTS` → `"${scratch}:${existing}:"`; Windows → same with `;`.
+The separator rule is a property of every TeX engine (pdfTeX, XeTeX, LuaTeX, htlatex), not something AIC-DC chose. It's documented in kpathsea's search-path rules but easy to miss when implementing the compile wrapper. Reimplementers should handle three cases: no existing `TEXINPUTS` → `"${scratch}:"`; existing `TEXINPUTS` → `"${scratch}:${existing}:"`; Windows → same with `;`.
 
 ### TeX4HT package detection via `kpsewhich`
 

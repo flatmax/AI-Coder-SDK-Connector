@@ -8,7 +8,7 @@
 // without this component knowing they exist.
 //
 // Host/guest contract, deliberately the same shape as
-// `ac-input-history` so the chat panel's keydown handler can
+// `aic-input-history` so the chat panel's keydown handler can
 // treat both the same way:
 //   - `show(commands, query)` — called on every input event
 //     while the cursor is inside a command token; opens if
@@ -25,7 +25,7 @@
 // nothing to restore.
 //
 // Each entry carries an `action` from the service — `route`
-// means selecting it opens an AC⚡DC surface instead of
+// means selecting it opens an AIC⚡DC surface instead of
 // sending text, and the row says so, because a command that
 // silently does something other than what its CLI description
 // promises is worse than no palette at all.
@@ -56,7 +56,7 @@ export class SlashPalette extends LitElement {
     /**
      * Index into the *filtered* list. Always a valid index
      * when the filtered list is non-empty — unlike
-     * ac-input-history's -1-means-nothing-yet, because a
+     * aic-input-history's -1-means-nothing-yet, because a
      * palette that opens with nothing selected makes Enter
      * ambiguous.
      */
@@ -278,7 +278,7 @@ export class SlashPalette extends LitElement {
   /**
    * Move the highlight, wrapping at both ends.
    *
-   * Wraps where `ac-input-history` clamps, and the difference
+   * Wraps where `aic-input-history` clamps, and the difference
    * is the list itself: history is a long chronology the user
    * reads through, where wrapping loses their place, while
    * this is a short list ordered by relevance that they are
@@ -349,7 +349,7 @@ export class SlashPalette extends LitElement {
                       >${command.description || ''}</span
                     >
                     ${command.action === 'route'
-                      ? html`<span class="badge" title="Opens an AC⚡DC surface"
+                      ? html`<span class="badge" title="Opens an AIC⚡DC surface"
                           >opens UI</span
                         >`
                       : ''}
@@ -366,4 +366,4 @@ export class SlashPalette extends LitElement {
   }
 }
 
-customElements.define('ac-slash-palette', SlashPalette);
+customElements.define('aic-slash-palette', SlashPalette);

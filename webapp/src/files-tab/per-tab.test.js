@@ -235,7 +235,7 @@ describe('FilesTab active-tab-changed handler', () => {
     t._excludedFilesByTab.set('agent-0', new Set(['agent-file.py']));
     fireActiveTabChanged('agent-0');
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.excludedFiles.has('agent-file.py')).toBe(true);
     // And the main tab's file (from any prior state)
     // shouldn't leak through.
@@ -258,12 +258,12 @@ describe('FilesTab active-tab-changed handler', () => {
     // Switch to agent-0.
     fireActiveTabChanged('agent-0');
     await settle(t);
-    let picker = t.shadowRoot.querySelector('ac-file-picker');
+    let picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.excludedFiles.size).toBe(0);
     // Switch back to main.
     fireActiveTabChanged('main', 'agent-0');
     await settle(t);
-    picker = t.shadowRoot.querySelector('ac-file-picker');
+    picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.excludedFiles.has('main-file.md')).toBe(true);
   });
 
@@ -277,7 +277,7 @@ describe('FilesTab active-tab-changed handler', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     const spy = vi.spyOn(picker, 'requestUpdate');
     fireActiveTabChanged('main', 'main');
     fireActiveTabChanged('main', 'main');
@@ -408,7 +408,7 @@ describe('FilesTab deny-read RPC routing', () => {
     await settle(t);
     fireActiveTabChanged('backend-auth');
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: ['a.py'] },
@@ -439,7 +439,7 @@ describe('FilesTab deny-read RPC routing', () => {
     const t = mountTab();
     await settle(t);
     // Stay on main.
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('exclusion-changed', {
         detail: { excludedFiles: ['a.py'] },

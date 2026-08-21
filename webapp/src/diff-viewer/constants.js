@@ -24,7 +24,7 @@ import _rawKatexCss from 'katex/dist/katex.min.css?raw';
 export const katexCssText =
   typeof _rawKatexCss === 'string' && _rawKatexCss
     ? _rawKatexCss
-    : '/* ac-dc KaTeX CSS placeholder — raw import unavailable */';
+    : '/* aic-dc KaTeX CSS placeholder — raw import unavailable */';
 
 /**
  * Virtual path prefix. Files with this prefix are
@@ -68,7 +68,7 @@ export const _HIGHLIGHT_DURATION_MS = 3000;
  * find and remove prior clones without touching styles
  * from other shadow-DOM consumers.
  */
-export const _CLONED_STYLE_MARKER = 'acDcMonacoClone';
+export const _CLONED_STYLE_MARKER = 'aicDcMonacoClone';
 
 /**
  * Dataset marker for the KaTeX stylesheet injected into
@@ -76,7 +76,7 @@ export const _CLONED_STYLE_MARKER = 'acDcMonacoClone';
  * from the Monaco-clone marker so the style-sync loop
  * doesn't touch it.
  */
-export const _KATEX_CSS_MARKER = 'acDcKatexCss';
+export const _KATEX_CSS_MARKER = 'aicDcKatexCss';
 
 /**
  * How long the scroll-sync lock stays held after one

@@ -15,7 +15,7 @@ later phases and are absent by construction.
 Usage::
 
     python scripts/engine_smoke.py
-    python scripts/engine_smoke.py "list the files in src/ac_dc/claude_code"
+    python scripts/engine_smoke.py "list the files in src/aic_dc/claude_code"
     python scripts/engine_smoke.py --repo /path/to/repo --raw
     python scripts/engine_smoke.py --cancel-after 3 "explain this repo"
 
@@ -51,7 +51,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ac_dc.claude_code import (  # noqa: E402
+from aic_dc.claude_code import (  # noqa: E402
     EngineConfig,
     EngineSession,
     EngineStartupError,
@@ -216,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         "--config-dir",
         default=None,
         help=(
-            "Directory holding engine.json (normally AC-DC's user config dir). "
+            "Directory holding engine.json (normally AIC-DC's user config dir). "
             "Omitted means every option falls through to the CLI's own default."
         ),
     )

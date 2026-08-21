@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.health credential resolution — phase 6.
+"""Tests for aic_dc.claude_code.health credential resolution — phase 6.
 
 ``detect_credentials`` is the only billing-mode signal the browser gets, and
 it answers a question this process cannot see the answer to: the CLI resolves
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.claude_code.health import (
+from aic_dc.claude_code.health import (
     _API_KEY_VARS,
     _ENDPOINT_VARS,
     _GATEWAY_VARS,

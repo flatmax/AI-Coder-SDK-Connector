@@ -123,7 +123,7 @@ Tests in `tests/test_llm_service.py`:
 
 ### Step 2a — Frontend progress overlay (doc-index + enrichment)
 
-New LitElement `ac-doc-index-progress` modeled after `ac-compaction-progress`. Floats above the compaction progress bar (stacks vertically — compaction at the usual position, doc-index one row up) so users can see both kinds of progress simultaneously during a busy session.
+New LitElement `aic-doc-index-progress` modeled after `aic-compaction-progress`. Floats above the compaction progress bar (stacks vertically — compaction at the usual position, doc-index one row up) so users can see both kinds of progress simultaneously during a busy session.
 
 Listens for `startupProgress` events with the following stages and routes them to the overlay instead of the startup-overlay machinery:
 
@@ -139,15 +139,15 @@ Listens for `startupProgress` events with the following stages and routes them t
 - Do NOT update `startupMessage` / `startupPercent` for these stages
 - Do NOT dismiss the startup overlay for these stages (the `ready` stage is still the only dismiss trigger)
 - Dispatch a new window event `doc-index-progress` that the overlay subscribes to
-- Import and mount `<ac-doc-index-progress>` alongside `<ac-compaction-progress>`
+- Import and mount `<aic-doc-index-progress>` alongside `<aic-compaction-progress>`
 
 ### Step 2b — One-shot unavailable toast
 
 When the backend reports `enrichment_status === "unavailable"`, show a warning toast exactly once per browser session:
 
-> "Keyword enrichment disabled — install `ac-dc[docs]` for richer document outlines."
+> "Keyword enrichment disabled — install `aic-dc[docs]` for richer document outlines."
 
-Check a localStorage flag `ac-dc-enrichment-unavailable-shown` to suppress repeats across page reloads. Trigger from two places:
+Check a localStorage flag `aic-dc-enrichment-unavailable-shown` to suppress repeats across page reloads. Trigger from two places:
 
 - `_fetchCurrentState` when the initial state snapshot arrives with the unavailable status
 - `_onModeChanged` when a mode-changed broadcast carries the unavailable status (handles the rare case where the user's backend session came up without KeyBERT after a reboot)
@@ -192,7 +192,7 @@ Currently a toast says "Compacting conversation..." and disappears. Compaction c
   - positioned top-center of the viewer area; high z-index so it floats above the dialog but below toasts
   - cleans up the interval timer on disconnect
   - ignores `url_fetch` / `url_ready` events (those share the channel but belong to URL fetching)
-- `webapp/src/app-shell.js` — import and mount `<ac-compaction-progress>` alongside the toast layer
+- `webapp/src/app-shell.js` — import and mount `<aic-compaction-progress>` alongside the toast layer
 - `webapp/src/compaction-progress.test.js` — 8–10 tests: initial hidden state, appears on compacting event, elapsed counter ticks, wrong-stage events ignored, transitions compacting → compacted with 800ms success display, compacted → hidden after fade, error stage shows message, disconnect clears timer, URL events don't activate the overlay
 
 No change to the event callback contract, no change to the compactor, no new RPCs. Pure frontend.
@@ -232,7 +232,7 @@ The `<details>` tag renders natively in the chat panel's markdown path (marked.j
 
 **Backend changes:**
 
-- `src/ac_dc/llm_service.py` — in `_post_response`, after the successful `context.set_history(result.messages)` + `tracker.purge_history()` path, build the event text and call `context.add_message("user", event_text, system_event=True)` plus (if `history_store`) `history_store.append_message(session_id=session_id, role="user", content=event_text, system_event=True)`. The `session_id` is the one captured at the top of `_post_response` — same pattern as `commit_all_background`. Do NOT append on the error path (the `compaction_error` event is enough; appending a message about a failed compaction to history that we couldn't compact would be noise).
+- `src/aic_dc/llm_service.py` — in `_post_response`, after the successful `context.set_history(result.messages)` + `tracker.purge_history()` path, build the event text and call `context.add_message("user", event_text, system_event=True)` plus (if `history_store`) `history_store.append_message(session_id=session_id, role="user", content=event_text, system_event=True)`. The `session_id` is the one captured at the top of `_post_response` — same pattern as `commit_all_background`. Do NOT append on the error path (the `compaction_error` event is enough; appending a message about a failed compaction to history that we couldn't compact would be noise).
 - new private helper `_build_compaction_event_text(result, tokens_before, tokens_after, messages_before_count, messages_after_count) -> str` — produces the 3-part text. Tokens before/after measured at the `_post_response` call site (before the compactor runs, and after `set_history` installs the new list).
 - the event message goes into the context AFTER the history replacement, so the chat panel sees the compacted list with the system event already appended. This matters because on a browser reload the system-event message needs to reflect the final state, not a pre-compaction state.
 
@@ -282,7 +282,7 @@ Pure render change. `Repo.get_file_tree()` already returns `{modified, staged, u
 
 ### ~~Increment 3 — Sort modes~~ (delivered `1e32eb2`)
 
-Three sort-mode buttons (A / 🕐 / #) in the filter bar. Clicking a different mode switches to it and resets direction to ascending (fresh sort starts at the familiar anchor — A-Z, oldest-first, smallest-first). Clicking the active mode toggles direction. Active button gets `.active` styling + `aria-pressed="true"` + direction glyph (↑/↓); inactive buttons show mode glyph only. Mode and direction persisted to localStorage keys `ac-dc-sort-mode` and `ac-dc-sort-asc`; restored on mount with safe defaults when storage is missing, unknown, or malformed. Directories always sort alphabetically ascending regardless of mode or direction — users expect a stable directory layout, and mtime/size aren't meaningful for directory nodes (the file-tree schema doesn't populate them for dirs).
+Three sort-mode buttons (A / 🕐 / #) in the filter bar. Clicking a different mode switches to it and resets direction to ascending (fresh sort starts at the familiar anchor — A-Z, oldest-first, smallest-first). Clicking the active mode toggles direction. Active button gets `.active` styling + `aria-pressed="true"` + direction glyph (↑/↓); inactive buttons show mode glyph only. Mode and direction persisted to localStorage keys `aic-dc-sort-mode` and `aic-dc-sort-asc`; restored on mount with safe defaults when storage is missing, unknown, or malformed. Directories always sort alphabetically ascending regardless of mode or direction — users expect a stable directory layout, and mtime/size aren't meaningful for directory nodes (the file-tree schema doesn't populate them for dirs).
 
 Implementation was already present in `file-picker.js` when tests landed — `sortChildrenWithMode`, `SORT_MODE_*` constants, `_loadSortPrefs`/`_saveSortPrefs`, `_renderSortButtons`, `_onSortButtonClick`. The commit adds 25 tests across two describe blocks: 13 helper tests for `sortChildrenWithMode` (dir-before-file invariant across all modes, name/mtime/size each in both directions, direction-ignored for dirs, unknown-mode fallback, missing-field tolerance, falsy-child filtering, no-mutation), 12 component-level tests for the sort buttons (render shape, default state, one-active-at-a-time, mode switch resets direction, active toggle flips direction, files render in selected order, dirs alphabetical regardless, localStorage round-trip for mode + direction, malformed-storage fallback, direction-glyph on active button only).
 
@@ -472,7 +472,7 @@ Design points pinned by tests:
 
 ### ~~Increment 8b — Stage / unstage / discard / delete~~ (delivered)
 
-Four context-menu actions now dispatch to real RPCs. Stage and unstage are fire-and-forget. Discard and delete prompt for confirmation via `window.confirm` before the RPC fires. Every action path reloads the file tree on success so status badges update; every failure surfaces via `ac-toast` window events (restricted as warning, RPC rejection as error); collaboration-mode `{error: "restricted"}` responses route to the warning toast just like selection changes do.
+Four context-menu actions now dispatch to real RPCs. Stage and unstage are fire-and-forget. Discard and delete prompt for confirmation via `window.confirm` before the RPC fires. Every action path reloads the file tree on success so status badges update; every failure surfaces via `aic-toast` window events (restricted as warning, RPC rejection as error); collaboration-mode `{error: "restricted"}` responses route to the warning toast just like selection changes do.
 
 - `files-tab.js` — new `_onContextMenuAction(event)` dispatcher catches `context-menu-action` bubbling from the picker. Filters to `type === 'file'` (directory menus reserved for a later sub-commit), validates the path shape, then routes on `action` to one of four per-action async methods: `_dispatchStage`, `_dispatchUnstage`, `_dispatchDiscard`, `_dispatchDelete`.
 - `Repo.stage_files` / `Repo.unstage_files` / `Repo.discard_changes` accept path arrays; each dispatcher wraps the single path in `[path]` for consistency with the multi-path form. `Repo.delete_file` takes a raw path; delete sends it unwrapped (and the test pins this asymmetry).
@@ -480,7 +480,7 @@ Four context-menu actions now dispatch to real RPCs. Stage and unstage are fire-
 - `_isRestrictedError(result)` shared helper for the four new dispatchers. Matches the pattern inline-defined in `_sendSelectionToServer` / `_sendExclusionToServer` — the older sites weren't migrated since they're stable code paths, but new dispatchers use the helper to avoid copy-paste.
 - Delete also clears the file from `_excludedFiles` if it was excluded — a deleted file no longer exists in the tree, so carrying an exclusion entry for a non-existent path would be a dead reference. Selection is cleared by the server's `filesChanged` broadcast if the deleted file was selected; exclusion has no such broadcast yet, so we clear locally and notify via `_applyExclusion`.
 - Unrecognised actions (rename / duplicate / load-left / load-right / include / exclude) fall through the dispatcher silently. They're the contract targets of 8c and 8d; picking them up here would require disabling the menu items (specs4 says they stay visible) or logging noise on every right-click preview. Silent drop + sub-commit coverage is cleaner.
-- `_onContextMenuAction` bound in the constructor alongside the other bound handlers. Template binding added to `ac-file-picker` alongside the existing picker event listeners. No new window-level listeners — the event reaches us via shadow-DOM bubbling through Lit's property-binding path.
+- `_onContextMenuAction` bound in the constructor alongside the other bound handlers. Template binding added to `aic-file-picker` alongside the existing picker event listeners. No new window-level listeners — the event reaches us via shadow-DOM bubbling through Lit's property-binding path.
 
 Twenty-six new tests across five describe blocks: stage (five tests — RPC shape, reload, success toast, restricted warning, error toast), unstage (two — RPC shape, reload; error paths share the stage pattern and don't need duplicating), discard (five — confirm prompt, cancel no-op, RPC shape, reload, error toast), delete (five — confirm prompt, cancel no-op, unwrapped path, reload, clears exclusion), edge cases (three — malformed detail, non-file types, unknown actions).
 
@@ -520,7 +520,7 @@ Rename and duplicate both use the same inline-input pattern: the picker renders 
   - `_onDuplicateCommitted(event)` — reads source content via `Repo.get_file_content`, then creates the target via `Repo.create_file(targetPath, content)`. Two-step because no backend `copy_file` RPC exists. Failures at either step surface as error toasts without partial state. Defensive type check on returned content — a future backend change that returned a different shape shouldn't dispatch garbage to `create_file`.
   - `_findNodeByPath(path)` — depth-first walk through `_latestTree` returning the node (file OR directory) at that path, or null when missing. Used by `_onRenameCommitted` to determine whether to call `rename_file` or `rename_directory`. Missing nodes (deleted between menu open and Enter press) default to file rename since the RPC surfaces a clean error.
   - `_migrateSubtreeState(oldDir, newDir)` — on directory rename, every descendant path under `oldDir` gets migrated to the equivalent path under `newDir` in both `_selectedFiles` and `_excludedFiles`. Nested selections survive a parent rename. Uses prefix-rewrite (`oldPrefix = oldDir + "/"`) so sibling directories with names that start the same (e.g. `src` and `src-archive`) don't cross-contaminate.
-  - Template bindings — `@rename-committed=${this._onRenameCommitted}` and `@duplicate-committed=${this._onDuplicateCommitted}` on the `<ac-file-picker>` element. Handlers bound in the constructor for stable references.
+  - Template bindings — `@rename-committed=${this._onRenameCommitted}` and `@duplicate-committed=${this._onDuplicateCommitted}` on the `<aic-file-picker>` element. Handlers bound in the constructor for stable references.
 
 - `webapp/src/file-picker.test.js` — 20+ tests across `describe('inline-input rename')` and `describe('inline-input duplicate')` blocks (the file-picker's side). Tests cover: `beginRename`/`beginDuplicate` state flip, inline input rendering shape (mode attr, data attributes), pre-fill values (basename vs full path), auto-focus and stem selection via `updated()`, Enter commits and dispatches the right event, Escape cancels without dispatch, blur cancels, blur-after-commit race short-circuit, mutual exclusion (starting duplicate while renaming cancels rename), empty-input no-op, unchanged-value no-op, path separators in target (orchestrator-level test — the picker itself allows them, rejection happens in `_onRenameCommitted`).
 
@@ -681,7 +681,7 @@ New file and new directory creation via the same inline-input pattern used by re
   - `_dispatchDirAction` switch updated — `new-file` and `new-directory` cases added alongside the existing five. No more silent-drop default for those actions. Unknown actions (future menu items without wired handlers) still fall through to the default branch.
   - `_onNewFileCommitted(event)` — reads `{parentPath, name}` from detail, rejects path separators with a warning toast, joins into a target path (`parentPath/name` or just `name` for repo root), calls `Repo.create_file(targetPath, '')`. On success, reloads the tree and surfaces a success toast. On restricted caller: warning. On RPC rejection: error toast (common cause: target already exists).
   - `_onNewDirectoryCommitted(event)` — same pattern, but the target path is `parentPath/name/.gitkeep` (with content `''`). Git doesn't track empty directories — only files with content — so writing a placeholder file is the standard technique for creating a directory that will be visible in the next commit. `.gitkeep` is the community convention; the name self-documents its purpose.
-  - Both handlers bound in the constructor alongside the existing rename / duplicate bindings. Template wires them via `@new-file-committed` / `@new-directory-committed` on the `<ac-file-picker>` element.
+  - Both handlers bound in the constructor alongside the existing rename / duplicate bindings. Template wires them via `@new-file-committed` / `@new-directory-committed` on the `<aic-file-picker>` element.
 
 Design points pinned by tests:
 
@@ -760,7 +760,7 @@ The spec (specs4/5-webapp/file-picker.md § Direct Update Pattern) describes a d
 
 > User sends message → chat panel updates its messages array → user clicks a file mention → files tab re-renders → chat panel receives the files tab's stale messages prop → latest messages are lost.
 
-**Decision: skip with documentation.** This failure mode does not exist in the current implementation because `<ac-files-tab>` never binds `.messages` on `<ac-chat-panel>`. The chat panel is the sole source of truth for its own message list; files-tab pushes `repoFiles` and `selectedFiles` down via the direct-update pattern but never touches `messages`. A files-tab re-render cannot clobber chat state that files-tab doesn't hold.
+**Decision: skip with documentation.** This failure mode does not exist in the current implementation because `<aic-files-tab>` never binds `.messages` on `<aic-chat-panel>`. The chat panel is the sole source of truth for its own message list; files-tab pushes `repoFiles` and `selectedFiles` down via the direct-update pattern but never touches `messages`. A files-tab re-render cannot clobber chat state that files-tab doesn't hold.
 
 **Why skip rather than land preemptively:**
 
@@ -768,7 +768,7 @@ Adding the field, helper, and sync calls now would create defensive infrastructu
 
 **When Increment 12 becomes necessary:**
 
-If a future refactor adds `.messages=${this._messages}` to the `<ac-chat-panel>` binding in the render template — for example, to support a shared-session model where files-tab mediates between chat history and some other consumer, or a collaboration feature where server-pushed message arrays flow through files-tab — the race becomes real and this increment must land. At that point:
+If a future refactor adds `.messages=${this._messages}` to the `<aic-chat-panel>` binding in the render template — for example, to support a shared-session model where files-tab mediates between chat history and some other consumer, or a collaboration feature where server-pushed message arrays flow through files-tab — the race becomes real and this increment must land. At that point:
 
 1. Add `this._messages = []` to the constructor
 2. Add `_syncMessagesFromChat()` helper that reads `chatPanel.messages` into `this._messages` when the chat panel exists
@@ -848,7 +848,7 @@ Wired `_onGlobalKeyDown` on `document` bubble-phase. Alt+1/2/3/4 route through `
 
 ### ~~Commit C — File picker left-panel resizer~~ (delivered `f9a9856`)
 
-Shipped the splitter. `files-tab.js` gained `_PICKER_*` constants (min 180, collapsed 24, default 280), localStorage hydration helpers for both width and collapsed state, a new `_pickerCollapsed` reactive property, pointerdown/move/up drag handlers with clamping to `[180, hostWidth/2]`, and a double-click handler that toggles collapsed state while preserving the stored drag width. Mid-drag inline-style mutations bypass Lit's re-render cycle; commit on pointerup writes the final width back to the reactive property and to `ac-dc-picker-width`. Pointerdown in collapsed mode no-ops (originWidth would be meaningless) — double-click is the only way out. Splitter widens from 4px to ~20px in collapsed mode with a `▸` glyph affordance so the click target is findable. ARIA separator role + contextual tooltip matches the spec. 16 tests in `files-tab.test.js § FilesTab left-panel resizer` cover rendering order, drag bounds, persistence, collapse toggle, malformed-storage fallbacks for both keys, disconnect-during-drag cleanup. `specs4/5-webapp/file-picker.md § Left Panel Resizer` firmed up from vague bullet points to concrete numbers and the two localStorage keys.
+Shipped the splitter. `files-tab.js` gained `_PICKER_*` constants (min 180, collapsed 24, default 280), localStorage hydration helpers for both width and collapsed state, a new `_pickerCollapsed` reactive property, pointerdown/move/up drag handlers with clamping to `[180, hostWidth/2]`, and a double-click handler that toggles collapsed state while preserving the stored drag width. Mid-drag inline-style mutations bypass Lit's re-render cycle; commit on pointerup writes the final width back to the reactive property and to `aic-dc-picker-width`. Pointerdown in collapsed mode no-ops (originWidth would be meaningless) — double-click is the only way out. Splitter widens from 4px to ~20px in collapsed mode with a `▸` glyph affordance so the click target is findable. ARIA separator role + contextual tooltip matches the spec. 16 tests in `files-tab.test.js § FilesTab left-panel resizer` cover rendering order, drag bounds, persistence, collapse toggle, malformed-storage fallbacks for both keys, disconnect-during-drag cleanup. `specs4/5-webapp/file-picker.md § Left Panel Resizer` firmed up from vague bullet points to concrete numbers and the two localStorage keys.
 
 ### ~~Commit D — specs4/5-webapp/shell.md catch-up for dialog chrome~~ (delivered `c586d59`)
 

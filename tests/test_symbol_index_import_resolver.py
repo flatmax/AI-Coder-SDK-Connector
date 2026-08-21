@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.import_resolver — Layer 2.5.
+"""Tests for aic_dc.symbol_index.import_resolver — Layer 2.5.
 
 Scope: the ImportResolver class. Each test constructs a fresh
 resolver with an explicit file set so behaviour is independent
@@ -25,8 +25,8 @@ Covers:
 
 from __future__ import annotations
 
-from ac_dc.symbol_index.import_resolver import ImportResolver
-from ac_dc.symbol_index.models import Import
+from aic_dc.symbol_index.import_resolver import ImportResolver
+from aic_dc.symbol_index.models import Import
 
 
 # ---------------------------------------------------------------------------

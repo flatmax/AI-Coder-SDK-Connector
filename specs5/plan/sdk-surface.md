@@ -33,7 +33,7 @@ check alone will tell you it does not exist. It does.
 
 ## The probe
 
-`src/ac_dc/claude_code/sdk_surface.py` asks the installed wheel what it offers and this repo's own source
+`src/aic_dc/claude_code/sdk_surface.py` asks the installed wheel what it offers and this repo's own source
 what it uses, and reports the difference in five sections: **options**, **hooks**, **messages**, **client
 methods**, **betas**. `tests/test_claude_code_sdk_surface.py` is the gate; `ClaudeCodeService.get_sdk_surface`
 is the RPC; `webapp/src/sdk-surface-tab.js` is the reader's view of it (Alt+5, linked from the Context tab's
@@ -161,7 +161,7 @@ to that question.
 | Method | Notes |
 |---|---|
 | `connect()` / `disconnect()` | Spawns / tears down the CLI subprocess. |
-| `query(prompt: str \| AsyncIterable[dict], session_id="default")` | Message dicts are written **verbatim**, so multimodal content blocks (images) survive untouched. This is how AC⚡DC sends pasted images — see [`../4-features/images.md`](../4-features/images.md). |
+| `query(prompt: str \| AsyncIterable[dict], session_id="default")` | Message dicts are written **verbatim**, so multimodal content blocks (images) survive untouched. This is how AIC⚡DC sends pasted images — see [`../4-features/images.md`](../4-features/images.md). |
 | `receive_messages()` / `receive_response()` | The latter stops after `ResultMessage`. |
 | `interrupt()` | Replaces our cancellation flag. |
 | `set_permission_mode(mode)` | Live switch; no reconnect. |
@@ -195,7 +195,7 @@ store to implement `list_sessions()`. Ours does, and we pass `resume` explicitly
 
 ## Options — fields we set
 
-From `ClaudeAgentOptions`. Fields AC⚡DC uses, and why:
+From `ClaudeAgentOptions`. Fields AIC⚡DC uses, and why:
 
 | Field | Value | Reason |
 |---|---|---|
@@ -207,11 +207,11 @@ From `ClaudeAgentOptions`. Fields AC⚡DC uses, and why:
 | `include_hook_events` | `True` | Surfaces `HookEventMessage` so hook activity is visible in the transcript. |
 | `setting_sources` | `["user", "project", "local"]` | CC-11 — `CLAUDE.md` and project settings apply. |
 | `enable_file_checkpointing` | `True`, **only without `session_store`** | Undo. Requires the `extra_args` flag above, and excludes the mirror (CC-20). |
-| `mcp_servers` | `{"ac-dc": <in-process server>}` | CC-6. |
+| `mcp_servers` | `{"aic-dc": <in-process server>}` | CC-6. |
 | `max_budget_usd` | optional, from config | A hard stop the native engine never had. |
 | `effort` / `thinking` | optional, from config | `thinking` is a TypedDict, not a class: `{"type": "adaptive", "display": "summarized" \| "omitted"}`. |
 | `resume` / `fork_session` | on session load | CC-3. |
-| `session_store` | our implementation | CC-3; mirrors the transcript into `.ac-dc4/`. |
+| `session_store` | our implementation | CC-3; mirrors the transcript into `.aic-dc/`. |
 | `session_store_flush` | `"eager"` | Batched flushing holds a turn's tail until the result message. |
 | `max_buffer_size` | 16 MiB, overridable in `engine.json` | The SDK's own 1 MiB default is per *line* of CLI stdout, and one line over it raises inside the reader and kills the session's message pump. An inline screenshot reaches it. Set unconditionally — the one place where deferring to the dependency's default is the broken choice. |
 | `stderr` | `EngineSession._note_cli_stderr` | Registering a callback is what *pipes* the CLI's stderr; unset, it is inherited. So the callback logs the line **and** keeps the last 20 on `EngineHealth`, where the health banner renders them. |
@@ -227,7 +227,7 @@ distinct, less alarming middle ground than `"bypassPermissions"`.
 
 What comes out of `receive_response()`, and where each lands in the UI:
 
-| Type | Contents | AC⚡DC surface |
+| Type | Contents | AIC⚡DC surface |
 |---|---|---|
 | `SystemMessage(subtype="init")` | Session ID, model, tools, MCP servers, slash commands | Session banner; seeds the request-ID ↔ session-ID map |
 | `AssistantMessage` | `TextBlock`, `ThinkingBlock`, `ToolUseBlock`, `usage` | Chat message; thinking collapsed by default; tool-use cards. `usage` is this API call's four token counters — the only mid-turn source of them — summed per model into the streaming card's live counter (`turnUsage`) |
@@ -391,10 +391,10 @@ last two the other way round; see [Corrections found while implementing phase 1]
 
 Consequences for [`../6-deployment/packaging.md`](../6-deployment/packaging.md):
 
-- AC⚡DC's wheel stops being pure-Python. Either we publish per-platform wheels, or we depend on
+- AIC⚡DC's wheel stops being pure-Python. Either we publish per-platform wheels, or we depend on
   the SDK and accept its platform constraint, or we ship an "external CLI" mode that requires
   `npm i -g @anthropic-ai/claude-code` and configure the path explicitly.
-- A PyInstaller bundle that embeds the SDK embeds 295 MB. Current AC⚡DC bundles are a fraction of
+- A PyInstaller bundle that embeds the SDK embeds 295 MB. Current AIC⚡DC bundles are a fraction of
   that.
 - Version skew between a system CLI and the SDK's pin is a real failure mode. Startup must log
   which CLI was selected and its version.
@@ -413,12 +413,12 @@ See [`risks.md`](risks.md#r-7--bundled-cli-size-and-platform-specific-wheels).
 - **Correction to an earlier draft of this file.** It claimed the `mcp` floor collided with a
   `doc_convert` pin of 1.14.1 and that the bump needed co-testing. There was no such pin — `mcp` was
   not in `uv.lock` at all, and `markitdown[all]` does not depend on it. The 1.14.1 reading came from
-  `litellm`'s `proxy` extra in `/home/flatmax/.venv`, a virtualenv that contains neither `ac_dc` nor
+  `litellm`'s `proxy` extra in `/home/flatmax/.venv`, a virtualenv that contains neither `aic_dc` nor
   `markitdown` and is not this project's environment. The repo had no materialised venv at the time.
   The surviving constraint is a packaging one, not a resolution one: six transport packages enter the
   dependency set that an in-process MCP server never serves.
 - Authentication conflicts: the SDK/CLI authenticates via its own config (subscription login or
-  `ANTHROPIC_API_KEY`). AC⚡DC's `llm.json` `env` block currently exports provider credentials into
+  `ANTHROPIC_API_KEY`). AIC⚡DC's `llm.json` `env` block currently exports provider credentials into
   the process environment on startup, which can silently redirect the CLI to a different account or
   a Bedrock endpoint. The env-export step must be removed with the rest of the LiteLLM config
   (CC-11), and startup should report which credential source the CLI resolved.
@@ -563,9 +563,9 @@ model-authored HTML — not forwarded into the dialog's shadow DOM incidentally)
 
 | Where | Said / assumed | Actually |
 |---|---|---|
-| `get_mcp_status()` (§ Client, above) — "MCP server health surface" | The place to check whether our server registered | **An in-process SDK server does not appear in it.** A live run listed only the user's `chrome-devtools` from settings while all six `mcp__ac-dc__*` tools were being called successfully in the same turn. It reports *configured* stdio/http servers. What proves an SDK server registered is the model calling one of its tools |
-| `specs5/3-engine/permissions.md` § classification table | `ac-dc` tools are ungated because they classify as read-only | Classification only shapes a dialog. The CLI raises a permission request for MCP tools in `acceptEdits` and `default` — not in `plan` — so they must be allowed in `can_use_tool` explicitly. Corrected in that file |
-| `specs5/3-engine/mcp-bridge.md` § Tools | The tool names are what the model sees | It sees them prefixed: `mcp__ac-dc__<tool>`. And when the inventory is deferred it reaches them through `ToolSearch` first — all three live runs showed `ToolSearch{query: "select:mcp__ac-dc__file_symbols"}` before the call. A tool whose *name* is not guessable from the task will not be found that way, which is an argument for plain names over clever ones |
+| `get_mcp_status()` (§ Client, above) — "MCP server health surface" | The place to check whether our server registered | **An in-process SDK server does not appear in it.** A live run listed only the user's `chrome-devtools` from settings while all six `mcp__aic-dc__*` tools were being called successfully in the same turn. It reports *configured* stdio/http servers. What proves an SDK server registered is the model calling one of its tools |
+| `specs5/3-engine/permissions.md` § classification table | `aic-dc` tools are ungated because they classify as read-only | Classification only shapes a dialog. The CLI raises a permission request for MCP tools in `acceptEdits` and `default` — not in `plan` — so they must be allowed in `can_use_tool` explicitly. Corrected in that file |
+| `specs5/3-engine/mcp-bridge.md` § Tools | The tool names are what the model sees | It sees them prefixed: `mcp__aic-dc__<tool>`. And when the inventory is deferred it reaches them through `ToolSearch` first — all three live runs showed `ToolSearch{query: "select:mcp__aic-dc__file_symbols"}` before the call. A tool whose *name* is not guessable from the task will not be found that way, which is an argument for plain names over clever ones |
 
 ### `ToolAnnotations(readOnlyHint=True)` buys nothing at the gate
 

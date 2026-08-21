@@ -1,8 +1,8 @@
-# AC⚡DC Specification Suite (specs5)
+# AIC⚡DC Specification Suite (specs5)
 
-**Status:** Active — target specification for AC⚡DC as a browser frontend for Claude Code.
+**Status:** Active — target specification for AIC⚡DC as a browser frontend for Claude Code.
 
-This suite describes the system **after** the engine conversion. AC⚡DC no longer assembles prompts,
+This suite describes the system **after** the engine conversion. AIC⚡DC no longer assembles prompts,
 counts tokens, or caches context in tiers; it drives a Claude Code session through the Claude Agent
 SDK and renders it. The conversion itself — what is kept, deleted, and added, and why — is in
 [`plan/`](plan/README.md). The specs assume every decision in
@@ -17,11 +17,11 @@ shapes, dependency quirks. The two trees mirror each other: when implementing fr
 mean the specs5 spec is self-sufficient. See
 [`specs-reference/README.md`](../specs-reference/README.md) for the full convention.
 
-## What AC⚡DC Is
+## What AIC⚡DC Is
 
 A browser frontend for Claude Code. It runs as a local terminal process, serves a Lit single-page app,
 and drives one Claude Code session per repository. Claude Code does the thinking, the tool use, and
-the file editing; AC⚡DC provides the surfaces a terminal cannot — a Monaco diff viewer over
+the file editing; AIC⚡DC provides the surfaces a terminal cannot — a Monaco diff viewer over
 everything the agent touches, a git-status file tree, an SVG editor, a TeX preview, a 2-D file
 navigation grid, permission prompts with a real diff in them, live context and cost visualisation,
 and multi-client collaboration.

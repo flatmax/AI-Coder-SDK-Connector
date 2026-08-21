@@ -33,7 +33,7 @@ describe('FilesTab middle-click path insertion', () => {
    * orchestrator's response to the event.
    */
   function firePickerInsertPath(tab, path, mention = false) {
-    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    const picker = tab.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('insert-path', {
         detail: { path, mention },
@@ -65,13 +65,13 @@ describe('FilesTab middle-click path insertion', () => {
     const t = await setupTab();
     firePickerInsertPath(t, 'src/foo.py');
     await settle(t);
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     expect(chat._input).toBe(' src/foo.py ');
   });
 
   it('inserts path at cursor position in non-empty textarea', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'before  after';
     ta.dispatchEvent(new Event('input'));
@@ -93,7 +93,7 @@ describe('FilesTab middle-click path insertion', () => {
     // one place, so gesture and menu item cannot drift apart
     // on what an `@path` looks like.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     firePickerInsertPath(t, 'src/foo.py', true);
     await settle(t);
     expect(chat._input).toBe(' @src/foo.py ');
@@ -103,7 +103,7 @@ describe('FilesTab middle-click path insertion', () => {
     // The composer's content is never replaced — the mention
     // joins what the user has already written, padded off it.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'review this:';
     ta.dispatchEvent(new Event('input'));
@@ -116,7 +116,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('pads a path appended after existing prose', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'word';
     ta.dispatchEvent(new Event('input'));
@@ -131,7 +131,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('pads a path inserted ahead of existing prose', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'trailing';
     ta.dispatchEvent(new Event('input'));
@@ -144,7 +144,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('adds both spaces when jammed between non-whitespace', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'ab';
     ta.dispatchEvent(new Event('input'));
@@ -157,7 +157,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('replaces selection when one exists', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = 'keep OLD keep';
     ta.dispatchEvent(new Event('input'));
@@ -172,7 +172,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('positions cursor at end of inserted text', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     ta.value = '';
     ta.dispatchEvent(new Event('input'));
@@ -196,7 +196,7 @@ describe('FilesTab middle-click path insertion', () => {
     // checking the flag is already true when it's
     // called.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     let flagAtFocus = null;
     const originalFocus = ta.focus.bind(ta);
@@ -213,7 +213,7 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('focuses the textarea after insertion', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     firePickerInsertPath(t, 'path.py');
     await settle(t);
@@ -222,9 +222,9 @@ describe('FilesTab middle-click path insertion', () => {
 
   it('ignores malformed events without a path', async () => {
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const originalInput = chat._input;
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Null detail.
     picker.dispatchEvent(
       new CustomEvent('insert-path', {
@@ -269,7 +269,7 @@ describe('FilesTab middle-click path insertion', () => {
     // path would be inserted but the textarea height
     // wouldn't adjust.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     const ta = chat.shadowRoot.querySelector('.input-textarea');
     const inputSpy = vi.fn();
     ta.addEventListener('input', inputSpy);
@@ -283,7 +283,7 @@ describe('FilesTab middle-click path insertion', () => {
     // each one appends with proper padding to whatever
     // was there before.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     firePickerInsertPath(t, 'a.py');
     await settle(t);
     firePickerInsertPath(t, 'b.py');
@@ -301,7 +301,7 @@ describe('FilesTab middle-click path insertion', () => {
     // Directories are legitimate insertion targets. The path
     // itself is untouched; only the padding is ours.
     const t = await setupTab();
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     firePickerInsertPath(t, 'src/utils');
     await settle(t);
     expect(chat._input).toBe(' src/utils ');
@@ -320,7 +320,7 @@ describe('FilesTab context-menu action dispatch', () => {
    * matches production.
    */
   function fireContextAction(tab, detail) {
-    const picker = tab.shadowRoot.querySelector('ac-file-picker');
+    const picker = tab.shadowRoot.querySelector('aic-file-picker');
     picker.dispatchEvent(
       new CustomEvent('context-menu-action', {
         detail,
@@ -416,7 +416,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('shows a success toast', async () => {
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupTabWithFile();
         fireContextAction(t, {
@@ -433,7 +433,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(successToasts.length).toBeGreaterThan(0);
         expect(successToasts[0].message).toContain('a.md');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -457,7 +457,7 @@ describe('FilesTab context-menu action dispatch', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
@@ -475,7 +475,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(warningToasts.length).toBeGreaterThan(0);
         expect(warningToasts[0].message).toContain('Participants');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -501,7 +501,7 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
@@ -519,7 +519,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(errorToasts.length).toBeGreaterThan(0);
         expect(errorToasts.at(-1).message).toContain('stage boom');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -666,7 +666,7 @@ describe('FilesTab context-menu action dispatch', () => {
           .spyOn(console, 'error')
           .mockImplementation(() => {});
         const toastListener = vi.fn();
-        window.addEventListener('ac-toast', toastListener);
+        window.addEventListener('aic-toast', toastListener);
         try {
           const t = mountTab();
           await settle(t);
@@ -683,7 +683,7 @@ describe('FilesTab context-menu action dispatch', () => {
             .filter((d) => d.type === 'error');
           expect(errorToasts.length).toBeGreaterThan(0);
         } finally {
-          window.removeEventListener('ac-toast', toastListener);
+          window.removeEventListener('aic-toast', toastListener);
           consoleSpy.mockRestore();
         }
       } finally {
@@ -805,7 +805,7 @@ describe('FilesTab context-menu action dispatch', () => {
         // delete-clears-exclusion path, not the
         // prompt flow.
         // Exclude the file first (picker event path).
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('exclusion-changed', {
             detail: { excludedFiles: ['a.md'] },
@@ -934,9 +934,9 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('context-menu action calls beginRename on the picker', async () => {
       const { t } = await setupRenameTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       const spy = vi.spyOn(picker, 'beginRename');
-      const picker2 = t.shadowRoot.querySelector('ac-file-picker');
+      const picker2 = t.shadowRoot.querySelector('aic-file-picker');
       picker2.dispatchEvent(
         new CustomEvent('context-menu-action', {
           detail: {
@@ -989,7 +989,7 @@ describe('FilesTab context-menu action dispatch', () => {
       });
       const t = mountTab();
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -1008,7 +1008,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('top-level file rename produces a top-level target', async () => {
       const { t, rename } = await setupRenameTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -1027,7 +1027,7 @@ describe('FilesTab context-menu action dispatch', () => {
     it('reloads the file tree after rename succeeds', async () => {
       const { t, rename, getTree } = await setupRenameTab();
       const initialCalls = getTree.mock.calls.length;
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -1045,10 +1045,10 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('shows a success toast after rename', async () => {
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupRenameTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('rename-committed', {
             detail: {
@@ -1066,7 +1066,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(successToasts.length).toBeGreaterThan(0);
         expect(successToasts.at(-1).message).toContain('b.md');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -1078,9 +1078,9 @@ describe('FilesTab context-menu action dispatch', () => {
       // detection heuristics.
       const { t, rename } = await setupRenameTab();
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('rename-committed', {
             detail: {
@@ -1101,13 +1101,13 @@ describe('FilesTab context-menu action dispatch', () => {
           'separator',
         );
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
     it('ignores malformed rename-committed events', async () => {
       const { t, rename } = await setupRenameTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       // Missing sourcePath.
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
@@ -1172,11 +1172,11 @@ describe('FilesTab context-menu action dispatch', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('rename-committed', {
             detail: {
@@ -1194,7 +1194,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(warnings.length).toBeGreaterThan(0);
         expect(warnings.at(-1).message).toContain('Participants');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -1220,11 +1220,11 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('rename-committed', {
             detail: {
@@ -1242,7 +1242,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(errors.length).toBeGreaterThan(0);
         expect(errors.at(-1).message).toContain('rename boom');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -1276,7 +1276,7 @@ describe('FilesTab context-menu action dispatch', () => {
       await settle(t);
       // Skip the L0 dialog — this test exercises
       // rename's path-migration, not the prompt.
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       // Exclude a.md.
       picker.dispatchEvent(
         new CustomEvent('exclusion-changed', {
@@ -1309,7 +1309,7 @@ describe('FilesTab context-menu action dispatch', () => {
       // defensive against a future refactor that
       // loosens the picker's check.
       const { t, rename } = await setupRenameTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('rename-committed', {
           detail: {
@@ -1366,7 +1366,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('context-menu action calls beginDuplicate on the picker', async () => {
       const { t } = await setupDuplicateTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       const spy = vi.spyOn(picker, 'beginDuplicate');
       picker.dispatchEvent(
         new CustomEvent('context-menu-action', {
@@ -1389,7 +1389,7 @@ describe('FilesTab context-menu action dispatch', () => {
     it('duplicate-committed reads source then creates target with content', async () => {
       const { t, getContent, createFile } =
         await setupDuplicateTab({ sourceContent: 'source body' });
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('duplicate-committed', {
           detail: {
@@ -1415,7 +1415,7 @@ describe('FilesTab context-menu action dispatch', () => {
       // Crosss-directory duplicates are the whole
       // point of distinguishing duplicate from rename.
       const { t, createFile } = await setupDuplicateTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('duplicate-committed', {
           detail: {
@@ -1433,7 +1433,7 @@ describe('FilesTab context-menu action dispatch', () => {
     it('reloads the file tree after duplicate succeeds', async () => {
       const { t, createFile, getTree } = await setupDuplicateTab();
       const initialCalls = getTree.mock.calls.length;
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('duplicate-committed', {
           detail: {
@@ -1451,10 +1451,10 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('shows a success toast with the target path', async () => {
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupDuplicateTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('duplicate-committed', {
             detail: {
@@ -1472,13 +1472,13 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(successes.length).toBeGreaterThan(0);
         expect(successes.at(-1).message).toContain('b.md');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
     it('same-path commit is a no-op', async () => {
       const { t, getContent, createFile } = await setupDuplicateTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('duplicate-committed', {
           detail: {
@@ -1496,7 +1496,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('ignores malformed duplicate-committed events', async () => {
       const { t, getContent, createFile } = await setupDuplicateTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('duplicate-committed', {
           detail: { targetName: 'b.md' },
@@ -1553,11 +1553,11 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('duplicate-committed', {
             detail: {
@@ -1575,7 +1575,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(errors.length).toBeGreaterThan(0);
         expect(errors.at(-1).message).toContain('binary file');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -1603,11 +1603,11 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('duplicate-committed', {
             detail: {
@@ -1625,7 +1625,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(errors.length).toBeGreaterThan(0);
         expect(errors.at(-1).message).toContain('already exists');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -1651,11 +1651,11 @@ describe('FilesTab context-menu action dispatch', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('duplicate-committed', {
             detail: {
@@ -1673,7 +1673,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(warnings.length).toBeGreaterThan(0);
         expect(warnings.at(-1).message).toContain('Participants');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -1701,11 +1701,11 @@ describe('FilesTab context-menu action dispatch', () => {
         'Repo.create_file': vi.fn().mockResolvedValue({}),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('duplicate-committed', {
             detail: {
@@ -1725,7 +1725,7 @@ describe('FilesTab context-menu action dispatch', () => {
           'unexpected',
         );
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
   });
@@ -1763,7 +1763,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('new-file-committed creates the file with empty content', async () => {
       const { t, createFile } = await setupNewFileTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-file-committed', {
           detail: { parentPath: 'src', name: 'README.md' },
@@ -1782,7 +1782,7 @@ describe('FilesTab context-menu action dispatch', () => {
       // directory — join should produce a bare name,
       // not a leading slash.
       const { t, createFile } = await setupNewFileTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-file-committed', {
           detail: { parentPath: '', name: 'a.md' },
@@ -1797,7 +1797,7 @@ describe('FilesTab context-menu action dispatch', () => {
     it('reloads the file tree after creation', async () => {
       const { t, getTree } = await setupNewFileTab();
       const initial = getTree.mock.calls.length;
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-file-committed', {
           detail: { parentPath: 'src', name: 'a.md' },
@@ -1811,10 +1811,10 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('shows a success toast with the target path', async () => {
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupNewFileTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-file-committed', {
             detail: { parentPath: 'src', name: 'a.md' },
@@ -1829,7 +1829,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(successes.length).toBeGreaterThan(0);
         expect(successes.at(-1).message).toContain('src/a.md');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
@@ -1838,9 +1838,9 @@ describe('FilesTab context-menu action dispatch', () => {
       // paths must be created step-by-step.
       const { t, createFile } = await setupNewFileTab();
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-file-committed', {
             detail: { parentPath: 'src', name: 'foo/bar.md' },
@@ -1858,13 +1858,13 @@ describe('FilesTab context-menu action dispatch', () => {
           'separator',
         );
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
     it('ignores malformed new-file-committed events', async () => {
       const { t, createFile } = await setupNewFileTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       // Missing parentPath.
       picker.dispatchEvent(
         new CustomEvent('new-file-committed', {
@@ -1919,11 +1919,11 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-file-committed', {
             detail: { parentPath: '', name: 'a.md' },
@@ -1938,7 +1938,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(errors.length).toBeGreaterThan(0);
         expect(errors.at(-1).message).toContain('already exists');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -1959,11 +1959,11 @@ describe('FilesTab context-menu action dispatch', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-file-committed', {
             detail: { parentPath: '', name: 'a.md' },
@@ -1978,7 +1978,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(warnings.length).toBeGreaterThan(0);
         expect(warnings.at(-1).message).toContain('Participants');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
   });
@@ -2017,7 +2017,7 @@ describe('FilesTab context-menu action dispatch', () => {
       // `{parentPath}/{name}/.gitkeep` and the
       // content is empty.
       const { t, createFile } = await setupNewDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-directory-committed', {
           detail: { parentPath: 'src', name: 'utils' },
@@ -2035,7 +2035,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('creates at repo root when parentPath is empty', async () => {
       const { t, createFile } = await setupNewDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-directory-committed', {
           detail: { parentPath: '', name: 'toplevel' },
@@ -2052,7 +2052,7 @@ describe('FilesTab context-menu action dispatch', () => {
     it('reloads the file tree after creation', async () => {
       const { t, getTree } = await setupNewDirTab();
       const initial = getTree.mock.calls.length;
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-directory-committed', {
           detail: { parentPath: 'src', name: 'utils' },
@@ -2070,10 +2070,10 @@ describe('FilesTab context-menu action dispatch', () => {
       // leaks our implementation choice. Toast
       // should name the directory.
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const { t } = await setupNewDirTab();
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-directory-committed', {
             detail: { parentPath: 'src', name: 'utils' },
@@ -2092,16 +2092,16 @@ describe('FilesTab context-menu action dispatch', () => {
         // NOT leak into user-facing messaging.
         expect(message).not.toContain('.gitkeep');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
     it('rejects names with path separators', async () => {
       const { t, createFile } = await setupNewDirTab();
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-directory-committed', {
             detail: {
@@ -2122,13 +2122,13 @@ describe('FilesTab context-menu action dispatch', () => {
           'separator',
         );
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
 
     it('ignores malformed new-directory-committed events', async () => {
       const { t, createFile } = await setupNewDirTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.dispatchEvent(
         new CustomEvent('new-directory-committed', {
           detail: { name: 'utils' },
@@ -2179,11 +2179,11 @@ describe('FilesTab context-menu action dispatch', () => {
         .spyOn(console, 'error')
         .mockImplementation(() => {});
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-directory-committed', {
             detail: { parentPath: '', name: 'utils' },
@@ -2200,7 +2200,7 @@ describe('FilesTab context-menu action dispatch', () => {
           'permission denied',
         );
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         consoleSpy.mockRestore();
       }
     });
@@ -2221,11 +2221,11 @@ describe('FilesTab context-menu action dispatch', () => {
         }),
       });
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         const t = mountTab();
         await settle(t);
-        const picker = t.shadowRoot.querySelector('ac-file-picker');
+        const picker = t.shadowRoot.querySelector('aic-file-picker');
         picker.dispatchEvent(
           new CustomEvent('new-directory-committed', {
             detail: { parentPath: '', name: 'utils' },
@@ -2240,7 +2240,7 @@ describe('FilesTab context-menu action dispatch', () => {
         expect(warnings.length).toBeGreaterThan(0);
         expect(warnings.at(-1).message).toContain('Participants');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     });
   });
@@ -2314,7 +2314,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('propagates the new exclusion to the picker', async () => {
       const { t } = await setupExcludeTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       fireContextAction(t, {
         action: 'exclude',
         type: 'file',
@@ -2391,7 +2391,7 @@ describe('FilesTab context-menu action dispatch', () => {
 
     it('propagates the updated exclusion to the picker', async () => {
       const { t } = await setupIncludeTab();
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       // Seed picker's view of exclusion to match.
       picker.excludedFiles = new Set(['a.md']);
       fireContextAction(t, {
@@ -2567,7 +2567,7 @@ describe('FilesTab context-menu action dispatch', () => {
         .mockImplementation(() => {});
       const toastListener = vi.fn();
       const panelListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       window.addEventListener('load-diff-panel', panelListener);
       try {
         const t = mountTab();
@@ -2589,7 +2589,7 @@ describe('FilesTab context-menu action dispatch', () => {
         // failed before we had content to dispatch.
         expect(panelListener).not.toHaveBeenCalled();
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         window.removeEventListener('load-diff-panel', panelListener);
         consoleSpy.mockRestore();
       }
@@ -2615,7 +2615,7 @@ describe('FilesTab context-menu action dispatch', () => {
       });
       const toastListener = vi.fn();
       const panelListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       window.addEventListener('load-diff-panel', panelListener);
       try {
         const t = mountTab();
@@ -2637,7 +2637,7 @@ describe('FilesTab context-menu action dispatch', () => {
         );
         expect(panelListener).not.toHaveBeenCalled();
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
         window.removeEventListener('load-diff-panel', panelListener);
       }
     });

@@ -87,7 +87,7 @@ Both must succeed. A common failure mode is make4ht installed standalone (from a
 
 The RPC returns either `{available: true}` or `{available: false, install_hint: "..."}` with a hint naming the specific missing piece. The frontend renders the hint verbatim in the preview pane instead of a compile error, so the user knows which package to install.
 
-Package-probe result is cached at class scope — subprocess runs at most once per Python process since TeX package installation is out-of-band of AC-DC.
+Package-probe result is cached at class scope — subprocess runs at most once per Python process since TeX package installation is out-of-band of AIC-DC.
 ## Temp Directory Lifecycle
 - Each compilation creates a temp directory under the per-repo working directory (already gitignored)
 - Previous compilation's temp dir cleaned up at the start of the next compilation

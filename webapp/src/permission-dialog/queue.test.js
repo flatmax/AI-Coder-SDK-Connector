@@ -305,8 +305,8 @@ describe('arrivalAnnouncement', () => {
   it('falls back to the summary when nothing more specific is present', () => {
     expect(arrivalAnnouncement({
       tool_class: 'mcp',
-      summary: 'ac-dc › search',
-    })).toBe('permission request: MCP tool, ac-dc › search');
+      summary: 'aic-dc › search',
+    })).toBe('permission request: MCP tool, aic-dc › search');
   });
 
   it('says when a subagent asked, because that changes the answer', () => {
@@ -347,8 +347,8 @@ describe('headerTarget', () => {
   });
 
   it('gives the server equal billing with the tool for MCP', () => {
-    expect(headerTarget({ server: 'ac-dc', tool_name: 'search' }))
-      .toBe('ac-dc › search');
+    expect(headerTarget({ server: 'aic-dc', tool_name: 'search' }))
+      .toBe('aic-dc › search');
   });
 
   it('prefers the plan headline over the CLI title', () => {
@@ -432,7 +432,7 @@ describe('describeRule', () => {
     }).label).toBe('Always ask about Bash');
   });
 
-  it('marks a rule AC-DC guessed rather than one the CLI suggested', () => {
+  it('marks a rule AIC-DC guessed rather than one the CLI suggested', () => {
     expect(describeRule({
       tool_name: 'Write', destination: 'projectSettings', origin: 'derived',
     })).toEqual({

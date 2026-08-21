@@ -210,7 +210,7 @@ export function renderHealthBanner(panel) {
           ${escalated(health)
             ? 'That is more than this repo tolerates: treat the mirror as '
               + 'broken rather than unlucky, and check the free space and the '
-              + 'permissions on .ac-dc4/sessions/.'
+              + 'permissions on .aic-dc/sessions/.'
             : nothing}
         </div>
       `);

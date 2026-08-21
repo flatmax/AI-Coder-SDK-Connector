@@ -1,15 +1,15 @@
 # Implementation Guide
 
-How to use `specs5/` and `specs-reference/` together when implementing AC⚡DC.
+How to use `specs5/` and `specs-reference/` together when implementing AIC⚡DC.
 
 ## Context: Why Two Suites Exist
 
-AC⚡DC's specification is split across two peer directories:
+AIC⚡DC's specification is split across two peer directories:
 
 - **`specs5/`** — behavioural contracts, invariants, module decomposition, data flow. Written at the level a capable reimplementer actually needs. Deliberately omits byte-level detail that a fresh implementation would legitimately handle differently.
 - **`specs-reference/`** — implementation detail that specs5 deliberately leaves unspecified but an implementation must reproduce for interop. Byte-level formats, numeric constants, persistent storage schemas, RPC argument shapes, dependency quirks. Mirrors specs5's path structure; each twin supplements its specs5 counterpart.
 
-The goal is equivalent user-visible behaviour and interop compatibility, not line-by-line reproduction. Internal structures (module boundaries, class hierarchies, internal APIs, framework patterns) are the implementer's choice. External structures (wire formats, file formats, numeric thresholds that affect observable behaviour) are contracts, because existing data, existing user configs, and other AC⚡DC instances depend on them.
+The goal is equivalent user-visible behaviour and interop compatibility, not line-by-line reproduction. Internal structures (module boundaries, class hierarchies, internal APIs, framework patterns) are the implementer's choice. External structures (wire formats, file formats, numeric thresholds that affect observable behaviour) are contracts, because existing data, existing user configs, and other AIC⚡DC instances depend on them.
 
 There is a third input, and it is not a spec: **the installed Claude Agent SDK**. See [Reading the SDK](#reading-the-sdk) below.
 
@@ -76,21 +76,21 @@ Version skew between the SDK and the `claude` CLI is its own failure class, surf
 
 ## Freedom the Implementer Does Not Have
 
-Changes that cross a boundary visible to users, git, the engine, or other AC⚡DC instances are fixed by interop:
+Changes that cross a boundary visible to users, git, the engine, or other AIC⚡DC instances are fixed by interop:
 
-- The persistent storage formats — engine transcript and session-key layout under `.ac-dc4/`, the events-log schema, docuvert headers, `.bundled_version` marker, doc-cache sidecars. The derived index is *not* in this list: it is rebuildable, so its format may change freely
+- The persistent storage formats — engine transcript and session-key layout under `.aic-dc/`, the events-log schema, docuvert headers, `.bundled_version` marker, doc-cache sidecars. The derived index is *not* in this list: it is rebuildable, so its format may change freely
 - The RPC surface the webapp expects, including server-push event names and payload shapes
 - The config file schemas users edit, and the whitelist of what the Settings tab may write
-- The `ac-dc` MCP tool names, argument shapes, and output formats — the agent's prompt cache and any project-level tool-permission rules are keyed to them
+- The `aic-dc` MCP tool names, argument shapes, and output formats — the agent's prompt cache and any project-level tool-permission rules are keyed to them
 - Permission rule syntax written into project settings, which the CLI reads too
 
-There is one entry that used to be on this list and is now absent: **LLM-facing prompt text**. AC⚡DC no longer has any. The engine's system prompt is the engine's, and repo conventions belong in `CLAUDE.md`, which the user owns.
+There is one entry that used to be on this list and is now absent: **LLM-facing prompt text**. AIC⚡DC no longer has any. The engine's system prompt is the engine's, and repo conventions belong in `CLAUDE.md`, which the user owns.
 
 ## Subtle Cases
 
 Some specs5 descriptions can be satisfied in several valid ways, but a twin pins a sequencing or timing detail that downstream behaviour depends on. The load-bearing examples:
 
-- **Index flush before a tool answer.** Re-indexing is debounced, but a pending flush must complete before any `ac-dc` tool returns. Get the ordering wrong and the agent silently reads a stale map — no error, just a wrong answer.
+- **Index flush before a tool answer.** Re-indexing is debounced, but a pending flush must complete before any `aic-dc` tool returns. Get the ordering wrong and the agent silently reads a stale map — no error, just a wrong answer.
 - **Drain before the next turn.** Cancellation must run the pump to `ResultMessage`. Breaking out of iteration routes the interrupted turn's tail into the next turn's UI and produces asyncio cleanup failures.
 - **Hooks are not a decision channel.** A `PreToolUse` hook that returns a permission decision silently disables the dialog. Observe in hooks; decide in `can_use_tool`.
 - **Credential resolution.** Nothing may export provider credentials into the process environment. The CLI resolves its own; polluting the environment changes which account a turn bills to.
@@ -108,7 +108,7 @@ When in doubt, read the twin for sequencing and ordering constraints, not just f
 | Streaming and lifecycle event payloads | [`3-engine/session.md` § Service: AcApp](../../specs-reference/3-engine/session.md#service-acapp--server--browser) — the authoritative server-push event set |
 | Permission rule syntax and `PermissionUpdate` shape | [`3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md) (rule content syntax, callback signature, return types, tool classification map) |
 | Which permission requests have a deadline, and the ID format | [`3-engine/permissions.md` § Numeric constants](../../specs-reference/3-engine/permissions.md#numeric-constants) |
-| `.ac-dc4/` layout, session keys, engine transcript lines | [`3-engine/history.md` § Byte-level formats](../../specs-reference/3-engine/history.md#byte-level-formats) |
+| `.aic-dc/` layout, session keys, engine transcript lines | [`3-engine/history.md` § Byte-level formats](../../specs-reference/3-engine/history.md#byte-level-formats) |
 | Mirrored-store JSONL schema | [`3-engine/history.md` § Schemas](../../specs-reference/3-engine/history.md#schemas) |
 | `SessionStore` conformance harness | [`3-engine/history.md` § Dependency quirks](../../specs-reference/3-engine/history.md#dependency-quirks) |
 | RPC method signatures | [`1-foundation/rpc-inventory.md`](../../specs-reference/1-foundation/rpc-inventory.md) (full inventory with argument and return shapes) |
@@ -122,7 +122,7 @@ Two rows that earlier suites carried are gone rather than moved: cache-tier thre
 
 ## Architectural Position Changes
 
-This suite changes what AC⚡DC *is*, not merely how it is built. The binding decisions, each with its rationale, are in [`../plan/decisions.md`](../plan/decisions.md); the file-by-file disposition is in [`../plan/inventory.md`](../plan/inventory.md). Read `decisions.md` before writing code in any layer — several specs read as under-specified until you know that the corresponding capability is deliberately the engine's.
+This suite changes what AIC⚡DC *is*, not merely how it is built. The binding decisions, each with its rationale, are in [`../plan/decisions.md`](../plan/decisions.md); the file-by-file disposition is in [`../plan/inventory.md`](../plan/inventory.md). Read `decisions.md` before writing code in any layer — several specs read as under-specified until you know that the corresponding capability is deliberately the engine's.
 
 The four that most change how a layer is built:
 
@@ -130,7 +130,7 @@ The four that most change how a layer is built:
 |---|---|
 | [CC-1](../plan/decisions.md#cc-1--total-replacement-not-a-dual-engine-mode-user) Total replacement | No dual-engine abstraction layer. Do not write an interface that both a native engine and the SDK could implement; there is one engine. |
 | [CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text) Indexes as tools | The indexes have one consumer shape — request/response — instead of two. No assembly path, no per-turn seeding. |
-| [CC-3](../plan/decisions.md#cc-3) + [CC-19](../plan/decisions.md#cc-19) Mirrored history | **One** transcript, two roles. Never read it back to build context — continuity is `resume`/`fork_session`. Never give the store an entry the CLI did not write. Anything else under `.ac-dc4/` is derived and rebuildable, or holds only what the transcript never had. |
+| [CC-3](../plan/decisions.md#cc-3) + [CC-19](../plan/decisions.md#cc-19) Mirrored history | **One** transcript, two roles. Never read it back to build context — continuity is `resume`/`fork_session`. Never give the store an entry the CLI did not write. Anything else under `.aic-dc/` is derived and rebuildable, or holds only what the transcript never had. |
 | [CC-15](../plan/decisions.md#cc-15--permission-prompts-are-localhost-only) Localhost-only permissions | The authority check belongs in the resolution path, not in the UI. A hidden button is not a security boundary. |
 
 Contracts inherited from earlier suites that remain live and are not obvious from any single spec: the repository layer's **per-path write mutex**; the **one user-initiated turn at a time** guard, which counts user intent and therefore does not gate subagents; **streaming state keyed by request ID** rather than a singleton passive-stream flag; and the **single bespoke SVG editor** on both panes, with the left pane constructed read-only.

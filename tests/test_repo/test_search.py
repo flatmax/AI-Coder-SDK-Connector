@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ac_dc.repo import Repo
+from aic_dc.repo import Repo
 
 from .conftest import _run_git
 
@@ -20,7 +20,7 @@ class TestSearch:
         """
         (repo.root / "README.md").write_text(
             "Welcome to the project.\n"
-            "This is AC-DC.\n"
+            "This is AIC-DC.\n"
             "Enjoy.\n",
             encoding="utf-8",
         )
@@ -217,10 +217,10 @@ class TestSearch:
         Actually — 'def hello():' ALSO contains 'hello', so it's a
         match too, not a context line. We need a test corpus where
         the context lines don't themselves match. Use the README,
-        which has 'AC-DC' on line 2 surrounded by non-matching lines.
+        which has 'AIC-DC' on line 2 surrounded by non-matching lines.
         """
         self._seed_corpus(repo)
-        results = repo.search_files("AC-DC", context_lines=1)
+        results = repo.search_files("AIC-DC", context_lines=1)
         # Should find one file (README.md) with one match.
         assert len(results) == 1
         assert results[0]["file"] == "README.md"
@@ -229,7 +229,7 @@ class TestSearch:
         match = matches[0]
         # The match is on line 2.
         assert match["line_num"] == 2
-        assert "AC-DC" in match["line"]
+        assert "AIC-DC" in match["line"]
         # context_before: one entry (line 1, "Welcome to the project.").
         assert len(match["context_before"]) == 1
         before = match["context_before"][0]
@@ -244,7 +244,7 @@ class TestSearch:
     def test_context_lines_zero_produces_no_context(self, repo: Repo) -> None:
         """``context_lines=0`` → empty context_before and context_after."""
         self._seed_corpus(repo)
-        results = repo.search_files("AC-DC", context_lines=0)
+        results = repo.search_files("AIC-DC", context_lines=0)
         match = results[0]["matches"][0]
         assert match["context_before"] == []
         assert match["context_after"] == []
@@ -257,7 +257,7 @@ class TestSearch:
         method clamps with ``max(0, context_lines)``.
         """
         self._seed_corpus(repo)
-        results = repo.search_files("AC-DC", context_lines=-5)
+        results = repo.search_files("AIC-DC", context_lines=-5)
         match = results[0]["matches"][0]
         assert match["context_before"] == []
         assert match["context_after"] == []

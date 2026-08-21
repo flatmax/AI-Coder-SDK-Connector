@@ -295,7 +295,7 @@ export function clearFakeRpc() {
 const _mounted = [];
 
 export function mountViewer() {
-  const el = document.createElement('ac-diff-viewer');
+  const el = document.createElement('aic-diff-viewer');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;

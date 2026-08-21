@@ -16,7 +16,7 @@ import {
 } from './viewport.js';
 
 export function getFileNav(host) {
-  return host.shadowRoot?.querySelector('ac-file-nav') || null;
+  return host.shadowRoot?.querySelector('aic-file-nav') || null;
 }
 
 /**
@@ -126,8 +126,8 @@ export function flushAltArrowPending(host) {
   host.updateComplete.then(() => {
     const viewer =
       target === 'svg'
-        ? host.shadowRoot?.querySelector('ac-svg-viewer')
-        : host.shadowRoot?.querySelector('ac-diff-viewer');
+        ? host.shadowRoot?.querySelector('aic-svg-viewer')
+        : host.shadowRoot?.querySelector('aic-diff-viewer');
     if (!viewer) return;
     const result = viewer.openFile({ path: targetPath });
     if (target !== 'diff') return;
@@ -231,8 +231,8 @@ export function onGlobalKeyDown(host, event) {
       : '';
     host._switchTab('files');
     host.updateComplete.then(() => {
-      const filesTab = host.shadowRoot?.querySelector('ac-files-tab');
-      const chatPanel = filesTab?.shadowRoot?.querySelector('ac-chat-panel');
+      const filesTab = host.shadowRoot?.querySelector('aic-files-tab');
+      const chatPanel = filesTab?.shadowRoot?.querySelector('aic-chat-panel');
       if (chatPanel
           && typeof chatPanel.activateFileSearch === 'function') {
         chatPanel.activateFileSearch(prefill);

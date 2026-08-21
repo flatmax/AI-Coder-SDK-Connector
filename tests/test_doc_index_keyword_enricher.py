@@ -12,11 +12,11 @@ from unittest.mock import patch
 
 import pytest
 
-from ac_dc.doc_index.keyword_enricher import (
+from aic_dc.doc_index.keyword_enricher import (
     KeywordEnricher,
     _DEFAULT_MODEL_NAME,
 )
-from ac_dc.doc_index.models import DocHeading, DocOutline
+from aic_dc.doc_index.models import DocHeading, DocOutline
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ class TestAvailability:
             return _impl.import_module(name)
 
         with patch(
-            "ac_dc.doc_index.keyword_enricher.importlib.import_module",
+            "aic_dc.doc_index.keyword_enricher.importlib.import_module",
             side_effect=fake_import,
         ):
             assert enricher._probe() is False
@@ -125,7 +125,7 @@ class TestAvailability:
             return stub
 
         with patch(
-            "ac_dc.doc_index.keyword_enricher.importlib.import_module",
+            "aic_dc.doc_index.keyword_enricher.importlib.import_module",
             side_effect=fake_import,
         ):
             assert enricher._probe() is False
@@ -140,7 +140,7 @@ class TestAvailability:
         """
         enricher = KeywordEnricher()
         with patch(
-            "ac_dc.doc_index.keyword_enricher.importlib.import_module",
+            "aic_dc.doc_index.keyword_enricher.importlib.import_module",
             side_effect=RuntimeError("CUDA not found"),
         ):
             assert enricher._probe() is False
@@ -149,7 +149,7 @@ class TestAvailability:
         """Happy path — both libraries import cleanly."""
         enricher = KeywordEnricher()
         with patch(
-            "ac_dc.doc_index.keyword_enricher.importlib.import_module",
+            "aic_dc.doc_index.keyword_enricher.importlib.import_module",
             return_value=object(),  # any truthy return is fine
         ):
             assert enricher._probe() is True
@@ -287,8 +287,8 @@ class TestEnsureLoaded:
 # ---------------------------------------------------------------------------
 
 
-from ac_dc.doc_index.keyword_enricher import EnrichmentConfig
-from ac_dc.doc_index.models import DocProseBlock
+from aic_dc.doc_index.keyword_enricher import EnrichmentConfig
+from aic_dc.doc_index.models import DocProseBlock
 
 
 class TestEnrichmentConfig:

@@ -14,7 +14,7 @@
 //      patterns and returns `{range, url}` tuples.
 //      Monaco then underlines them and handles the
 //      Ctrl+click gesture.
-//   2. LinkOpener — intercepts the `ac-navigate:` URI
+//   2. LinkOpener — intercepts the `aic-navigate:` URI
 //      scheme we emit for relative paths. Monaco's
 //      default opener would route these to an external
 //      browser and fail (no such scheme registered OS-
@@ -51,7 +51,7 @@
 //     line regex DOTALL complexity and gives natural
 //     range construction.
 //
-//   - **ac-navigate URI format.** `ac-navigate:///{path}`
+//   - **aic-navigate URI format.** `aic-navigate:///{path}`
 //     — three slashes for URI convention, then the
 //     path verbatim. Path may contain slashes, which is
 //     fine; Monaco treats the whole thing after the
@@ -87,7 +87,7 @@ const _installedMonacos = new WeakSet();
  * standard scheme (and deliberately so — we never want
  * Monaco to hand these to the system browser).
  */
-const _NAVIGATE_SCHEME = 'ac-navigate';
+const _NAVIGATE_SCHEME = 'aic-navigate';
 
 /**
  * Absolute-URL detection. Same set as the preview
@@ -164,7 +164,7 @@ export function findLinksInLine(line) {
 /**
  * Find all markdown links in a text block, returning
  * Monaco-compatible link objects. Each link has `range`
- * (line/column 1-indexed) and `url` (an `ac-navigate:`
+ * (line/column 1-indexed) and `url` (an `aic-navigate:`
  * URI).
  *
  * Exported for tests and for the LinkProvider's
@@ -197,7 +197,7 @@ export function findLinks(text) {
 }
 
 /**
- * Construct an `ac-navigate:` URI from a relative path.
+ * Construct an `aic-navigate:` URI from a relative path.
  * Three slashes matches the URI conventional form for
  * hostless schemes.
  *
@@ -209,7 +209,7 @@ export function buildNavigateUri(path) {
 }
 
 /**
- * Parse an `ac-navigate:` URI back to its relative
+ * Parse an `aic-navigate:` URI back to its relative
  * path component. Returns null for any URI that
  * doesn't match our scheme — the link opener uses this
  * to decide whether to claim a click event.
@@ -262,7 +262,7 @@ export function buildMarkdownLinkProvider(getText) {
 }
 
 /**
- * Build a LinkOpener that handles `ac-navigate:` URIs.
+ * Build a LinkOpener that handles `aic-navigate:` URIs.
  * The `onNavigate` callback receives the extracted
  * relative path; production usage dispatches a
  * `navigate-file` window event from there.
@@ -346,9 +346,9 @@ export function installMarkdownLinkProvider(
       err,
     );
   }
-  // LinkOpener intercepts clicks on ac-navigate URIs.
+  // LinkOpener intercepts clicks on aic-navigate URIs.
   // Monaco's opener chain tries each registered opener;
-  // ours returns true for ac-navigate, false for
+  // ours returns true for aic-navigate, false for
   // everything else (falling through to the default).
   try {
     const opener = buildMarkdownLinkOpener(onNavigate);

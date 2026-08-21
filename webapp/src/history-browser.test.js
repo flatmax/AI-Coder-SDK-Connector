@@ -44,7 +44,7 @@ import {
 const _mounted = [];
 
 function mountBrowser(props = {}) {
-  const el = document.createElement('ac-history-browser');
+  const el = document.createElement('aic-history-browser');
   Object.assign(el, props);
   document.body.appendChild(el);
   _mounted.push(el);
@@ -1025,12 +1025,12 @@ describe('HistoryBrowser resume and fork', () => {
     el.addEventListener('session-loaded', loaded);
     const toasts = [];
     const onToast = (e) => toasts.push(e.detail);
-    window.addEventListener('ac-toast', onToast);
+    window.addEventListener('aic-toast', onToast);
     try {
       el.shadowRoot.querySelector('.resume-button').click();
       await settle(el);
     } finally {
-      window.removeEventListener('ac-toast', onToast);
+      window.removeEventListener('aic-toast', onToast);
     }
     expect(loaded).not.toHaveBeenCalled();
     expect(toasts).toHaveLength(1);
@@ -1294,15 +1294,15 @@ describe('HistoryBrowser resume confirmation', () => {
 // Delete
 // ---------------------------------------------------------------------------
 
-/** Collect `ac-toast` details raised while `fn` runs. */
+/** Collect `aic-toast` details raised while `fn` runs. */
 async function withToasts(fn) {
   const toasts = [];
   const onToast = (e) => toasts.push(e.detail);
-  window.addEventListener('ac-toast', onToast);
+  window.addEventListener('aic-toast', onToast);
   try {
     await fn();
   } finally {
-    window.removeEventListener('ac-toast', onToast);
+    window.removeEventListener('aic-toast', onToast);
   }
   return toasts;
 }
@@ -2066,7 +2066,7 @@ describe('HistoryBrowser message action buttons', () => {
         { role: 'user', content: 'hi' },
       ]);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         el.shadowRoot
           .querySelector('.preview-toolbar')
@@ -2077,7 +2077,7 @@ describe('HistoryBrowser message action buttons', () => {
         expect(detail.type).toBe('success');
         expect(detail.message).toMatch(/copied/i);
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       restore();
@@ -2096,7 +2096,7 @@ describe('HistoryBrowser message action buttons', () => {
         { role: 'user', content: 'hi' },
       ]);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         el.shadowRoot
           .querySelector('.preview-toolbar')
@@ -2106,7 +2106,7 @@ describe('HistoryBrowser message action buttons', () => {
         const detail = toastListener.mock.calls.at(-1)[0].detail;
         expect(detail.type).toBe('warning');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       if (original === undefined) {

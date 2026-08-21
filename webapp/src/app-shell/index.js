@@ -1,4 +1,4 @@
-// AppShell — root component of the AC-DC webapp.
+// AppShell — root component of the AIC-DC webapp.
 //
 // Owns the single WebSocket connection (inherits from JRPCClient),
 // publishes the RPC proxy to SharedRpc for child components, drives
@@ -739,7 +739,7 @@ export class AppShell extends JRPCClient {
    */
   startupProgress(stage, message, percent) {
     // Doc-index-related stages take a separate path — they
-    // flow to ac-doc-index-progress via the doc-index-progress
+    // flow to aic-doc-index-progress via the doc-index-progress
     // window channel, not to the startup overlay.
     if (stage && DOC_INDEX_STAGES.has(stage)) {
       window.dispatchEvent(new CustomEvent('doc-index-progress', {
@@ -827,9 +827,9 @@ export class AppShell extends JRPCClient {
         : [];
     if (modified.length > 0) {
       const diffViewer =
-        this.shadowRoot?.querySelector('ac-diff-viewer');
+        this.shadowRoot?.querySelector('aic-diff-viewer');
       const svgViewer =
-        this.shadowRoot?.querySelector('ac-svg-viewer');
+        this.shadowRoot?.querySelector('aic-svg-viewer');
       if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
         // Fire and forget — viewer handles its own errors.
         diffViewer.refreshOpenFiles().catch((err) => {
@@ -892,7 +892,7 @@ export class AppShell extends JRPCClient {
     return true;
   }
 
-  // ``streamRetry`` was received here until conversion phase 3. AC⚡DC's own
+  // ``streamRetry`` was received here until conversion phase 3. AIC⚡DC's own
   // completion wrapper pushed it before each backoff sleep so the chat panel
   // could draw a countdown and prove the UI hadn't frozen. The CLI retries
   // inside the subprocess and says nothing about it; the retryable condition
@@ -968,9 +968,9 @@ export class AppShell extends JRPCClient {
     // HEAD. refreshOpenFiles re-fetches both sides so
     // this falls out naturally.
     const diffViewer =
-      this.shadowRoot?.querySelector('ac-diff-viewer');
+      this.shadowRoot?.querySelector('aic-diff-viewer');
     const svgViewer =
-      this.shadowRoot?.querySelector('ac-svg-viewer');
+      this.shadowRoot?.querySelector('aic-svg-viewer');
     if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
       diffViewer.refreshOpenFiles().catch((err) => {
         console.warn('[app-shell] diff viewer refresh failed', err);
@@ -991,7 +991,7 @@ export class AppShell extends JRPCClient {
   // The five callbacks below (`modeChanged`, `agentModeChanged`,
   // `agentsSpawned`, `agentsRehydrated`, `agentClosed`) have no
   // sender: the native engine broadcast them and nothing in
-  // `src/ac_dc/claude_code/` does. They are kept, not tombstoned,
+  // `src/aic_dc/claude_code/` does. They are kept, not tombstoned,
   // because their consumers are kept too and for the same reason —
   // the code/doc mode toggle's replacement is the preset selector
   // (CC-12) and the agent tab strip's is the subagent browser
@@ -1305,7 +1305,7 @@ export class AppShell extends JRPCClient {
     this.activeTab = tab;
     this._notifyTabVisible();
     try {
-      localStorage.setItem('ac-dc-active-tab', tab);
+      localStorage.setItem('aic-dc-active-tab', tab);
     } catch (_) {
       // localStorage can throw in private-browsing modes or
       // when quota is exhausted. Persistence is best-effort.
@@ -1316,7 +1316,7 @@ export class AppShell extends JRPCClient {
    * Tell the newly-revealed tab that it is on screen.
    *
    * A tab whose data costs a control request to the CLI —
-   * `ac-context-usage-tab` is the one today — refuses to
+   * `aic-context-usage-tab` is the one today — refuses to
    * refetch while hidden and marks itself stale instead. It
    * cannot see the class change that reveals it, so without
    * this call the badge stays lit until the user presses
@@ -1639,4 +1639,4 @@ export class AppShell extends JRPCClient {
   }
 }
 
-customElements.define('ac-app-shell', AppShell);
+customElements.define('aic-app-shell', AppShell);

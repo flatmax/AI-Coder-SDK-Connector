@@ -253,7 +253,7 @@ export function usageTitle(line) {
  * The same chips the settled footer draws, from the same `turn_model_usage`
  * shape: the engine pushes a per-model running total as each assistant
  * message reports what it used (`turnUsage`), so this is what the engine
- * measured and not a count of our own — AC⚡DC never counts tokens itself
+ * measured and not a count of our own — AIC⚡DC never counts tokens itself
  * (specs5/5-webapp/chat.md § Live Token Counter).
  *
  * Labelled "so far" because that is what it is. Usage arrives per completed
@@ -871,7 +871,7 @@ function openSubagentTranscript(panel, row) {
  * that way — and a row that waited for one would spin forever
  * (specs5/5-webapp/chat.md § Subagent Activity).
  *
- * Stop is the only write affordance. AC⚡DC did not create this subagent and
+ * Stop is the only write affordance. AIC⚡DC did not create this subagent and
  * cannot message it; the one thing a user can legitimately do is end it.
  *
  * The description doubles as the way into the transcript, for a row that

@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.doc_index.extractors.markdown import (
+from aic_dc.doc_index.extractors.markdown import (
     MarkdownExtractor,
     _detect_doc_type,
 )
-from ac_dc.doc_index.models import DocHeading
+from aic_dc.doc_index.models import DocHeading
 
 
 # ---------------------------------------------------------------------------

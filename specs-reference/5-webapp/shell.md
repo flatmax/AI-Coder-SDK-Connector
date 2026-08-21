@@ -19,9 +19,9 @@
 
 | Handle | Hit zone | Axis | Undock behavior |
 |---|---|---|---|
-| Right edge | 8 px wide, extends 4 px past border | Width only | Stays docked; writes `ac-dc-dialog-width` |
-| Bottom edge | 8 px tall | Height only | Auto-undocks; writes full `ac-dc-dialog-pos` rectangle |
-| Bottom-right corner | 14 × 14 px | Width + height | Auto-undocks; writes full `ac-dc-dialog-pos` rectangle |
+| Right edge | 8 px wide, extends 4 px past border | Width only | Stays docked; writes `aic-dc-dialog-width` |
+| Bottom edge | 8 px tall | Height only | Auto-undocks; writes full `aic-dc-dialog-pos` rectangle |
+| Bottom-right corner | 14 × 14 px | Width + height | Auto-undocks; writes full `aic-dc-dialog-pos` rectangle |
 
 ### Drag behavior
 
@@ -111,7 +111,7 @@ The permission dialog is the only surface above the startup overlay. A resume th
 `can_use_tool` can produce a request while startup is still running, and a dialog rendered underneath the
 overlay would deadlock the session behind an invisible prompt.
 
-`<ac-compaction-progress>` is deleted from this ladder. It has no floating overlay to place: compaction
+`<aic-compaction-progress>` is deleted from this ladder. It has no floating overlay to place: compaction
 is the engine's own, announced after the fact via `compactionEvent` stage `compact_boundary` rather than
 driven through a progress UI of ours, and what it does report renders inline in the dialog above the
 capacity bar.
@@ -160,23 +160,23 @@ The formula is `scaled = round(stored_pixels * current_viewport / baseline_viewp
 
 | Key | Type | Purpose |
 |---|---|---|
-| `ac-dc-active-tab` | `"files"` / `"context"` / `"settings"` / `"doc-convert"` | Last-selected tab (unknown values fall back to `"files"`) |
-| `ac-dc-minimized` | `"true"` / `"false"` | Dialog minimize state |
-| `ac-dc-dialog-width` | integer px (string) | Docked-mode width override (absent until first right-edge resize while docked) |
-| `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle (absent until first drag past threshold or first bottom/corner resize) |
-| `ac-last-open-file` | string (file path) | Last-opened file for restore on reload |
-| `ac-last-viewport` | JSON `{path, type, diff?: {...}, preview?: {open, scrollTop}, svg?: {viewBox, presentation}}` | Last viewport state of the last-opened file. The `type` field discriminates restore routing: `"diff"` routes to the diff viewer (Monaco), `"svg"` routes to the SVG viewer. For `.svg` paths, `type` reflects which viewer the user last had active — a user who toggled to text diff gets `type: "diff"` and a `diff` block; a user editing visually gets `type: "svg"` and an `svg` block. The blocks are mutually exclusive in practice; schema permits both for future mixed-mode viewers but only one is read per restore. `diff` shape: `{scrollTop, scrollLeft, lineNumber, column}`. `preview` shape: `{open: boolean, scrollTop: px}` — present only for markdown/TeX; restore treats missing as false. `svg` shape: `{viewBox: {x, y, width, height}, presentation: boolean}` — present only when `type === "svg"`; `viewBox` values are in SVG user units (matches `SvgEditor.getViewBox()`), `presentation` is whether the right pane was full-width with the left pane collapsed. Unknown or absent branches mean the feature wasn't used — restore treats missing as the default (no preview, no presentation, no SVG block). |
-| `ac-dc-enrichment-unavailable-shown` | `"true"` | One-shot flag suppressing the enrichment-unavailable warning toast across browser sessions |
-| `ac-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | Remembered answer to the file picker's denial-scope prompt. `ask` (the default) re-prompts every time; `local` writes deny rules to `.claude/settings.local.json`. Resettable from Settings (see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt) |
-| `ac-dc-permission-chime` | `"true"` / `"false"` | Whether a permission request arriving while the document is hidden plays a chime (default `"true"`) |
-| `ac-dc-context-section` | `"usage"` / `"session"` / `"debug"` | Active section of the Context tab |
-| `ac-dc-hud-collapsed` | JSON `string[]` | Collapsed HUD section names |
+| `aic-dc-active-tab` | `"files"` / `"context"` / `"settings"` / `"doc-convert"` | Last-selected tab (unknown values fall back to `"files"`) |
+| `aic-dc-minimized` | `"true"` / `"false"` | Dialog minimize state |
+| `aic-dc-dialog-width` | integer px (string) | Docked-mode width override (absent until first right-edge resize while docked) |
+| `aic-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle (absent until first drag past threshold or first bottom/corner resize) |
+| `aic-last-open-file` | string (file path) | Last-opened file for restore on reload |
+| `aic-last-viewport` | JSON `{path, type, diff?: {...}, preview?: {open, scrollTop}, svg?: {viewBox, presentation}}` | Last viewport state of the last-opened file. The `type` field discriminates restore routing: `"diff"` routes to the diff viewer (Monaco), `"svg"` routes to the SVG viewer. For `.svg` paths, `type` reflects which viewer the user last had active — a user who toggled to text diff gets `type: "diff"` and a `diff` block; a user editing visually gets `type: "svg"` and an `svg` block. The blocks are mutually exclusive in practice; schema permits both for future mixed-mode viewers but only one is read per restore. `diff` shape: `{scrollTop, scrollLeft, lineNumber, column}`. `preview` shape: `{open: boolean, scrollTop: px}` — present only for markdown/TeX; restore treats missing as false. `svg` shape: `{viewBox: {x, y, width, height}, presentation: boolean}` — present only when `type === "svg"`; `viewBox` values are in SVG user units (matches `SvgEditor.getViewBox()`), `presentation` is whether the right pane was full-width with the left pane collapsed. Unknown or absent branches mean the feature wasn't used — restore treats missing as the default (no preview, no presentation, no SVG block). |
+| `aic-dc-enrichment-unavailable-shown` | `"true"` | One-shot flag suppressing the enrichment-unavailable warning toast across browser sessions |
+| `aic-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | Remembered answer to the file picker's denial-scope prompt. `ask` (the default) re-prompts every time; `local` writes deny rules to `.claude/settings.local.json`. Resettable from Settings (see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt) |
+| `aic-dc-permission-chime` | `"true"` / `"false"` | Whether a permission request arriving while the document is hidden plays a chime (default `"true"`) |
+| `aic-dc-context-section` | `"usage"` / `"session"` / `"debug"` | Active section of the Context tab |
+| `aic-dc-hud-collapsed` | JSON `string[]` | Collapsed HUD section names |
 
-**Repo-scoped keys:** `ac-last-open-file` and `ac-last-viewport` use a `_repoKey(key, repoName)` helper producing `{key}:{repoName}`. Prevents opening a different repo from restoring the wrong file. Falls back to the bare key when repo name not yet known.
+**Repo-scoped keys:** `aic-last-open-file` and `aic-last-viewport` use a `_repoKey(key, repoName)` helper producing `{key}:{repoName}`. Prevents opening a different repo from restoring the wrong file. Falls back to the bare key when repo name not yet known.
 
 Keys are read synchronously in the constructor (not in `connectedCallback`) so first paint doesn't flash defaults before jumping to stored values.
 
-Width and position are independent — resizing the right edge while docked writes only `ac-dc-dialog-width`, leaving any stored undocked rectangle alone.
+Width and position are independent — resizing the right edge while docked writes only `aic-dc-dialog-width`, leaving any stored undocked rectangle alone.
 
 Malformed values (non-JSON, wrong shape, width below minimum, non-finite numbers) are treated as absent.
 
@@ -185,7 +185,7 @@ Malformed values (non-JSON, wrong shape, width below minimum, non-finite numbers
 | Trigger | Save scope |
 |---|---|
 | `beforeunload` | Save current viewport state — diff scroll/cursor OR svg viewBox/presentation, plus preview toggle/scroll |
-| Before navigating to a different file | Save outgoing file's viewport. Writes **two** places: the single `ac-last-viewport` localStorage slot (for reload) and the in-session per-path map (for Alt+Arrow return). Both capture the same shape; see [In-session viewport memory](#in-session-viewport-memory) |
+| Before navigating to a different file | Save outgoing file's viewport. Writes **two** places: the single `aic-last-viewport` localStorage slot (for reload) and the in-session per-path map (for Alt+Arrow return). Both capture the same shape; see [In-session viewport memory](#in-session-viewport-memory) |
 | `active-file-changed` from either viewer | Save alone — the viewer has just reported a file is live, so the `type` discriminator (svg vs diff) becomes known. Without this, opening a file and reloading without further interaction leaves the stored viewport describing the *previous* file, and the restore short-circuits on path mismatch. The save is additive: when the viewer's editors aren't yet attached (SVG: `getActiveViewBox()` returns null; diff: no modified editor yet), the save no-ops via the same try/catch guards that protect the other paths, so it can't clobber a live stored viewBox. First real gesture or Monaco attach produces a follow-up save that fills in the geometry block |
 | Preview toggle (on/off) | Save alone — capturing the toggle immediately means a reload right after a toggle-then-nothing still restores the correct pane |
 | SVG viewBox change (pan, zoom, fit, presentation-mode refit) | Debounced save — the viewer emits `viewbox-changed` on every right-editor `onViewChange`; the shell coalesces via a short debounce so a wheel-zoom burst doesn't produce one write per frame |
@@ -200,7 +200,7 @@ The preview fields are only written for files whose type has a preview toggle (m
 
 ### In-session viewport memory
 
-`ac-last-viewport` is a **single slot** — it answers "where was the user when the page closed", not "where was the user in each file they visited". Alt+Arrow returning to a file visited earlier in the session needs the latter, so the shell keeps a second, in-memory store: `_diffViewportMemory`, a `Map` of file path → the same `{path, diff, preview?}` shape written to localStorage (minus `type`, which is implied — only diff-viewer files are tracked; the SVG viewer's multi-file model already carries per-file viewBox in `_files[]`).
+`aic-last-viewport` is a **single slot** — it answers "where was the user when the page closed", not "where was the user in each file they visited". Alt+Arrow returning to a file visited earlier in the session needs the latter, so the shell keeps a second, in-memory store: `_diffViewportMemory`, a `Map` of file path → the same `{path, diff, preview?}` shape written to localStorage (minus `type`, which is implied — only diff-viewer files are tracked; the SVG viewer's multi-file model already carries per-file viewBox in `_files[]`).
 
 | Property | Value |
 |---|---|
@@ -220,10 +220,10 @@ Capture is synchronous within the event handler, before the deferred `openFile` 
 
 File reopen is deferred until the startup overlay dismisses (on `startupProgress("ready")` or when `init_complete` is true on reconnect). File-fetch RPCs during heavy init would block the server's event loop — synchronous `git show` subprocess calls can starve WebSocket pings and cause disconnects.
 
-1. Read `ac-last-open-file` from localStorage
+1. Read `aic-last-open-file` from localStorage
 2. If startup overlay still visible, set `_pendingReopen = true` and return
 3. When overlay dismisses, proceed
-4. Read `ac-last-viewport` and verify `viewport.path === fileToRestore`
+4. Read `aic-last-viewport` and verify `viewport.path === fileToRestore`
 5. Dispatch `navigate-file` event to re-open. Routing happens via the path's extension — `.svg` paths land on the SVG viewer, everything else on the diff viewer
 6. Branch on `viewport.type`:
    - `type === "diff"` → register one-shot `active-file-changed` listener on the diff viewer

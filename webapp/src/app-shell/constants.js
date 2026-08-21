@@ -26,8 +26,8 @@ export function repoKey(key, repoName) {
   return key;
 }
 
-export const LAST_OPEN_FILE_KEY = 'ac-last-open-file';
-export const LAST_VIEWPORT_KEY = 'ac-last-viewport';
+export const LAST_OPEN_FILE_KEY = 'aic-last-open-file';
+export const LAST_VIEWPORT_KEY = 'aic-last-viewport';
 
 /**
  * Stages that drive the doc-index progress overlay, not the
@@ -35,7 +35,7 @@ export const LAST_VIEWPORT_KEY = 'ac-last-viewport';
  * Stage Filtering" — in-progress doc-index updates shouldn't
  * re-show the already-dismissed startup overlay. We re-dispatch
  * them on the `doc-index-progress` window channel so
- * `ac-doc-index-progress` picks them up.
+ * `aic-doc-index-progress` picks them up.
  */
 export const DOC_INDEX_STAGES = new Set([
   'doc_index',
@@ -49,13 +49,13 @@ export const DOC_INDEX_STAGES = new Set([
  * localStorage key for the one-shot "enrichment unavailable"
  * warning toast. When `enrichment_status === "unavailable"`
  * arrives in a state snapshot or modeChanged broadcast, we
- * show a toast pointing users at `pip install 'ac-dc[docs]'`
+ * show a toast pointing users at `pip install 'aic-dc[docs]'`
  * — but only once per browser session. Setting this flag
  * suppresses repeats across page reloads and mid-session
  * broadcasts.
  */
 export const ENRICHMENT_UNAVAILABLE_SHOWN_KEY =
-  'ac-dc-enrichment-unavailable-shown';
+  'aic-dc-enrichment-unavailable-shown';
 
 /**
  * Alt+Arrow debounce window (ms). Rapid arrow sequences
@@ -76,16 +76,16 @@ export const ALT_ARROW_DEBOUNCE_MS = 200;
 // ---------------------------------------------------------------
 //
 // specs4/5-webapp/shell.md pins these four keys and the default
-// dock behaviour. `ac-dc-dialog-width` is the docked width (a
-// single number); `ac-dc-dialog-pos` is the full undocked rect
+// dock behaviour. `aic-dc-dialog-width` is the docked width (a
+// single number); `aic-dc-dialog-pos` is the full undocked rect
 // (JSON with left/top/width/height). They're separate so the
 // docked width survives an undock-then-redock cycle without
 // being clobbered by stale position data.
 
-export const DIALOG_WIDTH_KEY = 'ac-dc-dialog-width';
-export const DIALOG_POS_KEY = 'ac-dc-dialog-pos';
-export const DIALOG_MIN_KEY = 'ac-dc-minimized';
-export const ACTIVE_TAB_KEY = 'ac-dc-active-tab';
+export const DIALOG_WIDTH_KEY = 'aic-dc-dialog-width';
+export const DIALOG_POS_KEY = 'aic-dc-dialog-pos';
+export const DIALOG_MIN_KEY = 'aic-dc-minimized';
+export const ACTIVE_TAB_KEY = 'aic-dc-active-tab';
 
 // Minimum size during resize. Keep these generous — below
 // ~300 wide the tab buttons start wrapping, and below ~200
@@ -145,4 +145,4 @@ export const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
  * specs4/5-webapp/shell.md#toast-system — "Components dispatch
  * toast events; the shell catches and renders them."
  */
-export const TOAST_EVENT = 'ac-toast';
+export const TOAST_EVENT = 'aic-toast';

@@ -1,4 +1,4 @@
-// Tests for `ac-usage-hud` — the transient overlay that reports what a turn
+// Tests for `aic-usage-hud` — the transient overlay that reports what a turn
 // cost and how full the context window is.
 //
 // Landed in phase 3 (CC-17) with no coverage. Three things here are easy to
@@ -24,7 +24,7 @@ import { SharedRpc } from './rpc.js';
 const _mounted = [];
 
 function mountHud() {
-  const el = document.createElement('ac-usage-hud');
+  const el = document.createElement('aic-usage-hud');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;
@@ -138,7 +138,7 @@ function usageAt(totalTokens, overrides = {}) {
  * Note the two scopes, because the HUD used to read the wrong one:
  * `model_usage` / `total_cost_usd` are the *session's* running totals, and
  * `turn_model_usage` / `turn_cost_usd` / `turn_cost_basis` are this turn's,
- * differenced by `ac_dc/claude_code/cost.py`. The fixture keeps them
+ * differenced by `aic_dc/claude_code/cost.py`. The fixture keeps them
  * deliberately different — a session that has spent $1.20 across several
  * turns, of which this turn is 3.42 cents — so a test cannot pass by
  * reading either one in place of the other.
@@ -172,7 +172,7 @@ function resultFixture(overrides = {}) {
   };
 }
 
-/** The synthetic footer AC⚡DC writes when a turn dies before the engine's. */
+/** The synthetic footer AIC⚡DC writes when a turn dies before the engine's. */
 function crashFixture(overrides = {}) {
   return resultFixture({
     is_error: true,
@@ -708,7 +708,7 @@ describe('UsageHud token rows', () => {
   });
 
   it('shows no token row for a turn that reported no usage', async () => {
-    // The crash footer is AC⚡DC's own, so it carries no counters at all.
+    // The crash footer is AIC⚡DC's own, so it carries no counters at all.
     publishUsage();
     const el = mountHud();
     await settle(el);

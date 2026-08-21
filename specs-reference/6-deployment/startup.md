@@ -21,7 +21,7 @@ Exact stage name strings the browser handler dispatches on:
 | Stage | When emitted | Typical percent |
 |---|---|---|
 | `symbol_index` | Symbol index initialization starts (tree-sitter parser construction) | 10 |
-| `engine_wiring` | Symbol and doc indexes being wired into the `ac-dc` MCP server | 30 |
+| `engine_wiring` | Symbol and doc indexes being wired into the `aic-dc` MCP server | 30 |
 | `indexing` | Repository files being parsed in batches; message format `"Indexing repository... {N}/{M}"` | 50–90 |
 | `references` | Reference graph being built from the completed symbol index | 90 |
 | `ready` | Initialization complete; browser dismisses overlay after fade | 100 |
@@ -37,7 +37,7 @@ Two renames from the native engine, both because the stage no longer describes w
 
 | Old stage | New stage | Why |
 |---|---|---|
-| `session_restore` | `engine_wiring` | Nothing is restored *into context* at startup. The transcript is read from `.ac-dc4/` in Phase 1 as a plain disk read, and no `claude` subprocess exists yet. What Phase 2 actually does at 30% is hand the indexes to the MCP bridge |
+| `session_restore` | `engine_wiring` | Nothing is restored *into context* at startup. The transcript is read from `.aic-dc/` in Phase 1 as a plain disk read, and no `claude` subprocess exists yet. What Phase 2 actually does at 30% is hand the indexes to the MCP bridge |
 | `stability` | `references` | The step built cache tiers from the reference graph. The tiers are gone; the graph survives for Monaco's go-to-references |
 
 Neither old name may be re-used for anything. A shell built against the old spec would show
@@ -176,7 +176,7 @@ def find_available_port(start: int) -> int:
     raise RuntimeError(f"No available port in range {start}-{start + 99}")
 ```
 
-Both the WebSocket port and the webapp port are probed independently. A second concurrent `ac-dc` instance scans past the first's ports rather than accidentally binding to them or cross-wiring.
+Both the WebSocket port and the webapp port are probed independently. A second concurrent `aic-dc` instance scans past the first's ports rather than accidentally binding to them or cross-wiring.
 
 Probing binds to `127.0.0.1` even when `--collab` is passed — a loopback bind is a strict superset check (if `0.0.0.0:N` is taken, `127.0.0.1:N` is also unavailable). Avoids needing different probe logic for different bind modes.
 
@@ -204,7 +204,7 @@ The `--repo-path` argument accepts an absolute or relative path. Relative paths 
 Served as a `file://` URL when validation fails. Exact layout:
 
 - Dark theme (`#0d1117` background)
-- Centered content, AC⚡DC brand at top (4rem / 18% opacity)
+- Centered content, AIC⚡DC brand at top (4rem / 18% opacity)
 - Offending path in accent blue (`#58a6ff`), monospace font
 - Remediation commands in green (`#7ee787`) code blocks
 - Two commands shown: `git init` and `cd /path && git init`
@@ -252,7 +252,7 @@ reader is waiting on a decision that will now never arrive. Denying first releas
 first deadlocks the shutdown until the 5-second fallback kills the subprocess.
 
 The interrupt-then-disconnect sequence exists so the CLI can flush its own session files. Those files are
-the primary transcript and `.ac-dc4/sessions/` is a mirror of them, so a hard kill mid-turn can leave the
+the primary transcript and `.aic-dc/sessions/` is a mirror of them, so a hard kill mid-turn can leave the
 authoritative record shorter than what the user watched stream into the browser — and our mirror shorter
 again, since it only ever receives what the CLI has already written.
 

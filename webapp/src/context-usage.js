@@ -423,7 +423,7 @@ function _unwell(entry) {
 /**
  * `mcpTools` grouped by the server that provides them, joined to health.
  *
- * The flat table this replaces put 35 `ac-dc` rows next to two from
+ * The flat table this replaces put 35 `aic-dc` rows next to two from
  * another server and made the question the section exists to answer —
  * what does each server cost me — a subtraction the reader had to do.
  *

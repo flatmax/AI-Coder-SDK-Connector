@@ -23,8 +23,8 @@ describe('FilesTab initial state', () => {
   it('renders picker and chat children', async () => {
     const t = mountTab();
     await t.updateComplete;
-    expect(t.shadowRoot.querySelector('ac-file-picker')).toBeTruthy();
-    expect(t.shadowRoot.querySelector('ac-chat-panel')).toBeTruthy();
+    expect(t.shadowRoot.querySelector('aic-file-picker')).toBeTruthy();
+    expect(t.shadowRoot.querySelector('aic-chat-panel')).toBeTruthy();
   });
 
   it('does not call get_file_tree until RPC is ready', async () => {
@@ -53,7 +53,7 @@ describe('FilesTab initial state', () => {
     expect(getTree).toHaveBeenCalledOnce();
     expect(t._treeLoaded).toBe(true);
     // Picker received the tree via direct assignment.
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     await picker.updateComplete;
     const rows = picker.shadowRoot.querySelectorAll('.row.is-file');
     expect(rows.length).toBe(1);
@@ -87,7 +87,7 @@ describe('FilesTab initial state', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     await picker.updateComplete;
     expect(picker.statusData).toBeTruthy();
     expect(picker.statusData.modified).toBeInstanceOf(Set);
@@ -125,7 +125,7 @@ describe('FilesTab initial state', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     await picker.updateComplete;
     expect(picker.statusData.modified.size).toBe(0);
     expect(picker.statusData.staged.size).toBe(0);
@@ -149,7 +149,7 @@ describe('FilesTab initial state', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => {});
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
@@ -158,7 +158,7 @@ describe('FilesTab initial state', () => {
       expect(detail.type).toBe('error');
       expect(detail.message).toContain('repo exploded');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
       consoleSpy.mockRestore();
     }
   });

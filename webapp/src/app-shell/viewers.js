@@ -116,8 +116,8 @@ export function onNavigateFile(host, event) {
   host.updateComplete.then(() => {
     const viewer =
       target === 'svg'
-        ? host.shadowRoot?.querySelector('ac-svg-viewer')
-        : host.shadowRoot?.querySelector('ac-diff-viewer');
+        ? host.shadowRoot?.querySelector('aic-svg-viewer')
+        : host.shadowRoot?.querySelector('aic-diff-viewer');
     if (!viewer) return;
     viewer.openFile({
       path,
@@ -142,7 +142,7 @@ export function onLoadDiffPanel(host, event) {
   host._activeViewer = 'diff';
   host.updateComplete.then(() => {
     const viewer =
-      host.shadowRoot?.querySelector('ac-diff-viewer');
+      host.shadowRoot?.querySelector('aic-diff-viewer');
     if (!viewer || typeof viewer.loadPanel !== 'function') {
       return;
     }
@@ -171,7 +171,7 @@ export function onLoadSvgPanel(host, event) {
   host._activeViewer = 'svg';
   host.updateComplete.then(() => {
     const viewer =
-      host.shadowRoot?.querySelector('ac-svg-viewer');
+      host.shadowRoot?.querySelector('aic-svg-viewer');
     if (!viewer || typeof viewer.loadPanel !== 'function') {
       return;
     }
@@ -218,9 +218,9 @@ export function onToggleSvgMode(host, event) {
   };
   host.updateComplete.then(() => {
     const diffViewer =
-      host.shadowRoot?.querySelector('ac-diff-viewer');
+      host.shadowRoot?.querySelector('aic-diff-viewer');
     const svgViewer =
-      host.shadowRoot?.querySelector('ac-svg-viewer');
+      host.shadowRoot?.querySelector('aic-svg-viewer');
     if (target === 'diff') {
       // Visual → text diff.
       host._activeViewer = 'diff';
@@ -313,11 +313,11 @@ export function onActiveFileChanged(host, event) {
   const path = event.composedPath ? event.composedPath() : [];
   let newActive = null;
   for (const el of path) {
-    if (el && el.tagName === 'AC-SVG-VIEWER') {
+    if (el && el.tagName === 'AIC-SVG-VIEWER') {
       newActive = 'svg';
       break;
     }
-    if (el && el.tagName === 'AC-DIFF-VIEWER') {
+    if (el && el.tagName === 'AIC-DIFF-VIEWER') {
       newActive = 'diff';
       break;
     }
@@ -328,7 +328,7 @@ export function onActiveFileChanged(host, event) {
   // file active. Without this, a user who opens an SVG
   // and reloads without any further interaction has no
   // persisted record of which viewer was active — the
-  // stored `ac-last-viewport` still reflects the
+  // stored `aic-last-viewport` still reflects the
   // previously-open file, and the restore short-circuits
   // because `viewport.path !== fileToRestore`. Saving
   // here captures the `type` discriminator (svg vs diff)
@@ -446,8 +446,8 @@ export function syncViewerInset(host) {
  */
 export function relayoutViewers(host) {
   syncViewerInset(host);
-  const diff = host.shadowRoot?.querySelector('ac-diff-viewer');
-  const svg = host.shadowRoot?.querySelector('ac-svg-viewer');
+  const diff = host.shadowRoot?.querySelector('aic-diff-viewer');
+  const svg = host.shadowRoot?.querySelector('aic-svg-viewer');
   if (diff && typeof diff.relayout === 'function') {
     diff.relayout();
   }

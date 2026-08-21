@@ -1,4 +1,4 @@
-"""Tests for ac_dc.rpc — Layer 1.4.
+"""Tests for aic_dc.rpc — Layer 1.4.
 
 Scope:
 
@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ac_dc.rpc import (
+from aic_dc.rpc import (
     DEFAULT_REMOTE_TIMEOUT,
     DEFAULT_SERVER_PORT,
     EventLoopHandle,

@@ -123,7 +123,7 @@ export const PROPERTIES = {
   },
   /**
    * Whether the snippet drawer is expanded. Persisted to
-   * localStorage under `ac-dc-snippet-drawer` — the drawer
+   * localStorage under `aic-dc-snippet-drawer` — the drawer
    * state survives browser refreshes.
    */
   _snippetDrawerOpen: {
@@ -294,7 +294,7 @@ export const PROPERTIES = {
   /**
    * The engine's current permission mode — one of the values in
    * `PERMISSION_MODES` (permission-mode.js), which mirror the engine's own
-   * tuple in `src/ac_dc/claude_code/session.py`.
+   * tuple in `src/aic_dc/claude_code/session.py`.
    *
    * Only ever written from the engine's word: `sessionStarted`,
    * `permissionModeChanged`, or the `get_current_state` hydration. Never

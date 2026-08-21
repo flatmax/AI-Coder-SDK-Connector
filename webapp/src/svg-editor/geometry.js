@@ -151,7 +151,7 @@ export function _parseNum(value) {
  * When a keydown fires inside a component's shadow root
  * (e.g., the chat panel's <textarea>), a listener on
  * `document` sees `event.target` as the shadow host
- * (e.g., <ac-chat-panel>) rather than the textarea.
+ * (e.g., <aic-chat-panel>) rather than the textarea.
  * `composedPath()` returns the full path through every
  * shadow boundary, with the real target first.
  *

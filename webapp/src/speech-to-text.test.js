@@ -80,7 +80,7 @@ function latestInstance() {
 const _mounted = [];
 
 function mountSpeech() {
-  const el = document.createElement('ac-speech-to-text');
+  const el = document.createElement('aic-speech-to-text');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;

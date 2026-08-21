@@ -22,7 +22,7 @@ import {
  * Re-based from `get_history_status` onto the engine's own
  * `get_context_usage`. The bar means the same thing it always
  * did — how close we are to a compaction — but the threshold is
- * now the engine's rather than one AC⚡DC configured for a
+ * now the engine's rather than one AIC⚡DC configured for a
  * prompt it assembled.
  *
  * The bar fills toward the autocompact threshold, not the model's
@@ -95,23 +95,23 @@ export function renderContextBar(host) {
 export function renderTemplate(host) {
   return html`
     <div class="viewer-background">
-      <ac-diff-viewer
+      <aic-diff-viewer
         class=${host._activeViewer === 'diff'
           ? 'viewer-visible'
           : 'viewer-hidden'}
         @active-file-changed=${host._onActiveFileChanged}
-      ></ac-diff-viewer>
-      <ac-svg-viewer
+      ></aic-diff-viewer>
+      <aic-svg-viewer
         class=${host._activeViewer === 'svg'
           ? 'viewer-visible'
           : 'viewer-hidden'}
         @active-file-changed=${host._onActiveFileChanged}
-      ></ac-svg-viewer>
+      ></aic-svg-viewer>
     </div>
 
-    <ac-file-nav
+    <aic-file-nav
       @navigate-file=${host._onNavigateFile}
-    ></ac-file-nav>
+    ></aic-file-nav>
 
     <div
       class="dialog ${host._undockedPos ? 'floating' : ''} ${host._minimized ? 'minimized' : ''}"
@@ -133,24 +133,24 @@ export function renderTemplate(host) {
       ` : null}
       <div class="dialog-body">
         <div class="tab-panel ${host.activeTab === 'files' ? 'active' : ''}">
-          <ac-files-tab></ac-files-tab>
+          <aic-files-tab></aic-files-tab>
         </div>
         <div class="tab-panel ${host.activeTab === 'context' ? 'active' : ''}">
-          <ac-context-usage-tab></ac-context-usage-tab>
+          <aic-context-usage-tab></aic-context-usage-tab>
         </div>
         <div class="tab-panel ${host.activeTab === 'settings' ? 'active' : ''}">
-          <ac-settings-tab></ac-settings-tab>
+          <aic-settings-tab></aic-settings-tab>
         </div>
         <div class="tab-panel ${host.activeTab === 'sdk-surface' ? 'active' : ''}">
-          <ac-sdk-surface-tab></ac-sdk-surface-tab>
+          <aic-sdk-surface-tab></aic-sdk-surface-tab>
         </div>
         ${host._docConvertAvailable ? html`
           <div class="tab-panel ${host.activeTab === 'doc-convert' ? 'active' : ''}">
-            <ac-doc-convert-tab></ac-doc-convert-tab>
+            <aic-doc-convert-tab></aic-doc-convert-tab>
           </div>
         ` : null}
       </div>
-      <ac-doc-index-progress></ac-doc-index-progress>
+      <aic-doc-index-progress></aic-doc-index-progress>
       <!--
         Directly above the capacity bar, and the pairing is the point: the
         bar says how close a compaction is, this says when it is happening.
@@ -158,7 +158,7 @@ export function renderTemplate(host) {
         PreCompact hook) and the end (compact_boundary) and nothing in
         between, so there is no percentage to be had.
       -->
-      <ac-compaction-progress></ac-compaction-progress>
+      <aic-compaction-progress></aic-compaction-progress>
       ${renderContextBar(host)}
       <div
         class="resize-handle right"
@@ -177,7 +177,7 @@ export function renderTemplate(host) {
     ${host.overlayVisible ? html`
       <div class="startup-overlay ${host.startupPercent >= 100 ? 'fading' : ''}">
         <div class="startup-brand">
-          <span>AC</span><span class="bolt">⚡</span><span>DC</span>
+          <span>AIC</span><span class="bolt">⚡</span><span>DC</span>
         </div>
         <div class="startup-message">${host.startupMessage}</div>
         <div class="startup-progress">
@@ -198,14 +198,14 @@ export function renderTemplate(host) {
     </div>
 
     <!--
-      ac-compaction-progress left with the native engine and has since
+      aic-compaction-progress left with the native engine and has since
       come back, inline in the dialog above the capacity bar rather than
       floating here — the engine's compaction stalls the session just as
       visibly as ours did, and compact_boundary only says so afterwards.
     -->
-    <ac-speech-controls></ac-speech-controls>
+    <aic-speech-controls></aic-speech-controls>
 
-    <ac-usage-hud></ac-usage-hud>
+    <aic-usage-hud></aic-usage-hud>
 
     <!--
       Last in the template and at z-index 9000: above the dialog panel,
@@ -214,6 +214,6 @@ export function renderTemplate(host) {
       pending call, so "above the startup overlay" is not theoretical
       (specs5/5-webapp/permission-dialog.md § Placement).
     -->
-    <ac-permission-dialog></ac-permission-dialog>
+    <aic-permission-dialog></aic-permission-dialog>
   `;
 }

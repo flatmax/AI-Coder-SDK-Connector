@@ -6,7 +6,7 @@ once per turn, in a floating overlay. A reduced **terminal HUD** prints the same
 server-side.
 
 The data behind both is the engine's own accounting: `get_context_usage()` for composition,
-`ResultMessage` for per-turn usage. AC⚡DC does not model context. The contract, the field list, and the
+`ResultMessage` for per-turn usage. AIC⚡DC does not model context. The contract, the field list, and the
 rationale are in [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md); this file
 specifies the components.
 
@@ -15,8 +15,8 @@ specifies the components.
 The old version of this spec was mostly about our own cache. Two sub-views, a Budget / Cache pill
 toggle, tier bars in an L0–L3 palette, per-item N/threshold stability bars, promotion and demotion logs,
 synthetic `meta:` rows, an uncached synthetic tier, a fuzzy filter and sort over tier contents, a
-click-to-view map-block modal, and a manual rebuild button. All of it described AC⚡DC's belief about a
-prompt AC⚡DC assembled.
+click-to-view map-block modal, and a manual rebuild button. All of it described AIC⚡DC's belief about a
+prompt AIC⚡DC assembled.
 
 None of that has a referent now, and the replacement is not a lesser version of it — it is the thing the
 old tab was an approximation *of*. Where the old tab could drift from what the provider actually
@@ -112,7 +112,7 @@ the old tab could not, and it is mostly a set of tables:
 Two deliberate details:
 
 - **Memory files are clickable — the ones that can be opened.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it. Clicking one also minimizes the dialog, because the viewer is behind it and a click that opens a file under an opaque panel is indistinguishable from a click that did nothing. The engine reports these paths as *absolute* and every repo read rejects an absolute path, so `get_context_usage` adds `relPath` to each entry that lives inside the repo root and the browser makes exactly those rows clickable. A user-level `~/.claude/CLAUDE.md` is outside the repo, has no repo-relative name, and stays text.
-- **`ac-dc` appears in the tools table like any other MCP server**, with its token cost. Our own bridge is not exempt from the accounting it exists to provide (see [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)).
+- **`aic-dc` appears in the tools table like any other MCP server**, with its token cost. Our own bridge is not exempt from the accounting it exists to provide (see [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)).
 
 Two of the interactions above are not implementable from this payload, and saying so here is cheaper than
 each reader rediscovering it:
@@ -143,7 +143,7 @@ it back on the next visit like the other two. It diagnoses the engine, not the c
 - **Engine** — which `claude` binary was resolved, its version and where it came from, the SDK version
   and the CLI it pins, the credential source, and the mirror-gap count as a verdict rather than a
   number. This is `EngineHealth`, *not* `get_server_info()` as an earlier draft of this section had it:
-  the binary resolution is AC⚡DC's, recorded in `claude_code/health.py`, and the engine's own reply
+  the binary resolution is AIC⚡DC's, recorded in `claude_code/health.py`, and the engine's own reply
   knows nothing about it. Health arrives pushed on `engineHealth` and a pushed record wins over the
   fetched one, because `mirror_gaps` moves during a turn.
 - **The initialize reply** from `get_server_info()`, summarised by key and then printed verbatim. By
@@ -219,18 +219,18 @@ under the heading "This turn", and labelled a null as "included".
 Both halves were wrong. The schema types the field as a plain number with **no null branch**, and
 describes it as *"cumulative estimated cost in USD for this query() call … cumulative across turns in
 streaming-input sessions — each result carries the running total so far, so read the latest result
-rather than summing across results."* `modelUsage` carries the same warning. AC⚡DC runs one
+rather than summing across results."* `modelUsage` carries the same warning. AIC⚡DC runs one
 streaming-input client, so:
 
 - The HUD's "This turn" cost was the **whole session's** spend, growing every turn.
 - Its model list named every model the session had ever used, not the ones that answered.
-- Every null in this codebase is one AC⚡DC wrote itself — a synthetic failure footer, or a replayed
+- Every null in this codebase is one AIC⚡DC wrote itself — a synthetic failure footer, or a replayed
   turn. A live result always carries a figure, subscription or not; it is an estimate the CLI computes,
   not a billing statement.
 - `credential_source` on the engine-health record is the only real billing-mode signal.
 
 The turn's own cost is therefore a **difference** against the previous result. The baseline is session
-state, so the engine takes the difference (`ac_dc/claude_code/cost.py`) and every client reads the same
+state, so the engine takes the difference (`aic_dc/claude_code/cost.py`) and every client reads the same
 answer; a per-turn `TurnTranslator` could not hold the baseline, and the browser holding it would lose
 it on reconnect. Three per-turn fields ship beside the engine's cumulative ones, under names that cannot
 be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
@@ -241,7 +241,7 @@ be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
 |---|---|---|
 | `measured` | A difference in hand. **Zero is an answer**: the turn cost nothing extra. | The figure, or "nothing extra" |
 | `reset` | The running total went backwards — a `/clear`, or a resumed session. | "cost unknown", reason in the tooltip |
-| `unpriced` | No usable number: a footer AC⚡DC wrote, or one the CLI zeroed. The schema warns that *"crash/startup-error results may carry zeroed values"*, so a zero on an error is no evidence rather than free. | "cost unknown", reason in the tooltip |
+| `unpriced` | No usable number: a footer AIC⚡DC wrote, or one the CLI zeroed. The schema warns that *"crash/startup-error results may carry zeroed values"*, so a zero on an error is no evidence rather than free. | "cost unknown", reason in the tooltip |
 | *(absent)* | A browsed turn. Cost is not in the CLI's transcript, so it was never recorded — a different fact from "we lost track of it". | No cost shown at all |
 
 A `$0.00` is still never printed for a turn whose cost is unknown
@@ -265,7 +265,7 @@ one model per request.
 
 The two cache counters, `cacheReadInputTokens` and `cacheCreationInputTokens`, are reported in the
 row's tooltip and nowhere more prominently. No derived hit rate: a ratio was headline-worthy only
-while AC⚡DC was the thing doing the caching, and computing one now would be the app inventing a
+while AIC⚡DC was the thing doing the caching, and computing one now would be the app inventing a
 figure beside four the engine measured. The counters are there for a reader who wants to work it out.
 
 ### Behaviour
@@ -302,7 +302,7 @@ tier-distribution HUD.
 - The Context tab refreshes on `post-response-complete`, never on `stream-complete`.
 - `gridRows` is rendered only in the Debug section and never used for layout.
 - The Debug section is off by default and never required to understand normal usage.
-- Memory files, system prompt sections, and every MCP server including `ac-dc` appear in the Session section with their token cost.
+- Memory files, system prompt sections, and every MCP server including `aic-dc` appear in the Session section with their token cost.
 - The HUD renders without a follow-up RPC.
 - The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
 - No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running

@@ -99,7 +99,7 @@ export async function loadFileTree(host) {
     return;
   }
   // The repo returns the full shape documented in
-  // src/ac_dc/repo.py — `tree` is the nested node plus
+  // src/aic_dc/repo.py — `tree` is the nested node plus
   // sibling arrays (modified, staged, etc.).
   //
   // Direct-update pattern (see class docstring) — we

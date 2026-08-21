@@ -1,4 +1,4 @@
-"""Tests for ac_dc.base_cache — Layer 2.3.
+"""Tests for aic_dc.base_cache — Layer 2.3.
 
 Scope: BaseCache — mtime-based get/put/invalidate, signature hash
 accessor, path normalisation, subclass hook invocation.
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ac_dc.base_cache import BaseCache
+from aic_dc.base_cache import BaseCache
 
 
 class _Cache(BaseCache[str]):

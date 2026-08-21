@@ -22,7 +22,7 @@ import math
 
 import pytest
 
-from ac_dc.doc_index.extractors.svg_geometry import (
+from aic_dc.doc_index.extractors.svg_geometry import (
     BBox,
     IDENTITY,
     Matrix,

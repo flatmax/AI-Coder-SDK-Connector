@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc import main
+from aic_dc import main
 
 
 def _free_port() -> int:
@@ -119,7 +119,7 @@ def test_warns_when_sources_are_newer(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     dist = _tree(tmp_path, src_mtime=2_000.0, built_mtime=1_000.0)
-    with caplog.at_level(logging.WARNING, logger="ac_dc.main"):
+    with caplog.at_level(logging.WARNING, logger="aic_dc.main"):
         main._warn_if_dist_is_stale(dist)
     assert "stale webapp" in caplog.text
 
@@ -128,7 +128,7 @@ def test_silent_when_the_build_is_current(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     dist = _tree(tmp_path, src_mtime=1_000.0, built_mtime=2_000.0)
-    with caplog.at_level(logging.WARNING, logger="ac_dc.main"):
+    with caplog.at_level(logging.WARNING, logger="aic_dc.main"):
         main._warn_if_dist_is_stale(dist)
     assert caplog.text == ""
 
@@ -139,9 +139,9 @@ def test_silent_for_an_installed_package(
     """``webapp_dist`` ships without sources beside it. Nothing to
     compare is not the same as out of date, and warning every
     installed user would be noise they cannot act on."""
-    dist = tmp_path / "ac_dc" / "webapp_dist"
+    dist = tmp_path / "aic_dc" / "webapp_dist"
     dist.mkdir(parents=True)
     (dist / "index.html").write_text("<html></html>")
-    with caplog.at_level(logging.WARNING, logger="ac_dc.main"):
+    with caplog.at_level(logging.WARNING, logger="aic_dc.main"):
         main._warn_if_dist_is_stale(dist)
     assert caplog.text == ""

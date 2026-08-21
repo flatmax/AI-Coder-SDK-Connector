@@ -28,7 +28,7 @@ export function onBeforeUnload(host) {
  * reuse the diff-restore logic verbatim.
  */
 export function captureDiffViewportState(host) {
-  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-diff-viewer');
   if (!viewer) return null;
   const file = viewer._file;
   if (!file || !file.path) return null;
@@ -75,7 +75,7 @@ export function captureDiffViewportState(host) {
  */
 export function applyDiffViewportState(host, state) {
   if (!state || !state.diff) return;
-  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-diff-viewer');
   if (!viewer) return;
   const wantsPreview = !!(state.preview && state.preview.open);
   if (wantsPreview && typeof viewer.setPreviewMode === 'function') {
@@ -199,7 +199,7 @@ export function saveViewportState(host) {
     saveSvgViewportState(host);
     return;
   }
-  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-diff-viewer');
   if (!viewer) return;
   const file = viewer._file;
   if (!file || !file.path) return;
@@ -255,7 +255,7 @@ export function saveViewportState(host) {
  * sharing.
  */
 export function saveSvgViewportState(host) {
-  const viewer = host.shadowRoot?.querySelector('ac-svg-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-svg-viewer');
   if (!viewer) return;
   if (typeof viewer.getActiveViewBox !== 'function') return;
   if (viewer._activeIndex < 0) return;
@@ -374,7 +374,7 @@ export function doReopenLastFile(host, path) {
   // restore. Use a one-shot active-file-changed
   // listener filtered to the target path. Timeout
   // after 10 seconds.
-  const viewer = host.shadowRoot?.querySelector('ac-diff-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-diff-viewer');
   if (!viewer) return;
   let settled = false;
   const timeoutId = setTimeout(() => {
@@ -420,7 +420,7 @@ export function doReopenLastFile(host, path) {
  * write targets the same layout it was captured in.
  */
 export function doReopenSvg(host, path, svgState) {
-  const viewer = host.shadowRoot?.querySelector('ac-svg-viewer');
+  const viewer = host.shadowRoot?.querySelector('aic-svg-viewer');
   if (!viewer) return;
   let settled = false;
   const timeoutId = setTimeout(() => {

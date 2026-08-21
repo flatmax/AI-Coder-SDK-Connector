@@ -68,7 +68,7 @@ The cost of the full entry is that all built-in languages are bundled. Mitigate 
 When diff highlighting does not appear, the following in devtools distinguishes the four failure modes:
 
 ```
-const v = /* walk shadow roots to find <ac-diff-viewer> */;
+const v = /* walk shadow roots to find <aic-diff-viewer> */;
 const e = v._editor;
 console.log('line changes:', e.getLineChanges());
 console.log('modified len:', e.getModifiedEditor().getValue().length);

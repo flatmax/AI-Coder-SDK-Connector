@@ -1,11 +1,11 @@
 # Engine Session
 
-AC⚡DC drives one Claude Code session per repo, through the Claude Agent SDK. This spec covers the
+AIC⚡DC drives one Claude Code session per repo, through the Claude Agent SDK. This spec covers the
 session's lifecycle, how a user turn flows through it, and how the SDK's message taxonomy becomes
 server-push events the browser can render.
 
 The engine is not a provider behind an abstraction layer. There is no prompt assembly, no context
-manager, no token budget, and no cache tiering — Claude Code owns all of it. AC⚡DC's job is to
+manager, no token budget, and no cache tiering — Claude Code owns all of it. AIC⚡DC's job is to
 start a session, feed it user intent, and render what comes back.
 
 See [`../plan/sdk-surface.md`](../plan/sdk-surface.md) for the verified SDK API this spec is written
@@ -15,7 +15,7 @@ for exact option values and event payload shapes.
 ## Process Model
 
 - One `ClaudeSDKClient`, connected for the process lifetime, `cwd` at the repository root.
-- The client owns a `claude` CLI subprocess. AC⚡DC never spawns the CLI directly.
+- The client owns a `claude` CLI subprocess. AIC⚡DC never spawns the CLI directly.
 - Connection happens during deferred startup, not on the fast path — the CLI takes a moment to
   come up and the browser must not wait on it. Requests arriving before the engine is ready are
   rejected with a user-facing "still starting" message, as they were under the native engine.
@@ -26,7 +26,7 @@ for exact option values and event payload shapes.
 ## Session Options
 
 Assembled once at connect time from engine config (see
-[`../1-foundation/configuration.md`](../1-foundation/configuration.md)) plus AC⚡DC's own
+[`../1-foundation/configuration.md`](../1-foundation/configuration.md)) plus AIC⚡DC's own
 callbacks. The behaviourally load-bearing choices:
 
 | Option | Behaviour it buys |
@@ -37,25 +37,25 @@ callbacks. The behaviourally load-bearing choices:
 | `hooks` | UI broadcasts and incremental re-indexing. See [tool-surface.md](tool-surface.md). |
 | `include_partial_messages` | Token-level streaming. Without it the UI only updates per block, which reads as a stall on long responses. |
 | `include_hook_events` | Hook activity becomes inspectable rather than invisible. |
-| `setting_sources` = user, project, local | The repo's `CLAUDE.md`, `.claude/settings.json`, agents, skills, and custom slash commands all apply. A session in AC⚡DC behaves like a session in the CLI in the same repo. |
+| `setting_sources` = user, project, local | The repo's `CLAUDE.md`, `.claude/settings.json`, agents, skills, and custom slash commands all apply. A session in AIC⚡DC behaves like a session in the CLI in the same repo. |
 | `env` = `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT: markdown` | `AskUserQuestion` options may carry a `preview` — the example the dialog renders beside them. The field is in the tool's schema either way, but the CLI only documents its *format* for a terminal session — so unless the host names one, whether a preview arrives as markdown or as an HTML fragment is the model's guess, and the dialog renders markdown. See [`../5-webapp/permission-dialog.md` § `interact`](../5-webapp/permission-dialog.md#interact--real-choices). |
 | `enable_file_checkpointing` + the replay-user-messages flag | `rewind_files()` — a real undo. **Both** are required; checkpointing alone raises at rewind time. Set **only when there is no `session_store`**, which means only a repoless run — see below. |
-| `mcp_servers` = `{ac-dc: …}` | Repo intelligence as tools. See [mcp-bridge.md](mcp-bridge.md). |
-| `session_store` | The transcript is mirrored into `.ac-dc4/`. See [history.md](history.md). |
+| `mcp_servers` = `{aic-dc: …}` | Repo intelligence as tools. See [mcp-bridge.md](mcp-bridge.md). |
+| `session_store` | The transcript is mirrored into `.aic-dc/`. See [history.md](history.md). |
 | `max_budget_usd` | An optional hard stop. Absent under subscription billing. |
 | `effort`, `thinking` | Reasoning depth and whether thinking is shown, summarised, or hidden. |
 | `max_buffer_size` = 16 MiB | The ceiling on one line of CLI stdout. The SDK's own default is 1 MiB and one line over it raises inside the reader, which kills the message pump for the rest of the session — so this is set unconditionally rather than left to the dependency. A returned inline screenshot is the case that reaches it. Overridable in `engine.json`; see [`../1-foundation/configuration.md`](../1-foundation/configuration.md). |
 | `stderr` | A callback for the CLI's own diagnostics. Registering one *pipes* stderr instead of letting it inherit the server's, so the callback both logs the line and keeps the last 20 on `EngineHealth`, where the health banner shows them. Without it a CLI that explains its own failure explains it to nobody. |
 
-Options that AC⚡DC deliberately does **not** set:
+Options that AIC⚡DC deliberately does **not** set:
 
 - **`allowed_tools`** — allow rules approve a call before `can_use_tool` runs, which would make
   gated tools silently ungated. Tool-level allowances belong in project settings, where the user can
   see them, not in our options dict.
 - **`agents`** — subagent definitions come from the project (`.claude/agents/`), so they are shared
-  with the CLI rather than being AC⚡DC-only.
+  with the CLI rather than being AIC⚡DC-only.
 - **`system_prompt`** — prompt customisation is `CLAUDE.md`'s job. Injecting our own system prompt
-  would fork behaviour between AC⚡DC and the CLI for the same repo, and would be invisible to the
+  would fork behaviour between AIC⚡DC and the CLI for the same repo, and would be invisible to the
   user in a file they do not know exists.
 
 ### The mirror and file checkpointing exclude each other
@@ -138,7 +138,7 @@ cancel followed by a send.
 
 ## Message Taxonomy → UI
 
-The pump is the only component that knows SDK message types. Everything downstream sees AC⚡DC
+The pump is the only component that knows SDK message types. Everything downstream sees AIC⚡DC
 events.
 
 | SDK message | Becomes | Rendered as |
@@ -195,7 +195,7 @@ views want consistency. Only the housekeeping behind the second event has change
   the next turn's UI.
 - The pump never `break`s out of iteration. Cancellation is a flag plus `interrupt()`; the loop runs
   to completion. Breaking out causes asyncio cleanup failures, and a client disconnecting mid-turn is
-  AC⚡DC's normal case rather than an edge case.
+  AIC⚡DC's normal case rather than an edge case.
 - The turn's pump lifetime is independent of any WebSocket. A disconnected client's turn keeps
   running and accumulating server-side; the client re-attaches on reconnect and replays from the
   accumulated transcript.
@@ -210,7 +210,7 @@ views want consistency. Only the housekeeping behind the second event has change
 | New session | Connect without `resume`; a fresh session ID is issued. |
 | Undo a file change | `rewind_files(user_message_id)` back to a checkpoint — unavailable while the transcript is mirrored, which is every run with a repo (CC-20). Git is the answer there. |
 
-Context continuity is entirely the SDK's. AC⚡DC never reconstructs a conversation by replaying
+Context continuity is entirely the SDK's. AIC⚡DC never reconstructs a conversation by replaying
 messages into a prompt — the failure mode of that approach is a session that looks right in the UI
 and is subtly wrong in the model's view. See [history.md](history.md).
 
@@ -285,7 +285,7 @@ whose CLI advertises nothing is not the same condition.
 | Subprocess dies mid-turn | The turn ends with an error result. The session is **not** silently re-created; the user is told the session was lost and offered resume. |
 | Budget exceeded | The turn stops with the SDK's terminal reason; the HUD shows the budget state and the settings control. |
 | Rate limited | `RateLimitEvent` is surfaced with reset timing. The turn continues if the engine retries internally. |
-| MCP server (ours) fails to start | Session continues without the `ac-dc` tools; a banner reports the loss, because the agent will otherwise appear inexplicably worse at repo-wide questions. |
+| MCP server (ours) fails to start | Session continues without the `aic-dc` tools; a banner reports the loss, because the agent will otherwise appear inexplicably worse at repo-wide questions. |
 | The CLI writes to stderr | Logged, and the last 20 lines are kept on `EngineHealth` and rendered in the health banner. Deliberately **not** a health problem in itself: the CLI writes routine chatter there, so the tail can neither open the banner nor undo a dismissal — it is context underneath whatever did open it. The case it was added for is a connect that fails, where the CLI's own words are the only diagnosis and the banner is already open. |
 
 ## Invariants
@@ -306,5 +306,5 @@ whose CLI advertises nothing is not the same condition.
 - Turn framing never contains file content — only paths, ranges, and mode facts.
 - `streamComplete` always precedes `postResponseComplete` for the same turn.
 - No component outside the message pump references an SDK message type.
-- AC⚡DC never constructs a conversation history to hand to the model; resumption is always via
+- AIC⚡DC never constructs a conversation history to hand to the model; resumption is always via
   `resume` or `fork_session`.

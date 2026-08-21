@@ -23,9 +23,9 @@
  * without touching styles the host put in its shadow root for other
  * reasons.
  */
-export const HEAD_CLONE_MARKER = 'acDcMonacoClone';
+export const HEAD_CLONE_MARKER = 'aicDcMonacoClone';
 
-/** The attribute selector for a dataset key (`acDcFoo` → `data-ac-dc-foo`). */
+/** The attribute selector for a dataset key (`aicDcFoo` → `data-aic-dc-foo`). */
 function attrFor(marker) {
   return `data-${marker.replace(/([A-Z])/g, '-$1').toLowerCase()}`;
 }

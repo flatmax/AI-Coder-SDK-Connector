@@ -1,4 +1,4 @@
-"""Tests for ac_dc.base_formatter — Layer 2.6.
+"""Tests for aic_dc.base_formatter — Layer 2.6.
 
 Scope: BaseFormatter's plumbing — path aliasing,
 legend assembly, file sorting, exclusion handling,
@@ -13,7 +13,7 @@ files with their own per-kind rendering concerns.
 
 from __future__ import annotations
 
-from ac_dc.base_formatter import BaseFormatter
+from aic_dc.base_formatter import BaseFormatter
 
 
 class _StubFormatter(BaseFormatter):
@@ -239,7 +239,7 @@ class TestPathAliasing:
         """
         formatter = _StubFormatter()
         aliases = formatter._compute_aliases([
-            "src/ac_dc/symbol_index/parser.py",
+            "src/aic_dc/symbol_index/parser.py",
             "other.py",
         ])
         assert aliases == {}
@@ -248,20 +248,20 @@ class TestPathAliasing:
         """A long prefix used by many files gets ``@1/``."""
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
-            "src/ac_dc/symbol_index/d.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/d.py",
         ]
         aliases = formatter._compute_aliases(files)
         assert len(aliases) == 1
         prefix, alias = next(iter(aliases.items()))
         assert alias == "@1/"
         # Longest qualifying prefix wins — full directory.
-        assert prefix == "src/ac_dc/symbol_index/"
+        assert prefix == "src/aic_dc/symbol_index/"
 
     def test_sub_prefix_of_alias_skipped(self) -> None:
-        """Greedy: ``src/ac_dc/`` skipped when ``src/ac_dc/lib/`` aliased.
+        """Greedy: ``src/aic_dc/`` skipped when ``src/aic_dc/lib/`` aliased.
 
         Without this, the longest prefix gets ``@1/`` and its
         parent ``@2/`` — the second alias shadows the first
@@ -270,25 +270,25 @@ class TestPathAliasing:
         """
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/lib/foo.py",
-            "src/ac_dc/lib/bar.py",
-            "src/ac_dc/lib/baz.py",
-            "src/ac_dc/lib/qux.py",
+            "src/aic_dc/lib/foo.py",
+            "src/aic_dc/lib/bar.py",
+            "src/aic_dc/lib/baz.py",
+            "src/aic_dc/lib/qux.py",
         ]
         aliases = formatter._compute_aliases(files)
         # Exactly one alias — the deepest qualifying prefix.
         assert len(aliases) == 1
-        assert "src/ac_dc/lib/" in aliases
+        assert "src/aic_dc/lib/" in aliases
 
     def test_multiple_independent_prefixes_both_aliased(self) -> None:
         """Disjoint prefixes both earn aliases up to the max."""
         formatter = _StubFormatter()
         files = [
-            # src/ac_dc/symbol_index/ — 4 files, qualifies
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
-            "src/ac_dc/symbol_index/d.py",
+            # src/aic_dc/symbol_index/ — 4 files, qualifies
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/d.py",
             # webapp/src/components/ — 3 files, qualifies
             "webapp/src/components/x.js",
             "webapp/src/components/y.js",
@@ -301,16 +301,16 @@ class TestPathAliasing:
 
     def test_aliases_applied_to_paths(self) -> None:
         """_apply_aliases substitutes the longest matching prefix."""
-        aliases = {"src/ac_dc/symbol_index/": "@1/"}
+        aliases = {"src/aic_dc/symbol_index/": "@1/"}
         result = BaseFormatter._apply_aliases(
-            "src/ac_dc/symbol_index/parser.py",
+            "src/aic_dc/symbol_index/parser.py",
             aliases,
         )
         assert result == "@1/parser.py"
 
     def test_apply_aliases_no_match_returns_path(self) -> None:
         """A path not covered by any alias passes through unchanged."""
-        aliases = {"src/ac_dc/symbol_index/": "@1/"}
+        aliases = {"src/aic_dc/symbol_index/": "@1/"}
         result = BaseFormatter._apply_aliases("other/file.py", aliases)
         assert result == "other/file.py"
 
@@ -332,9 +332,9 @@ class TestPathAliasing:
         """
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
             "webapp/src/components/x.js",
             "webapp/src/components/y.js",
             "webapp/src/components/z.js",
@@ -347,14 +347,14 @@ class TestPathAliasing:
         """End-to-end: format() output shows aliased paths."""
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
-            "src/ac_dc/symbol_index/d.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/d.py",
         ]
         result = formatter.format(files)
         assert "@1/a.py: 0" in result
-        assert "# @1/=src/ac_dc/symbol_index/" in result
+        assert "# @1/=src/aic_dc/symbol_index/" in result
 
 
 # ---------------------------------------------------------------------------
@@ -375,14 +375,14 @@ class TestGetLegend:
         """With qualifying files, aliases appear in the legend."""
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
-            "src/ac_dc/symbol_index/d.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/d.py",
         ]
         legend = formatter.get_legend(files)
         assert "# stub legend" in legend
-        assert "# @1/=src/ac_dc/symbol_index/" in legend
+        assert "# @1/=src/aic_dc/symbol_index/" in legend
 
     def test_get_legend_empty_files_list_treated_as_none(self) -> None:
         """Empty list → legend without aliases, same as None."""
@@ -413,20 +413,20 @@ class TestExclusion:
         """Excluded files don't contribute to prefix use counts."""
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
         ]
         result = formatter.format(
             files,
             exclude_files={
-                "src/ac_dc/symbol_index/a.py",
-                "src/ac_dc/symbol_index/b.py",
+                "src/aic_dc/symbol_index/a.py",
+                "src/aic_dc/symbol_index/b.py",
             },
         )
         # Only one file remains — no alias should appear.
         assert "@1/" not in result
-        assert "src/ac_dc/symbol_index/c.py: 0" in result
+        assert "src/aic_dc/symbol_index/c.py: 0" in result
 
     def test_exclude_files_none_treated_as_empty_set(self) -> None:
         """exclude_files=None doesn't filter anything."""
@@ -456,10 +456,10 @@ class TestDeterminism:
         """Two format() calls with the same input match byte-for-byte."""
         formatter = _StubFormatter()
         files = [
-            "src/ac_dc/symbol_index/a.py",
-            "src/ac_dc/symbol_index/b.py",
-            "src/ac_dc/symbol_index/c.py",
-            "src/ac_dc/symbol_index/d.py",
+            "src/aic_dc/symbol_index/a.py",
+            "src/aic_dc/symbol_index/b.py",
+            "src/aic_dc/symbol_index/c.py",
+            "src/aic_dc/symbol_index/d.py",
             "webapp/src/components/x.js",
             "webapp/src/components/y.js",
             "webapp/src/components/z.js",

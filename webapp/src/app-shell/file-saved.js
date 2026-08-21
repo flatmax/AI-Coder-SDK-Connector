@@ -88,9 +88,9 @@ export async function onFileSaved(host, event) {
  */
 export function onFilesReverted(host, _event) {
   const diffViewer =
-    host.shadowRoot?.querySelector('ac-diff-viewer');
+    host.shadowRoot?.querySelector('aic-diff-viewer');
   const svgViewer =
-    host.shadowRoot?.querySelector('ac-svg-viewer');
+    host.shadowRoot?.querySelector('aic-svg-viewer');
   if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
     diffViewer.refreshOpenFiles().catch((err) => {
       console.warn(

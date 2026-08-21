@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.session — conversion phase 1.
+"""Tests for aic_dc.claude_code.session — conversion phase 1.
 
 Offline: ``ClaudeSDKClient`` is replaced with a fake, so no CLI is spawned
 and no tokens are spent. What is under test is *timing* — the behaviours
@@ -35,11 +35,11 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from ac_dc.claude_code import session as session_module
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.health import CliResolution, EngineStartupError
-from ac_dc.claude_code.messages import Event
-from ac_dc.claude_code.session import (
+from aic_dc.claude_code import session as session_module
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.health import CliResolution, EngineStartupError
+from aic_dc.claude_code.messages import Event
+from aic_dc.claude_code.session import (
     CONNECT_TIMEOUT,
     INTERRUPT_DRAIN_TIMEOUT,
     EngineNotReadyError,
@@ -230,8 +230,8 @@ class TestFraming:
     def test_framing_is_wrapped_so_it_is_distinguishable(self):
         """The model must be able to tell our words from the user's."""
         framing = build_framing(text_turn(viewer=ViewerFraming("a.py")))
-        assert framing.startswith("<ac-dc-ui-context>")
-        assert framing.endswith("</ac-dc-ui-context>")
+        assert framing.startswith("<aic-dc-ui-context>")
+        assert framing.endswith("</aic-dc-ui-context>")
 
     def test_the_viewer_contributes_a_path_and_a_range(self):
         framing = build_framing(
@@ -285,7 +285,7 @@ class TestFraming:
         prompt = compose_prompt(
             text_turn("fix this", viewer=ViewerFraming("a.py"))
         )
-        assert prompt.index("<ac-dc-ui-context>") < prompt.index("fix this")
+        assert prompt.index("<aic-dc-ui-context>") < prompt.index("fix this")
         assert prompt.endswith("fix this")
 
 
@@ -354,7 +354,7 @@ class TestContentBlocks:
         blocks = build_content_blocks(
             text_turn("hi", images=[PNG], viewer=ViewerFraming("a.py"))
         )
-        assert "<ac-dc-ui-context>" in blocks[-1]["text"]
+        assert "<aic-dc-ui-context>" in blocks[-1]["text"]
 
     async def test_an_image_turn_uses_the_verbatim_dict_path(self, engine):
         """query() JSON-encodes each dict as given, so blocks survive."""
@@ -494,7 +494,7 @@ class TestConnect:
         ``os._exit`` and never reaches the ``disconnect()`` the SDK cleans
         up in. One directory per launch cycle, holding a transcript copy
         and a live access token."""
-        from ac_dc.claude_code import resume_cleanup
+        from aic_dc.claude_code import resume_cleanup
 
         registry: set = set()
         monkeypatch.setattr(resume_cleanup, "_DIRS", registry)
@@ -515,7 +515,7 @@ class TestConnect:
 
     async def test_a_fresh_connect_registers_nothing(self, tmp_path, monkeypatch):
         """No resume, no materialised directory, nothing to clean up."""
-        from ac_dc.claude_code import resume_cleanup
+        from aic_dc.claude_code import resume_cleanup
 
         registry: set = set()
         monkeypatch.setattr(resume_cleanup, "_DIRS", registry)
@@ -816,7 +816,7 @@ class TestMirrorGapEscalation:
     """
 
     def health(self, **kwargs):
-        from ac_dc.claude_code.health import EngineHealth
+        from aic_dc.claude_code.health import EngineHealth
 
         return EngineHealth(**kwargs)
 
@@ -824,7 +824,7 @@ class TestMirrorGapEscalation:
         assert self.health().to_dict()["mirror_gaps_escalated"] is False
 
     def test_the_default_tolerates_a_run_of_three(self):
-        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+        from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
 
         h = self.health()
         for _ in range(DEFAULT_MIRROR_GAP_TOLERANCE):
@@ -852,7 +852,7 @@ class TestMirrorGapEscalation:
         assert h.to_dict()["mirror_gaps_escalated"] is True
 
     def test_a_broken_tolerance_is_not_a_way_to_silence_a_broken_mirror(self):
-        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+        from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
 
         def boom():
             raise RuntimeError("no config")
@@ -894,7 +894,7 @@ class TestStartupDegradation:
     """
 
     def health(self, **kwargs):
-        from ac_dc.claude_code.health import EngineHealth
+        from aic_dc.claude_code.health import EngineHealth
 
         return EngineHealth(**kwargs)
 
@@ -903,8 +903,8 @@ class TestStartupDegradation:
 
     def test_a_loss_is_carried_to_the_browser(self):
         h = self.health()
-        h.note_degradation("The ac-dc repo tools did not start.")
-        assert h.to_dict()["degradations"] == ["The ac-dc repo tools did not start."]
+        h.note_degradation("The aic-dc repo tools did not start.")
+        assert h.to_dict()["degradations"] == ["The aic-dc repo tools did not start."]
 
     def test_two_losses_keep_the_order_they_were_noted_in(self):
         h = self.health()
@@ -946,13 +946,13 @@ class TestCliStderr:
 
     Unset, ``options.stderr`` leaves the subprocess inheriting the
     server's stderr, so a failing CLI explains itself into whatever
-    terminal launched AC-DC — which for a desktop launch is nowhere.
+    terminal launched AIC-DC — which for a desktop launch is nowhere.
     Registering the callback pipes it instead, which is why the callback
     both logs and records: the terminal must not *lose* what it had.
     """
 
     def health(self, **kwargs):
-        from ac_dc.claude_code.health import EngineHealth
+        from aic_dc.claude_code.health import EngineHealth
 
         return EngineHealth(**kwargs)
 
@@ -965,7 +965,7 @@ class TestCliStderr:
         assert h.to_dict()["cli_stderr"] == ["node: out of memory"]
 
     def test_only_the_tail_is_kept(self):
-        from ac_dc.claude_code.health import CLI_STDERR_TAIL
+        from aic_dc.claude_code.health import CLI_STDERR_TAIL
 
         h = self.health()
         for i in range(CLI_STDERR_TAIL + 5):
@@ -986,7 +986,7 @@ class TestCliStderr:
 
     def test_an_enormous_line_is_cut(self):
         """One minified bundle in a trace must not become the payload."""
-        from ac_dc.claude_code.health import CLI_STDERR_LINE_CHARS
+        from aic_dc.claude_code.health import CLI_STDERR_LINE_CHARS
 
         h = self.health()
         h.note_cli_stderr("x" * (CLI_STDERR_LINE_CHARS * 3))
@@ -1398,13 +1398,13 @@ class TestLiveControls:
     async def test_the_remaining_controls_reach_the_client(self, engine):
         await engine.rewind_files("msg-uuid-1")
         await engine.stop_task("task-1")
-        await engine.reconnect_mcp_server("ac-dc")
-        await engine.toggle_mcp_server("ac-dc", False)
+        await engine.reconnect_mcp_server("aic-dc")
+        await engine.toggle_mcp_server("aic-dc", False)
         assert client_of(engine).control_calls == [
             ("rewind_files", ("msg-uuid-1",)),
             ("stop_task", ("task-1",)),
-            ("reconnect_mcp_server", ("ac-dc",)),
-            ("toggle_mcp_server", ("ac-dc", False)),
+            ("reconnect_mcp_server", ("aic-dc",)),
+            ("toggle_mcp_server", ("aic-dc", False)),
         ]
 
     def test_a_control_before_connect_is_not_ready(self, tmp_path):

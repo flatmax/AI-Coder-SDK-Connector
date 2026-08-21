@@ -17,14 +17,14 @@ taxonomy."* Met — see [Live verification](#live-verification).
 
 ### What landed
 
-`src/ac_dc/claude_code/`, a self-contained package with no import edge to `ac_dc.llm`:
+`src/aic_dc/claude_code/`, a self-contained package with no import edge to `aic_dc.llm`:
 
 | Module | Lines | Role |
 |---|---|---|
 | `engine_config.py` | 224 | `EngineConfig` over `engine.json`; every field nullable, null means "let the CLI decide" |
 | `health.py` | 464 | `resolve_cli()` version gate, `EngineHealth`, `EngineStartupError`, failure classification |
 | `options.py` | 194 | The single place `ClaudeAgentOptions` is constructed; `NEVER_SET` prohibitions with reasons |
-| `messages.py` | 960 | `TurnTranslator` — SDK message objects → AC⚡DC event payloads |
+| `messages.py` | 960 | `TurnTranslator` — SDK message objects → AIC⚡DC event payloads |
 | `session.py` | 791 | One `ClaudeSDKClient` per process: connect, admission, message pump, interrupt drain, live controls |
 | `service.py` | 566 | The `ClaudeCodeService` RPC facade |
 | `__init__.py` | 86 | Public surface |
@@ -33,9 +33,9 @@ Supporting changes:
 
 - `scripts/engine_smoke.py` (255 lines) — the CLI-side smoke test the exit criterion names. Sends
   one prompt, prints every event payload with its channel, and can drive an interrupt mid-turn.
-- `src/ac_dc/config/engine.json` — the default (all-null) engine config, registered in
+- `src/aic_dc/config/engine.json` — the default (all-null) engine config, registered in
   `config.py`'s `_USER_FILES` so it is user-editable and not overwritten on upgrade.
-- `src/ac_dc/main.py` — registers `ClaudeCodeService` alongside `LLMService`. The chat path is
+- `src/aic_dc/main.py` — registers `ClaudeCodeService` alongside `LLMService`. The chat path is
   untouched: nothing in the frontend calls the new namespace yet.
 
 **The engine connects lazily**, on the first turn or an explicit `connect_engine()`. Connecting at
@@ -140,20 +140,20 @@ the browser dialog.
 | `claude_code/options.py` | 214 (+30) | The `system_prompt` preset fix (below) |
 | `claude_code/messages.py` | 979 (+31) | `compact_boundary`, subagent framing |
 
-`src/ac_dc/collab.py` (+51): the async permission gate runs on the SDK's task, not on an RPC task,
+`src/aic_dc/collab.py` (+51): the async permission gate runs on the SDK's task, not on an RPC task,
 so the caller-identity `ContextVar` was unset there and every async gate read as "not localhost".
 Fixed by propagating the context. **This retroactively enables every async gate on `LLMService` and
 `Repo`** — they had the same latent hole and were failing open. `test_collab_restrictions.py` grew
 from its previous size to 68 tests to pin it.
 
-`src/ac_dc/main.py` (+116): registers the permission plumbing, and kills the CLI child on shutdown
+`src/aic_dc/main.py` (+116): registers the permission plumbing, and kills the CLI child on shutdown
 (see [The orphan fix](#the-orphan-fix)).
 
 **Frontend.** `webapp/src/permission-dialog/` is new (4970 lines incl. tests):
 
 | Module | Lines | Role |
 |---|---|---|
-| `index.js` | 952 | `<ac-permission-dialog>` |
+| `index.js` | 952 | `<aic-permission-dialog>` |
 | `bodies.js` | 282 | Per-tool request bodies |
 | `queue.js` | 306 | Serialises concurrent requests; one dialog at a time |
 | `styles.js` | 537 | |
@@ -165,7 +165,7 @@ from its previous size to 68 tests to pin it.
 (276), and `streaming.js` was substantially rewritten (1582 lines changed) to consume the Claude
 Code event stream instead of the native one. `styles.js` (+825 net) carries the turn-block UI.
 
-`LLMService` and `src/ac_dc/llm/` are **untouched and still registered** — per the plan's rule that
+`LLMService` and `src/aic_dc/llm/` are **untouched and still registered** — per the plan's rule that
 phases 1–3 are not interleaved. Nothing in the chat path reaches them.
 
 ### Removed from the frontend
@@ -179,7 +179,7 @@ Deleted outright, because the native engine's affordances have no Claude Code eq
 | The three retry-prompt builders (in `helpers.js`, −88) | — | — |
 
 Also removed from the UI: the mode toggle and the ✨ and 📜 buttons (**phase 6**), the reasoning
-control (**phase 6**), and the URL chips. `<ac-history-browser>` is left mounted but **inert** —
+control (**phase 6**), and the URL chips. `<aic-history-browser>` is left mounted but **inert** —
 `history_list` does not exist on `ClaudeCodeService` yet (**phase 5**). `_reasoningEnabled` and
 `_reasoningEffort` are still declared on the chat panel but nothing reads them; the `viewer` framing
 value arrives from the engine and is not wired to anything. The CSS families for all of the above
@@ -194,7 +194,7 @@ producer on this path. `doc_convert_available` was added to `EngineState` in the
 `build_option_kwargs` now sets `system_prompt={"type": "preset", "preset": "claude_code"}`.
 **Omitting it had been sending an empty prompt**, not the CLI's: the SDK emits `--system-prompt ""`
 for `None`, which strips the dynamic sections carrying the working directory, the git status and the
-platform. Observed: an agent asked to edit `greet.py` in a repo at `/tmp/ac-dc-live` reached for
+platform. Observed: an agent asked to edit `greet.py` in a repo at `/tmp/aic-dc-live` reached for
 `/home/flatmax/greet.py`, because nothing had told it where it was. This is the one exception to
 `options.py`'s null-means-omit rule, and the reason is recorded next to it.
 
@@ -307,7 +307,7 @@ the CLI actually suggests.
 Fixed:
 
 - **The derived rule named the wrong tool, so it did nothing.** Rules were built from the requesting
-  tool's name, giving `Write(src/ac_dc/**)` for a `Write` call. Claude Code consults path rules for
+  tool's name, giving `Write(src/aic_dc/**)` for a `Write` call. Claude Code consults path rules for
   `Edit` and `Read` only; anything else is accepted, never consulted, and warned about at startup
   (v2.1.210+). Clicking "always allow" wrote a rule to settings that had no effect, and the user was
   asked again on the next call. `_RULE_TOOL_FOR_PATHS` now maps write tools to `Edit` and read tools
@@ -412,7 +412,7 @@ which file gets written and deserves its own decision.
 
 ### For whoever picks up phase 3
 
-- **Phase 3 is the deletion.** `LLMService` and `src/ac_dc/llm/` are intact and registered; the
+- **Phase 3 is the deletion.** `LLMService` and `src/aic_dc/llm/` are intact and registered; the
   chat path does not reach them. The exit criterion for phase 2 is met, so the deletion is now
   unblocked — do it in one commit, per the plan.
 - **`collab.py`'s `ContextVar` fix is load-bearing beyond this phase.** Every async gate on
@@ -479,9 +479,9 @@ absence, not an oversight.
 Five dependencies left `pyproject.toml` with it: `litellm`, `tiktoken`, `boto3`, `tenacity` and
 `trafilatura`. The reason each one was there is recorded in the comment that replaced them.
 
-`src/ac_dc/__init__.py` now re-exports nothing but `__version__`. It used to hoist the four engine
+`src/aic_dc/__init__.py` now re-exports nothing but `__version__`. It used to hoist the four engine
 types that were constructed everywhere; all four are gone, and the surviving subsystems are reached
-by module path, which keeps `import ac_dc` free of transitive cost.
+by module path, which keeps `import aic_dc` free of transitive cost.
 
 ### What survived by moving
 
@@ -671,7 +671,7 @@ service-level pass-through tests. Phase 6's exit criterion ("the Context tab sho
 as `/context` in the CLI, live") is the check that closes this, and it is worth doing sooner than
 that.
 
-Two empty package directories were removed by hand (`src/ac_dc/llm/`, `src/ac_dc/url_service/`);
+Two empty package directories were removed by hand (`src/aic_dc/llm/`, `src/aic_dc/url_service/`);
 both held nothing but stale `__pycache__` after their contents were deleted.
 
 ### Deviations from `inventory.md`
@@ -734,7 +734,7 @@ both held nothing but stale `__pycache__` after their contents were deleted.
   [interlude](#interlude--the-tab-a-subagent-never-got-2026-08-17). CC-12 is unchanged.*
 - **No upgrade notice for a stale `llm.json` or `system.md`.** They are left on disk and ignored.
 - **The doc index still misses the agent's writes.** Phase 4.
-- **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged from phase 2.
+- **`<aic-history-browser>` is still mounted and inert.** Phase 5, unchanged from phase 2.
 
 ### For whoever picks up phase 4
 
@@ -828,7 +828,7 @@ to call it is visible in the transcript as a tool card.
 
 ### What landed
 
-Two new modules, both in `src/ac_dc/claude_code/`:
+Two new modules, both in `src/aic_dc/claude_code/`:
 
 | File | Lines | What it is |
 |---|---|---|
@@ -892,12 +892,12 @@ leading dot is a real directory and only `..` leaves.
 
 ### The gate had to learn about our own tools
 
-`specs5/3-engine/permissions.md` puts the `ac-dc` index tools in the read-only row: *displayed, not
+`specs5/3-engine/permissions.md` puts the `aic-dc` index tools in the read-only row: *displayed, not
 gated*. That was implemented as `classify_tool` returning `"read"` for them — which shapes a dialog's
 wording and does not skip one. `Read`, `Glob` and `Grep` are ungated because the **CLI** never asks
 about them. Our MCP tools it does ask about, in `acceptEdits` and `default` though not in `plan`.
 
-So `can_use_tool` now early-returns `PermissionResultAllow()` for `mcp__ac-dc__*`, with no dialog, no
+So `can_use_tool` now early-returns `PermissionResultAllow()` for `mcp__aic-dc__*`, with no dialog, no
 broadcast, and no prompt recorded on the turn — a prompt nobody saw must not inflate the turn footer's
 tally. Without it the agent stalls on a dialog for every `symbol_map` call, and answering those is
 click-through training, which is R-12 in `risks.md` becoming true through a mechanism the risk register
@@ -968,8 +968,8 @@ the bridge, then runs one turn.
 Four runs against CLI 2.1.229. Three pass; the fourth is the one that found the gate bug, and it ran
 first as a failure:
 
-- **`--no-docs`** (352 files indexed of 447): the model called `mcp__ac-dc__symbol_map` with
-  `{'path_prefix': 'src/ac_dc/claude_code'}` and named `permissions.py` as the module holding the
+- **`--no-docs`** (352 files indexed of 447): the model called `mcp__aic-dc__symbol_map` with
+  `{'path_prefix': 'src/aic_dc/claude_code'}` and named `permissions.py` as the module holding the
   permission gate, from the map alone. It also reported the chunk boundary rather than treating an
   unseen file as absent.
 - **`--tool doc_outline`**: summarised all seven documents in `specs5/plan/` — their headings,
@@ -977,7 +977,7 @@ first as a failure:
   enough to state that three phases were logged complete and phase 4 handed off.
 - **`--write`, first attempt — failed.** The hook half worked: `files_reindexed` came back
   `['scratch_bridge_smoke.py']`. But the tool call itself was refused — *"Claude requested permissions
-  to use mcp__ac-dc__file_symbols, but you haven't granted it yet"* — and the agent said so plainly
+  to use mcp__aic-dc__file_symbols, but you haven't granted it yet"* — and the agent said so plainly
   instead of guessing, which is the only reason it was legible. Two bugs behind one symptom: the gate
   did not ungate our tools, and the script passed no `can_use_tool` at all, so the *CLI* was answering
   and the script would have logged a real denial as a model choice. Both fixed; the script now wires
@@ -998,7 +998,7 @@ Two facts from the live runs worth knowing:
 - **`get_mcp_status` does not list an in-process SDK server.** It reported only the user's
   `chrome-devtools` while our six tools were being called successfully in the same turn. The smoke
   script's status line is context, not the registration check its comment used to claim; what proves
-  registration is a `mcp__ac-dc__*` call happening at all.
+  registration is a `mcp__aic-dc__*` call happening at all.
 - **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.**
   [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session)'s tripwire, working: the
   environment redirects the CLI to a gateway while `~/.claude/.credentials.json` exists. Worth knowing
@@ -1046,7 +1046,7 @@ Two facts from the live runs worth knowing:
   as a sentence on `EngineHealth.degradations` where it happens, and the health banner renders it beside
   the version and credential warnings. The same two tests now assert the sentence, not just the log.
 - **No token-cost display for the tool inventory.** `mcp-bridge.md` also wants server health and the
-  `ac-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
+  `aic-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
   the panel does not mention them. Phase 6 territory. The banner above is the same missing surface seen
   from the other side. It also inherited phase 3's gap that neither context panel has a unit test —
   that half has since been pulled forward to sit ahead of phase 5, because phase 5 adds *session load*
@@ -1054,7 +1054,7 @@ Two facts from the live runs worth knowing:
 - **No `symbol_map` in the Context tab's cost breakdown.** Same reason.
 - **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8, unchanged from
   phase 3. *The tab strip half closed 2026-08-17, same entry as under phase 3.*
-- **`<ac-history-browser>` is still mounted and inert.** Phase 5, unchanged since phase 2.
+- **`<aic-history-browser>` is still mounted and inert.** Phase 5, unchanged since phase 2.
 
 ### For whoever picks up phase 5
 
@@ -1075,7 +1075,7 @@ Two facts from the live runs worth knowing:
   `result['files_modified']` misses it because `messages.py:62` gates `_files_modified` on the same
   four-tool `_FILE_WRITING_TOOLS` map — whose docstring already calls input-attribution "a stopgap".
   Name the field for what it holds (`files_written_by_file_tools` or equivalent). A wrong live
-  broadcast dies at reload; a wrong field in `.ac-dc4/` is what the history browser and full-text
+  broadcast dies at reload; a wrong field in `.aic-dc/` is what the history browser and full-text
   search show until someone migrates every transcript users have accumulated. Phase 8 may later make
   the narrow name obsolete — that is a cheap problem, and the reverse is not.
 - **Before you start, the two context panels need tests and one live run.** They refresh on *a turn
@@ -1090,7 +1090,7 @@ Two facts from the live runs worth knowing:
   error anywhere. `build_hook_matchers` returns observation only, and
   `test_claude_code_hooks.py` pins that the returned dict never carries a decision.
 - **`can_use_tool` now has an early return before any dialog is built.** Anything you add to the front
-  of that method runs after it for `mcp__ac-dc__*` calls and before it for everything else. If a future
+  of that method runs after it for `mcp__aic-dc__*` calls and before it for everything else. If a future
   server is added to the bridge, it is ungated by the same line — which is correct only as long as
   every tool on it is genuinely read-only and in-process.
 - **`collab.py`'s `ContextVar` fix and its five `TestGateUnderRealDispatch` tests survive**, unchanged
@@ -1265,7 +1265,7 @@ model's view had diverged.
 ### One store, and the one it replaced
 
 `session_store.py` (753 lines) implements the SDK's `SessionStore` protocol as `RepoSessionStore`:
-`.ac-dc4/sessions/<project>/<session>.jsonl` with a sibling `<session>.summary.json`, folded and
+`.aic-dc/sessions/<project>/<session>.jsonl` with a sibling `<session>.summary.json`, folded and
 written atomically. Per-key `asyncio.Lock`s, so two appends to one session cannot interleave; every
 key component goes through `_safe_component` / `_safe_subpath` and raises `SessionStoreKeyError`,
 because the session ID reaching the path builder is minted by the CLI and not by us.
@@ -1310,7 +1310,7 @@ health. Both were specified in phase 1 and neither had a reader until this phase
 
 ### The events log had one writer and six events
 
-`events_log.py` (347 lines), append-only at `.ac-dc4/events.jsonl`, with `EVENT_TYPES` a **closed**
+`events_log.py` (347 lines), append-only at `.aic-dc/events.jsonl`, with `EVENT_TYPES` a **closed**
 seven-member set: a typo'd discriminator writes a record the browser has no renderer for, which reads
 as "the event never happened" rather than as a bug. `id` and `timestamp` come from one clock call so
 they cannot disagree.
@@ -1321,7 +1321,7 @@ event" and all three only broadcast live. They are records now, and they render 
 in a browsed session.
 
 `files_written_by_file_tools` keeps CC-18's narrow name. A wrong live broadcast dies at reload; a
-wrong field name in `.ac-dc4/` is what the browser shows until somebody migrates every transcript
+wrong field name in `.aic-dc/` is what the browser shows until somebody migrates every transcript
 users have accumulated.
 
 ### The browser was a reader for an engine that no longer existed
@@ -1334,7 +1334,7 @@ engine's. Seven RPCs now stand behind it: `history_list`, `history_load`, `histo
 The pieces that took more than re-pointing:
 
 - **Search that a cold index cannot answer differently.** `history_index.py` (563 lines) is CC-19's
-  derived index: token postings under `.ac-dc4/`, `INDEX_VERSION`-stamped, deletable and rebuildable
+  derived index: token postings under `.aic-dc/`, `INDEX_VERSION`-stamped, deletable and rebuildable
   from the transcripts. It **narrows which sessions to read and never decides a hit** — every match is
   confirmed against the transcript text — so a warm index and a cold one return the same rows, and the
   index can go stale without being able to disagree. `role` narrows to user, assistant or *tool*, the
@@ -1465,7 +1465,7 @@ from the mirrored transcript)
 
 ### 2 906 green tests and an engine that could not connect
 
-The SDK validates that pair in `ClaudeSDKClient.connect()` and again in `query()`. AC⚡DC had set
+The SDK validates that pair in `ClaudeSDKClient.connect()` and again in `query()`. AIC⚡DC had set
 `enable_file_checkpointing=True` unconditionally since phase 1 and it was harmless for four phases,
 because **nothing constructed a store** — `build_option_kwargs` only adds `session_store` when it is
 given one, and until phase 5 nobody was. The moment `_build_session_store()` started returning a
@@ -1492,7 +1492,7 @@ RPC refusal — take Python to **2 915 passed, 75 skipped**.
 ### Which one loses, and the answer was not close
 
 [CC-20](decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job) records it. The
-store is `.ac-dc4/` history, resume-after-restart, the session browser and the derived index —
+store is `.aic-dc/` history, resume-after-restart, the session browser and the derived index —
 everything phase 5 shipped, and its absence reads as data loss days later when the CLI's own retention
 window expires. Checkpointing was one control that has never had a caller, over changes git already
 tracks. `options.py` now sets checkpointing and the replay flag only when there is no store, which
@@ -1528,13 +1528,13 @@ a shutdown path needs a second agent, not a cleverer test.
 ### Every session row said the same thing, and 2 915 green tests agreed
 
 The bug the live run exposed was on screen the whole time. The session list showed, for **every** row,
-the same 100 characters of AC⚡DC's own `<ac-dc-ui-context>` prose — and `session-preview` is the only
+the same 100 characters of AIC⚡DC's own `<aic-dc-ui-context>` prose — and `session-preview` is the only
 field that distinguishes one row from another. A history browser where every entry is identical.
 
 Three things had to line up, and they did:
 
 - The CLI truncates the sidecar's `first_prompt` to **exactly 200 characters**, with an ellipsis. Our
-  framing block is longer than that, so the truncation lands *inside* it and `</ac-dc-ui-context>` never
+  framing block is longer than that, so the truncation lands *inside* it and `</aic-dc-ui-context>` never
   appears in the field.
 - `strip_framing` needs that closing tag. Without it, it takes its "opened and never closed" branch and
   returns the text unchanged — correct behaviour, on input it was never given a way to fix.
@@ -1579,7 +1579,7 @@ set, and `materialize_resume_session` copies the store's session into a temp `CL
 out like `~/.claude/` and points the subprocess there. Confirmed live: both `_bundled/claude` pids carry
 `CLAUDE_CONFIG_DIR=/tmp/claude-resume-<suffix>`.
 
-The consequence belongs in the spec, not just here. **Once AC⚡DC resumes a session,
+The consequence belongs in the spec, not just here. **Once AIC⚡DC resumes a session,
 `~/.claude/projects/…/<id>.jsonl` is frozen at the moment of resume** — permanently, and a terminal
 `claude --resume` on that id sees a stale conversation ending mid-restart. This sharpens the mirror-gap
 warning from a nicety into the thing it is: before a resume, a gap in our mirror was survivable because
@@ -1614,7 +1614,7 @@ directory is the live `CLAUDE_CONFIG_DIR` of the children being killed, and pull
 CLI still flushing its transcript would trade a disk leak for a write error on the way out.
 
 Two choices in it are worth the ink. It is **registered, not discovered**: sweeping the temp dir for
-the `claude-resume-` prefix would also match the live directory of another AC⚡DC or a plain `claude`
+the `claude-resume-` prefix would also match the live directory of another AIC⚡DC or a plain `claude`
 running alongside, and deleting that is a worse bug than the leak. And the registry is **not pruned on
 a graceful disconnect** — `purge()` removes with `ignore_errors`, so an already-cleaned path costs one
 failed `rmtree`, which is cheaper than keeping two sources of truth about which directories still
@@ -1687,8 +1687,8 @@ faithfully and returned it. The parser's first three user messages, live:
 ```
 parser messages: 329
   user msg #0 (idx   0): 'This session is being continued from a previous conversation that ran out of context. The '
-  user msg #1 (idx 102): '<ac-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
-  user msg #2 (idx 265): '<ac-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+  user msg #1 (idx 102): '<aic-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+  user msg #2 (idx 265): '<aic-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
 ```
 
 Three things are worth keeping about this.
@@ -1734,7 +1734,7 @@ exiting 0.
 ## Phase 6 — Context and cost visualisation (2026-08-17)
 
 The exit criterion: **the Context tab shows the designed visualisation over those numbers, names the
-`ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is
+`aic-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is
 unknown.** All three clauses are met in code and in tests. The first two were read off a live CLI on
 2026-08-17; the third was closed live later the same day for the case that actually occurs — a priced
 turn, verified as a *difference* rather than a running total — while its two remaining renderings
@@ -1745,7 +1745,7 @@ The phase divides on which half of it owed a correctness pass. The **context** n
 theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
 wrong on its own terms, collapsed into `context-usage.js`. The **cost** numbers turned out to owe one
 nobody had budgeted for. `total_cost_usd` and `modelUsage` are *session running totals* in a
-streaming-input session, which is the only kind AC⚡DC runs, and both readers printed them as one turn's
+streaming-input session, which is the only kind AIC⚡DC runs, and both readers printed them as one turn's
 — so every turn was mispriced upward, monotonically, and the HUD's "This turn · $1.87" was the whole
 session's bill. The difference is taken in the engine now (`cost.py`, 207 lines), and the wire carries
 `turn_cost_usd`, `turn_cost_basis` and `turn_model_usage`.
@@ -1824,7 +1824,7 @@ fires on every file the agent writes, so a turn with an edit in it fills this". 
 both directions, live, with the panel mounted throughout: a `window` probe on `hook-event` recorded
 **zero** events across two agent writes, while `file_symbols` on a file created seconds earlier came back
 fully indexed and the turn footer listed it under "3 files modified". So the hook ran, the re-index ran,
-and the *announcement* is what does not exist — AC⚡DC registers its `PostToolUse` hook as an SDK
+and the *announcement* is what does not exist — AIC⚡DC registers its `PostToolUse` hook as an SDK
 callback, which the CLI answers over the control channel and does not put in the message stream, and
 `HookEventMessage` is the only thing feeding this table. The copy now says an empty table is the normal
 state and is not evidence the re-index did not run.
@@ -1876,7 +1876,7 @@ the verifying**, so the numbers on screen described the conversation that was re
 instance, no synthetic turn.
 
 Verified by reading it: the segmented context bar and its arithmetic; all five Debug sections; the
-`ac-dc` tool inventory with a token cost per tool, which is the criterion's "names the `ac-dc` tools it
+`aic-dc` tool inventory with a token cost per tool, which is the criterion's "names the `aic-dc` tools it
 is paying for"; `get_mcp_status()` answering `connected`; Debug's `Grid rows` cross-checking the Usage
 section it is derived independently of; and both of the fixes above that have a visible consequence.
 
@@ -1931,7 +1931,7 @@ chip that was rendering the known branch. **A probe over rendered HTML has to na
 Two smaller things the live run settled about method:
 
 - **Diagnose the Python side first.** A webapp edit HMR-reloads the page, which remounts
-  `ac-context-usage-tab` and clears the hook log the diagnosis is reading. The hook finding above was
+  `aic-context-usage-tab` and clears the hook log the diagnosis is reading. The hook finding above was
   only reachable because the `health.py` edits came before the `context-usage-tab.js` ones.
 - **`(Budget + Cache)` survived four phases** of the panel it named being replaced. Stale copy is not
   found by grepping for what changed; it is found by reading the screen.
@@ -2293,10 +2293,10 @@ precondition is visible instead of assumed.
   SDK's 1 MB stdout line limit (`_DEFAULT_MAX_BUFFER_SIZE`, `subprocess_cli.py`), which raises in the reader
   and permanently kills the message pump — the session does not recover, and the `get_context_usage`
   timeouts that follow are the usage HUD polling a corpse. `ClaudeAgentOptions.max_buffer_size` is settable
-  and `src/ac_dc/claude_code/options.py` never sets it. Raising it is a decision about memory, not a
+  and `src/aic_dc/claude_code/options.py` never sets it. Raising it is a decision about memory, not a
   cleanup, so it is left open rather than quietly changed.
 - **`Failed: Absolute paths not accepted:` is not chased.** It appeared repeatedly in the same log, comes
-  from `src/ac_dc/repo/paths.py`, and is a separate pre-existing bug — most likely a webapp caller handing
+  from `src/aic_dc/repo/paths.py`, and is a separate pre-existing bug — most likely a webapp caller handing
   the engine's absolute `file_path` to a repo API that takes repo-relative paths. Folding it into a UI
   polish commit would bury it.
 - **The dialog re-clones the whole head per editor creation.** Same cost the viewer has always paid, same
@@ -2665,7 +2665,7 @@ to probe the claude SDK to look for new features or unimplemented features, whic
 keep up with SDK changes?* The answer is yes, and the interesting part is that the first two ways of doing
 it both produced confident wrong numbers.
 
-The result is `src/ac_dc/claude_code/sdk_surface.py`, the gate in
+The result is `src/aic_dc/claude_code/sdk_surface.py`, the gate in
 `tests/test_claude_code_sdk_surface.py`, `ClaudeCodeService.get_sdk_surface`, and an Alt+5 tab linked
 from the Context tab's Debug section. The design reasoning lives in
 [`sdk-surface.md` § The probe](sdk-surface.md#the-probe); this entry records what it cost and what it
@@ -2982,7 +2982,7 @@ Correct headers deliver whatever is in `dist` faithfully, and `dist` has its own
 `--preview` rebuilds before serving and the comment on that branch in `main.py` already says
 why — a stale bundle means old code, and if the RPC contract moved since the build, the app calls methods
 the backend no longer has. That is the paragraph that describes this bug, written before it happened,
-guarding the one path it could not happen on. Plain `ac-dc` serves whatever `npm run build` last left
+guarding the one path it could not happen on. Plain `aic-dc` serves whatever `npm run build` last left
 behind, however long ago that was.
 
 `_warn_if_dist_is_stale` compares `dist/index.html`'s mtime against the newest file under `webapp/src` and
@@ -3094,7 +3094,7 @@ None caused by this work; all three were spec claiming something the code never 
   `✕`. Confirmed against `git show HEAD` before correcting the spec, since the checkbox removal touched
   the same render path.
 - **The Denial Scope Prompt was never built.** A modal asking whether a rule should be session-scoped or
-  written to `.claude/settings.local.json`, specified in full, with an `ac-dc-deny-read-scope` localStorage
+  written to `.claude/settings.local.json`, specified in full, with an `aic-dc-deny-read-scope` localStorage
   key no code reads or writes. Every denial goes to `settings.local.json` unconditionally. Marked **Not
   built** rather than deleted: `specs-reference/3-engine/permissions.md` § There is no runtime rule API
   already explains what a `session` option would have to mean, and that is worth keeping.

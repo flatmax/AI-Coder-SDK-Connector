@@ -88,7 +88,7 @@ composition model; the engine now supplies both the categories and their colours
 
 Cache-hit colour thresholds are retained from the native engine (≥ 50% green, ≥ 20% amber, below that
 default text) but the metric is demoted from a header badge to a table column. It was headline-worthy
-only while AC⚡DC was the thing doing the caching.
+only while AIC⚡DC was the thing doing the caching.
 
 **Rows are never summed.** No total row, no aggregate header figure. A turn that delegated to a cheaper
 model reports two rows and keeps two rows.
@@ -167,16 +167,16 @@ category table with its "Symbol Map" / "Doc Map" label swap, the 📈/📉 tier-
 
 | Key | Purpose |
 |---|---|
-| `ac-dc-context-section` | `"usage"` / `"session"` / `"debug"` — active Context tab section (unknown values fall back to `"usage"`) |
-| `ac-dc-context-debug-enabled` | `"true"` / `"false"` — whether the Debug section is offered at all (default `"false"`) |
-| `ac-dc-session-expanded` | JSON-serialized array of expanded Session-section group names |
-| `ac-dc-hud-collapsed` | JSON-serialized array of collapsed section names in the Usage HUD |
+| `aic-dc-context-section` | `"usage"` / `"session"` / `"debug"` — active Context tab section (unknown values fall back to `"usage"`) |
+| `aic-dc-context-debug-enabled` | `"true"` / `"false"` — whether the Debug section is offered at all (default `"false"`) |
+| `aic-dc-session-expanded` | JSON-serialized array of expanded Session-section group names |
+| `aic-dc-hud-collapsed` | JSON-serialized array of collapsed section names in the Usage HUD |
 
 Session-section defaults: Memory files and Tools expanded; System prompt sections and Agents/skills
 collapsed.
 
-Deleted keys: `ac-dc-context-subview` (the Budget/Cache pill toggle), `ac-dc-cache-expanded`,
-`ac-dc-cache-sort`, `ac-dc-budget-expanded`. On upgrade they are simply ignored — no migration, since
+Deleted keys: `aic-dc-context-subview` (the Budget/Cache pill toggle), `aic-dc-cache-expanded`,
+`aic-dc-cache-sort`, `aic-dc-budget-expanded`. On upgrade they are simply ignored — no migration, since
 none of them names a section that still exists.
 
 ### Session-section row shapes
@@ -194,7 +194,7 @@ Rows are projections of the payload, not new state. What the component adds is t
 | Skills | `skills` | Opens the defining file |
 | Slash commands | `slashCommands` | None |
 
-The `ac-dc` server is grouped and rendered by the same code path as any third-party server, with no
+The `aic-dc` server is grouped and rendered by the same code path as any third-party server, with no
 special-casing and no exemption from the token column.
 
 ### Debug section content

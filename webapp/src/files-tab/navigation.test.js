@@ -42,7 +42,7 @@ describe('FilesTab file click → navigate-file', () => {
     try {
       const t = mountTab();
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.shadowRoot.querySelector('.row.is-file .name').click();
       await settle(t);
       expect(listener).toHaveBeenCalledOnce();
@@ -80,7 +80,7 @@ describe('FilesTab file click → navigate-file', () => {
     try {
       const t = mountTab();
       await settle(t);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       picker.shadowRoot.querySelector('.row.is-file').dispatchEvent(
         new MouseEvent('click', {
           shiftKey: true,
@@ -159,7 +159,7 @@ describe('FilesTab file-mention-click handling', () => {
 
   /** Fire the event the chat panel dispatches for a mention. */
   function clickMention(t, path) {
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-mention-click', {
         detail: { path },
@@ -194,7 +194,7 @@ describe('FilesTab file-mention-click handling', () => {
     // silently changed what the next turn claimed the user
     // wanted. Opening the file is now the whole effect.
     const { t, setDenied } = await setupWithFiles();
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     const before = new Set(picker.excludedFiles);
     clickMention(t, 'a.md');
     await settle(t);
@@ -229,7 +229,7 @@ describe('FilesTab file-mention-click handling', () => {
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      const chat = t.shadowRoot.querySelector('ac-chat-panel');
+      const chat = t.shadowRoot.querySelector('aic-chat-panel');
       for (const detail of [
         {},
         null,
@@ -295,7 +295,7 @@ describe('FilesTab file-chip-click handling', () => {
   }
 
   function clickChip(t, path) {
-    const chat = t.shadowRoot.querySelector('ac-chat-panel');
+    const chat = t.shadowRoot.querySelector('aic-chat-panel');
     chat.dispatchEvent(
       new CustomEvent('file-chip-click', {
         detail: { path },
@@ -326,7 +326,7 @@ describe('FilesTab file-chip-click handling', () => {
     const listener = vi.fn();
     window.addEventListener('navigate-file', listener);
     try {
-      const chat = t.shadowRoot.querySelector('ac-chat-panel');
+      const chat = t.shadowRoot.querySelector('aic-chat-panel');
       for (const detail of [{}, null, { path: '' }, { path: 42 }]) {
         chat.dispatchEvent(
           new CustomEvent('file-chip-click', {
@@ -361,7 +361,7 @@ describe('FilesTab active-file handling', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     // Default — no active file yet.
     expect(picker.activePath).toBeNull();
     // Fire the viewer's event at the window level (same
@@ -389,7 +389,7 @@ describe('FilesTab active-file handling', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     window.dispatchEvent(
       new CustomEvent('active-file-changed', {
         detail: { path: 'a.md' },
@@ -425,7 +425,7 @@ describe('FilesTab active-file handling', () => {
       }),
     );
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.activePath).toBe('a.md');
     // Close it — viewer sends null.
     window.dispatchEvent(
@@ -453,7 +453,7 @@ describe('FilesTab active-file handling', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     const requestUpdateSpy = vi.spyOn(picker, 'requestUpdate');
     window.dispatchEvent(
       new CustomEvent('active-file-changed', {
@@ -519,7 +519,7 @@ describe('FilesTab active-file handling', () => {
       }),
     );
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.activePath).toBe('a.md');
     // Reload.
     pushEvent('files-modified', {});

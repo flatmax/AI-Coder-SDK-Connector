@@ -306,7 +306,7 @@ class TestPptxFailures:
         # Force the LibreOffice path to bypass — pretend soffice
         # isn't available.
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: None,
         )
         monkeypatch.delitem(sys.modules, "pptx", raising=False)
@@ -334,7 +334,7 @@ class TestPptxFailures:
         # Force the LibreOffice path to bypass so we hit the
         # python-pptx fallback which will fail on corrupt input.
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: None,
         )
         _write_source(scan_root, "corrupt.pptx", b"not a real pptx")

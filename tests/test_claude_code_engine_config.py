@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.engine_config — conversion phase 1.
+"""Tests for aic_dc.claude_code.engine_config — conversion phase 1.
 
 Scope:
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 
-from ac_dc.claude_code.engine_config import (
+from aic_dc.claude_code.engine_config import (
     EFFORT_LEVELS,
     MIN_MAX_BUFFER_SIZE,
     PERMISSION_MODES,
@@ -55,7 +55,7 @@ class TestDefaults:
 
     def test_bundled_engine_json_is_all_null(self):
         """The shipped default must not pin any CLI-owned default."""
-        from ac_dc.config import _bundled_config_dir
+        from aic_dc.config import _bundled_config_dir
 
         raw = json.loads(
             (_bundled_config_dir() / "engine.json").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.javascript — Layer 2.2.3.
+"""Tests for aic_dc.symbol_index.extractors.javascript — Layer 2.2.3.
 
 Scope: the JavaScriptExtractor — imports, functions, arrow
 functions, classes, methods, getters/setters, class fields
@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.javascript import JavaScriptExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.javascript import JavaScriptExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 # ---------------------------------------------------------------------------

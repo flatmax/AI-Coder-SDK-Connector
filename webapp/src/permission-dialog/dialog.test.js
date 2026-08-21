@@ -1,4 +1,4 @@
-// Tests for <ac-permission-dialog>.
+// Tests for <aic-permission-dialog>.
 //
 // The invariants asserted here are the ones from
 // specs5/5-webapp/permission-dialog.md that cost the most to get wrong,
@@ -123,7 +123,7 @@ import './index.js';
 // ---------------------------------------------------------------------------
 
 const NOW = Date.parse('2026-08-14T10:00:00.000Z');
-const ORIGINAL_TITLE = 'AC-DC — test';
+const ORIGINAL_TITLE = 'AIC-DC — test';
 
 const _mounted = [];
 let rpcCalls;
@@ -163,7 +163,7 @@ function publishRpc(overrides = {}) {
 }
 
 function mount() {
-  const el = document.createElement('ac-permission-dialog');
+  const el = document.createElement('aic-permission-dialog');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;
@@ -226,7 +226,7 @@ function headStyle(cssText) {
 
 /** Everything the dialog cloned out of document.head, concatenated. */
 function clonedStyleText(el) {
-  return [...el.shadowRoot.querySelectorAll('[data-ac-dc-monaco-clone]')]
+  return [...el.shadowRoot.querySelectorAll('[data-aic-dc-monaco-clone]')]
     .map((node) => node.textContent)
     .join('\n');
 }
@@ -239,7 +239,7 @@ function lastResolve() {
 }
 
 // ---------------------------------------------------------------------------
-// Payload factories — shapes from src/ac_dc/claude_code/permissions.py
+// Payload factories — shapes from src/aic_dc/claude_code/permissions.py
 // ---------------------------------------------------------------------------
 
 function execPayload(over = {}) {
@@ -394,14 +394,14 @@ beforeEach(() => {
   rpcCalls = [];
   toasts = [];
   onToast = (event) => toasts.push(event.detail);
-  window.addEventListener('ac-toast', onToast);
+  window.addEventListener('aic-toast', onToast);
   document.title = ORIGINAL_TITLE;
   monacoState.editors = [];
   monacoState.models = [];
 });
 
 afterEach(() => {
-  window.removeEventListener('ac-toast', onToast);
+  window.removeEventListener('aic-toast', onToast);
   while (_mounted.length) {
     const el = _mounted.pop();
     if (el.parentNode) el.parentNode.removeChild(el);
@@ -661,9 +661,9 @@ describe('after the settling interval', () => {
     await settle(el);
     await ask(el, execPayload({
       permission_id: 'perm_mcp',
-      tool_name: 'mcp__ac-dc__search',
+      tool_name: 'mcp__aic-dc__search',
       tool_class: 'mcp',
-      server: 'ac-dc',
+      server: 'aic-dc',
       command: null,
       input: { query: 'x' },
     }));
@@ -788,7 +788,7 @@ describe('deciding', () => {
     expect(button.title).not.toContain('settings file you can read and revoke');
   });
 
-  it('marks a rule AC-DC guessed rather than one the CLI suggested', async () => {
+  it('marks a rule AIC-DC guessed rather than one the CLI suggested', async () => {
     publishRpc();
     const el = mount();
     await settle(el);
@@ -851,7 +851,7 @@ describe('deciding', () => {
   });
 
   it('has no mode control when the CLI offered no mode', async () => {
-    // AC-DC never invents one: a rule grants one path and can be read back
+    // AIC-DC never invents one: a rule grants one path and can be read back
     // out of a settings file, whereas a mode silences the gate wholesale.
     publishRpc();
     const el = mount();

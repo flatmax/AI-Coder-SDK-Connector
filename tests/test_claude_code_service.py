@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.service — conversion phase 1.
+"""Tests for aic_dc.claude_code.service — conversion phase 1.
 
 The engine is faked; what is under test is the *outward* half of a turn.
 The properties that matter here are the ones a browser depends on:
@@ -28,15 +28,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.health import EngineHealth, EngineStartupError
-from ac_dc.claude_code.messages import Event
-from ac_dc.claude_code.service import (
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.health import EngineHealth, EngineStartupError
+from aic_dc.claude_code.messages import Event
+from aic_dc.claude_code.service import (
     SLASH_DENIED,
     SLASH_ROUTES,
     ClaudeCodeService,
 )
-from ac_dc.claude_code.session import (
+from aic_dc.claude_code.session import (
     EngineNotReadyError,
     SessionLostError,
     TurnInProgressError,
@@ -47,17 +47,17 @@ PNG = "data:image/png;base64,aGk="
 
 
 class FakeConfig:
-    def __init__(self, repo_root, config_dir=None, ac_dc_dir=None):
+    def __init__(self, repo_root, config_dir=None, aic_dc_dir=None):
         self.repo_root = repo_root
         self.config_dir = config_dir
         # Present so the session store is built on the production path in
         # every service test rather than only where one asks for it. Nothing
         # here appends, so no file is written — but a wiring change that
         # dropped the store would now have somewhere to show up.
-        # None without a repo root, matching ConfigManager.ac_dc_dir.
-        if ac_dc_dir is None and repo_root is not None:
-            ac_dc_dir = Path(repo_root) / ".ac-dc4"
-        self.ac_dc_dir = ac_dc_dir
+        # None without a repo root, matching ConfigManager.aic_dc_dir.
+        if aic_dc_dir is None and repo_root is not None:
+            aic_dc_dir = Path(repo_root) / ".aic-dc"
+        self.aic_dc_dir = aic_dc_dir
         self.snippet_calls: list[str] = []
 
     def get_snippets(self, mode="code"):
@@ -177,7 +177,7 @@ class FakeSession:
         return self.active_request_id
 
     async def set_permission_mode(self, mode):
-        from ac_dc.claude_code.engine_config import PERMISSION_MODES
+        from aic_dc.claude_code.engine_config import PERMISSION_MODES
 
         self.control_calls.append(("set_permission_mode", (mode,)))
         if self.control_error is not None:
@@ -197,7 +197,7 @@ class FakeSession:
         self.permission_mode = mode
 
     def prefer_permission_mode(self, mode):
-        from ac_dc.claude_code.engine_config import PERMISSION_MODES
+        from aic_dc.claude_code.engine_config import PERMISSION_MODES
 
         self.control_calls.append(("prefer_permission_mode", (mode,)))
         if mode not in PERMISSION_MODES:
@@ -1509,13 +1509,13 @@ class TestLiveControls:
         assert await service.get_mcp_status() == {"servers": []}
 
     async def test_mcp_controls_report_what_they_did(self, service):
-        assert await service.reconnect_mcp_server("ac-dc") == {
+        assert await service.reconnect_mcp_server("aic-dc") == {
             "status": "reconnecting",
-            "name": "ac-dc",
+            "name": "aic-dc",
         }
-        assert await service.toggle_mcp_server("ac-dc", False) == {
+        assert await service.toggle_mcp_server("aic-dc", False) == {
             "status": "ok",
-            "name": "ac-dc",
+            "name": "aic-dc",
             "enabled": False,
         }
 
@@ -1670,8 +1670,8 @@ GATED_METHODS: dict[str, tuple] = {
     "set_model": ("claude-opus-5",),
     "rewind_files": ("msg-uuid-1",),
     "stop_task": ("task-1",),
-    "reconnect_mcp_server": ("ac-dc",),
-    "toggle_mcp_server": ("ac-dc", True),
+    "reconnect_mcp_server": ("aic-dc",),
+    "toggle_mcp_server": ("aic-dc", True),
     # Writes nothing, and is still a lever on the prompt: the viewer path
     # goes into the turn framing and into the `ui_state` tool, so a
     # participant could point the agent at a file of their choosing on
@@ -1845,12 +1845,12 @@ class TestBridgeWiring:
         )
 
     def test_the_server_is_registered_under_its_own_name(self, wired):
-        """`mcp__ac-dc__symbol_map` is the name the CLI and the permission
+        """`mcp__aic-dc__symbol_map` is the name the CLI and the permission
         classifier both spell out, so the key is interface."""
-        from ac_dc.claude_code.mcp_server import SERVER_NAME
+        from aic_dc.claude_code.mcp_server import SERVER_NAME
 
         assert list(wired.session._mcp_servers) == [SERVER_NAME]
-        assert SERVER_NAME == "ac-dc"
+        assert SERVER_NAME == "aic-dc"
 
     def test_the_two_observational_hooks_are_the_whole_subscription(self, wired):
         """Nothing that could decide anything — see hooks.py's invariant."""
@@ -1866,7 +1866,7 @@ class TestBridgeWiring:
     ):
         """Without the bridge the agent loses two tools and keeps every
         built-in; refusing to construct would trade that for a dead editor."""
-        from ac_dc.claude_code import mcp_server as mcp_module
+        from aic_dc.claude_code import mcp_server as mcp_module
 
         def boom(self):
             raise RuntimeError("no sdk")
@@ -1888,7 +1888,7 @@ class TestBridgeWiring:
         # and a banner reports the loss — otherwise the agent simply appears
         # inexplicably worse at repo-wide questions."
         assert svc.session.health.degradations == [
-            "The ac-dc repo tools did not start, so the agent has no symbol "
+            "The aic-dc repo tools did not start, so the agent has no symbol "
             "map, no document outlines and no reference graph — it will fall "
             "back to Glob, Grep and Read, which answer repo-wide questions "
             "less well."
@@ -1900,7 +1900,7 @@ class TestBridgeWiring:
     def test_a_hook_that_will_not_build_still_leaves_a_session(
         self, tmp_path, events, monkeypatch, caplog
     ):
-        from ac_dc.claude_code import service as service_module
+        from aic_dc.claude_code import service as service_module
 
         def boom(reindexer, broadcast=None):
             raise RuntimeError("no sdk")
@@ -1927,8 +1927,8 @@ class TestBridgeWiring:
         """One sentence per capability, not one per session: the two
         failures have different remedies, and a reader told only the first
         would go looking for a symbol map that is also gone."""
-        from ac_dc.claude_code import mcp_server as mcp_module
-        from ac_dc.claude_code import service as service_module
+        from aic_dc.claude_code import mcp_server as mcp_module
+        from aic_dc.claude_code import service as service_module
 
         def boom_hook(reindexer, broadcast=None):
             raise RuntimeError("no sdk")
@@ -1982,14 +1982,14 @@ class TestSessionStoreWiring:
     def test_the_store_points_at_the_repo_not_the_home_directory(
         self, wired, tmp_path
     ):
-        """`.ac-dc4/sessions/` is the whole point: the CLI already has a copy
+        """`.aic-dc/sessions/` is the whole point: the CLI already has a copy
         under ~/.claude/projects/, and that is the one that expires."""
-        assert wired.session_store.root == tmp_path / ".ac-dc4" / "sessions"
+        assert wired.session_store.root == tmp_path / ".aic-dc" / "sessions"
 
     def test_building_the_service_writes_nothing(self, wired, tmp_path):
         """A directory that exists is not the same signal as a session that
         was mirrored, so the store makes its own on first append."""
-        assert not (tmp_path / ".ac-dc4" / "sessions").exists()
+        assert not (tmp_path / ".aic-dc" / "sessions").exists()
 
     def test_an_injected_store_wins(self, tmp_path, events):
         sentinel = object()
@@ -2007,7 +2007,7 @@ class TestSessionStoreWiring:
         """Nowhere to mirror to is not a reason to refuse to start."""
         with caplog.at_level(logging.INFO):
             svc = ClaudeCodeService(
-                SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+                SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
                 event_callback=events,
                 engine_config=EngineConfig(),
             )
@@ -2027,7 +2027,7 @@ class TestSessionStoreWiring:
 
 
 class TestTheDiskWarning:
-    """One sentence, once, about the one thing under `.ac-dc4/` that does
+    """One sentence, once, about the one thing under `.aic-dc/` that does
     not rebuild.
 
     Transcripts hold pasted images verbatim as base64, so an image-heavy
@@ -2040,7 +2040,7 @@ class TestTheDiskWarning:
 
     @pytest.fixture
     def over_threshold(self, service, monkeypatch):
-        from ac_dc.claude_code import service as service_mod
+        from aic_dc.claude_code import service as service_mod
 
         monkeypatch.setattr(
             service.session_store,
@@ -2057,7 +2057,7 @@ class TestTheDiskWarning:
     ):
         warning = await over_threshold._disk_warning()
         assert "1.0 GiB" in warning
-        assert ".ac-dc4/sessions/" in warning
+        assert ".aic-dc/sessions/" in warning
         assert "history browser" in warning
 
     async def test_it_fires_at_most_once_per_server_lifetime(self, over_threshold):
@@ -2092,7 +2092,7 @@ class TestTheDiskWarning:
 
     async def test_without_a_store_there_is_nothing_to_measure(self, tmp_path, events):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -2153,7 +2153,7 @@ class TestTheMirrorGapTolerance:
         assert wired.session.health.mirror_gap_tolerance() == 7
 
     def test_a_config_without_the_section_uses_the_default(self, wired):
-        from ac_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
+        from aic_dc.claude_code.health import DEFAULT_MIRROR_GAP_TOLERANCE
 
         assert not hasattr(wired._config, "history_config")
         assert (
@@ -2214,7 +2214,7 @@ class TestHistoryRpcs:
 
     async def test_this_session_events_are_interleaved(self, wired, session_id):
         """The half of a browsed transcript the engine never wrote."""
-        from ac_dc.claude_code.events_log import commit_content
+        from aic_dc.claude_code.events_log import commit_content
 
         await wired._record_event("commit", commit_content("abc1234", "fix: it"))
         messages = await wired.history_load(session_id)
@@ -2248,7 +2248,7 @@ class TestHistoryRpcs:
         self, tmp_path, events
     ):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -2261,7 +2261,7 @@ class TestHistoryRpcs:
         self, tmp_path, events
     ):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -2280,7 +2280,7 @@ class TestHistoryRpcs:
         await wired._record_event("commit", "already done")
 
     def test_the_log_points_at_the_repo(self, wired, tmp_path):
-        assert wired.events_log.path == tmp_path / "repo" / ".ac-dc4" / "events.jsonl"
+        assert wired.events_log.path == tmp_path / "repo" / ".aic-dc" / "events.jsonl"
 
 
 class TestTheModeSwitchRecord:
@@ -2451,7 +2451,7 @@ class TestSearch:
                                 "type": "tool_use",
                                 "id": "toolu_1",
                                 "name": "Bash",
-                                "input": {"command": "ruff check src/ac_dc"},
+                                "input": {"command": "ruff check src/aic_dc"},
                             }
                         ],
                     },
@@ -2460,7 +2460,7 @@ class TestSearch:
         )
         rows = await wired.history_search("ruff check")
         assert [r["role"] for r in rows] == ["tool"]
-        assert "ruff check src/ac_dc" in rows[0]["content_preview"]
+        assert "ruff check src/aic_dc" in rows[0]["content_preview"]
 
     async def test_a_tool_result_is_never_searched(self, wired, newer):
         """The transcript holds results verbatim because it must; searching
@@ -2508,8 +2508,8 @@ class TestSearch:
                     "message": {
                         "role": "user",
                         "content": (
-                            "<ac-dc-ui-context>selected: zzzunique.py"
-                            "</ac-dc-ui-context>\nwhat does it do?"
+                            "<aic-dc-ui-context>selected: zzzunique.py"
+                            "</aic-dc-ui-context>\nwhat does it do?"
                         ),
                     },
                 }
@@ -2526,7 +2526,7 @@ class TestSearch:
 
     async def test_without_a_store_there_is_nothing_to_search(self, tmp_path, events):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -2562,7 +2562,7 @@ class TestTheDerivedIndex:
 
     def test_it_lands_under_the_project_key(self, wired, tmp_path):
         assert wired.history_index.path.parent == (
-            tmp_path / "repo" / ".ac-dc4" / "index"
+            tmp_path / "repo" / ".aic-dc" / "index"
         )
         assert wired.history_index.path.name.endswith(".json")
 
@@ -2636,7 +2636,7 @@ class TestTheDerivedIndex:
     ):
         """A truncated term list would make a real hit findable only after
         someone deleted the index."""
-        from ac_dc.claude_code.history_index import _TEXT_CAP
+        from aic_dc.claude_code.history_index import _TEXT_CAP
 
         await wired.session_store.append(
             {
@@ -2819,7 +2819,7 @@ class TestImagesAreFetchedOneAtATime:
 
     async def test_without_a_repo_it_says_why(self, tmp_path, events):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -2938,7 +2938,7 @@ class TestSubagentTranscripts:
     ):
         """``events.jsonl`` records belong to the session; interleaving them
         here would credit a commit to whichever subagent was running."""
-        from ac_dc.claude_code.events_log import commit_content
+        from aic_dc.claude_code.events_log import commit_content
 
         await wired._record_event("commit", commit_content("abc1234", "fix: it"))
         await seed_subagent(wired, session_id, "a1")
@@ -3001,7 +3001,7 @@ class TestDeletingASession:
     @pytest.fixture
     async def wired(self, tmp_path, events, old, live):
         """A past session with everything hanging off it, plus a live one."""
-        from ac_dc.claude_code.events_log import commit_content
+        from aic_dc.claude_code.events_log import commit_content
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -3090,7 +3090,7 @@ class TestDeletingASession:
 
     async def test_without_a_repo_it_says_why(self, tmp_path, events):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )
@@ -3173,7 +3173,7 @@ class TestSessionLifecycle:
 
     async def test_a_storeless_service_still_snapshots(self, tmp_path, events):
         svc = ClaudeCodeService(
-            SimpleNamespace(repo_root=tmp_path, config_dir=None, ac_dc_dir=None),
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
             event_callback=events,
             engine_config=EngineConfig(),
         )

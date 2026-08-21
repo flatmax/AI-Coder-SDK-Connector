@@ -1,4 +1,4 @@
-"""Tests for ac_dc.cli.
+"""Tests for aic_dc.cli.
 
 Layer 0 scope — verify the CLI parses arguments, prints the banner, and
 exits cleanly. Full startup orchestration is tested in Layer 6.
@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from ac_dc import __version__
-from ac_dc.cli import main
+from aic_dc import __version__
+from aic_dc.cli import main
 
 
 def test_main_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -23,15 +23,15 @@ def test_main_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     — not the banner wording itself, which changes as development
     progresses.
 
-    ``main()`` now dispatches to ``ac_dc.main.run`` which launches the
+    ``main()`` now dispatches to ``aic_dc.main.run`` which launches the
     webapp and RPC servers, opens a browser, and then waits on
     ``asyncio.Event().wait()`` to keep the process alive. Unit tests
     want the argparse + banner behaviour only, so we mock the launcher.
     ``run`` is patched where it's imported inside ``cli.main``
-    (``ac_dc.main.run``), not at the import site in ``ac_dc.cli``
+    (``aic_dc.main.run``), not at the import site in ``aic_dc.cli``
     (because ``cli.py`` imports it lazily inside the function).
     """
-    with patch("ac_dc.main.run") as mock_run:
+    with patch("aic_dc.main.run") as mock_run:
         # Replace the coroutine with a no-op async function so
         # asyncio.run can await it without raising.
         async def _noop(**_kwargs):
@@ -40,8 +40,8 @@ def test_main_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         exit_code = main([])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "AC-DC" in captured.err
-    assert "AI Coder - DeCoder" in captured.err
+    assert "AIC-DC" in captured.err
+    assert "AI-Coder-SDK-Connector" in captured.err
 
 
 def test_main_version_flag_prints_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -61,7 +61,7 @@ def test_main_help_flag_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
-    assert "ac-dc" in captured.out.lower()
+    assert "aic-dc" in captured.out.lower()
     assert "usage" in captured.out.lower()
 
 
@@ -69,7 +69,7 @@ def test_main_accepts_all_documented_flags() -> None:
     """All flags listed in specs4/6-deployment/startup.md parse without error.
 
     This test is the contract that the flag set is stable. ``main()``
-    now launches real servers via ``ac_dc.main.run``, so we mock that
+    now launches real servers via ``aic_dc.main.run``, so we mock that
     launcher — this test's scope is argparse plumbing, not the full
     startup orchestration (covered by Layer 6 tests). Each flag set
     should parse cleanly and reach the launcher; we don't verify what
@@ -92,7 +92,7 @@ def test_main_accepts_all_documented_flags() -> None:
         return None
 
     for flags in flag_sets:
-        with patch("ac_dc.main.run") as mock_run:
+        with patch("aic_dc.main.run") as mock_run:
             mock_run.side_effect = _noop
             assert main(flags) == 0, (
                 f"flags {flags!r} did not parse cleanly"
@@ -112,12 +112,12 @@ def test_main_rejects_unknown_flag() -> None:
 
 
 def test_module_entrypoint_runs() -> None:
-    """`python -m ac_dc` works as an alternative to the ac-dc script.
+    """`python -m aic_dc` works as an alternative to the aic-dc script.
 
     Uses a subprocess so we exercise the real __main__ module dispatch.
     """
     result = subprocess.run(
-        [sys.executable, "-m", "ac_dc", "--version"],
+        [sys.executable, "-m", "aic_dc", "--version"],
         capture_output=True,
         text=True,
         timeout=30,

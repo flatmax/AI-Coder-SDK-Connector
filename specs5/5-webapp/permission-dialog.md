@@ -144,7 +144,7 @@ inside a body captioned "command". A dialog asking for approval of something it 
 same failure the `write` renderer's fallback rule forbids.
 
 One known gap: when a plan is approved the CLI switches its own permission mode to `prePlanMode ?? default`
-**without announcing it on the stream**, so AC⚡DC's mode selector goes on claiming `plan`. Same class of
+**without announcing it on the stream**, so AIC⚡DC's mode selector goes on claiming `plan`. Same class of
 lie the `note_mode` callback fixed for the other mode transitions; it needs the engine to learn the target
 mode rather than guess it, so it is recorded here and not patched.
 
@@ -197,7 +197,7 @@ scrolling between the halves is not one.
 - **The pane follows focus and hover**, falling back to the chosen option and then to the first option that has an example. Comparing must not cost a click each way — a click is an answer — and a pane that opened blank beside a list of examples would read as a pane that failed to load.
 - **The pane names the option it is showing, and that option is marked in the list.** Two carriers, because four options beside one pane otherwise ask the user to work out which row they are looking at.
 - **It is monospace, and paragraphs keep their whitespace.** These are mockups; a box drawn with `│` and `└` re-flowed into prose is not the thing being chosen. A fenced block still renders as a code block inside it.
-- **The example is markdown, not HTML.** That is a choice made on the engine side — the CLI offers both formats and AC⚡DC asks for markdown, so the pane can use the escaping renderer the plan body and the chat panel already trust rather than putting model-authored HTML into the dialog's shadow DOM. The two sides have to agree on one format, so it is pinned rather than configurable.
+- **The example is markdown, not HTML.** That is a choice made on the engine side — the CLI offers both formats and AIC⚡DC asks for markdown, so the pane can use the escaping renderer the plan body and the chat panel already trust rather than putting model-authored HTML into the dialog's shadow DOM. The two sides have to agree on one format, so it is pinned rather than configurable.
 - **A multi-select renders each example under its own option instead.** The pane cannot serve one: several options can be ticked and "which example" has no answer, which is why the tool tells the model previews are single-select only. A model that sends one anyway has still authored something the user is deciding about, so it is shown where there is no ambiguity rather than dropped.
 - **The pane is navigable, not announced.** Same call as the diff (§ Accessibility): it is labelled by the option it belongs to and reachable in the DOM, but arrow-keying a radio group must not read a whole mockup aloud on every keystroke.
 
@@ -253,7 +253,7 @@ avoid.
 
 The control is labelled with the rule that will be written and its destination is stated next to it
 (`.claude/settings.local.json` for the default, local grant; `.claude/settings.json` for the shared
-one). Rules suggested by the CLI (`origin: "cli"`) are offered first and unlabelled; a rule AC⚡DC
+one). Rules suggested by the CLI (`origin: "cli"`) are offered first and unlabelled; a rule AIC⚡DC
 derived itself is marked "derived" so the user knows the pattern is our guess at their intent rather
 than the CLI's own normalisation.
 
@@ -266,7 +266,7 @@ a permission to grant permissions.
 
 Two consequences are stated in the control's tooltip rather than left to be discovered:
 
-- The rule applies to the `claude` CLI in this repository too, not just to AC⚡DC. That is the honest consequence of `setting_sources` including the project.
+- The rule applies to the `claude` CLI in this repository too, not just to AIC⚡DC. That is the honest consequence of `setting_sources` including the project.
 - It is a file the user can read and revoke. There is no invisible session grant behind this button — an in-memory "always" is exactly what the engine spec forbids.
 
 ### Editing the input

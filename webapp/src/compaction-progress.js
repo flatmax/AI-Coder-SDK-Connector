@@ -444,4 +444,4 @@ export class CompactionProgress extends LitElement {
   }
 }
 
-customElements.define('ac-compaction-progress', CompactionProgress);
+customElements.define('aic-compaction-progress', CompactionProgress);

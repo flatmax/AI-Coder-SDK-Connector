@@ -28,7 +28,7 @@
 //
 // Host integration — the chat panel imports this module
 // (side-effect registers the custom element), renders
-// `<ac-speech-to-text>` in the action bar, and listens
+// `<aic-speech-to-text>` in the action bar, and listens
 // for `transcript` events. The transcript handler
 // inserts the text at the cursor position with
 // auto-space separators. Error events surface via toast.
@@ -391,7 +391,7 @@ export class SpeechToText extends LitElement {
   }
 }
 
-customElements.define('ac-speech-to-text', SpeechToText);
+customElements.define('aic-speech-to-text', SpeechToText);
 
 // Exported for tests.
 export { _RESTART_DELAY_MS, _getRecognitionCtor };

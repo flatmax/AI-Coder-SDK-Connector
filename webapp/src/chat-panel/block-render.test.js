@@ -1157,7 +1157,7 @@ describe('renderSubagentRow', () => {
   });
 
   it('spins a running subagent and offers the one thing a user may do', () => {
-    // AC⚡DC did not create this subagent and cannot message it. Stopping it is
+    // AIC⚡DC did not create this subagent and cannot message it. Stopping it is
     // the only legitimate write.
     const panel = stubPanel();
     const live = row({ status: 'running', last_tool_name: 'Grep', agent_id: 'agent_7' });
@@ -1485,7 +1485,7 @@ describe('renderLiveUsage', () => {
   it('shows no cost, which cannot be known mid-turn', () => {
     // Pricing this turn needs the result message's differenced session total;
     // anything shown before it would be a guess, and chat.md § Turn Footer
-    // forbids numbers AC⚡DC computed itself.
+    // forbids numbers AIC⚡DC computed itself.
     const host = draw(renderLiveUsage({
       turn_model_usage: { 'claude-opus-5': { input_tokens: 900, costUSD: 0.02 } },
     }));

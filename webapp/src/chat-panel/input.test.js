@@ -962,7 +962,7 @@ describe('ChatPanel input history — recording', () => {
     p._input = 'my first prompt';
     await p._send();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual(['my first prompt']);
   });
 
@@ -979,7 +979,7 @@ describe('ChatPanel input history — recording', () => {
     p._input = 'second';
     await p._send();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual(['first', 'second']);
   });
 
@@ -990,7 +990,7 @@ describe('ChatPanel input history — recording', () => {
     p._input = '';
     await p._send();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual([]);
   });
 
@@ -1009,7 +1009,7 @@ describe('ChatPanel input history — recording', () => {
       await p._send();
       await settle(p);
       const history = p.shadowRoot.querySelector(
-        'ac-input-history',
+        'aic-input-history',
       );
       expect(history._entries).toEqual(['will fail']);
     } finally {
@@ -1031,7 +1031,7 @@ describe('ChatPanel input history — session seeding', () => {
       ],
     });
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual([
       'first user msg',
       'second user msg',
@@ -1053,7 +1053,7 @@ describe('ChatPanel input history — session seeding', () => {
       ],
     });
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual(['real prompt']);
   });
 
@@ -1076,7 +1076,7 @@ describe('ChatPanel input history — session seeding', () => {
       ],
     });
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual(['please look at this']);
   });
 
@@ -1084,7 +1084,7 @@ describe('ChatPanel input history — session seeding', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('existing entry');
     pushEvent('session-changed', {
       session_id: 'sess_new',
@@ -1100,7 +1100,7 @@ describe('ChatPanel input history — open/close interactions', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('prior message');
     const ta = p.shadowRoot.querySelector('.input-textarea');
     ta.value = '';
@@ -1119,7 +1119,7 @@ describe('ChatPanel input history — open/close interactions', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('prior');
     const ta = p.shadowRoot.querySelector('.input-textarea');
     ta.value = 'some typed text';
@@ -1138,7 +1138,7 @@ describe('ChatPanel input history — open/close interactions', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     const ta = p.shadowRoot.querySelector('.input-textarea');
     ta.setSelectionRange(0, 0);
     ta.dispatchEvent(
@@ -1155,7 +1155,7 @@ describe('ChatPanel input history — open/close interactions', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('prior');
     p._input = 'draft message';
     await settle(p);
@@ -1178,7 +1178,7 @@ describe('ChatPanel input history — event handling', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('recalled prompt');
     history.show('');
     await settle(p);
@@ -1193,7 +1193,7 @@ describe('ChatPanel input history — event handling', () => {
     publishFakeRpc({});
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('prior');
     history.show('my draft');
     await settle(p);
@@ -1209,7 +1209,7 @@ describe('ChatPanel input history — event handling', () => {
     publishFakeRpc({ 'ClaudeCodeService.chat_streaming': started });
     const p = mountPanel();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     history.addEntry('prior');
     history.show('');
     await settle(p);
@@ -1684,12 +1684,12 @@ describe('ChatPanel new-session', () => {
     await settle(p);
     const toasts = [];
     const onToast = (e) => toasts.push(e.detail);
-    window.addEventListener('ac-toast', onToast);
+    window.addEventListener('aic-toast', onToast);
     try {
       p.shadowRoot.querySelector('.new-session-button').click();
       await settle(p);
     } finally {
-      window.removeEventListener('ac-toast', onToast);
+      window.removeEventListener('aic-toast', onToast);
     }
     expect(toasts[0].message).toContain('Only the host');
     expect(toasts[0].type).toBe('warning');
@@ -1705,12 +1705,12 @@ describe('ChatPanel new-session', () => {
     await settle(p);
     const toasts = [];
     const onToast = (e) => toasts.push(e.detail);
-    window.addEventListener('ac-toast', onToast);
+    window.addEventListener('aic-toast', onToast);
     try {
       await p._onNewSession();
       await settle(p);
     } finally {
-      window.removeEventListener('ac-toast', onToast);
+      window.removeEventListener('aic-toast', onToast);
     }
     expect(toasts[0].message).toContain('A turn is still running');
   });
@@ -1763,8 +1763,8 @@ describe('ChatPanel new-session', () => {
 
 describe('ChatPanel history browser', () => {
   // The 📜 button came back with the ✨ one in phase 5, now that
-  // `<ac-history-browser>` reads the CLI's own transcript mirrored under
-  // `.ac-dc4/sessions/` instead of `LLMService`'s session store. It stayed
+  // `<aic-history-browser>` reads the CLI's own transcript mirrored under
+  // `.aic-dc/sessions/` instead of `LLMService`'s session store. It stayed
   // mounted and closed through phases 2–4, which is why it only needed
   // repointing rather than rebuilding.
 
@@ -1777,7 +1777,7 @@ describe('ChatPanel history browser', () => {
     const p = mountPanel();
     await settle(p);
     const browser = p.shadowRoot.querySelector(
-      'ac-history-browser',
+      'aic-history-browser',
     );
     expect(browser.open).toBe(false);
     p.shadowRoot.querySelector('.history-button').click();
@@ -1817,7 +1817,7 @@ describe('ChatPanel history browser', () => {
     p._onOpenHistory();
     await settle(p);
     const browser = p.shadowRoot.querySelector(
-      'ac-history-browser',
+      'aic-history-browser',
     );
     expect(browser.open).toBe(true);
   });
@@ -1833,7 +1833,7 @@ describe('ChatPanel history browser', () => {
     p._historyOpen = true;
     await settle(p);
     const browser = p.shadowRoot.querySelector(
-      'ac-history-browser',
+      'aic-history-browser',
     );
     browser.dispatchEvent(
       new CustomEvent('close', {
@@ -1856,7 +1856,7 @@ describe('ChatPanel history browser', () => {
     p._historyOpen = true;
     await settle(p);
     const browser = p.shadowRoot.querySelector(
-      'ac-history-browser',
+      'aic-history-browser',
     );
     browser.dispatchEvent(
       new CustomEvent('session-loaded', {
@@ -1882,7 +1882,7 @@ describe('ChatPanel history browser', () => {
     p._historyOpen = true;
     await settle(p);
     const browser = p.shadowRoot.querySelector(
-      'ac-history-browser',
+      'aic-history-browser',
     );
     browser.dispatchEvent(
       new CustomEvent('session-loaded', {
@@ -1921,7 +1921,7 @@ describe('ChatPanel history browser', () => {
   // Load). The browser turns a yes into a second click.
 
   function browserOf(panel) {
-    return panel.shadowRoot.querySelector('ac-history-browser');
+    return panel.shadowRoot.querySelector('aic-history-browser');
   }
 
   it('says nothing is unread when the transcript is empty', async () => {
@@ -2101,7 +2101,7 @@ describe('ChatPanel image paste', () => {
     await settle(p);
     const ta = p.shadowRoot.querySelector('.input-textarea');
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       for (let i = 0; i < 6; i += 1) {
         ta.dispatchEvent(
@@ -2118,7 +2118,7 @@ describe('ChatPanel image paste', () => {
       expect(warnings.length).toBeGreaterThan(0);
       expect(warnings[0].message).toMatch(/Maximum.*5/);
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 });
@@ -2267,7 +2267,7 @@ describe('ChatPanel send with images', () => {
     p._pendingImages = ['data:image/png;base64,A'];
     await p._send();
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     expect(history._entries).toEqual([]);
   });
 });
@@ -2335,7 +2335,7 @@ describe('ChatPanel message images', () => {
     });
     await settle(p);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       p.shadowRoot
         .querySelector('.message-image-reattach')
@@ -2350,7 +2350,7 @@ describe('ChatPanel message images', () => {
       expect(successes.length).toBe(1);
       expect(successes[0].message).toContain('attached');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -2368,7 +2368,7 @@ describe('ChatPanel message images', () => {
     p._pendingImages = ['data:image/png;base64,SAME'];
     await settle(p);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       p.shadowRoot
         .querySelector('.message-image-reattach')
@@ -2381,7 +2381,7 @@ describe('ChatPanel message images', () => {
       expect(infos.length).toBe(1);
       expect(infos[0].message).toContain('already attached');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -2469,7 +2469,7 @@ describe('ChatPanel lightbox', () => {
     p._lightboxImage = 'data:image/png;base64,X';
     await settle(p);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const buttons = p.shadowRoot.querySelectorAll(
         '.lightbox-button',
@@ -2484,7 +2484,7 @@ describe('ChatPanel lightbox', () => {
       ]);
       expect(p._lightboxImage).toBeNull();
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 
@@ -2651,7 +2651,7 @@ describe('ChatPanel copy action', () => {
       });
       await settle(p);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         p.shadowRoot
           .querySelector('.message-toolbar.top')
@@ -2662,7 +2662,7 @@ describe('ChatPanel copy action', () => {
         expect(detail.type).toBe('success');
         expect(detail.message).toMatch(/copied/i);
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       restore();
@@ -2721,7 +2721,7 @@ describe('ChatPanel copy action', () => {
       });
       await settle(p);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         p.shadowRoot
           .querySelector('.message-toolbar.top')
@@ -2731,7 +2731,7 @@ describe('ChatPanel copy action', () => {
         expect(writeText).not.toHaveBeenCalled();
         expect(toastListener).not.toHaveBeenCalled();
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       restore();
@@ -2750,7 +2750,7 @@ describe('ChatPanel copy action', () => {
       });
       await settle(p);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         p.shadowRoot
           .querySelector('.message-toolbar.top')
@@ -2761,7 +2761,7 @@ describe('ChatPanel copy action', () => {
         expect(detail.type).toBe('warning');
         expect(detail.message).toMatch(/not available/i);
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       if (originalClipboard === undefined) {
@@ -2790,7 +2790,7 @@ describe('ChatPanel copy action', () => {
       });
       await settle(p);
       const toastListener = vi.fn();
-      window.addEventListener('ac-toast', toastListener);
+      window.addEventListener('aic-toast', toastListener);
       try {
         p.shadowRoot
           .querySelector('.message-toolbar.top')
@@ -2802,7 +2802,7 @@ describe('ChatPanel copy action', () => {
         expect(detail.message).toMatch(/copy failed/i);
         expect(detail.message).toContain('permission denied');
       } finally {
-        window.removeEventListener('ac-toast', toastListener);
+        window.removeEventListener('aic-toast', toastListener);
       }
     } finally {
       if (originalClipboard === undefined) {

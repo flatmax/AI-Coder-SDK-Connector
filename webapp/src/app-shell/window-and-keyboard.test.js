@@ -68,8 +68,8 @@ describe('AppShell window resize and keyboard shortcuts', () => {
       });
       const shell = mountShell();
       await shell.updateComplete;
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       const diffRelayout = vi.spyOn(diff, 'relayout');
       const svgRelayout = vi.spyOn(svg, 'relayout');
       shell._onWindowResize();
@@ -337,7 +337,7 @@ describe('AppShell window resize and keyboard shortcuts', () => {
       const shell = mountShell();
       await shell.updateComplete;
       fireKey({ key: '3', altKey: true });
-      expect(localStorage.getItem('ac-dc-active-tab'))
+      expect(localStorage.getItem('aic-dc-active-tab'))
         .toBe('settings');
     });
 
@@ -345,7 +345,7 @@ describe('AppShell window resize and keyboard shortcuts', () => {
       const shell = mountShell();
       await shell.updateComplete;
       fireKey({ key: 'm', altKey: true });
-      expect(localStorage.getItem('ac-dc-minimized')).toBe('true');
+      expect(localStorage.getItem('aic-dc-minimized')).toBe('true');
     });
 
     it('listener removed on disconnect', async () => {

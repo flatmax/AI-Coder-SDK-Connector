@@ -1474,7 +1474,7 @@ export class CommitGraph extends LitElement {
   }
 }
 
-customElements.define('ac-commit-graph', CommitGraph);
+customElements.define('aic-commit-graph', CommitGraph);
 
 // Exports for unit tests.
 export {

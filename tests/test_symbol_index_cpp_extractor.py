@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.cpp — Layer 2.2.6.
+"""Tests for aic_dc.symbol_index.extractors.cpp — Layer 2.2.6.
 
 Scope: CppExtractor — everything C++ adds on top of C. Inheritance
 from C means the C test suite is already proving that base
@@ -28,9 +28,9 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.cpp import CppExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.cpp import CppExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 @pytest.fixture

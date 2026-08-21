@@ -352,8 +352,8 @@ describe('FilePicker component', () => {
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
       await clickMenuItem(p, 'modified');
-      expect(localStorage.getItem('ac-dc-sort-mode')).toBe('mtime');
-      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
+      expect(localStorage.getItem('aic-dc-sort-mode')).toBe('mtime');
+      expect(localStorage.getItem('aic-dc-sort-asc')).toBe('1');
     });
 
     it('persists direction to localStorage on toggle', async () => {
@@ -364,18 +364,18 @@ describe('FilePicker component', () => {
       // Toggle name to descending.
       primary().click();
       await p.updateComplete;
-      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('0');
+      expect(localStorage.getItem('aic-dc-sort-asc')).toBe('0');
       // Back to ascending.
       primary().click();
       await p.updateComplete;
-      expect(localStorage.getItem('ac-dc-sort-asc')).toBe('1');
+      expect(localStorage.getItem('aic-dc-sort-asc')).toBe('1');
     });
 
     it('restores mode and direction from localStorage on mount', async () => {
       // Seed storage before mounting — the constructor
       // reads these and applies them immediately.
-      localStorage.setItem('ac-dc-sort-mode', 'size');
-      localStorage.setItem('ac-dc-sort-asc', '0');
+      localStorage.setItem('aic-dc-sort-mode', 'size');
+      localStorage.setItem('aic-dc-sort-asc', '0');
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
       expect(p._sortMode).toBe('size');
@@ -389,7 +389,7 @@ describe('FilePicker component', () => {
     });
 
     it('ignores unknown mode in localStorage', async () => {
-      localStorage.setItem('ac-dc-sort-mode', 'bogus');
+      localStorage.setItem('aic-dc-sort-mode', 'bogus');
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
       // Falls back to name.
@@ -397,8 +397,8 @@ describe('FilePicker component', () => {
     });
 
     it('ignores malformed direction in localStorage', async () => {
-      localStorage.setItem('ac-dc-sort-mode', 'name');
-      localStorage.setItem('ac-dc-sort-asc', 'maybe');
+      localStorage.setItem('aic-dc-sort-mode', 'name');
+      localStorage.setItem('aic-dc-sort-asc', 'maybe');
       const p = mountPicker({ tree: rootOf([]) });
       await p.updateComplete;
       // Falls back to ascending.

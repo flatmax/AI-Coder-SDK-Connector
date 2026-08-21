@@ -1,13 +1,13 @@
-"""Tests for ac_dc.claude_code.mcp_server — conversion phase 4.
+"""Tests for aic_dc.claude_code.mcp_server — conversion phase 4.
 
 The bridge's job is to answer the agent's questions about the repo from
-AC-DC's own indexes. What is worth pinning is not the map format — the
+AIC-DC's own indexes. What is worth pinning is not the map format — the
 formatters have their own tests — but the properties an agent's behaviour
 depends on:
 
 - **Read-only, all six.** Pinned as a statement of intent, not as the
   mechanism: a live ``acceptEdits`` run showed the CLI raising a permission
-  request for an ``mcp__ac-dc__*`` tool that carried ``readOnlyHint=True``,
+  request for an ``mcp__aic-dc__*`` tool that carried ``readOnlyHint=True``,
   so the annotation is advisory metadata for the model and the UI and buys
   nothing at the gate. What keeps these calls out of the dialog is the
   explicit allow in ``PermissionBroker.can_use_tool``
@@ -35,13 +35,13 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.claude_code.mcp_server import (
+from aic_dc.claude_code.mcp_server import (
     MAX_FILE_SYMBOL_PATHS,
     MAX_RESPONSE_CHARS,
     SERVER_NAME,
     McpBridge,
 )
-from ac_dc.claude_code.permissions import AC_DC_MCP_SERVER, classify_tool
+from aic_dc.claude_code.permissions import AIC_DC_MCP_SERVER, classify_tool
 
 
 # ---------------------------------------------------------------------------
@@ -153,13 +153,13 @@ def bridge(symbols, docs):
 
 class TestServerShape:
     def test_the_server_name_matches_the_permission_classifier(self):
-        """`mcp__ac-dc__*` is classified `read` by name.
+        """`mcp__aic-dc__*` is classified `read` by name.
 
         A rename here without one there turns every bridge call into a
         third-party MCP prompt — gated by default, so the agent would stop
         being able to ask for a symbol map without a click.
         """
-        assert SERVER_NAME == AC_DC_MCP_SERVER
+        assert SERVER_NAME == AIC_DC_MCP_SERVER
         assert classify_tool(f"mcp__{SERVER_NAME}__symbol_map") == "read"
 
     def test_it_builds_an_in_process_server(self, bridge):
@@ -608,7 +608,7 @@ class TestAgainstARealIndex:
 
     @pytest.fixture
     def real(self, tmp_path):
-        from ac_dc.symbol_index.index import SymbolIndex
+        from aic_dc.symbol_index.index import SymbolIndex
 
         (tmp_path / "pkg").mkdir()
         (tmp_path / "pkg" / "engine.py").write_text(

@@ -5,7 +5,7 @@ and reloaded via the settings RPC service with a whitelisted type set. Editing h
 tab — no separate window or modal.
 
 The tab shrank with the config surface. Eight cards became three, because five of them edited prompt
-files AC⚡DC no longer assembles. What it gained is honesty about *when* an edit takes effect: most of
+files AIC⚡DC no longer assembles. What it gained is honesty about *when* an edit takes effect: most of
 what remains cannot be applied to a running session, and a Settings tab that pretends otherwise is worse
 than one that says so.
 
@@ -40,7 +40,7 @@ files are listed by name, with the explanation that the agent's instructions now
 and `.claude/` — which the user edits in the viewer like any other repository file, with the agent's help,
 and which the Context tab prices in tokens.
 
-There is no "system prompt" for AC⚡DC to own any more. That is the conversion in one card.
+There is no "system prompt" for AIC⚡DC to own any more. That is the conversion in one card.
 
 ## The Applies Column Is Load-Bearing
 
@@ -67,10 +67,10 @@ the icon and label. Descriptions live in the `title` attribute so the grid stays
 | Permission mode | `engine.json` `permission_mode`, live via `set_permission_mode()` | The posture a session starts in, and the running session's posture. Mirrors the chat panel's control; changing it here broadcasts identically |
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
 | Permission chime | `localStorage` | Whether a permission request in a background tab plays a sound |
-| Deny-read scope | `localStorage` `ac-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask` |
+| Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask` |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
 
-The **Agentic coding** toggle is deleted. It gated whether AC⚡DC would tell the model about its
+The **Agentic coding** toggle is deleted. It gated whether AIC⚡DC would tell the model about its
 `🟧🟧🟧 AGENT` spawn protocol, and there is no protocol left to gate — the agent's `Task` tool is part of
 the platform and is not ours to switch off. A user who wants to constrain delegation does it where the
 platform expects: a `Task` deny rule in project settings, which the permission layer honours like any
@@ -82,8 +82,8 @@ A group the old tab had no equivalent for, because the old engine had no session
 
 - **Engine health** — the resolved `claude` binary and version, credential source, and any auth warning. Read-only, and the first place to look when a turn fails for a reason that is not about code
 - **Restart session** — reconnects the SDK client, applying every pending `engine.json` change. Confirmation first, naming what will apply
-- **MCP servers** — status per server from `get_mcp_status()`, with a reconnect action for a failed one. `ac-dc` appears here like any other
-- **Session storage** — the size of `.ac-dc4/sessions/` and a link to the history browser for deletion. Deletion happens there, next to what is being deleted, not behind a settings button
+- **MCP servers** — status per server from `get_mcp_status()`, with a reconnect action for a failed one. `aic-dc` appears here like any other
+- **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion. Deletion happens there, next to what is being deleted, not behind a settings button
 
 ## Editing Flow
 

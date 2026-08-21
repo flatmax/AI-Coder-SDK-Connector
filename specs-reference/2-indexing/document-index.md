@@ -47,7 +47,7 @@ Braces indicate optional segments. Each segment has a leading space only when pr
 docs/guides/sessions-and-history.md [spec]:
   # Sessions & History ~280ln ←5
   ## Session Lifecycle (connect, options, terminal reason) [code] ~85ln ←3
-    →src/ac_dc/engine/session.py
+    →src/aic_dc/engine/session.py
   ## Mirrored Store (append path, mirror gap, flush policy) [code] ~120ln ←2
     ### Record Schema (envelope fields, image refs) ~45ln
       →history.md#Mirror-Gap-Accounting
@@ -107,7 +107,7 @@ Detection is heuristic and conservative. Path triggers win over heading triggers
 
 ### Cache sidecar JSON
 
-Each cached outline persists as `{repo_root}/.ac-dc4/doc_cache/{flattened-path}.json`. Flattening rule: replace `/` and `\` in the relative path with `__`, append `.json`.
+Each cached outline persists as `{repo_root}/.aic-dc/doc_cache/{flattened-path}.json`. Flattening rule: replace `/` and `\` in the relative path with `__`, append `.json`.
 
 Fields:
 
@@ -136,7 +136,7 @@ Cache operations:
 
 ### KeyBERT optional dependency
 
-The `keybert` pip package pulls in `sentence-transformers`, which pulls in `torch`. The bundle is large and is gated behind an optional extras group (`ac-dc[docs]` or equivalent). Missing keybert causes the enricher to silently no-op — outlines emit without keyword annotations. This is the designed degradation path.
+The `keybert` pip package pulls in `sentence-transformers`, which pulls in `torch`. The bundle is large and is gated behind an optional extras group (`aic-dc[docs]` or equivalent). Missing keybert causes the enricher to silently no-op — outlines emit without keyword annotations. This is the designed degradation path.
 
 ### `huggingface_hub` cache probe
 

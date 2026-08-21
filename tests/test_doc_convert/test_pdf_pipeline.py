@@ -493,7 +493,7 @@ class TestPdfSvgTextPreservation:
             )
 
         monkeypatch.setattr(
-            "ac_dc.doc_convert.shutil.which",
+            "aic_dc.doc_convert.shutil.which",
             lambda cmd: (
                 "/usr/bin/soffice" if cmd == "soffice" else None
             ),

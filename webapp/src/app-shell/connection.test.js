@@ -65,7 +65,7 @@ describe('AppShell connection lifecycle', () => {
     // beforeEach/afterEach pair when Phase 2d work adds proper
     // RPC mocking for the files-tab inside app-shell tests.
     //
-    // Context: mounting the shell renders <ac-files-tab> in the
+    // Context: mounting the shell renders <aic-files-tab> in the
     // default tab. On setupDone(), the files-tab's onRpcReady
     // fires and calls Repo.get_file_tree on whatever fake proxy
     // these tests installed. That proxy doesn't expose

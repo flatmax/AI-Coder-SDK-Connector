@@ -162,7 +162,7 @@ export function onContextUsageRefresh(host) {
  * reactive property behind the dialog's capacity bar.
  *
  * Replaces the `get_history_status` fetch this used to make.
- * That method merged AC⚡DC's own token budget with its own
+ * That method merged AIC⚡DC's own token budget with its own
  * compaction threshold — two numbers this app computed about a
  * prompt it assembled. The engine now owns both and reports them
  * together: `totalTokens` against `autoCompactThreshold` is the

@@ -1,7 +1,7 @@
 """Tests for the doc-index data model.
 
 Pins the shape of the dataclasses in
-:mod:`ac_dc.doc_index.models` so future refactors (adding fields,
+:mod:`aic_dc.doc_index.models` so future refactors (adding fields,
 changing defaults, renaming) surface as test failures rather than
 silent regressions in consumer code.
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.doc_index.models import (
+from aic_dc.doc_index.models import (
     DOC_TYPES,
     DocHeading,
     DocLink,

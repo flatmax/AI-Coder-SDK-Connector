@@ -21,7 +21,7 @@ import logging
 import pytest
 from claude_agent_sdk import SessionStore
 
-from ac_dc.claude_code.session_store import (
+from aic_dc.claude_code.session_store import (
     RepoSessionStore,
     SessionStoreKeyError,
 )

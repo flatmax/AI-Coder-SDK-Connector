@@ -1,4 +1,4 @@
-"""Tests for ac_dc.claude_code.permissions — the phase-2 gate.
+"""Tests for aic_dc.claude_code.permissions — the phase-2 gate.
 
 The properties under test are the three the module docstring pins, because
 each has a failure mode worse than a broken dialog:
@@ -8,7 +8,7 @@ each has a failure mode worse than a broken dialog:
   resolved twice answers one control request and leaves another hanging.
 - **The callback never raises.** An exception answers the CLI's control
   request with an error, which it reports as a *tool failure* — so an
-  AC-DC bug would look to the user like the tool broke.
+  AIC-DC bug would look to the user like the tool broke.
 - **Denials carry a reason.** A blank denial produces an agent that
   retries the same call immediately.
 
@@ -23,7 +23,7 @@ import json
 
 import pytest
 
-from ac_dc.claude_code.permissions import (
+from aic_dc.claude_code.permissions import (
     DENY_DEFAULT_REASON,
     DIFF_CEILING_BYTES,
     PermissionBroker,
@@ -137,7 +137,7 @@ class TestClassification:
             ("AskUserQuestion", "interact"),
             ("ExitPlanMode", "plan"),
             ("mcp__playwright__click", "mcp"),
-            ("mcp__ac-dc__repo_map", "read"),
+            ("mcp__aic-dc__repo_map", "read"),
         ],
     )
     def test_known_tools(self, tool_name, expected):
@@ -781,13 +781,13 @@ class TestSuggestedRules:
     def test_a_derived_write_rule_grants_only_the_approved_file(self, tmp_path):
         """The CLI's own rule "matches only the literal path you approved".
 
-        Not ``src/ac_dc/**``, which reads like "this directory" but is
+        Not ``src/aic_dc/**``, which reads like "this directory" but is
         recursive in gitignore syntax.
         """
         rules = derive_suggested_rules(
-            tmp_path, "Edit", {"file_path": "src/ac_dc/x.py"}, "write", None
+            tmp_path, "Edit", {"file_path": "src/aic_dc/x.py"}, "write", None
         )
-        assert rules[0]["rule_content"] == "src/ac_dc/x.py"
+        assert rules[0]["rule_content"] == "src/aic_dc/x.py"
 
     def test_a_file_at_the_repo_root_does_not_grant_the_repo(self, tmp_path):
         """The regression this pins.
@@ -888,7 +888,7 @@ class TestRuleDestination:
     """A click must not commit a permission grant.
 
     The CLI persists its own approvals to ``localSettings``
-    (``.claude/settings.local.json``, git-ignored). AC-DC defaulted to
+    (``.claude/settings.local.json``, git-ignored). AIC-DC defaulted to
     ``projectSettings`` (``.claude/settings.json``, git-tracked), so the same
     approval landed in a different file depending on which front end the user
     was in — and one of those files travels to the rest of the team on the
@@ -989,7 +989,7 @@ class TestSuggestedMode:
 
     Observed against CLI 2.1.229: an in-repo file edit produces exactly one
     suggestion — ``setMode acceptEdits``, destination ``session`` — and no
-    rule at all. Dropping it meant AC-DC never offered what the terminal
+    rule at all. Dropping it meant AIC-DC never offered what the terminal
     offers for the same call.
     """
 
@@ -1052,7 +1052,7 @@ class TestSuggestedMode:
 
 
 class TestOurOwnToolsAreUngated:
-    """``specs5/3-engine/permissions.md`` puts the ``ac-dc`` index tools in
+    """``specs5/3-engine/permissions.md`` puts the ``aic-dc`` index tools in
     the read-only row: *displayed, not gated*.
 
     ``Read``/``Glob``/``Grep`` get that for free because the CLI never asks
@@ -1065,7 +1065,7 @@ class TestOurOwnToolsAreUngated:
 
     async def test_our_own_tool_is_allowed_with_no_dialog(self, broker, events):
         result = await broker.can_use_tool(
-            "mcp__ac-dc__symbol_map", {"path_prefix": "src"}, FakeContext()
+            "mcp__aic-dc__symbol_map", {"path_prefix": "src"}, FakeContext()
         )
         assert type(result).__name__ == "PermissionResultAllow"
         assert events.named("permissionRequest") == []
@@ -1078,7 +1078,7 @@ class TestOurOwnToolsAreUngated:
         tool nobody was asked about, and an ``updated_input`` would rewrite
         a call we did not inspect.
         """
-        result = await broker.can_use_tool("mcp__ac-dc__ui_state", {}, FakeContext())
+        result = await broker.can_use_tool("mcp__aic-dc__ui_state", {}, FakeContext())
         assert result.updated_permissions is None
         assert result.updated_input is None
 
@@ -1092,7 +1092,7 @@ class TestOurOwnToolsAreUngated:
             broadcast=events,
             note_prompt=lambda tool_use_id: noted.append(tool_use_id) or "req-1",
         )
-        await broker.can_use_tool("mcp__ac-dc__doc_outline", {}, FakeContext())
+        await broker.can_use_tool("mcp__aic-dc__doc_outline", {}, FakeContext())
         assert noted == []
 
     async def test_a_third_party_mcp_tool_still_asks(self, broker, events):
@@ -1105,10 +1105,10 @@ class TestOurOwnToolsAreUngated:
         await task
 
     async def test_a_lookalike_server_still_asks(self, broker, events):
-        """``ac-dc-plus`` is somebody else's server, not a prefix of ours."""
-        task = await ask(broker, tool_name="mcp__ac-dc-plus__anything", tool_input={})
+        """``aic-dc-plus`` is somebody else's server, not a prefix of ours."""
+        task = await ask(broker, tool_name="mcp__aic-dc-plus__anything", tool_input={})
         assert events.only("permissionRequest")["tool_name"].startswith(
-            "mcp__ac-dc-plus__"
+            "mcp__aic-dc-plus__"
         )
         await broker.resolve(
             events.only("permissionRequest")["permission_id"], {"action": "deny"}
@@ -1368,7 +1368,7 @@ class TestCanUseTool:
         )
         deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
         assert type(deny).__name__ == "PermissionResultDeny"
-        assert "No local AC-DC client" in deny.message
+        assert "No local AIC-DC client" in deny.message
         assert events.only("permissionRequest")["expires_at"] is not None
         assert events.only("permissionResolved")["action"] == "timeout"
         assert broker.pending() == []
@@ -1390,7 +1390,7 @@ class TestCanUseTool:
 
         present["value"] = False
         deny = await asyncio.wait_for(task, timeout=5)
-        assert "No local AC-DC client" in deny.message
+        assert "No local AIC-DC client" in deny.message
 
         armed = events.named("permissionDeadline")[0]
         assert armed["permission_id"] == pid
@@ -1444,18 +1444,18 @@ class TestCanUseTool:
             no_localhost_timeout=0.01,
         )
         deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
-        assert "No local AC-DC client" in deny.message
+        assert "No local AIC-DC client" in deny.message
 
     async def test_a_payload_failure_denies_rather_than_raising(self, broker, monkeypatch):
         """Raising would surface to the user as a broken tool, not a denial."""
-        import ac_dc.claude_code.permissions as module
+        import aic_dc.claude_code.permissions as module
 
         monkeypatch.setattr(
             module, "classify_tool", lambda name: (_ for _ in ()).throw(RuntimeError("x"))
         )
         deny = await broker.can_use_tool("Bash", {"command": "ls"}, FakeContext())
         assert type(deny).__name__ == "PermissionResultDeny"
-        assert "AC-DC fault" in deny.message
+        assert "AIC-DC fault" in deny.message
 
     async def test_a_broadcast_failure_does_not_lose_the_decision(self, tmp_path):
         calls = []
@@ -1533,7 +1533,7 @@ class TestCancelForTurn:
         assert broker.pending() == []
 
     async def test_the_stop_reason_says_the_user_stopped_it(self, broker, events):
-        from ac_dc.claude_code.permissions import DENY_CANCELLED_REASON
+        from aic_dc.claude_code.permissions import DENY_CANCELLED_REASON
 
         task = await ask(broker)
         await broker.cancel_for_turn("req-1", reason=DENY_CANCELLED_REASON)

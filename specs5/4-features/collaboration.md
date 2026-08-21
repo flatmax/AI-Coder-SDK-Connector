@@ -255,7 +255,7 @@ and the permission dialog:
 - When a localhost client changes the permission mode, the server broadcasts the change with the mode and who set it; every browser updates its indicator, and the change is recorded in the transcript as a system event
 - A permission request is broadcast to everyone. Localhost clients get the dialog with buttons; participants get the same content, read-only
 - Concurrent localhost clients race and the first decision wins; the dialog closes on the others with a note naming who answered
-- If no localhost client is connected when a request arrives, it is denied after a short timeout with a reason that says nobody was there. A headless AC⚡DC with only remote participants therefore degrades toward `plan`-like behaviour rather than toward something permissive
+- If no localhost client is connected when a request arrives, it is denied after a short timeout with a reason that says nobody was there. A headless AIC⚡DC with only remote participants therefore degrades toward `plan`-like behaviour rather than toward something permissive
 - See [`../3-engine/permissions.md`](../3-engine/permissions.md) for the decision protocol and timeouts
 
 ### Session Sync

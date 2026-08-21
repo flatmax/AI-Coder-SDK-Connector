@@ -89,12 +89,12 @@ export const FILES_TAB_STYLES = css`
       pointer-events: none;
     }
 
-    ac-file-picker {
+    aic-file-picker {
       flex: 1;
       min-height: 0;
     }
 
-    ac-chat-panel {
+    aic-chat-panel {
       flex: 1;
       min-height: 0;
     }
@@ -139,7 +139,7 @@ export const FILES_TAB_STYLES = css`
       backdrop-filter: blur(8px);
     }
     /* Commit-graph wrapper fills the modal body. */
-    ac-commit-graph {
+    aic-commit-graph {
       flex: 1;
       min-height: 0;
       display: flex;

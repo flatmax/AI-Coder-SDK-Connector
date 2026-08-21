@@ -154,7 +154,7 @@ describe('FilesTab left-panel resizer', () => {
     firePointerDown(t, 300);
     fireDocPointerMove(400);
     fireDocPointerUp();
-    expect(localStorage.getItem('ac-dc-picker-width')).toBe('380');
+    expect(localStorage.getItem('aic-dc-picker-width')).toBe('380');
   });
 
   it('drag below minimum clamps to 180px', async () => {
@@ -255,7 +255,7 @@ describe('FilesTab left-panel resizer', () => {
       new MouseEvent('dblclick', { bubbles: true, cancelable: true }),
     );
     await t.updateComplete;
-    expect(localStorage.getItem('ac-dc-picker-collapsed')).toBe('true');
+    expect(localStorage.getItem('aic-dc-picker-collapsed')).toBe('true');
   });
 
   it('collapsed render uses affordance width, not stored width', async () => {
@@ -330,7 +330,7 @@ describe('FilesTab left-panel resizer', () => {
   });
 
   it('loads width from localStorage on mount', async () => {
-    localStorage.setItem('ac-dc-picker-width', '420');
+    localStorage.setItem('aic-dc-picker-width', '420');
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -344,7 +344,7 @@ describe('FilesTab left-panel resizer', () => {
   });
 
   it('loads collapsed state from localStorage on mount', async () => {
-    localStorage.setItem('ac-dc-picker-collapsed', 'true');
+    localStorage.setItem('aic-dc-picker-collapsed', 'true');
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -358,7 +358,7 @@ describe('FilesTab left-panel resizer', () => {
   });
 
   it('malformed stored width falls back to default', async () => {
-    localStorage.setItem('ac-dc-picker-width', 'garbage');
+    localStorage.setItem('aic-dc-picker-width', 'garbage');
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -374,7 +374,7 @@ describe('FilesTab left-panel resizer', () => {
     // could happen if we raise the minimum in a future
     // commit) should fall through to the default rather
     // than render at a sub-readable size.
-    localStorage.setItem('ac-dc-picker-width', '50');
+    localStorage.setItem('aic-dc-picker-width', '50');
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()
@@ -386,7 +386,7 @@ describe('FilesTab left-panel resizer', () => {
   });
 
   it('malformed collapsed value defaults to false', async () => {
-    localStorage.setItem('ac-dc-picker-collapsed', 'maybe');
+    localStorage.setItem('aic-dc-picker-collapsed', 'maybe');
     publishFakeRpc({
       'Repo.get_file_tree': vi
         .fn()

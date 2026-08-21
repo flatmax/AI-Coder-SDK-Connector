@@ -15,7 +15,7 @@ import { SPEECH_STATE_EVENT, speechPlayer } from './speech-player.js';
 const _mounted = [];
 
 function mountControls() {
-  const el = document.createElement('ac-speech-controls');
+  const el = document.createElement('aic-speech-controls');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;
@@ -50,7 +50,7 @@ afterEach(() => {
     if (el.parentNode) el.parentNode.removeChild(el);
   }
   try {
-    localStorage.removeItem('ac-dc-speech-controls-pos');
+    localStorage.removeItem('aic-dc-speech-controls-pos');
   } catch (_) {
     // ignore
   }
@@ -222,7 +222,7 @@ describe('SpeechControls dragging', () => {
     window.dispatchEvent(new MouseEvent('pointerup', {}));
     await el.updateComplete;
     const saved = JSON.parse(
-      localStorage.getItem('ac-dc-speech-controls-pos'),
+      localStorage.getItem('aic-dc-speech-controls-pos'),
     );
     expect(saved).toHaveProperty('x');
     expect(saved).toHaveProperty('y');

@@ -92,13 +92,13 @@ import { LitElement } from 'lit';
 import { RpcMixin } from '../rpc-mixin.js';
 import { speechPlayer } from '../speech-player.js';
 // Side-effect imports — these modules register
-// custom elements (`<ac-history-browser>`,
-// `<ac-input-history>`, `<ac-speech-to-text>`)
+// custom elements (`<aic-history-browser>`,
+// `<aic-input-history>`, `<aic-speech-to-text>`)
 // that the render template uses. Without these
 // imports the elements would render as unknown
 // HTML.
 //
-// `<ac-url-chips>` used to be here. Phase 2 took the
+// `<aic-url-chips>` used to be here. Phase 2 took the
 // chips off the input area — they fetched URLs into
 // the native engine's context, and Claude Code has
 // WebFetch. See rendering.js.
@@ -383,7 +383,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
   // `active-tab-changed` on real transitions.
   //
   // It used to snapshot and restore URL chip state across
-  // the switch as well — a singleton `<ac-url-chips>`
+  // the switch as well — a singleton `<aic-url-chips>`
   // element showed the active tab's chips, so its `_chips`
   // Map had to be swapped by hand. Phase 2 removed the
   // chips, and with them the swap.
@@ -429,7 +429,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    */
   _emitToast(message, type = 'info') {
     window.dispatchEvent(
-      new CustomEvent('ac-toast', {
+      new CustomEvent('aic-toast', {
         detail: { message, type },
         bubbles: false,
       }),
@@ -619,7 +619,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
 // state.js for details).
 installReactiveAccessors(ChatPanel.prototype);
 
-customElements.define('ac-chat-panel', ChatPanel);
+customElements.define('aic-chat-panel', ChatPanel);
 
 // ---------------------------------------------------------------
 // Public re-exports

@@ -24,9 +24,9 @@ ordering / path-normalisation issues.
 from __future__ import annotations
 from pathlib import Path
 import pytest
-from ac_dc.doc_index.extractors.markdown import MarkdownExtractor
-from ac_dc.doc_index.index import DocIndex
-from ac_dc.doc_index.models import DocOutline
+from aic_dc.doc_index.extractors.markdown import MarkdownExtractor
+from aic_dc.doc_index.index import DocIndex
+from aic_dc.doc_index.models import DocOutline
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ class TestIndexRepo:
             "# dep\n",
         )
         _write(
-            repo_root / ".ac-dc" / "state.md",
+            repo_root / ".aic-dc" / "state.md",
             "# state\n",
         )
         _write(repo_root / "__pycache__" / "x.md", "# py\n")

@@ -1,4 +1,4 @@
-"""Tests for ac_dc.symbol_index.extractors.c — Layer 2.2.5.
+"""Tests for aic_dc.symbol_index.extractors.c — Layer 2.2.5.
 
 Scope: CExtractor — functions (definitions and prototypes),
 structs, unions, enums, typedefs, #include, globals, call sites,
@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import pytest
 
-from ac_dc.symbol_index.extractors.c import CExtractor
-from ac_dc.symbol_index.models import FileSymbols
-from ac_dc.symbol_index.parser import TreeSitterParser
+from aic_dc.symbol_index.extractors.c import CExtractor
+from aic_dc.symbol_index.models import FileSymbols
+from aic_dc.symbol_index.parser import TreeSitterParser
 
 
 @pytest.fixture

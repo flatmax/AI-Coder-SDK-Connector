@@ -4,8 +4,8 @@ Configuration is split across a small set of files, each with a distinct purpose
 provides RPC methods for reading, editing, and reloading configs. Packaged builds copy configs to a
 persistent user directory on first run.
 
-Two things shrank this layer dramatically. AC⚡DC no longer has prompts, so the prompt files are gone;
-and AC⚡DC no longer talks to a provider, so the credential and cache-tuning machinery is gone with
+Two things shrank this layer dramatically. AIC⚡DC no longer has prompts, so the prompt files are gone;
+and AIC⚡DC no longer talks to a provider, so the credential and cache-tuning machinery is gone with
 them. What remains is thin, and deliberately so: **the engine's own configuration is not ours to
 own**. `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/`, and `.claude/commands/` belong to the
 user and reach the session through `setting_sources` (see
@@ -23,7 +23,7 @@ not through anything in this spec.
 
 Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`, `system_doc.md`,
 `system_extra.md`, `system_agentic_appendix.md`, `review.md`, `compaction.md`, `system_reminder.md`.
-Every one of them existed to shape a prompt AC⚡DC no longer assembles.
+Every one of them existed to shape a prompt AIC⚡DC no longer assembles.
 
 `commit.md` survives as the system prompt for the one auxiliary model call the conversion did not
 remove: a **stateless one-shot** — its own short-lived CLI process, no tools, no settings sources, no
@@ -67,7 +67,7 @@ The consequences to preserve:
 
 - **Document conversion** — enabled flag, supported extensions, max source size
 - **Document index** — keyword model name, enabled flag, top-N, n-gram range, min section chars, min score, diversity, TF-IDF fallback threshold, max document frequency
-- **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `ac-dc` tool call may wait for a pending flush
+- **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `aic-dc` tool call may wait for a pending flush
 - **Permissions** — `no_client_timeout_s`, the deadline armed when the *last* localhost client leaves and cancelled when one returns, and `presence_poll_s`, how often presence is re-sampled for the life of a waiting request. **There is no decision timeout, and adding one back is a decision to be argued rather than a default to be restored**: nothing accrues while a request waits — one blocked SDK control request is the whole cost — so a wall-clock limit protects no resource and does the one thing a permission dialog must not do, which is answer for the user. Stop is the escape hatch from a dialog nobody wants to answer. Whatever reads these keys must also keep the screen-reader milestones inside the window that exists; the coarse `[300, 60, 10]` list told a user they had five minutes to answer something expiring in thirty seconds. See [delivery § the timer that answered for the user](../plan/delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
 - **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did. Both thresholds are compared engine-side and the browser is told the verdict — the banner receives "this has escalated", not the number to compare against, for the same reason the disk warning arrives as a sentence: two owners of one rule can only disagree. Both are read on use rather than at construction, so an edit to `app.json` takes effect on the next turn
 - **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
@@ -158,13 +158,13 @@ config" problem, because there is no prompt. A config change never invalidates t
 
 ## Per-Repository Working Directory
 
-`.ac-dc4/` under the repository root, created on first run, hidden, auto-added to `.gitignore`. It
+`.aic-dc/` under the repository root, created on first run, hidden, auto-added to `.gitignore`. It
 holds:
 
 | Entry | Contents |
 |---|---|
 | `sessions/` | Engine transcripts written through our `SessionStore`, plus subagent transcripts. The only transcript there is |
-| `events.jsonl` | AC⚡DC's own operational events — commit, reset, review entry and exit, preset and permission-mode changes |
+| `events.jsonl` | AIC⚡DC's own operational events — commit, reset, review entry and exit, preset and permission-mode changes |
 | `index/` | Derived search, summary and request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Document outline cache |
 | `tex_preview/` | Generated TeX preview output |

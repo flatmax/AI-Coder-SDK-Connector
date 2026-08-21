@@ -15,15 +15,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from ac_dc.config import ConfigManager
+from aic_dc.config import ConfigManager
 
 from ._helpers import _FakeMarkItDown
 
 
 @pytest.fixture
 def isolated_config_dir(tmp_path, monkeypatch):
-    home = tmp_path / "ac-dc-config"
-    monkeypatch.setenv("AC_DC_CONFIG_HOME", str(home))
+    home = tmp_path / "aic-dc-config"
+    monkeypatch.setenv("AIC_DC_CONFIG_HOME", str(home))
     return home
 
 
@@ -49,7 +49,7 @@ def fake_repo(scan_root):
 @pytest.fixture
 def doc_convert(config, fake_repo):
     """DocConvert with no collab attached (single-user mode)."""
-    from ac_dc.doc_convert import DocConvert
+    from aic_dc.doc_convert import DocConvert
     return DocConvert(config, repo=fake_repo)
 
 
@@ -82,6 +82,6 @@ def force_pptx_fallback(monkeypatch):
     python-pptx. The A4 tests work unchanged.
     """
     monkeypatch.setattr(
-        "ac_dc.doc_convert.shutil.which",
+        "aic_dc.doc_convert.shutil.which",
         lambda cmd: None,
     )

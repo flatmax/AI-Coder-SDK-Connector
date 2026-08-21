@@ -53,8 +53,8 @@ export const APP_SHELL_STYLES = css`
       overflow: hidden;
       z-index: 0;
     }
-    ac-diff-viewer,
-    ac-svg-viewer {
+    aic-diff-viewer,
+    aic-svg-viewer {
       position: absolute;
       inset: 0;
       transition: opacity 150ms ease;
@@ -227,7 +227,7 @@ export const APP_SHELL_STYLES = css`
       display: flex;
       flex-direction: column;
     }
-    .dialog-body > ac-files-tab {
+    .dialog-body > aic-files-tab {
       flex: 1;
       min-height: 0;
     }

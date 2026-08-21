@@ -34,7 +34,7 @@ import './doc-convert-tab.js';
 const _mounted = [];
 
 function mountTab(props = {}) {
-  const t = document.createElement('ac-doc-convert-tab');
+  const t = document.createElement('aic-doc-convert-tab');
   Object.assign(t, props);
   document.body.appendChild(t);
   _mounted.push(t);

@@ -525,7 +525,7 @@ export class InputHistory extends LitElement {
   }
 }
 
-customElements.define('ac-input-history', InputHistory);
+customElements.define('aic-input-history', InputHistory);
 
 // Test-only exports.
 export { MAX_ENTRIES };

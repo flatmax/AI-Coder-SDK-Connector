@@ -13,7 +13,7 @@ import './doc-index-progress.js';
 const _mounted = [];
 
 function mountOverlay() {
-  const el = document.createElement('ac-doc-index-progress');
+  const el = document.createElement('aic-doc-index-progress');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;

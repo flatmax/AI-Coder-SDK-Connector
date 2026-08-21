@@ -27,13 +27,13 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.doc_index.extractors.svg import (
+from aic_dc.doc_index.extractors.svg import (
     SvgExtractor,
     _local_name,
     _spatial_cluster,
     _TextElement,
 )
-from ac_dc.doc_index.models import DocOutline
+from aic_dc.doc_index.models import DocOutline
 
 
 # ---------------------------------------------------------------------------

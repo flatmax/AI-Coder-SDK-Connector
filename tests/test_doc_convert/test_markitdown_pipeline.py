@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.doc_convert import DocConvert
+from aic_dc.doc_convert import DocConvert
 
 from ._helpers import (
     _RaisingCollab,

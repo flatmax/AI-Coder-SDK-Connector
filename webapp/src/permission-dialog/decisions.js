@@ -31,7 +31,7 @@ import {
 /**
  * The decision row for a request the caller may answer.
  *
- * @param {object} host — the ac-permission-dialog element
+ * @param {object} host — the aic-permission-dialog element
  * @param {object} payload
  */
 export function renderDecisions(host, payload) {
@@ -79,7 +79,7 @@ export function renderDecisions(host, payload) {
                     : null}
                   ${primaryRule?.derived
                     ? html`<span class="derived-tag" title=${
-                        'AC-DC derived this pattern from the call. The CLI did '
+                        'AIC-DC derived this pattern from the call. The CLI did '
                         + 'not suggest it, so check that it matches what you mean.'
                       }>derived</span>`
                     : null}

@@ -7,7 +7,7 @@ main reason a browser frontend beats a terminal for this workflow.
 
 ## The Mechanism
 
-The session is configured with an async `can_use_tool` callback. When it fires, AC⚡DC:
+The session is configured with an async `can_use_tool` callback. When it fires, AIC⚡DC:
 
 1. Assigns the request an ID and broadcasts `permissionRequest` to all clients.
 2. Awaits a decision from a **localhost** client.
@@ -33,8 +33,8 @@ user switches to `acceptEdits` — nothing errors, the transcript just goes quie
 
 Corollaries:
 
-- AC⚡DC does not set `allowed_tools`. Allow rules approve before the callback runs.
-- AC⚡DC's hooks never return a `permissionDecision`. The SDK emits `CanUseToolShadowedWarning` when
+- AIC⚡DC does not set `allowed_tools`. Allow rules approve before the callback runs.
+- AIC⚡DC's hooks never return a `permissionDecision`. The SDK emits `CanUseToolShadowedWarning` when
   a hook pre-empts the callback; if that warning appears, a hook has overstepped.
 - Some tools always reach the callback regardless of mode: `AskUserQuestion`, MCP tools marked as
   requiring user interaction, and organisation-`ask` connector tools. In `dontAsk` mode these are
@@ -48,13 +48,13 @@ documented failure mode of every permission UI.
 
 | Class | Tools | Default posture | Dialog shows |
 |---|---|---|---|
-| **Read-only** | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `ac-dc` index tools | Displayed, not gated | — (tool card only) |
+| **Read-only** | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `aic-dc` index tools | Displayed, not gated | — (tool card only) |
 | **File mutation** | `Edit`, `Write`, `NotebookEdit`, `MultiEdit` | Gated | Path, and the proposed change as a **rendered Monaco diff** — the same viewer used everywhere else in the app |
 | **Execution** | `Bash`, `BashOutput`, `KillShell` | Gated | The exact command, the working directory, and a note when it appears to write, network, or delete |
 | **Delegation** | `Task` | Displayed, not gated | Subagent type and prompt summary |
 | **Interaction** | `AskUserQuestion` | Always gated by the SDK | The question and its options, rendered as real choices, each with a freeform reply |
 | **Plan** | `ExitPlanMode` | Gated | The proposed plan, **rendered as markdown and never truncated** |
-| **MCP (third-party)** | Anything from a non-`ac-dc` MCP server | Gated | Server name, tool name, full input |
+| **MCP (third-party)** | Anything from a non-`aic-dc` MCP server | Gated | Server name, tool name, full input |
 
 Read-only calls being ungated by default is a deliberate trade. The alternative — gating reads —
 produces the click-through failure, and a read of a file inside the repo the user opened is within
@@ -66,10 +66,10 @@ when the checkbox went).
 
 **"Ungated" is two different mechanisms, and only one of them is ours.** `Read`, `Glob`, `Grep`,
 `WebFetch`, `WebSearch` and `Task` are ungated because the CLI never raises a permission request for
-them — `can_use_tool` is not called at all, so nothing in this app decides anything. The `ac-dc`
+them — `can_use_tool` is not called at all, so nothing in this app decides anything. The `aic-dc`
 index tools it *does* ask about: in `plan` mode it allows them itself, but in `acceptEdits` and
 `default` it asks, and an unanswered ask is a denial. So `can_use_tool` early-returns
-`PermissionResultAllow()` for any `mcp__ac-dc__*` tool, before a payload is built or a request is
+`PermissionResultAllow()` for any `mcp__aic-dc__*` tool, before a payload is built or a request is
 broadcast, and without recording a prompt against the turn.
 
 `classify_tool` returning `"read"` for those tools is *not* what ungates them — it only shapes a
@@ -77,7 +77,7 @@ dialog's wording, and by the time it is consulted the request already exists. Th
 worth stating because getting it wrong is invisible in `plan` mode and produces a dialog per
 `symbol_map` call everywhere else, which is the click-through failure arriving through prompts that
 should never have existed. Pinned by `TestOurOwnToolsAreUngated`, including the case that keeps it
-narrow: `mcp__ac-dc-plus__*` is somebody else's server and is still gated.
+narrow: `mcp__aic-dc-plus__*` is somebody else's server and is still gated.
 
 The allow is safe because the tools are read-only by construction — closures over index objects this
 process already holds, on an in-process server with no third party who could change its tool list.
@@ -140,7 +140,7 @@ stakes application of it: `can_use_tool` authorises arbitrary `Bash`. A remote p
 answer it would make collaboration mode a remote-code-execution grant.
 
 When no localhost client is connected, a request cannot be answered. It is denied after a short
-deadline, with a reason recorded in the transcript naming the cause. A headless AC⚡DC therefore
+deadline, with a reason recorded in the transcript naming the cause. A headless AIC⚡DC therefore
 cannot be driven into running commands by a remote collaborator — it degrades to something like
 `plan` mode rather than to something permissive.
 
@@ -175,16 +175,16 @@ A request raised while nobody is connected starts out counting down, which is wh
 ## Related Hooks
 
 `PermissionRequest` is the right hook for observing that a permission is being asked for; it carries
-no shadowing risk, unlike `PreToolUse`. AC⚡DC uses it for the debug view and for the
+no shadowing risk, unlike `PreToolUse`. AIC⚡DC uses it for the debug view and for the
 prompts-per-turn metric that tells us whether the tiering above is working (see
 [risks § R-12](../plan/risks.md#r-12--the-permission-dialog-becomes-a-click-through)).
 
 ## Invariants
 
 - `can_use_tool` is the only ask path; tool display never depends on it firing.
-- No AC⚡DC hook ever returns a `permissionDecision`; `CanUseToolShadowedWarning` never appears in
+- No AIC⚡DC hook ever returns a `permissionDecision`; `CanUseToolShadowedWarning` never appears in
   our logs.
-- `allowed_tools` is never set by AC⚡DC.
+- `allowed_tools` is never set by AIC⚡DC.
 - Every permission request resolves exactly once — by a localhost decision, by a stopped turn, by
   the end of its turn, by the no-localhost deadline, or by session teardown — and the SDK always
   receives a result.

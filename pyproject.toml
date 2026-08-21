@@ -1,4 +1,4 @@
-# AC-DC — AI Coder - DeCoder
+# AIC-DC — AI-Coder-SDK-Connector
 # Build configuration and dependencies.
 
 [build-system]
@@ -6,16 +6,16 @@ requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ac-dc"
+name = "aic-dc"
 version = "0.0.0-dev"
-description = "AI Coder - DeCoder: AI-assisted code editing with a browser UI, stability-based prompt caching, and document-mode support."
+description = "AI-Coder-SDK-Connector: a browser UI over AI coding-agent SDKs — Claude Code today — with tree-sitter symbol indexing, document indexing, and a Monaco diff viewer over everything the agent touches."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
     { name = "Flatmax Pty Ltd" },
 ]
-keywords = ["llm", "coding-assistant", "ai", "git", "editor"]
+keywords = ["llm", "coding-assistant", "ai", "git", "editor", "claude-code", "agent-sdk"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -35,7 +35,7 @@ classifiers = [
 dependencies = [
     # Claude Code engine. Owns the agent loop, tool execution, permissions,
     # compaction, and session persistence — see specs5/3-engine/. Pulls
-    # `mcp` (>=1.29) for the in-process MCP server that exposes AC-DC's
+    # `mcp` (>=1.29) for the in-process MCP server that exposes AIC-DC's
     # symbol and document indexes to the agent (specs5/plan/decisions.md CC-6).
     # The `claude` CLI itself is a Node app and is NOT installed by this
     # dependency; it is resolved at startup (specs5/6-deployment/build.md).
@@ -55,7 +55,7 @@ dependencies = [
 # phase 3: the provider abstraction itself and its transitive tree; the
 # tokenizer the token counter wrapped; the AWS SDK that Bedrock routing
 # needed; the retry library the provider used when asked for retries; and
-# the web-page extractor behind URL fetching. Nothing AC-DC still runs
+# the web-page extractor behind URL fetching. Nothing AIC-DC still runs
 # imports any of them — the `claude` CLI resolves its own credentials,
 # counts its own tokens, retries its own requests and fetches its own
 # pages.
@@ -71,7 +71,7 @@ dependencies = [
 # docs-enrich: keyword enrichment via KeyBERT + sentence-transformers.
 # Pulls torch (CUDA wheel by default, ~800MB — use PyTorch's CPU
 # index to keep installs sane). Not bundled in releases; users who
-# want it install via `pip install "ac-dc[docs-enrich]"`. Missing
+# want it install via `pip install "aic-dc[docs-enrich]"`. Missing
 # keyword enrichment degrades gracefully with a toast pointing at
 # the install command (per IMPLEMENTATION_NOTES.md D1).
 #
@@ -89,7 +89,7 @@ docs-enrich = [
     "huggingface_hub>=0.24",
 ]
 docs = [
-    "ac-dc[docs-convert,docs-enrich]",
+    "aic-dc[docs-convert,docs-enrich]",
 ]
 
 # Developer tooling: test runner, linters.
@@ -106,13 +106,13 @@ build = [
 ]
 
 [project.scripts]
-# CLI entry point — resolves to `ac_dc.cli:main`.
-ac-dc = "ac_dc.cli:main"
+# CLI entry point — resolves to `aic_dc.cli:main`.
+aic-dc = "aic_dc.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/flatmax/AI-Coder-DeCoder"
-Repository = "https://github.com/flatmax/AI-Coder-DeCoder"
-Issues = "https://github.com/flatmax/AI-Coder-DeCoder/issues"
+Homepage = "https://github.com/flatmax/AI-Coder-SDK-Connector"
+Repository = "https://github.com/flatmax/AI-Coder-SDK-Connector"
+Issues = "https://github.com/flatmax/AI-Coder-SDK-Connector/issues"
 
 # ---------------------------------------------------------------------------
 # Hatch build configuration
@@ -128,25 +128,25 @@ allow-direct-references = true
 
 [tool.hatch.build]
 # Sources live under src/ (src layout).
-packages = ["src/ac_dc"]
+packages = ["src/aic_dc"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ac_dc"]
+packages = ["src/aic_dc"]
 
 # NOTE on webapp bundling:
-# The final packaged wheel needs to ship webapp/dist/ at ac_dc/webapp_dist/
+# The final packaged wheel needs to ship webapp/dist/ at aic_dc/webapp_dist/
 # so pip-installed releases can serve the webapp without a separate npm build.
 # Hatchling's `force-include` fails loudly when the source path is missing,
 # which breaks `uv sync` in dev checkouts (webapp/dist only exists after
 # `npm run build`). Layer 6 (deployment) will wire this up properly — either
 # via a release-only config overlay, a pre-build hook that ensures webapp/dist
 # exists, or a conditional include. For now the wheel ships backend only,
-# which is correct for development and for the `ac-dc --dev`/`--preview`
+# which is correct for development and for the `aic-dc --dev`/`--preview`
 # modes that run Vite as a subprocess.
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/ac_dc",
+    "src/aic_dc",
     "README.md",
     "LICENSE",
     "pyproject.toml",

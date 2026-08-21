@@ -33,7 +33,7 @@ message:
 c3f1a2b4-5d6e-4f70-8a91-b2c3d4e5f607
 ```
 
-AC⚡DC never generates one. The SDK validates the format on resume paths (`_validate_uuid`), so a
+AIC⚡DC never generates one. The SDK validates the format on resume paths (`_validate_uuid`), so a
 malformed ID fails at the SDK boundary rather than silently starting a new session.
 
 Native-engine session IDs (`sess_{epoch_ms}_{uuid6}`) still appear in pre-conversion mirror records.
@@ -104,7 +104,7 @@ ClaudeAgentOptions(
     setting_sources=["user", "project", "local"],
     enable_file_checkpointing=True,
     extra_args={"replay-user-messages": None},      # mandatory partner of the line above
-    mcp_servers={"ac-dc": bridge.server},
+    mcp_servers={"aic-dc": bridge.server},
     session_store=store,
     session_store_flush="eager",
     model=cfg.model,                                # omitted when null → CLI default
@@ -127,7 +127,7 @@ ThinkingConfigDisabled`), not a class — there is no `ThinkingConfig(display=�
 `"adaptive"` leaves the token budget to the model, which is the CLI's own posture; `display` is the
 only part the user chose. Verified against 0.2.137 on 2026-08-14.
 
-`cli_path` should be set to the binary AC⚡DC already resolved and version-checked. Left unset, the
+`cli_path` should be set to the binary AIC⚡DC already resolved and version-checked. Left unset, the
 SDK re-runs its own discovery, which has no fallback where ours does — so the binary named in the
 engine-health record would not necessarily be the binary that runs.
 
@@ -218,7 +218,7 @@ EngineState:
     denied_read_files: list[string]
     session_id: string | null             // null before the init message arrives
     repo_name: string
-    init_complete: bool                   // AC⚡DC startup
+    init_complete: bool                   // AIC⚡DC startup
     engine_ready: bool                    // client connected and init message seen
     streaming_active: bool
     active_streams: list[ActiveStream]    // empty when no turn in flight
@@ -346,7 +346,7 @@ avoiding re-sending the whole turn on every token.
 ```pseudo
 ToolCard:
     tool_use_id: string          // also the block_id
-    name: string                 // e.g. "Edit", "Bash", "mcp__ac-dc__symbol_map"
+    name: string                 // e.g. "Edit", "Bash", "mcp__aic-dc__symbol_map"
     server: string | null        // MCP server name when the tool is an MCP tool
     input_summary: string        // ≤ 200 chars, single line
     input: object                // full tool input
@@ -450,7 +450,7 @@ Assembled from the result message plus pump-local accounting:
 | `permission_prompts` | integer | Always | Pump-counted; feeds the click-through metric |
 | `files_modified` | list[string] | Always | Union of tool-result paths; may be empty |
 | `permission_denials` | list[object] \| null | When denials occurred | SDK passthrough |
-| `deferred_tool_use` | object \| null | A `PreToolUse` hook returned `defer` | Should never occur — AC⚡DC hooks are observational |
+| `deferred_tool_use` | object \| null | A `PreToolUse` hook returned `defer` | Should never occur — AIC⚡DC hooks are observational |
 | `api_error_status` | integer \| null | On API failure | HTTP status, e.g. 429, 500, 529 |
 | `errors` | list[string] \| null | On error | |
 | `cancelled` | bool | On interrupt | Derived from `terminal_reason` |
@@ -515,7 +515,7 @@ second; it did not, so a machine with a newer system CLI still runs the wheel's 
 
 Startup must log which one was selected and its version, because a system CLI newer or older than
 `__cli_version__` changes behaviour in ways that are otherwise invisible. The SDK itself only *warns*
-on skew; refusing to start on an unusably old CLI is AC⚡DC's job, not the SDK's.
+on skew; refusing to start on an unusably old CLI is AIC⚡DC's job, not the SDK's.
 
 ### RPC namespace derives from the Python class name
 

@@ -696,14 +696,14 @@ export function onUserMessageImages(panel, event) {
  */
 function seedInputHistory(panel, msgs) {
   const history = panel.shadowRoot?.querySelector(
-    'ac-input-history',
+    'aic-input-history',
   );
   if (!history) {
     // Component isn't mounted yet. Defer until
     // it is. Adding entries is cheap, so we can
     // safely retry once Lit commits.
     panel.updateComplete.then(() => {
-      const h = panel.shadowRoot?.querySelector('ac-input-history');
+      const h = panel.shadowRoot?.querySelector('aic-input-history');
       if (h) seedIntoHistory(h, msgs);
     });
     return;

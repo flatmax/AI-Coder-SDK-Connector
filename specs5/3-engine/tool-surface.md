@@ -1,11 +1,11 @@
 # Tool Surface and Hooks
 
 Everything the agent *does* arrives as a tool call. This spec covers how tool activity is displayed,
-how AC⚡DC reacts to it (file broadcasts, re-indexing, viewer refresh), and the hook contract that
+how AIC⚡DC reacts to it (file broadcasts, re-indexing, viewer refresh), and the hook contract that
 makes those reactions possible.
 
 The companion surfaces are [permissions.md](permissions.md) (which tool calls are *asked about*) and
-[mcp-bridge.md](mcp-bridge.md) (the tools AC⚡DC itself provides).
+[mcp-bridge.md](mcp-bridge.md) (the tools AIC⚡DC itself provides).
 
 ## Display Comes From the Stream
 
@@ -49,11 +49,11 @@ transcript is never unsure whether they are reading a conclusion or a deliberati
 
 ## Hooks
 
-AC⚡DC registers hooks for **observation only**. They broadcast, re-index, and record. They never
+AIC⚡DC registers hooks for **observation only**. They broadcast, re-index, and record. They never
 return a `permissionDecision` — a `PreToolUse` hook returning `allow` skips `can_use_tool`
 entirely, which would silently disable the permission dialog.
 
-| Hook | AC⚡DC uses it to |
+| Hook | AIC⚡DC uses it to |
 |---|---|
 | `PreToolUse` | Create the tool card immediately; start a timer for the duration display. |
 | `PostToolUse` | Detect file changes → broadcast, re-index, refresh the viewer. The main reaction point. |
@@ -107,7 +107,7 @@ between calls. Concretely — a `symbol_map` call made after an `Edit` call retu
 the edit. Without this, our own MCP tool misleads the agent about code the agent itself just wrote,
 which is worse than having no tool.
 
-The debounce must therefore be bounded by the next `ac-dc` tool invocation: a pending re-index is
+The debounce must therefore be bounded by the next `aic-dc` tool invocation: a pending re-index is
 flushed synchronously before any index-reading tool answers.
 
 ## Checkpointing and Undo
@@ -126,7 +126,7 @@ misleading.
 `Bash` output appears in tool cards, not in a terminal emulator. Long-running commands stream their
 output into the card; `BashOutput` and `KillShell` calls attach to the same card.
 
-AC⚡DC does not ship a terminal. A user who wants a terminal has one — the point of the frontend is
+AIC⚡DC does not ship a terminal. A user who wants a terminal has one — the point of the frontend is
 the surfaces a terminal cannot provide. What it does provide is the thing a terminal makes hard:
 clicking a path in command output to open it in the diff viewer.
 
@@ -144,12 +144,12 @@ exposed as per-server controls, localhost-only.
 
 - Tool cards are created from the message stream and `PreToolUse`, never from `can_use_tool`; the
   rendered card count for a given turn is independent of permission mode.
-- No AC⚡DC hook returns a `permissionDecision`.
+- No AIC⚡DC hook returns a `permissionDecision`.
 - Every tool card reaches a terminal state (succeeded, failed, denied) or is explicitly marked
   abandoned when a turn is interrupted; no card stays pending forever.
 - `tool_use_id` is the only correlation key between a call and its result.
 - Every file-mutating tool call results in a `filesModified` broadcast naming the paths it touched.
-- A pending incremental re-index is flushed before any `ac-dc` index-reading tool returns; an
+- A pending incremental re-index is flushed before any `aic-dc` index-reading tool returns; an
   index-reading tool never reports state older than the most recent completed file-mutating tool
   call.
 - Failed tool cards are expanded by default; successful ones are collapsed.

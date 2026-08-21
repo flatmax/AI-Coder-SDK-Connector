@@ -1,6 +1,6 @@
-// AC-DC webapp entry point.
+// AIC-DC webapp entry point.
 //
-// Layer 5 Phase 1 — mounts the AppShell (AC-DC's root component).
+// Layer 5 Phase 1 — mounts the AppShell (AIC-DC's root component).
 // The shell owns the WebSocket connection, publishes the RPC proxy
 // to child components via SharedRpc, and renders the dialog + viewer
 // background layers.
@@ -28,7 +28,7 @@ function main() {
   const port = getWebSocketPort();
   const uri = getWebSocketURI(port);
   console.log(
-    `%cAC-DC webapp%c\n  connecting to ${uri}`,
+    `%cAIC-DC webapp%c\n  connecting to ${uri}`,
     'font-weight: bold; color: #58a6ff;',
     'color: inherit;',
   );
@@ -41,7 +41,7 @@ function main() {
     // Clear the boot splash.
     appRoot.innerHTML = '';
   }
-  const shell = document.createElement('ac-app-shell');
+  const shell = document.createElement('aic-app-shell');
   (appRoot || document.body).appendChild(shell);
 }
 

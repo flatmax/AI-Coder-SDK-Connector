@@ -33,10 +33,10 @@ describe('AppShell viewer routing and navigation', () => {
       await shell.updateComplete;
       // Let the viewers' own Lit updates settle.
       const diff = shell.shadowRoot.querySelector(
-        'ac-diff-viewer',
+        'aic-diff-viewer',
       );
       const svg = shell.shadowRoot.querySelector(
-        'ac-svg-viewer',
+        'aic-svg-viewer',
       );
       if (diff) await diff.updateComplete;
       if (svg) await svg.updateComplete;
@@ -45,8 +45,8 @@ describe('AppShell viewer routing and navigation', () => {
     it('renders both viewers in the background layer', async () => {
       const shell = mountShell();
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       expect(diff).toBeTruthy();
       expect(svg).toBeTruthy();
     });
@@ -54,8 +54,8 @@ describe('AppShell viewer routing and navigation', () => {
     it('diff viewer is visible by default', async () => {
       const shell = mountShell();
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       expect(diff.classList.contains('viewer-visible')).toBe(true);
       expect(svg.classList.contains('viewer-hidden')).toBe(true);
     });
@@ -69,7 +69,7 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff.hasOpenFiles).toBe(true);
       expect(diff._file.path).toBe('src/main.py');
     });
@@ -83,8 +83,8 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(svg.hasOpenFiles).toBe(true);
       expect(svg._files[0].path).toBe('docs/flow.svg');
       // Diff viewer didn't receive it — no file in the
@@ -103,8 +103,8 @@ describe('AppShell viewer routing and navigation', () => {
       );
       await settle(shell);
       expect(shell._activeViewer).toBe('svg');
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       expect(svg.classList.contains('viewer-visible')).toBe(true);
       expect(diff.classList.contains('viewer-hidden')).toBe(true);
     });
@@ -157,8 +157,8 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       // Diff viewer holds its single active file; SVG
       // viewer still uses the multi-file model.
       expect(diff._file?.path).toBe('a.py');
@@ -175,8 +175,8 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
       expect(diff.hasOpenFiles).toBe(false);
       expect(svg.hasOpenFiles).toBe(false);
     });
@@ -186,7 +186,7 @@ describe('AppShell viewer routing and navigation', () => {
       await settle(shell);
       window.dispatchEvent(new CustomEvent('navigate-file'));
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff.hasOpenFiles).toBe(false);
     });
 
@@ -203,7 +203,7 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff._file.path).toBe('tests/test_thing.py');
     });
 
@@ -238,7 +238,7 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff._file.path).toBe('/etc/hosts.py');
     });
 
@@ -261,7 +261,7 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff._file.path).toBe('src/main.js');
     });
 
@@ -277,7 +277,7 @@ describe('AppShell viewer routing and navigation', () => {
         }),
       );
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       expect(diff._file.path).toBe('/home/dev/my-repo/a.py');
     });
 
@@ -289,7 +289,7 @@ describe('AppShell viewer routing and navigation', () => {
       const shell = mountShell();
       await settle(shell);
       // Spy on the viewer's openFile to inspect args.
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       const spy = vi.spyOn(diff, 'openFile');
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
@@ -332,7 +332,7 @@ describe('AppShell viewer routing and navigation', () => {
       await shell.updateComplete;
       await new Promise((r) => setTimeout(r, 0));
       await shell.updateComplete;
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       if (diff) await diff.updateComplete;
     }
 
@@ -370,7 +370,7 @@ describe('AppShell viewer routing and navigation', () => {
       // hit) left nothing to restore on the way back.
       const shell = mountShell();
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       stubViewportState(diff, {
         path: 'docs/guide.md',
         scrollTop: 640,
@@ -399,8 +399,8 @@ describe('AppShell viewer routing and navigation', () => {
       // both scroll surfaces must be restored.
       const shell = mountShell();
       await settle(shell);
-      const nav = shell.shadowRoot.querySelector('ac-file-nav');
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const nav = shell.shadowRoot.querySelector('aic-file-nav');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       // Seed the grid the way real navigation would: the md
       // file is opened, then the link target.
       nav.openFile('docs/guide.md');
@@ -446,7 +446,7 @@ describe('AppShell viewer routing and navigation', () => {
     it('viewport memory is bounded and evicts least-recently-touched', async () => {
       const shell = mountShell();
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       const { VIEWPORT_MEMORY_LIMIT } = await import('./viewport.js');
       // Walk through one more file than the cap allows.
       for (let i = 0; i <= VIEWPORT_MEMORY_LIMIT; i += 1) {
@@ -472,7 +472,7 @@ describe('AppShell viewer routing and navigation', () => {
       // same path.
       const shell = mountShell();
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       stubViewportState(diff, { path: 'a.md', scrollTop: 500 });
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
@@ -551,14 +551,14 @@ describe('AppShell viewer routing and navigation', () => {
       // presses have targets. openFile on the grid is
       // synchronous; each call creates a new node
       // adjacent to the current.
-      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      const nav = shell.shadowRoot.querySelector('aic-file-nav');
       nav.openFile('a.py');
       nav.openFile('b.py');
       nav.openFile('c.py');
       nav.openFile('d.py');
       await settle(shell);
       // Spy on the diff viewer's openFile.
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       const openSpy = vi.spyOn(diff, 'openFile');
       // NOW install fake timers — only the debounce
       // setTimeout needs to be controlled from here on.
@@ -592,11 +592,11 @@ describe('AppShell viewer routing and navigation', () => {
       // before the viewer updates.
       const shell = mountShell();
       await settle(shell);
-      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      const nav = shell.shadowRoot.querySelector('aic-file-nav');
       nav.openFile('a.py');
       nav.openFile('b.py');
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       const openSpy = vi.spyOn(diff, 'openFile');
       vi.useFakeTimers();
       try {
@@ -621,12 +621,12 @@ describe('AppShell viewer routing and navigation', () => {
       // keystroke's target gets dispatched.
       const shell = mountShell();
       await settle(shell);
-      const nav = shell.shadowRoot.querySelector('ac-file-nav');
+      const nav = shell.shadowRoot.querySelector('aic-file-nav');
       nav.openFile('a.py');
       nav.openFile('b.py');
       nav.openFile('c.py');
       await settle(shell);
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       const openSpy = vi.spyOn(diff, 'openFile');
       vi.useFakeTimers();
       try {
@@ -769,8 +769,8 @@ describe('AppShell viewer routing and navigation', () => {
       await shell.updateComplete;
       stubDialogRect(shell, { left: 0, width: 401 });
       const seen = [];
-      const svg = shell.shadowRoot.querySelector('ac-svg-viewer');
-      const diff = shell.shadowRoot.querySelector('ac-diff-viewer');
+      const svg = shell.shadowRoot.querySelector('aic-svg-viewer');
+      const diff = shell.shadowRoot.querySelector('aic-diff-viewer');
       svg.relayout = () => seen.push(insetOf(shell));
       diff.relayout = () => seen.push(insetOf(shell));
       relayoutViewers(shell);

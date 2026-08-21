@@ -33,12 +33,12 @@ Read(secrets/**)          — path glob, used for deny rules
 WebFetch(domain:*.example.com)
 ```
 
-A rule with `rule_content: None` is a bare tool grant. AC⚡DC never writes one — see the parent spec.
+A rule with `rule_content: None` is a bare tool grant. AIC⚡DC never writes one — see the parent spec.
 
 #### Path rules are gitignore patterns, and only two tool names are consulted
 
 Verified against CLI 2.1.229 and the published permission reference. Four properties, each of
-which AC⚡DC got wrong before phase 2 closed:
+which AIC⚡DC got wrong before phase 2 closed:
 
 - **Only `Edit(path)` and `Read(path)` rules are checked.** A path rule written for `Write`,
   `MultiEdit`, `NotebookEdit` or `Glob` is *accepted, never consulted*, and warned about at
@@ -74,11 +74,11 @@ Three consequences worth stating, because each contradicts a reasonable guess:
 - **`destination: "session"` is normal, not an edge case.** Any dialog copy that denies the
   existence of session-scoped grants is false.
 - **Persisted rules go to `localSettings`**, `.claude/settings.local.json` at the git root — not
-  to `projectSettings`. AC⚡DC's derived rules follow the CLI here (CC-16): `localSettings` is the
+  to `projectSettings`. AIC⚡DC's derived rules follow the CLI here (CC-16): `localSettings` is the
   default, and `projectSettings` is reachable only from the extra, `shared`-tagged menu row. A
   destination the CLI names is used exactly as named, `session` included.
 
-#### How AC⚡DC answers a mode suggestion
+#### How AIC⚡DC answers a mode suggestion
 
 A `setMode` suggestion is **offered on its own control**, never folded into "always allow". The
 reason is the size of the grant: `acceptEdits` stops the dialog opening for every later edit in
@@ -89,7 +89,7 @@ waiting on the permission response and will not service another control request 
 
 Two constraints on which modes may be offered:
 
-- Only modes AC⚡DC holds copy for, so the control can state what stops being asked. An
+- Only modes AIC⚡DC holds copy for, so the control can state what stops being asked. An
   unrecognised mode is logged and dropped rather than rendered with a generic label.
 - **Never `bypassPermissions`**, at either end — not in the offer table, and re-checked when the
   update is built. A dialog button is precisely the accident the no-bypass rule exists to prevent.
@@ -105,7 +105,7 @@ told separately, or the mode selector goes on reporting the mode the session sta
 
 #### Derived rules for shell commands
 
-When the CLI offers no suggestion of its own, AC⚡DC derives two, **narrowest first**:
+When the CLI offers no suggestion of its own, AIC⚡DC derives two, **narrowest first**:
 
 | Order | For `git push origin main` | Grants |
 |---|---|---|
@@ -115,7 +115,7 @@ When the CLI offers no suggestion of its own, AC⚡DC derives two, **narrowest f
 
 Row 3 exists once per dialog, not once per rule, and it always carries the *narrowest* content: the
 wider grant and the wider audience must not arrive on the same click. It is built only for rules
-AC⚡DC derived — a CLI suggestion keeps the destination the CLI chose, since promoting its
+AIC⚡DC derived — a CLI suggestion keeps the destination the CLI chose, since promoting its
 `session` suggestion to a committed rule would invent a persisted grant it declined to ask for.
 
 The literal command is the default because it is what the CLI derives and because the prefix
@@ -220,12 +220,12 @@ PermissionUpdate(
 ```
 
 - `type` ∈ `addRules`, `replaceRules`, `removeRules`, `setMode`, `addDirectories`, `removeDirectories`.
-  AC⚡DC writes `addRules` only.
+  AIC⚡DC writes `addRules` only.
 - `behavior` ∈ `allow`, `deny`, `ask`.
 - `destination` ∈ `userSettings`, `projectSettings`, `localSettings`, `session`. Default for "always
   allow" is `localSettings` (`.claude/settings.local.json`, git-ignored) — the file the CLI persists
   its own approvals to (CC-16). `projectSettings` is offered as one extra menu row, tagged `shared`,
-  because a git-tracked grant reaches every checkout that pulls it. AC⚡DC never *chooses* `session`
+  because a git-tracked grant reaches every checkout that pulls it. AIC⚡DC never *chooses* `session`
   for a derived rule — an invisible in-memory grant is what the parent spec forbids — but it does
   pass one back unchanged when the CLI suggested it, which for reads outside the cwd is the common
   case.
@@ -251,7 +251,7 @@ rules. The consequences are load-bearing and an earlier draft of this file assum
   reaches the CLI is writing the rule into `.claude/settings.local.json` ourselves, which the CLI reads
   on its own. `set_denied_read_files` is therefore a file writer, not an SDK call, and the "this session
   only" option in `specs5/5-webapp/file-picker.md` § Denial Scope Prompt has to be honest about what it
-  means: AC⚡DC drops the rule from its own list at session end and rewrites the file, rather than the
+  means: AIC⚡DC drops the rule from its own list at session end and rewrites the file, rather than the
   engine forgetting anything.
 - **A rule written mid-session is not retroactive** to a call already in flight, and nothing can query
   the CLI for the rules currently in force. The dialog's "always allow" therefore reports what it
@@ -397,7 +397,7 @@ dialog's "does this option have an example?" test is a truth test.
 Two facts about it are not guessable from the tool schema, which types it as a bare optional string
 and defers the format to the tool description (verified against the bundled CLI 2.1.233):
 
-- **The format is the host's choice, and there are two of them.** `previewFormat` on the SDK's `askUserQuestion` options reaches the CLI as `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which takes `"markdown"` or `"html"`. Markdown is "rendered as markdown in a monospace box"; html requires "a self-contained HTML fragment (no `<html>`/`<body>` wrapper, no `<script>` or `<style>` tags)" and is validated as such before the call runs. AC⚡DC asks for markdown — see `src/ac_dc/claude_code/options.py`, `QUESTION_PREVIEW_FORMAT`, for why the other one is not a display preference.
+- **The format is the host's choice, and there are two of them.** `previewFormat` on the SDK's `askUserQuestion` options reaches the CLI as `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which takes `"markdown"` or `"html"`. Markdown is "rendered as markdown in a monospace box"; html requires "a self-contained HTML fragment (no `<html>`/`<body>` wrapper, no `<script>` or `<style>` tags)" and is validated as such before the call runs. AIC⚡DC asks for markdown — see `src/aic_dc/claude_code/options.py`, `QUESTION_PREVIEW_FORMAT`, for why the other one is not a display preference.
 - **Unset, the format is nobody's decision.** The same env var decides whether the tool's *prompt* carries the "Preview feature" block that documents the field — what it is for, which format to author, that the UI turns side-by-side, that it is single-select only. Unset, the CLI adds that block for a terminal session and omits it for every SDK entrypoint; ours is `sdk-py`. The field itself stays in the schema either way, so this is not an on/off switch: a live A/B against the bundled CLI produced previews with the variable removed from the environment altogether, because the model knows the field without being told. What the omission actually costs is the format — the schema's own description defers it to a tool description that then says nothing, leaving markdown-or-html to the model, and the dialog renders one of those as a mockup and the other as a wall of angle brackets. Asking makes the format the host's.
 
 The tool's guidance also says previews are supported for single-select questions only. The payload
@@ -470,7 +470,7 @@ Verified against the bundled CLI 2.1.229, whose tool definition is:
 `else if (response?.trim())` branch yielding `The user responded: …` that pre-empts the answers branch
 entirely — so a decision that set `response` for the freeform reply would report that reply and silently
 discard every option the user picked alongside it, on every other question in the call too. The terminal
-itself never sets it; the field exists for a caller that has nothing but prose. AC⚡DC therefore routes
+itself never sets it; the field exists for a caller that has nothing but prose. AIC⚡DC therefore routes
 the freeform reply through `answers[<question text>]` like any other answer, and
 `test_no_response_key_is_ever_written` pins it. Nor is the reply a distinct kind of answer to the CLI:
 the tool's own schema instructs the model not to write an "Other" option *because the front end provides
@@ -598,13 +598,13 @@ config surface — a user who wants a different posture writes a rule.
 
 | Class | Tools | Gated by default |
 |---|---|---|
-| `read` | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `NotebookRead`, `TodoWrite`, `mcp__ac-dc__*` | No |
+| `read` | `Read`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `NotebookRead`, `TodoWrite`, `mcp__aic-dc__*` | No |
 | `write` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | Yes |
 | `exec` | `Bash`, `BashOutput`, `KillShell` | Yes |
 | `delegate` | `Task` | No |
 | `interact` | `AskUserQuestion` | Always, by the SDK |
 | `plan` | `ExitPlanMode` | Yes |
-| `mcp` | any `mcp__*` tool from a server other than `ac-dc` | Yes |
+| `mcp` | any `mcp__*` tool from a server other than `aic-dc` | Yes |
 
 An unrecognised tool name classifies as `mcp` when it matches `mcp__*` and as `exec` otherwise —
 unknown-and-gated is the safe default, and a new built-in tool appearing in a CLI upgrade must not
@@ -630,7 +630,7 @@ as such in the payload so the UI can label a fallback.
 
 The SDK emits `CanUseToolShadowedWarning` when a `PreToolUse` hook returns a `permissionDecision` that
 pre-empts `can_use_tool`. `"allow"` shadows it just as `"deny"` does, and `"defer"` stops the run and
-surfaces the call in `ResultMessage.deferred_tool_use`. AC⚡DC's hooks return no decision at all;
+surfaces the call in `ResultMessage.deferred_tool_use`. AIC⚡DC's hooks return no decision at all;
 treat the warning appearing in logs as a regression, and `deferred_tool_use` being non-null likewise.
 
 ### `PermissionMode` has six values

@@ -17,7 +17,7 @@ import './compaction-progress.js';
 const _mounted = [];
 
 function mountOverlay() {
-  const el = document.createElement('ac-compaction-progress');
+  const el = document.createElement('aic-compaction-progress');
   document.body.appendChild(el);
   _mounted.push(el);
   return el;

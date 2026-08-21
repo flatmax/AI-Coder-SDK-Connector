@@ -19,8 +19,8 @@
 // survives so double-click-to-expand restores the user's prior
 // width rather than snapping to a default.
 
-export const _PICKER_WIDTH_KEY = 'ac-dc-picker-width';
-export const _PICKER_COLLAPSED_KEY = 'ac-dc-picker-collapsed';
+export const _PICKER_WIDTH_KEY = 'aic-dc-picker-width';
+export const _PICKER_COLLAPSED_KEY = 'aic-dc-picker-collapsed';
 export const _PICKER_MIN_WIDTH = 180;
 export const _PICKER_COLLAPSED_WIDTH = 24;
 export const _PICKER_DEFAULT_WIDTH = 280;

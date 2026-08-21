@@ -9,7 +9,7 @@
 
 import { afterEach } from 'vitest';
 
-// Importing the component module registers the <ac-file-picker>
+// Importing the component module registers the <aic-file-picker>
 // custom element as a side effect. Every test file pulls in this
 // helpers module, so the registration happens exactly once per
 // shard regardless of which tests load first.
@@ -90,7 +90,7 @@ const _mounted = [];
 
 /** Create, mount, and track a picker instance for cleanup. */
 export function mountPicker(props = {}) {
-  const p = document.createElement('ac-file-picker');
+  const p = document.createElement('aic-file-picker');
   Object.assign(p, props);
   document.body.appendChild(p);
   _mounted.push(p);
@@ -112,8 +112,8 @@ export function installCleanup() {
     // Tests that need to exercise the persistence path set the
     // keys explicitly before mounting.
     try {
-      localStorage.removeItem('ac-dc-sort-mode');
-      localStorage.removeItem('ac-dc-sort-asc');
+      localStorage.removeItem('aic-dc-sort-mode');
+      localStorage.removeItem('aic-dc-sort-asc');
     } catch (_err) {
       // ignore
     }

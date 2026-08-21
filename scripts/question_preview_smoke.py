@@ -42,7 +42,7 @@ Usage::
     environment, then compare. The second half matters and is easy to miss:
     the SDK spawns the CLI with ``{**os.environ, **options.env}``, so
     emptying ``options.env`` alone leaves an inherited value in place — and
-    a session run from inside AC⚡DC inherits one from the engine hosting it,
+    a session run from inside AIC⚡DC inherits one from the engine hosting it,
     which is how a first attempt at this A/B produced two identical runs.
 
 ``--deny``
@@ -67,13 +67,13 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ac_dc.claude_code import (  # noqa: E402
+from aic_dc.claude_code import (  # noqa: E402
     EngineConfig,
     build_options,
     resolve_cli,
 )
-from ac_dc.claude_code.options import QUESTION_PREVIEW_ENV  # noqa: E402
-from ac_dc.claude_code.permissions import (  # noqa: E402
+from aic_dc.claude_code.options import QUESTION_PREVIEW_ENV  # noqa: E402
+from aic_dc.claude_code.permissions import (  # noqa: E402
     build_answer_input,
     build_question_payload,
 )

@@ -8,11 +8,11 @@
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `ac-dc-sort-mode` | `"name"` / `"mtime"` / `"size"` | `"name"` | Sort mode for file tree |
-| `ac-dc-sort-asc` | `"1"` / `"0"` | `"1"` | Sort direction: 1 = ascending, 0 = descending |
-| `ac-dc-picker-width` | integer px (string) | `280` | Picker pane width within the Files tab |
-| `ac-dc-picker-collapsed` | `"true"` / `"false"` | `"false"` | Picker collapsed state |
-| `ac-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | `"ask"` | **Not written or read by any code.** Belongs to the denial-scope prompt, which was specified and never built — see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt. Every denial goes to `.claude/settings.local.json` unconditionally |
+| `aic-dc-sort-mode` | `"name"` / `"mtime"` / `"size"` | `"name"` | Sort mode for file tree |
+| `aic-dc-sort-asc` | `"1"` / `"0"` | `"1"` | Sort direction: 1 = ascending, 0 = descending |
+| `aic-dc-picker-width` | integer px (string) | `280` | Picker pane width within the Files tab |
+| `aic-dc-picker-collapsed` | `"true"` / `"false"` | `"false"` | Picker collapsed state |
+| `aic-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | `"ask"` | **Not written or read by any code.** Belongs to the denial-scope prompt, which was specified and never built — see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt. Every denial goes to `.claude/settings.local.json` unconditionally |
 
 Malformed values fall back to defaults. Storage errors (private-browsing quirks, quota) are swallowed silently.
 
@@ -150,7 +150,7 @@ is **not** denied, because there is no glob covering it.
 ### The denial-scope prompt is not built
 
 `specs5/5-webapp/file-picker.md` § Denial Scope Prompt describes a modal that asks where the rule should
-live before the first write. No such dialog exists, `ac-dc-deny-read-scope` is never read or written, and
+live before the first write. No such dialog exists, `aic-dc-deny-read-scope` is never read or written, and
 every denial goes straight to `.claude/settings.local.json`. What does reach the user is a
 `takes_effect` toast — the string comes from the RPC's return value, not from an assumption in the
 frontend — shown once per session on the first denial, plus a `restricted` warning toast when a non-local

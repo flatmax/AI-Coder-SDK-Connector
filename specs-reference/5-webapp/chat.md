@@ -243,18 +243,18 @@ since `compact_boundary` can arrive just after `streamComplete`.
 
 | Key | Type | Purpose |
 |---|---|---|
-| `ac-dc-snippet-drawer` | `"true"` / `"false"` | Snippet drawer open/closed state |
-| `ac-dc-search-ignore-case` | `"true"` / `"false"` | Search toggle: ignore case (default `"true"`) |
-| `ac-dc-search-regex` | `"true"` / `"false"` | Search toggle: regex mode (default `"false"`) |
-| `ac-dc-search-whole-word` | `"true"` / `"false"` | Search toggle: whole word (default `"false"`) |
-| `ac-dc.chat.draft` | string | In-progress textarea content for the main tab. Written on every input event; removed on send. Global rather than per-repo — drafts are short-lived and the chat panel does not currently receive `repoName`. Restored at `connectedCallback` time when `_input` is empty so an existing in-memory draft is not clobbered. Subagent tabs have no input, so nothing else needs a draft slot |
-| `ac-dc-preset` | string | Selected prompt preset name. **Per-client and never sent to the server** — a preset is a local text template, not an engine state (`specs5/plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states`) |
-| `ac-dc-thinking-collapsed` | `"true"` / `"false"` | Whether thinking regions start collapsed (default `"true"`) |
-| `ac-dc-tool-cards-collapsed` | `"true"` / `"false"` | Whether tool cards start collapsed (default `"true"`) |
+| `aic-dc-snippet-drawer` | `"true"` / `"false"` | Snippet drawer open/closed state |
+| `aic-dc-search-ignore-case` | `"true"` / `"false"` | Search toggle: ignore case (default `"true"`) |
+| `aic-dc-search-regex` | `"true"` / `"false"` | Search toggle: regex mode (default `"false"`) |
+| `aic-dc-search-whole-word` | `"true"` / `"false"` | Search toggle: whole word (default `"false"`) |
+| `aic-dc.chat.draft` | string | In-progress textarea content for the main tab. Written on every input event; removed on send. Global rather than per-repo — drafts are short-lived and the chat panel does not currently receive `repoName`. Restored at `connectedCallback` time when `_input` is empty so an existing in-memory draft is not clobbered. Subagent tabs have no input, so nothing else needs a draft slot |
+| `aic-dc-preset` | string | Selected prompt preset name. **Per-client and never sent to the server** — a preset is a local text template, not an engine state (`specs5/plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states`) |
+| `aic-dc-thinking-collapsed` | `"true"` / `"false"` | Whether thinking regions start collapsed (default `"true"`) |
+| `aic-dc-tool-cards-collapsed` | `"true"` / `"false"` | Whether tool cards start collapsed (default `"true"`) |
 
 Input history is NOT persisted — session-scoped only.
 
-There is no `ac-dc-mode` key. Mode was server state broadcast as `modeChanged`; a preset is a browser-local
+There is no `aic-dc-mode` key. Mode was server state broadcast as `modeChanged`; a preset is a browser-local
 string, so two windows on the same repo can hold different presets without contradiction.
 
 ### System event message content templates
@@ -318,7 +318,7 @@ The one card object per `tool_use_id`, built browser-side by folding three sourc
 {
   tool_use_id: string,
   agent_id: string | null,     // routes the card to a scope
-  name: string,                // "Edit", "Bash", "mcp__ac-dc__symbol_search"
+  name: string,                // "Edit", "Bash", "mcp__aic-dc__symbol_search"
   server: string | null,       // MCP server chip, parsed from an mcp__ name
   input: object,               // from the assistant message's tool_use block
   gated: boolean,              // set when a permissionRequest carried this id

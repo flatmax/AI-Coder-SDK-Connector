@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from ac_dc.repo import Repo
+from aic_dc.repo import Repo
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +477,7 @@ class TestReadOperationsAllowed:
 
 from jrpc_oo.ExposeClass import ExposeClass  # noqa: E402
 
-from ac_dc.collab import Collab, CollabServer  # noqa: E402
+from aic_dc.collab import Collab, CollabServer  # noqa: E402
 
 
 class _GatedService:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.repo import Repo
+from aic_dc.repo import Repo
 
 
 def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess:

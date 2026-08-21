@@ -16,9 +16,9 @@ specs4 says missing optional deps (KeyBERT, markitdown, PyMuPDF, LibreOffice, ma
 
 Per specs4/6-deployment/packaging.md:
 
-- Linux / BSD: `~/.config/ac-dc/`
-- macOS: `~/Library/Application Support/ac-dc/`
-- Windows: `%APPDATA%/ac-dc/`
+- Linux / BSD: `~/.config/aic-dc/`
+- macOS: `~/Library/Application Support/aic-dc/`
+- Windows: `%APPDATA%/aic-dc/`
 
 Managed vs user file sets as specified. `.bundled_version` marker tracks which release populated the directory.
 
@@ -59,9 +59,9 @@ Without this, `uv sync` / `pip install -e .` fails at build time.
 
 ### D7 — Webapp-as-bundle deferred
 
-specs4/6-deployment/build.md calls for the final wheel to ship `webapp/dist/` at `ac_dc/webapp_dist/` so pip-installed releases serve the webapp without a separate npm build.
+specs4/6-deployment/build.md calls for the final wheel to ship `webapp/dist/` at `aic_dc/webapp_dist/` so pip-installed releases serve the webapp without a separate npm build.
 
-Hatchling's `force-include` fails loudly when the source path is missing, which would break `uv sync` in dev checkouts (webapp/dist exists only after `npm run build`). Layer 6 will wire this up properly — release-only config overlay, pre-build hook, or conditional include. For now the wheel is backend-only, which is correct for development and for `ac-dc --dev`/`--preview` modes that run Vite as a subprocess.
+Hatchling's `force-include` fails loudly when the source path is missing, which would break `uv sync` in dev checkouts (webapp/dist exists only after `npm run build`). Layer 6 will wire this up properly — release-only config overlay, pre-build hook, or conditional include. For now the wheel is backend-only, which is correct for development and for `aic-dc --dev`/`--preview` modes that run Vite as a subprocess.
 
 ### D8 — jrpc-oo pinning
 
@@ -100,7 +100,7 @@ async function settle(panel) {
 
 ### D16 — Both server and webapp ports must be probed independently
 
-`rpc.py`'s `find_available_port` already handled the WebSocket port. The webapp port was passed through verbatim to either Vite or the built-in static server. On the second concurrent `ac-dc` launch, the webapp bind would fail silently — either inside a daemon thread (static server `OSError` swallowed) or with a Vite crash-loop — but `webbrowser.open()` still fired, sending the user to the first instance's webapp. The browser tab would show the second instance's repo title while executing the first instance's JS bundle, producing the confusing "AC-DC4 title bar, AC-DC code" failure mode.
+`rpc.py`'s `find_available_port` already handled the WebSocket port. The webapp port was passed through verbatim to either Vite or the built-in static server. On the second concurrent `aic-dc` launch, the webapp bind would fail silently — either inside a daemon thread (static server `OSError` swallowed) or with a Vite crash-loop — but `webbrowser.open()` still fired, sending the user to the first instance's webapp. The browser tab would show the second instance's repo title while executing the first instance's JS bundle, producing the confusing "AIC-DC title bar, AIC-DC code" failure mode.
 
 **Fix:** probe both ports in `run()` using the same `find_available_port` helper already used for the server port. The CLI flags become *starting* ports rather than required ones.
 
@@ -119,7 +119,7 @@ except RuntimeError as exc:
 
 Probe-host: loopback is a strict superset check — if `0.0.0.0:N` is taken, `127.0.0.1:N` is also unavailable. So the default loopback probe in `find_available_port` is correct in both single-user and `--collab` modes.
 
-**Diagnostic that found this:** a user running two concurrent `ac-dc` instances on the same machine saw edits applied to disk on the second instance but the browser never reflected them. `grep -c "console.log"` confirmed the logs were in the file; `fetch('/src/chat-panel.js', {cache: 'no-store'})` returned 790 bytes (a 404 HTML stub) because the request was being served by the *first* instance's Vite, rooted at a different project directory with a different source layout. `ps aux | grep vite` showed two Vite processes bound to the same port — the race loser had failed to bind but hadn't crashed the backend.
+**Diagnostic that found this:** a user running two concurrent `aic-dc` instances on the same machine saw edits applied to disk on the second instance but the browser never reflected them. `grep -c "console.log"` confirmed the logs were in the file; `fetch('/src/chat-panel.js', {cache: 'no-store'})` returned 790 bytes (a 404 HTML stub) because the request was being served by the *first* instance's Vite, rooted at a different project directory with a different source layout. `ps aux | grep vite` showed two Vite processes bound to the same port — the race loser had failed to bind but hadn't crashed the backend.
 
 **Lesson:** silent cross-wiring is worse than a loud error. Any subprocess or thread that binds a port must either go through the probe or check the bind result and surface the failure. Swallowing `OSError` inside a daemon thread is load-bearing for robustness during shutdown (broken-pipe errors) but masks genuine bind failures during startup. Future contributors adding new network listeners should follow the same probe-then-log pattern.
 
@@ -254,7 +254,7 @@ The API entry is tempting because it looks smaller and lets you cherry-pick lang
 **Diagnostic probe.** When diff highlighting doesn't work, run in devtools console:
 
 ```js
-const v = /* walk shadow roots for <ac-diff-viewer> */;
+const v = /* walk shadow roots for <aic-diff-viewer> */;
 const e = v._editor;
 console.log('line changes:', e.getLineChanges());
 console.log('has .mtk:', [...v.shadowRoot.querySelectorAll('style')]
@@ -304,7 +304,7 @@ The user's complaint surfaced the cost: "adding full context files invalidates t
 **Six-commit delivery sequence.**
 
 1. `4cdc23a` — spec updates: `specs4/3-llm/cache-tiering.md`, `specs4/3-llm/prompt-assembly.md`, `specs-reference/3-llm/cache-tiering.md`, `specs-reference/3-llm/prompt-assembly.md`. Defines the contract before code changes.
-2. `f9e2d1c` — system prompt updates: `src/ac_dc/config/system.md`, `src/ac_dc/config/system_doc.md` add the "How Files Appear in This Prompt — Authority Rule" clause. Synced to `specs-reference/3-llm/prompts/` via `scripts/sync_prompts.py`.
+2. `f9e2d1c` — system prompt updates: `src/aic_dc/config/system.md`, `src/aic_dc/config/system_doc.md` add the "How Files Appear in This Prompt — Authority Rule" clause. Synced to `specs-reference/3-llm/prompts/` via `scripts/sync_prompts.py`.
 3. `8a7b4e9` — `StabilityTracker` changes: pin flag on `file:` entries with hash changes, deletion-marker transition in Phase 0, `mark_deleted` / `pin_file` / `is_pinned` / `is_deleted` helpers, cascade refuses to promote into L0, underfill demotion skips pinned and marker entries, removal protection in Phase 1 cleanup.
 4. `2c8d6f1` — `init` and `rebuild_cache` paths: don't seed `symbol:`/`doc:` entries into L1/L2/L3 anymore; only `system:prompt` lands as a tracker entry; `rebuild_cache` clears pin flags as part of the explicit reset; aggregate maps regenerated at assembly time from the index.
 5. `bba76ab` — `_breakdown.py` and `_assembly.py` changes: rename `wide_map_exclude_set` → `user_excluded_paths`; aggregate map rendering passes only user-exclusion set; per-file detail enumeration includes selected files; LLMService shim forwards to the new helper.
@@ -418,7 +418,7 @@ Three problems surfaced in practice:
 | Stability tracker | Per-mode (two total) | Per-context-manager (N possible) |
 | Single-stream guard | Any LLM request | User-initiated requests only |
 | Chunk routing | Singleton passive flag | Keyed by request ID |
-| Agent conversations | Unspecified | Per-agent files archived to `.ac-dc4/agents/{turn_id}/agent-NN.jsonl`; main LLM lives in main history |
+| Agent conversations | Unspecified | Per-agent files archived to `.aic-dc/agents/{turn_id}/agent-NN.jsonl`; main LLM lives in main history |
 | Index mutation | Procedural timing | Read-only snapshots within a request |
 | HUD breakdown | Session-global | Per-context-manager |
 
@@ -430,7 +430,7 @@ All are zero-cost in single-agent operation. Preserving them now means the found
 
 The diff viewer's D18 rewrite eliminated cross-run staleness by refetching on every `openFile`. The SVG viewer kept its multi-tab `_files[]` cache and relied on the app shell's narrower set of refresh triggers (`streamComplete` with non-empty `files_modified`, `commitResult`, `files-reverted`), which miss external edits that fire only the generic `files-modified` broadcast — git pulls, edit-pipeline applies on unrelated workflows, collab writes, terminal edits.
 
-Symptom: opening an SVG in the viewer, editing the same file outside AC⚡DC (or across a different run), clicking back to the viewer tab shows the pre-edit cached content. The backend RPC (`Repo.get_file_content`) is honest — it reads from disk — but `openFile`'s same-file short-circuit means it never gets called for an already-open path.
+Symptom: opening an SVG in the viewer, editing the same file outside AIC⚡DC (or across a different run), clicking back to the viewer tab shows the pre-edit cached content. The backend RPC (`Repo.get_file_content`) is honest — it reads from disk — but `openFile`'s same-file short-circuit means it never gets called for an already-open path.
 
 Resolution: the SVG viewer subscribes to `files-modified` window events in `connectedCallback`, removes the listener in `disconnectedCallback`, and calls `refreshOpenFiles()` when any affected path is open. `refreshOpenFiles` itself gained a dirty-skip guard so mid-edit SvgEditor state isn't clobbered by an unrelated refresh. Defensive against missing / empty `paths` in the event detail (older backends, edge paths) — falls back to refreshing every open file. Six new tests in `svg-viewer.test.js § SvgViewer files-modified broadcast` cover the happy path, unrelated-paths short-circuit, empty-detail defensive refresh, no-open-files no-op, dirty-file preservation, and disconnect cleanup.
 
@@ -512,8 +512,8 @@ The `AgentBlock` marker parsing (Slice 3) and per-agent ContextManager factory (
 
 Files deleted:
 
-- `src/ac_dc/agent_runner.py`
-- `src/ac_dc/agent_orchestrator.py`
+- `src/aic_dc/agent_runner.py`
+- `src/aic_dc/agent_orchestrator.py`
 - `tests/test_agent_runner.py`
 - `tests/test_agent_orchestrator.py`
 
@@ -531,7 +531,7 @@ The `agents.enabled` toggle in `app.json` gates the parallel-agent capability at
 
 The appendix uses **user-dir-only read semantics**, distinct from the base `system.md` where the fallback-to-bundle path is load-bearing. A user who deletes `system_agentic_appendix.md` from their user config dir has made a clear choice to suppress agent-mode instructions; the fallback-to-bundle pattern would defeat that choice by re-injecting the text they just removed. The base `system.md` can't use user-dir-only because a missing base prompt would break every chat request — so the two files deliberately have different read semantics, documented in `specs4/1-foundation/configuration.md` § User-Dir-Only Read for the Agentic Appendix.
 
-Diagnosing the test failure that surfaced this semantic took one turn of back-and-forth. The test deleted `system_agentic_appendix.md` expecting the prompt to omit the appendix, but the assertion still found "Agent-Spawn Capability" in the prompt — because `_read_user_file` was falling back to the bundled copy under `src/ac_dc/config/system_agentic_appendix.md`. Fix was a user-dir-only read path added inline in `get_system_prompt()` rather than plumbing a no-fallback option through the generic helper.
+Diagnosing the test failure that surfaced this semantic took one turn of back-and-forth. The test deleted `system_agentic_appendix.md` expecting the prompt to omit the appendix, but the assertion still found "Agent-Spawn Capability" in the prompt — because `_read_user_file` was falling back to the bundled copy under `src/aic_dc/config/system_agentic_appendix.md`. Fix was a user-dir-only read path added inline in `get_system_prompt()` rather than plumbing a no-fallback option through the generic helper.
 
 **Layer 3 — LLMService refresh wiring.** Without explicit refresh, the context manager caches the assembled prompt at session start, mode switches, and review entry/exit. Toggling `agents.enabled` in the Settings tab would change what `ConfigManager.get_system_prompt()` returns, but the cached prompt on the active context manager wouldn't refresh until the next mode switch — producing a confusing UX where the toggle UI says "agents on" but the LLM doesn't see the appendix for several turns.
 
@@ -654,7 +654,7 @@ When the toggle is on and the LLM emits agent-spawn blocks, the backend now genu
 
 D21 originally specified agent tab IDs as the compound shape `{turn_id}/agent-{NN}`, with `parseAgentTabId` returning a `[turn_id, agent_idx]` tuple and the corresponding RPCs (`set_agent_selected_files`, `set_agent_excluded_index_files`, `close_agent_context`, `chat_streaming`'s `agent_tag`) taking three or four positional arguments to thread the tuple components through.
 
-Specs4/5-webapp/agent-browser.md and specs4/7-future/parallel-agents.md § "Agent Reuse by ID" subsequently revised this contract to **flat identity**: the agent's LLM-chosen `id` from its `🟧🟧🟧 AGENT` block IS the tab ID IS the backend registry key. `parseAgentTabId(tabId)` becomes the identity function for any non-"main" non-empty string, returning `null` only for `"main"` and malformed inputs (empty string, non-string types). The backend RPCs take a single `agent_id` string instead of a `(turn_id, agent_idx)` pair. The padded numeric index in child request IDs (`{parent}-agent-{NN}`) and archive file names (`.ac-dc4/agents/{turn_id}/agent-{NN}.jsonl`) is a routing/storage detail — it does not feed back into tab identity, and the frontend never reconstructs identity from it.
+Specs4/5-webapp/agent-browser.md and specs4/7-future/parallel-agents.md § "Agent Reuse by ID" subsequently revised this contract to **flat identity**: the agent's LLM-chosen `id` from its `🟧🟧🟧 AGENT` block IS the tab ID IS the backend registry key. `parseAgentTabId(tabId)` becomes the identity function for any non-"main" non-empty string, returning `null` only for `"main"` and malformed inputs (empty string, non-string types). The backend RPCs take a single `agent_id` string instead of a `(turn_id, agent_idx)` pair. The padded numeric index in child request IDs (`{parent}-agent-{NN}`) and archive file names (`.aic-dc/agents/{turn_id}/agent-{NN}.jsonl`) is a routing/storage detail — it does not feed back into tab identity, and the frontend never reconstructs identity from it.
 
 Production code in `webapp/src/chat-panel.js` and `webapp/src/files-tab.js` was updated to match the flat-identity spec when the spec change landed, but 27 tests in `chat-panel.test.js` and `files-tab.test.js` still asserted the obsolete tuple-parsing contract. The failures broke into six buckets:
 
@@ -699,7 +699,7 @@ Spec updates landing alongside this decision:
 - `specs4/6-deployment/startup.md` § Phase 1 step 3 expanded — env application slotted between config-manager construction and other lightweight services, with rationale and cross-reference. New invariant added at the bottom of the file.
 - `specs-reference/1-foundation/configuration.md` § Provider SDK env-var caching — boto3-specific quirk, lazy provider construction in litellm, `AWS_REGION` vs `AWS_DEFAULT_REGION` precedence.
 
-Code change is one line in `src/ac_dc/main.py` between `ConfigManager` construction and `Settings` construction. No tests added — the existing `test_apply_llm_env_exports_variables` covers the helper; an integration test against `main.run` would require extracting a `_init_lightweight_services` helper since `main.run` itself opens sockets and starts servers. Filed as a follow-up if the cold-start path regresses.
+Code change is one line in `src/aic_dc/main.py` between `ConfigManager` construction and `Settings` construction. No tests added — the existing `test_apply_llm_env_exports_variables` covers the helper; an integration test against `main.run` would require extracting a `_init_lightweight_services` helper since `main.run` itself opens sockets and starts servers. Filed as a follow-up if the cold-start path regresses.
 
 ### D31 — Dialog header removed; tab strip absorbs drag-handle role; per-tab affordances replace dialog-level controls
 
@@ -859,9 +859,9 @@ The flux equation is
 
 with a Taylor-branch numerical guard at `|V/V_T| < 1e-9` and overflow-safe asymptotic branches at `|V/V_T| > 50`. The hard rectification clamp on the lower side makes flux upward-only — downward motion is reserved for the edit invariant (hash mismatch teleports to Active) and explicit invalidations.
 
-Earlier revisions of this decision exposed three variants — `linear` (Taylor branch as a separate code path), `rectified-ghk`, and `bidirectional-ghk` (no clamp, controller-driven demotion). All three were retired: rectification is **free** on AC-DC4's single-tenant headline (paper §6.3 — the demotion path is empirically dead code), and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default. Carrying the alternates as live code paths added dispatch surface, test surface, and config surface for no production-headline benefit.
+Earlier revisions of this decision exposed three variants — `linear` (Taylor branch as a separate code path), `rectified-ghk`, and `bidirectional-ghk` (no clamp, controller-driven demotion). All three were retired: rectification is **free** on AIC-DC's single-tenant headline (paper §6.3 — the demotion path is empirically dead code), and the linear form is the V → 0 Taylor branch of GHK, redundant once the GHK form is the production default. Carrying the alternates as live code paths added dispatch surface, test surface, and config surface for no production-headline benefit.
 
-AC-DC4 is single-tenant single-class — the K=4 multi-class structure of the paper does not apply; we keep the three-membrane geometry (Active→L3, L3→L2, L2→L1; L1→L0 absent per D27) and treat each membrane as its own one-class controller, with V summed across all membranes per constraint C1.
+AIC-DC is single-tenant single-class — the K=4 multi-class structure of the paper does not apply; we keep the three-membrane geometry (Active→L3, L3→L2, L2→L1; L1→L0 absent per D27) and treat each membrane as its own one-class controller, with V summed across all membranes per constraint C1.
 
 **Default parameters** are sourced from the synth-tuner's headline rectified-GHK fit (`runs/opt-run2/best_params.json` in `~/flatmax/personal.work/research/cache.tiering`):
 
@@ -876,7 +876,7 @@ The original tune ran bidirectional (`allow_negative_flux=True`); for the rectif
 
 - `n` is now a pure age counter (turns since last seen at `n=0`), not "consecutive unchanged appearances." The Active→L3 membrane is **admission_only** (`n_admit=3`, `pick_mode="oldest"`) — no flux equation, just an age gate. Higher membranes use the flux controller alone.
 
-  **Why Active→L3 falls back to admission semantics.** The flux model treats V (token-mass differential) as the driving force, which is right for inter-cache balancing but degenerate at the admission boundary: in AC-DC4, active is structurally lighter than the cached tiers — items live there only until they age past the gate, after which they leave for L3+ — so `t_active < t_L3` is the steady state and rectified Φ is permanently zero. An earlier revision of this decision used flux uniformly (`n_admit=2` as a soft prefer-aged rule with retry-without-floor). It produced a hard regression: active items never graduated, the cache stalled with a permanently-occupied active tier, and the L3 cache hit rate fell off the cliff once the synthetic startup churn ended. The fix is to recognise that admission is fundamentally a gating problem (has this file proven stable enough to commit to cache?) not a balancing problem (which tier is overfull?), and treat it as such — `n ≥ n_admit` is the entire criterion on this membrane.
+  **Why Active→L3 falls back to admission semantics.** The flux model treats V (token-mass differential) as the driving force, which is right for inter-cache balancing but degenerate at the admission boundary: in AIC-DC, active is structurally lighter than the cached tiers — items live there only until they age past the gate, after which they leave for L3+ — so `t_active < t_L3` is the steady state and rectified Φ is permanently zero. An earlier revision of this decision used flux uniformly (`n_admit=2` as a soft prefer-aged rule with retry-without-floor). It produced a hard regression: active items never graduated, the cache stalled with a permanently-occupied active tier, and the L3 cache hit rate fell off the cliff once the synthetic startup churn ended. The fix is to recognise that admission is fundamentally a gating problem (has this file proven stable enough to commit to cache?) not a balancing problem (which tier is overfull?), and treat it as such — `n ≥ n_admit` is the entire criterion on this membrane.
 
   `history:*` items are also marked protected against the regular relax flux — they only enter L3 via the piggyback path (which fires when L3 is already broken). Without this guard the admission_only membrane would graduate stable history every few turns and rewrite the L3 cache block on every conversation, defeating the no-churn property the piggyback design was supposed to provide.
 - The `_run_cascade` driver is replaced by an iterate-to-equilibrium relaxation loop: per turn, recompute V, recompute every membrane's `Φ`, drain any membrane whose accumulator has crossed unit charge, repeat until no membrane fires (capped at 1000 iterations as a safety bound, never expected to bind in practice).
@@ -887,7 +887,7 @@ The original tune ran bidirectional (`allow_negative_flux=True`); for the rectif
 
 **Why a single variant rather than config-selectable.**
 
-An earlier revision of this decision exposed all three (linear / rectified-GHK / bidirectional-GHK) behind a config switch on the theory that AC-DC4's metric of interest might shift later. In practice the three variants share most of their machinery, the bidirectional path is empirically dead at our operating point (paper §6.3), and the linear form is the V → 0 Taylor branch of GHK — redundant once the GHK form is the production default. Carrying the alternates added dispatch surface in `compute_flux`, two more dataclass branches in `FluxConfig`, and pages of tests pinning behaviours that are decorative on the headline. The simpler module is easier to reason about and easier to retune; if a future workload shift demands the alternates back, they live in git history and in the synth reference implementation alongside the optimisation runs.
+An earlier revision of this decision exposed all three (linear / rectified-GHK / bidirectional-GHK) behind a config switch on the theory that AIC-DC's metric of interest might shift later. In practice the three variants share most of their machinery, the bidirectional path is empirically dead at our operating point (paper §6.3), and the linear form is the V → 0 Taylor branch of GHK — redundant once the GHK form is the production default. Carrying the alternates added dispatch surface in `compute_flux`, two more dataclass branches in `FluxConfig`, and pages of tests pinning behaviours that are decorative on the headline. The simpler module is easier to reason about and easier to retune; if a future workload shift demands the alternates back, they live in git history and in the synth reference implementation alongside the optimisation runs.
 
 **What this decision does NOT change.**
 
@@ -897,7 +897,7 @@ An earlier revision of this decision exposed all three (linear / rectified-GHK /
 
 **Superseded artefacts.** `specs4/7-future/cache-tiering-piggyback-promotion.md` is retired — its buildup pathology is structurally resolved by V coupling (the global signal pulls promotion pressure where it's needed without needing the upper tier to have been "broken" first). The retired spec is left in place with a banner pointing here and to the new `cache-tiering.md`; no content removed, since the analysis of the buildup pathology is still useful as motivation reading.
 
-**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten); `specs4/7-future/cache-tiering-piggyback-promotion.md` (banner only — superseded). Implementation authority: `src/ac_dc/cache_membrane.py` (new module) + `src/ac_dc/stability_tracker.py` (cascade replaced). Reference implementation: `~/flatmax/personal.work/research/cache.tiering/synth/model.py` and `~/flatmax/personal.work/research/cache.tiering/cache_membrane/state.py`, published publicly at <https://github.com/flatmax/membrane.cache> (the canonical flux-approach tiered-cache reference). Paper sections: §3.1 constraints C1/C2/C3; §3.2 linear; §3.3 GHK; §4 implementation contract; §6.3 rectification ablation; §6.4 GHK-vs-linear ablation.
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten); `specs4/7-future/cache-tiering-piggyback-promotion.md` (banner only — superseded). Implementation authority: `src/aic_dc/cache_membrane.py` (new module) + `src/aic_dc/stability_tracker.py` (cascade replaced). Reference implementation: `~/flatmax/personal.work/research/cache.tiering/synth/model.py` and `~/flatmax/personal.work/research/cache.tiering/cache_membrane/state.py`, published publicly at <https://github.com/flatmax/membrane.cache> (the canonical flux-approach tiered-cache reference). Paper sections: §3.1 constraints C1/C2/C3; §3.2 linear; §3.3 GHK; §4 implementation contract; §6.3 rectification ablation; §6.4 GHK-vs-linear ablation.
 
 ### D36 — Per-directory dir-blocks supersede L0 aggregate maps; L0 joins the flux path
 
@@ -977,7 +977,7 @@ D27/D28 were a correct response to the N-counter cascade: the cascade had no glo
 - D28 — superseded in full. There is no L0 snapshot to freeze. Live indexes feed dir-block reconstruction directly at freeze events (turn boundary, edit landing, file deletion, mode switch).
 - The `meta:file_tree` rendering path in `_breakdown.py` (lines around 366–367 and 913 per current grep) is removed.
 
-**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten under this decision); `specs4/3-llm/prompt-assembly.md` and `specs-reference/3-llm/prompt-assembly.md` (`meta:file_tree` row removed). Implementation: `src/ac_dc/stability_tracker.py` (dir-block registration replaces aggregate-map population; deletion-marker code path removed; L1→L0 membrane enabled), `src/ac_dc/llm/_breakdown.py` (dir-block rendering replaces aggregate-map and `meta:file_tree` rendering), `src/ac_dc/llm/_assembly.py` (L0 freeze removed), `src/ac_dc/cache_membrane.py` (no change — geometry just gains an enabled L1→L0 membrane via config).
+**Spec authority:** `specs4/3-llm/cache-tiering.md` (rewritten under this decision); `specs4/3-llm/prompt-assembly.md` and `specs-reference/3-llm/prompt-assembly.md` (`meta:file_tree` row removed). Implementation: `src/aic_dc/stability_tracker.py` (dir-block registration replaces aggregate-map population; deletion-marker code path removed; L1→L0 membrane enabled), `src/aic_dc/llm/_breakdown.py` (dir-block rendering replaces aggregate-map and `meta:file_tree` rendering), `src/aic_dc/llm/_assembly.py` (L0 freeze removed), `src/aic_dc/cache_membrane.py` (no change — geometry just gains an enabled L1→L0 membrane via config).
 
 **Open implementation questions (deferred to the work commit).**
 
@@ -1018,11 +1018,11 @@ These differ in semantics and shouldn't be merged. Pinning says "can't move"; ba
 
 **Implementation touchpoints.**
 
-- `src/ac_dc/cache_membrane.py` — `relax()` accepts a new `is_balance_excluded: Callable[[Any], bool]` keyword (defaulting to `lambda f: False` for backward compatibility). The accumulation loop (`for f in files: ...`) skips files matching the predicate when computing `c_lower`, `c_upper`, `t_lower`, `t_upper`. Mover-selection callsites are unchanged — `is_protected` continues to handle that.
-- `src/ac_dc/stability_tracker.py` — `_run_cascade` passes `is_balance_excluded=lambda f: f.key.startswith("history:")` into `relax()`. The existing `is_protected` lambda is unchanged.
-- `src/ac_dc/stability_tracker.py` — `_TIER_CONFIG` drops the `promote_n` field for L0, L1, L2, L3. Active keeps `promote_n: 3` since that drives admission. Test files referencing `_TIER_CONFIG[Tier.L3]["promote_n"]` (and similar for L1/L2) are updated.
-- `src/ac_dc/llm/_breakdown.py` — drops the `promote_n` lookup from the per-item entry dict for non-Active items. The `entry["threshold"]` field is `None` (or omitted) for cached-tier rows; populated only for Active rows.
-- `src/ac_dc/llm/_types.py` — doc-comment on `_TIER_CONFIG_LOOKUP` updated to reflect that only `entry_n` survives for cached tiers.
+- `src/aic_dc/cache_membrane.py` — `relax()` accepts a new `is_balance_excluded: Callable[[Any], bool]` keyword (defaulting to `lambda f: False` for backward compatibility). The accumulation loop (`for f in files: ...`) skips files matching the predicate when computing `c_lower`, `c_upper`, `t_lower`, `t_upper`. Mover-selection callsites are unchanged — `is_protected` continues to handle that.
+- `src/aic_dc/stability_tracker.py` — `_run_cascade` passes `is_balance_excluded=lambda f: f.key.startswith("history:")` into `relax()`. The existing `is_protected` lambda is unchanged.
+- `src/aic_dc/stability_tracker.py` — `_TIER_CONFIG` drops the `promote_n` field for L0, L1, L2, L3. Active keeps `promote_n: 3` since that drives admission. Test files referencing `_TIER_CONFIG[Tier.L3]["promote_n"]` (and similar for L1/L2) are updated.
+- `src/aic_dc/llm/_breakdown.py` — drops the `promote_n` lookup from the per-item entry dict for non-Active items. The `entry["threshold"]` field is `None` (or omitted) for cached-tier rows; populated only for Active rows.
+- `src/aic_dc/llm/_types.py` — doc-comment on `_TIER_CONFIG_LOOKUP` updated to reflect that only `entry_n` survives for cached tiers.
 - Frontend (`webapp/src/.../*`) — cache-viewer threshold column renders blank when `threshold` is `None`. (To verify: existing renderer may already handle `None` correctly; this is a display-only change.)
 
 **Spec authority.** `specs4/3-llm/cache-tiering.md` (§4.1, § History Graduation, §4.5, § Invariants); `specs4/0-overview/glossary.md` (N value, admission gate, ripple promotion, history isolation); `specs4/impl-history/layer-3.md` (per-tier config narrative).

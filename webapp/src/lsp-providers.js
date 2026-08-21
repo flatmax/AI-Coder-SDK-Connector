@@ -397,7 +397,7 @@ export function buildCompletionProvider(monaco, getActivePath, getCall) {
  * installed providers on. Using a WeakSet rather than a
  * property on the monaco object itself — Vitest's mocked
  * modules trap any undeclared property read with a
- * "No export is defined" error, so `monaco.__acDcLspInstalled`
+ * "No export is defined" error, so `monaco.__aicDcLspInstalled`
  * throws before we can even check it. The WeakSet
  * sidesteps the trap entirely; we check membership with
  * a normal method call that doesn't touch monaco's

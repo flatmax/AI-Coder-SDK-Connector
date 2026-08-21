@@ -44,10 +44,10 @@ from claude_agent_sdk import (
     TextBlock,
 )
 
-from ac_dc.claude_code import session as session_module
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.health import CliResolution
-from ac_dc.claude_code.service import ClaudeCodeService
+from aic_dc.claude_code import session as session_module
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.health import CliResolution
+from aic_dc.claude_code.service import ClaudeCodeService
 
 pytestmark = pytest.mark.asyncio
 
@@ -63,7 +63,7 @@ class FakeConfig:
     def __init__(self, repo_root):
         self.repo_root = repo_root
         self.config_dir = None
-        self.ac_dc_dir = Path(repo_root) / ".ac-dc4"
+        self.aic_dc_dir = Path(repo_root) / ".aic-dc"
 
     def get_snippets(self, mode="code"):
         return []

@@ -1,6 +1,6 @@
 # Conversion Plan — Native Engine → Claude Code Frontend
 
-**Status:** Active. This directory is the plan of record for converting AC⚡DC from its own
+**Status:** Active. This directory is the plan of record for converting AIC⚡DC from its own
 LiteLLM-based context engine to a frontend for Claude Code (via the Claude Agent SDK).
 
 The rest of `specs5/` describes the **target** state. This directory describes **how we get
@@ -10,7 +10,7 @@ history and moves under `specs5/impl-history/`.
 ## Where we are (2026-08-18)
 
 **Phases 0 through 6 are done, and phase 6's last clause closed on 2026-08-17.** The Context tab had its
-live run: the visualisation and the `ac-dc` tool inventory were read off a live CLI — the app was
+live run: the visualisation and the `aic-dc` tool inventory were read off a live CLI — the app was
 hosting the session doing the verifying — and the run found four things no test could have, all of them
 about what a reader is *told* rather than what is computed. The clause that was outstanding — a live
 turn's cost chip — was closed by leaving a `window.__phase6` recorder behind and reading it on the two
@@ -22,7 +22,7 @@ turn has difference equal to total, so the bug and the fix look identical. The c
 "cost unknown" renderings are still unobserved, because no ordinary turn causes them. Details in the
 [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17) under *Live
 verification*. A conversation now outlives the process: `RepoSessionStore` mirrors the CLI's transcript
-under `.ac-dc4/sessions/`,
+under `.aic-dc/sessions/`,
 `run_session_store_conformance` passes with nothing waived, and a server that comes back up reattaches
 to the session it was in. **Resumption is the SDK's rebuild, never our replay** — we render a *record*
 of a session for the human and hand the same session ID to the CLI, and the two views cannot drift
@@ -317,14 +317,14 @@ interlude that found it; this list exists so that none of them has to be redisco
     already unreachable. The replacement having shipped is what makes deletion the answer; the risk is
     only that a reader deletes the CC-12 pair in the same sweep.
 
-**The native engine is gone.** `llm_service.py`, `src/ac_dc/llm/`, the four-tier cache and its
+**The native engine is gone.** `llm_service.py`, `src/aic_dc/llm/`, the four-tier cache and its
 membrane, the context manager, the stability tracker, the token counter, the edit protocol and its
 pipeline, the history compactor, URL fetching and the `🟧🟧🟧 AGENT` factory: 37 modules, 25,371
 lines, plus 52 test files and five dependencies (`litellm`, `tiktoken`, `boto3`, `tenacity`,
 `trafilatura`). `grep -rn -i litellm src/` and the same over `webapp/src/` both return nothing.
 
 **The indexes are back, as tools rather than as prompt text** (CC-6). An in-process MCP server named
-`ac-dc` exposes six read-only tools — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`,
+`aic-dc` exposes six read-only tools — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`,
 `review_state`, `ui_state` — sharing the browser's own index objects. A `PostToolUse` hook re-indexes
 what the agent writes, and every index-reading tool flushes that queue before it answers, so a file
 written this turn is a file the map describes. Verified live: the agent answered a "which module holds
@@ -383,7 +383,7 @@ The state phase 6 inherits:
   consumer mounted moves the break instead of fixing it. **Its two `LLMService.switch_mode` call sites are
   the pair open item 11 exempts** — that item deletes the other five names, and this is the one that stays.
   Two former members of this list have left it.
-  Phase 5 re-pointed `<ac-history-browser>` at the seven `history_*` RPCs and gave it a way in from the
+  Phase 5 re-pointed `<aic-history-browser>` at the seven `history_*` RPCs and gave it a way in from the
   chat panel; 2026-08-17 gave the tab strip a producer — a running `Task` opens its own read-only tab
   (CC-8's live half, see [`delivery.md`](delivery.md#interlude--the-tab-a-subagent-never-got-2026-08-17)).
 - **17 RPCs are localhost-gated, and four do not look it.** `commit_all`, `reset_to_head`,
@@ -414,11 +414,11 @@ in the tree:
   carries the running total — while `usage` is per-turn but main-agent-loop only. The HUD and the turn
   footer were both printing the session's running total under a heading that said "This turn", and
   naming every model the session had ever used. A turn's cost is a *difference*, its baseline is session
-  state, so the engine takes it (`ac_dc/claude_code/cost.py`) and ships `turn_cost_usd`,
+  state, so the engine takes it (`aic_dc/claude_code/cost.py`) and ships `turn_cost_usd`,
   `turn_cost_basis` and `turn_model_usage` beside the cumulative fields rather than replacing them.
   **One name per scope**, so no reader can confuse the two again. The same read also killed the "null
   cost means subscription billing" belief three specs carried: the field has no null branch, so every
-  null in the tree is a footer AC⚡DC wrote itself, and `EngineHealth.credential_source` is the only
+  null in the tree is a footer AIC⚡DC wrote itself, and `EngineHealth.credential_source` is the only
   billing-mode signal. Shapes and lifetimes are in `3-engine/context-visibility.md`
   § *Verified field shapes — the result footer*; the browser's single owner of the derivation is
   `webapp/src/turn-cost.js`, which exists for the reason `context-usage.js` does.
@@ -459,14 +459,14 @@ added is the pattern — a callable provider so `reload_app_config()` takes, and
 
 ## The one-paragraph version
 
-AC⚡DC keeps its skin and loses its brain. The browser UI, the jrpc-oo transport, the git
+AIC⚡DC keeps its skin and loses its brain. The browser UI, the jrpc-oo transport, the git
 repository layer, the file picker, the Monaco diff viewer, the SVG editor, the document
 converter, collaboration admission, and the tree-sitter indexes all survive. Everything that
 existed to *assemble a prompt and pay for it efficiently* is deleted: prompt assembly, the
 four-tier stability cache and its membrane/flux controller, the token counter, the emoji
 edit protocol, the LLM-driven history compactor, URL fetching, and the
 `🟧🟧🟧 AGENT` spawn protocol. In their place sits one `ClaudeSDKClient` per repo, and
-AC⚡DC's job becomes *rendering* an agent session rather than *constructing* one.
+AIC⚡DC's job becomes *rendering* an agent session rather than *constructing* one.
 
 ## Why
 
@@ -476,21 +476,21 @@ Three reasons, in order of weight:
    by caching it in tiers. Claude Code sidesteps the problem instead of optimising it: it reads
    what it needs, when it needs it, with its own cache discipline, and — under a Claude
    subscription — the marginal cost of a turn is not a per-token invoice.
-2. **Capability.** Claude Code ships agentic behaviour AC⚡DC does not have and would have to
+2. **Capability.** Claude Code ships agentic behaviour AIC⚡DC does not have and would have to
    build: real tool use, bash execution, web fetch and search, subagents, skills, plugins,
    MCP clients, file checkpointing, self-compaction, and its own edit application with
    checkpoint/rewind.
 3. **Maintenance.** ~28k lines of engine become a small adapter. Measured at the end of phase 3:
-   **25,371 lines of engine deleted** against **6273 lines in `src/ac_dc/claude_code/`** — three
+   **25,371 lines of engine deleted** against **6273 lines in `src/aic_dc/claude_code/`** — three
    times the "~2k" this estimate guessed, because the permission gate (1548 lines) and the message
    pump (979) are real work the estimate did not foresee. Still a 4:1 reduction, and the deleted
    code is the part of the system that was most expensive to reason about and most sensitive to
    provider behaviour changes.
 
-## What AC⚡DC still contributes
+## What AIC⚡DC still contributes
 
 The point of the conversion is not "be a terminal in a browser". Claude Code already has a
-terminal. AC⚡DC contributes what a terminal cannot:
+terminal. AIC⚡DC contributes what a terminal cannot:
 
 - **Spatial code navigation.** A Monaco diff viewer over every file the agent touches, a
   git-status file tree, an SVG editor, a TeX preview, a 2-D file-navigation grid.
@@ -513,12 +513,12 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | Phase | Scope | Exit criterion |
 |---|---|---|
 | **0. Plan and specs** ✅ | This directory + the specs5 rewrite. No code changes. | specs5 describes the target state; `plan/inventory.md` names every file to keep, delete, or add. |
-| **1. Engine spike** ✅ | `src/ac_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
+| **1. Engine spike** ✅ | `src/aic_dc/claude_code/` — session, options, message pump. Registered as a second service alongside `LLMService`; not yet wired to the UI. | A CLI-side smoke test can send a prompt and print the streamed message taxonomy. |
 | **2. Chat on the new engine** ✅ | Frontend chat panel renders the Claude Code message stream (text, thinking, tool-use cards, tool results, result summary). Permission dialog lands. `LLMService` still constructed but no longer reachable from the chat path. | A user can hold a full working conversation, including edits, entirely through Claude Code. |
-| **3. Rip-out** ✅ | Delete `src/ac_dc/llm_service.py`, `src/ac_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
+| **3. Rip-out** ✅ | Delete `src/aic_dc/llm_service.py`, `src/aic_dc/llm/`, the cache/context/edit/compaction modules, and the frontend surfaces that fed them. Replace the HUD and Context tab with minimal panels over the SDK's own numbers rather than vacating them ([`decisions.md#cc-17`](decisions.md)). | `grep -r litellm src/` is empty; test suite green. |
 | **4. Restore the indexes as tools** ✅ | In-process MCP server exposing the symbol map, doc outlines, and reference graph. Monaco LSP paths re-pointed at the surviving index. | Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition still work in Monaco. |
-| **5. History and sessions** ✅ | A fresh `SessionStore` over `.ac-dc4/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run**; the two interludes after it are what that cost, and the criterion was verified live in the second — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. **Met live**: `--resume` on the CLI child, the earlier conversation answered with no tool calls, no fork in the transcript. |
-| **6. Context and cost visualisation** ✅ | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `ac-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. The live run then found four things no test could have, all fixed, and all four about what a reader is *told*: see the [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17). | The Context tab shows the designed visualisation over those numbers, names the `ac-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. **All three met**; the first two live on 2026-08-17, the third live later that day via the `window.__phase6` recorder — two consecutive turns, `1.51561 + 1.210191 = 2.725801`, chip reading **$1.21 not $2.73**, so the figure is a difference and not the running total. Its "nothing extra" and "cost unknown" renderings hold in 60 tests but remain unobserved, because no ordinary turn causes them. |
+| **5. History and sessions** ✅ | A fresh `SessionStore` over `.aic-dc/` — all six protocol methods, entries verbatim, `history_store.py` retired ([`decisions.md#cc-19`](decisions.md)) — plus resume/fork, and the history browser and full-text search re-pointed at the mirrored transcript. Also the readers four specified-but-undelivered warnings never had: the mirror gap at both scales, the disk warning, and the health banner. **Shipped without a live CLI run**; the two interludes after it are what that cost, and the criterion was verified live in the second — see the [phase-5 entry](delivery.md#phase-5--history-and-sessions-2026-08-16). | Restarting the server resumes the previous conversation with context intact, and `session_store_conformance` passes. **Met live**: `--resume` on the CLI child, the earlier conversation answered with no tool calls, no fork in the transcript. |
+| **6. Context and cost visualisation** ✅ | Both panels exist as of phase 3 (CC-17); their tests and first live run landed ahead of phase 5, and that run spent this phase's correctness budget on the *context* numbers, which now match `/context`. The **cost** numbers turned out to owe a correctness pass of their own: the row below expected "a turn that fails late" to be the unpriced case, and reading the CLI's wire schema found the opposite — every turn was mispriced, because `total_cost_usd` and `modelUsage` are cumulative and both readers printed them as one turn's. Done: the difference is taken in the engine, `turn_cost_basis` names why a figure is absent when it is, the autocompact point is marked on the context bar, the sections are built — Usage over the engine's own categories, Session over what the session was started with including MCP server health and the `aic-dc` tool inventory with its token cost, Debug over the engine rather than the code — and a bridge or hook that did not start now reports the loss in the health banner instead of the log line nobody read. The live run then found four things no test could have, all fixed, and all four about what a reader is *told*: see the [phase-6 entry](delivery.md#phase-6--context-and-cost-visualisation-2026-08-17). | The Context tab shows the designed visualisation over those numbers, names the `aic-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is unknown. **All three met**; the first two live on 2026-08-17, the third live later that day via the `window.__phase6` recorder — two consecutive turns, `1.51561 + 1.210191 = 2.725801`, chip reading **$1.21 not $2.73**, so the figure is a difference and not the running total. Its "nothing extra" and "cost unknown" renderings hold in 60 tests but remain unobserved, because no ordinary turn causes them. |
 | **7. Packaging** | Platform-specific wheels or an explicit external-CLI mode; the bundled CLI is ~295 MB. | A fresh machine can install and run without a manual `npm i -g @anthropic-ai/claude-code`. |
 | **8. Index freshness after `Bash`** | Close phase 4's largest known hole per [`decisions.md#cc-18`](decisions.md): a filesystem watcher, or an explicit spec statement that `Bash`-driven writes are not tracked. The choice is open; "nothing, documented" is a legitimate exit. | A file changed by `sed -i` or `git checkout` is either reflected in the indexes, or its absence is stated in `2-indexing/` and surfaced to the user rather than silent. |
 

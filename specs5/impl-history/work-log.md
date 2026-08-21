@@ -53,7 +53,7 @@ specs-reference/3-llm/
     app.json
 ```
 
-`scripts/sync_prompts.py` copies the nine files from `src/ac_dc/config/` into `specs-reference/3-llm/prompts/`, comparing bytes before writing so unchanged files are no-ops. Re-run after any prompt edit; commit both sides of the diff together. When the source tree is deleted, the mirror becomes authoritative.
+`scripts/sync_prompts.py` copies the nine files from `src/aic_dc/config/` into `specs-reference/3-llm/prompts/`, comparing bytes before writing so unchanged files are no-ops. Re-run after any prompt edit; commit both sides of the diff together. When the source tree is deleted, the mirror becomes authoritative.
 
 The script itself avoids the edit-block self-reference problem by reading bytes off disk and writing them verbatim — it never constructs marker sequences in its own source code.
 
@@ -105,7 +105,7 @@ What the audit found in `webapp/src/chat-panel/` and `webapp/src/files-tab/`:
 
 - **Tab strip rendering** — `renderTabStrip()` in `tabs.js` produces the strip with active-class, streaming indicators, close buttons, mode-aware tooltips, and an overflow menu for many tabs. Hidden when only the main tab exists; appears the moment a second tab materialises.
 - **Per-tab state** — `_tabs: Map<id, state>` on the chat panel, with `makeTabState()` factory and `installReactiveAccessors` (in `state.js`) installing prototype getters/setters that forward every reactive property to the active tab's slot. `noAccessor: true` in `properties.js` opts out of Lit's default accessor installation.
-- **Tab activation** — click handler in `tabs.js`, Alt+` cycling via `onChatTabShortcut`, LED-row click via `led-row.js`'s `scrollTabIntoView`. The setter on `_activeTabId` snapshots / restores per-tab URL chip state across the singleton `ac-url-chips` element so chip state per tab survives switching.
+- **Tab activation** — click handler in `tabs.js`, Alt+` cycling via `onChatTabShortcut`, LED-row click via `led-row.js`'s `scrollTabIntoView`. The setter on `_activeTabId` snapshots / restores per-tab URL chip state across the singleton `aic-url-chips` element so chip state per tab survives switching.
 - **`agentsSpawned` event** — handler in `streaming.js` (`onAgentsSpawned`) calls `spawnAgentTabs` in `tabs.js`, creating tabs SYNCHRONOUSLY before child stream chunks arrive (the spec's tab-creation-ordering invariant — without this, fast-completing agents' chunks are dropped because no tab claims the child request ID yet).
 - **Streaming routing** — `findTabForRequest` in `tabs.js` matches by exact ID first, then by parent-prefix (`{parent}-agent-NN`). Both `onStreamChunk` and `onStreamComplete` route through this. Pending-chunk coalescing per animation frame is per-tab.
 - **`agent_tag` routing** — `send()` in `input.js` reads the active tab id, passes it through `parseAgentTabId` (`null` for main, the id otherwise), and threads the result as `chat_streaming`'s `agent_tag` argument. Stale-agent error response (`{error: "agent not found"}`) closes the tab locally and toasts the user.
@@ -207,7 +207,7 @@ Why Increment 1 *first*: the audit-then-action sequence reveals that the spec ga
 
 Backend-only change with broadcast-driven frontend visibility. Reverses the D24/D25 "agents survive new_session" policy after audit revealed the resulting UX bug: the new-session button was rendered on every tab including agents but only ever reset main, leaving users on agent tabs clicking and seeing nothing happen. Increment 1 hid the button on agent tabs (palliative); Increment 2 fixes the underlying policy.
 
-Implementation in `src/ac_dc/llm/_rpc_state.py:new_session`:
+Implementation in `src/aic_dc/llm/_rpc_state.py:new_session`:
 
 1. Clear `_active_agent_streams` first — signals any in-flight agent task to stop on its next chunk check, before its scope vanishes underneath it.
 2. Snapshot the agent ids, then `_agent_contexts.clear()` to free `ContextManager` + `StabilityTracker` + `file_context` per agent.
@@ -236,9 +236,9 @@ The orchestrator's assistant record now persists per-agent state alongside ident
 
 Implementation in two places:
 
-1. **`HistoryStore.append_message`** (`src/ac_dc/history_store.py`) — `agent_blocks` filter extended to accept and round-trip the three new fields. Defensive validation: unknown mode strings dropped (so a future write-side mode value can't corrupt records the read-side doesn't recognise), strict bool check on cross-ref (rejects 0/1 ints), empty-string model dropped. Required `id` and `agent_idx` contract unchanged — optional fields don't promote malformed entries to valid.
+1. **`HistoryStore.append_message`** (`src/aic_dc/history_store.py`) — `agent_blocks` filter extended to accept and round-trip the three new fields. Defensive validation: unknown mode strings dropped (so a future write-side mode value can't corrupt records the read-side doesn't recognise), strict bool check on cross-ref (rejects 0/1 ints), empty-string model dropped. Required `id` and `agent_idx` contract unchanged — optional fields don't promote malformed entries to valid.
 
-2. **`stream_chat`** (`src/ac_dc/llm/_streaming.py`) — persistence-write site builds the per-block summary with mode resolution mirroring the `agentsSpawned` broadcast path (existing agents on retask keep their current mode; fresh spawns resolve via `_resolve_agent_mode` against the orchestrator's scope). Model read from `service._config.model` rather than from the agent's ContextManager since fresh-spawn scopes don't exist yet at this persistence point. Defensive: a config read failure must not block persistence — reconstruction tolerates a missing model field.
+2. **`stream_chat`** (`src/aic_dc/llm/_streaming.py`) — persistence-write site builds the per-block summary with mode resolution mirroring the `agentsSpawned` broadcast path (existing agents on retask keep their current mode; fresh spawns resolve via `_resolve_agent_mode` against the orchestrator's scope). Model read from `service._config.model` rather than from the agent's ContextManager since fresh-spawn scopes don't exist yet at this persistence point. Defensive: a config read failure must not block persistence — reconstruction tolerates a missing model field.
 
 Tests: `TestAgentBlocksOptionalFields` in `test_history_store.py` pins the persistence contract (round-trip, partial fields, all four valid modes, defensive filtering for unknown/non-bool/non-string values, backwards-compat with pre-3a bare `{id, agent_idx}` shape). `TestAgentBlocksPersistence` in `test_agent_spawn.py` extended with four end-to-end tests through `_stream_chat`: explicit + inherited mode persist correctly, cross-ref flag both values round-trip, model field carries the orchestrator's config value, retasked agent persists the existing agent's mode (not the orchestrator's drifted mode).
 
@@ -246,7 +246,7 @@ Backwards-compat: D30 records (bare `{id, agent_idx}`) load correctly; reconstru
 
 #### 3b — Write per-agent mode-change events to the archive
 
-Lands with Increment 4. When per-agent mode toggles ship, each toggle writes a system-event message to the agent's `.ac-dc4/agents/{turn_id}/agent-NN.jsonl` archive marking the transition. Reconstruction replays these events to arrive at the agent's final mode rather than relying solely on the spawn-time mode in `agent_blocks`.
+Lands with Increment 4. When per-agent mode toggles ship, each toggle writes a system-event message to the agent's `.aic-dc/agents/{turn_id}/agent-NN.jsonl` archive marking the transition. Reconstruction replays these events to arrive at the agent's final mode rather than relying solely on the spawn-time mode in `agent_blocks`.
 
 Scope:
 - `HistoryStore` — new `append_agent_system_event(turn_id, agent_idx, event_type, payload)` helper for mode-change events.
@@ -305,7 +305,7 @@ What 4b deliberately does NOT deliver:
 
 - **Optimistic UI updates.** Click → RPC → broadcast → re-render is the full loop. The user sees the new state on the broadcast, not on the click. Matches main's pattern. Without optimistic updates, a failing RPC (mid-stream rejection, restricted caller, network error) leaves the toggle in its actual state rather than briefly showing the user-attempted state then snapping back.
 
-- **Spec updates.** `specs4/5-webapp/agent-browser.md` should document the per-agent toggle; `src/ac_dc/config/system_agentic_appendix.md` should relax the "mode is fixed for the life of the agent" claim. Filed as a follow-up doc-mode pass — the behavioural test suite is now the authoritative spec for the mid-session mode-change behaviour.
+- **Spec updates.** `specs4/5-webapp/agent-browser.md` should document the per-agent toggle; `src/aic_dc/config/system_agentic_appendix.md` should relax the "mode is fixed for the life of the agent" claim. Filed as a follow-up doc-mode pass — the behavioural test suite is now the authoritative spec for the mid-session mode-change behaviour.
 
 What the user can now do (the scenario from the original 4b plan):
 
@@ -333,13 +333,13 @@ Per-commit delivery record:
 
 **Commit 1 — Reconstruction skeleton with spawn-time baseline only** (`2284b5b`).
 
-`reconstruct_agent_scope` in `src/ac_dc/llm/_agents.py` constructs a ContextManager via the existing `build_agent_context_manager` factory, pre-populates history from concatenated archive content, attaches a fresh StabilityTracker, and registers the scope in `service._agent_contexts[agent_id]`. `_reconstruct_agents_from_session` in `src/ac_dc/llm/_rpc_history.py` walks the session's full records (NOT the context-load shape, which strips `agent_blocks`), groups by agent id keeping the latest record per id (retask wins), concatenates archive content across every turn the id appeared in, and resolves mode from the latest spawn entry. Wired into `load_session_into_context` between the history-set step and the `sessionChanged` broadcast; idempotent against partial registration.
+`reconstruct_agent_scope` in `src/aic_dc/llm/_agents.py` constructs a ContextManager via the existing `build_agent_context_manager` factory, pre-populates history from concatenated archive content, attaches a fresh StabilityTracker, and registers the scope in `service._agent_contexts[agent_id]`. `_reconstruct_agents_from_session` in `src/aic_dc/llm/_rpc_history.py` walks the session's full records (NOT the context-load shape, which strips `agent_blocks`), groups by agent id keeping the latest record per id (retask wins), concatenates archive content across every turn the id appeared in, and resolves mode from the latest spawn entry. Wired into `load_session_into_context` between the history-set step and the `sessionChanged` broadcast; idempotent against partial registration.
 
 After Commit 1, agents reappeared in `_agent_contexts` after session-load with their conversation history but with the spawn-time mode rather than the post-toggle mode — known-wrong intermediate state per replay strategy.
 
 **Commit 2 — Replay mode-change events on top of spawn-time baseline** (`312828b`).
 
-`_replay_mode_events` in `src/ac_dc/llm/_agents.py` walks `archive_messages` for `system_event: true` records whose content matches the strict format `"Mode changed: {old} → {new}."` produced by `switch_agent_mode` and `set_agent_cross_reference`. Each valid event advances running `(Mode, cross_ref)` state to the parsed target; malformed events skip without raising. `reconstruct_agent_scope` now calls the replay before constructing the ContextManager, so the scope's mode is the post-replay result, not the spawn-time baseline.
+`_replay_mode_events` in `src/aic_dc/llm/_agents.py` walks `archive_messages` for `system_event: true` records whose content matches the strict format `"Mode changed: {old} → {new}."` produced by `switch_agent_mode` and `set_agent_cross_reference`. Each valid event advances running `(Mode, cross_ref)` state to the parsed target; malformed events skip without raising. `reconstruct_agent_scope` now calls the replay before constructing the ContextManager, so the scope's mode is the post-replay result, not the spawn-time baseline.
 
 The strict format (prefix + arrow + terminating period) is deliberate. A loose match like `"Mode changed: code → doc"` (no terminator) would tolerate writer-side regressions silently — pinning the exact format means a future change to the writer surfaces as a quietly-lost replay rather than continuing to "work" with subtly wrong state.
 
@@ -410,9 +410,9 @@ Modern backends emit BOTH events for every agentic turn. The second call hit the
 
 ### URL fetch result lands in wrong tab when user switches tabs mid-fetch
 
-**Symptom.** A URL fetch is initiated from agent tab A (user clicks "Fetch" on a chip). While the RPC is in flight (GitHub repo clone + symbol map generation can take 10+ seconds), the user switches to agent tab B. When the fetch resolves, `chipsEl.markFetched(url, result)` runs against whichever tab's chip state is currently installed on the singleton `ac-url-chips` element — which is B, not A. The user sees a chip for a URL they never fetched on B, and A's own chip stays in `fetching` state indefinitely.
+**Symptom.** A URL fetch is initiated from agent tab A (user clicks "Fetch" on a chip). While the RPC is in flight (GitHub repo clone + symbol map generation can take 10+ seconds), the user switches to agent tab B. When the fetch resolves, `chipsEl.markFetched(url, result)` runs against whichever tab's chip state is currently installed on the singleton `aic-url-chips` element — which is B, not A. The user sees a chip for a URL they never fetched on B, and A's own chip stays in `fetching` state indefinitely.
 
-**Root cause.** Per-tab URL chip state (D23 Commit 4) is swapped in/out of the singleton `ac-url-chips` element on tab switch via `_snapshotUrlChipsForTab` / `_restoreUrlChipsForTab`. The fetch RPC closure in `_onUrlFetchRequested` captures the `chipsEl` reference, not the tab ID — so when the promise resolves, the mutation lands on whichever tab is currently showing.
+**Root cause.** Per-tab URL chip state (D23 Commit 4) is swapped in/out of the singleton `aic-url-chips` element on tab switch via `_snapshotUrlChipsForTab` / `_restoreUrlChipsForTab`. The fetch RPC closure in `_onUrlFetchRequested` captures the `chipsEl` reference, not the tab ID — so when the promise resolves, the mutation lands on whichever tab is currently showing.
 
 **Fix shape (when this becomes a real pain point).** Capture the originating tab ID at fetch-initiation time, look up that tab's state slot when the promise resolves, and mutate the state slot directly (rather than via the singleton element). If the originating tab is still active, also mutate the live element. If it's inactive, the snapshot carries the updated state and restoration on next tab switch surfaces it. Same pattern for `markErrored`.
 

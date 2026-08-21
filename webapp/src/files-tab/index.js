@@ -902,11 +902,11 @@ export class FilesTab extends RpcMixin(LitElement) {
 
 
   _picker() {
-    return this.shadowRoot?.querySelector('ac-file-picker') || null;
+    return this.shadowRoot?.querySelector('aic-file-picker') || null;
   }
 
   _chat() {
-    return this.shadowRoot?.querySelector('ac-chat-panel') || null;
+    return this.shadowRoot?.querySelector('aic-chat-panel') || null;
   }
 
   _setsEqual(a, b) {
@@ -918,11 +918,11 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 
   _showToast(message, type = 'info') {
-    // AppShell listens for `ac-toast` window events and
+    // AppShell listens for `aic-toast` window events and
     // renders them in the global toast layer. Components
     // dispatch rather than reach through the DOM.
     window.dispatchEvent(
-      new CustomEvent('ac-toast', {
+      new CustomEvent('aic-toast', {
         detail: { message, type },
       }),
     );
@@ -951,7 +951,7 @@ export class FilesTab extends RpcMixin(LitElement) {
         class=${paneClasses}
         style="width: ${pickerWidth}px"
       >
-        <ac-file-picker
+        <aic-file-picker
           .tree=${this._latestTree}
           .statusData=${this._latestStatusData}
           .branchInfo=${this._latestBranchInfo}
@@ -969,7 +969,7 @@ export class FilesTab extends RpcMixin(LitElement) {
           @open-review-graph=${this._onOpenReviewGraph}
           @branch-menu-requested=${this._onBranchMenuRequested}
           @branch-switch-requested=${this._onBranchSwitchRequested}
-        ></ac-file-picker>
+        ></aic-file-picker>
       </div>
       <div
         class=${splitterClasses}
@@ -987,13 +987,13 @@ export class FilesTab extends RpcMixin(LitElement) {
         ? html`<span class="splitter-affordance">▸</span>`
         : ''}</div>
       <div class="chat-pane">
-        <ac-chat-panel
+        <aic-chat-panel
           @file-mention-click=${this._onFileMentionClick}
           @file-chip-click=${this._onFileChipClick}
           @file-search-changed=${this._onFileSearchChanged}
           @file-search-scroll=${this._onFileSearchScroll}
           @filter-from-chat=${this._onFilterFromChat}
-        ></ac-chat-panel>
+        ></aic-chat-panel>
       </div>
       ${this._renderReviewSelectorModal()}
       ${this._renderReviewGraphModal()}
@@ -1067,7 +1067,7 @@ export class FilesTab extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-files-tab', FilesTab);
+customElements.define('aic-files-tab', FilesTab);
 
 // Exported for unit tests. Production callers don't need
 // the helpers — they run internally during tree load and

@@ -23,7 +23,7 @@ import { _DRAFT_STORAGE_KEY } from '../chat-panel/index.js';
 const _mounted = [];
 
 export function mountTab(props = {}) {
-  const t = document.createElement('ac-files-tab');
+  const t = document.createElement('aic-files-tab');
   Object.assign(t, props);
   document.body.appendChild(t);
   _mounted.push(t);
@@ -74,9 +74,9 @@ export async function settle(tab) {
   await tab.updateComplete;
   // Children (picker, chat) may have independent
   // updateComplete cycles — let them settle too.
-  const picker = tab.shadowRoot?.querySelector('ac-file-picker');
+  const picker = tab.shadowRoot?.querySelector('aic-file-picker');
   if (picker) await picker.updateComplete;
-  const chat = tab.shadowRoot?.querySelector('ac-chat-panel');
+  const chat = tab.shadowRoot?.querySelector('aic-chat-panel');
   if (chat) await chat.updateComplete;
 }
 

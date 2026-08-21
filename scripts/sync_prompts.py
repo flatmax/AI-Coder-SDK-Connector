@@ -1,8 +1,8 @@
-"""Sync prompt files from src/ac_dc/config/ into specs-reference/3-llm/prompts/.
+"""Sync prompt files from src/aic_dc/config/ into specs-reference/3-llm/prompts/.
 
 Rationale: specs-reference/3-llm/prompts.md points at sibling files under
 specs-reference/3-llm/prompts/ rather than embedding their content. This
-script refreshes those copies after prompt text in src/ac_dc/config/ changes.
+script refreshes those copies after prompt text in src/aic_dc/config/ changes.
 
 Why a script rather than cp? Two of the source files (system.md, system_doc.md)
 contain the edit-protocol marker byte sequences inside fenced example blocks.
@@ -14,7 +14,7 @@ source code.
 Usage:
     python scripts/sync_prompts.py
 
-Run this before committing a change to src/ac_dc/config/*.md or *.json if
+Run this before committing a change to src/aic_dc/config/*.md or *.json if
 you want specs-reference to reflect the new prompt text.
 """
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Files to mirror. All live directly under src/ac_dc/config/ in the source,
+# Files to mirror. All live directly under src/aic_dc/config/ in the source,
 # and are copied verbatim into specs-reference/3-llm/prompts/.
 PROMPT_FILES = (
     "system.md",
@@ -51,7 +51,7 @@ def find_repo_root(start: Path) -> Path:
 
 def main() -> int:
     repo_root = find_repo_root(Path(__file__).parent)
-    source_dir = repo_root / "src" / "ac_dc" / "config"
+    source_dir = repo_root / "src" / "aic_dc" / "config"
     target_dir = repo_root / "specs-reference" / "3-llm" / "prompts"
 
     if not source_dir.is_dir():

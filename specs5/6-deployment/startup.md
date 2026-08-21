@@ -30,7 +30,7 @@ nothing about sessions at all.
 That read is a read, not a resume. Showing the transcript makes the browser show the conversation; the
 engine has no session until one is needed. Resuming is a `ClaudeSDKClient` connect with `resume`, and
 doing it eagerly at startup would spawn a `claude` subprocess for every launch — including the many where
-the user opens AC⚡DC to read a diff and never sends a message. See
+the user opens AIC⚡DC to read a diff and never sends a message. See
 [`../3-engine/history.md`](../3-engine/history.md) and
 [chat.md § Resume Is Not Load](../5-webapp/chat.md#resume-is-not-load).
 ## Phase 2: Deferred (non-blocking background task)
@@ -52,7 +52,7 @@ prompt-assembly decision.
 - Each stage is best-effort — if the browser isn't connected yet, the call is silently dropped
 - An init-complete flag gates chat requests — requests before phase 2 completes are rejected with a user-friendly message
 
-The gate is narrower than it was. It exists now only because the `ac-dc` MCP server would advertise search
+The gate is narrower than it was. It exists now only because the `aic-dc` MCP server would advertise search
 tools backed by a half-built index; the conversation itself needs nothing from phase 2. A future refinement
 could let a turn start immediately with the search tools withheld until the index lands, and the reason
 that is not specified as the behaviour is honesty about sequencing: it wants the tool-availability
@@ -113,7 +113,7 @@ the banner's reason as its placeholder.
 - First successfully bound port is used
 - If no port available in the range, server exits with an error
 - **Both ports are probed independently** — the WebSocket port AND the webapp port. Skipping the probe on either port is a correctness bug: a second instance launched with defaults would fail to bind the taken port in one of two silent ways (static-server constructor raises `OSError` inside a daemon thread and gets swallowed; or the browser-open call still fires and the user sees "their" app in the tab title while the loaded JS comes from the first instance). Users have no clear signal that something is wrong — the tab loads, looks right, and silently talks to the wrong backend
-- The CLI flags `--server-port` and `--webapp-port` specify the *starting* port for the probe, not a required port. This matches the "just works" principle — running two AC⚡DC instances back to back should never require the user to remember port arithmetic
+- The CLI flags `--server-port` and `--webapp-port` specify the *starting* port for the probe, not a required port. This matches the "just works" principle — running two AIC⚡DC instances back to back should never require the user to remember port arithmetic
 
 ## Browser Tab Title
 
@@ -121,7 +121,7 @@ the banner's reason as its placeholder.
 - Repo name comes from the state snapshot returned by the current-state RPC
 - Updated on initial state load
 - No prefix or branding — just the bare repo name
-- Helps users distinguish multiple AC⚡DC sessions across different repos
+- Helps users distinguish multiple AIC⚡DC sessions across different repos
 
 ## Logging
 
@@ -157,10 +157,10 @@ contents, and file contents are never logged at any level.
 | WebSocket binding | Loopback by default; all interfaces only when collaboration flag is set |
 | Agent tool calls | Gated by the permission layer; write and exec classes always reach a human on localhost unless a rule or mode says otherwise ([`../3-engine/permissions.md`](../3-engine/permissions.md)) |
 | Permission decisions | Localhost clients only; non-localhost participants see requests read-only ([`../4-features/collaboration.md`](../4-features/collaboration.md)) |
-| Credentials | Never read, written, logged, or forwarded. The CLI owns them; AC⚡DC reports only which source was resolved |
+| Credentials | Never read, written, logged, or forwarded. The CLI owns them; AIC⚡DC reports only which source was resolved |
 | Settings writes | Only `.claude/settings.json` and `.claude/settings.local.json`, only through the permission layer's rule writer, only on an explicit "always allow" |
 
-Path validation moved rather than vanished. AC⚡DC's own file RPCs still resolve against the repo root and
+Path validation moved rather than vanished. AIC⚡DC's own file RPCs still resolve against the repo root and
 still reject traversal, because those serve the browser. The agent's file access is the CLI's to police
 via `cwd` and its own path rules — and unlike an edit-block parser we wrote, it is enforced by the process
 that performs the write.

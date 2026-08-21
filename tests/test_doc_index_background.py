@@ -1,4 +1,4 @@
-"""The doc index's background build — ``ac_dc.doc_index.background``.
+"""The doc index's background build — ``aic_dc.doc_index.background``.
 
 The extraction and the enrichment themselves belong to ``DocIndex`` and
 ``KeywordEnricher`` and are tested against those. What is under test here
@@ -30,8 +30,8 @@ from concurrent.futures import Future
 
 import pytest
 
-from ac_dc.doc_index import background as background_mod
-from ac_dc.doc_index.background import DocIndexBuilder
+from aic_dc.doc_index import background as background_mod
+from aic_dc.doc_index.background import DocIndexBuilder
 
 
 class FakeDocIndex:

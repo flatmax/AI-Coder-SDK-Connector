@@ -35,7 +35,7 @@ function health(overrides = {}) {
 }
 
 /** The sentence `_build_bridge_wiring` writes when the bridge will not start. */
-const NO_BRIDGE = 'The ac-dc repo tools did not start, so the agent has no '
+const NO_BRIDGE = 'The aic-dc repo tools did not start, so the agent has no '
   + 'symbol map, no document outlines and no reference graph — it will fall '
   + 'back to Glob, Grep and Read, which answer repo-wide questions less well.';
 
@@ -222,7 +222,7 @@ describe('ChatPanel health banner', () => {
     const text = banner(p).textContent;
     expect(text).toContain('4 turns were not appended');
     expect(text).toContain('more than this repo tolerates');
-    expect(text).toContain('.ac-dc4/sessions/');
+    expect(text).toContain('.aic-dc/sessions/');
   });
 
   it('speaks again when a dismissed warning escalates', async () => {

@@ -35,9 +35,9 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.claude_code import commit as commit_mod
-from ac_dc.claude_code.engine_config import EngineConfig
-from ac_dc.claude_code.service import ClaudeCodeService
+from aic_dc.claude_code import commit as commit_mod
+from aic_dc.claude_code.engine_config import EngineConfig
+from aic_dc.claude_code.service import ClaudeCodeService
 
 from .test_claude_code_service import (
     FakeCollab,
@@ -654,7 +654,7 @@ class TestTheHistoryRecord:
     """Neither write appears in the engine's transcript.
 
     The CLI never hears about a commit or a reset, so if these do not reach
-    ``.ac-dc4/events.jsonl`` they are absent from browsed history entirely —
+    ``.aic-dc/events.jsonl`` they are absent from browsed history entirely —
     and for the reset that record is the *only* surviving trace of the work
     it destroyed (``specs5/3-engine/history.md`` § One Store, One Index, One
     Events Log).

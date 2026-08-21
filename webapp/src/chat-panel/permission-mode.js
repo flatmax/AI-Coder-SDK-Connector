@@ -29,7 +29,7 @@ import { html, nothing } from 'lit';
 /**
  * The engine's modes, in ascending order of how much they let through.
  *
- * Mirrors `PERMISSION_MODES` in `src/ac_dc/claude_code/session.py`. The engine
+ * Mirrors `PERMISSION_MODES` in `src/aic_dc/claude_code/session.py`. The engine
  * validates and is authoritative; this list exists to label them. A mode the
  * engine reports that is missing here still renders — see
  * `renderPermissionModeSelector` — because a selector that silently dropped an

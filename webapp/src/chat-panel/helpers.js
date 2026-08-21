@@ -104,7 +104,7 @@ export const _EXPERIMENTAL_ENABLED = (() => {
 })();
 
 /** localStorage key for the snippet drawer's open/closed state. */
-export const _DRAWER_STORAGE_KEY = 'ac-dc-snippet-drawer';
+export const _DRAWER_STORAGE_KEY = 'aic-dc-snippet-drawer';
 
 // The reasoning toggle's and effort selector's localStorage shims stood here
 // until conversion phase 3. Both fed arguments to the native
@@ -134,9 +134,9 @@ export function _saveDrawerOpen(open) {
 }
 
 /** Search toggle keys, kept compatible with specs3 history. */
-export const _SEARCH_IGNORE_CASE_KEY = 'ac-dc-search-ignore-case';
-export const _SEARCH_REGEX_KEY = 'ac-dc-search-regex';
-export const _SEARCH_WHOLE_WORD_KEY = 'ac-dc-search-whole-word';
+export const _SEARCH_IGNORE_CASE_KEY = 'aic-dc-search-ignore-case';
+export const _SEARCH_REGEX_KEY = 'aic-dc-search-regex';
+export const _SEARCH_WHOLE_WORD_KEY = 'aic-dc-search-whole-word';
 
 export function _loadSearchToggle(key, defaultValue) {
   try {

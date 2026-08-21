@@ -408,7 +408,7 @@ describe('view-subagents handler — no channel to a subagent', () => {
     await settle(p);
     expect(p.shadowRoot.querySelector('.input-textarea')).toBeNull();
     expect(p.shadowRoot.querySelector('.send-button')).toBeNull();
-    expect(p.shadowRoot.querySelector('ac-input-history')).toBeNull();
+    expect(p.shadowRoot.querySelector('aic-input-history')).toBeNull();
     expect(
       p.shadowRoot.querySelector('.read-only-note').textContent,
     ).toContain('no channel to a subagent');
@@ -539,7 +539,7 @@ describe('view-subagents handler — the history browser’s route in', () => {
 
     p.shadowRoot.querySelector('.history-button').click();
     await settle(p);
-    const browser = p.shadowRoot.querySelector('ac-history-browser');
+    const browser = p.shadowRoot.querySelector('aic-history-browser');
     await browser.updateComplete;
     await settle(p);
     browser.shadowRoot.querySelector('.session-item').click();

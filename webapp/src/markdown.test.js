@@ -91,7 +91,7 @@ describe('renderMarkdown', () => {
     // guaranteed, but a recognisable JSON fragment should
     // pick up at least one hljs- class.
     const html = renderMarkdown(
-      '```\n{"name": "ac-dc", "version": "1.0"}\n```',
+      '```\n{"name": "aic-dc", "version": "1.0"}\n```',
     );
     expect(html).toMatch(/hljs-/);
   });

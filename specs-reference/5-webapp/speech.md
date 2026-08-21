@@ -88,13 +88,13 @@ The synthesis player broadcasts on every transition.
   }
   ```
 
-- **Consumers:** the `ac-speech-controls` overlay (reflects into its UI/visibility) and the chat panel (mirrors `ownerKey` onto `_speakingMsgIndex`: when `active && typeof ownerKey === 'number'`, set the index to `ownerKey`, else `-1`).
+- **Consumers:** the `aic-speech-controls` overlay (reflects into its UI/visibility) and the chat panel (mirrors `ownerKey` onto `_speakingMsgIndex`: when `active && typeof ownerKey === 'number'`, set the index to `ownerKey`, else `-1`).
 
 ### localStorage keys
 
 | Key | Type | Purpose |
 |---|---|---|
-| `ac-dc-speech-controls-pos` | JSON `{x: number, y: number}` | Last dragged position of the floating transport, in pixels from the viewport top-left. Written on drag-end (after viewport clamping); read at construction. Corrupt or non-numeric entries are ignored and the default position is used |
+| `aic-dc-speech-controls-pos` | JSON `{x: number, y: number}` | Last dragged position of the floating transport, in pixels from the viewport top-left. Written on drag-end (after viewport clamping); read at construction. Corrupt or non-numeric entries are ignored and the default position is used |
 
 ### Synthesis helper surface
 

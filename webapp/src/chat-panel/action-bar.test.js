@@ -40,7 +40,7 @@ const REMOVED_CONTROLS = [
   ['.mode-toggle', 'code/doc index switch — the preset selector, CC-12'],
   ['.crossref-btn', 'cross-reference toggle — never; retired in phase 4'],
   ['.reasoning-toggle', 'reasoning flags chat_streaming no longer takes'],
-  ['ac-url-chips', 'URL fetching — the CLI has WebFetch'],
+  ['aic-url-chips', 'URL fetching — the CLI has WebFetch'],
 ];
 
 /** The session group, back in phase 5 against `ClaudeCodeService`. */

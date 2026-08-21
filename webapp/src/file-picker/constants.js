@@ -216,5 +216,5 @@ export const _BRANCH_MENU_MAX_HEIGHT = 320;
 export const _BRANCH_MENU_WIDTH = 280;
 
 // localStorage keys for persisting sort preferences.
-export const _SORT_MODE_KEY = 'ac-dc-sort-mode';
-export const _SORT_ASC_KEY = 'ac-dc-sort-asc';
+export const _SORT_MODE_KEY = 'aic-dc-sort-mode';
+export const _SORT_ASC_KEY = 'aic-dc-sort-asc';

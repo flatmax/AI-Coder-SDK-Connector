@@ -436,7 +436,7 @@ describe('ChatPanel restoring a rendered turn', () => {
       ],
     });
     await settle(p);
-    const history = p.shadowRoot.querySelector('ac-input-history');
+    const history = p.shadowRoot.querySelector('aic-input-history');
     // `_entries` is plain strings; the element exposes no public reader.
     const recalled = history._entries || [];
     expect(recalled).toContain('what I typed');
@@ -920,7 +920,7 @@ describe('ChatPanel compaction events — retired stages', () => {
     const reqId = await sendAndComplete(p, 'original question');
     const before = [...p.messages];
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       for (const event of [
         { stage: 'url_fetch', url: 'github.com/owner/repo' },
@@ -934,7 +934,7 @@ describe('ChatPanel compaction events — retired stages', () => {
       expect(toasts).not.toHaveBeenCalled();
       expect(p.messages).toEqual(before);
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 
@@ -1037,13 +1037,13 @@ describe('ChatPanel compact_boundary', () => {
     const p = mountPanel();
     const reqId = await sendAndGetId(p);
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       boundary(reqId);
       await settle(p);
       expect(toasts).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 
@@ -1258,7 +1258,7 @@ describe('ChatPanel compaction events — defensive', () => {
   it('unknown stage is silently ignored', async () => {
     const p = mountPanel();
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       pushEvent('compaction-event', {
         event: { stage: 'future_stage_we_dont_know_about' },
@@ -1266,7 +1266,7 @@ describe('ChatPanel compaction events — defensive', () => {
       await settle(p);
       expect(toasts).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 
@@ -1277,7 +1277,7 @@ describe('ChatPanel compaction events — defensive', () => {
     // channel.
     const p = mountPanel();
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       for (const stage of [
         'doc_enrichment_queued',
@@ -1292,7 +1292,7 @@ describe('ChatPanel compaction events — defensive', () => {
       }
       expect(toasts).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 
@@ -1320,7 +1320,7 @@ describe('ChatPanel compaction events — defensive', () => {
   it('event with missing stage field is ignored', async () => {
     const p = mountPanel();
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       pushEvent('compaction-event', {
         event: { url: 'no stage here' },
@@ -1328,7 +1328,7 @@ describe('ChatPanel compaction events — defensive', () => {
       await settle(p);
       expect(toasts).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 });
@@ -1391,7 +1391,7 @@ describe('ChatPanel cleanup', () => {
     await settle(p);
     p.remove();
     const toasts = vi.fn();
-    window.addEventListener('ac-toast', toasts);
+    window.addEventListener('aic-toast', toasts);
     try {
       pushEvent('compaction-event', {
         event: { stage: 'url_fetch', url: 'test' },
@@ -1399,7 +1399,7 @@ describe('ChatPanel cleanup', () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(toasts).not.toHaveBeenCalled();
     } finally {
-      window.removeEventListener('ac-toast', toasts);
+      window.removeEventListener('aic-toast', toasts);
     }
   });
 });
@@ -1483,7 +1483,7 @@ describe('ChatPanel speech-player-state sync', () => {
 
 describe('ChatPanel disk warning', () => {
   const WARNING =
-    'Mirrored session transcripts are using 1.4 GiB in `.ac-dc4/sessions/`. '
+    'Mirrored session transcripts are using 1.4 GiB in `.aic-dc/sessions/`. '
     + 'Deleting old sessions from the history browser reclaims the space.';
 
   function systemCards(panel) {
@@ -1537,7 +1537,7 @@ describe('ChatPanel disk warning', () => {
     expect(cards).toHaveLength(1);
     // The path it names is a code span in the sentence the service writes.
     expect(cards[0].querySelector('code')?.textContent)
-      .toBe('.ac-dc4/sessions/');
+      .toBe('.aic-dc/sessions/');
   });
 
   it('survives the restore that a state-loaded snapshot does', async () => {

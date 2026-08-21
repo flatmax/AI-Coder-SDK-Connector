@@ -38,7 +38,7 @@
 //                           → renderPendingImages
 //                           → input row + send column
 //                         → renderReadOnlyNote (read-only tabs instead)
-//                       → ac-history-browser (modal)
+//                       → aic-history-browser (modal)
 //                       → renderLightbox
 //
 // Assistant cards render one of two ways. A turn produced by Claude Code carries
@@ -146,15 +146,15 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 //   💻/📄 + 🔀 — `LLMService.switch_mode` / `set_cross_reference`, choosing
 //     which index fed the native engine's context assembly. Claude Code builds
 //     its own context by reading files with its own tools; there is no index to
-//     switch. The context story came back in phase 3 as `ac-context-usage-tab`
-//     and `ac-usage-hud`, which *report* the engine's real usage instead of
+//     switch. The context story came back in phase 3 as `aic-context-usage-tab`
+//     and `aic-usage-hud`, which *report* the engine's real usage instead of
 //     steering an index we no longer own.
 //
 //   🧠 + effort — reasoning flags passed as `chat_streaming` arguments the new
 //     signature does not take. Worse than merely inert: phase 2 renders thinking
 //     blocks, so a 🧠 toggle would read as the switch that controls them.
 //
-//   `ac-url-chips`, for the same reason at one remove: the chips fetched URLs
+//   `aic-url-chips`, for the same reason at one remove: the chips fetched URLs
 //     into the native engine's context. The CLI has WebFetch.
 //
 // Back in phase 5, now that there is a session lifecycle over the CLI to drive:
@@ -165,7 +165,7 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 //     and a button that reports a refusal it could have prevented is noise.
 //
 //   📜 — the history browser, now reading the CLI's own transcript mirrored
-//     under `.ac-dc4/sessions/` rather than native-engine session files.
+//     under `.aic-dc/sessions/` rather than native-engine session files.
 //
 // The permission-mode selector is the third member of the row and the one
 // control that genuinely changes what the next tool call does. It is
@@ -196,18 +196,18 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
  *   │  action-bar (permission mode + search)      │
  *   │  search-bar                                 │
  *   │  snippet drawer (if open)                   │
- *   │  ac-input-history                           │
+ *   │  aic-input-history                           │
  *   │  pending images (if any)                    │
- *   │  ac-slash-palette (when typing a /command)  │
+ *   │  aic-slash-palette (when typing a /command)  │
  *   │  input row (textarea + send column)         │
- *   ├─ ac-history-browser (modal) ────────────────┤
+ *   ├─ aic-history-browser (modal) ────────────────┤
  *   └─ lightbox (if open) ───────────────────────┘
  *
  * The lightbox lives at component-root level so it
  * can cover the whole shadow root regardless of
  * scroll position inside the messages list.
  *
- * Everything from `ac-input-history` down is absent on a subagent
+ * Everything from `aic-input-history` down is absent on a subagent
  * transcript, replaced by one line saying why. Not disabled — absent:
  * "a greyed-out textarea implies a channel that might open under some
  * condition, and none exists" (specs5/5-webapp/subagent-browser.md
@@ -285,12 +285,12 @@ export function render(panel) {
       than snapshotted at open time, so a collaborator's turn arriving
       behind the modal counts as something the reader has not seen.
     -->
-    <ac-history-browser
+    <aic-history-browser
       ?open=${panel._historyOpen}
       .liveUnread=${hasUnreadLiveMessages(panel)}
       @close=${() => panel._onHistoryClose()}
       @session-loaded=${() => panel._onHistorySessionLoaded()}
-    ></ac-history-browser>
+    ></aic-history-browser>
     ${panel._lightboxImage ? renderLightbox(panel) : ''}
   `;
 }
@@ -303,14 +303,14 @@ export function render(panel) {
 function renderInputSurface(panel) {
   return html`
     ${panel._snippetDrawerOpen ? renderSnippetDrawer(panel) : ''}
-    <ac-input-history
+    <aic-input-history
       @history-select=${(e) => onHistorySelect(panel, e)}
       @history-cancel=${(e) => onHistoryCancel(panel, e)}
-    ></ac-input-history>
+    ></aic-input-history>
     ${panel._pendingImages.length > 0 ? renderPendingImages(panel) : ''}
-    <ac-slash-palette
+    <aic-slash-palette
       @command-select=${(e) => onSlashCommandSelect(panel, e)}
-    ></ac-slash-palette>
+    ></aic-slash-palette>
     <div class="input-row">
       <textarea
         class="input-textarea"
@@ -338,10 +338,10 @@ function renderInputSurface(panel) {
           >
             ✂️
           </button>
-          <ac-speech-to-text
+          <aic-speech-to-text
             @transcript=${(e) => panel._onTranscript(e)}
             @recognition-error=${(e) => panel._onRecognitionError(e)}
-          ></ac-speech-to-text>
+          ></aic-speech-to-text>
         </div>
         ${panel._streaming
           ? html`<button
@@ -1287,7 +1287,7 @@ export function renderStreamingMessage(panel) {
 }
 
 // `renderRetryBanner` stood here until conversion phase 3, drawing a
-// countdown while AC⚡DC's completion wrapper slept between attempts. The CLI
+// countdown while AIC⚡DC's completion wrapper slept between attempts. The CLI
 // retries inside the subprocess without narrating it, so there is no wait to
 // count down. Rate limits — the one retryable condition it does report —
 // arrive as a `rateLimit` message carrying a real reset time, handled in

@@ -21,7 +21,7 @@ resolution-markers = [
 constraints = [{ name = "magika", specifier = "<0.6.3" }]
 
 [[package]]
-name = "ac-dc"
+name = "aic-dc"
 version = "0.0.0.dev0"
 source = { editable = "." }
 dependencies = [
@@ -80,7 +80,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ac-dc", extras = ["docs-convert", "docs-enrich"], marker = "extra == 'docs'" },
+    { name = "aic-dc", extras = ["docs-convert", "docs-enrich"], marker = "extra == 'docs'" },
     { name = "claude-agent-sdk", specifier = ">=0.2.136" },
     { name = "huggingface-hub", marker = "extra == 'docs-enrich'", specifier = ">=0.24" },
     { name = "jrpc-oo", git = "https://github.com/flatmax/jrpc-oo.git" },

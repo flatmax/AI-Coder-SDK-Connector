@@ -6,11 +6,12 @@ __pycache__/
 dist/
 build/
 
-# AC-DC runtime state (per-repo working directory).
-# Two entries intentional — `.ac-dc4/` is this reimplementation's
-# working directory; `.ac-dc/` is the previous implementation's.
-# During the transition both may coexist in a shared repository.
-# See src/ac_dc/config.py:_AC_DC_DIR for the rename rationale.
+# AIC⚡DC runtime state (per-repo working directory).
+# `.aic-dc/` is the current name. The two legacy entries are kept so a
+# checkout that still holds state from an earlier name doesn't suddenly
+# start showing 30MB of session JSONL as untracked.
+# See src/aic_dc/config.py:_AIC_DC_DIR.
+.aic-dc/
 .ac-dc4/
 .ac-dc/
 

@@ -23,8 +23,8 @@ from typing import Any
 
 import pytest
 
-from ac_dc.doc_index.index import DocIndex
-from ac_dc.doc_index.models import (
+from aic_dc.doc_index.index import DocIndex
+from aic_dc.doc_index.models import (
     DocHeading,
     DocOutline,
     DocProseBlock,

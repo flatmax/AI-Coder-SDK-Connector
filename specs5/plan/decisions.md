@@ -42,7 +42,7 @@ changes is who consumes them.
 | File picker outlines, doc navigation, SVG structure | Secondary | Retained |
 | Claude Code | — | **New** — via MCP tools (see CC-6) |
 
-**Why it matters:** the indexes are the one piece of the engine that is genuinely AC⚡DC's own
+**Why it matters:** the indexes are the one piece of the engine that is genuinely AIC⚡DC's own
 intelligence rather than plumbing around a provider. They give Monaco real language features
 without an LSP server per language, and they let the agent buy a whole-repo structural picture
 for a few hundred tokens instead of a directory walk plus twenty `Read` calls.
@@ -52,7 +52,7 @@ sections are repointed from cache tiering to the MCP bridge and the browser.
 
 ---
 
-## CC-3 — Transcript mirrored to `.ac-dc4/`, context continuity via the SDK **(user)**
+## CC-3 — Transcript mirrored to `.aic-dc/`, context continuity via the SDK **(user)**
 
 > **Partly superseded by [CC-19](#cc-19) (2026-08-16).** The split below stands. The second writer
 > does not: there is one store, `HistoryStore` is retired, and the browser reads the mirrored
@@ -60,12 +60,12 @@ sections are repointed from cache tiering to the MCP bridge and the browser.
 
 History is split cleanly in two:
 
-- **Display and search** — AC⚡DC persists the rendered message stream to `.ac-dc4/` as JSONL and
+- **Display and search** — AIC⚡DC persists the rendered message stream to `.aic-dc/` as JSONL and
   keeps `HistoryStore`, the history browser, and full-text search. This is what the user browses.
 - **Context continuity** — owned entirely by the SDK. Resumption is `resume=<session_id>` (plus
   `fork_session` to branch); the conversation state the model sees is Claude Code's, not ours.
 
-AC⚡DC additionally implements the SDK's `SessionStore` protocol against `.ac-dc4/` so the
+AIC⚡DC additionally implements the SDK's `SessionStore` protocol against `.aic-dc/` so the
 authoritative transcript lives inside the repo working directory rather than only under
 `~/.claude/projects/`.
 
@@ -119,14 +119,14 @@ touches ~28k lines across two languages. Agreeing the target shape on paper is t
 
 ## CC-6 — The indexes reach Claude Code as MCP tools, not as prompt text
 
-AC⚡DC registers an in-process SDK MCP server (`ac-dc`) exposing its repo intelligence as tools
+AIC⚡DC registers an in-process SDK MCP server (`aic-dc`) exposing its repo intelligence as tools
 the agent may call. It does **not** pre-inject the symbol map into the system prompt or via a
 `UserPromptSubmit` hook's `additionalContext`.
 
 **Why it matters:** pre-injection is the native engine's model, and it is the model that made
 caching necessary in the first place — every turn carried the whole map whether the turn needed it
 or not. On-demand tool calls invert that: the agent pays for structure only when it asks for
-structure, and Claude Code's own cache handles the repeat case. It also keeps AC⚡DC honest about
+structure, and Claude Code's own cache handles the repeat case. It also keeps AIC⚡DC honest about
 what it adds: a tool that returns a whole-repo map in one call is a real capability, visible in
 `/context`'s MCP-tools section, and attributable in the transcript.
 
@@ -143,7 +143,7 @@ The `🟧🟧🟧 EDIT` / `🟨🟨🟨 REPL` / `🟩🟩🟩 END` protocol, the
 failure classifications, and the three auto-populated retry prompts are all deleted. Claude Code's
 own `Edit` / `Write` / `NotebookEdit` tools apply changes.
 
-AC⚡DC's role at edit time becomes:
+AIC⚡DC's role at edit time becomes:
 
 1. **Before** — `can_use_tool` intercepts the call and renders the proposed change as a Monaco
    diff in the permission dialog. Allow / deny / allow-and-remember.
@@ -167,7 +167,7 @@ checkpointing in a session that mirrors its transcript, and the mirror is the on
 
 ---
 
-## CC-8 — Subagents are Claude Code's `Task` tool, not AC⚡DC's spawn blocks
+## CC-8 — Subagents are Claude Code's `Task` tool, not AIC⚡DC's spawn blocks
 
 The agent-mode design (`🟧🟧🟧 AGENT` blocks, `filter_dispatchable_agents`, per-agent
 `ContextManager`s, `agent_idx` archive routing, cross-turn reconstruction, the `agents.enabled`
@@ -223,12 +223,12 @@ The session is configured with `setting_sources=["user", "project", "local"]`. T
 `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/`, `.claude/skills/`, and slash commands all
 apply.
 
-**Why it matters:** the alternative is an AC⚡DC session that behaves differently from the CLI in
+**Why it matters:** the alternative is an AIC⚡DC session that behaves differently from the CLI in
 the same repo, which makes every "does it work in Claude Code?" question ambiguous. Honouring
-project settings means the user's existing configuration transfers, and it makes AC⚡DC a viewer
+project settings means the user's existing configuration transfers, and it makes AIC⚡DC a viewer
 onto a session they could also have opened in a terminal.
 
-**Consequence:** `1-foundation/configuration.md` shrinks dramatically. AC⚡DC's own prompt files
+**Consequence:** `1-foundation/configuration.md` shrinks dramatically. AIC⚡DC's own prompt files
 (`system.md`, `system_doc.md`, `review.md`, `system_reminder.md`, `compaction.md`, `commit.md`,
 `system_agentic_appendix.md`) are deleted; what survives is a thin engine config plus the UI's own
 settings. Prompt customisation moves to `CLAUDE.md`, where users already expect it.
@@ -306,7 +306,7 @@ dialog is the most consequential mutation surface in the new design — it autho
 execution grant, which is precisely what the existing restriction policy exists to prevent.
 
 **Consequence:** if no localhost client is connected when a permission request arrives, the
-request is denied after a timeout with a reason the transcript records. A headless AC⚡DC cannot
+request is denied after a timeout with a reason the transcript records. A headless AIC⚡DC cannot
 be driven by a remote collaborator into running commands.
 
 ---
@@ -322,10 +322,10 @@ Separately, no derived rule may ever name a path under `.claude/`.
 
 1. **It is where the CLI puts its own grants.** Observed against CLI 2.1.229 and recorded in
    [`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md):
-   a persisted rule goes to `localSettings`. With AC⚡DC defaulting to `projectSettings`, the same
+   a persisted rule goes to `localSettings`. With AIC⚡DC defaulting to `projectSettings`, the same
    approval landed in a different file depending on which front end the user happened to be in, so
    "what have I allowed in this repo?" had two answers and only one of them was the CLI's.
-2. **A click must not become a commit.** `.claude/settings.json` is git-tracked. AC⚡DC is a
+2. **A click must not become a commit.** `.claude/settings.json` is git-tracked. AIC⚡DC is a
    multi-client system (CC-15, [`../4-features/collaboration.md`](../4-features/collaboration.md)):
    one participant's trust decision would have become the team's checked-in policy, shared by the
    next `git push`. A shared allowlist is a policy, and a policy deserves a reviewed edit rather
@@ -339,7 +339,7 @@ Separately, no derived rule may ever name a path under `.claude/`.
 
 **Consequence:** `derive_suggested_rules` returns no rule at all for a write under `.claude/`, so
 such a call is approvable once but never permanently. `permissions.py` continues to honour an
-explicit `destination` on a CLI suggestion; the change is to what AC⚡DC's own derivation defaults.
+explicit `destination` on a CLI suggestion; the change is to what AIC⚡DC's own derivation defaults.
 
 ## CC-17 — The HUD and Context tab are replaced in phase 3, not vacated **(user)**
 
@@ -389,7 +389,7 @@ share the `Bash` blind spot — `take_reindexed()` because the hook never fires,
 field **must be named for what it actually contains** (`files_written_by_file_tools` or equivalent),
 never `files_changed`.
 
-**Why it matters:** a wrong live broadcast dies at reload. A wrong field written into `.ac-dc4/` is
+**Why it matters:** a wrong live broadcast dies at reload. A wrong field written into `.aic-dc/` is
 what the history browser and full-text search then show, permanently, and correcting it means
 migrating transcripts users have already accumulated. The cheap moment to be accurate about scope is
 before the first one is written — phase 5, before CC-18's implementation exists.
@@ -398,7 +398,7 @@ before the first one is written — phase 5, before CC-18's implementation exist
 
 ## CC-19 — One store, entries verbatim; `history_store.py` retires **(user)**
 
-Phase 5 implements the SDK's `SessionStore` protocol fresh, under `.ac-dc4/`, against
+Phase 5 implements the SDK's `SessionStore` protocol fresh, under `.aic-dc/`, against
 `claude_agent_sdk.testing.session_store_conformance`. **`history_store.py` and
 `test_history_store.py` are deleted with it.** There is no second writer: the history browser and
 full-text search become readers of the mirrored transcript, through the SDK's `*_from_store`
@@ -410,7 +410,7 @@ included.
 **This supersedes the first half of [CC-3](#cc-3).**
 CC-3's split of the two jobs stands, and is still the right split: *display and search* are ours,
 *context continuity* is the SDK's, because the SDK owns compaction. What does not stand is CC-3's
-sentence that AC⚡DC "keeps `HistoryStore`" alongside its `SessionStore` implementation. That was
+sentence that AIC⚡DC "keeps `HistoryStore`" alongside its `SessionStore` implementation. That was
 written before the protocol was read.
 
 **Why:** `SessionStoreEntry` is documented in the installed SDK (0.2.137) as *"a minimal structural
@@ -428,7 +428,7 @@ transcript union, which is internal. Three things follow:
    sources that can disagree about what a session contains, and a reload is where the disagreement
    surfaces.
 
-Nothing is being migrated: no `.ac-dc4/history.jsonl` exists in practice, and
+Nothing is being migrated: no `.aic-dc/history.jsonl` exists in practice, and
 `import_session_to_store()` is the SDK's own path for replaying a local transcript if one ever needs
 adopting.
 
@@ -440,9 +440,9 @@ dropped, and neither home is a second transcript:
 
 | Job | Home | Property that makes it safe |
 |---|---|---|
-| Search, session list, request-ID ↔ session correlation | A **derived index** under `.ac-dc4/`, built from the store | Deletable at any time and rebuilt from the transcript. It can go stale; it cannot disagree, because it has no independent content. |
+| Search, session list, request-ID ↔ session correlation | A **derived index** under `.aic-dc/`, built from the store | Deletable at any time and rebuilt from the transcript. It can go stale; it cannot disagree, because it has no independent content. |
 | Browse rendering, tool-call summaries | Produced at read time from parsed `SessionMessage`s | Summarising at write time is denormalisation that drifts from the transcript it summarises. |
-| AC⚡DC's own system events — commit, reset, review entry and exit, preset switch, permission-mode change | `.ac-dc4/events.jsonl`: ours, append-only, keyed by session ID and request ID, carrying no message content | Not derivable from the transcript, so it cannot live in the index; not the CLI's, so it must not live in the store. |
+| AIC⚡DC's own system events — commit, reset, review entry and exit, preset switch, permission-mode change | `.aic-dc/events.jsonl`: ours, append-only, keyed by session ID and request ID, carrying no message content | Not derivable from the transcript, so it cannot live in the index; not the CLI's, so it must not live in the store. |
 
 **The store is never given an entry the CLI did not write.** This is the invariant that keeps the
 single-store design safe. Injecting our own records — namespaced `type` or not — puts them in front of
@@ -456,7 +456,7 @@ loss, arbitrarily later, in a session the user cares about.
   `list_sessions`, `list_session_summaries`, `delete` and `list_subkeys` by attribute presence, so a
   missing one degrades a feature *silently* — the failure mode is a browser that lists nothing and
   reports no error.
-- **Pasted-image extraction to `.ac-dc4/images/` retires with the store.** Images are live — the
+- **Pasted-image extraction to `.aic-dc/images/` retires with the store.** Images are live — the
   browser pastes data URIs and `session.py:212` turns them into content blocks — so they arrive as
   base64 inside opaque entries and stay there. A session with several pasted screenshots produces a
   multi-MB JSONL. **The revisit trigger is measured size, not distaste**; if it fires, the mechanism
@@ -477,7 +477,7 @@ loss, arbitrarily later, in a session the user cares about.
   `4-features/images.md`, `6-deployment/packaging.md`, and the schema twin in
   `specs-reference/3-engine/history.md`. Seven more turned up in a grep sweep for the phrase *mirrored
   store*, which had come to mean two different files in two different documents:
-  `0-overview/architecture.md` (the `.ac-dc4/` table, and a turn-flow step claiming the server persists
+  `0-overview/architecture.md` (the `.aic-dc/` table, and a turn-flow step claiming the server persists
   the user message itself), `3-engine/session.md` (the same step), `1-foundation/rpc-inventory.md`,
   `5-webapp/chat.md`, `plan/inventory.md` (`history_store.py` was still filed under ADAPT),
   `specs-reference/1-foundation/rpc-inventory.md` and `specs-reference/5-webapp/chat.md` (both pointing
@@ -518,13 +518,13 @@ than left implicit in a table:
 > would diverge from the mirrored transcript)`
 
 A session that asks for both therefore does not start at all — the user sees "Could not start a Claude
-Code session" and has no engine, no history, and no way to ask for either. AC⚡DC set both from phase 1
+Code session" and has no engine, no history, and no way to ask for either. AIC⚡DC set both from phase 1
 onward and got away with it because nothing *constructed* a store until CC-19's implementation landed;
 the constraint fired on the first run that had one. `claude_code/options.py` now sets checkpointing and
 its `--replay-user-messages` partner only when there is no store, which in practice means only a
 repoless run — every run with a repo mirrors.
 
-**Why the mirror rather than the undo:** the store carries `.ac-dc4/` history, resume after a restart,
+**Why the mirror rather than the undo:** the store carries `.aic-dc/` history, resume after a restart,
 the session browser and the derived index — it *is* CC-19 and most of phase 5. Without it a session
 outlives only the CLI's own retention window, so the loss surfaces days later looking like data loss.
 Checkpointing carries one control that has never had a caller (`delivery.md` § No rewind UI), over
@@ -551,7 +551,7 @@ The picker's checkbox column is deleted, and with it every channel the selection
 the frontend's `_selectedFiles` state and its per-tab Map, the `set_selected_files` /
 `get_selected_files` / `set_agent_selected_files` RPCs, the `filesChanged` broadcast, `Turn.files`,
 the framing branch that listed selected paths, the `selected_files` key in the `ui_state` snapshot
-and in `mcp__ac-dc__ui_state`'s rendered block, the `files` key on the user-message history entry,
+and in `mcp__aic-dc__ui_state`'s rendered block, the `files` key on the user-message history entry,
 and review entry's `on_selection_cleared` callback. `chat_streaming` loses its `files` parameter and
 takes four arguments.
 

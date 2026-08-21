@@ -13,14 +13,14 @@
 // this turn's. The CLI's own wire schema says so in as many words —
 // "cumulative across turns in streaming-input sessions: each result
 // carries the running total so far, so read the latest result rather
-// than summing across results" — and AC⚡DC runs exactly one
+// than summing across results" — and AIC⚡DC runs exactly one
 // streaming-input client. So the HUD's "This turn · $1.87" was the whole
 // session's spend, and its model list named every model the session had
 // ever touched, not the ones that answered.
 //
 // The per-turn figures are a difference against the previous result, so
 // the baseline is session state and the engine takes the difference
-// server-side (`ac_dc/claude_code/cost.py`). Everything here reads what
+// server-side (`aic_dc/claude_code/cost.py`). Everything here reads what
 // it produced:
 //
 //   turn_cost_usd     this turn's cost, or null
@@ -34,7 +34,7 @@
 // `turn_model_usage` has two producers, both per-turn and therefore both
 // under that one name: the `streamComplete` the engine builds at the end
 // of a turn, and the `turnUsage` it pushes *during* one, as each
-// assistant message reports what it used (`ac_dc/claude_code/messages.py`).
+// assistant message reports what it used (`aic_dc/claude_code/messages.py`).
 // `modelUsageLines` reads either. The live one is a running figure —
 // incomplete until the result lands, and replaced by it then — but it is
 // never a session total, which is the only distinction this module
@@ -44,7 +44,7 @@
 export const MEASURED = 'measured';
 /** The engine's total went backwards — a `/clear`, or a resumed session. */
 export const RESET = 'reset';
-/** No usable number: a footer AC⚡DC wrote itself, or one the CLI zeroed. */
+/** No usable number: a footer AIC⚡DC wrote itself, or one the CLI zeroed. */
 export const UNPRICED = 'unpriced';
 /**
  * Nothing on the payload says anything about cost at all.
@@ -324,7 +324,7 @@ export function modelNames(result) {
  * chat panel plus a toast already carry the error.
  *
  * The last two checks are what make a crash footer legible. The engine
- * never wrote it — AC⚡DC did — so it carries no usage at all, and the
+ * never wrote it — AIC⚡DC did — so it carries no usage at all, and the
  * only evidence the turn spent money is that it had already done work.
  */
 export function reportsUsage(result) {

@@ -261,7 +261,7 @@ describe('DiffViewer markdown link provider', () => {
     window.addEventListener('navigate-file', listener);
     try {
       const opener = monacoState.linkOpeners[0];
-      const result = opener.open('ac-navigate:///other.md');
+      const result = opener.open('aic-navigate:///other.md');
       expect(result).toBe(true);
       expect(listener).toHaveBeenCalledOnce();
       expect(listener.mock.calls[0][0].detail.path).toBe('docs/other.md');
@@ -279,14 +279,14 @@ describe('DiffViewer markdown link provider', () => {
     window.addEventListener('navigate-file', listener);
     try {
       const opener = monacoState.linkOpeners[0];
-      opener.open('ac-navigate:///../top.md');
+      opener.open('aic-navigate:///../top.md');
       expect(listener.mock.calls[0][0].detail.path).toBe('docs/top.md');
     } finally {
       window.removeEventListener('navigate-file', listener);
     }
   });
 
-  it('link opener ignores non-ac-navigate URIs', async () => {
+  it('link opener ignores non-aic-navigate URIs', async () => {
     const el = mountViewer();
     await settle(el);
     await el.openFile({ path: 'docs/spec.md' });
@@ -313,7 +313,7 @@ describe('DiffViewer markdown link provider', () => {
     // Returns true (claims the URI) but dispatches
     // nothing because there's no active file to
     // resolve against.
-    opener.open('ac-navigate:///other.md');
+    opener.open('aic-navigate:///other.md');
     expect(listener).not.toHaveBeenCalled();
   });
 
@@ -329,7 +329,7 @@ describe('DiffViewer markdown link provider', () => {
     };
     const result = provider.provideLinks(model);
     expect(result.links).toHaveLength(1);
-    expect(result.links[0].url).toBe('ac-navigate:///spec.md');
+    expect(result.links[0].url).toBe('aic-navigate:///spec.md');
   });
 
   it('link provider skips absolute URLs', async () => {
@@ -344,6 +344,6 @@ describe('DiffViewer markdown link provider', () => {
     };
     const result = provider.provideLinks(model);
     expect(result.links).toHaveLength(1);
-    expect(result.links[0].url).toBe('ac-navigate:///local.md');
+    expect(result.links[0].url).toBe('aic-navigate:///local.md');
   });
 });

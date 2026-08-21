@@ -1,6 +1,6 @@
 # MCP Bridge
 
-AC⚡DC exposes its repo intelligence to Claude Code as an in-process MCP server named `ac-dc`. This
+AIC⚡DC exposes its repo intelligence to Claude Code as an in-process MCP server named `aic-dc`. This
 is how the tree-sitter symbol index, the document index, and the reference graph survive the
 conversion with a purpose beyond serving Monaco.
 
@@ -53,7 +53,7 @@ Arguments: an optional path prefix to scope to a subtree, and an optional langua
 output with a continuation token when the map exceeds a reasonable response size, because a 900-file
 monorepo map is not a single response.
 
-This is the bridge's flagship tool and the clearest case where AC⚡DC knows something the agent cannot
+This is the bridge's flagship tool and the clearest case where AIC⚡DC knows something the agent cannot
 cheaply discover.
 
 ### `file_symbols`
@@ -90,7 +90,7 @@ returns coordinate soup, while the index returns a labelled nesting structure. S
 Active review facts: reviewed branch, target branch, merge-base, changed files with status.
 
 *Answers:* "what am I reviewing?" The agent can derive most of this with `git`, but not the fact that
-the repository is in AC⚡DC's soft-reset review state — which changes what `git status` means. Without
+the repository is in AIC⚡DC's soft-reset review state — which changes what `git status` means. Without
 this tool the agent will misinterpret the staged-changes-as-branch-changes arrangement. Returns an
 explicit not-in-review result when review is inactive. See
 [`../4-features/code-review.md`](../4-features/code-review.md).
@@ -126,7 +126,7 @@ call. An agent misled by our own tool about code it just wrote is worse off than
 at all — it will confidently reason from a stale map.
 
 The mechanism: incremental re-indexing is debounced on `PostToolUse`, and a pending re-index is
-flushed synchronously before any `ac-dc` index-reading tool returns. See
+flushed synchronously before any `aic-dc` index-reading tool returns. See
 [tool-surface.md § Snapshot discipline](tool-surface.md#snapshot-discipline-moves-to-tool-call-boundaries).
 
 ## Availability and Degradation
@@ -156,7 +156,7 @@ flushed synchronously before any `ac-dc` index-reading tool returns. See
 - Tools are read-only and are displayed but not gated — but that posture is **implemented by an
   explicit allow in `can_use_tool`**, not inherited from being read-only. The CLI asks about MCP
   tools. See [permissions.md](permissions.md) for why the distinction matters.
-- Server health, and the `ac-dc` tool inventory with its token cost, appear in the Context tab like
+- Server health, and the `aic-dc` tool inventory with its token cost, appear in the Context tab like
   any third-party server.
 
 ## Invariants

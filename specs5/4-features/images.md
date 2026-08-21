@@ -12,7 +12,7 @@ turn, and the entry the engine writes is what lets us render it again a week lat
 
 ## Storage
 
-- **The transcript under `.ac-dc4/sessions/`**, verbatim. A pasted screenshot is base64 inside a user
+- **The transcript under `.aic-dc/sessions/`**, verbatim. A pasted screenshot is base64 inside a user
   entry, which is why a session with several of them produces a multi-MB transcript file.
 - **No content-hash filenames and no deduplication.** Pasting the same image in two turns stores it
   twice, once per entry. The native engine's `{epoch_ms}-{hash12}.{ext}` scheme and its idempotent
@@ -20,7 +20,7 @@ turn, and the entry the engine writes is what lets us render it again a week lat
 - **The size revisit is a store-internal change.** If transcript size becomes a real problem, images are
   extracted on `append` and rehydrated on `load`, which preserves the round-trip invariant the protocol
   requires and changes nothing outside the store — including nothing in this document.
-- **An `.ac-dc4/images/` directory written by the native engine is ignored**, not read and not migrated.
+- **An `.aic-dc/images/` directory written by the native engine is ignored**, not read and not migrated.
 
 ## Reading Flow
 
@@ -74,7 +74,7 @@ turn, and the entry the engine writes is what lets us render it again a week lat
 
 The model's view and the browser's view of a resumed session's images are the *same* entries. Under the
 two-store design they were two different records of the same paste — the engine's content blocks and our
-refs-to-disk — and the asymmetry had a memorable failure mode: deleting `.ac-dc4/images/` blinded the
+refs-to-disk — and the asymmetry had a memorable failure mode: deleting `.aic-dc/images/` blinded the
 browser while the model could still reason about an image the user could no longer see.
 
 That divergence is gone, and with it the leak in the other direction (a file on disk with no record
@@ -88,7 +88,7 @@ images too.** There is no second copy, and deleting a session deletes its pictur
 - Maximum images per message (default 5)
 - Encoding — base64 data URI
 - Display — thumbnail previews with remove button, below textarea
-- No token counting. AC⚡DC no longer estimates what an image costs; the engine reports actual usage in `streamComplete` and the context HUD reflects it afterwards (see [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md))
+- No token counting. AIC⚡DC no longer estimates what an image costs; the engine reports actual usage in `streamComplete` and the context HUD reflects it afterwards (see [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md))
 
 ## Frontend Message Display
 
@@ -121,7 +121,7 @@ Two interaction paths to re-attach an image to the current input:
 
 ## What Does Not Change
 
-- AC⚡DC never re-sends an image. The engine keeps the original content blocks in its own context for the rest of the session, so the model does not need us to; re-attaching is a deliberate user action that sends a fresh copy
+- AIC⚡DC never re-sends an image. The engine keeps the original content blocks in its own context for the rest of the session, so the model does not need us to; re-attaching is a deliberate user action that sends a fresh copy
 - Image size and count limits unchanged
 - The whole frontend surface — paste, thumbnails, lightbox, re-attach, limits, the absence of token counting — is unchanged. What moved is where the bytes rest
 

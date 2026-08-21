@@ -18,7 +18,7 @@ The repository layer maintains an internal per-path mutex for write operations. 
 
 The contended case is now real rather than hypothetical. The agent's own file writes are executed by the CLI and do not pass through this layer at all, but the browser writes through it (diff-viewer saves, SVG edits, renames, staging) while a turn is in flight, and the agent's subagents write concurrently with each other. A save landing in the middle of an agent edit to the same file is a genuine race; the mutex is what makes the outcome one write or the other rather than an interleaved file.
 
-The mutex does **not** serialize AC⚡DC against the agent — nothing can, because the CLI writes to disk directly without passing through this layer. What limits the damage there is elsewhere: the `PostToolUse` broadcast makes the viewer refetch a file the agent just wrote, and the agent's own file checkpointing makes the write undoable. See [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md#reacting-to-file-changes). This layer's guarantee stops at "no interleaved write through the repository layer", and specs that need more must say so themselves.
+The mutex does **not** serialize AIC⚡DC against the agent — nothing can, because the CLI writes to disk directly without passing through this layer. What limits the damage there is elsewhere: the `PostToolUse` broadcast makes the viewer refetch a file the agent just wrote, and the agent's own file checkpointing makes the write undoable. See [`../3-engine/tool-surface.md`](../3-engine/tool-surface.md#reacting-to-file-changes). This layer's guarantee stops at "no interleaved write through the repository layer", and specs that need more must say so themselves.
 
 ## Git Staging
 

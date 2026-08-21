@@ -2188,7 +2188,7 @@ export class FilePicker extends LitElement {
   }
 }
 
-customElements.define('ac-file-picker', FilePicker);
+customElements.define('aic-file-picker', FilePicker);
 
 // Re-export pure helpers and constants for tests and downstream
 // importers that pulled them from the old file-picker.js entry

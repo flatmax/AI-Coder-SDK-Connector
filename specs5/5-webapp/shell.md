@@ -47,7 +47,7 @@ All dispatch to window-level custom events that the relevant child components li
 ## Startup Overlay
 
 - Full-screen overlay driven by startup-progress events
-- Shows the AC⚡DC brand, a status message, and a progress bar
+- Shows the AIC⚡DC brand, a status message, and a progress bar
 - Message and percent update per stage (config load, symbol index init, engine connect, session restore, doc index, ready)
 - Fades out shortly after the ready signal
 
@@ -83,7 +83,7 @@ All dispatch to window-level custom events that the relevant child components li
   - Markdown files — whether the preview pane was open and the preview's scroll position
   - TeX files — whether the preview pane was open and the preview's scroll position
   - SVG files — the current viewBox (pan/zoom), presentation-mode flag, and which viewer was active (visual SVG vs. Monaco text diff via `toggle-svg-mode`). Persisting the active-viewer choice means a user who switched to text diff for precise editing, then reloaded, returns to the text diff rather than having to re-toggle every session.
-- Not persisted: editor find-widget state, focused side of the diff editor. Adding either is an additive `ac-last-viewport` schema change.
+- Not persisted: editor find-widget state, focused side of the diff editor. Adding either is an additive `aic-last-viewport` schema change.
 
 ### Restore Flow
 
@@ -147,7 +147,7 @@ The dialog has no header bar. The chat panel's tab strip sits directly at the to
 
 The 📊 icon is on Main only, and no tab carries a ✕. Context is session-scoped now — there is one
 snapshot to show, not one per conversation — and a subagent tab cannot be closed because closing it never
-meant "hide a view", it meant "kill a scope AC⚡DC owned". See
+meant "hide a view", it meant "kill a scope AIC⚡DC owned". See
 [subagent-browser.md](subagent-browser.md).
 
 **LED strip** (below the textarea, above the context-capacity bar): one small dot per tab, centered horizontally. Each dot reflects that tab's live / outcome state (cyan flashing while working, green for a clean finish, red for failure, amber for stopped or unknown). Clicking a dot activates the corresponding tab. The strip takes minimal vertical space — no background, no border, just the dots floating below the input. Tooltip on hover gives the description, status, and state-specific diagnostic per [subagent-browser.md](subagent-browser.md#status-leds).
@@ -176,9 +176,9 @@ threshold to compare against: the threshold is the engine's, reported alongside 
 sees the fill cross the marker knows compaction is imminent, which is what the old bar was trying to say
 and could only approximate.
 
-**Doc index progress overlay**: an `ac-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. It also carries the doc-enrichment stages, which arrive on the compaction-event channel during a session rather than at startup. Exists so background indexing surfaces without re-showing the startup overlay or stalling chat interaction.
+**Doc index progress overlay**: an `aic-doc-index-progress` component rendered inside the dialog body. Owns its own visibility lifecycle keyed on the doc-index stages the shell intercepts from the startup-progress channel and re-dispatches as `doc-index-progress` window events. It also carries the doc-enrichment stages, which arrive on the compaction-event channel during a session rather than at startup. Exists so background indexing surfaces without re-showing the startup overlay or stalling chat interaction.
 
-**Compaction progress indicator**: an `ac-compaction-progress` component rendered inline in the dialog
+**Compaction progress indicator**: an `aic-compaction-progress` component rendered inline in the dialog
 directly above the context-capacity bar, and the pairing is the point — the bar says how close a
 compaction is, the indicator says when one is happening. Appears on the `pre_compact` `systemEvent` our
 own `PreCompact` hook broadcasts, holds a spinner, a label naming the trigger, an indeterminate sweeping
@@ -202,7 +202,7 @@ The reverse case is bounded rather than trusted: a spinner is a claim only `comp
 so after 3 minutes with no boundary the component says it lost track and gets out of the way, because a
 spinner that runs forever is worse than the toast it replaced.
 
-**Read-aloud transport overlay**: an `ac-speech-controls` component rendered at viewport scope. Unlike the progress overlays, it is **draggable** and remembers its position across sessions. It listens for the text-to-speech player's state-change window event and is visible only while a message is being read aloud, offering play/pause, a speed slider, and a per-sentence position bar. It holds no playback state — it is a remote control for the shared synthesis player and reflects its state. See [speech.md § Floating Transport](speech.md#floating-transport-controls-overlay) for the full specification.
+**Read-aloud transport overlay**: an `aic-speech-controls` component rendered at viewport scope. Unlike the progress overlays, it is **draggable** and remembers its position across sessions. It listens for the text-to-speech player's state-change window event and is visible only while a message is being read aloud, offering play/pause, a speed slider, and a per-sentence position bar. It holds no playback state — it is a remote control for the shared synthesis player and reflects its state. See [speech.md § Floating Transport](speech.md#floating-transport-controls-overlay) for the full specification.
 
 Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
 
@@ -231,11 +231,11 @@ Three handles — invisible hit zones at the edges that grow a subtle accent lin
 
 | Handle | Location | Axis | Behaviour |
 |---|---|---|---|
-| Right | Right edge, 8px hit zone extending 4px past the border | Horizontal | Adjusts width only. In docked mode, writes the new width to `ac-dc-dialog-width` and stays docked. In undocked mode, writes to the full undocked rectangle. |
+| Right | Right edge, 8px hit zone extending 4px past the border | Horizontal | Adjusts width only. In docked mode, writes the new width to `aic-dc-dialog-width` and stays docked. In undocked mode, writes to the full undocked rectangle. |
 | Bottom | Bottom edge, 8px hit zone | Vertical | Adjusts height only. **Always undocks** — the docked mode's height comes from `bottom: 0`, so expressing a smaller height requires an explicit rectangle. |
 | Corner | Bottom-right, 14×14px hit zone | Both | Adjusts width and height simultaneously. Always undocks for the same reason. |
 
-The right handle's behaviour is asymmetric: while docked, only `ac-dc-dialog-width` is persisted, leaving the undocked rectangle alone. This lets a user widen the docked dialog without committing to floating mode.
+The right handle's behaviour is asymmetric: while docked, only `aic-dc-dialog-width` is persisted, leaving the undocked rectangle alone. This lets a user widen the docked dialog without committing to floating mode.
 
 Mid-drag the `.dialog.resizing` class is active, suppressing the width transition so the pane tracks the pointer 1:1. The class is removed on pointerup.
 
@@ -291,14 +291,14 @@ Four localStorage keys, all repo-scoped implicitly via the URL-derived WebSocket
 
 | Key | Type | Purpose |
 |---|---|---|
-| `ac-dc-active-tab` | string | Last-selected tab — one of `files`, `context`, `settings`, `doc-convert`, `sdk-surface`. Unknown values fall back to `files`. A stored `search` value (from a pre-integrated-search-tab build) also falls back to `files`. |
-| `ac-dc-minimized` | string `"true"` / `"false"` | Minimize state. |
-| `ac-dc-dialog-width` | string (integer px) | Docked-mode width override. Absent until the user resizes the right edge while docked. Ignored while undocked. |
-| `ac-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle. Absent until the user drags the header past the drag threshold or resizes from the bottom / corner. |
+| `aic-dc-active-tab` | string | Last-selected tab — one of `files`, `context`, `settings`, `doc-convert`, `sdk-surface`. Unknown values fall back to `files`. A stored `search` value (from a pre-integrated-search-tab build) also falls back to `files`. |
+| `aic-dc-minimized` | string `"true"` / `"false"` | Minimize state. |
+| `aic-dc-dialog-width` | string (integer px) | Docked-mode width override. Absent until the user resizes the right edge while docked. Ignored while undocked. |
+| `aic-dc-dialog-pos` | JSON `{left, top, width, height}` | Full undocked rectangle. Absent until the user drags the header past the drag threshold or resizes from the bottom / corner. |
 
 Keys are read synchronously in the constructor (not in `connectedCallback`) so first paint doesn't flash the defaults before jumping to the stored values.
 
-Width and position are independent — resizing the right edge while docked writes only `ac-dc-dialog-width`, leaving any stored undocked rectangle alone. This is deliberate: a user who occasionally floats the dialog shouldn't lose their preferred floating geometry just because they widened the docked view in between.
+Width and position are independent — resizing the right edge while docked writes only `aic-dc-dialog-width`, leaving any stored undocked rectangle alone. This is deliberate: a user who occasionally floats the dialog shouldn't lose their preferred floating geometry just because they widened the docked view in between.
 
 Malformed values (non-JSON, wrong shape, width below minimum, finite-number check fails) are treated as absent. Invalid keys don't propagate into the UI state.
 

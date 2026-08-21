@@ -89,7 +89,7 @@ Path prefixes earn an alias when they meet both thresholds:
 - **Minimum prefix length** — 4 characters (shorter prefixes aren't worth aliasing)
 - **Minimum use count** — 2 (prefix must appear in at least two paths)
 
-Alias indices (`@1`, `@2`, ...) are assigned in descending order of reference frequency — the most-referenced prefix gets `@1`. Sub-prefixes of an already-aliased prefix are skipped (if `src/ac_dc/` is `@1/`, `src/` doesn't also get an alias).
+Alias indices (`@1`, `@2`, ...) are assigned in descending order of reference frequency — the most-referenced prefix gets `@1`. Sub-prefixes of an already-aliased prefix are skipped (if `src/aic_dc/` is `@1/`, `src/` doesn't also get an alias).
 
 ## Schemas
 

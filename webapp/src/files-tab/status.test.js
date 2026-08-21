@@ -46,7 +46,7 @@ describe('FilesTab files-modified reload', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => {});
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
@@ -59,7 +59,7 @@ describe('FilesTab files-modified reload', () => {
       expect(errorToasts.length).toBeGreaterThan(0);
       expect(errorToasts[0].message).toContain('reload failed');
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
       consoleSpy.mockRestore();
     }
   });
@@ -97,7 +97,7 @@ describe('FilesTab status data plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.statusData).toBeDefined();
     expect(picker.statusData.modified).toBeInstanceOf(Set);
     expect(picker.statusData.modified.has('m.md')).toBe(true);
@@ -128,7 +128,7 @@ describe('FilesTab status data plumbing', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.statusData.diffStats).toBeInstanceOf(Map);
     const entry = picker.statusData.diffStats.get('a.md');
     expect(entry).toEqual({ added: 7, removed: 2 });
@@ -151,7 +151,7 @@ describe('FilesTab status data plumbing', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.statusData.modified.size).toBe(0);
     expect(picker.statusData.staged.size).toBe(0);
     expect(picker.statusData.untracked.size).toBe(0);
@@ -180,7 +180,7 @@ describe('FilesTab status data plumbing', () => {
     publishFakeRpc({ 'Repo.get_file_tree': getTree });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.statusData.modified.size).toBe(0);
     expect(picker.statusData.staged.size).toBe(0);
     expect(picker.statusData.untracked.size).toBe(0);
@@ -236,7 +236,7 @@ describe('FilesTab status data plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.statusData.modified.has('a.md')).toBe(true);
     pushEvent('files-modified', {});
     await settle(t);
@@ -280,7 +280,7 @@ describe('FilesTab branch info plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.branchInfo).toBeDefined();
     expect(picker.branchInfo.branch).toBe('feature/x');
     expect(picker.branchInfo.detached).toBe(false);
@@ -305,7 +305,7 @@ describe('FilesTab branch info plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.branchInfo.repoName).toBe('repo');
   });
 
@@ -322,7 +322,7 @@ describe('FilesTab branch info plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.branchInfo.detached).toBe(true);
     expect(picker.branchInfo.branch).toBeNull();
     expect(picker.branchInfo.sha).toBe('abc1234deadbeef');
@@ -357,7 +357,7 @@ describe('FilesTab branch info plumbing', () => {
       const t = mountTab();
       await settle(t);
       expect(t._treeLoaded).toBe(true);
-      const picker = t.shadowRoot.querySelector('ac-file-picker');
+      const picker = t.shadowRoot.querySelector('aic-file-picker');
       // Branch info degrades to the default empty state.
       expect(picker.branchInfo.branch).toBeNull();
       expect(picker.branchInfo.detached).toBe(false);
@@ -389,7 +389,7 @@ describe('FilesTab branch info plumbing', () => {
       .spyOn(console, 'error')
       .mockImplementation(() => {});
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       const t = mountTab();
       await settle(t);
@@ -397,7 +397,7 @@ describe('FilesTab branch info plumbing', () => {
       // Branch info stayed at the initial empty state.
       expect(t._latestBranchInfo.branch).toBeNull();
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
       consoleSpy.mockRestore();
     }
   });
@@ -430,7 +430,7 @@ describe('FilesTab branch info plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.branchInfo.branch).toBe('main');
     pushEvent('files-modified', {});
     await settle(t);
@@ -451,7 +451,7 @@ describe('FilesTab branch info plumbing', () => {
     });
     const t = mountTab();
     await settle(t);
-    const picker = t.shadowRoot.querySelector('ac-file-picker');
+    const picker = t.shadowRoot.querySelector('aic-file-picker');
     expect(picker.branchInfo.branch).toBeNull();
     expect(picker.branchInfo.detached).toBe(false);
     expect(picker.branchInfo.sha).toBeNull();

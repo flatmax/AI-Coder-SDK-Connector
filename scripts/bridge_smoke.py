@@ -10,20 +10,20 @@ reason: it costs tokens and needs a login.
 
 What it exercises, end to end:
 
-1. A real :class:`~ac_dc.symbol_index.index.SymbolIndex` over the repo,
+1. A real :class:`~aic_dc.symbol_index.index.SymbolIndex` over the repo,
    built the way ``main.py`` builds it (resolver seeding, call-site
    resolution, reference graph) — because a bridge over a differently
    built index would prove nothing about the running app.
-2. :class:`~ac_dc.claude_code.mcp_server.McpBridge`, registered as an
+2. :class:`~aic_dc.claude_code.mcp_server.McpBridge`, registered as an
    in-process SDK server, so the tools share those index objects rather
    than a second copy.
-3. The real :class:`~ac_dc.claude_code.permissions.PermissionBroker`, so
+3. The real :class:`~aic_dc.claude_code.permissions.PermissionBroker`, so
    the run is gated the way the app gates it. Our own tools must reach
    the model *without* a dialog — "displayed, not gated"
    (``specs5/3-engine/permissions.md``) — and a dialog for one is
    reported as a failure below.
 4. The ``PostToolUse`` re-index hook, if ``--write`` is passed.
-5. The turn itself: which ``mcp__ac-dc__*`` tools the model chose, what
+5. The turn itself: which ``mcp__aic-dc__*`` tools the model chose, what
    they returned, and whether it answered from them.
 
 Usage::
@@ -65,7 +65,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from ac_dc.claude_code import (  # noqa: E402
+from aic_dc.claude_code import (  # noqa: E402
     EngineConfig,
     EngineSession,
     EngineStartupError,
@@ -73,42 +73,42 @@ from ac_dc.claude_code import (  # noqa: E402
     Turn,
     resolve_cli,
 )
-from ac_dc.claude_code.hooks import Reindexer, build_hook_matchers  # noqa: E402
-from ac_dc.claude_code.mcp_server import (  # noqa: E402
+from aic_dc.claude_code.hooks import Reindexer, build_hook_matchers  # noqa: E402
+from aic_dc.claude_code.mcp_server import (  # noqa: E402
     SERVER_NAME,
     McpBridge,
 )
-from ac_dc.claude_code.permissions import PermissionBroker  # noqa: E402
+from aic_dc.claude_code.permissions import PermissionBroker  # noqa: E402
 
 DEFAULT_PROMPT = (
-    "Call the ac-dc symbol_map tool for the path prefix "
-    "src/ac_dc/claude_code and tell me, from its output alone, which "
+    "Call the aic-dc symbol_map tool for the path prefix "
+    "src/aic_dc/claude_code and tell me, from its output alone, which "
     "module holds the permission gate. Do not read any files."
 )
 
 TOOL_PROMPTS = {
     "symbol_map": DEFAULT_PROMPT,
     "file_symbols": (
-        "Call the ac-dc file_symbols tool for "
-        "src/ac_dc/claude_code/hooks.py and list the functions it reports, "
+        "Call the aic-dc file_symbols tool for "
+        "src/aic_dc/claude_code/hooks.py and list the functions it reports, "
         "with their line numbers. Do not read the file."
     ),
     "find_references": (
-        "Call the ac-dc find_references tool for the symbol Reindexer and "
+        "Call the aic-dc find_references tool for the symbol Reindexer and "
         "tell me where it is defined and what refers to it. Do not grep."
     ),
     "doc_outline": (
-        "Call the ac-dc doc_outline tool for the path prefix specs5/plan "
+        "Call the aic-dc doc_outline tool for the path prefix specs5/plan "
         "and summarise what those documents cover, from the outline alone."
     ),
-    "review_state": "Call the ac-dc review_state tool and report what it says.",
-    "ui_state": "Call the ac-dc ui_state tool and report what it says.",
+    "review_state": "Call the aic-dc review_state tool and report what it says.",
+    "ui_state": "Call the aic-dc ui_state tool and report what it says.",
 }
 
 WRITE_PROMPT = (
     "Create a file at scratch_bridge_smoke.py containing a single "
     "function `smoke_marker()` that returns the string 'ok'. Then call the "
-    "ac-dc file_symbols tool for that path and tell me what it reports. "
+    "aic-dc file_symbols tool for that path and tell me what it reports. "
     "The tool must see the function you just wrote — say so plainly if it "
     "does not."
 )
@@ -126,8 +126,8 @@ def _short(value: object, limit: int = 300) -> str:
 
 def _build_symbol_index(repo_root: Path) -> object | None:
     """The repo's symbol index, built the way ``main.py`` builds it."""
-    from ac_dc.repo import Repo
-    from ac_dc.symbol_index.index import SymbolIndex
+    from aic_dc.repo import Repo
+    from aic_dc.symbol_index.index import SymbolIndex
 
     index = SymbolIndex(repo_root)
     repo = Repo(str(repo_root))
@@ -149,8 +149,8 @@ def _build_symbol_index(repo_root: Path) -> object | None:
 
 def _build_doc_index(repo_root: Path) -> object | None:
     """The doc index, structural pass only — no keyword enrichment."""
-    from ac_dc.doc_index.index import DocIndex
-    from ac_dc.repo import Repo
+    from aic_dc.doc_index.index import DocIndex
+    from aic_dc.repo import Repo
 
     repo = Repo(str(repo_root))
     doc_index = DocIndex(repo_root=repo.root)
@@ -260,7 +260,7 @@ async def _run(args: argparse.Namespace) -> int:
     # an in-process SDK server is not one of those — a live run showed only
     # `chrome-devtools` from the user's settings while our tools were being
     # called successfully in the same turn. What proves registration is the
-    # model calling a `mcp__ac-dc__*` tool at all, which is the check at the
+    # model calling a `mcp__aic-dc__*` tool at all, which is the check at the
     # bottom of this function.
     try:
         status = await session.get_mcp_status()
@@ -314,7 +314,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     if not ours:
         print(
-            "\nFAIL: the model called no ac-dc tool. Either the prompt let it "
+            "\nFAIL: the model called no aic-dc tool. Either the prompt let it "
             "answer another way, or the server never registered — `mcp status` "
             "above cannot tell you which, since an in-process SDK server does "
             "not appear there. Re-run with --log DEBUG to see the tool list "

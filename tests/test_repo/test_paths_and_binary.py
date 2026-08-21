@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ac_dc.repo import Repo, RepoError
+from aic_dc.repo import Repo, RepoError
 
 
 class TestPathValidation:

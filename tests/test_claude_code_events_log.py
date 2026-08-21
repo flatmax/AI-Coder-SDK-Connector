@@ -1,6 +1,6 @@
-"""Tests for ``.ac-dc4/events.jsonl``.
+"""Tests for ``.aic-dc/events.jsonl``.
 
-This file is the one thing under ``.ac-dc4/`` that is neither the
+This file is the one thing under ``.aic-dc/`` that is neither the
 transcript nor derived from it, so nothing can rebuild it. That shapes
 what these tests care about: a record that reaches disk must be readable
 and correlatable, a record that does not reach disk must be counted rather
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from ac_dc.claude_code.events_log import (
+from aic_dc.claude_code.events_log import (
     EVENT_TYPES,
     EventsLog,
     commit_content,

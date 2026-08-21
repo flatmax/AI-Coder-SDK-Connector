@@ -1,4 +1,4 @@
-// Vite configuration for the AC-DC webapp.
+// Vite configuration for the AIC-DC webapp.
 //
 // Constraints from specs4 driving the non-default settings:
 //

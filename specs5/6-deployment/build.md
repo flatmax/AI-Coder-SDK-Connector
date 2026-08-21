@@ -3,7 +3,7 @@
 How the webapp and backend are packaged for distribution. The webapp is a Vite-built SPA served by a built-in HTTP static file server; the backend is a Python package optionally packaged as a PyInstaller single-file binary. Source installs can use a fallback served from GitHub Pages.
 
 **The single-file binary is no longer self-sufficient**, and that is the headline of this file after the
-conversion. AC⚡DC used to contain its own inference client: bundle `litellm`, ship the binary, and a user
+conversion. AIC⚡DC used to contain its own inference client: bundle `litellm`, ship the binary, and a user
 with an API key had a working application. Now the engine is a separate Node process the user must have —
 the `claude` CLI. No amount of PyInstaller flags changes that, so the packaging story becomes "bundle
 everything we can and diagnose the one thing we cannot" (see
@@ -65,7 +65,7 @@ Per-platform single-file binaries built in CI:
 ### Dependency Collection
 
 - `--collect-all` for packages with data files — the agent SDK, tree-sitter core and per-language grammars, content extraction library
-- `--hidden-import` for every ac_dc submodule and extractor (static analysis misses dynamically imported modules and modules only referenced via class registration)
+- `--hidden-import` for every aic_dc submodule and extractor (static analysis misses dynamically imported modules and modules only referenced via class registration)
 - `--hidden-import` for the RPC library
 - Runtime behavior verified in CI on each platform
 
@@ -100,13 +100,13 @@ a user's machine that no build-time test caught.
 Two consequences worth stating rather than discovering:
 
 - **Version skew is a supported state, not an error.** A user's `PATH` CLI can be newer or older than the SDK's `__cli_version__` pin. Startup records both and warns on mismatch; it does not refuse to run. Refusing would make our release cadence a gate on theirs
-- **The binary's version string describes AC⚡DC only.** It says nothing about the engine, so bug reports need both — which is why `EngineHealth` carries `cli_path`, `cli_version`, `sdk_version`, and `sdk_cli_pin` together ([`../../specs-reference/3-engine/session.md`](../../specs-reference/3-engine/session.md) § `EngineHealth`)
+- **The binary's version string describes AIC⚡DC only.** It says nothing about the engine, so bug reports need both — which is why `EngineHealth` carries `cli_path`, `cli_version`, `sdk_version`, and `sdk_cli_pin` together ([`../../specs-reference/3-engine/session.md`](../../specs-reference/3-engine/session.md) § `EngineHealth`)
 
 ### The SDK Brings a Server Stack We Do Not Serve
 
 `claude-agent-sdk` requires `mcp` ≥ 1.29.0, and `mcp` in turn pulls `starlette`, `uvicorn`,
 `sse-starlette`, `python-multipart`, `httpx-sse`, and `pydantic-settings` — the HTTP/SSE transport half
-of the MCP protocol. AC⚡DC's MCP server is **in-process** ([`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)),
+of the MCP protocol. AIC⚡DC's MCP server is **in-process** ([`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)),
 so none of that transport is used at runtime, and `pywin32` arrives for Windows only.
 
 This is a packaging decision, not a resolution problem: the stack is dead weight in the binary unless

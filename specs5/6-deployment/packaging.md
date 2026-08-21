@@ -4,7 +4,7 @@ How config defaults and per-repo working state are distributed with the applicat
 upgrades. The bundle embeds sensible defaults; the user config directory persists customizations across
 releases. A per-repo working directory holds the transcript mirror, session files, and caches.
 
-The word "prompts" left this sentence. Six of the eight bundled config files were prompt text AC⚡DC
+The word "prompts" left this sentence. Six of the eight bundled config files were prompt text AIC⚡DC
 assembled into requests, and none of them has a consumer any more — the agent's instructions come from
 `CLAUDE.md` and `.claude/`, which live in the repository and are not ours to package. What remains is
 three config files plus one request template, and the interesting part of this spec is now the *upgrade
@@ -28,9 +28,9 @@ policy: [`../1-foundation/configuration.md`](../1-foundation/configuration.md).
 
 | Platform | Path |
 |---|---|
-| Linux | `~/.config/ac-dc/` |
-| Windows | `%APPDATA%/ac-dc/` |
-| macOS | `~/Library/Application Support/ac-dc/` |
+| Linux | `~/.config/aic-dc/` |
+| Windows | `%APPDATA%/aic-dc/` |
+| macOS | `~/Library/Application Support/aic-dc/` |
 
 Resolution uses the platform's standard user config location. Created on first run if missing.
 
@@ -152,13 +152,13 @@ A per-repo working directory at the repo root, hidden (leading dot). Created on 
 
 ### Contents
 
-The directory is `.ac-dc4/` — a new name, so a rollback to the previous release finds its own `.ac-dc3/`
+The directory is `.aic-dc/` — a new name, so a rollback to the previous release finds its own `.aic-dc3/`
 state intact rather than a directory of records it cannot parse.
 
 | Entry | Purpose | Lifecycle |
 |---|---|---|
 | `sessions/` | Engine transcripts written through our `SessionStore`, plus per-session `subagents/`. The browsable archive and the resume source, one file per session | Append-only; a failed append surfaces as a health banner, never a silent gap. Deleted per session from the history browser — which deletes that session's images with it |
-| `events.jsonl` | AC⚡DC's own operational events, keyed by session and request ID | Append-only; never rewritten |
+| `events.jsonl` | AIC⚡DC's own operational events, keyed by session and request ID | Append-only; never rewritten |
 | `index/` | Derived search and summary index | Built from `sessions/`; deletable, rebuilt on next start |
 | `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
 | `tex_preview/` | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |

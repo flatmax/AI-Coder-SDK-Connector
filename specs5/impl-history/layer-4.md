@@ -10,8 +10,8 @@ Historical delivery record. Moved from `IMPLEMENTATION_NOTES.md` during the docs
 
 Completes the collab integration by guarding every mutating RPC method on `Repo` and `LLMService` with a `_check_localhost_only()` helper. When no collab is attached (single-user mode), the guard returns None and all callers execute normally — **zero behaviour change for the 1855+ pre-existing tests**. When a collab is attached and reports a non-localhost caller, mutating methods return `{"error": "restricted", "reason": ...}` verbatim to the RPC caller. The frontend's RpcMixin surfaces this as a `restricted` error and hides the UI affordance.
 
-- `src/ac_dc/repo.py` — `_collab: Any = None` field and `_check_localhost_only()` helper (returns None when allowed, else the spec's restricted-error shape). Guarded 13 mutating methods: `write_file`, `create_file`, `delete_file`, `rename_file`, `rename_directory`, `stage_files`, `unstage_files`, `discard_changes`, `stage_all`, `commit`, `reset_hard`. Read-only methods (`get_file_content`, `get_staged_diff`, `file_exists`, `is_clean`, etc.) explicitly unguarded per specs4's "browse, search, view" allowance for participants.
-- `src/ac_dc/llm_service.py` — same pattern on the service class. `_check_localhost_only()` uses `getattr(self, "_collab", None)` since `_collab` isn't in the service's own constructor (it's set by `main.py` after construction when collab mode is active). Guarded methods: `chat_streaming`, `cancel_streaming`, `new_session`, `set_selected_files`, `switch_mode`, `set_cross_reference`, `start_review`, `end_review`, `commit_all`, `reset_to_head`, `fetch_url`, `detect_and_fetch`, `invalidate_url_cache`, `remove_fetched_url`, `clear_url_cache`. The `set_selected_files` return type widened from `list[str]` to `list[str] | dict[str, Any]` to accommodate the restricted-error shape; `detect_and_fetch` similarly widened from `list[dict]` to `list[dict] | dict`.
+- `src/aic_dc/repo.py` — `_collab: Any = None` field and `_check_localhost_only()` helper (returns None when allowed, else the spec's restricted-error shape). Guarded 13 mutating methods: `write_file`, `create_file`, `delete_file`, `rename_file`, `rename_directory`, `stage_files`, `unstage_files`, `discard_changes`, `stage_all`, `commit`, `reset_hard`. Read-only methods (`get_file_content`, `get_staged_diff`, `file_exists`, `is_clean`, etc.) explicitly unguarded per specs4's "browse, search, view" allowance for participants.
+- `src/aic_dc/llm_service.py` — same pattern on the service class. `_check_localhost_only()` uses `getattr(self, "_collab", None)` since `_collab` isn't in the service's own constructor (it's set by `main.py` after construction when collab mode is active). Guarded methods: `chat_streaming`, `cancel_streaming`, `new_session`, `set_selected_files`, `switch_mode`, `set_cross_reference`, `start_review`, `end_review`, `commit_all`, `reset_to_head`, `fetch_url`, `detect_and_fetch`, `invalidate_url_cache`, `remove_fetched_url`, `clear_url_cache`. The `set_selected_files` return type widened from `list[str]` to `list[str] | dict[str, Any]` to accommodate the restricted-error shape; `detect_and_fetch` similarly widened from `list[dict]` to `list[dict] | dict`.
 - `tests/test_collab_restrictions.py` — extended with an LLMService section. 3 test classes: `TestLLMServiceNoCollab` (no-collab path works), `TestLLMServiceLocalhostAllowed` (localhost caller sees normal behaviour — including three "guard ordering" tests that prove the method got past the guard when the localhost check passes but a different precondition fails, e.g. commit-all with no repo, end-review when not active, cancel-streaming with wrong request ID), `TestLLMServiceNonLocalhostRejected` (restricted shape returned, state unchanged — 14 methods covered including both sync and async paths), `TestLLMServiceReadOpsAllowed` (read-only methods work for non-localhost callers — `get_current_state`, `get_selected_files`, `get_mode`, `get_review_state`, `detect_urls`, `get_snippets`), `TestLLMServiceCollabFailClosed` (raising collab check is denied).
 
 Design points pinned by tests:
@@ -32,8 +32,8 @@ Open for future sub-layers:
 
 Closes out the Layer 1 deferral. The Settings service is a narrow RPC surface for reading and writing user-editable config files, using the same `_check_localhost_only()` pattern on write/reload methods that Repo and LLMService got in 4.4.2.
 
-- `src/ac_dc/settings.py` — `Settings` class with seven RPC methods: `get_config_content(type_key)`, `get_config_info()`, `get_snippets()`, `get_review_snippets()` (all unguarded reads), `save_config_content(type_key, content)`, `reload_llm_config()`, `reload_app_config()` (all localhost-gated). Plus a static `is_reloadable(type_key)` helper for callers (tests, a future UI-side dispatcher) that want to know whether a save on a given type warrants a reload RPC.
-- **Whitelist enforcement.** Every type-taking method consults `CONFIG_TYPES` (imported from `ac_dc.config`). Unknown keys — including internal files like `commit.md` and `system_reminder.md` that are loaded by `ConfigManager` but deliberately excluded from the whitelist per specs4 — return a clean `{"error": "Unknown config type: ..."}` dict. Arbitrary filesystem paths never cross the RPC boundary.
+- `src/aic_dc/settings.py` — `Settings` class with seven RPC methods: `get_config_content(type_key)`, `get_config_info()`, `get_snippets()`, `get_review_snippets()` (all unguarded reads), `save_config_content(type_key, content)`, `reload_llm_config()`, `reload_app_config()` (all localhost-gated). Plus a static `is_reloadable(type_key)` helper for callers (tests, a future UI-side dispatcher) that want to know whether a save on a given type warrants a reload RPC.
+- **Whitelist enforcement.** Every type-taking method consults `CONFIG_TYPES` (imported from `aic_dc.config`). Unknown keys — including internal files like `commit.md` and `system_reminder.md` that are loaded by `ConfigManager` but deliberately excluded from the whitelist per specs4 — return a clean `{"error": "Unknown config type: ..."}` dict. Arbitrary filesystem paths never cross the RPC boundary.
 - **Direct file I/O, not via `_read_user_file`.** `ConfigManager._read_user_file` falls back to the bundle when the user file is missing. That's wrong for Settings — we want to present the user's actual on-disk state so the editor opens with what's really there (empty for missing files, not the bundle default silently reappearing). `get_config_content` reads directly from `config.config_dir / filename`; missing files return empty content, not an error (the next startup re-copies the bundle default anyway).
 - **Advisory JSON validation.** `save_config_content` writes first, then parses. Invalid JSON produces `{"status": "ok", "type": ..., "warning": "JSON parse error: ..."}` — the file is still written so users can save a partially-edited state and come back to finish. Rejecting malformed JSON at the write boundary would force users into external editors to recover.
 - **Write always creates parent directory.** A vanished config dir (manual `rm`, filesystem corruption) doesn't wedge saves — `mkdir(parents=True, exist_ok=True)` before the write re-creates it. Pinned by `test_save_creates_directory_if_missing`.
@@ -61,11 +61,11 @@ Shipped the Doc Convert backend incrementally across six passes. Pass A delivere
 
 Ships the backend skeleton: class structure, dependency probing, repository scanning with status classification via provenance headers, and the localhost-only guard on the `convert_files` stub.
 
-- `src/ac_dc/doc_convert.py` — `DocConvert` class with:
+- `src/aic_dc/doc_convert.py` — `DocConvert` class with:
   - Construction takes `config: ConfigManager` and optional `repo`. `repo` is `Any`-typed to avoid a Layer 1 ↔ Layer 4 circular import; all we need is `.root` as a Path-like attribute. Tests use `SimpleNamespace(root=tmp_path)` to avoid pulling in the Repo fixture dependencies.
   - `is_available()` probes every optional dependency: markitdown (importable → conversion possible at all), LibreOffice (`shutil.which("soffice")` → pptx/odp path works), PyMuPDF (`fitz` importable → PDF text extraction works), and derives `pdf_pipeline = libreoffice AND pymupdf`. Returns the specs4-mandated shape `{available, libreoffice, pymupdf, pdf_pipeline}`.
   - `_probe_import(name)` is a broad-catch helper that returns False on any exception during import. A module that installs but raises at import time (corrupted install, missing native dependency, version mismatch) shows as unavailable rather than propagating the exception into what is meant to be a cheap probe.
-  - `scan_convertible_files()` walks the repo via `os.walk` (chosen over `Path.rglob` for the in-place directory pruning hook) and classifies each source file. Respects `_EXCLUDED_DIRS` (`.git`, `.ac-dc`, `node_modules`, `__pycache__`, `.venv`, `venv`, `dist`, `build`) plus hidden directories with an exception for `.github` (some repos store CI docs there). Returns entries with `path`, `name`, `size`, `status`, `output_path`, `over_size` fields. Results stable-sorted by path for deterministic frontend rendering.
+  - `scan_convertible_files()` walks the repo via `os.walk` (chosen over `Path.rglob` for the in-place directory pruning hook) and classifies each source file. Respects `_EXCLUDED_DIRS` (`.git`, `.aic-dc`, `node_modules`, `__pycache__`, `.venv`, `venv`, `dist`, `build`) plus hidden directories with an exception for `.github` (some repos store CI docs there). Returns entries with `path`, `name`, `size`, `status`, `output_path`, `over_size` fields. Results stable-sorted by path for deterministic frontend rendering.
   - `_classify_status(source, output)` runs the spec's four-step priority ladder: no output → `new`; output without docuvert header → `conflict`; hash matches → `current`; hash differs → `stale`. Defensive — any I/O error reading the output file or hashing the source downgrades to `new` rather than showing a misleading `current`.
   - `parse_provenance_body(body)` — static method exposing the header parser for testing and future utilities. Extracts `source`, `sha256` (both required) plus optional `images` list. Unknown fields land in `extra` for forward compatibility — a future release adding a `tool_version` field won't break older clients reading newer files.
   - `_read_provenance_header(path)` reads the first 2048 bytes, runs the parser, returns a `ProvenanceHeader` or `None`. Lenient on file format — UTF-8 with error replacement on the probe bytes, so a mid-file binary section can't crash the scanner.
@@ -74,7 +74,7 @@ Ships the backend skeleton: class structure, dependency probing, repository scan
   - `_check_localhost_only()` — same contract as Repo/LLMService/Settings. Fails closed on collab-check exceptions.
   - Read-through config accessors (`_enabled`, `_extensions`, `_max_size_bytes`) — every call re-reads `config.doc_convert_config`, so hot-reloaded values take effect immediately. Useful during development; matches the pattern other services use.
 
-- `src/ac_dc/doc_convert.py` (module-level):
+- `src/aic_dc/doc_convert.py` (module-level):
   - `_DEFAULT_EXTENSIONS` — fallback when config's `extensions` list is missing or malformed. Matches specs4's list exactly.
   - `_EXCLUDED_DIRS` — frozen set of directory names never walked. Mirrors the indexers' exclusion list; rebuilt here rather than imported to keep the doc-convert scan a self-contained code path.
   - `_PROVENANCE_RE` — matches the whole `<!-- docuvert: ... -->` comment. Uses `([^>]+?)` to capture the body lazily so we can parse unknown fields ourselves rather than reusing capture groups for each expected field.
@@ -88,7 +88,7 @@ Ships the backend skeleton: class structure, dependency probing, repository scan
   - `is_available` (returns all four flags with bool types, pdf_pipeline truth table with all four combinations, markitdown-missing flag, all-missing, probe-catches-exception, disabled config doesn't affect availability).
   - `scan_convertible_files` empty cases (empty repo, disabled config returns empty, missing root logs and returns empty).
   - Extension filtering (all default extensions recognised, non-convertible ignored, case-insensitive match, config restriction applied).
-  - Directory exclusions (`.git`, `.ac-dc`, `node_modules` each individually; hidden dirs excluded except `.github`; full enumeration of `_EXCLUDED_DIRS`).
+  - Directory exclusions (`.git`, `.aic-dc`, `node_modules` each individually; hidden dirs excluded except `.github`; full enumeration of `_EXCLUDED_DIRS`).
   - Status classification matrix (new / conflict / current / stale, plus precedence — conflict beats hash check, malformed header → conflict).
   - Entry shape (required fields, path/name populated, output_path is sibling `.md`, size is byte count, over_size flag false under threshold, over_size flag true above threshold after config reload, Windows path normalisation to forward slashes).
   - Ordering (stable alphabetical sort, nested paths sorted correctly).
@@ -119,7 +119,7 @@ Design points pinned by tests:
 
 Adds real conversion for `.docx`, `.rtf`, `.odt` via markitdown. Other supported extensions (`.pdf`, `.pptx`, `.xlsx`, `.csv`, `.odp`) return per-file `skipped` results — caller sees specific "not yet supported" messages rather than a blanket error.
 
-- `src/ac_dc/doc_convert.py` — Pass A2 additions:
+- `src/aic_dc/doc_convert.py` — Pass A2 additions:
   - `convert_files(paths)` — real implementation replacing the Pass A stub. Guard runs first; then the clean-tree gate (when a repo is attached); then per-file dispatch. Returns `{"status": "ok", "results": [per_file]}` on successful dispatch, `{"error": ...}` on restricted caller or dirty tree.
   - `_convert_one(root, rel_path)` — per-file entry point. Validates path is inside root (defensive — the caller should use scan output, but we protect against directly-crafted paths). Checks file existence, size-within-budget, extension routing. Every failure wrapped in a per-file result dict — one bad file never aborts the batch.
   - `_convert_via_markitdown(root, source_abs, rel_path)` — the actual conversion pipeline: compute source hash, read prior provenance for orphan tracking, call markitdown (lazy import — no module-level dependency), apply DOCX truncated-URI workaround for `.docx`, extract data-URI images to the assets subdirectory, clean up orphan images from prior conversion, remove empty assets dir, write output with provenance header prepended.
@@ -129,7 +129,7 @@ Adds real conversion for `.docx`, `.rtf`, `.odt` via markitdown. Other supported
   - `_build_provenance_header(source_name, source_hash, images)` — static helper producing the `<!-- docuvert: ... -->` line. Images field omitted entirely when no images (keeps the header compact for text-only docs). Stable field ordering: source → sha256 → images.
   - `_fail(rel_path, message)` / `_skip(rel_path, message)` — static result-dict builders. `fail` status is `"error"`; `skip` status is `"skipped"`. The distinction lets the frontend render different icons — skipped files may be retried later (over-size, deferred extension) while errors indicate a real problem.
   - Module constants: `_MARKITDOWN_EXTENSIONS` (the three formats Pass A2 handles), `_DATA_URI_IMAGE_RE` (matches the `![alt](data:image/mime;base64,payload)` shape), `_TRUNCATED_URI_RE` (matches DOCX's truncated-ellipsis form), `_MIME_TO_EXT` (png → .png, jpeg → .jpg, etc., with `.bin` fallback for unknown MIMEs so files still land on disk).
-  - Lazy markitdown import inside `_convert_via_markitdown` (not at module load). Keeps `from ac_dc.doc_convert import DocConvert` cheap in releases without markitdown; `ImportError` surfaces as a per-file error with an install hint (`pip install 'ac-dc[docs]'`).
+  - Lazy markitdown import inside `_convert_via_markitdown` (not at module load). Keeps `from aic_dc.doc_convert import DocConvert` cheap in releases without markitdown; `ImportError` surfaces as a per-file error with an install hint (`pip install 'aic-dc[docs]'`).
 
 - `tests/test_doc_convert.py` — Pass A2 additions (replaces the 4-test `TestConvertFilesStub` class with 10 test classes, 45 tests):
   - `TestConvertFilesGuards` — 3 tests: non-localhost restricted, raising-collab restricted, guard runs BEFORE the clean-tree check (restricted caller doesn't even see the dirty-tree error — pinned because the order matters: we don't want a participant to discover "working tree is dirty" and be tempted to engineer a workaround).
@@ -173,7 +173,7 @@ Design points pinned by tests:
 
 Adds xlsx support via a dedicated openpyxl pipeline that preserves cell background colours as emoji markers. csv support is simpler — routed through markitdown since markitdown produces clean markdown tables for csv natively and there's no formatting to preserve.
 
-- `src/ac_dc/doc_convert.py` — module-level additions:
+- `src/aic_dc/doc_convert.py` — module-level additions:
   - `_XLSX_EXTENSIONS = frozenset({".xlsx"})` — dispatch set for the openpyxl path. Separated from `_MARKITDOWN_EXTENSIONS` so the xlsx-specific routing is explicit.
   - `.csv` added to `_MARKITDOWN_EXTENSIONS`. markitdown's built-in csv handling produces standard markdown tables; no colour info to preserve.
   - `_IGNORE_NEAR_WHITE_THRESHOLD` / `_IGNORE_NEAR_BLACK_THRESHOLD` — per-channel RGB deltas (20) for filtering "effectively no fill" cells. Default formatting in many spreadsheets produces near-white fills; emitting an emoji for every such cell would overwhelm the output. Black is filtered for symmetry with border-coloured cells.
@@ -181,9 +181,9 @@ Adds xlsx support via a dedicated openpyxl pipeline that preserves cell backgrou
   - `_NAMED_COLOURS` — eight well-known hues (red, green, yellow, blue, orange, purple, pink, brown) each mapped to an emoji and a name. Used for the "named match" path in colour assignment.
   - `_NAMED_COLOUR_DISTANCE = 80.0` — looser threshold for matching against named colours than the cluster distance. Named colours should absorb a wider range of shades (every "pinkish red" → 🔴); fallback clusters should stay distinct.
   - `_FALLBACK_MARKERS` — eight distinct emoji glyphs (⬛, ◆, ▲, ●, ■, ★, ◉, ◈) for unrecognised colour clusters. Cycle with index suffixing if more than eight clusters appear (rare in practice).
-- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+- `src/aic_dc/doc_convert.py` — dispatch in `_convert_one`:
   - Added a new branch between the markitdown path and the "not yet supported" skip: `if suffix in _XLSX_EXTENSIONS: return self._convert_via_openpyxl(root, source_abs, rel_path)`.
-- `src/ac_dc/doc_convert.py` — `_convert_via_openpyxl` and helpers:
+- `src/aic_dc/doc_convert.py` — `_convert_via_openpyxl` and helpers:
   - Lazy openpyxl import. ImportError → fall back to markitdown (not error). Matches specs4's "graceful degradation" policy for optional deps.
   - Source hash computed before open so the provenance header is correct even on fallback.
   - openpyxl `load_workbook(read_only=False)` — read-only mode would strip the Cell.fill attribute we need. data_only=True so formula cells yield cached values rather than formula strings.
@@ -194,7 +194,7 @@ Adds xlsx support via a dedicated openpyxl pipeline that preserves cell backgrou
   - Empty-spreadsheet case — produces a placeholder `(empty spreadsheet)` body so the output file exists and the scanner classifies it as `current`. Without this, a sparse xlsx would produce no output and re-scan as `new` every cycle.
   - xlsx path never produces embedded images, so the provenance header always has `images=()`. Skips the whole data-URI extraction pipeline that the markitdown path runs.
 
-- `src/ac_dc/doc_convert.py` — helper methods:
+- `src/aic_dc/doc_convert.py` — helper methods:
   - `_normalise_cell_value` — handles None (→ empty), "nan"/"none" case-insensitively (→ empty, catches pandas/numpy export artifacts), stringification for non-strings, and pipe escaping (`|` → `\|`) so cell values can't break the markdown table row structure.
   - `_extract_cell_fill` — the defensive part. openpyxl's fill model is verbose: cells with no explicit fill still have a `PatternFill` with theme-default `fgColor`. Filter by checking `patternType` is one of `solid`/`lightGrid`/`darkGrid` (solid is the common case; the grid variants crop up in rare templates). Theme colours return None from `rgb`; we don't resolve them without the workbook theme table, which isn't worth the code for a diagnostic marker. 8-char `AARRGGBB` strips the alpha prefix. Near-white and near-black fills filtered per the module thresholds. Broad exception handler — anything unexpected from openpyxl returns None rather than raising.
   - `_hex_to_rgb` / `_colour_distance` — straightforward Euclidean RGB. Perceptually naive (doesn't weight green) but fine for the "are these two reds the same?" question the clustering needs.
@@ -241,7 +241,7 @@ Notes from delivery:
 
 Adds pptx support via a dedicated python-pptx pipeline that renders each slide as a standalone SVG. Each SVG contains the slide's text, embedded images, and tables. An index markdown links all slide SVGs. This is the fallback pipeline; the primary PyMuPDF+LibreOffice path for pptx lands in Pass A5.
 
-- `src/ac_dc/doc_convert.py` — module-level additions:
+- `src/aic_dc/doc_convert.py` — module-level additions:
   - `_PPTX_EXTENSIONS = frozenset({".pptx"})` — dispatch set for the python-pptx path.
   - `_EMU_PER_INCH`, `_SVG_DPI = 96`, `_EMU_TO_PX` — conversion from python-pptx's native EMU units to SVG pixels at 96 DPI.
   - `_DEFAULT_SLIDE_WIDTH_EMU` / `_DEFAULT_SLIDE_HEIGHT_EMU` — standard 4:3 slide (10" x 7.5") as fallback when python-pptx reports None dimensions (rare but defensive against corrupted templates).
@@ -250,10 +250,10 @@ Adds pptx support via a dedicated python-pptx pipeline that renders each slide a
   - `_PT_TO_PX = 96 / 72` — SVG font-size is in user units (pixels at 96 DPI); 1 point = 4/3 pixels.
   - `_SLIDE_NUMBER_MIN_WIDTH = 2` — default zero-padding width for slide filenames. Decks with more than 99 slides dynamically pad to 3 digits.
 
-- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+- `src/aic_dc/doc_convert.py` — dispatch in `_convert_one`:
   - Added a new branch after the xlsx path and before the "not yet supported" skip: `if suffix in _PPTX_EXTENSIONS: return self._convert_via_python_pptx(root, source_abs, rel_path)`.
 
-- `src/ac_dc/doc_convert.py` — `_convert_via_python_pptx` and helpers:
+- `src/aic_dc/doc_convert.py` — `_convert_via_python_pptx` and helpers:
   - Lazy python-pptx import. ImportError → per-file error with install hint (same pattern as markitdown). Unlike xlsx there's no fallback — A5's LibreOffice+PyMuPDF pipeline is the primary path; this is the fallback for users without those deps.
   - Source hash computed before open so provenance is correct.
   - Slide dimensions extracted via `presentation.slide_width` / `.slide_height` in EMU, converted to pixels for SVG viewBox.
@@ -263,7 +263,7 @@ Adds pptx support via a dedicated python-pptx pipeline that renders each slide a
   - Per-slide failure isolation — a slide that fails to render gets a placeholder entry in the index (`## Slide N\n\n*(rendering failed)*`) and the rest of the deck proceeds. Debug-logged for diagnostics without breaking the batch.
   - Orphan cleanup on re-conversion — reads the prior output's provenance header, diffs `images=` against the slides produced this round, unlinks orphans. Prevents a re-saved deck with fewer slides from leaving stale SVGs on disk.
 
-- `src/ac_dc/doc_convert.py` — SVG rendering helpers:
+- `src/aic_dc/doc_convert.py` — SVG rendering helpers:
   - `_render_pptx_slide` — emits the full SVG document. White background rect sized to viewBox, then walks slide shapes and dispatches each to `_render_pptx_shape`. Per-shape exceptions are caught and logged; never aborts the whole slide.
   - `_render_pptx_shape` — dispatches on shape type via attribute probes: `_is_picture` (checks for `.image.blob`), `has_table`, `has_text_frame`. Unsupported shapes (charts, SmartArt, groups, OLE) return empty string — caller skips. Probes use attribute access rather than importing `MSO_SHAPE_TYPE` to keep the pipeline resilient to python-pptx API changes.
   - `_render_picture` — reads `shape.image.blob`, base64-encodes, emits `<image>` with `xlink:href="data:{mime};base64,..."`. Inline images keep slide layout self-contained (one SVG per slide, no external refs).
@@ -274,7 +274,7 @@ Adds pptx support via a dedicated python-pptx pipeline that renders each slide a
   - `_render_table` — renders as a grid of `<rect>` borders + `<text>` cell content. Uniform cell widths from `table.columns` / `table.rows` with fallback to equal division if dimensions are zero. No merged-cell handling — out of A4 scope.
   - `_escape_svg_text` — XML-escapes `<`, `>`, `&`, plus quote characters for attribute-context robustness. Strips leading/trailing whitespace (PowerPoint often pads bullet text).
 
-- `src/ac_dc/doc_convert.py` — `_write_pptx_output` and `_read_prior_images` helpers:
+- `src/aic_dc/doc_convert.py` — `_write_pptx_output` and `_read_prior_images` helpers:
   - Shared output-writing path for the normal and empty-deck cases. Builds provenance header with `images=(slide_names)` tuple, prepends to markdown body, atomic write.
   - `_read_prior_images` — reads the existing output's provenance header and returns the tuple from `images=`. Used by the orphan-cleanup path. Empty tuple when no prior output exists or the header is absent/malformed.
 
@@ -333,7 +333,7 @@ Notes from delivery:
 
 Completes the doc convert backend. pptx and odp route through `soffice --headless --convert-to pdf` to produce an intermediate PDF, which is then processed by the Pass A5a PyMuPDF pipeline. Output markdown lands next to the original source (not the temp PDF); provenance header records the original filename and hash. Graceful fallback to format-specific paths (python-pptx for `.pptx`, markitdown for `.odp`) when LibreOffice or PyMuPDF is missing, or when the soffice invocation fails for any reason.
 
-- `src/ac_dc/doc_convert.py` — changes:
+- `src/aic_dc/doc_convert.py` — changes:
   - `_convert_via_pymupdf` gains three optional keyword-only parameters: `pdf_source` (open a different file than `source_abs`), `display_name` (override the provenance `source=` field), `hash_source` (override which file gets hashed). Defaults preserve the A5a behaviour for direct PDF callers. The parameters thread through `_process_pdf_document` and `_write_pdf_output` so the provenance header on the final markdown reflects the original pptx/odp rather than the intermediate PDF.
   - New `_convert_via_libreoffice(root, source_abs, rel_path)` method. Pre-flight checks both deps (`shutil.which("soffice")` and `_probe_import("fitz")`). Any missing dep falls back to the format-specific path without subprocess launch. Runs `soffice --headless --convert-to pdf --outdir {tmpdir} {source}` with `_LIBREOFFICE_TIMEOUT_SECONDS = 120` timeout. Output PDF found by `{source_stem}.pdf` in the temp dir, with a fallback to `tmp_path.glob("*.pdf")` for locale variants. Routes the intermediate PDF through `_convert_via_pymupdf` with provenance overrides. Temp dir cleanup bounded by `TemporaryDirectory` context manager — guaranteed regardless of which branch exits.
   - New `_libreoffice_fallback(root, source_abs, rel_path, reason)` method. Dispatches on source extension: `.pptx` → `_convert_via_python_pptx`; `.odp` → `_convert_via_markitdown`. Debug-logs the reason so operators can diagnose why the primary path was skipped.
@@ -342,7 +342,7 @@ Completes the doc convert backend. pptx and odp route through `soffice --headles
 
 - `tests/test_doc_convert.py` — changes:
   - Added `shutil` import.
-  - New `force_pptx_fallback` fixture — monkeypatches `ac_dc.doc_convert.shutil.which` to return None. Applied via `@pytest.mark.usefixtures("force_pptx_fallback")` on `TestPptxDispatch`, `TestPptxSlideFiles`, `TestPptxIndexMarkdown`, `TestPptxSvgContent`, `TestPptxOrphanCleanup`. These A4 fallback tests assert on python-pptx output format (`NN_slide.svg`, `## Slide N` headings), which is incompatible with the A5b primary path's output format (`NN_page.svg`, `## Page N` headings). The fixture forces them onto the fallback path regardless of whether LibreOffice is installed on the test machine.
+  - New `force_pptx_fallback` fixture — monkeypatches `aic_dc.doc_convert.shutil.which` to return None. Applied via `@pytest.mark.usefixtures("force_pptx_fallback")` on `TestPptxDispatch`, `TestPptxSlideFiles`, `TestPptxIndexMarkdown`, `TestPptxSvgContent`, `TestPptxOrphanCleanup`. These A4 fallback tests assert on python-pptx output format (`NN_slide.svg`, `## Slide N` headings), which is incompatible with the A5b primary path's output format (`NN_page.svg`, `## Page N` headings). The fixture forces them onto the fallback path regardless of whether LibreOffice is installed on the test machine.
   - `TestPptxFailures` updated to use the same `shutil.which` monkeypatch pattern inline — two tests now bypass LibreOffice explicitly since they depend on the python-pptx fallback path's error behaviour.
   - Four new test classes for A5b coverage:
     - `TestLibreOfficeDispatch` — pptx and odp route to LibreOffice when soffice is on PATH. Uses subprocess mocking to verify the command arguments (`--headless`, `--convert-to pdf`, `--outdir`) and the source path.
@@ -371,7 +371,7 @@ Notes from delivery:
 
 - **The `_mixed_batch_produces_per_file_results` test needed reshaping, not extension swapping.** The original test paired a `.docx` success with a `.pdf` "not yet supported" skip, proving that one file's failure doesn't abort the batch. A5a implemented `.pdf`, so the test switched to `.odp` for the skip side. A5b implemented `.odp` too, leaving no supported-but-deferred extension to use as the skip side. Rather than keep chasing deferred extensions, changed the test to use a missing file (pre-flight failure) — structurally equivalent per-file-isolation proof, but extension-agnostic so future additions won't break it again.
 
-- **`shutil.which` monkeypatched at the module level, not globally.** `monkeypatch.setattr("ac_dc.doc_convert.shutil.which", ...)` replaces the name in the doc_convert module's namespace only. Other modules that import `shutil.which` directly are unaffected. The RPC-inventory tests, for example, still see the real `shutil.which` even while `force_pptx_fallback` is active. Avoids cross-test contamination.
+- **`shutil.which` monkeypatched at the module level, not globally.** `monkeypatch.setattr("aic_dc.doc_convert.shutil.which", ...)` replaces the name in the doc_convert module's namespace only. Other modules that import `shutil.which` directly are unaffected. The RPC-inventory tests, for example, still see the real `shutil.which` even while `force_pptx_fallback` is active. Avoids cross-test contamination.
 
 Open — nothing carried over. Doc Convert backend is complete for the scope specs4/4-features/doc-convert.md covers. Frontend UI (the Doc Convert tab) lands with Layer 5.
 
@@ -379,15 +379,15 @@ Open — nothing carried over. Doc Convert backend is complete for the scope spe
 
 Adds PDF support via PyMuPDF's hybrid text + SVG pipeline. Each page's text is extracted into markdown paragraphs; pages with raster images or significant vector drawings also get companion SVGs. Glyph elements are stripped from SVGs when text is already in markdown (avoids duplication). Embedded raster images are externalised from SVGs to separate files. This is the direct PDF path — Pass A5b will add the LibreOffice-based pptx/odp → PDF conversion on top of this pipeline.
 
-- `src/ac_dc/doc_convert.py` — module-level additions:
+- `src/aic_dc/doc_convert.py` — module-level additions:
   - `_PDF_EXTENSIONS = frozenset({".pdf"})` — dispatch set for the direct PyMuPDF path.
   - `_PAGE_GRAPHICS_THRESHOLD = 3` — minimum significant-drawing count to trigger SVG export alongside text. Below this, page is treated as text-only.
   - `_PATH_SIGNIFICANT_SEGMENTS = 4` / `_POLYGON_SIGNIFICANT_SEGMENTS = 2` — significance thresholds per specs4/4-features/doc-convert.md.
 
-- `src/ac_dc/doc_convert.py` — dispatch in `_convert_one`:
+- `src/aic_dc/doc_convert.py` — dispatch in `_convert_one`:
   - Added a new branch after the pptx path: `if suffix in _PDF_EXTENSIONS: return self._convert_via_pymupdf(...)`.
 
-- `src/ac_dc/doc_convert.py` — `_convert_via_pymupdf` and helpers:
+- `src/aic_dc/doc_convert.py` — `_convert_via_pymupdf` and helpers:
   - Lazy PyMuPDF import. ImportError → per-file error with install hint. No fallback — PyMuPDF is the only reliable PDF extractor.
   - Document opened via `fitz.open`; errors wrapped with broad catch (corrupt PDF, wrong version, encrypted without password all produce different exception types).
   - `_process_pdf_document` split from `_convert_via_pymupdf` so the `doc.close()` is guaranteed in the caller's finally block regardless of which branch exits.
@@ -397,26 +397,26 @@ Adds PDF support via PyMuPDF's hybrid text + SVG pipeline. Each page's text is e
   - Assets subdirectory created lazily on the first page that actually needs it. Text-only PDFs produce no assets dir.
   - Orphan cleanup on re-conversion — reads prior provenance header, unlinks artefacts (SVGs + externalised images) listed there but not produced this round. Empty assets dir removed after cleanup.
 
-- `src/ac_dc/doc_convert.py` — `_process_pdf_page`:
+- `src/aic_dc/doc_convert.py` — `_process_pdf_page`:
   - Per-page dispatch logic: extract text first, then detect images and drawings, then decide whether to emit SVG.
   - SVG emission criteria: page has any raster images OR >= _PAGE_GRAPHICS_THRESHOLD significant drawings OR page has no text AND no detected content (fallback — lightweight vector graphics below the significance threshold still get captured).
   - Markdown structure per page: `## Page N` heading, then extracted text paragraphs if any, then image reference if SVG was emitted.
   - Text-only pages emit no SVG — keeps output lean.
   - Pages where SVG write fails still emit the text markdown (best-effort).
 
-- `src/ac_dc/doc_convert.py` — text extraction via `_extract_pdf_text`:
+- `src/aic_dc/doc_convert.py` — text extraction via `_extract_pdf_text`:
   - Uses `page.get_text("dict")` which returns structured blocks/lines/spans.
   - Each text block becomes one paragraph; spans within lines joined by spaces; lines within a block also joined by spaces (visual-wrap within a block is usually not semantic paragraph break).
   - Future enhancement: heading detection from font sizes. For A5a, emits plain paragraphs.
 
-- `src/ac_dc/doc_convert.py` — drawing significance via `_count_significant_drawings`:
+- `src/aic_dc/doc_convert.py` — drawing significance via `_count_significant_drawings`:
   - Walks `page.get_drawings()` output.
   - Bézier (`c`) or quadratic (`qu`) curves → always significant.
   - Filled paths with > _POLYGON_SIGNIFICANT_SEGMENTS segments → significant.
   - Other paths with > _PATH_SIGNIFICANT_SEGMENTS segments → significant.
   - Simple rectangles and single lines → NOT significant (border/table-rule noise every PDF emits).
 
-- `src/ac_dc/doc_convert.py` — SVG export and processing:
+- `src/aic_dc/doc_convert.py` — SVG export and processing:
   - `_export_pdf_page_svg` — calls `page.get_svg_image(text_as_path=0)` so text stays as `<text>` elements rather than decomposed paths. Keeps SVG selectable and small.
   - `_strip_svg_glyphs` — regex-removes `<text>...</text>` when `strip_glyphs=True`. Used when text is already in markdown; keeps visual layout (drawings, images) without duplicating word content. PyMuPDF's SVG output doesn't nest `<text>` elements so the regex is reliable.
   - `_externalize_svg_images` — scans SVG for `href="data:image/..."` attributes (both `href` and `xlink:href` variants), decodes base64 payloads, writes files with `{stem}_img{NN}{ext}` naming, rewrites SVG attributes to reference files. Failures leave original data URI in place (broken-ref is better than silent content loss). Uses the `_MIME_TO_EXT` map shared with the markitdown path.
@@ -524,7 +524,7 @@ Layer 4.2's backend scope is fully delivered by the `HistoryStore` implementatio
 
 What specs4/4-features/images.md requires that the backend already does:
 
-- **Storage location** — `.ac-dc/images/` created by `ConfigManager._init_ac_dc_dir()` AND by `HistoryStore.__init__()`. Idempotent: either order works, `mkdir(exist_ok=True)` on both sides.
+- **Storage location** — `.aic-dc/images/` created by `ConfigManager._init_aic_dc_dir()` AND by `HistoryStore.__init__()`. Idempotent: either order works, `mkdir(exist_ok=True)` on both sides.
 - **Content-hash filenames** — `HistoryStore._save_image()` uses `{hash_prefix}{ext}` where hash_prefix is the first 12 chars of SHA-256 over the raw data URI. Deterministic — identical data URIs produce identical filenames, so re-pasting the same image in a later message produces no new file. Pinned by `test_duplicate_image_deduplicated` in `tests/test_history_store.py`.
 - **MIME-to-extension mapping** — covers png / jpg / jpeg / gif / webp / bmp with png fallback. Round-trips correctly via `_EXT_TO_MIME` reverse map.
 - **Writing flow** — `append_message(images=...)` accepts a list of data URIs; saves each, stores filenames as `image_refs` in the JSONL record. Legacy integer-count shape tolerated for backwards compat but never produced by new writes.
@@ -542,7 +542,7 @@ These are pure frontend concerns — no backend changes needed. The backend alre
 
 ### 4.1.6 — LLMService integration — **delivered**
 
-- `src/ac_dc/llm_service.py` — changes:
+- `src/aic_dc/llm_service.py` — changes:
   - Constructor builds `URLService` via `_build_url_service()` helper. Wires the filesystem cache (from `config.url_cache_config` — uses a system-temp-dir fallback when no path configured), the smaller model name, and the SymbolIndex class (lazy-imported so tree-sitter grammars aren't loaded at service construction). Falls back gracefully to `symbol_index_cls=None` if the import fails.
   - `_stream_chat` calls `_detect_and_fetch_urls(request_id, message)` after persisting the user message and broadcasting `userMessage`, but before tiered-content building and message assembly. Fetched URL content is attached to the context manager's URL context section via `set_url_context([formatted])` or cleared via `clear_url_context()` when no URLs qualify.
   - `_detect_and_fetch_urls` — detects URLs via `url_service.detect_urls`, caps to `_URL_PER_MESSAGE_LIMIT = 3` (per specs4/4-features/url-content.md), skips already-fetched URLs (checked via `get_url_content` → sentinel compare), fires `compactionEvent(stage="url_fetch", url=display_name)` before each fetch and `compactionEvent(stage="url_ready", url=display_name)` after success. Fetch runs in the aux executor via `run_in_executor(_fetch_url_sync, url)` so the event loop stays free during blocking HTTP/git/LLM calls.
@@ -571,7 +571,7 @@ Open carried over for later sub-layers:
 
 ### 4.1.5 — URLService — **delivered**
 
-- `src/ac_dc/url_service/service.py` — `URLService` class orchestrating the full URL pipeline: detect → classify → fetch → cache → summarize. Construction takes optional injection points per D10: `cache` (URLCache for cross-session persistence), `smaller_model` (provider-qualified model string for summarization), `symbol_index_cls` (for GitHub repo symbol map generation). All three default to None; the service degrades gracefully when any is absent.
+- `src/aic_dc/url_service/service.py` — `URLService` class orchestrating the full URL pipeline: detect → classify → fetch → cache → summarize. Construction takes optional injection points per D10: `cache` (URLCache for cross-session persistence), `smaller_model` (provider-qualified model string for summarization), `symbol_index_cls` (for GitHub repo symbol map generation). All three default to None; the service degrades gracefully when any is absent.
 - **In-memory `_fetched` dict is authoritative for the session.** Keyed by URL string (exact match, no normalisation). Contains both successes and error records — the `error` field distinguishes. Persists across chat requests within a session; cleared via `clear_fetched()` (memory only) or `clear_url_cache()` (both stores).
 - **Filesystem cache is a cross-session persistence layer.** `URLCache` already refuses to persist error records, so the service writes unconditionally on success. Cache-check before fetch; cache-write after successful fetch; cache-update-in-place when a cached entry is missing a summary and the caller requests one.
 - **Sentinel error for "not yet fetched".** `get_url_content(url)` returns `URLContent(url=url, error="URL not yet fetched")` when the URL isn't in `_fetched` or in the filesystem cache. Streaming handler compares against the exact string to decide whether to issue a fetch. Cache-only hits are hoisted into `_fetched` so subsequent calls are O(1).
@@ -586,7 +586,7 @@ Open carried over for later sub-layers:
 - **`detect_and_fetch(text, use_cache=True, summarize=False, max_urls=None)`** — convenience wrapper combining detection and sequential fetching. Already-fetched URLs are reused from `_fetched` rather than re-fetched (session-level memoization). `max_urls=None` means no limit; streaming handler passes the per-message cap (typically 3). Sequential rather than parallel — per-message URL volume is small and avoids hammering upstream.
 - **`detect_urls(text)`** — RPC-friendly wire format: list of dicts with `url`, `type` (string form of URLType.value), `display_name`. The type is emitted as `.value` so RPC serialisation doesn't need special handling.
 - **`format_url_context(urls=None, excluded=None, max_length=None)`** — formats fetched URLs for LLM prompt injection. Default `urls=None` → all fetched URLs; explicit list overrides. Excluded set skipped (matches frontend's exclude-checkbox state). Error records always skipped. Separator `\n---\n` between multiple URLs. Falls back to filesystem cache for URLs in the explicit list that aren't in `_fetched` (robust to session-restore where the fetched dict starts empty).
-- `src/ac_dc/url_service/__init__.py` updated to export `URLService`, `URLCache`, plus the existing surface.
+- `src/aic_dc/url_service/__init__.py` updated to export `URLService`, `URLCache`, plus the existing surface.
 - `tests/test_url_service.py` — 12 test classes, 55 tests covering construction (all four combinations of injection points), `_parse_github_info` (repo, repo.git, file blob, deep file path, raw URL, issue, PR), `detect_urls` wire format (empty, single, multiple types, GitHub repo display name), `fetch_url` dispatch (all five URL type routes), cache interactions (hit returns cached, miss fetches + writes, `use_cache=False` bypasses both, error records not cached, cached-without-summary → update in place, cached-with-summary no LLM call), summarization integration (LLM call on success, silent no-op without smaller model, not-called-on-error, cache updated with summary), in-memory fetched dict (success stored, error records also stored), `detect_and_fetch` (empty text, multi-URL, max_urls cap, already-fetched reuse), `get_url_content` (in-memory hit, filesystem fallback with hoist, sentinel on miss, sentinel with cache miss), cache management (`invalidate_url_cache` both-stores, idempotent on unknown, no-cache variant; `clear_url_cache` both-stores, no-cache variant; `remove_fetched` memory-only; `clear_fetched` memory-only), `get_fetched_urls` (empty, all-fetched, returns independent list), `format_url_context` (empty when no URLs, default-all-fetched, separator presence, explicit URL list filter, excluded URLs skipped, error records skipped, all-excluded returns empty, cache fallback for explicit URLs not in memory, max_length passed through to URLContent formatter).
 
 Design points pinned by tests:
@@ -608,7 +608,7 @@ Open carried over for Layer 4.1.6 (LLMService integration):
 
 ### 4.1.4 — Summarizer — **delivered**
 
-- `src/ac_dc/url_service/summarizer.py` — `SummaryType` enum (BRIEF, USAGE, API, ARCHITECTURE, EVALUATION) subclassing `str` for wire-format friendliness, `choose_summary_type(content, user_text=None)` picks a type from URL-type defaults (GitHub repo with symbol map → ARCHITECTURE; without → BRIEF; documentation → USAGE; everything else → BRIEF) with user-text keyword overrides (`"how to"` → USAGE, `"api"` → API, `"architecture"` → ARCHITECTURE, `"compare"`/`"evaluate"` → EVALUATION), `_build_user_prompt(content, summary_type)` assembles the focus prompt + URL header + body (readme preferred over content, truncated at 100k chars) + optional symbol map under its own header, `summarize(content, model, summary_type=None, user_text=None)` runs the blocking `litellm.completion(stream=False)` call with a fixed system message and max_tokens=500, returns a NEW URLContent via `to_dict`/`from_dict` round-trip (functional style — caller can't forget to propagate the update).
+- `src/aic_dc/url_service/summarizer.py` — `SummaryType` enum (BRIEF, USAGE, API, ARCHITECTURE, EVALUATION) subclassing `str` for wire-format friendliness, `choose_summary_type(content, user_text=None)` picks a type from URL-type defaults (GitHub repo with symbol map → ARCHITECTURE; without → BRIEF; documentation → USAGE; everything else → BRIEF) with user-text keyword overrides (`"how to"` → USAGE, `"api"` → API, `"architecture"` → ARCHITECTURE, `"compare"`/`"evaluate"` → EVALUATION), `_build_user_prompt(content, summary_type)` assembles the focus prompt + URL header + body (readme preferred over content, truncated at 100k chars) + optional symbol map under its own header, `summarize(content, model, summary_type=None, user_text=None)` runs the blocking `litellm.completion(stream=False)` call with a fixed system message and max_tokens=500, returns a NEW URLContent via `to_dict`/`from_dict` round-trip (functional style — caller can't forget to propagate the update).
 - **Error records pass through unchanged.** Content with a non-empty `error` field is returned as-is — we don't re-summarize failed fetches. Caller detects this because `result is content`.
 - **Error-marked return on LLM failure.** litellm ImportError, completion exception, malformed response shape, empty/whitespace-only reply, non-string content all produce a copy with `summary_type="error"` and `summary=None`. Caller checks `summary_type == "error"` to detect failed summarization. The data shape stays uniform (summary_type is always populated when summarization was attempted).
 - **Fixed system message.** Per spec — "You are a concise technical writer. Summarize content clearly and factually without speculation or editorializing." Never varies per request, so providers with system-prompt caching aren't invalidated by summary-type selection. Tested with `test_system_message_is_fixed` which calls summarize twice with different URLs and different types and asserts the system message is identical.
@@ -618,7 +618,7 @@ Open carried over for Layer 4.1.6 (LLMService integration):
 - **Lazy litellm import.** `import litellm` happens inside `summarize` so the module is importable in tests that don't exercise summarization. ImportError degrades to the error-marker path.
 - `tests/test_url_summarizer.py` — 5 test classes, 35 tests covering type selection (URL-type defaults for all six URL types — GITHUB_REPO with/without symbol_map, GITHUB_FILE, DOCUMENTATION, GENERIC, GITHUB_ISSUE, GITHUB_PR), user-text triggers (every trigger keyword individually, case-insensitive matching, first-matching-trigger-wins precedence, no-match-falls-through, empty and None user text), prompt assembly (focus-first ordering, URL header inclusion, body priority, no-body placeholder, truncation, short-body no-op, symbol-map placement relative to body, header omission when no symbol map, per-type focus prompt distinctness, API/USAGE-specific content), success path (populates fields, doesn't mutate input, explicit type overrides auto-selection, user_text drives auto-selection, model passed through, system message fixed across calls, non-streaming, max_tokens set, reply stripped, preserves existing fields), and error handling (error records pass through unchanged without making LLM call, litellm ImportError, completion exception, malformed response shape, empty reply, whitespace-only reply, non-string content).
 - Uses `_FakeLiteLLM` installed via `monkeypatch.setitem(sys.modules, "litellm", fake)` — same pattern as `test_llm_service.py`. Captures completion calls for argument verification; supports configurable reply text and raise-on-completion.
-- `src/ac_dc/url_service/__init__.py` updated to export `SummaryType`, `choose_summary_type`, `summarize`.
+- `src/aic_dc/url_service/__init__.py` updated to export `SummaryType`, `choose_summary_type`, `summarize`.
 
 Design points pinned by tests:
 
@@ -634,18 +634,18 @@ Open carried over for 4.1.5:
 
 ### 4.1.3 — URL fetchers — **delivered**
 
-- `src/ac_dc/url_service/fetchers.py` — three fetchers dispatched by URL type:
+- `src/aic_dc/url_service/fetchers.py` — three fetchers dispatched by URL type:
   - `fetch_web_page(url)` — HTTP GET via stdlib `urllib.request` with a browser-like User-Agent, 30s timeout. UTF-8 decode with latin-1 fallback for invalid bytes. Title extraction via regex (always, before content extraction) so short pages and paywalled content still produce a title. Main content extraction via trafilatura when available, falling back to a stdlib regex pipeline (strip script/style, strip remaining tags, decode HTML entities, collapse whitespace). ImportError and runtime errors in trafilatura both degrade to the fallback — keeps the fetcher working in stripped-down releases.
   - `fetch_github_file(url, info)` — constructs the raw.githubusercontent.com URL from parsed `GitHubInfo`, fetches via HTTP. When `info.branch is None` (implicit default) and the main branch returns 404, automatically retries against master. Explicit branch names don't trigger the fallback — a 404 on a named branch is a real error, not a default-branch mismatch. Returns URLContent with `title` set to the filename.
   - `fetch_github_repo(url, info, symbol_index_cls=None)` — shallow clones the repo to a temp directory, reads the README, optionally generates a symbol map via an injected index class, cleans up in a `finally` block. Uses the SSH-first-with-HTTPS-fallback pattern from D13.
 - **SSH-first clone (D13).** `_ssh_clone_attempt(info)` returns an attempt with URL `git@github.com:owner/repo.git` and env `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"` + `GIT_TERMINAL_PROMPT=0`. BatchMode fails fast rather than prompting. accept-new auto-accepts GitHub's known host key on first contact but refuses changed keys (CI-safe). On non-zero exit, `_https_clone_attempt(info)` returns an HTTPS attempt with all credential sources disabled: `GIT_TERMINAL_PROMPT=0`, `GIT_ASKPASS=/bin/true`, `SSH_ASKPASS=/bin/true`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`. Public repos succeed via the fallback; private-without-access produces a single combined error message per D13. No attempt categorises stderr — any non-zero exit triggers the fallback, and the final message is "repository may be private or you may lack access" which covers all realistic failure modes.
 - **README two-pass search.** `_find_readme(repo_dir)` walks `_README_CANDIDATES` (priority ordered — `README.md` wins over `README.rst` over `README`) for exact matches first. On pass 2, builds a lowercase → actual filename map via `os.listdir` and probes known lowercase keys — catches `README.MD`, `Readme.md`, platform-dependent case variations. Read failures (permission denied, binary content) are treated as "not found" rather than propagated. Empty directories and repos without any README return None cleanly; the URLContent just has no `readme` field.
-- **Injected symbol-index class.** `_generate_symbol_map(repo_dir, symbol_index_cls)` instantiates the passed class on the clone directory, walks the repo (skipping `.git` entirely) to build a relative-path file list, calls `index.index_repo(files)` then `index.get_symbol_map()`. Failures at any step log and return None — the URLContent omits `symbol_map`. Tests use a `_FakeSymbolIndex` stub; production passes `ac_dc.symbol_index.index.SymbolIndex`. Matches the D10 "no module-level coupling" pattern and keeps the fetcher from importing tree-sitter grammars at module load.
+- **Injected symbol-index class.** `_generate_symbol_map(repo_dir, symbol_index_cls)` instantiates the passed class on the clone directory, walks the repo (skipping `.git` entirely) to build a relative-path file list, calls `index.index_repo(files)` then `index.get_symbol_map()`. Failures at any step log and return None — the URLContent omits `symbol_map`. Tests use a `_FakeSymbolIndex` stub; production passes `aic_dc.symbol_index.index.SymbolIndex`. Matches the D10 "no module-level coupling" pattern and keeps the fetcher from importing tree-sitter grammars at module load.
 - **Timeouts everywhere.** HTTP GET 30s, git clone 120s (full budget per attempt — SSH fail + HTTPS fail is 240s worst case). No retry loops beyond the SSH→HTTPS fallback. Timeouts convert to error records; the URLCache refuses to persist them.
 - **Blocking by design.** Fetchers are synchronous — the URLService (Layer 4.1.5) will schedule them via `asyncio.run_in_executor`. Making them async internally would duplicate responsibility between the fetcher and the caller.
 - `tests/test_url_fetchers.py` — 9 test classes, 36 tests covering title extraction (simple, multiline collapse, attributes, absent, whitespace-only, case-insensitive), HTML tag stripping (scripts, styles, entities, whitespace), web page fetcher (success, HTTP error, URL error, generic exception, latin-1 fallback for invalid UTF-8), GitHub file fetcher (success with correct raw URL, no-path error, main→master auto-fallback for implicit default, no-fallback for explicit branches), clone attempt helpers (SSH URL format, SSH batch mode flags, HTTPS URL format, all-auth-disabled env vars for HTTPS), README discovery (exact match priority, RST fallback, extensionless README, case-insensitive fallback, empty directory), symbol map generation (success, .git exclusion via walk, construction failure, indexing failure, no class omits field), and the full repo fetcher flow (SSH first-attempt success, SSH→HTTPS fallback, combined failure message, timeout handling, missing git binary, missing owner error, no README produces content-without-readme, symbol map generation via injection, temp directory cleanup on both success and failure).
 - Uses `unittest.mock.patch` for `urllib.request.urlopen` and `subprocess.run`. A `_FakeSymbolIndex` stub validates the injection pattern; `_FailingSymbolIndex` and a throwing-on-index-repo variant prove error-path resilience. Tests `test_temp_directory_cleaned_up` and `test_temp_directory_cleaned_up_on_failure` capture the temp directory via side-effect and verify it's gone after the fetcher returns — essential for the `finally` block correctness.
-- `src/ac_dc/url_service/__init__.py` updated to export `fetch_web_page`, `fetch_github_file`, `fetch_github_repo`, plus the `URLContent` and `GitHubInfo` models.
+- `src/aic_dc/url_service/__init__.py` updated to export `fetch_web_page`, `fetch_github_file`, `fetch_github_repo`, plus the `URLContent` and `GitHubInfo` models.
 
 Design points pinned by tests:
 

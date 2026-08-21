@@ -26,7 +26,7 @@ describe('AppShell events and toasts', () => {
   describe('toast system', () => {
     it('dispatches window event → shows toast', async () => {
       const shell = mountShell();
-      window.dispatchEvent(new CustomEvent('ac-toast', {
+      window.dispatchEvent(new CustomEvent('aic-toast', {
         detail: { message: 'File saved', type: 'success' },
       }));
       await shell.updateComplete;
@@ -48,14 +48,14 @@ describe('AppShell events and toasts', () => {
 
     it('ignores events with no message', async () => {
       const shell = mountShell();
-      window.dispatchEvent(new CustomEvent('ac-toast', { detail: {} }));
+      window.dispatchEvent(new CustomEvent('aic-toast', { detail: {} }));
       await shell.updateComplete;
       expect(shell.toasts.length).toBe(0);
     });
 
     it('defaults type to info when not specified', () => {
       const shell = mountShell();
-      window.dispatchEvent(new CustomEvent('ac-toast', {
+      window.dispatchEvent(new CustomEvent('aic-toast', {
         detail: { message: 'No type here' },
       }));
       expect(shell.toasts[0].type).toBe('info');
@@ -64,7 +64,7 @@ describe('AppShell events and toasts', () => {
     it('unsubscribes from toast events on disconnect', () => {
       const shell = mountShell();
       shell.remove();
-      window.dispatchEvent(new CustomEvent('ac-toast', {
+      window.dispatchEvent(new CustomEvent('aic-toast', {
         detail: { message: 'Should not appear' },
       }));
       // Element was removed, so its internal state is gone.
@@ -239,7 +239,7 @@ describe('AppShell events and toasts', () => {
       // never clears.
       const shell = mountShell();
       await shell.updateComplete;
-      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const tab = shell.shadowRoot.querySelector('aic-context-usage-tab');
       const spy = vi.spyOn(tab, 'onTabVisible');
       shell._switchTab('context');
       await settleSwitch(shell);
@@ -250,7 +250,7 @@ describe('AppShell events and toasts', () => {
       const shell = mountShell();
       shell._switchTab('context');
       await settleSwitch(shell);
-      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const tab = shell.shadowRoot.querySelector('aic-context-usage-tab');
       const spy = vi.spyOn(tab, 'onTabVisible');
       shell._switchTab('settings');
       await settleSwitch(shell);
@@ -269,7 +269,7 @@ describe('AppShell events and toasts', () => {
       // tab marks itself stale, and switching to it refreshes.
       const shell = mountShell();
       await shell.updateComplete;
-      const tab = shell.shadowRoot.querySelector('ac-context-usage-tab');
+      const tab = shell.shadowRoot.querySelector('aic-context-usage-tab');
       const refresh = vi
         .spyOn(tab, '_refresh')
         .mockImplementation(async () => {});
@@ -295,7 +295,7 @@ describe('AppShell events and toasts', () => {
   // When the backend reports
   // `enrichment_status === "unavailable"` (KeyBERT probe failed
   // or model load failed), the shell shows a one-shot warning
-  // toast pointing users at `pip install 'ac-dc[docs]'`. The
+  // toast pointing users at `pip install 'aic-dc[docs]'`. The
   // toast fires from two places:
   //
   //   - `_fetchCurrentState` — initial state snapshot on
@@ -309,7 +309,7 @@ describe('AppShell events and toasts', () => {
   // permanent for the session — repeated toasts would be noise.
 
   describe('enrichment unavailable toast', () => {
-    const STORAGE_KEY = 'ac-dc-enrichment-unavailable-shown';
+    const STORAGE_KEY = 'aic-dc-enrichment-unavailable-shown';
 
     beforeEach(() => {
       localStorage.clear();
@@ -329,7 +329,7 @@ describe('AppShell events and toasts', () => {
       expect(shell.toasts.length).toBe(1);
       expect(shell.toasts[0].type).toBe('warning');
       expect(shell.toasts[0].message)
-        .toContain('ac-dc[docs]');
+        .toContain('aic-dc[docs]');
     });
 
     it('does not fire for other enrichment_status values', () => {

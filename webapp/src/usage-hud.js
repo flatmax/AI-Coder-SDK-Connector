@@ -2,7 +2,7 @@
 // how full the context window is.
 //
 // Replaces `token-hud.js`, which is gone with the native engine. The
-// difference is not cosmetic: the old HUD rendered AC⚡DC's own
+// difference is not cosmetic: the old HUD rendered AIC⚡DC's own
 // bookkeeping — L0/L1/L2/L3 context tiers, a "map block" modal — all
 // of which described a prompt this app assembled itself. It assembles no prompt now. Every number here comes
 // from the engine, either on the `streamComplete` payload or from
@@ -723,4 +723,4 @@ export class UsageHud extends RpcMixin(LitElement) {
   }
 }
 
-customElements.define('ac-usage-hud', UsageHud);
+customElements.define('aic-usage-hud', UsageHud);

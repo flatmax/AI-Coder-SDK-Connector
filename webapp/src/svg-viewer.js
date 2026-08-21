@@ -1278,8 +1278,8 @@ export class SvgViewer extends LitElement {
     // Swap inlined data-URI hrefs back to their original
     // externalised values before serialising. The image
     // resolver stashed the pre-rewrite href(s) on
-    // `data-ac-dc-original-href` and
-    // `data-ac-dc-original-xlink-href` when it inlined the
+    // `data-aic-dc-original-href` and
+    // `data-aic-dc-original-xlink-href` when it inlined the
     // binary content (`_resolveOneImageHref`). Without
     // this, the multi-megabyte inlined payload ends up in
     // file.modified — which then flows into saves, the
@@ -1295,9 +1295,9 @@ export class SvgViewer extends LitElement {
     const restoreSwaps = [];
     const inlinedImages = rightSvg.querySelectorAll('image');
     for (const img of inlinedImages) {
-      const origHref = img.getAttribute('data-ac-dc-original-href');
+      const origHref = img.getAttribute('data-aic-dc-original-href');
       const origXlink = img.getAttribute(
-        'data-ac-dc-original-xlink-href',
+        'data-aic-dc-original-xlink-href',
       );
       if (origHref === null && origXlink === null) continue;
       const swap = { img, origHref, origXlink };
@@ -1325,8 +1325,8 @@ export class SvgViewer extends LitElement {
       // into the saved content. Re-added by the resolver
       // on the next mount (since the file content on disk
       // doesn't carry them).
-      img.removeAttribute('data-ac-dc-original-href');
-      img.removeAttribute('data-ac-dc-original-xlink-href');
+      img.removeAttribute('data-aic-dc-original-href');
+      img.removeAttribute('data-aic-dc-original-xlink-href');
       restoreSwaps.push(swap);
     }
     let html;
@@ -1344,7 +1344,7 @@ export class SvgViewer extends LitElement {
       for (const swap of restoreSwaps) {
         if (swap.origHref !== null) {
           swap.img.setAttribute(
-            'data-ac-dc-original-href',
+            'data-aic-dc-original-href',
             swap.origHref,
           );
           if (swap.inlinedHref !== null) {
@@ -1353,7 +1353,7 @@ export class SvgViewer extends LitElement {
         }
         if (swap.origXlink !== null) {
           swap.img.setAttribute(
-            'data-ac-dc-original-xlink-href',
+            'data-aic-dc-original-xlink-href',
             swap.origXlink,
           );
           if (swap.inlinedXlink !== null && swap.inlinedXlink !== '') {
@@ -1517,7 +1517,7 @@ export class SvgViewer extends LitElement {
       const originalHref = imgEl.getAttribute('href');
       if (originalHref !== null) {
         imgEl.setAttribute(
-          'data-ac-dc-original-href',
+          'data-aic-dc-original-href',
           originalHref,
         );
       }
@@ -1527,7 +1527,7 @@ export class SvgViewer extends LitElement {
       );
       if (originalXlinkHref !== null && originalXlinkHref !== '') {
         imgEl.setAttribute(
-          'data-ac-dc-original-xlink-href',
+          'data-aic-dc-original-xlink-href',
           originalXlinkHref,
         );
       }
@@ -2401,7 +2401,7 @@ export class SvgViewer extends LitElement {
 
   _emitToast(message, type = 'info') {
     window.dispatchEvent(
-      new CustomEvent('ac-toast', {
+      new CustomEvent('aic-toast', {
         detail: { message, type },
         bubbles: false,
       }),
@@ -2572,7 +2572,7 @@ export class SvgViewer extends LitElement {
       return html`
         <div class="empty-state">
           <div class="watermark">
-            <span>AC</span><span class="bolt">⚡</span><span>DC</span>
+            <span>AIC</span><span class="bolt">⚡</span><span>DC</span>
           </div>
         </div>
       `;
@@ -2796,4 +2796,4 @@ export class SvgViewer extends LitElement {
   }
 }
 
-customElements.define('ac-svg-viewer', SvgViewer);
+customElements.define('aic-svg-viewer', SvgViewer);

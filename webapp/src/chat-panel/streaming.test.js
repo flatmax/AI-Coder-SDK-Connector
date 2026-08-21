@@ -123,7 +123,7 @@ describe('ChatPanel streaming events', () => {
     const p = mountPanel();
     const reqId = await sendAndGetRequestId(p, 'hi');
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       pushEvent('stream-complete', {
         requestId: reqId,
@@ -143,7 +143,7 @@ describe('ChatPanel streaming events', () => {
       expect(p.messages[1].role).toBe('assistant');
       expect(p.messages[1].turn.is_error).toBe(true);
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 });
@@ -799,7 +799,7 @@ describe('ChatPanel agent tabs', () => {
   it('a subagent renders as a row inside the turn', async () => {
     // The replacement for a tab: nested under the `Task` card that spawned
     // it, live until its status is terminal, with Stop as the only write
-    // affordance — AC⚡DC did not create it and cannot message it.
+    // affordance — AIC⚡DC did not create it and cannot message it.
     const p = mountPanel();
     const reqId = await startMainStream(p);
     pushEvent('tool-use', {
@@ -849,7 +849,7 @@ describe('ChatPanel agent tabs', () => {
 });
 
 // The `onStreamRetry` suite stood here until conversion phase 3. It asserted
-// the wording of a backoff toast fed by AC⚡DC's own completion wrapper, which
+// the wording of a backoff toast fed by AIC⚡DC's own completion wrapper, which
 // pushed `streamRetry` before each sleep. The CLI retries inside the
 // subprocess without reporting it, so there is nothing left to assert; the
 // `rateLimit` path is covered by the rate-limit notice tests.
@@ -1345,7 +1345,7 @@ describe('ChatPanel stream-start error handling', () => {
     const p = mountPanel();
     await settle(p);
     const toastListener = vi.fn();
-    window.addEventListener('ac-toast', toastListener);
+    window.addEventListener('aic-toast', toastListener);
     try {
       p._input = 'hi';
       await p._send();
@@ -1357,7 +1357,7 @@ describe('ChatPanel stream-start error handling', () => {
         .filter((d) => d.type === 'warning');
       expect(warnings.length).toBeGreaterThan(0);
     } finally {
-      window.removeEventListener('ac-toast', toastListener);
+      window.removeEventListener('aic-toast', toastListener);
     }
   });
 });
@@ -1376,7 +1376,7 @@ describe('ChatPanel compaction toast', () => {
     // This used to toast. A toast lives 3 seconds and the compaction it
     // announces runs for tens, so the stall went unexplained for most of its
     // duration — the notice expired while the condition continued.
-    // `ac-compaction-progress` listens to this same window event and holds an
+    // `aic-compaction-progress` listens to this same window event and holds an
     // indicator until `compact_boundary`; a toast on top of it would announce
     // one compaction twice with two different lifetimes.
     const p = mountPanel();
