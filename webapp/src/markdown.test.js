@@ -147,23 +147,52 @@ describe('renderMarkdown', () => {
     expect(html).toContain('checkbox');
   });
 
-  it('passes raw HTML through in prose (we trust the source)', () => {
-    // Marked's default behaviour for inline HTML in prose is
-    // passthrough — it renders tags literally rather than
-    // escaping them. This is safe for our use:
-    //   - User messages never reach renderMarkdown; they go
-    //     through escapeHtml instead. See the chat panel's
-    //     _renderMessage which dispatches on role.
-    //   - Assistant messages come from the LLM, which we
-    //     trust in the same way we trust the code it writes
-    //     into our files.
-    //
-    // The test pins the passthrough so if we ever swap to a
-    // library that escapes by default (or add a sanitizer),
-    // the expectations surface for review rather than silently
-    // changing the rendering model.
+  it('shows a tag in prose as the text it was typed as', () => {
+    // This test used to pin the opposite — marked's raw-HTML
+    // passthrough — on the premise that user messages never
+    // reached this renderer and the model's output could be
+    // trusted like the code it writes. The first half was
+    // untrue (the chat panel renders user content through
+    // here), and the second traded a user's own words for
+    // markup nobody asked for: `<b>bold</b>` drew as "bold"
+    // and `<your topic>` drew as nothing at all.
     const html = renderMarkdown('use <b>bold</b> tag');
-    expect(html).toContain('<b>bold</b>');
+    expect(html).toContain('&lt;b&gt;bold&lt;/b&gt;');
+    expect(html).not.toContain('<b>bold</b>');
+  });
+
+  it('keeps a placeholder nobody would recognise as markup', () => {
+    // The reported case. An unknown element renders as zero
+    // pixels, so the prompt read "Write about  now" — the
+    // sentence lost its subject with nothing to show that it
+    // had.
+    const html = renderMarkdown('Write about <your topic> now');
+    expect(html).toContain('&lt;your topic&gt;');
+  });
+
+  it('escapes a tag on its own line, not just one mid-sentence', () => {
+    // Block-level HTML is a separate tokenizer from inline, so
+    // one of these can escape while the other passes through.
+    const html = renderMarkdown('<img src=x onerror=alert(1)>');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(html).not.toContain('<img');
+  });
+
+  it('still autolinks an angle-bracketed URL', () => {
+    // `<https://…>` is a link token, not an HTML one, so the
+    // escaping above must not reach it.
+    const html = renderMarkdown('see <https://example.com> please');
+    expect(html).toContain('href="https://example.com"');
+  });
+
+  it('leaves markdown emphasis and code alone', () => {
+    // Escaping raw HTML is not escaping the source: markdown
+    // still renders, and code spans keep their own escaping
+    // rather than being double-escaped by this path.
+    const html = renderMarkdown('*em* and `<b>x</b>`');
+    expect(html).toContain('<em>em</em>');
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(html).not.toContain('&amp;lt;');
   });
 
   it('renders inline math via KaTeX', () => {

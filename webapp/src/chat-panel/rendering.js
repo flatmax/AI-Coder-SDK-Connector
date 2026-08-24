@@ -502,12 +502,14 @@ export function renderMessage(panel, msg, index) {
   // User content and system-event content both
   // go through the markdown renderer so lists,
   // paragraphs, code fences, etc. render as
-  // intended. The markdown renderer handles
-  // escaping internally, so this path is safe
-  // against HTML injection. Assistant content
-  // goes through the edit-block segmenter so
-  // edit blocks become visual cards instead of
-  // raw prose.
+  // intended. Angle brackets survive as the
+  // text they were typed as — the renderer
+  // escapes raw HTML rather than passing it
+  // through, so a prompt about `<your topic>`
+  // still says so. Assistant content goes
+  // through the edit-block segmenter so edit
+  // blocks become visual cards instead of raw
+  // prose.
   let bodyHtml;
   if (msg.role === 'user' && !msg.system_event) {
     bodyHtml = html`

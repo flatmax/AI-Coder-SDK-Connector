@@ -18,7 +18,7 @@ The permission dialog is not part of this spec even though it interrupts this pa
 - User cards may include image thumbnails
 - Assistant cards render markdown with syntax highlighting, math, and file mentions
 - Within an assistant turn, tool cards and thinking regions are rendered inline in arrival order (see [§ Tool Cards](#tool-cards) and [§ Thinking Regions](#thinking-regions))
-- System event cards (commit, reset, session switch, permission-mode change, compaction boundary) use distinct styling — dashed border, muted color, "System" role label
+- System event cards (commit, reset, session switch, permission-mode change, compaction boundary, a background agent's task notification on a replayed session — see [`../3-engine/history.md`](../3-engine/history.md#a-background-agents-wake-up-is-a-system-note-not-a-prompt)) use distinct styling — dashed border, muted color, "System" role label
 ### Terminal-Reason Badge Placement
 The badge reports `terminal_reason` from `streamComplete` rather than a provider finish reason. Same
 severity split, different vocabulary:
@@ -86,6 +86,13 @@ only thing that reads it, and the handler replaces that message in place.
 Without this the closing answer was consumed and rendered nowhere: it reached the turn's blocks, but the
 freeze had already happened and nothing re-froze it. It appeared only if the user reloaded, from the
 mirror.
+
+The mirror is also where the two views diverge, permanently and correctly. Live, the same work is one
+revised message; replayed, it is two turns with the task notification between them, rendered as a system
+note rather than a prompt
+([`../3-engine/history.md` § A background agent's wake-up](../3-engine/history.md#a-background-agents-wake-up-is-a-system-note-not-a-prompt)).
+The transcript records that seam because that is where the turn on disk actually breaks, and the browser
+does not edit the transcript's turn boundaries to match a live rendering decision.
 
 ## Thinking Regions
 
@@ -157,7 +164,9 @@ protocol-specific need.
 - Code renderer override — language label, copy button, syntax highlighting
 - All other block elements use marked defaults (no preview-specific logic)
 - Math extension — display and inline expressions rendered via KaTeX with parse-failure fallback
-- Applies to user and assistant messages equally — users type markdown-literate text (matching what the agent receives), so the UI renders it the same way. The renderer handles escaping internally, so passing user content through it is safe against HTML injection
+- Applies to user and assistant messages equally — users type markdown-literate text (matching what the agent receives), so the UI renders it the same way
+- **Raw HTML renders as the text it was written as, never as markup.** `marked` does not sanitize, so anything tag-shaped reached the DOM as a tag: a prompt about `<your topic>` drew an unknown element, which is zero pixels, and the sentence lost its subject with nothing to show that it had. Angle brackets in a conversation about code are far more often literal than markup — placeholders, generics, comparisons, XML the conversation is *about* — and nothing writes HTML into message content, so escaping loses no rendering. It also closes the gap trust-the-source left open: message content is not all the user's, and a file the agent reads can ask it to echo `<img onerror=…>`, which would run with the app's own RPC access. Code fences and `<https://…>` autolinks are separate token types and are unaffected
+- **Who wrote a string does not change how it renders.** One instance serves prompts, replies, system-event cards and replayed transcripts, and it trusts none of them more than another — a per-role escaping rule would be a second place for the question "is this content ours?" to be answered differently from the first
 ### Syntax Highlighting
 - Explicit language registration for common languages (JavaScript, TypeScript, Python, JSON, Bash, CSS, HTML, YAML, C, C++, diff, markdown)
 - Fenced blocks with recognized language are highlighted directly

@@ -21,6 +21,8 @@
 //   - Paragraphs, headings, bold, italic, GFM tables/task lists
 //   - Line breaks within paragraphs (breaks: true)
 //   - KaTeX math — `$$...$$` display, `$...$` inline
+//   - Raw HTML rendered as the literal text it was written as,
+//     never as markup (see `_makeChatMarked`)
 //
 // Not here:
 //   - Source-line attributes for preview scroll sync (lives in
@@ -160,6 +162,23 @@ const _mathExtension = {
  * `<pre class="code-block">` shape with a language label
  * and a copy button. The chat panel owns the delegated
  * click handler, so no per-element listeners attach here.
+ *
+ * The `html()` override escapes raw HTML instead of passing
+ * it through. `marked` does not sanitize — that option was
+ * removed in v5 — so anything that looks like a tag reached
+ * the DOM as one. A prompt asking about `<your topic>`
+ * rendered as a paragraph with an unknown element in it,
+ * which the browser draws as nothing: the user's own words
+ * silently disappeared from their own message. Angle
+ * brackets in prose are far more often literal than
+ * markup — placeholders, generics, comparisons, XML the
+ * conversation is *about* — and nothing in this codebase
+ * writes HTML into message content, so there is no
+ * rendering to lose by escaping. Escaping also closes the
+ * gap the alternative left open: message content is not all
+ * ours, and a file the agent reads can ask it to echo
+ * `<img onerror=…>`, which would run with the app's own
+ * RPC access.
  */
 function _makeChatMarked() {
   const instance = new Marked({
@@ -174,6 +193,18 @@ function _makeChatMarked() {
   instance.use(_mathExtension);
   instance.use({
     renderer: {
+      html(token) {
+        // Both the block and inline HTML tokenizers land here, so
+        // one override covers `<div>` on its own line and `<x>`
+        // mid-sentence. Fenced and inline code are separate token
+        // types and keep their own escaping; autolinks
+        // (`<https://…>`) are `link` tokens and still work.
+        const raw =
+          token && typeof token === 'object' && 'text' in token
+            ? token.text
+            : token;
+        return escapeHtml(raw);
+      },
       code(code, infostring) {
         // Marked 14+ can pass either a token object
         // (`{text, lang}`) or positional args depending on
@@ -270,12 +301,14 @@ const marked = _makeChatMarked();
  *
  * Returns an HTML string, not a DOM node. Callers that need to
  * insert it into a Lit template should use `unsafeHTML` from
- * `lit/directives/unsafe-html.js` — we trust the content
- * because it comes from the LLM, not from user-crafted input
- * that could inject scripts. (The LLM can in principle output
- * HTML tags, but `marked` escapes them by default unless they
- * appear inside a code fence, and the code-fence case renders
- * as literal text via <code>.)
+ * `lit/directives/unsafe-html.js`. The only markup in the
+ * result is this module's own: `marked` does not sanitize, so
+ * every path that could carry a tag from the content — raw
+ * HTML, code fences, math fallbacks, language labels — escapes
+ * it, and the instance is not given a source it trusts more
+ * than another. Who wrote the string therefore does not change
+ * how it renders, which is what makes the same function safe
+ * for a prompt, a reply and a replayed transcript alike.
  *
  * Empty or null input returns the empty string — callers don't
  * need to guard against these cases.
@@ -297,11 +330,10 @@ export function renderMarkdown(text) {
 /**
  * Escape HTML special characters in a string.
  *
- * Used for the fallback path when markdown rendering fails, and
- * exported so the chat panel can render raw user input safely
- * (user messages are shown verbatim, not markdown-rendered, per
- * specs4 — users typed what they typed, we shouldn't
- * reinterpret it).
+ * Used for the fallback path when markdown rendering fails, for
+ * the raw-HTML and code-fence renderers above, and exported for
+ * the renderers that build markup by hand (edit blocks, tool
+ * cards) and must not let a path or a label out of its slot.
  */
 export function escapeHtml(text) {
   if (!text) return '';
