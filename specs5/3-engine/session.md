@@ -86,6 +86,41 @@ Unchanged in shape from the native engine, which is why the transport and reconn
 4. Server sends the turn to the engine via `query()` and starts a message pump.
 5. Pump translates SDK messages into server-push events, all carrying the request ID.
 6. Pump runs to `ResultMessage`, then finalises.
+7. If that result arrived with background tasks still running, a **drain** keeps consuming the stream
+   past it — see below.
+
+### A result message ends a turn, not the run
+
+A background subagent — `Task` with `run_in_background` — outlives the turn that spawned it, and the
+SDK is explicit about it: a result frame arriving with tasks in flight leaves stdin open and logs
+`Result received with N task(s) in flight`. It then goes on emitting for those tasks, and for main's
+own reply once a task notification wakes it.
+
+`receive_response()` stops at the result regardless, so step 6 must not be where consumption ends.
+Instead the session keeps a **background drain**: a task that consumes `receive_messages()` with the
+same `TurnTranslator`, and ends on a result message that arrives with nothing left in flight — the
+SDK's own definition of the run ending.
+
+Stopping at the turn's result instead left a background subagent's entire life unread, which showed
+up as four unrelated-looking bugs: an empty subagent tab, an activity LED stuck on "status unknown at
+turn end" for a subagent that had succeeded, a permission request attributed to no turn at all
+(`_active_turn` was already gone), and main's closing answer missing. The CLI wrote all of it to the
+transcript meanwhile, so it appeared if — and only if — the user reloaded the page, rendered from the
+mirror as a malformed user turn.
+
+What made it read as a rendering bug is that **nothing was lost**. The SDK's message stream is a
+100-slot buffer the client owns, so the messages sat in it and whichever turn read next got them.
+What was lost was *when*: they arrived attributed to a later turn, long after they meant anything
+live. Two consequences the implementation depends on — a second iterator resumes rather than
+replaying, and there must never be two: the drain is stopped, not merely signalled, before the next
+turn's pump starts.
+
+The result message carries `background_tasks`, the ids it did *not* end. The browser settles live
+subagent tabs at the result and has no other way to tell "its terminal event never arrived" from "it
+is still working" ([`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § Status
+LEDs).
+
+A cancelled turn is not followed. Stop is the user saying they are done with this work.
 
 If the prompt carried pasted images, a `userMessageImages` follow-up joins step 4 — pointers to the
 image blocks, sent when the mirror writes the user entry, because the entry `uuid` a pointer is built
@@ -296,6 +331,12 @@ whose CLI advertises nothing is not the same condition.
   assumes a singleton turn.
 - The message pump runs to `ResultMessage` for every turn, including cancelled and errored turns,
   and never exits the iterator via `break`.
+- Consumption of the message stream outlives the turn whenever the turn's result arrives with
+  background tasks in flight, and ends on a result that arrives with none. A background subagent's
+  events are never first read by a later turn.
+- Exactly one consumer of the message stream at a time. A background drain is stopped and awaited
+  before the next turn's pump starts, and on disconnect.
+- A result message reports which background tasks it did not end.
 - After `interrupt()`, the interrupted turn's messages are fully drained before any later turn's
   messages are read; a message arriving for a finalised request ID is dropped and logged, never
   re-routed.

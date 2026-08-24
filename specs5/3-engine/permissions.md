@@ -160,6 +160,19 @@ The escape hatch is a person, not a clock. A dialog nobody wants to answer is cl
 denies the turn's open requests before it interrupts, and the end of a turn sweeps anything still
 open. Both denials say which happened, so the agent can tell it was not refused on the merits.
 
+**A background subagent's request survives the end of the turn that spawned it.** The turn-end sweep
+is scoped to the main conversation, because a background subagent is not finished when main is — the
+SDK keeps stdin open past the result message and says so ("Result received with 1 task(s) in
+flight"). Sweeping such a request denied a call the subagent was still blocked on, which stranded it:
+the feed froze on a padlocked tool card, the tab's LED stuck at "status unknown at turn end", and
+nothing said why, because the denial went out attributed to a turn that had already ended.
+
+Ownership alone is the test — a subagent blocked on a permission is blocked, not finished — so there
+is no liveness registry to fall out of step with the SDK. What closes a spared request instead: the
+user answering it, **any terminal task status for that subagent** (`killed` from `stop_task()` most
+of all), Stop, or session teardown. Every one of those denials is logged; a swept request that left
+an `asked` line with no matching resolution is how the stranding stayed invisible.
+
 **The one deadline left runs only when nobody who could answer is there.** A remote collaborator
 cannot grant permissions, so a session whose only participants are remote is not thinking about it —
 it is unattended, and a fast deny beats a stalled turn. Presence is therefore re-sampled for the
@@ -186,10 +199,14 @@ prompts-per-turn metric that tells us whether the tiering above is working (see
   our logs.
 - `allowed_tools` is never set by AIC⚡DC.
 - Every permission request resolves exactly once — by a localhost decision, by a stopped turn, by
-  the end of its turn, by the no-localhost deadline, or by session teardown — and the SDK always
-  receives a result.
-- No dialog outlives its turn. Stop denies the turn's open requests before it interrupts, and a turn
-  that ends any other way sweeps whatever is left.
+  the end of its turn, by the end of the subagent that made it, by the no-localhost deadline, or by
+  session teardown — and the SDK always receives a result.
+- No dialog outlives the work it belongs to. Stop denies the turn's open requests before it
+  interrupts, and a turn that ends any other way sweeps whatever is left — except a background
+  subagent's request, which outlives the turn exactly as the subagent does, and is swept when that
+  subagent reaches a terminal status.
+- Every server-side denial is logged with the reason it was denied. A request that was asked and
+  then answered by the server never leaves an unmatched `asked` line.
 - No request has a wall-clock deadline while a localhost client is connected to answer it, and a
   request that acquires one loses it again when a localhost client returns.
 - Only localhost clients can resolve a request; a non-localhost attempt is rejected and logged.

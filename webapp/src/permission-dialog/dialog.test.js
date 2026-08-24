@@ -1133,7 +1133,56 @@ describe('a resolution from elsewhere', () => {
 
   it('says when a stopped turn denied it', async () => {
     // The way out of a dialog nobody wants to answer is Stop, not a timer,
-    // so the dialog that Stop closes has to say that is what happened.
+    // so the dialog that Stop closes has to say that is what happened —
+    // which it did not, while the message was read off `action` alone.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+
+    resolveBroadcast({
+      permission_id: 'perm_exec', action: 'cancelled', cause: 'stopped',
+    });
+    await settle(el);
+
+    expect(el.current).toBeNull();
+    expect(toasts.map((t) => t.message).join(' ')).toContain('the turn was stopped');
+  });
+
+  it('says when the end of a turn denied it', async () => {
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+
+    resolveBroadcast({
+      permission_id: 'perm_exec', action: 'cancelled', cause: 'turn_ended',
+    });
+    await settle(el);
+
+    expect(toasts.map((t) => t.message).join(' ')).toContain('the turn it belonged to ended');
+  });
+
+  it('blames the subagent, not the turn, when a subagent ended', async () => {
+    // A background subagent's dialog outlives the turn that spawned it, so
+    // pointing at the turn would send the user looking in the wrong place.
+    publishRpc();
+    const el = mount();
+    await settle(el);
+    await ask(el, execPayload());
+
+    resolveBroadcast({
+      permission_id: 'perm_exec', action: 'cancelled', cause: 'agent_ended',
+    });
+    await settle(el);
+
+    expect(toasts.map((t) => t.message).join(' '))
+      .toContain('the subagent that asked for it ended');
+  });
+
+  it('stays vague rather than wrong when no cause is given', async () => {
+    // An engine too old to send a cause must not make the dialog assert a
+    // specific reason it cannot know.
     publishRpc();
     const el = mount();
     await settle(el);
@@ -1142,8 +1191,9 @@ describe('a resolution from elsewhere', () => {
     resolveBroadcast({ permission_id: 'perm_exec', action: 'cancelled' });
     await settle(el);
 
-    expect(el.current).toBeNull();
-    expect(toasts.map((t) => t.message).join(' ')).toContain('the turn it belonged to ended');
+    const said = toasts.map((t) => t.message).join(' ');
+    expect(said).toContain('no longer waiting on anyone');
+    expect(said).not.toContain('the turn it belonged to ended');
   });
 
   it('says when a shutdown denied it', async () => {
@@ -1152,7 +1202,9 @@ describe('a resolution from elsewhere', () => {
     await settle(el);
     await ask(el, execPayload());
 
-    resolveBroadcast({ permission_id: 'perm_exec', action: 'shutdown' });
+    resolveBroadcast({
+      permission_id: 'perm_exec', action: 'shutdown', cause: 'shutdown',
+    });
     await settle(el);
 
     expect(toasts.map((t) => t.message).join(' ')).toContain('shut down');

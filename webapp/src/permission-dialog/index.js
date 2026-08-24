@@ -72,6 +72,28 @@ import {
  */
 const FULL_CONTENT_TOOLS = { Write: 'content', NotebookEdit: 'new_source' };
 
+/**
+ * Why the session denied a request, keyed by the `cause` the engine sends
+ * on `permissionResolved` (`CAUSE_*` in
+ * src/aic_dc/claude_code/permissions.py).
+ *
+ * The `action` cannot carry this: Stop, the end of a turn and the end of a
+ * subagent all resolve as `cancelled`, so a dialog that read the action
+ * announced whichever one was hardcoded — and told a user who had just
+ * pressed Stop that "the turn it belonged to ended" instead.
+ *
+ * `agent_ended` is the one that most needs saying out loud. A background
+ * subagent's dialog now outlives the turn that spawned it, so when one does
+ * get denied it is because that subagent stopped, and pointing at the turn
+ * would send the user looking in the wrong place entirely.
+ */
+const CANCEL_CAUSES = {
+  stopped: 'the turn was stopped.',
+  turn_ended: 'the turn it belonged to ended.',
+  agent_ended: 'the subagent that asked for it ended.',
+  shutdown: 'the session shut down.',
+};
+
 export class PermissionDialog extends RpcMixin(LitElement) {
   static properties = {
     /** Pending requests as `{payload, arrivedAt}`, unordered. */
@@ -453,11 +475,14 @@ export class PermissionDialog extends RpcMixin(LitElement) {
       // dialog that was never on their screen.
       message = 'A pending permission request was denied — no host client was '
         + 'connected to answer it.';
-    } else if (action === 'cancelled') {
-      message = 'A pending permission request was denied — the turn it belonged '
-        + 'to ended.';
-    } else if (action === 'shutdown') {
-      message = 'A pending permission request was denied — the session shut down.';
+    } else if (action === 'cancelled' || action === 'shutdown') {
+      // `cause`, not `action`: Stop, a turn ending and a subagent ending all
+      // resolve as `cancelled`, so reading the action alone told the user
+      // "the turn it belonged to ended" when they had pressed Stop. The
+      // fallback covers a server too old to send a cause, and reads as the
+      // vaguer thing rather than as a specific wrong thing.
+      message = 'A pending permission request was denied — '
+        + (CANCEL_CAUSES[detail.cause] ?? 'it was no longer waiting on anyone.');
     } else if (detail.resolved_by && detail.resolved_by !== 'localhost') {
       message = `${ALLOW_ACTIONS.includes(action) ? 'Allowed' : 'Denied'}`
         + ` by another window (${detail.resolved_by}).`;

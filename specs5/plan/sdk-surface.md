@@ -124,8 +124,16 @@ Read on 2026-08-18 against SDK 0.2.137 / CLI pin 2.1.229, nothing untriaged:
 | Betas | 0 | 1 | 0 |
 
 The message taxonomy and the client surface are fully consumed, which is the part that would have been
-guessed wrong: this repo renders every message type the union carries and calls every client method but
-`receive_messages` (declined — `receive_response` bounds itself on `ResultMessage`).
+guessed wrong: this repo renders every message type the union carries and calls every client method.
+
+`receive_messages` was originally declined here, on the reasoning that `receive_response` bounds
+itself on `ResultMessage` and that bound was the one we wanted. That reasoning was wrong, and the
+correction is the reason the count above has no exception left: a result frame ends a *turn*, not the
+run, so a background subagent's messages arrive after `receive_response()` has already returned. The
+session consumes `receive_messages` past the result while tasks are in flight
+([`../3-engine/session.md`](../3-engine/session.md) § A result message ends a turn, not the run). The
+convenience wrapper is still what a turn itself uses; it is simply not the whole of what has to be
+read.
 
 The hook column reached zero pending the same day the probe first reported it. `PreCompact` was the single
 entry there, and the argument for it was already written down; see below.
@@ -162,7 +170,7 @@ to that question.
 |---|---|
 | `connect()` / `disconnect()` | Spawns / tears down the CLI subprocess. |
 | `query(prompt: str \| AsyncIterable[dict], session_id="default")` | Message dicts are written **verbatim**, so multimodal content blocks (images) survive untouched. This is how AIC⚡DC sends pasted images — see [`../4-features/images.md`](../4-features/images.md). |
-| `receive_messages()` / `receive_response()` | The latter stops after `ResultMessage`. |
+| `receive_messages()` / `receive_response()` | The latter stops after `ResultMessage` — which ends a turn, not the run, so a turn with background tasks in flight is followed with the former. Both read one buffer the client owns: a second iterator resumes rather than replaying, and two at once would split the stream. |
 | `interrupt()` | Replaces our cancellation flag. |
 | `set_permission_mode(mode)` | Live switch; no reconnect. |
 | `set_model(model)` | Live switch. |

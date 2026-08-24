@@ -72,8 +72,10 @@ appears in its own row and in the Context tab's subagent inventory
 A subagent tab's life is bounded by the subagent, not by the session:
 
 - **Terminal status** — the tab stops pulsing and becomes an archived transcript in place. It stays in the strip for the remainder of the turn so a user can read what happened. A terminal status may arrive via `updated` with **no** `notification`; the tab must settle on either (see `specs-reference/3-engine/session.md` § A task can finish without a notification).
-- **Turn end** — on `streamComplete`, live tabs that have not reported terminal status are marked *status unknown* rather than silently completed. The turn is over; a subagent that never reported is a fact worth showing, not a spinner to leave running.
+- **Turn end** — on `streamComplete`, live tabs that have not reported terminal status are marked *status unknown* rather than silently completed. The turn is over; a subagent that never reported is a fact worth showing, not a spinner to leave running. **Except the tabs named in the completion's `background_tasks`**: those subagents are still working, the engine is still following them, and the turn keeps the routing state their blocks arrive through until it hears otherwise (§ Status LEDs).
 - **New turn** — the previous turn's subagent tabs leave the strip. Their transcripts remain on disk under the session's `subagents/` directory and stay reachable through the history browser.
+
+  **Known gap:** this drops a background subagent that is *still running*, and the new turn's pump takes the stream back from the drain that was following it, so the rest of its output is translated against the new turn instead. Nothing is lost — it lands mis-attributed rather than dropped, and the transcript on disk is complete either way — but sending a message while a background agent works is exactly what background agents are for, so this is the case to fix next. Fixing it properly means routing each message to the translator that owns it rather than to whichever turn is current, which is a change to the turn model rather than an addition to it.
 - **New session / session resume** — the strip drops to Main alone. Nothing is torn down on the server, because AIC⚡DC owns no subagent state to tear down.
 - **Server shutdown** — in-memory tab state is lost; transcripts on disk survive.
 
@@ -117,6 +119,15 @@ Amber is new, and it exists because a stopped subagent is neither a success nor 
 it as either is a lie. The old spec's green rule — "every `EditResult` in the result reports success" —
 has no successor: edit outcomes are the agent's business now, reported as tool results inside the
 transcript rather than as a structured array we can total up.
+
+**"Status unknown at turn end" is a claim, and it has to be earned.** A background subagent outlives
+the turn that spawned it, so a subagent still live at the result is not necessarily one whose terminal
+event went missing — it may simply still be working. The completion says which is which: the tasks
+named in its `background_tasks` are still running and are *not* settled
+([`../3-engine/session.md`](../3-engine/session.md) § A result message ends a turn, not the run).
+Settling them anyway put amber on subagents that went on to succeed seconds later, on tabs whose feeds
+were empty because nothing after the result was being read — the two halves of the same bug, and the
+reason the honest-sounding amber state was the most misleading thing on screen.
 
 LED lifetime tracks its tab's lifetime exactly. There is no acknowledgement gesture, no auto-fade, no
 "seen" state; the LED reflects current state until the tab leaves the strip.

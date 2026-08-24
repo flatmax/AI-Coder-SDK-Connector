@@ -68,8 +68,12 @@ The SDK warns that breaking out of iteration causes asyncio cleanup problems. AI
 is exactly the provoking case: the user refreshes the tab, the WebSocket drops, and the naive
 handler stops reading.
 
-**Mitigation:** the message pump's lifetime is tied to the **turn**, not to any client connection.
-It runs to `ResultMessage` regardless of who is listening, accumulating into a server-side buffer;
+**Mitigation:** the message pump's lifetime is tied to the **work**, not to any client connection.
+It runs to `ResultMessage` regardless of who is listening — and past it while background tasks are
+still in flight, because a result frame ends a turn rather than the run
+([`../3-engine/session.md`](../3-engine/session.md) § A result message ends a turn, not the run;
+"tied to the turn" is what this originally said, and a background subagent is what disproved it) —
+accumulating into a server-side buffer;
 disconnected clients re-attach and replay from the buffer. This is the same shape as the native
 engine's existing stream-resumption behaviour, so the reconnect logic in `app-shell/reconnect.js`
 carries over rather than being rewritten. Cancellation is a flag plus `interrupt()`, never a

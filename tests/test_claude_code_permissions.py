@@ -1615,6 +1615,143 @@ class TestCancelForTurn:
 
 
 # ---------------------------------------------------------------------------
+# Background subagents outliving their turn
+# ---------------------------------------------------------------------------
+
+
+class TestSpareSubagents:
+    """A background subagent outlives the turn that spawned it.
+
+    The bug this pins: main finished while a background subagent was still
+    working, the turn-end sweep denied the ``Bash`` that subagent was blocked
+    on, and the subagent was stranded — feed frozen on a padlocked card, LED
+    stuck at "status unknown at turn end". The SDK says the subagent is still
+    live ("Result received with 1 task(s) in flight; keeping stdin open"), so
+    the sweep was wrong, not the subagent.
+    """
+
+    async def test_the_turn_end_sweep_spares_a_subagents_request(
+        self, broker, events
+    ):
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+
+        assert await broker.cancel_for_turn("req-1", spare_subagents=True) == 0
+
+        # Still on screen and still answerable: the subagent is waiting.
+        assert len(broker.pending()) == 1
+        assert events.named("permissionResolved") == []
+
+        await broker.resolve(broker.pending()[0]["permission_id"], {"action": "allow"})
+        assert type(await task).__name__ == "PermissionResultAllow"
+
+    async def test_it_still_sweeps_the_main_scopes_request(self, broker, events):
+        """Sparing is per request, not a blanket opt-out for the turn."""
+        task = await ask(broker)
+        assert await broker.cancel_for_turn("req-1", spare_subagents=True) == 1
+        assert "The turn ended" in (await task).message
+
+    async def test_stop_sweeps_subagents_too(self, broker, events):
+        """Stop means stop. ``cancel_streaming`` does not spare anything."""
+        from aic_dc.claude_code.permissions import DENY_CANCELLED_REASON
+
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        assert await broker.cancel_for_turn("req-1", reason=DENY_CANCELLED_REASON) == 1
+        assert "stopped this turn" in (await task).message
+
+    async def test_a_terminated_subagents_request_is_denied(self, broker, events):
+        """The other half: sparing needs something to close it later.
+
+        A subagent cannot *finish* while blocked on a permission, but it can
+        be killed — ``stop_task()`` reports ``status="killed"`` — and that has
+        to close the dialog it left open.
+        """
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        assert await broker.cancel_for_turn("req-1", spare_subagents=True) == 0
+
+        assert await broker.cancel_for_agent("agent-7") == 1
+
+        result = await task
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "subagent that made this call ended" in result.message
+        assert "not a refusal on the merits" in result.message
+        assert broker.pending() == []
+
+    async def test_cancel_for_agent_leaves_other_scopes_alone(self, tmp_path, events):
+        broker = PermissionBroker(
+            tmp_path, broadcast=events, note_prompt=lambda tool_use_id: "req-1"
+        )
+        mine = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        theirs = asyncio.create_task(
+            broker.can_use_tool(
+                "Bash", {"command": "pwd"}, FakeContext("toolu_02", agent_id="agent-8")
+            )
+        )
+        await settle(lambda: len(broker.pending()) >= 2)
+
+        assert await broker.cancel_for_agent("agent-7") == 1
+        await mine
+        assert [p["agent_id"] for p in broker.pending()] == ["agent-8"]
+
+        await broker.cancel_all()
+        await theirs
+
+    async def test_cancel_for_agent_with_no_agent_is_a_no_op(self, broker, events):
+        """Not every ``Task*`` message carries an ``agent_id``."""
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        assert await broker.cancel_for_agent(None) == 0
+        assert await broker.cancel_for_agent("") == 0
+        assert await broker.cancel_for_agent("agent-9") == 0
+        assert len(broker.pending()) == 1
+
+        await broker.cancel_all()
+        await task
+
+    async def test_teardown_still_closes_a_spared_request(self, broker, events):
+        """``cancel_all`` is the backstop under the backstop."""
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        await broker.cancel_for_turn("req-1", spare_subagents=True)
+
+        await broker.cancel_all()
+
+        assert "shut down" in (await task).message
+        assert broker.pending() == []
+
+    async def test_the_sweep_logs_what_it_denied(self, broker, events, caplog):
+        """An ``asked`` line with no resolution was the bug's best evidence.
+
+        ``cancel_for_turn`` did not log, so the one failure mode that needed
+        the log most — a dialog answered by the server, never shown to the
+        user — was the one it did not record.
+        """
+        import logging
+
+        caplog.set_level(logging.INFO, logger="aic_dc.claude_code.permissions")
+        task = await ask(broker)
+        await broker.cancel_for_turn("req-1")
+        await task
+
+        assert any(
+            "denied as cancelled by the session" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_sparing_a_request_says_so_in_the_log(self, broker, events, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO, logger="aic_dc.claude_code.permissions")
+        task = await ask(broker, context=FakeContext(agent_id="agent-7"))
+        await broker.cancel_for_turn("req-1", spare_subagents=True)
+
+        assert any(
+            "is still waiting on it" in record.getMessage()
+            for record in caplog.records
+        )
+
+        await broker.cancel_all()
+        await task
+
+
+# ---------------------------------------------------------------------------
 # The broadcast payload
 # ---------------------------------------------------------------------------
 

@@ -17,6 +17,10 @@ Three behaviours here are load-bearing and easy to lose in a refactor
   ``interrupt()``; the loop still runs to the end. ``break``-ing out of
   the SDK's iterator causes asyncio cleanup failures, and a client
   disconnecting mid-turn is AIC-DC's normal case, not an edge case.
+- **A result message ends a turn, not the run.** While a background task is
+  in flight the stream keeps carrying that task's life *and* main's reply to
+  its notification, so consumption continues past the turn's result — see
+  :meth:`EngineSession._drain_background`.
 - **A turn's lifetime is independent of any WebSocket.** The pump writes
   into the translator, which accumulates the transcript, so a client that
   reconnects mid-turn replays from server state.
@@ -28,8 +32,9 @@ Reference: ``specs-reference/3-engine/session.md``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +63,14 @@ CONNECT_TIMEOUT = 60.0
 # the client is disconnected and the session reported lost, rather than
 # reading the next turn's messages over an undrained buffer.
 INTERRUPT_DRAIN_TIMEOUT = 30.0
+
+
+# Task types whose completion the engine waits for past a result message —
+# the ones that make a result end a turn rather than the run. Mirrors
+# `claude_agent_sdk._internal.query.DEFERRING_TASK_TYPES`, copied rather
+# than imported because it is private: if the SDK's set grows, the cost is
+# a background task we stop following, not an ImportError at startup.
+DEFERRING_TASK_TYPES = frozenset({"local_agent", "local_workflow"})
 
 
 Emit = Callable[[Event], Awaitable[None]]
@@ -136,6 +149,30 @@ class ActiveTurn:
     cancelled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
     drain_watchdog: asyncio.Task[None] | None = None
+    # Task ids started but not yet finished. Non-empty at the result message
+    # means the run has not ended, only this turn has — see
+    # `EngineSession._drain_background`.
+    tasks_in_flight: set[str] = field(default_factory=set)
+
+    def note_task_flight(self, payload: Mapping[str, Any]) -> None:
+        """Track one ``subagentEvent`` against the in-flight task set.
+
+        The rule is the SDK's own (`Query._note_task_flight`), applied to the
+        translated payload rather than the message so this module keeps its
+        distance from the SDK's task dataclasses. A notification is what the
+        parent agent is woken by, so it counts as finished even when no
+        terminal status ever arrives — and a terminal status counts even when
+        no notification does, which is how `stop_task()` reports a kill.
+        """
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return
+        kind = payload.get("type")
+        if kind == "started":
+            if payload.get("task_type") in DEFERRING_TASK_TYPES:
+                self.tasks_in_flight.add(task_id)
+        elif kind == "notification" or payload.get("terminal"):
+            self.tasks_in_flight.discard(task_id)
 
     def to_dict(self) -> dict[str, Any]:
         """The ``ActiveStream`` shape a reconnecting client replays from."""
@@ -301,6 +338,9 @@ class EngineSession:
         self._cost = CostLedger()
         self._client: Any = None
         self._active_turn: ActiveTurn | None = None
+        # Consumes the stream between turns while a background task is still
+        # running. Never concurrent with a pump: see _stop_background_drain.
+        self._drain: asyncio.Task[None] | None = None
         # Guards connect/disconnect against each other; turn admission is
         # a synchronous check, not a lock, because a rejected turn must be
         # rejected rather than made to wait.
@@ -527,6 +567,7 @@ class EngineSession:
 
     async def disconnect(self) -> None:
         """Shut the session down as part of graceful shutdown."""
+        await self._stop_background_drain()
         async with self._lifecycle_lock:
             client, self._client = self._client, None
             self.health.connected = False
@@ -574,6 +615,10 @@ class EngineSession:
         turn that the engine is still running.
         """
         self.admit(turn.request_id)
+        # Before the client is touched: this turn's pump is about to become the
+        # stream's only consumer, and the previous turn's drain may still be on
+        # it.
+        await self._stop_background_drain()
         translator = TurnTranslator(turn.request_id)
         active = ActiveTurn(
             request_id=turn.request_id,
@@ -591,7 +636,12 @@ class EngineSession:
             watchdog = active.drain_watchdog
             if watchdog is not None and not watchdog.done():
                 watchdog.cancel()
+            # Cleared before the drain starts, so the next turn is admitted
+            # while a background agent is still being followed. Waiting for a
+            # background agent to finish before accepting a message would
+            # defeat the point of running one.
             self._active_turn = None
+            self._start_background_drain(active, emit)
 
     async def _send(self, turn: Turn) -> None:
         """Write the user turn to the CLI."""
@@ -619,21 +669,8 @@ class EngineSession:
         try:
             async for message in client.receive_response():
                 for event in translator.translate(message):
-                    if event.name == "engineHealth":
-                        # The translator only knows this turn; the full
-                        # record is session state, so fold it in here.
-                        self.health.note_mirror_gap()
-                        self.health.last_error = event.payload.get("error") or None
-                        event = Event("engineHealth", self.health.to_dict(), turn_scoped=False)
+                    event = self._fold_session_state(active, event)
                     if event.name == "streamComplete":
-                        # Same reason as engineHealth above: the translator
-                        # knows this turn, and what the turn *cost* is only
-                        # visible against the session's running total.
-                        event = Event(
-                            "streamComplete",
-                            self._price_turn(event.payload),
-                            turn_scoped=event.turn_scoped,
-                        )
                         result = event.payload
                     await self._emit(emit, event)
         except asyncio.CancelledError:
@@ -655,6 +692,130 @@ class EngineSession:
                 SessionLostError("The engine closed the stream before the turn finished."),
             )
         return result
+
+    def _fold_session_state(self, active: ActiveTurn, event: Event) -> Event:
+        """Complete one translated event with state only the session holds.
+
+        A ``TurnTranslator`` knows one turn. Two events need more than that,
+        and one needs to be *counted* as well as emitted, so all three are
+        finished here rather than in the translator — which keeps the pump and
+        the background drain agreeing on the arithmetic by construction.
+        """
+        if event.name == "engineHealth":
+            self.health.note_mirror_gap()
+            self.health.last_error = event.payload.get("error") or None
+            return Event("engineHealth", self.health.to_dict(), turn_scoped=False)
+        if event.name == "streamComplete":
+            # What a turn *cost* is only visible against the session's running
+            # total, and pricing advances that baseline — so every result is
+            # priced, including one the drain goes on to swallow.
+            return Event(
+                "streamComplete",
+                {
+                    **self._price_turn(event.payload),
+                    # Which background tasks this result did *not* end. The
+                    # browser settles a live subagent tab at the turn's result
+                    # and has no other way to tell "its terminal event never
+                    # arrived" from "it is still working" — and reporting the
+                    # second as the first is what puts an amber "status
+                    # unknown" LED on a subagent that goes on to succeed.
+                    "background_tasks": sorted(active.tasks_in_flight),
+                },
+                turn_scoped=event.turn_scoped,
+            )
+        if event.name == "subagentEvent":
+            active.note_task_flight(event.payload)
+        return event
+
+    # ------------------------------------------------------------------
+    # Background drain
+    # ------------------------------------------------------------------
+
+    def _start_background_drain(self, active: ActiveTurn, emit: Emit | None) -> None:
+        """Follow the stream past this turn's result, if anything is still on it."""
+        if not active.tasks_in_flight or active.cancelled or self._client is None:
+            return
+        logger.info(
+            "Turn %s finished with %d background task(s) still running; "
+            "following the stream past its result",
+            active.request_id,
+            len(active.tasks_in_flight),
+        )
+        self._drain = asyncio.create_task(
+            self._drain_background(active, emit), name=f"cc-drain-{active.request_id}"
+        )
+
+    async def _stop_background_drain(self) -> None:
+        """Give the stream back before another consumer takes it.
+
+        Two iterators over the SDK's message stream would split its messages
+        between them arbitrarily, so the drain must be gone — not merely asked
+        to go — before the next turn's pump starts.
+        """
+        task, self._drain = self._drain, None
+        if task is None or task.done():
+            return
+        logger.info("Ending the background drain; the stream has a new consumer")
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _drain_background(self, active: ActiveTurn, emit: Emit | None) -> None:
+        """Keep translating while background tasks outlive their turn.
+
+        **A result message ends a turn, not the run.** The SDK says so in as
+        many words — "Result received with N task(s) in flight; keeping stdin
+        open" — and goes on emitting for the tasks still going, plus main's
+        own reply once a task notification wakes it. ``receive_response()``
+        stops at the result regardless, so stopping with it left a background
+        subagent's entire life unread: an empty tab, an activity LED stuck at
+        "status unknown at turn end", a permission request attributed to no
+        turn at all, and main's closing answer missing — all of it written to
+        the transcript meanwhile, so it appeared only if the user reloaded.
+
+        Nothing was being lost to the buffer, which is why the symptom read as
+        a rendering bug: the SDK's stream is a 100-slot anyio buffer owned by
+        the client, so those messages sat there and a later iterator would
+        still get them. What was lost was *when* — they arrived attributed to
+        whatever turn happened to be reading next, long after they meant
+        anything live. This drain reads them while they still do.
+
+        Ends on a result message that arrives with the in-flight set empty,
+        which is the SDK's own definition of the run ending, or when
+        :meth:`_stop_background_drain` hands the stream to the next turn.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            async for message in client.receive_messages():
+                for event in active.translator.translate(message):
+                    event = self._fold_session_state(active, event)
+                    if event.name != "streamComplete":
+                        await self._emit(emit, event)
+                        continue
+                    # The turn's footer already went out and the browser has
+                    # already finished with it; a second one would re-complete
+                    # a completed turn. It is still priced above, so the cost
+                    # stays with the session rather than leaking into the next
+                    # turn's difference.
+                    if active.tasks_in_flight:
+                        continue
+                    logger.info(
+                        "Background work for turn %s finished; drain ending",
+                        active.request_id,
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never fatal: the turn is long over and the next one re-reads the
+            # stream from scratch. Losing the tail of a background agent is
+            # worth strictly less than a raise out of a detached task.
+            logger.exception(
+                "Background drain for turn %s failed; stopping it",
+                active.request_id,
+            )
 
     async def _fail_turn(
         self, active: ActiveTurn, emit: Emit | None, exc: BaseException
@@ -797,6 +958,7 @@ class EngineSession:
             f"The interrupted turn did not stop within {INTERRUPT_DRAIN_TIMEOUT:.0f}s; "
             f"the session was disconnected. Resume to continue this conversation."
         )
+        await self._stop_background_drain()
         client, self._client = self._client, None
         if client is not None:
             await _quiet_disconnect(client)

@@ -1318,6 +1318,87 @@ class TestCancel:
         assert "The turn ended" in result.message
         assert service.permissions.pending() == []
 
+    async def test_a_background_subagents_dialog_survives_the_turn(self, service):
+        """The turn-end sweep must not strand a subagent that is still working.
+
+        Main can finish while a background subagent is mid-task — the SDK
+        keeps stdin open and says so ("Result received with 1 task(s) in
+        flight"). Sweeping the subagent's dialog then denied a call it was
+        still blocked on, so its feed froze on a padlocked card and its tab's
+        LED stuck at "status unknown at turn end".
+        """
+        context = FakePermissionContext()
+        context.agent_id = "agent-7"
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool("Bash", {"command": "ls"}, context)
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await send(service)
+        await finish_turns(service)
+
+        assert not gate.done()
+        assert len(service.permissions.pending()) == 1
+
+        gate.cancel()
+        await asyncio.gather(gate, return_exceptions=True)
+
+    async def test_a_terminal_subagent_event_closes_its_dialog(self, service):
+        """What closes a spared dialog once the subagent stops working.
+
+        ``stop_task()`` reports ``status="killed"``, which reaches the service
+        as a terminal ``subagentEvent`` — the only signal that a subagent
+        blocked on a permission is not coming back.
+        """
+        context = FakePermissionContext()
+        context.agent_id = "agent-7"
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool("Bash", {"command": "ls"}, context)
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await service._dispatch(
+            Event("subagentEvent", {"agent_id": "agent-7", "terminal": True}),
+            REQUEST_ID,
+        )
+
+        result = await asyncio.wait_for(gate, timeout=1)
+        assert type(result).__name__ == "PermissionResultDeny"
+        assert "subagent that made this call ended" in result.message
+        assert service.permissions.pending() == []
+
+    async def test_a_live_subagent_event_leaves_the_dialog_alone(self, service):
+        """Only a terminal status sweeps. Progress is not an ending."""
+        context = FakePermissionContext()
+        context.agent_id = "agent-7"
+        service.session.active_request_id = REQUEST_ID
+        gate = asyncio.create_task(
+            service.permissions.can_use_tool("Bash", {"command": "ls"}, context)
+        )
+        for _ in range(500):
+            if service.permissions.pending():
+                break
+            await asyncio.sleep(0.002)
+
+        await service._dispatch(
+            Event("subagentEvent", {"agent_id": "agent-7", "terminal": False}),
+            REQUEST_ID,
+        )
+
+        assert not gate.done()
+        assert len(service.permissions.pending()) == 1
+
+        gate.cancel()
+        await asyncio.gather(gate, return_exceptions=True)
+
 
 # ---------------------------------------------------------------------------
 # State

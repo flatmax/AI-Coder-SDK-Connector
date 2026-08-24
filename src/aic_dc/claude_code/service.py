@@ -1042,8 +1042,16 @@ class ClaudeCodeService:
             # turn. `cancel_streaming` normally gets here first; this covers
             # every other way a turn can end with a request still open — a
             # lost session, an engine crash, a drain that timed out.
+            #
+            # `spare_subagents` because a background subagent outlives this
+            # turn: the SDK keeps stdin open with tasks in flight past the
+            # result message, so a request it is blocked on is live work,
+            # not a leftover dialog. `cancel_for_agent` closes those when the
+            # subagent ends (`permissions.py` § spare_subagents).
             try:
-                await self.permissions.cancel_for_turn(turn.request_id)
+                await self.permissions.cancel_for_turn(
+                    turn.request_id, spare_subagents=True
+                )
             except Exception:
                 logger.exception(
                     "Could not sweep pending permissions for turn %s",
@@ -2513,12 +2521,49 @@ class ClaudeCodeService:
         Turn-scoped events take the request ID as their first argument; the
         rest take only the payload.
         """
-        if self._event_callback is None:
+        if self._event_callback is not None:
+            args: tuple[Any, ...] = (
+                (event.payload,)
+                if not event.turn_scoped
+                else (request_id, event.payload)
+            )
+            try:
+                await self._event_callback(event.name, *args)
+            except Exception as exc:
+                logger.warning("Broadcast of %s failed: %s", event.name, exc)
+
+        # After the browsers have the event rather than before, and outside
+        # the callback check because it is engine state, not display: a
+        # subagent that ends with a dialog still open produces two events,
+        # and the terminal status is what explains the denial that follows.
+        if event.name == "subagentEvent":
+            await self._sweep_ended_subagent(event.payload)
+
+    async def _sweep_ended_subagent(self, payload: Any) -> None:
+        """Close any permission dialog a subagent left open when it ended.
+
+        The other half of ``cancel_for_turn(spare_subagents=True)``. Sparing
+        a subagent's request at turn end is only safe because something else
+        closes it when the subagent stops working, and this is that
+        something: any terminal task status — ``killed`` from ``stop_task()``
+        most of all — denies what that subagent was still waiting on.
+        """
+        if not isinstance(payload, dict) or not payload.get("terminal"):
             return
-        args: tuple[Any, ...] = (
-            (event.payload,) if not event.turn_scoped else (request_id, event.payload)
-        )
+        agent_id = payload.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            return
         try:
-            await self._event_callback(event.name, *args)
-        except Exception as exc:
-            logger.warning("Broadcast of %s failed: %s", event.name, exc)
+            cancelled = await self.permissions.cancel_for_agent(agent_id)
+        except Exception:
+            logger.exception(
+                "Could not sweep pending permissions for subagent %s", agent_id
+            )
+            return
+        if cancelled:
+            logger.info(
+                "Subagent %s ended with %d permission request(s) unanswered; "
+                "they were denied",
+                agent_id,
+                cancelled,
+            )

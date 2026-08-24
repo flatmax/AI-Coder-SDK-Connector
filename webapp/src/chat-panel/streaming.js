@@ -671,6 +671,13 @@ export function onStreamComplete(panel, event) {
   const ownerTab = panel._tabs.get(ownerTabId);
   if (!ownerTab) return;
   const ownerIsActive = ownerTabId === panel._activeTabId;
+  // Task ids this result did *not* end — see `settleLiveSubagentTabs` and the
+  // teardown below. Absent on a synthetic footer the browser built itself, and
+  // on any engine older than the background drain, so an empty list is the
+  // safe reading: tear the turn down exactly as before.
+  const backgroundTasks = Array.isArray(result?.background_tasks)
+    ? result.background_tasks.filter((id) => typeof id === 'string' && id)
+    : [];
 
   if (requestId === ownerTab.currentRequestId) {
     // Drain anything staged but not yet applied: the engine can send the
@@ -726,21 +733,33 @@ export function onStreamComplete(panel, event) {
     if (result?.deferred_tool_use) emitDeferredToolToast(panel, result);
 
     ownerTab.lastEditOutcome = computeTurnOutcome(result, files);
-    // Every subagent tab still live settles with the turn. A subagent cannot
-    // outlive the turn that spawned it, so one still marked live here is one
-    // whose terminal event never arrived — its outcome is *unknown*, and the
-    // spec is explicit that it must never be reported as completed
-    // (specs5/5-webapp/subagent-browser.md § Status LEDs). The tabs stay in
-    // the strip for the rest of the turn; the next send clears them.
+    // Subagent tabs settle with the turn, *except* the ones the engine says
+    // are still running. A result message ends a turn, not the run — a
+    // background subagent outlives the turn that spawned it — so one still
+    // marked live here is either a task whose terminal event never arrived
+    // (outcome *unknown*, never "completed", per
+    // specs5/5-webapp/subagent-browser.md § Status LEDs) or one still working.
+    // Only `background_tasks` distinguishes them. The tabs stay in the strip
+    // for the rest of the turn; the next send clears them.
     settleLiveSubagentTabs(
       panel,
       requestId,
       ownerTab.lastEditOutcome.status === 'error',
+      backgroundTasks,
     );
-    resetTurnBlocks(turn);
+    // The turn's *presentation* is finished either way — footer rendered,
+    // spinner stopped, composer released — but a turn with background work
+    // still on the stream keeps the state that work arrives through: emptying
+    // `turnBlocks` or clearing `currentRequestId` would route the subagent's
+    // remaining blocks nowhere (`findTabForRequest` matches on
+    // `currentRequestId` alone) and its tab would stay as empty as it looked
+    // before the engine started following it.
+    if (backgroundTasks.length === 0) {
+      resetTurnBlocks(turn);
+      ownerTab.currentRequestId = null;
+    }
     ownerTab.streaming = false;
     ownerTab.streamingContent = '';
-    ownerTab.currentRequestId = null;
     ownerTab.streamStartedAt = null;
     maybeStopStreamTimerTick(panel);
     // Remember the completed request ID so post-turn housekeeping — a

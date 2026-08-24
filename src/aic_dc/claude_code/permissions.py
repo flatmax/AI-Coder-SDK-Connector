@@ -17,12 +17,16 @@ Three things about this module are load-bearing
 - **Every request resolves exactly once, and the SDK always gets a
   result.** By a localhost decision, by the no-localhost deadline, by
   :meth:`PermissionBroker.cancel_for_turn` when the turn is stopped or
-  ends, or by :meth:`PermissionBroker.cancel_all` at teardown. A request
-  that resolved twice would answer one control request and leave another
-  hanging; one that never resolved would wedge the turn. Note what is
-  *not* on that list: a wall-clock deadline while somebody is there to
-  answer. A request outlives a coffee break, and the way out of one
-  nobody wants to answer is Stop, not a timer — see § Deadline.
+  ends, by :meth:`PermissionBroker.cancel_for_agent` when the subagent
+  that made the call ends, or by :meth:`PermissionBroker.cancel_all` at
+  teardown. A request that resolved twice would answer one control
+  request and leave another hanging; one that never resolved would wedge
+  the turn. Note what is *not* on that list: a wall-clock deadline while
+  somebody is there to answer. A request outlives a coffee break, and
+  the way out of one nobody wants to answer is Stop, not a timer — see
+  § Deadline. Nor is the end of the turn, for a **background subagent**:
+  it outlives its turn, so its request does too (``cancel_for_turn``
+  § ``spare_subagents``).
 - **Only localhost may answer.** ``can_use_tool`` authorises arbitrary
   ``Bash``; a remote participant able to answer it would make
   collaboration mode a remote-code-execution grant. The gate itself lives
@@ -211,7 +215,33 @@ DENY_TURN_ENDED_REASON = (
     "denied and never made. This is not a refusal on the merits."
 )
 
+DENY_AGENT_ENDED_REASON = (
+    "The subagent that made this call ended before the permission request was "
+    "answered, so the call was denied and never made. This is not a refusal on "
+    "the merits."
+)
+
 DENY_DEFAULT_REASON = "The user denied this call without giving a reason."
+
+# Why the *session* denied a request, for the ``permissionResolved`` payload.
+# The action alone cannot say: Stop, the end of a turn and the end of a
+# subagent all resolve as ``cancelled``, and a browser that guessed from the
+# action told the user "the turn it belonged to ended" when they had pressed
+# Stop. The reason text says which, but it is a sentence written for the
+# model; this is the same fact in a form a UI can switch on.
+CAUSE_STOPPED = "stopped"
+CAUSE_TURN_ENDED = "turn_ended"
+CAUSE_AGENT_ENDED = "agent_ended"
+CAUSE_SHUTDOWN = "shutdown"
+
+# Which cause goes with each of the reasons above, so a caller that passes a
+# custom `reason` still gets the cause right without having to name it.
+_REASON_CAUSES = {
+    DENY_CANCELLED_REASON: CAUSE_STOPPED,
+    DENY_TURN_ENDED_REASON: CAUSE_TURN_ENDED,
+    DENY_AGENT_ENDED_REASON: CAUSE_AGENT_ENDED,
+    DENY_SHUTDOWN_REASON: CAUSE_SHUTDOWN,
+}
 
 _DECISION_ACTIONS = frozenset(
     {"allow", "allow_always", "allow_mode", "deny", "deny_interrupt"}
@@ -244,6 +274,11 @@ class PendingPermission:
     request_id: str | None
     tool_name: str
     tool_use_id: str
+    # The subagent that made the call — the SDK's `context.agent_id`, absent
+    # for the main scope. Load-bearing at turn end: a background subagent
+    # outlives the turn that spawned it, so its request must survive the
+    # turn-end sweep (see `cancel_for_turn`).
+    agent_id: str | None
     payload: dict[str, Any]
     future: asyncio.Future[dict[str, Any]]
     # ``None`` while a localhost client is connected: the request waits as
@@ -1351,6 +1386,7 @@ class PermissionBroker:
             request_id=request_id,
             tool_name=tool_name,
             tool_use_id=tool_use_id,
+            agent_id=getattr(context, "agent_id", None) or None,
             payload=payload,
             future=loop.create_future(),
             expires_at=expires_at,
@@ -1468,16 +1504,14 @@ class PermissionBroker:
         the CLI's own exit.
         """
         for pending in list(self._pending.values()):
-            if pending.resolved or pending.future.done():
-                continue
-            pending.resolved = True
-            pending.resolved_by = "shutdown"
-            pending.future.set_result({"action": "deny", "reason": reason})
-            self._remember(pending.permission_id, "shutdown")
-            await self._announce(pending, action="shutdown", reason=reason, rule=None)
+            await self._deny_unanswered(pending, "shutdown", reason)
 
     async def cancel_for_turn(
-        self, request_id: str | None, *, reason: str = DENY_TURN_ENDED_REASON
+        self,
+        request_id: str | None,
+        *,
+        reason: str = DENY_TURN_ENDED_REASON,
+        spare_subagents: bool = False,
     ) -> int:
         """Deny everything still pending for one turn. Returns how many.
 
@@ -1488,11 +1522,30 @@ class PermissionBroker:
           blocked on, so releasing it first is what lets the CLI act on the
           interrupt at all, and lets the drain watchdog see a result inside
           its window instead of declaring the session lost
-          (``session.py`` § Cancellation).
-        - the end of every turn, as the backstop. A dialog must not outlive
-          the turn it belongs to. Before this it could: an interrupted turn
-          left one on screen until the decision deadline expired, and then
-          announced a denial for a turn that had already finished.
+          (``session.py`` § Cancellation). Stop means stop, so this caller
+          sweeps subagents too.
+        - the end of every turn, as the backstop, with
+          ``spare_subagents=True``. A dialog must not outlive the *work* it
+          belongs to. Before this it could: an interrupted turn left one on
+          screen until the decision deadline expired, and then announced a
+          denial for a turn that had already finished.
+
+        ``spare_subagents`` is the difference between those two, and it
+        exists because a background subagent legitimately outlives the turn
+        that spawned it — the SDK says so itself, keeping stdin open with
+        tasks in flight after the result message. Sweeping such a request at
+        turn end denied a call the subagent was still waiting on, which
+        stranded it: the feed froze on a padlocked tool card, the tab's LED
+        stuck at "status unknown at turn end", and nothing said why, because
+        the denial went out under the *previous* turn's id.
+
+        A subagent-owned request that is still pending means a subagent that
+        is still live, because a subagent blocked on a permission is blocked,
+        not finished. So ownership alone is the test; there is no separate
+        liveness registry to fall out of step with the SDK. What closes a
+        spared request instead: the user answering it,
+        :meth:`cancel_for_agent` when the subagent reaches a terminal
+        status, Stop, or :meth:`cancel_all` at teardown.
 
         A request raised outside a turn carries no ``request_id`` and
         belongs to no turn, so nothing sweeps it but shutdown.
@@ -1503,17 +1556,81 @@ class PermissionBroker:
         for pending in list(self._pending.values()):
             if pending.request_id != request_id:
                 continue
-            if pending.resolved or pending.future.done():
+            if spare_subagents and pending.agent_id:
+                if not (pending.resolved or pending.future.done()):
+                    logger.info(
+                        "Permission %s for %s left open past the end of turn %s: "
+                        "subagent %s is still waiting on it",
+                        pending.permission_id,
+                        pending.tool_name,
+                        request_id,
+                        pending.agent_id,
+                    )
                 continue
-            pending.resolved = True
-            pending.resolved_by = "cancelled"
-            pending.future.set_result({"action": "deny", "reason": reason})
-            self._remember(pending.permission_id, "cancelled")
-            await self._announce(
-                pending, action="cancelled", reason=reason, rule=None
-            )
-            cancelled += 1
+            if await self._deny_unanswered(pending, "cancelled", reason):
+                cancelled += 1
         return cancelled
+
+    async def cancel_for_agent(
+        self, agent_id: str | None, *, reason: str = DENY_AGENT_ENDED_REASON
+    ) -> int:
+        """Deny what one subagent left pending. Returns how many.
+
+        The other half of ``cancel_for_turn(spare_subagents=True)``: sparing
+        a request because its subagent is still working needs a way to close
+        it when that stops being true. A subagent cannot *finish* while
+        blocked on a permission, but it can be killed — ``stop_task()``
+        reports ``status="killed"`` — and it can go terminal in ways the SDK
+        adds later, so the service calls this on any terminal task status.
+
+        Best-effort by design: not every ``Task*`` message carries an
+        ``agent_id``, so a subagent that ends without one is closed by Stop
+        or by teardown instead. Cheap to call for an agent with nothing
+        pending, which is the common case.
+        """
+        if not agent_id:
+            return 0
+        cancelled = 0
+        for pending in list(self._pending.values()):
+            if pending.agent_id != agent_id:
+                continue
+            if await self._deny_unanswered(pending, "cancelled", reason):
+                cancelled += 1
+        return cancelled
+
+    async def _deny_unanswered(
+        self, pending: PendingPermission, resolved_by: str, reason: str
+    ) -> bool:
+        """Deny one pending request on the session's behalf. Idempotent.
+
+        The shared body of the three sweeps. It logs, which the sweeps did
+        not: a request that was asked and then swept left an ``asked`` line
+        in the log with no matching resolution, so the one failure mode that
+        needed the log most — a dialog answered by the server rather than by
+        the user — was the one it did not record.
+        """
+        if pending.resolved or pending.future.done():
+            return False
+        pending.resolved = True
+        pending.resolved_by = resolved_by
+        pending.future.set_result({"action": "deny", "reason": reason})
+        self._remember(pending.permission_id, resolved_by)
+        logger.info(
+            "Permission %s for %s denied as %s by the session%s: %s",
+            pending.permission_id,
+            pending.tool_name,
+            resolved_by,
+            f" (subagent {pending.agent_id})" if pending.agent_id else "",
+            reason,
+        )
+        await self._announce(
+            pending,
+            action=resolved_by,
+            reason=reason,
+            rule=None,
+            cause=_REASON_CAUSES.get(reason),
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Resolution
@@ -1885,6 +2002,7 @@ class PermissionBroker:
         reason: str | None,
         rule: dict[str, Any] | None,
         mode: dict[str, Any] | None = None,
+        cause: str | None = None,
     ) -> None:
         """Close the dialog on every client, with attribution."""
         try:
@@ -1895,8 +2013,15 @@ class PermissionBroker:
                         "permission_id": pending.permission_id,
                         "request_id": pending.request_id,
                         "tool_use_id": pending.tool_use_id,
+                        "agent_id": pending.agent_id,
                         "action": action,
                         "reason": reason,
+                        # Why the *session* denied it, when it was the session
+                        # and not a person. `action` cannot say — Stop, a turn
+                        # ending and a subagent ending are all "cancelled" —
+                        # so a client that guessed from the action told the
+                        # user the wrong one. `None` for a human decision.
+                        "cause": cause,
                         "resolved_by": pending.resolved_by or "unknown",
                         "rule_written": rule,
                         # What the decision changed beyond this one call, so a

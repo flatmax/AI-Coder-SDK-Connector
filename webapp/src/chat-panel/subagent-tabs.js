@@ -440,23 +440,32 @@ export function settleSubagentTab(panel, tab, options = {}) {
 /**
  * Settle every subagent tab still live on a parent request.
  *
- * Called from `streamComplete`. A subagent cannot outlive the turn that
- * spawned it — the CLI ends the turn when its tasks are done — so one still
- * marked live here is one whose terminal event never arrived, not one still
- * working. Its status is *unknown*, which is a distinct thing to say and the
- * reason the amber LED state exists.
+ * Called from `streamComplete`. A subagent still marked live here is one whose
+ * terminal event never arrived, not one still working, so its status is
+ * *unknown* — a distinct thing to say and the reason the amber LED exists.
+ *
+ * That reading is only true of the tasks this result actually ended, which is
+ * why `stillRunning` exists. **A result message ends a turn, not the run**: a
+ * background subagent outlives the turn that spawned it, the engine keeps
+ * following it (`session.py` § `_drain_background`), and it names what is still
+ * going in `background_tasks`. Settling those was this bug's most visible face
+ * — an amber "status unknown at turn end" LED on a subagent that went on to
+ * finish successfully seconds later, on a tab whose feed was empty because
+ * nothing after the result had been read.
  *
  * Tabs whose `requestId` names a different turn are left alone: nothing
  * currently produces them (subagent tabs are cleared at each send) but
  * settling another turn's feed on this turn's result would be wrong if
  * anything ever did.
  */
-export function settleLiveSubagentTabs(panel, requestId, errored) {
+export function settleLiveSubagentTabs(panel, requestId, errored, stillRunning = []) {
+  const running = new Set(Array.isArray(stillRunning) ? stillRunning : []);
   let changed = false;
   for (const { tab } of subagentTabs(panel)) {
     const sub = tab.subagent;
     if (sub.settled) continue;
     if (requestId && sub.requestId && sub.requestId !== requestId) continue;
+    if (sub.task_id && running.has(sub.task_id)) continue;
     const unknown = !sub.terminal;
     if (settleSubagentTab(panel, tab, {
       unknown,

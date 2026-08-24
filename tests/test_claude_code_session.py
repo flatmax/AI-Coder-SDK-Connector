@@ -31,7 +31,9 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
     TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
 )
 
@@ -87,6 +89,13 @@ class FakeClient:
     ``messages`` may hold SDK message objects or callables; a callable is
     invoked when the pump reaches it, which is how a mid-stream failure or
     a mid-stream assertion is injected.
+
+    The two receive methods share one cursor, because the real client's
+    stream is a buffer *it* owns: ``receive_response()`` returning at a
+    result does not discard what is behind it, and the next iterator
+    resumes rather than replaying. The background drain depends on exactly
+    that, so a fake that replayed from the top would pass a test the SDK
+    would fail.
     """
 
     instances: list[FakeClient] = []
@@ -126,8 +135,32 @@ class FakeClient:
         else:
             self.queries.append(prompt)
 
+    @property
+    def messages(self):
+        return self._messages
+
+    @messages.setter
+    def messages(self, value):
+        """Assigning a script rewinds; appending to one does not.
+
+        A test that hands the client a new list is staging the next turn,
+        which on the real client is a new run's worth of messages.
+        """
+        self._messages = value
+        self._cursor = 0
+
     async def receive_response(self):
-        for message in self.messages:
+        """To the first result message and no further, like the SDK's."""
+        async for message in self.receive_messages():
+            yield message
+            if isinstance(message, ResultMessage):
+                return
+
+    async def receive_messages(self):
+        """Everything, from wherever the last iterator stopped."""
+        while self._cursor < len(self.messages):
+            message = self.messages[self._cursor]
+            self._cursor += 1
             if callable(message):
                 produced = message()
                 if inspect.isawaitable(produced):
@@ -1461,3 +1494,277 @@ def _raise(exc):
         raise exc
 
     return _fail
+
+
+def task_started(task_id="task-1", *, task_type="local_agent", agent_id="agent-7"):
+    return TaskStartedMessage(
+        subtype="task_started",
+        data={"agent_id": agent_id},
+        task_id=task_id,
+        description="Audit the tests",
+        uuid="u",
+        session_id="sess-1",
+        tool_use_id=f"toolu_{task_id}",
+        task_type=task_type,
+    )
+
+
+def task_notification(task_id="task-1"):
+    return TaskNotificationMessage(
+        subtype="task_notification",
+        data={"agent_id": "agent-7"},
+        task_id=task_id,
+        status="completed",
+        output_file="/tmp/out.md",
+        summary="done",
+        uuid="u2",
+        session_id="sess-1",
+        tool_use_id=f"toolu_{task_id}",
+    )
+
+
+def task_updated(task_id="task-1", status="completed"):
+    return TaskUpdatedMessage(
+        subtype="task_updated",
+        data={"agent_id": "agent-7"},
+        task_id=task_id,
+        patch={"status": status},
+        status=status,
+        session_id="sess-1",
+        uuid="u3",
+    )
+
+
+class TestBackgroundDrain:
+    """A result message ends a turn, not the run.
+
+    The SDK is explicit about it — "Result received with N task(s) in
+    flight; keeping stdin open" — and goes on emitting for the background
+    tasks still running, plus main's own reply once a task notification
+    wakes it. ``receive_response()`` stops at the result regardless, so
+    stopping with it left every one of those messages unread until some
+    later turn happened to consume them: an empty subagent tab, an activity
+    LED stuck on "status unknown at turn end", a permission request
+    attributed to no turn, and main's closing answer missing.
+
+    What makes the symptom subtle is that nothing was *lost*. The stream is
+    a buffer the client owns, so the messages sat in it. What was lost was
+    *when* they arrived.
+    """
+
+    async def drained(self, engine, messages):
+        """Run a turn on ``messages``, then let its drain finish."""
+        events: list[Event] = []
+
+        async def emit(event):
+            events.append(event)
+
+        client = client_of(engine)
+        client.messages = messages
+        result = await engine.run_turn(text_turn(), emit)
+        drain = engine._drain
+        if drain is not None:
+            await drain
+        return events, result
+
+    async def test_a_background_subagents_life_is_read_past_the_result(self, engine):
+        """The bug, end to end: everything after the turn's result was unread
+        while the CLI wrote all of it to the transcript, so a background
+        subagent's work appeared only if the user reloaded the page."""
+        events, _ = await self.drained(
+            engine,
+            [
+                DEFAULT_MESSAGES[0],
+                task_started(),
+                result_message(),
+                # Everything below here used to go unread.
+                AssistantMessage(
+                    content=[TextBlock(text="`git log` says")],
+                    model="m",
+                    message_id="msg_late",
+                ),
+                task_notification(),
+                result_message(),
+            ],
+        )
+        late = [e for e in events if e.payload.get("content") == "`git log` says"]
+        assert late, "the subagent's own output never reached the browser"
+        assert [e.payload["type"] for e in events if e.name == "subagentEvent"] == [
+            "started",
+            "notification",
+        ]
+
+    async def test_the_drain_ends_on_a_result_with_nothing_left_in_flight(self, engine):
+        """The SDK's own definition of the run ending, so the stream is given
+        back rather than held until the next turn takes it."""
+        await self.drained(
+            engine,
+            [task_started(), result_message(), task_notification(), result_message()],
+        )
+        assert engine._drain is not None
+        assert engine._drain.done()
+
+    async def test_a_second_background_task_keeps_the_drain_going(self, engine):
+        """One task finishing is not the run finishing. The intermediate
+        result is main replying to the first notification, not the end."""
+        events, _ = await self.drained(
+            engine,
+            [
+                task_started("task-1"),
+                task_started("task-2"),
+                result_message(),
+                task_notification("task-1"),
+                result_message(),  # main answered the first notification
+                task_notification("task-2"),
+                result_message(),  # now nothing is left
+            ],
+        )
+        kinds = [e.payload["task_id"] for e in events if e.name == "subagentEvent"]
+        assert kinds == ["task-1", "task-2", "task-1", "task-2"]
+
+    async def test_the_drain_never_re_emits_a_completion(self, engine):
+        """The browser has already finished with this turn; a second footer
+        would finish it again. It is still priced, so the cost of the
+        continuation stays with the session instead of leaking into the next
+        turn's difference."""
+        events, _ = await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(total_cost_usd=0.10),
+                task_notification(),
+                result_message(total_cost_usd=0.30),
+            ],
+        )
+        assert [e.name for e in events].count("streamComplete") == 1
+        # The swallowed footer still moved the baseline: the next turn is
+        # differenced against 0.30, not against the 0.10 the browser saw.
+        _, later = await self.drained(engine, [result_message(total_cost_usd=0.34)])
+        assert later["turn_cost_usd"] == pytest.approx(0.04, abs=1e-9)
+
+    async def test_a_completion_names_the_tasks_it_did_not_end(self, engine):
+        """The browser settles live subagent tabs at the result and cannot
+        otherwise tell "its terminal event never arrived" from "it is still
+        working" — and calling the second the first is what puts an amber
+        "status unknown" LED on a subagent that goes on to succeed."""
+        _, result = await self.drained(
+            engine,
+            [task_started(), result_message(), task_notification(), result_message()],
+        )
+        assert result["background_tasks"] == ["task-1"]
+
+    async def test_a_turn_that_ended_everything_says_so_with_an_empty_list(self, engine):
+        _, result = await self.drained(
+            engine, [task_started(), task_notification(), result_message()]
+        )
+        assert result["background_tasks"] == []
+        assert engine._drain is None
+
+    async def test_an_ordinary_turn_starts_no_drain(self, engine):
+        """Nothing in flight, nothing to follow: the common case is untouched."""
+        await self.drained(engine, list(DEFAULT_MESSAGES))
+        assert engine._drain is None
+
+    async def test_a_bash_task_is_not_a_reason_to_keep_reading(self, engine):
+        """A slow shell command is a task too, but the engine does not hold
+        the run open for one — only ``DEFERRING_TASK_TYPES`` do."""
+        _, result = await self.drained(
+            engine, [task_started(task_type="local_bash"), result_message()]
+        )
+        assert result["background_tasks"] == []
+        assert engine._drain is None
+
+    async def test_a_kill_ends_the_drain_with_no_notification_at_all(self, engine):
+        """`stop_task()` reports `status: "killed"` through `updated` and sends
+        no notification, so a terminal status has to count on its own."""
+        await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(),
+                task_updated(status="killed"),
+                result_message(),
+            ],
+        )
+        assert engine._drain.done()
+
+    async def test_a_cancelled_turn_is_not_followed(self, engine):
+        """Stop is the user saying they are done with this work."""
+        client = client_of(engine)
+        client.messages = [task_started(), result_message()]
+
+        async def cancel_mid_turn():
+            await engine.interrupt(REQUEST_ID)
+
+        client.messages = [task_started(), cancel_mid_turn, result_message()]
+        await engine.run_turn(text_turn())
+        assert engine._drain is None
+
+    async def test_the_next_turn_takes_the_stream_back(self, engine):
+        """Two iterators over one stream would split its messages between
+        them, so the drain has to be gone — not merely asked to go — before
+        the next turn's pump starts."""
+        release = asyncio.Event()
+
+        async def hang():
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [task_started(), result_message(), hang]
+        await engine.run_turn(text_turn())
+        drain = engine._drain
+        assert drain is not None and not drain.done()
+
+        client.messages = list(DEFAULT_MESSAGES)
+        await engine.run_turn(text_turn())
+        assert drain.cancelled()
+        assert engine._drain is None
+
+    async def test_a_disconnect_ends_the_drain(self, engine):
+        """Otherwise shutdown waits on a task reading a stream that is going."""
+        release = asyncio.Event()
+
+        async def hang():
+            await release.wait()
+
+        client = client_of(engine)
+        client.messages = [task_started(), result_message(), hang]
+        await engine.run_turn(text_turn())
+        drain = engine._drain
+        await engine.disconnect()
+        assert drain.cancelled()
+        assert engine._drain is None
+
+    async def test_a_failing_drain_does_not_raise_out_of_a_detached_task(self, engine):
+        """The turn is long over; losing a background agent's tail is worth
+        strictly less than an unretrieved exception."""
+        events, _ = await self.drained(
+            engine,
+            [task_started(), result_message(), _raise(RuntimeError("boom"))],
+        )
+        assert engine._drain.exception() is None
+        # The turn's own footer still went out before any of this.
+        assert [e.name for e in events].count("streamComplete") == 1
+
+    async def test_a_notification_finishes_a_task_with_no_status(self, engine):
+        """What the parent agent is woken by is the notification, so it counts
+        as finished on its own — the SDK's rule, and ours has to match or the
+        drain outlives the run."""
+        active = session_module.ActiveTurn(
+            request_id=REQUEST_ID,
+            translator=session_module.TurnTranslator(REQUEST_ID),
+            started_at="2026-08-14T00:00:00Z",
+        )
+        active.note_task_flight(
+            {"type": "started", "task_id": "t", "task_type": "local_agent"}
+        )
+        assert active.tasks_in_flight == {"t"}
+        active.note_task_flight({"type": "notification", "task_id": "t"})
+        assert active.tasks_in_flight == set()
+
+    def test_the_sdks_deferring_task_types_still_match_ours(self):
+        """Copied rather than imported because it is private, which only works
+        if a divergence is noticed here."""
+        from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
+
+        assert session_module.DEFERRING_TASK_TYPES == DEFERRING_TASK_TYPES

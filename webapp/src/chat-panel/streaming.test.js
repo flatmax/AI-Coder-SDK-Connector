@@ -846,6 +846,162 @@ describe('ChatPanel agent tabs', () => {
     expect(done.querySelector('.subagent-summary').textContent)
       .toContain('no issues found');
   });
+
+  // -------------------------------------------------------------------
+  // Background subagents outliving their turn
+  // -------------------------------------------------------------------
+  //
+  // A result message ends a turn, not the run. A subagent spawned with
+  // `run_in_background` keeps going past it, the engine keeps following it
+  // (`session.py` § `_drain_background`), and the result names what is still
+  // going in `background_tasks`.
+  //
+  // Reading that list as "nothing is running" produced the pair of symptoms
+  // this suite pins: an amber "status unknown" LED on a subagent that went on
+  // to succeed, and an empty feed behind it — the second because tearing the
+  // turn down clears `currentRequestId`, and `findTabForRequest` matches on
+  // that alone, so every later block for the turn was unroutable.
+
+  async function backgroundTurn(panel) {
+    const reqId = await startMainStream(panel);
+    pushEvent('subagent-event', {
+      requestId: reqId,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        tool_use_id: 'toolu_task',
+        description: 'describe git log --stat',
+        task_type: 'local_agent',
+        status: 'running',
+      },
+    });
+    await settle(panel);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'dispatched',
+        terminal_reason: 'completed',
+        background_tasks: ['task-1'],
+      },
+    });
+    await settle(panel);
+    return reqId;
+  }
+
+  function subagentTab(panel) {
+    for (const tab of panel._tabs.values()) {
+      if (tab.subagent) return tab;
+    }
+    return null;
+  }
+
+  it('a still-running background subagent is not settled by the turn', async () => {
+    const p = mountPanel();
+    await backgroundTurn(p);
+    const tab = subagentTab(p);
+    expect(tab).toBeTruthy();
+    expect(tab.subagent.settled).toBe(false);
+    // "unknown" is the amber LED. It is a claim about a subagent whose
+    // terminal event never arrived, and saying it about one that is simply
+    // still working is a lie the user then watches get contradicted.
+    expect(tab.subagent.unknown).toBe(false);
+    expect(tab.streaming).toBe(true);
+  });
+
+  it('the turn keeps the routing state its background work arrives through', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    // Main's own presentation is finished — footer rendered, composer free.
+    expect(p._streaming).toBe(false);
+    expect(p.messages.at(-1).content).toBe('dispatched');
+    // But the turn is still addressable, which is what makes the events
+    // below land anywhere at all.
+    expect(p._tabs.get('main').currentRequestId).toBe(reqId);
+  });
+
+  it('a background subagent’s later blocks reach its feed', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    pushEvent('tool-use', {
+      requestId: reqId,
+      data: {
+        tool_use_id: 'toolu_bash',
+        name: 'Bash',
+        input: { command: 'git log --stat' },
+        agent_id: 'toolu_task',
+      },
+    });
+    await settle(p);
+    const tab = subagentTab(p);
+    const commands = tab.turnBlocks.blocks
+      .map((b) => b.tool?.input?.command)
+      .filter(Boolean);
+    expect(commands).toContain('git log --stat');
+  });
+
+  it('its terminal event settles it after the turn has finished', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    pushEvent('subagent-event', {
+      requestId: reqId,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        status: 'completed',
+        terminal: true,
+        summary: 'listed 1 commit',
+      },
+    });
+    await settle(p);
+    const tab = subagentTab(p);
+    expect(tab.subagent.settled).toBe(true);
+    // Settled by its own outcome, so the LED reads completed rather than
+    // amber — the whole point of not settling it early.
+    expect(tab.subagent.unknown).toBe(false);
+    expect(tab.subagent.status).toBe('completed');
+  });
+
+  it('a turn with nothing left running is torn down exactly as before', async () => {
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('subagent-event', {
+      requestId: reqId,
+      data: {
+        task_id: 'task-1',
+        agent_id: 'agent-1',
+        description: 'quick look',
+        task_type: 'local_agent',
+        status: 'running',
+      },
+    });
+    await settle(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'done',
+        terminal_reason: 'completed',
+        background_tasks: [],
+      },
+    });
+    await settle(p);
+    expect(p._tabs.get('main').currentRequestId).toBeNull();
+    // No terminal event ever arrived for this one, and the turn really did
+    // end it — so amber is the honest reading here.
+    expect(subagentTab(p).subagent.unknown).toBe(true);
+  });
+
+  it('a completion with no background_tasks field tears the turn down', async () => {
+    // Every synthetic footer the browser builds itself omits it, as does any
+    // engine without the drain. An empty list has to be the safe reading.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: 'done', terminal_reason: 'completed' },
+    });
+    await settle(p);
+    expect(p._tabs.get('main').currentRequestId).toBeNull();
+  });
 });
 
 // The `onStreamRetry` suite stood here until conversion phase 3. It asserted
