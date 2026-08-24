@@ -222,8 +222,17 @@ So a null cost never comes from the engine — every one in this codebase is a f
 or a replayed turn whose cost the transcript does not record. Billing mode is not visible here at all;
 `EngineHealth.credential_source` is the only signal for it.
 
-Because the figure is cumulative, **this turn's cost is a difference against the previous result**. The
-baseline outlives the turn, so it lives in `EngineSession` (`aic_dc/claude_code/cost.py`), folded into
+Because the figure is cumulative, **this turn's cost is a difference against where the session's total
+stood when the turn was admitted** — not against the previous *result*. The two are the same number for
+a turn that ends once, which is nearly all of them. They part company when a background subagent is in
+flight: a result message ends a turn, not the run, so the engine goes on to send further results for the
+same request, and the subagent's tokens are spent *after* the first one. Differencing per result would
+put most of a delegated turn's cost into an intermediate footer, and the footer the browser ends up
+rendering is the *last* result's. Anchoring at admission instead (`CostLedger.start_turn`) makes each
+result the turn's running total, so the last one priced is the one the footer should carry — see
+[`session.md` § Every result the drain reads is emitted](session.md#every-result-the-drain-reads-is-emitted-flagged-continuation).
+
+The baseline outlives the turn, so it lives in `EngineSession` (`aic_dc/claude_code/cost.py`), folded into
 `streamComplete` by the pump exactly as `engineHealth` already is — a `TurnTranslator` is one turn's
 worth of state and could not hold it, and a browser holding it would lose it on reconnect and disagree
 between clients. Three per-turn fields are added beside the engine's cumulative ones, never replacing
@@ -238,7 +247,10 @@ them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
   *no evidence* rather than free.
 
 An `unpriced` result deliberately does **not** advance the baseline, so spend we could not attribute
-lands on the next turn we can price rather than going missing or turning a later delta negative.
+lands on the next turn we can price rather than going missing or turning a later delta negative. A
+`reset` does the opposite: it re-anchors on the new total, because reporting `reset` for every remaining
+result of a turn a `/clear` landed in the middle of would lose the whole rest of the turn to save one
+result's share.
 Genuine late failures — `error_max_turns`, `budget_exhausted`,
 `structured_output_retry_exhausted`, `tool_deferred_unavailable` — carry the real running total, so
 they stay `measured`; only fabricated footers fall through.

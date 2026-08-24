@@ -1622,11 +1622,39 @@ class TestBackgroundDrain:
         kinds = [e.payload["task_id"] for e in events if e.name == "subagentEvent"]
         assert kinds == ["task-1", "task-2", "task-1", "task-2"]
 
-    async def test_the_drain_never_re_emits_a_completion(self, engine):
-        """The browser has already finished with this turn; a second footer
-        would finish it again. It is still priced, so the cost of the
-        continuation stays with the session instead of leaking into the next
-        turn's difference."""
+    async def test_a_continuation_result_is_emitted_and_says_that_it_is_one(self, engine):
+        """Main's reply to a task notification arrives in a result of its own,
+        and the browser has already settled a message for this turn — so the
+        flag is what tells it to revise that message rather than append a
+        second one. Swallowing the result instead lost the reply entirely: it
+        was consumed, folded into the turn's blocks, and rendered nowhere."""
+        events, first = await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(),
+                AssistantMessage(
+                    content=[TextBlock(text="The background agent finished.")],
+                    model="m",
+                    message_id="msg_late",
+                ),
+                task_notification(),
+                result_message(),
+            ],
+        )
+        footers = [e.payload for e in events if e.name == "streamComplete"]
+        assert len(footers) == 2
+        assert first.get("continuation") is None
+        assert footers[1]["continuation"] is True
+        # Cumulative over the request, which is what makes revising the
+        # settled message the right move rather than appending to it.
+        assert "The background agent finished." in footers[1]["response"]
+
+    async def test_every_result_of_one_turn_reports_that_turns_whole_cost(self, engine):
+        """The footer the browser ends up rendering is built from the last
+        result it receives, and a background subagent spends most of its
+        tokens after the first one. Pricing each result against the previous
+        would leave that spend in a footer nothing renders."""
         events, _ = await self.drained(
             engine,
             [
@@ -1636,11 +1664,80 @@ class TestBackgroundDrain:
                 result_message(total_cost_usd=0.30),
             ],
         )
-        assert [e.name for e in events].count("streamComplete") == 1
-        # The swallowed footer still moved the baseline: the next turn is
-        # differenced against 0.30, not against the 0.10 the browser saw.
+        costs = [e.payload["turn_cost_usd"] for e in events if e.name == "streamComplete"]
+        assert costs == [pytest.approx(0.10), pytest.approx(0.30)]
+        # And the next turn starts from the last total seen, not from this
+        # turn's anchor — the background work must not be charged twice.
         _, later = await self.drained(engine, [result_message(total_cost_usd=0.34)])
         assert later["turn_cost_usd"] == pytest.approx(0.04, abs=1e-9)
+
+    async def test_every_result_of_one_turn_reports_that_turns_whole_effort(self, engine):
+        """`duration_ms` and `num_turns` describe the result carrying them, so
+        the same reasoning as the cost applies: the browser renders the last
+        result, and passing these through unchanged had the footer read
+        "2.7s · 1 engine turn" for a turn that spent four times that across
+        two of them."""
+        events, _ = await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(duration_ms=4581, duration_api_ms=4000, num_turns=1),
+                task_notification(),
+                result_message(duration_ms=2718, duration_api_ms=2500, num_turns=1),
+            ],
+        )
+        footers = [e.payload for e in events if e.name == "streamComplete"]
+        assert [f["duration_ms"] for f in footers] == [4581, 7299]
+        assert [f["duration_api_ms"] for f in footers] == [4000, 6500]
+        assert [f["num_turns"] for f in footers] == [1, 2]
+
+    async def test_the_next_turn_counts_only_itself(self, engine):
+        """The accumulator belongs to the turn, so it cannot leak into the
+        next one — which would make every turn look longer than the last."""
+        await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(duration_ms=4581),
+                task_notification(),
+                result_message(duration_ms=2718),
+            ],
+        )
+        _, later = await self.drained(engine, [result_message(duration_ms=90)])
+        assert later["duration_ms"] == 90
+        assert later["num_turns"] == 1
+
+    async def test_an_ordinary_turn_reports_the_engines_own_figures(self, engine):
+        """A turn that ends once must be untouched by the arithmetic."""
+        _, result = await self.drained(engine, list(DEFAULT_MESSAGES))
+        assert result["duration_ms"] == 10
+        assert result["duration_api_ms"] == 8
+        assert result["num_turns"] == 1
+
+    async def test_a_counter_the_engine_did_not_send_is_not_invented(self, engine):
+        """A missing counter stays missing on the first result — summing from
+        nothing would report a zero where the engine reported no figure."""
+        _, result = await self.drained(
+            engine, [result_message(duration_ms=None, num_turns=None)]
+        )
+        assert result["duration_ms"] is None
+        assert result["num_turns"] is None
+
+    async def test_a_continuation_keeps_what_the_first_result_did_report(self, engine):
+        """The turn's measured effort must not be lost because a later result
+        came through without a figure."""
+        events, _ = await self.drained(
+            engine,
+            [
+                task_started(),
+                result_message(duration_ms=4581, num_turns=1),
+                task_notification(),
+                result_message(duration_ms=None, num_turns=None),
+            ],
+        )
+        footers = [e.payload for e in events if e.name == "streamComplete"]
+        assert footers[1]["duration_ms"] == 4581
+        assert footers[1]["num_turns"] == 1
 
     async def test_a_completion_names_the_tasks_it_did_not_end(self, engine):
         """The browser settles live subagent tabs at the result and cannot

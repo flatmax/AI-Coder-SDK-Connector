@@ -662,6 +662,15 @@ export function onHookEvent(panel, event) {
  *
  * A turn that produced no blocks at all still appends a message when it
  * errored: an empty transcript with a red LED gives the user nothing to read.
+ *
+ * A turn can end more than once. **A result message ends a turn, not the run**:
+ * while a background subagent is in flight the engine keeps reading the stream
+ * and main is woken for a follow-up turn, which ends in a result of its own
+ * flagged `continuation` (`session.py` § `_drain_background`). Those revise the
+ * message this handler already settled rather than appending a second one —
+ * every field on the payload is cumulative over the request, so a second
+ * message would repeat the whole turn under a second footer, and the subagent
+ * row with it.
  */
 export function onStreamComplete(panel, event) {
   const { requestId, result } = event.detail || {};
@@ -713,20 +722,37 @@ export function onStreamComplete(panel, event) {
       stampUserMessageId(ownerTab, result.user_message_id);
     }
 
-    if (blocks.length > 0 || content || result?.is_error) {
+    const settled = {
+      role: 'assistant',
+      // The request this turn answered, so a continuation can find the message
+      // it has to revise. Nothing else reads it.
+      requestId,
+      content,
+      blocks,
+      subagents,
+      files,
+      turn: result && typeof result === 'object' ? { ...result } : {},
+      terminalReason: result?.terminal_reason ?? null,
+      ...durationField,
+    };
+    const revising = result?.continuation
+      ? findSettledTurn(ownerTab, requestId)
+      : -1;
+    if (revising >= 0) {
+      const previous = ownerTab.messages[revising];
       ownerTab.messages = [
-        ...ownerTab.messages,
+        ...ownerTab.messages.slice(0, revising),
         {
-          role: 'assistant',
-          content,
-          blocks,
-          subagents,
-          files,
-          turn: result && typeof result === 'object' ? { ...result } : {},
-          terminalReason: result?.terminal_reason ?? null,
-          ...durationField,
+          ...settled,
+          // The run timer stopped when the turn's presentation finished, so
+          // there is no new wall-clock reading to take. The first one measured
+          // what the user waited for and is the one the ⏱ chip means.
+          ...(previous.durationMs != null ? { durationMs: previous.durationMs } : {}),
         },
+        ...ownerTab.messages.slice(revising + 1),
       ];
+    } else if (blocks.length > 0 || content || result?.is_error) {
+      ownerTab.messages = [...ownerTab.messages, settled];
     }
 
     if (result?.is_error) emitEngineErrorToast(panel, result);
@@ -770,6 +796,21 @@ export function onStreamComplete(panel, event) {
 
   ownerTab.streams.delete(requestId);
   if (!ownerIsActive) panel.requestUpdate();
+}
+
+/**
+ * The index of the settled assistant message for a request, or -1.
+ *
+ * Walks backwards because the answer is almost always the last message, and
+ * because a turn that revises itself may have had system or user messages
+ * appended after it — a commit notice, a collaborator's prompt.
+ */
+function findSettledTurn(tab, requestId) {
+  for (let i = tab.messages.length - 1; i >= 0; i -= 1) {
+    const message = tab.messages[i];
+    if (message?.role === 'assistant' && message.requestId === requestId) return i;
+  }
+  return -1;
 }
 
 /**

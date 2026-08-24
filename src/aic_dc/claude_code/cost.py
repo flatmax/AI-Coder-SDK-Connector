@@ -51,6 +51,18 @@ Spend that cannot be attributed is not thrown away: the baseline stays where it
 was, so the next turn we *can* price carries it. The alternative — adopting an
 unusable total — would make the following turn's difference negative and lose
 the money out of both turns.
+
+The baseline moves **once per turn**, not once per result. A result message ends
+a turn, not the run: with a background task in flight the engine goes on to send
+further results for the same request
+(:meth:`~aic_dc.claude_code.session.EngineSession._drain_background`), and a
+per-result baseline would price each of them against the last, so the figure the
+turn's footer carries would be the final result's share alone. For a background
+subagent that is most of the money — its tokens are spent after the first result
+— so the turn would report a fraction of what it cost. Anchoring at
+:meth:`CostLedger.start_turn` instead makes every result of one turn report that
+turn's running total, which is what ``turn_cost_usd`` has always claimed to be.
+A turn with one result is the same number either way.
 """
 
 from __future__ import annotations
@@ -87,13 +99,29 @@ class CostLedger:
     """
 
     def __init__(self) -> None:
+        self._baseline: float | None = None
+        self._baseline_models: dict[str, dict[str, float]] = {}
         self._total: float | None = None
         self._models: dict[str, dict[str, float]] = {}
 
     def reset(self) -> None:
         """Forget the baseline, because the engine just forgot its own."""
+        self._baseline = None
+        self._baseline_models = {}
         self._total = None
         self._models = {}
+
+    def start_turn(self) -> None:
+        """Anchor pricing where the session's total stands now.
+
+        Called as a turn is admitted, so every result that turn produces is
+        differenced against the same point — see the module note on why the
+        anchor is per turn rather than per result. Idempotent between turns:
+        with no result seen since the last call it re-anchors to the same
+        place.
+        """
+        self._baseline = self._total
+        self._baseline_models = self._models
 
     def price(self, result: dict[str, Any]) -> dict[str, Any]:
         """The three turn-scoped fields to fold into a ``streamComplete``.
@@ -103,8 +131,10 @@ class CostLedger:
         and ``turn_model_usage`` (the same difference per model, in the
         engine's own camelCase field names so the two are comparable).
 
-        Called once per result, in arrival order. Calling it twice for one
-        turn would price the second call at zero.
+        Safe to call more than once for one turn, and a turn with a background
+        task in flight does exactly that: each answer is the turn's running
+        total, not the step since the previous result, so the last one priced
+        is the one the footer should carry.
         """
         total = _as_cost(result.get("total_cost_usd"))
         errored = bool(result.get("is_error"))
@@ -112,7 +142,7 @@ class CostLedger:
         if total is None or (errored and total == 0.0):
             return _answer(None, UNPRICED, None)
 
-        baseline = self._total
+        baseline = self._baseline
         self._total = total
 
         if baseline is None:
@@ -121,11 +151,18 @@ class CostLedger:
             # this turn's — no earlier turn has spent against it.
             baseline = 0.0
         elif total < baseline:
+            # The engine restarted its ledger under us. Re-anchor so the rest
+            # of this turn is priced from the new zero rather than reporting
+            # `reset` forever, and lose only the result that straddled it.
             self._models = _snapshot(result.get("model_usage"))
+            self._baseline = total
+            self._baseline_models = self._models
             return _answer(None, RESET, None)
 
         models = _snapshot(result.get("model_usage"))
-        turn_models = _model_deltas(models, self._models, result.get("model_usage"))
+        turn_models = _model_deltas(
+            models, self._baseline_models, result.get("model_usage")
+        )
         self._models = models
         return _answer(round(total - baseline, 10), MEASURED, turn_models)
 

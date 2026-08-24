@@ -229,11 +229,21 @@ streaming-input client, so:
   not a billing statement.
 - `credential_source` on the engine-health record is the only real billing-mode signal.
 
-The turn's own cost is therefore a **difference** against the previous result. The baseline is session
-state, so the engine takes the difference (`aic_dc/claude_code/cost.py`) and every client reads the same
-answer; a per-turn `TurnTranslator` could not hold the baseline, and the browser holding it would lose
-it on reconnect. Three per-turn fields ship beside the engine's cumulative ones, under names that cannot
-be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
+The turn's own cost is therefore a **difference** — against where the session's total stood when the turn
+was admitted, not against the previous result. The distinction only bites when a turn ends more than
+once, which a turn with a background subagent does: the HUD renders from the last result of the turn, and
+the subagent's tokens are spent after the first. Both figures agree for a turn that ends once. The
+baseline is session state, so the engine takes the difference (`aic_dc/claude_code/cost.py`) and every
+client reads the same answer; a per-turn `TurnTranslator` could not hold the baseline, and the browser
+holding it would lose it on reconnect. Three per-turn fields ship beside the engine's cumulative ones,
+under names that cannot be confused with them: `turn_cost_usd`, `turn_cost_basis`, `turn_model_usage`.
+
+A turn with a background subagent therefore reaches the HUD twice. The second `streamComplete` arrives
+flagged `continuation` ([`../3-engine/session.md`](../3-engine/session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)),
+and the HUD shows again with the turn's figures now that the subagent's spend is in them — it replaces
+the reading, it does not add a second turn's. That it may pop up seconds after the user read the first
+one is not a race with the next turn: the drain is stopped before the next turn's pump starts, so a
+continuation can only ever be about the turn still on screen.
 
 `turn_cost_basis` is what lets the HUD tell apart the two things it used to render identically:
 

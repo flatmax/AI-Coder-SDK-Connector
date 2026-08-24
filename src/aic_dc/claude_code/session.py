@@ -153,6 +153,40 @@ class ActiveTurn:
     # means the run has not ended, only this turn has — see
     # `EngineSession._drain_background`.
     tasks_in_flight: set[str] = field(default_factory=set)
+    # Engine-side counters summed over every result this turn produces, for
+    # the same reason the cost baseline is per-turn — see `accrue`.
+    accrued: dict[str, int] = field(default_factory=dict)
+
+    def accrue(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Sum the engine's per-result counters over the whole turn.
+
+        `duration_ms`, `duration_api_ms` and `num_turns` describe the result
+        that carries them, and a turn with a background task in flight produces
+        more than one: main's spawning turn, then main's reply to the task
+        notification. Passed through as they arrive, the footer would report the
+        *last* result's figures — "2.7s · 1 engine turn" for a turn that took
+        four times that across two of them — because the browser renders the
+        last result it receives.
+
+        So they are summed here, next to the cost baseline and for the same
+        reason: cumulative is a property this layer has to maintain rather than
+        one it can read off. Duration is the engine's *working* time, not the
+        wall clock, which is why the two are not the same figure and why the
+        gap while a background agent worked and main slept belongs to neither.
+        The browser's own run timer is what reports wall clock.
+
+        A turn that ends once gets its own numbers back unchanged.
+        """
+        summed = dict(payload)
+        for name in ("duration_ms", "duration_api_ms", "num_turns"):
+            value = payload.get(name)
+            # A bool is an int in Python, and a synthetic footer may carry
+            # anything; only real counters accumulate.
+            if isinstance(value, int) and not isinstance(value, bool):
+                self.accrued[name] = self.accrued.get(name, 0) + value
+            if name in self.accrued:
+                summed[name] = self.accrued[name]
+        return summed
 
     def note_task_flight(self, payload: Mapping[str, Any]) -> None:
         """Track one ``subagentEvent`` against the in-flight task set.
@@ -619,6 +653,10 @@ class EngineSession:
         # stream's only consumer, and the previous turn's drain may still be on
         # it.
         await self._stop_background_drain()
+        # Anchor the cost baseline here, so every result this turn produces —
+        # including the ones the drain reads after the first — is differenced
+        # against the same point and reports the turn's running total.
+        self._cost.start_turn()
         translator = TurnTranslator(turn.request_id)
         active = ActiveTurn(
             request_id=turn.request_id,
@@ -707,12 +745,15 @@ class EngineSession:
             return Event("engineHealth", self.health.to_dict(), turn_scoped=False)
         if event.name == "streamComplete":
             # What a turn *cost* is only visible against the session's running
-            # total, and pricing advances that baseline — so every result is
-            # priced, including one the drain goes on to swallow.
+            # total. Every result is priced, and a turn that ends more than
+            # once is priced against its own start rather than against its
+            # previous result, so each answer is the whole turn's — see
+            # `CostLedger.start_turn`. `ActiveTurn.accrue` does the same for
+            # the counters the engine reports per result.
             return Event(
                 "streamComplete",
                 {
-                    **self._price_turn(event.payload),
+                    **self._price_turn(active.accrue(event.payload)),
                     # Which background tasks this result did *not* end. The
                     # browser settles a live subagent tab at the turn's result
                     # and has no other way to tell "its terminal event never
@@ -794,18 +835,28 @@ class EngineSession:
                     if event.name != "streamComplete":
                         await self._emit(emit, event)
                         continue
-                    # The turn's footer already went out and the browser has
-                    # already finished with it; a second one would re-complete
-                    # a completed turn. It is still priced above, so the cost
-                    # stays with the session rather than leaking into the next
-                    # turn's difference.
-                    if active.tasks_in_flight:
-                        continue
-                    logger.info(
-                        "Background work for turn %s finished; drain ending",
-                        active.request_id,
+                    # Main's own follow-up turn ends here — the one a task
+                    # notification woke it for — and its answer is in this
+                    # payload. Flagged so the browser revises the turn it has
+                    # already settled instead of appending a second footer to
+                    # a turn the user has read: every field is cumulative over
+                    # the request, so this result *supersedes* the last one
+                    # rather than adding to it.
+                    finished = not active.tasks_in_flight
+                    await self._emit(
+                        emit,
+                        Event(
+                            "streamComplete",
+                            {**event.payload, "continuation": True},
+                            turn_scoped=event.turn_scoped,
+                        ),
                     )
-                    return
+                    if finished:
+                        logger.info(
+                            "Background work for turn %s finished; drain ending",
+                            active.request_id,
+                        )
+                        return
         except asyncio.CancelledError:
             raise
         except Exception:

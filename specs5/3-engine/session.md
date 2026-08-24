@@ -122,6 +122,42 @@ LEDs).
 
 A cancelled turn is not followed. Stop is the user saying they are done with this work.
 
+#### Every result the drain reads is emitted, flagged `continuation`
+
+Main's reply to a task notification is a *further* turn on the same request, and it ends in a result
+of its own. The drain emits those too, with `continuation: true` added.
+
+Swallowing them looked defensible — the browser has already rendered this turn's footer, and a second
+one would finish a finished turn — and it cost main's closing answer, which was the fourth symptom
+above still standing after the drain fixed the other three. The answer was consumed, folded into the
+turn's blocks, and rendered nowhere: the browser freezes a turn's blocks onto a settled message at its
+result, and with no further result nothing ever re-froze it. The subagent's own blocks escaped only
+because the subagent tab holds them by reference rather than frozen
+([`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md) § Block mirroring).
+
+The flag exists because the browser's two available readings of a result are both wrong for this one:
+appending a second message repeats the whole turn, since every field on the payload is cumulative over
+the request, and ignoring it drops the answer. What it does instead is **revise** the message it
+already settled ([`../5-webapp/chat.md`](../5-webapp/chat.md) § A turn can end more than once).
+
+Cumulative is a property the engine has to *maintain*, not just observe. Two kinds of field need work
+for it to hold, and both are handled where the pump and the drain meet — `_fold_session_state` — so the
+two cannot disagree about the arithmetic:
+
+- **Differences the engine takes.** `turn_cost_usd` and `turn_model_usage` are derived against a
+  baseline, and taking them per result would put a background subagent's spend — most of a delegated
+  turn's cost, since its tokens are spent after the first result — into a footer nothing renders. The
+  baseline is anchored **once per turn**, at admission
+  ([`context-visibility.md` § Cost is cumulative](context-visibility.md#cost-is-cumulative-and-a-turn-is-a-difference)).
+- **Counters the engine reports per result.** `duration_ms`, `duration_api_ms` and `num_turns` describe
+  the result carrying them, so they are summed over the turn. Passed through as they arrive, the footer
+  read *"2.7s · 1 engine turn"* for a turn that spent four times that across two of them. The sum is the
+  engine's *working* time, not the wall clock — the gap while a background agent worked and main slept
+  belongs to neither, and wall clock is what the browser's own run timer reports. A counter the engine
+  did not send stays absent rather than becoming a zero.
+
+A turn that ends once gets its own figures back unchanged, either way.
+
 If the prompt carried pasted images, a `userMessageImages` follow-up joins step 4 — pointers to the
 image blocks, sent when the mirror writes the user entry, because the entry `uuid` a pointer is built
 from does not exist at step 3 ([`../4-features/images.md`](../4-features/images.md) § Engine Service
@@ -212,8 +248,10 @@ coalescing is unchanged — the browser still batches to one render per animatio
 
 ### Two completion events survive, with new meanings
 
-- `streamComplete` fires on `ResultMessage`. It finalises the assistant turn in the chat panel and
-  carries the usage and cost figures.
+- `streamComplete` fires on `ResultMessage` — on *every* one for the request, not only the first, since
+  a result ends a turn rather than the run. It finalises the assistant turn in the chat panel and
+  carries the usage and cost figures. All but the first are flagged `continuation` and revise the turn
+  the browser has already settled (§ *A result message ends a turn, not the run*).
 - `postResponseComplete` fires after post-turn housekeeping (transcript mirroring flushed,
   re-indexing of touched files settled, context-usage refetched). Consumers that need consistent
   derived state — the Context tab, the file tree — wait for it.
@@ -334,6 +372,10 @@ whose CLI advertises nothing is not the same condition.
 - Consumption of the message stream outlives the turn whenever the turn's result arrives with
   background tasks in flight, and ends on a result that arrives with none. A background subagent's
   events are never first read by a later turn.
+- Every result message for a request reaches the browser. All but the first carry `continuation`, and
+  every one of them reports the *turn's* figures rather than the step since the previous result — the
+  cost differenced from one per-turn anchor, the duration and engine-turn counters summed. The browser
+  renders the last result it receives, and a background subagent's work all lands after the first.
 - Exactly one consumer of the message stream at a time. A background drain is stopped and awaited
   before the next turn's pump starts, and on disconnect.
 - A result message reports which background tasks it did not end.
@@ -345,7 +387,9 @@ whose CLI advertises nothing is not the same condition.
 - Only one user-initiated turn is in flight at a time; engine-internal subagent activity is not
   gated by that guard.
 - Turn framing never contains file content — only paths, ranges, and mode facts.
-- `streamComplete` always precedes `postResponseComplete` for the same turn.
+- `streamComplete` always precedes `postResponseComplete` for the same turn. Housekeeping runs once,
+  after the turn's *first* result: a continuation arriving later revises the chat panel's turn but does
+  not refresh the derived views, which pick the change up on the next turn.
 - No component outside the message pump references an SDK message type.
 - AIC⚡DC never constructs a conversation history to hand to the model; resumption is always via
   `resume` or `fork_session`.

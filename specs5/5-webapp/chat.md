@@ -64,6 +64,29 @@ Subagents produce concurrent activity *inside* one turn. Their events carry the 
 
 The transport never assumes a singleton stream — every event carries the exact ID of the stream it belongs to (see [`../1-foundation/rpc-transport.md` § Concurrency](../1-foundation/rpc-transport.md#concurrency)). The chat panel's routing layer is the frontend counterpart to that contract.
 
+### A Turn Can End More Than Once
+
+`streamComplete` is where the panel *settles* a turn: it freezes the turn's blocks onto a new assistant
+message, attaches the footer, and tears the streaming card down. A turn that left a background subagent
+running goes on to end again — main's reply to the task notification is a further turn on the same
+request, and it arrives as a second `streamComplete` flagged `continuation`
+([`../3-engine/session.md` § Every result the drain reads is emitted](../3-engine/session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)).
+
+A continuation **revises the message already settled for that request** rather than appending a second
+one. Appending is the wrong reading because every field on the payload is cumulative over the request,
+not incremental: a second message would repeat the whole turn — its text, its tool cards, its subagent
+rows — under a second footer. So the settled message carries the `requestId` it answered, which is the
+only thing that reads it, and the handler replaces that message in place.
+
+- The revised message keeps its original `durationMs`. The panel's run timer stopped when the turn's presentation finished; that reading is what the user waited for and is what the ⏱ badge means. There is no second wall-clock measurement to take. The footer's duration is a different figure and comes from the payload — the engine's working time, summed across the turn's results by the engine rather than the browser
+- Everything else comes from the continuation: it is the whole turn's state, including main's closing answer, which is the content the revision exists to deliver
+- The turn is torn down only when the continuation reports nothing left running. One that still has work in flight leaves the turn addressable, because more events are coming for it
+- A continuation for a request with no settled message appends one. That is a turn whose first result carried nothing to render — not a case to lose the answer over
+
+Without this the closing answer was consumed and rendered nowhere: it reached the turn's blocks, but the
+freeze had already happened and nothing re-froze it. It appeared only if the user reloaded, from the
+mirror.
+
 ## Thinking Regions
 
 - `thinkingChunk` events render into a collapsed region above the text they precede, labelled `Thinking…` while chunks are arriving and `Thinking` once the block reports `done`
@@ -180,7 +203,7 @@ Replaces the edit summary banner. Rendered at the end of the assistant turn, not
 
 - Files modified — the union of every tool result's `files_modified`, deduplicated, each clickable through to the diff viewer. This is the answer to "what did it just do to my repo?" and it is the footer's most important line. Those paths are absolute — the CLI's file tools require that, and the field reports what the tool was given — so the click relies on the shell relativising them before the viewer asks for one (see [shell.md § Viewer Background](shell.md#viewer-background))
 - Tool calls, and how many needed a permission prompt
-- Duration, engine-internal turn count
+- Duration, engine-internal turn count. This duration is the engine's working time summed over the turn, which is a different figure from the ⏱ badge beside the role label — that one is the panel's own wall clock, and the two part company for a turn that spent time waiting on a background subagent (see § A Turn Can End More Than Once)
 - Usage — one chip per model that answered: the turn's total, then how it split, `N tok · N in · N cache · N out`. Cost when the engine reports it; **nothing** when it doesn't. Subscription billing reports null and the footer must not render that as `$0.00` (see [risks § R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap))
 - A mirror-gap marker when the turn failed to append to the repo-local transcript, linking to the health banner. The link *forces* the banner open rather than merely un-dismissing it, because the engine may have recovered or restarted since that turn — a readout with nothing wrong in it is still an answer, and better than a link that lands on nothing
 
@@ -579,6 +602,7 @@ the UI in two places that must be got right:
 
 - Every rendered streaming element is keyed by block identity; a chunk with a stale `seq` for its block is discarded rather than applied
 - Content is cumulative within a block and never assumed cumulative across a turn
+- A request has at most one settled assistant message. A second `streamComplete` for a request revises that message rather than adding another, because the payload is the whole turn and not the part since the last one
 - Only final-rendered messages detect file mentions — streaming messages never process mentions
 - Auto-scroll never disengages during active streaming without a deliberate upward scroll beyond a threshold; height changes from tool-card expansion never disengage it
 - The chat-local toast never dispatches global toast events

@@ -1002,6 +1002,122 @@ describe('ChatPanel agent tabs', () => {
     await settle(p);
     expect(p._tabs.get('main').currentRequestId).toBeNull();
   });
+
+  // -------------------------------------------------------------------
+  // The turn's own follow-up answer
+  // -------------------------------------------------------------------
+  //
+  // A task notification wakes main for a *further* turn on the same request,
+  // and that turn ends in a result of its own flagged `continuation`. Before
+  // the engine emitted those, main's closing answer was consumed, folded into
+  // the turn's blocks, and rendered nowhere: the message had been frozen at
+  // the first result and nothing re-froze it.
+
+  /** Main answering the notification, then the drain-ending result. */
+  async function continuation(panel, reqId, overrides = {}) {
+    pushEvent('stream-chunk', {
+      requestId: reqId,
+      chunk: {
+        block_id: 'blk_late',
+        seq: 1,
+        content: 'The background agent finished.',
+        done: true,
+      },
+    });
+    await settle(panel);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: {
+        response: 'dispatchedThe background agent finished.',
+        terminal_reason: 'completed',
+        continuation: true,
+        background_tasks: [],
+        ...overrides,
+      },
+    });
+    await settle(panel);
+  }
+
+  it('main’s reply to a task notification reaches the transcript', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    expect(p.messages.at(-1).content).toBe('dispatched');
+    await continuation(p, reqId);
+    expect(p.messages.at(-1).content).toContain('The background agent finished.');
+  });
+
+  it('a continuation revises the settled turn instead of appending one', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    const before = p.messages.length;
+    await continuation(p, reqId);
+    // Every field on the payload is cumulative over the request, so a second
+    // message would repeat the whole turn — the `Task` card and the subagent
+    // row with it — under a second footer.
+    expect(p.messages.length).toBe(before);
+    expect(p.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('the revised turn keeps the wall-clock reading it was settled with', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    const first = p.messages.at(-1).durationMs;
+    expect(first).toEqual(expect.any(Number));
+    await continuation(p, reqId);
+    // The run timer stopped when the turn's presentation finished; there is no
+    // second reading to take, and re-deriving one from a null start would drop
+    // the ⏱ chip off a turn that had one.
+    expect(p.messages.at(-1).durationMs).toBe(first);
+  });
+
+  it('the continuation carries the footer the turn ends up with', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    await continuation(p, reqId, {
+      turn_cost_usd: 0.24,
+      turn_cost_basis: 'measured',
+      tool_calls: 3,
+    });
+    // The engine prices every result of one turn against that turn's start
+    // (`cost.py` § start_turn), so the last footer is the whole turn's cost —
+    // most of which a background subagent spends after the first result.
+    expect(p.messages.at(-1).turn.turn_cost_usd).toBe(0.24);
+    expect(p.messages.at(-1).turn.tool_calls).toBe(3);
+  });
+
+  it('the continuation tears the turn down when nothing is left running', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    expect(p._tabs.get('main').currentRequestId).toBe(reqId);
+    await continuation(p, reqId);
+    expect(p._tabs.get('main').currentRequestId).toBeNull();
+    expect(p._tabs.get('main').turnBlocks.blocks).toHaveLength(0);
+  });
+
+  it('a continuation that leaves work running keeps the turn addressable', async () => {
+    const p = mountPanel();
+    const reqId = await backgroundTurn(p);
+    // Main answered the first task's notification; a second task is still
+    // going, so this is not the end of the run.
+    await continuation(p, reqId, { background_tasks: ['task-2'] });
+    expect(p.messages.at(-1).content).toContain('The background agent finished.');
+    expect(p._tabs.get('main').currentRequestId).toBe(reqId);
+  });
+
+  it('a continuation for a turn with no settled message appends one', async () => {
+    // The first result produced nothing to show, so there is no message to
+    // revise. Appending is the only way its follow-up answer is seen at all.
+    const p = mountPanel();
+    const reqId = await startMainStream(p);
+    pushEvent('stream-complete', {
+      requestId: reqId,
+      result: { response: '', terminal_reason: 'completed', background_tasks: ['task-1'] },
+    });
+    await settle(p);
+    expect(p.messages.filter((m) => m.role === 'assistant')).toHaveLength(0);
+    await continuation(p, reqId);
+    expect(p.messages.at(-1).content).toContain('The background agent finished.');
+  });
 });
 
 // The `onStreamRetry` suite stood here until conversion phase 3. It asserted
