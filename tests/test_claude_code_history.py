@@ -751,6 +751,191 @@ class TestCompaction:
         assert not any(m.get("system_event") for m in rendered)
 
 
+_UNSET = object()
+"""Distinguishes "not passed" from "passed ``None``" in a test helper."""
+
+
+class TestABackgroundAgentsWakeUp:
+    """The CLI wakes the main agent by sending it a user message.
+
+    So a turn that delegated to a background subagent has a `user` entry in
+    the middle of it that nobody typed, holding a payload written for the
+    model. Rendered as a prompt it was the worst row in the transcript.
+    """
+
+    NOTIFICATION = (
+        "<task-notification>\n"
+        "<task-id>a24b07aead0d86603</task-id>\n"
+        "<tool-use-id>toolu_bdrk_01Hj4EpVcJupjrpSV3q3UN4i</tool-use-id>\n"
+        "<output-file>/tmp/claude-1000/-tmp-x/sess/tasks/a24b0.output</output-file>\n"
+        "<status>completed</status>\n"
+        '<summary>Agent "Describe calc.py" finished</summary>\n'
+        "<note>A task-notification fires each time this agent stops with no "
+        "live background children of its own. The user can send it another "
+        "message and resume it.</note>\n"
+        "<result>`calc.py` defines two one-line arithmetic helpers.</result>\n"
+        "<usage><subagent_tokens>8868</subagent_tokens><tool_uses>1</tool_uses>"
+        "<duration_ms>4858</duration_ms></usage>\n"
+        "</task-notification>"
+    )
+
+    @staticmethod
+    def notification(
+        uuid: str = "n1",
+        content: str | None = None,
+        *,
+        at: str = "2026-08-16T12:05:00.000Z",
+        origin: Any = _UNSET,
+    ) -> tuple:
+        """One wake-up entry. ``origin`` defaults to the CLI's own marker;
+        pass anything else — including ``None`` — to test an entry without it.
+        """
+        body = {
+            "role": "user",
+            "content": (
+                TestABackgroundAgentsWakeUp.NOTIFICATION if content is None else content
+            ),
+        }
+        message = FakeSessionMessage("user", uuid, body)
+        entry = {
+            "uuid": uuid,
+            "type": "user",
+            "timestamp": at,
+            "origin": {"kind": "task-notification"} if origin is _UNSET else origin,
+            "message": body,
+        }
+        return message, entry
+
+    def _rendered(self, **kwargs):
+        return render(
+            human("u1", "delegate this"),
+            assistant("a1", {"type": "text", "text": "SPAWNED"}),
+            self.notification(**kwargs),
+            assistant(
+                "a2", {"type": "text", "text": "The agent finished. Its report: …"}
+            ),
+        )
+
+    def test_it_is_not_attributed_to_the_user(self):
+        """A "YOU" label on this row says the user typed a task id and an
+        internal explainer, which is the whole complaint."""
+        rendered = self._rendered()
+        assert [m.get("system_event", False) for m in rendered] == [
+            False,
+            False,
+            True,
+            False,
+        ]
+
+    def test_it_says_which_agent_finished_and_what_it_spent(self):
+        assert self._rendered()[2]["content"] == (
+            '🤖 Agent "Describe calc.py" finished (8,868 tokens, 1 tool call, 4.9s)'
+        )
+
+    def test_the_metrics_are_labelled_rather_than_run_together(self):
+        """Passed through verbatim, the three counters concatenated into one
+        meaningless number — `886814858` here, and the reason this row was
+        reported as unreadable."""
+        content = self._rendered()[2]["content"]
+        assert "886814858" not in content
+        assert "8,868 tokens" in content
+        assert "4.9s" in content
+
+    def test_the_plumbing_and_the_model_facing_note_are_left_out(self):
+        content = self._rendered()[2]["content"]
+        assert "toolu_bdrk" not in content
+        assert "/tmp/claude-1000" not in content
+        assert "task-notification fires" not in content
+        assert "a24b07aead0d86603" not in content
+
+    def test_the_subagents_answer_is_left_to_the_turn_that_restates_it(self):
+        """The assistant's next turn reports it, and the subagent's own
+        transcript holds it in full. Two copies in the feed is one too many."""
+        assert "arithmetic helpers" not in self._rendered()[2]["content"]
+
+    def test_a_status_that_is_not_success_is_the_point_of_the_row(self):
+        rendered = self._rendered(
+            content=(
+                "<task-notification><task-id>t7</task-id><status>killed</status>"
+                "<summary>Agent \"Sweep\" stopped</summary></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == '🤖 Agent "Sweep" stopped — **killed**'
+
+    def test_an_agent_with_no_summary_is_named_by_its_task_id(self):
+        """Better than an unattributed row: the id is at least a handle for
+        finding the subagent's transcript."""
+        rendered = self._rendered(
+            content="<task-notification><task-id>t7</task-id></task-notification>"
+        )
+        assert rendered[2]["content"] == "🤖 Background agent `t7` finished"
+
+    def test_a_payload_with_no_usage_block_reports_no_figures(self):
+        """Rather than three zeroes, which would read as an agent that ran
+        and did nothing."""
+        rendered = self._rendered(
+            content=(
+                "<task-notification><summary>Agent finished</summary>"
+                "</task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished"
+
+    def test_a_non_numeric_counter_is_dropped_not_printed(self):
+        rendered = self._rendered(
+            content=(
+                "<task-notification><summary>Agent finished</summary><usage>"
+                "<subagent_tokens>lots</subagent_tokens><tool_uses>2</tool_uses>"
+                "</usage></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished (2 tool calls)"
+
+    def test_a_result_containing_markup_does_not_break_the_parse(self):
+        """`<result>` is the subagent's prose, so it holds whatever the
+        subagent wrote — including unbalanced tags. An XML parse would raise
+        on it; this one keeps reading the fields it came for."""
+        rendered = self._rendered(
+            content=(
+                "<task-notification><result>Use <Foo> and </Bar unclosed</result>"
+                "<summary>Agent finished</summary>"
+                "<usage><tool_uses>1</tool_uses></usage></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished (1 tool call)"
+
+    def test_it_keeps_the_time_it_happened(self):
+        """The row is interleaved with `events.jsonl` records by timestamp, so
+        one without a stamp sorts to the end of the conversation."""
+        assert self._rendered()[2]["timestamp"] == "2026-08-16T12:05:00.000Z"
+
+    def test_it_still_ends_the_turn_above_it_and_opens_the_one_below(self):
+        """Where the turn breaks is the transcript's decision, not ours. Live
+        the two halves are one settled message, because the browser revises it
+        when the continuation arrives; on disk they are two turns and the row
+        is the seam between them."""
+        rendered = self._rendered()
+        assert [m["role"] for m in rendered] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert rendered[1]["blocks"][0]["content"] == "SPAWNED"
+        assert "Its report" in rendered[3]["blocks"][0]["content"]
+
+    def test_a_prompt_that_merely_looks_like_one_is_still_a_prompt(self):
+        """`origin.kind` is the CLI's own discriminator, so nothing sniffs the
+        content — a user quoting a notification back is not a notification."""
+        rendered = self._rendered(origin={"kind": "user"})
+        assert rendered[2].get("system_event") is None
+        assert "toolu_bdrk" in rendered[2]["content"]
+
+    def test_an_entry_with_no_origin_at_all_is_a_prompt(self):
+        rendered = self._rendered(origin=None)
+        assert rendered[2].get("system_event") is None
+
+
 # ---------------------------------------------------------------------------
 # Framing
 # ---------------------------------------------------------------------------
@@ -1103,6 +1288,29 @@ class TestACompactedSessionPreviewsTheHumansWords:
             for sid, asked in (("s1", "fix the parser"), ("s2", "write the HUD"))
         }
         assert previews == {"fix the parser", "write the HUD"}
+
+    def test_a_task_notification_does_not_become_the_preview(self):
+        """The third guise. A wake-up cannot ordinarily be the first user
+        message — the prompt that spawned the agent precedes it — but a
+        compacted session whose subagent notified after the boundary has one
+        as the first the parser hands over, and a row previewing a task id
+        names nothing the user would recognise their conversation by."""
+        summary = summarise_session(
+            FakeInfo(summary="A title"),
+            [
+                human("u1", _COMPACT_SUMMARY)[0],
+                TestABackgroundAgentsWakeUp.notification("n1")[0],
+                human("u2", "so what did it find?")[0],
+            ],
+        )
+        assert summary["preview"] == "so what did it find?"
+
+    def test_a_notification_alone_falls_back_to_the_title(self):
+        summary = summarise_session(
+            FakeInfo(summary="Audit the parser"),
+            [TestABackgroundAgentsWakeUp.notification("n1")[0]],
+        )
+        assert summary["preview"] == "Audit the parser"
 
     def test_no_preview_ever_opens_with_the_compaction_preamble(self):
         for info in (

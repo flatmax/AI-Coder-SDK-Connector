@@ -156,6 +156,50 @@ Rendering happens at read time, not write time:
 A line that fails to parse is skipped with a warning: a partial write from a crash must not make a
 session unreadable. This applies to all three files.
 
+### A background agent's wake-up is a system note, not a prompt
+
+The CLI wakes the main agent after a background subagent finishes by **sending it a user message**. So a
+turn that delegated to one has a `user` entry in the middle of it that nobody typed, and rendering it as
+a prompt produced the worst row in the transcript: labelled "YOU", carrying a raw task id, a `toolu_…`
+tool-use id, a `/tmp/claude-…` output path, an explainer addressed to the model about how notifications
+work, and three unlabelled integers that ran together into a single meaningless number.
+
+It is rendered instead as a system-event card — `🤖 Agent "Describe calc.py" finished (8,868 tokens,
+1 tool call, 4.9s)` — reusing the presentation that already carries commits, resets and mode changes
+([`../5-webapp/chat.md` § Message Display](../5-webapp/chat.md#message-display)). The flag goes on the
+rendered message, not on the entry: the transcript is a mirror and takes nothing of ours.
+
+- **`origin.kind == "task-notification"` is the discriminator**, not the content. It is the CLI's own
+  field for exactly this, so nothing has to pattern-match the body to know what it is reading; the parse
+  is only for the fields worth showing. An entry without that marker is a prompt and is rendered as one.
+- **The payload is read tag by tag, not parsed as XML**, because it is not XML: `<result>` holds the
+  subagent's prose, which routinely contains `<`.
+- **What is left out is deliberate.** The task id, the tool-use id and the output path are plumbing; the
+  explainer is written for the model; and `<result>` is the subagent's own answer, which the assistant's
+  next turn restates and the subagent's transcript holds in full
+  ([§ Subagent Transcripts](#subagent-transcripts)). A non-`completed` status *is* shown, because a
+  failure the user cannot see is a turn whose result they cannot account for.
+- **The metrics are labelled or absent.** Each is named where it is shown and a counter the CLI did not
+  send is not invented — the original row's defect was three bare integers, and unlabelled figures are
+  the same defect with better spacing.
+- **The wake-up still ends the turn above it and opens the one below.** That is how the transcript
+  records the turn, and the derived turn structure is not rewritten to hide it; only the row's
+  presentation changes.
+- **Live and replay are structurally different, and that is correct.** Live, the wake-up produces no row
+  at all: it lands inside a turn the browser has already settled, and the answer arrives as a
+  continuation that revises that one message in place
+  ([session.md § Every result the drain reads](session.md#every-result-the-drain-reads-is-emitted-flagged-continuation)).
+  On replay the same work reads as two turns with a seam row between them. The replay shows the seam
+  because the transcript records one — that is where the turn on disk actually breaks — and reconciling
+  the two views would mean editing the transcript's own turn boundaries to match a live rendering
+  decision.
+- **It never becomes a session's preview line.** The line that titles a session in the list is its first
+  *typed* prompt, and a notification is the third kind of user entry the user did not write — after the
+  engine's own framing preamble and a compaction's restated context. All three are skipped for the same
+  reason: a list where several sessions share one boilerplate title is a list that cannot be scanned.
+  Ordinarily a notification cannot be first, but a session whose opening prompt has been compacted away
+  can begin with one, and the fallback is the session's own title rather than the notification's text.
+
 ## The Derived Index
 
 Search, the session list, and request-ID correlation are served by an index under `.aic-dc/` built from
@@ -298,4 +342,6 @@ read them.
 - Compaction boundaries are always visible in the transcript; a compaction never happens without a
   rendered marker.
 - Subagent transcripts are keyed by SDK agent ID; no positional index appears in any path or record.
+- No rendered row attributes to the user text the user did not write. A `user` entry carrying
+  `origin.kind == "task-notification"` renders as a system note, and no session preview opens with one.
 - The disk-usage warning fires at most once per server lifetime and never blocks work.

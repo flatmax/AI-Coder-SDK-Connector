@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -77,11 +78,19 @@ _FRAMING_CLOSE = "</aic-dc-ui-context>"
 # compacted has an `ai_title`, and `info.summary` is a real title.
 _COMPACT_PREAMBLE = "This session is being continued from a previous conversation"
 
-# Prose that is identical in every session, and so tells one row from
-# another not at all. Both openers are here rather than checked separately
-# because the failure they cause is one failure: a session list whose rows
-# cannot be distinguished.
-_BOILERPLATE = (_FRAMING_OPEN, _COMPACT_PREAMBLE)
+# How the CLI opens the message it wakes the main agent with when a
+# background subagent finishes. A prefix again, and for the same reason: the
+# entry's `origin.kind` marker does not survive the SDK's parser either, and
+# a preview reads messages rather than entries. `_task_notification_card`
+# does have the entry and uses the marker.
+_NOTIFICATION_OPEN = "<task-notification>"
+
+# Text that tells one session row from another not at all — either because
+# it is identical in every session, or because it is machine plumbing nobody
+# would recognise their conversation by. They are checked together rather
+# than separately because the failure they cause is one failure: a session
+# list whose rows cannot be distinguished.
+_BOILERPLATE = (_FRAMING_OPEN, _COMPACT_PREAMBLE, _NOTIFICATION_OPEN)
 
 
 class ImageUnavailable(Exception):
@@ -543,6 +552,13 @@ def _first_prompt(messages: list[SessionMessage]) -> str:
     exactly the ones a user has most reason to find again. Skipped, the loop
     reaches the first thing the user typed *after* the compaction, which is
     their own words and specific to the session.
+
+    Skips a background agent's task-notification for the same reason, in a
+    third guise. Ordinarily one cannot be first — the prompt that spawned the
+    agent comes before it — but a compacted session whose subagent notified
+    after the boundary has one as the first user message the loop can see, and
+    a session row previewing a task id and an output path names nothing a user
+    could recognise.
     """
     for message in messages:
         body = getattr(message, "message", None) or {}
@@ -661,7 +677,16 @@ def render_messages(
             divider = _compaction_divider(entry, by_uuid)
             if divider is not None:
                 rendered.append(divider)
-            rendered.append(_user_message(message, entry, session_id))
+            # A background agent's wake-up is a user entry the user did not
+            # write. It still ends the turn above it and opens the one below —
+            # that is how the transcript records it — but it is a system note,
+            # not a prompt.
+            notification = _task_notification_card(entry, body)
+            rendered.append(
+                notification
+                if notification is not None
+                else _user_message(message, entry, session_id)
+            )
             timestamp = entry.get("timestamp")
             asked_at = timestamp if isinstance(timestamp, str) else None
         else:
@@ -787,6 +812,106 @@ def _is_tool_reply(body: dict[str, Any]) -> bool:
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in content
     )
+
+
+def _tagged(text: str, tag: str) -> str | None:
+    """The body of one ``<tag>…</tag>`` in a notification, or ``None``.
+
+    Not an XML parse, because the payload is not XML: ``<result>`` holds the
+    subagent's prose, which routinely contains ``<`` and unbalanced markup of
+    its own. A non-greedy scan for the matching close tag is what the CLI's
+    own format supports, and a field it cannot find is one this card leaves
+    out rather than guesses at.
+    """
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    if match is None:
+        return None
+    body = match.group(1).strip()
+    return body or None
+
+
+def _task_notification_card(
+    entry: dict[str, Any], body: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A background agent's wake-up, as a system note rather than a prompt.
+
+    The CLI wakes the main agent by *sending it a user message*, so a turn
+    that delegated to a background subagent has a `user` entry in the middle
+    of it that nobody typed. Rendered as a prompt it was the worst row in the
+    transcript: labelled "YOU", carrying a raw task id, a `toolu_…` tool-use
+    id, a `/tmp/claude-…` output path, an explainer addressed to the model
+    about how notifications work, and three unlabelled integers that ran
+    together into one meaningless number.
+
+    ``origin.kind`` is the CLI's own discriminator for these, so nothing here
+    has to sniff the content to know what it is reading — the parse is only
+    for the fields worth showing. What is left out is deliberate: the ids and
+    the output path are plumbing, the note is written for the model, and the
+    ``<result>`` is the subagent's own answer, which the assistant's next turn
+    restates and the subagent's transcript holds in full.
+
+    Live, no row appears here at all: the wake-up happens inside the turn the
+    browser has already settled, and the answer arrives as a continuation of
+    it (``specs5/3-engine/session.md`` § *A result message ends a turn*). The
+    replay shows the seam because the transcript records one — this is where
+    the turn on disk actually breaks.
+    """
+    origin = entry.get("origin")
+    if not isinstance(origin, dict) or origin.get("kind") != "task-notification":
+        return None
+    content = body.get("content")
+    if not isinstance(content, str):
+        return None
+
+    # The CLI's own sentence about what finished, e.g. `Agent "Describe
+    # calc.py" finished`. Without it there is nothing to name the agent by
+    # but the task id, which is better than an unattributed row.
+    headline = _tagged(content, "summary")
+    if headline is None:
+        task_id = _tagged(content, "task-id")
+        headline = (
+            f"Background agent `{task_id}` finished"
+            if task_id
+            else "A background agent finished"
+        )
+    status = _tagged(content, "status")
+    # `completed` is what the headline already says. Anything else — killed,
+    # failed — is the point of the row.
+    if status and status != "completed":
+        headline = f"{headline} — **{status}**"
+
+    stats: list[str] = []
+    usage = _tagged(content, "usage") or ""
+    tokens = _int_tagged(usage, "subagent_tokens")
+    if tokens is not None:
+        stats.append(f"{tokens:,} tokens")
+    tools = _int_tagged(usage, "tool_uses")
+    if tools is not None:
+        stats.append(f"{tools} tool {'call' if tools == 1 else 'calls'}")
+    duration = _int_tagged(usage, "duration_ms")
+    if duration is not None:
+        stats.append(f"{duration / 1000:.1f}s")
+
+    card: dict[str, Any] = {
+        "role": "user",
+        "content": f"🤖 {headline}" + (f" ({', '.join(stats)})" if stats else ""),
+        "system_event": True,
+    }
+    timestamp = entry.get("timestamp")
+    if isinstance(timestamp, str):
+        card["timestamp"] = timestamp
+    return card
+
+
+def _int_tagged(text: str, tag: str) -> int | None:
+    """One ``<tag>`` read as a count. Absent or non-numeric reads as absent."""
+    body = _tagged(text, tag)
+    if body is None:
+        return None
+    try:
+        return int(body)
+    except ValueError:
+        return None
 
 
 def _compaction_divider(
