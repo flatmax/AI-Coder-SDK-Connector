@@ -102,6 +102,7 @@ _SUBAGENT_FIELDS = (
     "tool_use_id",
     "description",
     "task_type",
+    "subagent_type",
     "status",
     "last_tool_name",
     "usage",
@@ -605,6 +606,16 @@ class TurnTranslator:
             or patch.get("description")
             or "",
             "task_type": getattr(message, "task_type", None),
+            # Two different "types" ride on these messages and only one of
+            # them names the agent. `task_type` is the *transport* kind —
+            # "local_agent", "local_bash" — which is what
+            # `_NON_SUBAGENT_TASK_TYPES` filters on and is identical on every
+            # subagent row. The agent's own kind ("Explore", "general-purpose")
+            # arrives as `subagent_type`, which the SDK dataclasses do not
+            # hoist, so it has to be read off the raw payload. Captured from a
+            # headless CLI run on 2026-08-25: `task_started` carried
+            # `{"task_type": "local_agent", "subagent_type": "Explore"}`.
+            "subagent_type": data.get("subagent_type") or patch.get("subagent_type"),
             "status": status,
             "last_tool_name": getattr(message, "last_tool_name", None),
             "usage": dict(usage) if usage else None,

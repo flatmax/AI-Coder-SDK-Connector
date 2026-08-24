@@ -51,8 +51,10 @@ import {
   renderToolCard,
   renderTurnBlocks,
   renderTurnFooter,
+  subagentBlocksExpanded,
   terminalBadge,
   toggleBlock,
+  toggleSubagentBlocks,
   toolLabel,
 } from './block-render.js';
 
@@ -698,7 +700,9 @@ describe('renderTurnBlocks', () => {
     const task = toolBlock({ block_id: 'toolu_task', tool: { name: 'Task', input_summary: 'explore' } });
     const inner = toolBlock({ block_id: 'toolu_inner', agent_id: 'toolu_task', tool: { name: 'Grep' } });
     const row = { key: 'task-1', task_id: 'task-1', tool_use_id: 'toolu_task', description: 'Explore' };
-    const host = draw(renderTurnBlocks(stubPanel(), [task, inner], { subagents: [row] }));
+    const panel = stubPanel();
+    toggleSubagentBlocks(panel, row);
+    const host = draw(renderTurnBlocks(panel, [task, inner], { subagents: [row] }));
     const nested = host.querySelector('.subagent-blocks');
     expect(nested.querySelectorAll('.tool-card')).toHaveLength(1);
     expect(nested.querySelector('.tool-card').dataset.tool).toBe('Grep');
@@ -1147,7 +1151,10 @@ describe('renderSubagentRow', () => {
     task_id: 'task-1',
     tool_use_id: 'toolu_task',
     description: 'Explore the auth flow',
-    task_type: 'Explore',
+    // Both types as the CLI really reports them: the transport kind and the
+    // agent's own kind. Only the second is ever shown to a reader.
+    task_type: 'local_agent',
+    subagent_type: 'Explore',
     ...over,
   });
 
@@ -1211,22 +1218,105 @@ describe('renderSubagentRow', () => {
   });
 
   it('falls back to a name when the CLI described neither the task nor its type', () => {
+    // Never to `task_type`: "local_agent" is the transport, and a row headed
+    // with it names nothing a reader was looking for.
     const host = draw(renderSubagentRow(
       stubPanel(),
-      row({ description: null, task_type: null }),
+      row({ description: null, subagent_type: null }),
       [], [], false,
     ));
     expect(text(host.querySelector('.subagent-desc'))).toBe('Subagent');
   });
 
-  it('indents the subagent’s own tool cards beneath it', () => {
+  it('collapses the subagent’s own tool cards, counting them instead', () => {
+    // The transcript has a tab; drawing it inline as well is what made a
+    // delegated turn read as though it had happened twice.
+    const panel = stubPanel();
+    const live = row({ status: 'running' });
+    const host = draw(renderSubagentRow(
+      panel,
+      live,
+      [toolBlock({ tool: { name: 'Grep', input: {} } }),
+        toolBlock({ tool: { name: 'Read', input: {} } })],
+      [], false,
+    ));
+    expect(host.querySelector('.subagent-blocks')).toBeNull();
+    const toggle = host.querySelector('.subagent-blocks-toggle');
+    expect(text(toggle)).toBe('▸ 2 tool calls');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+    toggle.click();
+    expect(subagentBlocksExpanded(panel, live)).toBe(true);
+    expect(panel.requestUpdate).toHaveBeenCalled();
+  });
+
+  it('counts the calls it would draw, not every nested block', () => {
+    // A subagent's blocks are its prose as well as its calls, and a
+    // `TodoWrite` draws nothing. Observed live: one `Read` between two text
+    // blocks was announced as "3 tool calls".
     const host = draw(renderSubagentRow(
       stubPanel(),
       row(),
+      [
+        textBlock({ block_id: 'a:b0', content: 'I’ll read the README.' }),
+        toolBlock({ tool: { name: 'Read', input: {} } }),
+        toolBlock({ block_id: 'toolu_todo', tool: { name: 'TodoWrite', input: {} } }),
+        textBlock({ block_id: 'a:b1', content: 'The magic word is ORCHID.' }),
+      ],
+      [], false,
+    ));
+    expect(text(host.querySelector('.subagent-blocks-toggle'))).toBe('▸ 1 tool call');
+  });
+
+  it('names the disclosure for a subagent that only answered', () => {
+    const host = draw(renderSubagentRow(
+      stubPanel(),
+      row(),
+      [textBlock({ block_id: 'a:b0', content: 'ORCHID.' })],
+      [], false,
+    ));
+    expect(text(host.querySelector('.subagent-blocks-toggle'))).toBe('▸ transcript');
+  });
+
+  it('indents the subagent’s own tool cards beneath it once expanded', () => {
+    const panel = stubPanel();
+    const one = row();
+    toggleSubagentBlocks(panel, one);
+    const host = draw(renderSubagentRow(
+      panel,
+      one,
       [toolBlock({ tool: { name: 'Grep', input: {} } })],
       [], false,
     ));
     expect(host.querySelector('.subagent-blocks .tool-card')).toBeTruthy();
+    expect(text(host.querySelector('.subagent-blocks-toggle'))).toBe('▾ 1 tool call');
+  });
+
+  it('does not offer a disclosure for a subagent that has run nothing', () => {
+    const host = draw(renderSubagentRow(stubPanel(), row(), [], [], false));
+    expect(host.querySelector('.subagent-blocks-toggle')).toBeNull();
+  });
+
+  it('remembers one subagent’s disclosure without opening the next', () => {
+    // The same `_blockExpansion` Map serves rows and blocks alike, keyed by
+    // task id, so expanding one row must not expand its siblings.
+    const panel = stubPanel();
+    toggleSubagentBlocks(panel, row({ key: 'task-1' }));
+    expect(subagentBlocksExpanded(panel, row({ key: 'task-1' }))).toBe(true);
+    expect(subagentBlocksExpanded(panel, row({ key: 'task-2' }))).toBe(false);
+  });
+
+  it('renders the summary as the markdown the subagent wrote', () => {
+    // Verified against a live CLI notification: the summary is the subagent's
+    // own closing answer, and it arrives as markdown.
+    const host = draw(renderSubagentRow(
+      stubPanel(),
+      row({ terminal: true, summary: 'The magic word is **ORCHID**.' }),
+      [], [], false,
+    ));
+    const summary = host.querySelector('.subagent-summary');
+    expect(text(summary)).toBe('The magic word is ORCHID.');
+    expect(summary.querySelector('strong').textContent).toBe('ORCHID');
   });
 
   it('has no block container when the subagent has run nothing yet', () => {

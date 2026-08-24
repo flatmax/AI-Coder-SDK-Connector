@@ -117,16 +117,23 @@ class TestSubclassDispatch:
             assert issubclass(cls, SystemMessage)
 
     def test_task_started_is_a_subagent_event(self, translator):
+        """The payload shape, with both types as the CLI really reports them.
+
+        `task_type` is the transport kind and `subagent_type` the agent's own;
+        the field names are one letter apart in meaning and completely apart in
+        value, so both are pinned here. Taken from a headless CLI capture on
+        2026-08-25: `{"task_type": "local_agent", "subagent_type": "Explore"}`.
+        """
         events = translator.translate(
             TaskStartedMessage(
                 subtype="task_started",
-                data={"agent_id": "agent-7"},
+                data={"agent_id": "agent-7", "subagent_type": "Explore"},
                 task_id="task-1",
                 description="Explore the repo",
                 uuid="u",
                 session_id="s",
                 tool_use_id="toolu_1",
-                task_type="Explore",
+                task_type="local_agent",
             )
         )
         assert names(events) == ["subagentEvent"]
@@ -135,8 +142,48 @@ class TestSubclassDispatch:
         assert payload["task_id"] == "task-1"
         assert payload["agent_id"] == "agent-7"
         assert payload["tool_use_id"] == "toolu_1"
-        assert payload["task_type"] == "Explore"
+        assert payload["task_type"] == "local_agent"
+        assert payload["subagent_type"] == "Explore"
         assert payload["terminal"] is False
+
+    def test_subagent_type_is_read_off_the_raw_payload(self, translator):
+        """It has no dataclass field, so only `data`/`patch` carry it.
+
+        The browser labels every subagent with it — the row's chip, the tab
+        strip, the Stop confirmation — and the fallback when it is missing is
+        the description alone, never `task_type`: labelling with the transport
+        kind put "local_agent" on every row alike.
+        """
+        translator.translate(
+            TaskStartedMessage(
+                subtype="task_started",
+                data={"agent_id": "agent-7", "subagent_type": "general-purpose"},
+                task_id="task-1",
+                description="Write the tests",
+                uuid="u",
+                session_id="s",
+                tool_use_id="toolu_1",
+                task_type="local_agent",
+            )
+        )
+        # And it survives the events that do not repeat it: a notification
+        # carries neither type, and the row must not lose its label.
+        translator.translate(
+            TaskNotificationMessage(
+                subtype="task_notification",
+                data={},
+                task_id="task-1",
+                status="completed",
+                output_file="/tmp/task-1.output",
+                summary="Wrote 4 tests.",
+                uuid="u",
+                session_id="s",
+            )
+        )
+        (row,) = translator.rendered_subagents()
+        assert row["subagent_type"] == "general-purpose"
+        assert row["task_type"] == "local_agent"
+        assert row["summary"] == "Wrote 4 tests."
 
     def test_task_progress_carries_usage_and_last_tool(self, translator):
         events = translator.translate(

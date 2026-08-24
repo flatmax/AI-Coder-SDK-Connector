@@ -460,11 +460,32 @@ deliberate simplification, not an oversight — the old global mode existed beca
 The agent spawns subagents with its own `Task` tool. They are internal to the turn: AIC⚡DC does not
 create them, cannot send them a message, and cannot grant them files.
 
-- A turn that spawns subagents grows a row per subagent inside the assistant turn — description, task type, live status, last tool name, token usage
-- Tool cards from a subagent render indented under its row, keyed by `agent_id`
+- A turn that spawns subagents grows a row per subagent inside the assistant turn — description, agent type, live status, last tool name, token usage
+- Tool cards from a subagent render indented under its row, keyed by `agent_id`, **collapsed behind a disclosure** that counts them
 - A row is terminal when its status reaches a terminal value. A task can reach a terminal status with no notification event, so the row must not wait for one to stop spinning
 - Clicking a row opens its full transcript in the subagent browser (see [subagent-browser.md](subagent-browser.md))
 - A live subagent can be stopped — `stop_task(task_id)` — from its row. This is the only write affordance a subagent row has
+
+### What a Row Shows, and What It Drops
+
+A delegated turn describes the same subagent four times over — the `Task` card's header, the row's head,
+the row's summary, and the agent's own prose introducing the delegation. Left alone this reads as though
+the turn happened several times; one live run produced a bubble that said "single commit" three times.
+Two of the four are dropped at the row.
+
+- **The nested tool cards collapse.** The subagent's transcript already has a tab; drawing it inline is a
+  second copy of it. The disclosure stays shut until clicked, including for a live subagent — the head
+  carries the running status and the tool it is in, which is the part worth watching from here.
+- **The type chip is `subagent_type`, never `task_type`.** Two types ride on the `Task*` messages:
+  `task_type` is the *transport* kind (`local_agent`, `local_bash` — what decides whether a task is a
+  subagent at all), and `subagent_type` is the agent's own kind (`Explore`, `general-purpose`). Only the
+  second means anything to a reader; the first is identical on every subagent row. This applies wherever
+  a subagent is labelled — the row's chip, its inline label, the tab strip, the Stop confirmation.
+- **The summary stays, and renders as markdown.** It is the notification's `summary`, which is the
+  subagent's own closing answer rather than a restatement of its description — verified against a
+  headless CLI capture on 2026-08-25, where a task described as "Find magic word in README" reported
+  `summary: "The magic word is **ORCHID**."`. It is the only record in the main transcript of what the
+  subagent *concluded*, so it survives the collapse.
 
 ### What the Old Agent Tabs Did That This Does Not
 

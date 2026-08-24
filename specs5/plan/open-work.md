@@ -1,7 +1,7 @@
 # Open Work — Background-Subagent Fix List
 
-**Status:** paused mid-list on 2026-08-24. Items 1–4 are committed; 5 and 6 are not started. This file
-is the handoff note for resuming, and should be deleted when the list is finished.
+**Status:** resumed 2026-08-25. Items 1–5 are done; 6 is not started. This file is the handoff note for
+resuming, and should be deleted when the list is finished.
 
 The list came out of one live run on the dev backend: a turn that delegated to a background subagent,
 watched from the browser rather than from tests. Everything below is something that run surfaced, in the
@@ -15,41 +15,43 @@ order it was worth fixing.
 | 3(a) | The drain emits every result; the browser revises the settled message | `e3d0e9c` |
 | 3(b) | A background agent's wake-up renders as a system note on replay | `fa572ce` |
 | 4 | Raw HTML in a message renders as the text it was written as | `1d40022` |
+| 5 | The inline subagent block collapses; the type chip names the agent | *this change* |
 
 Each has specs: `specs5/3-engine/session.md` § *Every result the drain reads is emitted*,
 `specs5/3-engine/history.md` § *A background agent's wake-up*, `specs5/5-webapp/chat.md`
-§ *A Turn Can End More Than Once* and § *Markdown Rendering*.
+§ *A Turn Can End More Than Once*, § *Markdown Rendering* and § *What a Row Shows, and What It Drops*.
 
-## 5. The inline subagent block repeats itself
+### What item 5 turned out to be
 
-**Symptom, from the live run:** one assistant bubble said "single commit" three times.
+The open question was whether `row.summary` duplicates the description by construction. It does not.
+A headless CLI capture (`claude -p … --output-format stream-json`, 2026-08-25) settled it: a task
+described as "Find magic word in README" reported `summary: "The magic word is **ORCHID**."` — the
+subagent's own closing answer. So the summary stayed, and now renders as the markdown it arrives as.
+What was dropped instead is the nested transcript, behind a disclosure that counts the calls it would
+draw, and the `task_type` chip.
 
-**Where to look.** `renderSubagentRow` in `webapp/src/chat-panel/block-render.js:882` draws, in order:
-`row.description` (or `task_type`) as the head, then `row.summary` as a line under it, then the
-subagent's own blocks indented beneath. The main turn *also* carries a `Task` tool card whose input
-summary is that same description, and the assistant's own text usually restates it a fourth time. So
-the repetition is several sources agreeing, not one renderer looping — which means the fix is a decision
-about which of them is the one worth showing, not a bug hunt.
+The same capture turned up a second fault the live run had not isolated: **`task_type` is the transport
+kind** (`local_agent`, `local_bash`), not the agent's. The agent's own kind rides as `subagent_type`,
+which no SDK dataclass hoists, so the engine never forwarded it and every subagent chip and label
+fallback read "local_agent". The engine now forwards it and everything user-facing labels with it.
 
-**Intended shape:** collapse the block by default. The row is evidence the subagent ran and the way into
-its transcript; its blocks are a second copy of a transcript that already has a tab. What was not yet
-decided is whether `row.summary` survives the collapse — it is the only line that says what the subagent
-*concluded*, and it is also the line most likely to be identical to the description.
+### Left over from item 5: the row head follows the activity string
 
-**Where the investigation stopped:** I was about to trace where `row.summary` is set
-(`webapp/src/chat-panel/streaming.js`, around the freeze at line 654) to find out whether it is the
-notification's `<summary>` — in which case it duplicates the description by construction — or the
-subagent's own closing text. Resume there.
-
-**No live data survives for this.** A restored session does not rebuild the `subagents` map, so the dev
-frontend's current transcript has `rows: []` on every turn — verified. Reproducing needs a fresh
-delegated turn on the dev backend, not a reload.
+The row's head shows the *last* description an event carried, and the CLI overwrites it as the task
+runs: `task_started` gave "Find magic word in README", `task_progress` replaced it with "Reading
+README.md", which is what the settled row is still headed with. The tab strip already solved this —
+`resolveLabel` in `subagent-tabs.js` latches the `Task` card's description and comments that "the SDK's
+live description is an *activity* string, not the task" — but the inline row has no such latch, and its
+live activity is already carried by the `last_tool_name` chip beside it. Not fixed here: it changes what
+`description` means in the fold (`applySubagentEvent` and `_record_subagent` both patch cumulatively, and
+the spec says so), which is a decision of its own rather than part of the collapse.
 
 ## 6. Post-refresh and boot state
 
 Three separate faults, all about state that does not survive a page load:
 
-- Subagent tabs are lost on refresh.
+- Subagent tabs are lost on refresh. Re-confirmed on 2026-08-25 by accident: a Vite HMR reload during
+  item 5's verification took the settled turn's subagent row and tab with it, mid-inspection.
 - A stale `Main: running` LED at boot.
 - The `Bypass permissions?` confirm replays on page load, with the mode selector still reading "Ask" —
   so the dialog asks about a change that is not in effect.
@@ -93,9 +95,10 @@ recursively), `panel._tabs` is a `Map`, and `panel.messages` is the active tab's
 
 ## Test baselines
 
-- **Python:** `pytest tests/ -q` — **3337 passed**, nothing failing or skipped, measured with items 1–4
-  committed.
+- **Python:** `pytest tests/ -q` — **3343 passed**, nothing failing or skipped, measured with item 5
+  applied.
 - **Frontend:** `npx vitest run src/` in `webapp/` reports **63 failures that predate this list**, all
   in `deriveAgentTabLabel`, `parseAgentTabId` and the chat-panel tab suites — leftovers from `a0cb83b`
   removing the agent-spawn protocol. Measure a baseline with `git stash` before believing a new failure
-  is yours; the whole list so far has introduced none.
+  is yours; the whole list so far has introduced none. Item 5 was checked exactly that way — 68 with the
+  change, 63 stashed, and the five were its own fixtures asserting the old `task_type` vocabulary.

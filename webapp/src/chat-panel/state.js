@@ -192,8 +192,12 @@ export function makeTabState() {
     //                `currentRequestId`: a second tab claiming the parent's
     //                request would steal Main's chunks in
     //                `findTabForRequest`.
-    //   description / task_type / status / last_tool_name / usage / summary
-    //                as reported, patched cumulatively across events
+    //   description / task_type / subagent_type / status / last_tool_name /
+    //   usage / summary
+    //                as reported, patched cumulatively across events.
+    //                `task_type` is the transport ("local_agent");
+    //                `subagent_type` is the agent's kind ("Explore") and is
+    //                the one anything user-facing labels with.
     //   terminal     the engine's own verdict that the task ended
     //   settled      this tab's feed has stopped
     //   unknown      the parent turn ended while it was still live, so its

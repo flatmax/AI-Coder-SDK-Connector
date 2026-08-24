@@ -423,7 +423,7 @@ function renderSubagentTabStop(panel, tabId, tab, streaming) {
   // something other than what they are ending.
   const desc = tab.subagent.labelDescription
     || tab.subagent.description
-    || tab.subagent.task_type
+    || tab.subagent.subagent_type
     || 'this subagent';
   const stop = (e) => {
     e.preventDefault();

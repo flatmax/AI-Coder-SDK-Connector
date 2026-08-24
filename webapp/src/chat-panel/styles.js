@@ -2655,6 +2655,37 @@ export const STYLES = css`
     color: var(--text-secondary, #8b949e);
     word-break: break-word;
   }
+  /* The summary is the subagent's own closing text and arrives as
+   * markdown, so it carries paragraphs; the outer padding already
+   * spaces it off the head and the blocks. */
+  .subagent-summary > :first-child { margin-top: 0; }
+  .subagent-summary > :last-child { margin-bottom: 0; }
+  /* The way to the inline copy of a transcript that is collapsed
+   * by default. Sized like the chips above it rather than like a
+   * button: it is a disclosure, not an action. */
+  .subagent-blocks-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: 1.4rem;
+    padding: 0 0 0.3rem 0;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary, #8b949e);
+    font-family: inherit;
+    font-size: 0.7rem;
+    cursor: pointer;
+  }
+  .subagent-blocks-toggle:hover {
+    color: var(--text-primary, #c9d1d9);
+  }
+  .subagent-blocks-toggle:focus-visible {
+    outline: 2px solid var(--accent-primary, #58a6ff);
+    outline-offset: 2px;
+  }
+  .subagent-caret {
+    font-size: 0.6rem;
+  }
   /* Indented and rule-marked so a subagent's tool calls
    * are visibly not the main agent's. */
   .subagent-blocks {

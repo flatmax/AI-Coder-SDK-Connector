@@ -367,7 +367,11 @@ export function applySubagentEvent(turn, payload) {
     // instead of collecting subagents into a separate section.
     tool_use_id: payload.tool_use_id || null,
     description: '',
+    // The transport kind ("local_agent") and the agent's own kind
+    // ("Explore") respectively. Only the second is worth showing; see
+    // `subagent_type` in `_task_event` (src/aic_dc/claude_code/messages.py).
     task_type: null,
+    subagent_type: null,
     status: null,
     last_tool_name: null,
     usage: null,
@@ -380,6 +384,7 @@ export function applySubagentEvent(turn, payload) {
   if (payload.tool_use_id) patched.tool_use_id = payload.tool_use_id;
   if (payload.description) patched.description = payload.description;
   if (payload.task_type) patched.task_type = payload.task_type;
+  if (payload.subagent_type) patched.subagent_type = payload.subagent_type;
   if (payload.status) patched.status = payload.status;
   if (payload.last_tool_name) patched.last_tool_name = payload.last_tool_name;
   if (payload.usage) patched.usage = payload.usage;

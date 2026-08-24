@@ -155,6 +155,42 @@ export function toggleBlock(panel, block) {
   panel.requestUpdate();
 }
 
+/**
+ * The `_blockExpansion` key for a subagent's nested tool cards.
+ *
+ * A row is not a block and has no `block_id`, but its key is a task id, which
+ * is unique for the same reason a block id is — so the one Map serves both
+ * without a second store or a tab-keyed lookup.
+ */
+function subagentBlocksKey(row) {
+  const id = row?.key || row?.task_id || row?.agent_id || row?.tool_use_id;
+  return id ? `subagent-blocks:${id}` : null;
+}
+
+/**
+ * Whether a subagent's own tool cards are showing. Collapsed unless the user
+ * said otherwise — the same transcript has a tab of its own, and drawing it
+ * inline made a delegated turn read as though it had happened twice
+ * (specs5/5-webapp/chat.md § Subagent Activity).
+ *
+ * No auto-expand branch, deliberately, and in particular not one for a live
+ * subagent: the head already carries the running status and the tool the
+ * subagent is in, which is the part worth watching from the main transcript.
+ */
+export function subagentBlocksExpanded(panel, row) {
+  const key = subagentBlocksKey(row);
+  return key ? panel?._blockExpansion?.get(key) === true : false;
+}
+
+/** Flip a subagent's nested cards and repaint. */
+export function toggleSubagentBlocks(panel, row) {
+  const key = subagentBlocksKey(row);
+  if (!panel || !key) return;
+  if (!panel._blockExpansion) panel._blockExpansion = new Map();
+  panel._blockExpansion.set(key, !subagentBlocksExpanded(panel, row));
+  panel.requestUpdate();
+}
+
 // ---------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------
@@ -830,12 +866,15 @@ export function renderTodoList(todos, live) {
  *
  * Per specs5/5-webapp/subagent-browser.md § Tab Strip: the type plus the
  * description, because an SDK agent id is opaque and means nothing to a
- * reader. Two vocabularies reach here — a live row's `task_type` and a
+ * reader. Two vocabularies reach here — a live row's `subagent_type` and a
  * transcript listing's `agent_type` — and either part may be missing;
  * a row with neither returns '' and its caller falls back to the id.
+ *
+ * Not `task_type`: that names the transport ("local_agent"), so labelling
+ * with it produced "local_agent: find auth call sites" on every row alike.
  */
 export function subagentLabel(row) {
-  const rawType = row?.task_type || row?.agent_type;
+  const rawType = row?.subagent_type || row?.agent_type;
   const type = typeof rawType === 'string' ? rawType.trim() : '';
   const desc =
     typeof row?.description === 'string' ? row.description.trim() : '';
@@ -878,6 +917,21 @@ function openSubagentTranscript(panel, row) {
  * names an agent. A button rather than a click handler on the row itself:
  * the row contains the subagent's own tool cards, which expand on click,
  * and one of those clicks must not also open a tab.
+ *
+ * What the row shows is a decision about *duplication*, because a delegated
+ * turn describes the same subagent four times over: the `Task` card's own
+ * header, this row's head, this summary, and usually the agent's prose above
+ * it. Two of those are dropped here. The nested cards collapse, because the
+ * subagent's transcript already has a tab and drawing it inline is a second
+ * copy of it. The type chip shows `subagent_type` and not `task_type`, which
+ * is the transport kind and reads "local_agent" on every row alike.
+ *
+ * `summary` survives, and is the one line that earns its place: a headless CLI
+ * capture on 2026-08-25 showed it is the subagent's own closing answer
+ * ("The magic word is **ORCHID**"), not a restatement of the description — so
+ * collapsing it away would lose the only record of what the subagent
+ * *concluded*. It arrives as markdown and is rendered as such, through the
+ * same escaping path as message text.
  */
 export function renderSubagentRow(panel, row, blocks, candidates, settled) {
   if (!row) return nothing;
@@ -887,7 +941,21 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
   // them, so reading it with `turnTokens` scored every subagent at zero and
   // the chip below never drew. See `taskUsage` in turn-cost.js.
   const { tokens, toolUses } = taskUsage(row.usage);
-  const desc = row.description || row.task_type || 'Subagent';
+  const desc = row.description || row.subagent_type || 'Subagent';
+  // What the disclosure would actually draw, which is not `blocks.length`:
+  // a subagent's nested blocks are its prose as well as its calls, and
+  // `renderBlock` draws nothing for a superseded block or a `TodoWrite`. A
+  // count taken before that filter said "3 tool calls" over one `Read`.
+  const nested = (blocks || []).filter((b) => b && !b.superseded);
+  const calls = nested.filter(
+    (b) => b.kind === 'tool' && !isTodoWrite(b.tool?.name),
+  ).length;
+  // The prose comes with the calls either way, so the count leads only when
+  // there is one to give; a subagent that just answered gets the plain noun.
+  const disclosure = calls > 0
+    ? `${calls} ${calls === 1 ? 'tool call' : 'tool calls'}`
+    : 'transcript';
+  const showBlocks = nested.length > 0 && subagentBlocksExpanded(panel, row);
   return html`
     <div class="subagent-row ${live ? 'live' : 'terminal'}" data-agent-id=${row.agent_id || row.key}>
       <div class="subagent-head">
@@ -902,8 +970,8 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
               }}
             >${desc}</button>`
           : html`<span class="subagent-desc">${desc}</span>`}
-        ${row.task_type
-          ? html`<span class="subagent-type">${row.task_type}</span>`
+        ${row.subagent_type
+          ? html`<span class="subagent-type">${row.subagent_type}</span>`
           : nothing}
         ${row.status
           ? html`<span class="subagent-status">${row.status}</span>`
@@ -929,12 +997,30 @@ export function renderSubagentRow(panel, row, blocks, candidates, settled) {
           : nothing}
       </div>
       ${row.summary
-        ? html`<div class="subagent-summary">${row.summary}</div>`
+        ? html`<div class="subagent-summary md-content">
+            ${unsafeHTML(renderMarkdown(row.summary))}
+          </div>`
         : nothing}
-      ${blocks?.length
+      ${nested.length > 0
+        ? html`
+            <button
+              class="subagent-blocks-toggle"
+              aria-expanded=${showBlocks ? 'true' : 'false'}
+              title="Show this subagent's own transcript inline"
+              @click=${(e) => {
+                e.stopPropagation();
+                toggleSubagentBlocks(panel, row);
+              }}
+            >
+              <span class="subagent-caret">${showBlocks ? '▾' : '▸'}</span>
+              ${disclosure}
+            </button>
+          `
+        : nothing}
+      ${showBlocks
         ? html`
             <div class="subagent-blocks">
-              ${blocks.map((block) => renderBlock(panel, block, candidates, settled))}
+              ${nested.map((block) => renderBlock(panel, block, candidates, settled))}
             </div>
           `
         : nothing}

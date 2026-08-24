@@ -46,7 +46,7 @@ function subagentEvent(reqId, over = {}) {
       agent_id: 'agent-1',
       tool_use_id: PARENT,
       description: 'audit the parser',
-      task_type: 'Explore',
+      subagent_type: 'Explore',
       terminal: false,
       ...over,
     },
@@ -130,7 +130,7 @@ describe('a live subagent gets a tab', () => {
       // label itself with.
       pushEvent('subagent-event', subagentEvent(reqId, {
         description: '',
-        task_type: '',
+        subagent_type: '',
       }));
       await settle(p);
       expect(p._tabs.size).toBe(2);
@@ -509,7 +509,7 @@ describe('a refresh mid-fan-out', () => {
         agent_id: 'agent-1',
         tool_use_id: PARENT,
         description: 'audit the parser',
-        task_type: 'Explore',
+        subagent_type: 'Explore',
         status: 'running',
         terminal: false,
       }],
@@ -539,12 +539,12 @@ describe('a refresh mid-fan-out', () => {
         {
           key: 'task-1', task_id: 'task-1', agent_id: 'agent-1',
           tool_use_id: PARENT, description: 'audit the parser',
-          task_type: 'Explore', terminal: false,
+          subagent_type: 'Explore', terminal: false,
         },
         {
           key: 'task-2', task_id: 'task-2', agent_id: 'agent-2',
           tool_use_id: 'toolu_task2', description: 'check the tests',
-          task_type: 'Explore', terminal: false,
+          subagent_type: 'Explore', terminal: false,
         },
       ],
     }]);
@@ -779,7 +779,7 @@ describe('the label a tab keeps', () => {
     const reqId = await sendAndGetRequestId(p);
     pushEvent('subagent-event', subagentEvent(reqId, {
       description: '',
-      task_type: '',
+      subagent_type: '',
       agent_id: '',
       task_id: 'task-1',
     }));

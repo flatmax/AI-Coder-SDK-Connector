@@ -237,12 +237,14 @@ function resolveLabel(sub, row, ownerTab) {
   if (!sub.labelDescription && row?.description) {
     sub.labelDescription = row.description;
   }
-  if (!sub.labelType && row?.task_type) sub.labelType = row.task_type;
+  // `subagent_type` and not `task_type`, so the fallback names the same thing
+  // the card above does — the agent's kind, not the "local_agent" transport.
+  if (!sub.labelType && row?.subagent_type) sub.labelType = row.subagent_type;
 }
 
 /** The whole sentence: a tooltip, the feed's opening line, an LED's subject. */
 function describe(sub) {
-  const type = sub?.labelType || sub?.task_type || sub?.agent_type || '';
+  const type = sub?.labelType || sub?.subagent_type || sub?.agent_type || '';
   const desc = sub?.labelDescription || sub?.description || '';
   if (type && desc) return `${type} — ${desc}`;
   return desc || type || sub?.agent_id || sub?.task_id || 'Subagent';
