@@ -478,8 +478,67 @@ class TurnTranslator:
                 )
             ]
 
+        if subtype == "status":
+            events = self._status_event(data)
+            if events is not None:
+                return events
+
         logger.debug("Generic system message subtype=%s", subtype)
         return [Event("systemEvent", {"subtype": subtype, "data": data})]
+
+    def _status_event(self, data: dict[str, Any]) -> list[Event] | None:
+        """A ``status`` frame, when it is about compaction.
+
+        The CLI's own status channel, and the only *live* report of a
+        compaction the stream carries. Its shape (read from the binary's
+        schema for the SDK output union, not from a capture)::
+
+            {subtype: "status", status: "compacting" | "requesting" | null,
+             permissionMode?, compact_result?: "success" | "failed",
+             compact_error?}
+
+        Two frames per compaction: ``status="compacting"`` when it starts,
+        and ``status=null`` carrying ``compact_result`` when it ends.
+
+        Both matter, for reasons the ``PreCompact`` hook cannot cover:
+
+        - **The start is the honest one.** The hook fires for the CLI's
+          *speculative* background compaction too — precomputed well ahead
+          of the threshold, with the same ``trigger="auto"``, and often
+          discarded without ever compacting anything. This frame is emitted
+          only when the session is actually waiting.
+        - **There is no other report of failure.** A compaction that fails
+          emits no ``compact_boundary``, so a UI holding an indicator until
+          the boundary retracts it would hold it forever.
+
+        Every other status — ``requesting``, a bare ``permissionMode``
+        change — is not ours, and returning ``None`` sends it down the
+        generic channel unchanged.
+        """
+        status = data.get("status")
+        result = data.get("compact_result")
+        if status == "compacting":
+            return [
+                Event(
+                    "compactionEvent",
+                    {"stage": "compaction_started", "raw": data},
+                )
+            ]
+        if result in ("success", "failed"):
+            return [
+                Event(
+                    "compactionEvent",
+                    {
+                        "stage": "compaction_ended",
+                        "result": result,
+                        # Gated behind an internal check on the CLI side, so
+                        # a failure can arrive with no error text at all.
+                        "error": data.get("compact_error"),
+                        "raw": data,
+                    },
+                )
+            ]
+        return None
 
     def _hook_event(self, message: Any) -> list[Event]:
         data = getattr(message, "data", None) or {}

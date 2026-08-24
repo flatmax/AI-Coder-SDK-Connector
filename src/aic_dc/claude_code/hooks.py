@@ -368,16 +368,23 @@ def build_post_tool_use_hook(
 def build_pre_compact_hook(
     broadcast: Callable[[Event], Awaitable[None]] | None = None,
 ) -> Callable[[Any, str | None, Any], Awaitable[dict[str, Any]]]:
-    """The ``PreCompact`` callback: say that compaction is starting.
+    """The ``PreCompact`` callback: say that compaction *may* be starting.
 
     The only reason this is a hook and not a translated message: timing.
     Compaction re-summarises the whole conversation, which on a long
-    session is tens of seconds during which the engine emits nothing. The
-    stream does report it — ``compact_boundary``, which
-    :mod:`aic_dc.claude_code.messages` turns into ``compactionEvent`` — but
-    that message arrives when compaction has *finished*, so the only thing
-    it can explain is a stall the user has already sat through and read as
-    a hang. This hook fires before the pause, which is the whole value.
+    session is tens of seconds during which the engine emits nothing.
+    ``compact_boundary`` arrives when compaction has *finished*, so the
+    only thing it can explain is a stall the user has already sat through
+    and read as a hang. This hook fires first.
+
+    It fires *too* often, though, and the browser has to know that. The
+    CLI also compacts speculatively — a summary precomputed in the
+    background well ahead of the threshold, discarded if the session ends
+    or the context moves on — and it runs this same hook, with the same
+    ``trigger="auto"``, for that. Nothing in the payload distinguishes the
+    two. So this broadcast is a *maybe*, and the engine's own
+    ``status`` frames (``messages._status_event``) are what confirm it;
+    ``webapp/src/compaction-progress.js`` holds one back for the other.
 
     Observational like its neighbour: returns ``{}``, and a ``PreCompact``
     hook has nothing it could usefully return anyway — the compaction is

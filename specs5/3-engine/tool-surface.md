@@ -59,7 +59,7 @@ entirely, which would silently disable the permission dialog.
 | `PostToolUse` | Detect file changes → broadcast, re-index, refresh the viewer. The main reaction point. |
 | `PostToolUseFailure` | Mark the card failed and surface the error; expand it by default. |
 | `UserPromptSubmit` | Record the turn boundary — the request-ID mapping in the derived index, and the turn's own events in `events.jsonl`. **Not** used to inject context — see [decisions § CC-6](../plan/decisions.md#cc-6--the-indexes-reach-claude-code-as-mcp-tools-not-as-prompt-text). |
-| `PreCompact` | Broadcast that compaction is about to happen, so the UI can show it rather than presenting an unexplained pause. |
+| `PreCompact` | Broadcast that compaction *may* be about to happen, so the UI can show it rather than presenting an unexplained pause. A maybe rather than a start — the CLI runs it for speculative background compaction too; the engine's `status` frame is what confirms one. See [history.md § Compaction](history.md#compaction). |
 | `Stop` | Turn boundary housekeeping; triggers `postResponseComplete`. |
 | `SubagentStart` / `SubagentStop` | Create and retire subagent tabs. |
 | `Notification` | Surface engine notifications as toasts. |
@@ -71,8 +71,9 @@ rows describe facts the message stream already carries — a tool card comes fro
 own tool-use block, a failure from the `ToolResultBlock`, the turn's end from `ResultMessage`, subagents
 from the four `Task*` messages, and the prompt from the fact that we sent it. `PreToolUse` and
 `PermissionRequest` are refused on top of that, because a decision returned from either shadows
-`can_use_tool` and silently ungates the session. `PreCompact` is the one row with no equivalent in the
-stream: `compact_boundary` arrives when compaction has *finished*. The per-event reasons are the
+`can_use_tool` and silently ungates the session. `PreCompact` is the one row that beats the stream:
+`compact_boundary` arrives when compaction has *finished*, and even the `status` frame that reports it
+running arrives after the hook. The per-event reasons are the
 `HOOK_EVENTS` table in `sdk_surface.py`, which the suite checks against what `hooks.py` actually
 registers, in both directions — see [`../plan/sdk-surface.md`](../plan/sdk-surface.md).
 

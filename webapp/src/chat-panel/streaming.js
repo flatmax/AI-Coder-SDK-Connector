@@ -608,9 +608,11 @@ export function onEngineHealth(panel, event) {
  * announces runs for tens of seconds; the toast expired after three, so the
  * stall it existed to explain was unexplained for most of its duration.
  * `aic-compaction-progress` reads the same event off the same window channel
- * and holds an indicator until `compact_boundary` retracts it — see
+ * and holds an indicator until the engine retracts it — see
  * compaction-progress.js. Toasting as well would announce one compaction
- * twice, in two places, with two lifetimes.
+ * twice, in two places, with two lifetimes; and it would announce the CLI's
+ * speculative background compaction, which fires the same hook and stalls
+ * nothing, as though the session were waiting.
  */
 export function onSystemEvent(panel, event) {
   const { data } = event.detail || {};

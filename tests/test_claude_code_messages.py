@@ -305,6 +305,69 @@ class TestSystemMessages:
         )
         assert events[0].payload["pre_tokens"] == 10
 
+    def test_a_compacting_status_is_the_live_start_signal(self, translator):
+        """The stream's only report that a compaction is running *now*.
+
+        The ``PreCompact`` hook fires for the CLI's speculative background
+        compaction too, so it cannot be read as "the session is waiting".
+        This frame can.
+        """
+        events = translator.translate(
+            SystemMessage(subtype="status", data={"status": "compacting"})
+        )
+        assert names(events) == ["compactionEvent"]
+        assert events[0].payload["stage"] == "compaction_started"
+
+    def test_a_failed_compaction_is_reported_nowhere_else(self, translator):
+        """No boundary is written when compaction fails, so this is it."""
+        events = translator.translate(
+            SystemMessage(
+                subtype="status",
+                data={
+                    "status": None,
+                    "compact_result": "failed",
+                    "compact_error": "Conversation too long",
+                },
+            )
+        )
+        assert names(events) == ["compactionEvent"]
+        payload = events[0].payload
+        assert payload["stage"] == "compaction_ended"
+        assert payload["result"] == "failed"
+        assert payload["error"] == "Conversation too long"
+
+    def test_a_failure_with_no_reason_is_still_a_failure(self, translator):
+        """``compact_error`` is gated on the CLI side; the result is not."""
+        events = translator.translate(
+            SystemMessage(
+                subtype="status", data={"status": None, "compact_result": "failed"}
+            )
+        )
+        assert events[0].payload["result"] == "failed"
+        assert events[0].payload["error"] is None
+
+    def test_a_successful_end_retracts_the_indicator(self, translator):
+        events = translator.translate(
+            SystemMessage(
+                subtype="status", data={"status": None, "compact_result": "success"}
+            )
+        )
+        assert names(events) == ["compactionEvent"]
+        assert events[0].payload["stage"] == "compaction_ended"
+        assert events[0].payload["result"] == "success"
+
+    def test_a_status_that_is_not_about_compaction_stays_generic(self, translator):
+        """``requesting`` fires on ordinary API calls, and a permission-mode
+        change rides the same subtype. Neither is the compaction channel's."""
+        for data in (
+            {"status": "requesting"},
+            {"status": None, "permissionMode": "acceptEdits"},
+            {"status": "something_new"},
+        ):
+            events = translator.translate(SystemMessage(subtype="status", data=data))
+            assert names(events) == ["systemEvent"]
+            assert events[0].payload["subtype"] == "status"
+
     def test_unknown_subtype_reaches_the_generic_channel(self, translator):
         """A CLI upgrade must degrade to shown-but-unstyled, never silent."""
         events = translator.translate(

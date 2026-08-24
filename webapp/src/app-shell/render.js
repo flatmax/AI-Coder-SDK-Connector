@@ -154,9 +154,10 @@ export function renderTemplate(host) {
       <!--
         Directly above the capacity bar, and the pairing is the point: the
         bar says how close a compaction is, this says when it is happening.
-        Indeterminate by construction — the engine reports the start (our
-        PreCompact hook) and the end (compact_boundary) and nothing in
-        between, so there is no percentage to be had.
+        Indeterminate by construction — the engine reports the start (its
+        own status frame) and the end (compact_boundary, or a status frame
+        carrying the failure) and nothing in between, so there is no
+        percentage to be had.
       -->
       <aic-compaction-progress></aic-compaction-progress>
       ${renderContextBar(host)}
@@ -201,7 +202,7 @@ export function renderTemplate(host) {
       aic-compaction-progress left with the native engine and has since
       come back, inline in the dialog above the capacity bar rather than
       floating here — the engine's compaction stalls the session just as
-      visibly as ours did, and compact_boundary only says so afterwards.
+      visibly as ours did, and the boundary only says so afterwards.
     -->
     <aic-speech-controls></aic-speech-controls>
 

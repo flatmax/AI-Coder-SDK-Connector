@@ -222,14 +222,15 @@ events.
 | `UserMessage` → `ToolResultBlock` | `toolResult` | Result attached to its card by `tool_use_id`; collapsed by default, expandable, truncated with a "show all" affordance. |
 | `StreamEvent` | `streamChunk` (partial) | Same coalescing path as full blocks. |
 | `SystemMessage(subtype="compact_boundary")` | `compactionEvent` | A divider in the transcript recording that the engine compacted itself, with before/after token counts. |
+| `SystemMessage(subtype="status")` | `compactionEvent` when it is about compaction, `systemEvent` otherwise | The engine's live compaction report: `status: "compacting"` starts the indicator, a later frame's `compact_result` / `compact_error` ends it. A failed compaction writes no boundary, so this is its only report. `requesting` and permission-mode changes ride the same subtype and stay generic. See [history.md § Compaction](history.md#compaction). |
 | `TaskStartedMessage` / `TaskProgressMessage` / `TaskUpdatedMessage` / `TaskNotificationMessage` | `subagentEvent` | Subagent tabs. See [`../5-webapp/subagent-browser.md`](../5-webapp/subagent-browser.md). |
 | `HookEventMessage` | `hookEvent` | Debug view only; not in the main transcript. |
 | `RateLimitEvent` | `rateLimit` | A warning band in the usage HUD with reset timing. |
 | `MirrorErrorMessage` | `engineHealth` | A banner: the repo-local transcript copy has a gap. Non-fatal — the turn continues. See [history.md](history.md). |
 | `ResultMessage` | `streamComplete` | Turn footer: cost, per-model usage, duration, turn count, terminal reason. |
 
-Only some system-message subtypes have dedicated SDK classes; `init` and `compact_boundary` arrive as
-generic `SystemMessage` and are dispatched on the subtype string. Assistant content is likewise not
+Only some system-message subtypes have dedicated SDK classes; `init`, `compact_boundary` and `status`
+arrive as generic `SystemMessage` and are dispatched on the subtype string. Assistant content is likewise not
 limited to text, thinking, and tool-use blocks. The pump must route unknown subtypes and unknown block
 kinds to a generic rendering path rather than dropping them — a CLI upgrade that adds a block kind
 should degrade to "shown but not specially styled", never to silence.

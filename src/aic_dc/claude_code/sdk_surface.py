@@ -190,7 +190,9 @@ HOOK_EVENTS: dict[str, tuple[str, str]] = {
         "broadcasts the compaction as a systemEvent, before the pause "
         "rather than after it. The stream's own compact_boundary arrives "
         "when compaction has finished, so it can only explain a stall the "
-        "user has already read as a hang",
+        "user has already read as a hang. Treated as a maybe, not a "
+        "start: the CLI runs it for speculative background compaction "
+        "too, and the system `status` frame is what confirms one",
     ),
 }
 

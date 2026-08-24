@@ -723,8 +723,18 @@ function seedIntoHistory(historyEl, msgs) {
  *     to the transcript carrying the before/after
  *     token counts.
  *
- * That is the whole vocabulary now. Five further
- * stages — `url_fetch`, `url_ready`, `compacting`,
+ * That is the whole vocabulary this panel acts on.
+ * Two further stages ride the channel and belong to
+ * someone else: `compaction_started` and
+ * `compaction_ended` carry the engine's live status
+ * frames, which drive the compaction indicator
+ * (compaction-progress.js) and leave no trace in
+ * scrollback. A compaction that *failed* produces
+ * only those and no boundary — and so no divider,
+ * correctly, since nothing about the conversation
+ * changed.
+ *
+ * Five further stages — `url_fetch`, `url_ready`, `compacting`,
  * `compacted` and `compaction_error` — were handled
  * here until conversion phase 3 deleted the native
  * engine that broadcast them. The first two belonged

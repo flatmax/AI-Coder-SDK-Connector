@@ -259,11 +259,24 @@ Claude Code compacts itself. AIC⚡DC's compactor — topic-boundary detection o
 verbatim windows, summarise-versus-truncate, minimum-exchange safeguards, tracker re-registration —
 is deleted.
 
-What remains is presentation:
+What remains is presentation, and it reads three signals rather than one:
 
-- `PreCompact` broadcasts that compaction is starting, so a pause is explained rather than mysterious.
-- `SystemMessage(subtype="compact_boundary")` renders as a divider in the transcript with before/after token counts and the
-  trigger, so the user can see where the model's memory was condensed.
+- `SystemMessage(subtype="status")` is the engine's live report. `status: "compacting"` means a
+  compaction is running **now**; a later frame carries `compact_result` — `"success"`, or `"failed"`
+  with an optional `compact_error`. Both become `compactionEvent`s (`compaction_started`,
+  `compaction_ended`). This is the only report a *failed* compaction produces at all: failure writes
+  no boundary, so an indicator waiting for one waits forever.
+- `PreCompact` broadcasts earlier still, so a pause is explained rather than mysterious — but it is a
+  *maybe*. The CLI runs the same hook, with the same `trigger: "auto"`, for the summary it precomputes
+  in the background well ahead of the threshold and often discards without compacting anything.
+  Nothing in the payload separates the two cases. So the indicator holds a hook back for a grace
+  period and shows it only once a `status` frame confirms it; an unconfirmed hook is still shown when
+  the grace period expires — an engine that emits no `status` frames would otherwise show nothing —
+  but on a short leash, and it leaves without a warning, because on this engine an unconfirmed start
+  is a precompute far more often than a stall.
+- `SystemMessage(subtype="compact_boundary")` renders as a divider in the transcript with before/after
+  token counts and the trigger, so the user can see where the model's memory was condensed. It is also
+  the preferred caption for the indicator on the way out, since it is the frame carrying the counts.
 - The Context tab shows auto-compact state and the threshold, so an imminent compaction is
   predictable rather than a surprise. See [context-visibility.md](context-visibility.md).
 
