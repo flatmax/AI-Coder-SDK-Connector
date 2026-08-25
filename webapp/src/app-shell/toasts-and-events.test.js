@@ -289,6 +289,76 @@ describe('AppShell events and toasts', () => {
   });
 
   // ---------------------------------------------------------------
+  // request-dialog-tab, and the section inside the tab
+  // ---------------------------------------------------------------
+  //
+  // A routed slash command names `tab:context#session`, because naming
+  // the tab alone lands on whatever section its reader was last on —
+  // and MCP status is not on Usage at all. The shell's job is only to
+  // pass the section on; the tab decides what it means.
+
+  describe('request-dialog-tab', () => {
+    async function settleSwitch(shell) {
+      await shell.updateComplete;
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    function request(detail) {
+      window.dispatchEvent(
+        new CustomEvent('request-dialog-tab', { detail }),
+      );
+    }
+
+    it('switches to the tab the event names', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      request({ tab: 'context' });
+      await settleSwitch(shell);
+      expect(shell.activeTab).toBe('context');
+    });
+
+    it('asks the tab for the section the event names', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      const tab = shell.shadowRoot.querySelector('aic-context-usage-tab');
+      const spy = vi.spyOn(tab, 'showSection');
+      request({ tab: 'context', section: 'session' });
+      await settleSwitch(shell);
+      expect(spy).toHaveBeenCalledWith('session');
+    });
+
+    it('asks for nothing when no section is named', async () => {
+      // The back-arrow buttons on every tab body fire this event with a
+      // tab and nothing else, and they must not disturb the section.
+      const shell = mountShell();
+      await shell.updateComplete;
+      const tab = shell.shadowRoot.querySelector('aic-context-usage-tab');
+      const spy = vi.spyOn(tab, 'showSection');
+      request({ tab: 'context' });
+      await settleSwitch(shell);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('survives a tab with no section hook', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      request({ tab: 'settings', section: 'session' });
+      await settleSwitch(shell);
+      expect(shell.activeTab).toBe('settings');
+    });
+
+    it('ignores an event naming no tab', async () => {
+      const shell = mountShell();
+      shell._switchTab('context');
+      await settleSwitch(shell);
+      request({ section: 'session' });
+      await settleSwitch(shell);
+      expect(shell.activeTab).toBe('context');
+    });
+  });
+
+  // ---------------------------------------------------------------
   // Enrichment unavailable — one-shot toast
   // ---------------------------------------------------------------
   //

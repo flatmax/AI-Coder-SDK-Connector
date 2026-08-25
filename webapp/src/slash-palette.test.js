@@ -42,7 +42,7 @@ const COMMANDS = [
     argument_hint: '',
     description: 'Show context usage',
     action: 'route',
-    target: 'tab:context',
+    target: 'tab:context#usage',
     during_turn: true,
   },
 ];

@@ -315,7 +315,8 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 ### Slash Commands
 - A leading `/` is not intercepted by the panel. Commands from `.claude/commands/`, skills, plugin commands and the CLI's own built-ins are the engine's and pass through untouched — including a mistyped one, which the CLI names better than the panel could
 - A routed command returns `{status: "routed", target}` synchronously; the panel opens the surface `target` names and renders the reply as a system note saying where it went. A denied one returns `{status: "unsupported"}` with the reason, rendered the same way. Neither reaches the model
-- See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
+- A `target` may name a section within the surface after a `#`, and a tab with a segmented control must be targeted that way — the section it opens on is otherwise the reader's remembered choice, which is how `/mcp` came to open a tab with no MCP status on it. The panel splits the fragment off before it resolves the surface, so a section it does not recognize costs nothing: the surface still opens. Forwarding it is the shell's, over a hook the surface may simply not have — see [`shell.md`](shell.md)
+- See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands) for the target grammar and the routed table
 ### Slash Palette
 - A separate component hosted inside the chat input area, on the same host/guest contract as [§ Input History](#input-history) — `show`/`hide`/`handleKey`, and the chat panel owns the lifecycle
 - Opens when `/` is the first non-whitespace character in the composer and the cursor is still inside that token; closes once whitespace settles the command or the token is gone. The same rule the engine applies to decide a message is a command, so the palette and the engine never disagree about what will be sent

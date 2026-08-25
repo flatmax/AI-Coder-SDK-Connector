@@ -123,9 +123,16 @@ EventCallback = Callable[..., Awaitable[Any]]
 # it so, because routing is what keeps it off `query()`. The two `False`
 # entries are the session swaps, which would orphan the stream the user is
 # watching (specs5/3-engine/session.md § Mid-turn availability).
+#
+# A `target` may name a section within a surface, after a `#`. Naming the tab
+# alone is not enough when the tab has a segmented control: the Context tab
+# remembers the section its reader last chose, so `/mcp` without the anchor
+# opens onto whatever that was — usually Usage, which has no MCP status on it
+# at all. The command would then have opened the right tab and still not shown
+# the thing it names.
 SLASH_ROUTES: dict[str, dict[str, Any]] = {
     "context": {
-        "target": "tab:context",
+        "target": "tab:context#usage",
         "surface": "the Context tab, which is live rather than a one-shot print",
         "palette": "Show context usage in the Context tab",
         "during_turn": True,
@@ -136,13 +143,13 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
     # show them prettier — it stays true afterwards, and it is where the
     # per-model breakdown already lives.
     "usage": {
-        "target": "tab:context",
+        "target": "tab:context#usage",
         "surface": "the Context tab's cost and per-model token breakdown",
         "palette": "Session cost and token usage, in the Context tab",
         "during_turn": True,
     },
     "cost": {
-        "target": "tab:context",
+        "target": "tab:context#usage",
         "surface": "the Context tab's cost and per-model token breakdown",
         "palette": "Session cost and token usage, in the Context tab",
         "during_turn": True,
@@ -151,13 +158,13 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
     # state, which the CLI's text block cannot keep current — and because
     # the reconnect and toggle controls are on that surface too.
     "mcp": {
-        "target": "tab:context",
+        "target": "tab:context#session",
         "surface": "the Context tab's MCP section, with live per-server connection state",
         "palette": "MCP server status and tools, in the Context tab",
         "during_turn": True,
     },
     "agents": {
-        "target": "tab:context",
+        "target": "tab:context#session",
         "surface": "the Context tab's subagent list",
         "palette": "The subagents this session can delegate to",
         "during_turn": True,

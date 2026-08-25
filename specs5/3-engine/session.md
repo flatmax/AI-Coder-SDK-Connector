@@ -314,13 +314,30 @@ the webapp opens the surface named by `target`.
 
 | Command | Target | Mid-turn | Surface |
 |---|---|---|---|
-| `/context` | `tab:context` | Yes | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
-| `/usage`, `/cost` | `tab:context` | Yes | The same tab's cost and per-model breakdown ([`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)). AIC⚡DC computes these figures itself from every result message, so the tab knows more than the CLI's one-shot print does — and unlike the print, it keeps being true. |
-| `/mcp` | `tab:context` | Yes | The Context tab's MCP section: per-server connection state from `get_mcp_status()`, plus each server's tools and their token cost. |
-| `/agents` | `tab:context` | Yes | The Context tab's subagent list — the definitions this session can delegate to, with what they have spent. |
+| `/context` | `tab:context#usage` | Yes | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
+| `/usage`, `/cost` | `tab:context#usage` | Yes | The same tab's cost and per-model breakdown ([`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)). AIC⚡DC computes these figures itself from every result message, so the tab knows more than the CLI's one-shot print does — and unlike the print, it keeps being true. |
+| `/mcp` | `tab:context#session` | Yes | The Context tab's MCP section: per-server connection state from `get_mcp_status()`, plus each server's tools and their token cost. |
+| `/agents` | `tab:context#session` | Yes | The Context tab's subagent list — the definitions this session can delegate to, with what they have spent. |
 | `/permissions` | `tab:settings` | Yes | The Settings tab's permission-mode control plus the rules list. |
 | `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
 | `/resume` | `history` | No | The history browser. Not in the CLI's command list at all. |
+
+#### Target grammar
+
+A target is `surface` or `surface#section`. The webapp opens the surface, then — when a section is
+named — asks it to show that section.
+
+**A surface with a segmented control must be targeted with a section.** The Context tab remembers
+the section its reader last chose, so a bare `tab:context` opens onto whatever that was: `/mcp`
+would land on Usage, which carries no MCP status at all. The command would have opened the right
+tab and still not shown the thing it names. Naming the section is what closes that gap, and it is
+why every Context route above carries one.
+
+Being *shown* a section is not the same as *choosing* it, so an arriving command does not overwrite
+the remembered choice — the reader's own next visit still opens where they left off. An unknown
+section is ignored rather than fatal: the surface still opens, on whatever it would have shown
+anyway. A section is never a substitute for the surface being right, only for where inside it the
+answer lives.
 
 #### Mid-turn availability
 

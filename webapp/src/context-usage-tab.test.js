@@ -1358,6 +1358,80 @@ describe('ContextUsageTab sections', () => {
     ).toEqual(['Session']);
   });
 
+  // `showSection(el, label)` above clicks the segment — the reader
+  // choosing. `el.showSection(id)` is something outside choosing for
+  // them, which is a routed slash command today. The two differ over
+  // exactly one thing: whether the choice is remembered.
+
+  it('shows the section something outside asks for', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    el.showSection('session');
+    await settle(el);
+    expect(
+      [...el.shadowRoot.querySelectorAll('.seg')]
+        .filter((b) => b.getAttribute('aria-selected') === 'true')
+        .map((b) => b.textContent.trim()),
+    ).toEqual(['Session']);
+  });
+
+  it('does not remember a section it was sent to', async () => {
+    // The stored key is the section its *reader* was last on. A command
+    // writing it would quietly redecide where the tab opens for every
+    // manual visit afterwards.
+    publishUsage(usageFixture());
+    const first = mountTab();
+    await settle(first);
+    first.showSection('session');
+    await settle(first);
+    expect(localStorage.getItem('aic-dc-context-section')).toBe(null);
+
+    const second = mountTab();
+    await settle(second);
+    expect(
+      [...second.shadowRoot.querySelectorAll('.seg')]
+        .filter((b) => b.getAttribute('aria-selected') === 'true')
+        .map((b) => b.textContent.trim()),
+    ).toEqual(['Usage']);
+  });
+
+  it('leaves a section the reader did choose remembered', async () => {
+    // Being sent somewhere must not un-remember what they picked before.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(localStorage.getItem('aic-dc-context-section')).toBe('session');
+    el.showSection('usage');
+    await settle(el);
+    expect(localStorage.getItem('aic-dc-context-section')).toBe('session');
+  });
+
+  it('ignores an id it has no section for', async () => {
+    // The ids come from the service's route table, so a mismatch means
+    // the two have drifted. Opening on the usual section beats a body
+    // that renders nothing.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    el.showSection('mcp');
+    await settle(el);
+    expect(sectionFor(el, 'Categories')).not.toBeUndefined();
+  });
+
+  it('loads Debug lazily when sent there', async () => {
+    // Same lazy rule the segmented control follows: the sources behind
+    // Debug cost control requests, so nothing fetches them until asked.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    const spy = vi.spyOn(el, '_ensureDebug').mockImplementation(async () => {});
+    el.showSection('debug');
+    await settle(el);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
   it('ignores a stored section it no longer has', async () => {
     // "cache" was the old tab's second sub-view, and a build that had
     // written it is exactly the one that upgrades into this panel.

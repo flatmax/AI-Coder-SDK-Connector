@@ -702,6 +702,36 @@ class TestSlashCommands:
         }
         assert withheld == {"clear", "resume"}
 
+    def test_every_context_tab_route_names_a_section(self):
+        """The Context tab remembers the section its reader last chose, so a
+        target naming the tab alone opens onto whatever that was. For ``/mcp``
+        that is usually Usage, which carries no MCP status at all — the command
+        would open the right tab and still not show the thing it names.
+        """
+        for name, route in SLASH_ROUTES.items():
+            if not route["target"].startswith("tab:context"):
+                continue
+            assert "#" in route["target"], f"/{name} names no section"
+
+    @pytest.mark.parametrize(
+        ("command", "section"),
+        [
+            ("context", "usage"),
+            ("usage", "usage"),
+            ("cost", "usage"),
+            ("mcp", "session"),
+            ("agents", "session"),
+        ],
+    )
+    def test_a_context_route_lands_on_the_section_holding_its_answer(
+        self, command, section
+    ):
+        """Split by which half of the tab actually renders the answer: the
+        window breakdown and the cost figures are on Usage, while MCP status
+        and the subagent list are on Session.
+        """
+        assert SLASH_ROUTES[command]["target"] == f"tab:context#{section}"
+
 
 # ---------------------------------------------------------------------------
 # The `/` palette's command list
@@ -741,7 +771,9 @@ class TestListCommands:
         }
         commands = _commands_by_name(await service.list_commands())
         assert commands["context"]["action"] == "route"
-        assert commands["context"]["target"] == "tab:context"
+        # Section and all: the browser splits the anchor off, so the target
+        # travels as one string rather than as a pair the two could disagree on.
+        assert commands["context"]["target"] == "tab:context#usage"
 
     async def test_a_routed_row_is_described_by_where_it_goes(self, service):
         """Our description wins over the CLI's for a routed command.

@@ -1272,10 +1272,39 @@ export class AppShell extends JRPCClient {
     });
   }
 
+  /**
+   * Ask the newly-revealed tab to show one of its sections.
+   *
+   * Duck-typed and generic in the same way as
+   * `_notifyTabVisible`, and for the same reason: the shell
+   * should not know which tabs have a segmented control, only
+   * that a request naming a section is worth passing on. A tab
+   * without the hook, or with no such section, is untouched.
+   *
+   * Deliberately *not* the same call the segmented control
+   * makes. That one persists the choice as the section its
+   * reader was last on, and a command choosing it is not the
+   * reader choosing it.
+   *
+   * @private
+   */
+  _notifyTabSection(section) {
+    if (!section) return;
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector('.tab-panel.active');
+      const view = panel?.firstElementChild;
+      if (typeof view?.showSection === 'function') view.showSection(section);
+    });
+  }
+
   _onRequestDialogTab(event) {
     const tab = event?.detail?.tab;
     if (typeof tab !== 'string' || !tab) return;
     this._switchTab(tab);
+    // After the switch: a section is a destination inside the
+    // tab, so there is no sense asking for one before the tab
+    // that owns it is the active one.
+    this._notifyTabSection(event?.detail?.section);
   }
 
   _onRequestDialogMinimize() {

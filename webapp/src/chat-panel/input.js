@@ -777,14 +777,25 @@ function _setComposerValue(panel, ta, value, caret) {
  * guessed at — a service that grows a new route without this
  * switch learning it should do nothing visible, not the
  * wrong thing.
+ *
+ * A target may name a section inside the surface after a `#`,
+ * as `tab:context#session` does. The tab alone is not a
+ * sufficient destination for a surface with a segmented
+ * control: the Context tab remembers the section its reader
+ * last chose, so `/mcp` naming only the tab lands on whatever
+ * that was — and MCP status is not on Usage at all. The
+ * fragment is split off before the switch so an unknown
+ * section cannot make a known tab unreachable; the tab decides
+ * what to do with it, and ignores one it does not have.
  */
 export function applySlashRoute(panel, target) {
-  switch (target) {
+  const [base, section = ''] = String(target || '').split('#');
+  switch (base) {
     case 'tab:context':
     case 'tab:settings':
       panel.dispatchEvent(
         new CustomEvent('request-dialog-tab', {
-          detail: { tab: target.slice('tab:'.length) },
+          detail: { tab: base.slice('tab:'.length), section },
           bubbles: true,
           composed: true,
         }),

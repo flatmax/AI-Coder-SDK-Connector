@@ -437,13 +437,20 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
   [`applySlashRoute`'s](../../webapp/src/chat-panel/input.js) unknown-target branch exists to avoid.
   The RPC is localhost-only and currently has no caller.
 
-- **Sub-anchors on a route target.** `/context`, `/usage`, `/cost`, `/mcp` and `/agents` all resolve to
-  `tab:context` and all open it at the top. The tab holds a section for each, so the honest target
-  would name the section — but the target vocabulary is a flat string the webapp switches on, and
-  teaching it to scroll is a second feature. Four commands landing on the right tab and the wrong
-  scroll position is a smaller miss than four commands landing nowhere.
-
 ### Landed since
+
+- **Sections on a route target** — built, and it was a correctness fix rather than the polish this
+  entry first called it. The earlier framing said the five Context routes landed "on the right tab and
+  the wrong scroll position". They did not: the Context tab is a segmented control that *remembers the
+  section its reader last chose*, so a bare `tab:context` opened onto whatever that was. For `/mcp` and
+  `/agents` the usual answer was Usage, which carries no MCP status and no agent list — two commands
+  opening the right tab and never showing the thing they name, silently, looking like they had worked.
+  A target may now name a section after a `#` (`tab:context#session`), the shell forwards it through a
+  duck-typed `showSection(id)` in the same shape as the existing `onTabVisible()` hook, and the fragment
+  is split off *before* the surface switch so an unknown section cannot make a known tab unreachable.
+  `showSection` deliberately does **not** persist: the stored key means "the section the user was last
+  reading", and a command choosing it is not the reader choosing it. See
+  [`3-engine/session.md` § Target grammar](../3-engine/session.md#target-grammar).
 
 - **`during_turn` on `list_commands` entries** — built. `SLASH_ROUTES` carries the flag, `list_commands`
   and `_routed_commands` emit it, the chat panel binds `panel._streaming` onto `aic-slash-palette`, and

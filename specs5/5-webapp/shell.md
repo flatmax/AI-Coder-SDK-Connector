@@ -206,6 +206,8 @@ spinner that runs forever is worse than the toast it replaced.
 
 Returning to chat from an overlay tab: each overlay tab's body carries a back-arrow (`← Chat`) at top-left. Clicking it dispatches `request-dialog-tab` with `{tab: 'files'}` — legacy storage key, retained for migration safety. The shell's `_switchTab` handles the rest.
 
+**`request-dialog-tab` may also name a `section`**, for a tab that holds a segmented control — a routed slash command uses this to land on the part of the tab that answers it (see [chat.md § Slash Commands](chat.md#slash-commands)). The shell switches the tab, then offers the section to whatever view is now active over a duck-typed `showSection(id)`, the same shape as the existing `onTabVisible()` hook: a view that has no such method is left alone, and no event names which tabs have sections. The shell does not know what a section *is*, and should not — every question about which ids are valid, whether an id is remembered, and what an unknown one means belongs to the view that owns the control.
+
 **The back-arrow is load-bearing, and the dialog gives it no backup.** There is no rendered tab bar — the
 strip at the top of the dialog body belongs to the *chat panel* and is unreachable while an overlay is
 active — so an overlay tab without its own `← Chat` is a dead end escapable only by knowing Alt+1. The SDK

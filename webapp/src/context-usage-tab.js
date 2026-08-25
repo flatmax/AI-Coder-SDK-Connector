@@ -915,6 +915,30 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (id === 'debug') this._ensureDebug();
   }
 
+  /**
+   * Show a section because something outside asked for it — a routed
+   * slash command naming `tab:context#session`, today.
+   *
+   * Separate from `_switchSection` over one line: this does not write
+   * the choice to localStorage. That key records the section its reader
+   * was last on, and `/mcp` picking Session is not the reader picking
+   * it — persisting would let a command quietly redecide where the tab
+   * opens for every manual visit afterwards.
+   *
+   * An unknown id is ignored rather than blanking the body. The section
+   * names come from the service's route table, so a mismatch means the
+   * two have drifted, and the tab a user asked for opening on its usual
+   * section is a far better answer than one rendering nothing.
+   *
+   * @param {string} id One of `_SECTIONS`.
+   */
+  showSection(id) {
+    if (!_SECTIONS.some((s) => s.id === id)) return;
+    if (this._section === id) return;
+    this._section = id;
+    if (id === 'debug') this._ensureDebug();
+  }
+
   _toggleGroup(key) {
     if (this._openGroups.has(key)) this._openGroups.delete(key);
     else this._openGroups.add(key);

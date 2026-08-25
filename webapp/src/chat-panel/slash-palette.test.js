@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { openSlashPalette } from './input.js';
+import { applySlashRoute, openSlashPalette } from './input.js';
 import { mountPanel, publishFakeRpc, settle } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -32,7 +32,9 @@ const FULL = [
     argument_hint: '',
     description: 'Show context usage',
     action: 'route',
-    target: 'tab:context',
+    // Anchored, as the service's route table really answers: the tab
+    // alone lands on whichever section its reader was last on.
+    target: 'tab:context#usage',
     during_turn: true,
   },
 ];
@@ -400,6 +402,7 @@ describe('ChatPanel slash palette selection', () => {
     expect(ta.value).toBe('');
     expect(p._input).toBe('');
     expect(asked.length).toBe(1);
+    expect(asked[0]).toEqual({ tab: 'context', section: 'usage' });
   });
 
   it('leaves an unmatched command alone and sendable', async () => {
@@ -418,6 +421,65 @@ describe('ChatPanel slash palette selection', () => {
     expect(palette(p).handleKey(event)).toBe(false);
     expect(ta.value).toBe('/zzz');
     expect(started).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Route targets
+// ---------------------------------------------------------------------------
+//
+// The `target` strings are the service's, so this side only knows how to
+// reach each surface. A `#section` suffix exists because naming a tab is
+// not a sufficient destination when that tab has a segmented control it
+// restores from localStorage: `/mcp` naming only the tab opens onto
+// whatever the reader was last on, and MCP status is not on Usage.
+
+describe('applySlashRoute', () => {
+  function collect(p) {
+    const seen = [];
+    p.addEventListener('request-dialog-tab', (e) => seen.push(e.detail));
+    return seen;
+  }
+
+  it('splits the section off the tab', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const seen = collect(p);
+    expect(applySlashRoute(p, 'tab:context#session')).toBe(true);
+    expect(seen).toEqual([{ tab: 'context', section: 'session' }]);
+  });
+
+  it('names no section when the target carries none', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const seen = collect(p);
+    expect(applySlashRoute(p, 'tab:settings')).toBe(true);
+    expect(seen).toEqual([{ tab: 'settings', section: '' }]);
+  });
+
+  it('reaches the tab even with a section it does not know', async () => {
+    // The fragment is split off before the switch, so a service that
+    // grows a section this build has never heard of cannot make a tab
+    // it *does* know unreachable. Landing on the tab is the fallback.
+    const p = mountPanel();
+    await settle(p);
+    const seen = collect(p);
+    expect(applySlashRoute(p, 'tab:context#nonesuch')).toBe(true);
+    expect(seen).toEqual([{ tab: 'context', section: 'nonesuch' }]);
+  });
+
+  it('still refuses an unknown surface', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const seen = collect(p);
+    expect(applySlashRoute(p, 'tab:nonesuch#usage')).toBe(false);
+    expect(seen).toEqual([]);
+  });
+
+  it('survives a missing target', async () => {
+    const p = mountPanel();
+    await settle(p);
+    expect(applySlashRoute(p, undefined)).toBe(false);
   });
 });
 
