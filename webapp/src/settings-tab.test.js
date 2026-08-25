@@ -156,14 +156,10 @@ describe('aic-settings-tab config cards', () => {
       .map((n) => n.textContent.trim());
   }
 
-  it('offers engine, app and snippets — and nothing else', async () => {
+  it('offers engine and app — and nothing else', async () => {
     const el = mountTab();
     await settle(el);
-    expect(cardLabels(el).sort()).toEqual([
-      'App Config',
-      'Engine Config',
-      'Snippets',
-    ]);
+    expect(cardLabels(el).sort()).toEqual(['App Config', 'Engine Config']);
   });
 
   it('offers no card for a retired prompt or provider file', async () => {

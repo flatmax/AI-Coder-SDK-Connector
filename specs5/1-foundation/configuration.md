@@ -18,7 +18,6 @@ not through anything in this spec.
 |---|---|---|
 | `engine.json` | User | Model, commit-message model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
 | `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
-| `snippets.json` | Managed | Quick-insert chat buttons, keyed by preset |
 | `commit.md` | Managed | The commit-message request text |
 
 Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`, `system_doc.md`,
@@ -70,22 +69,11 @@ The consequences to preserve:
 - **Indexing** — the debounce interval for post-tool-call re-indexing, and the ceiling on how long an `aic-dc` tool call may wait for a pending flush
 - **Permissions** — `no_client_timeout_s`, the deadline armed when the *last* localhost client leaves and cancelled when one returns, and `presence_poll_s`, how often presence is re-sampled for the life of a waiting request. **There is no decision timeout, and adding one back is a decision to be argued rather than a default to be restored**: nothing accrues while a request waits — one blocked SDK control request is the whole cost — so a wall-clock limit protects no resource and does the one thing a permission dialog must not do, which is answer for the user. Stop is the escape hatch from a dialog nobody wants to answer. Whatever reads these keys must also keep the screen-reader milestones inside the window that exists; the coarse `[300, 60, 10]` list told a user they had five minutes to answer something expiring in thirty seconds. See [delivery § the timer that answered for the user](../plan/delivery.md#interlude--the-timer-that-answered-for-the-user-2026-08-17)
 - **History** — session-directory size warning threshold, and how many mirror-append failures are tolerated before the health banner escalates. The transcript now carries pasted images inline, so the threshold is reached sooner than the native engine's history did. Both thresholds are compared engine-side and the browser is told the verdict — the banner receives "this has escalated", not the number to compare against, for the same reason the disk warning arrives as a sentence: two owners of one rule can only disagree. Both are read on use rather than at construction, so an edit to `app.json` takes effect on the next turn
-- **Presets** — the named bundles that replaced modes: a snippet set, a default tool hint, and optionally a Claude Code skill or agent name. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
+- **Presets** — the named bundles that replaced modes: a default tool hint and optionally a Claude Code skill or agent name. The snippet set that was a preset's third component went with snippets themselves — see [decisions § CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user) and [§ CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states)
 
 Deleted keys: `url_cache`, `history_compaction`, `cache_tiering` (including every membrane and flux
 parameter), and `agents`. The first two describe subsystems the engine now owns; the third describes a
 cache that no longer exists; the last gated a spawn protocol replaced by the `Task` tool.
-
-## Snippets
-
-- Single file with nested structure keyed by preset (code, review, doc)
-- Each snippet has an icon, tooltip, and message text
-- Legacy flat format supported for backwards compatibility
-- Repo-local override first, then the app config directory
-
-The snippet *content* changes with the conversion even though the mechanism does not: snippets that
-recited the edit protocol or asked for a cache rebuild are meaningless, and are replaced by ones that
-are useful against an agent (ask it to plan first, to run the tests, to review its own diff).
 
 ## Config Directory Resolution
 
@@ -97,7 +85,7 @@ are useful against an agent (ask it to plan first, to run the tests, to review i
 
 ## Managed vs User Files
 
-- Managed files — safe to overwrite on upgrade (`app.json`, `snippets.json`, `commit.md`)
+- Managed files — safe to overwrite on upgrade (`app.json`, `commit.md`)
 - User files — never overwritten (`engine.json`)
 - Upgrade creates backup copies of overwritten managed files with a version suffix
 - Files outside either set are skipped during iteration
@@ -109,6 +97,10 @@ rather than deleting them. They may contain a user's customised prompt text, tha
 work, and an upgrade that silently deletes it is hostile — the more so because the deletion would be
 irreversible and the file would never be read again either way. Ignoring them costs a few kilobytes;
 deleting them costs trust.
+
+A repo-local `.aic-dc/snippets.json` is left alone on the same reasoning, and is simply never read
+([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user)). Prose a user
+still wants belongs in `.claude/commands/`, where the CLI reads it and the `/` palette lists it.
 
 For the same reason, a leftover `llm.json` is not migrated automatically. Its model name is the only
 field with a successor, and the rest of it (`env`, cache tuning, timeouts) maps to nothing. Startup
@@ -131,7 +123,6 @@ notices the file, reports it once in the health banner as ignored, and does not 
 
 - App config loaded once and cached; hot-reload available
 - Downstream consumers read config values through accessor methods, not snapshot dicts, so hot-reloaded values take effect immediately
-- Snippets loaded on request with two-location fallback: repo-local first, then app config directory
 - Engine config read on init and on explicit reload
 
 ### What a config change can and cannot do live
@@ -153,7 +144,7 @@ config" problem, because there is no prompt. A config change never invalidates t
 
 - Whitelisted config types can be read, written, and reloaded
 - Arbitrary file paths rejected
-- The whitelist is now three entries — `engine`, `app`, `snippets` — down from eight; the five prompt entries went with the prompt files
+- The whitelist is now two entries — `engine` and `app` — down from eight; the five prompt entries went with the prompt files, and `snippets` with snippets ([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user))
 - `commit.md` is loaded internally but not exposed via the whitelist, as before
 
 ## Per-Repository Working Directory
@@ -168,7 +159,6 @@ holds:
 | `index/` | Derived search, summary and request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Document outline cache |
 | `tex_preview/` | Generated TeX preview output |
-| `snippets.json` | Optional per-repo snippet override |
 
 Gone: the symbol map snapshot (the map is rebuilt in memory and served as a tool), the URL cache,
 `agents/` from the parallel-agent design, and — per [CC-19](../plan/decisions.md#cc-19) — `history.jsonl`

@@ -10,8 +10,8 @@ Scope pinned by specs5/1-foundation/configuration.md#settings-service
 and specs5/1-foundation/rpc-inventory.md:
 
 - **Whitelisted config types only.** The :data:`CONFIG_TYPES` map in
-  :mod:`aic_dc.config` is the authoritative allow-list — three entries
-  now (``"engine"``, ``"app"``, ``"snippets"``), down from eight.
+  :mod:`aic_dc.config` is the authoritative allow-list — two entries
+  now (``"engine"`` and ``"app"``), down from eight.
   Callers pass a type key; the service maps that to a real filename and
   reads / writes inside the user config directory. Arbitrary paths are
   rejected — a caller that asks for ``"commit"`` (loaded internally but
@@ -20,16 +20,14 @@ and specs5/1-foundation/rpc-inventory.md:
 - **Reload is type-aware, and narrower than it looks.** Editing
   ``app.json`` invalidates the doc-convert / doc-index caches, and
   nothing in it reaches the engine, so the new values apply on the next
-  use. ``snippets.json`` is loaded on demand — no cache to invalidate.
-  ``engine.json`` has **no reload RPC at all**: session options are
+  use. ``engine.json`` has **no reload RPC at all**: session options are
   assembled once, at connect time, so most of that file only takes
   effect on a new session and a reload call would be a lie. The
   Settings tab says so and offers a restart instead.
 
 - **Localhost-only for writes and reloads.** The collaboration policy
   treats config edits as mutation-class operations. Read methods
-  (``get_config_content``, ``get_config_info``, ``get_snippets``,
-  ``get_review_snippets``) are always allowed; write and reload methods
+  (``get_config_content``, ``get_config_info``) are always allowed; write and reload methods
   check :meth:`_check_localhost_only` and return the restricted-error
   shape when a non-localhost participant calls them. Matches the
   pattern established in :class:`Repo` and
@@ -99,13 +97,12 @@ logger = logging.getLogger(__name__)
 #
 # Which config types cause a reload call into ConfigManager on save.
 #
-# "app"      → reload_app_config (invalidates the doc-convert and
-#              doc-index caches)
-# "snippets" → no reload needed; loaded on demand
-# "engine"   → deliberately NOT reloadable. The session's options are
-#              built once at connect time, so a reload would clear a
-#              cache nobody reads and report success for a change that
-#              hasn't happened. A new session is the honest answer.
+# "app"    → reload_app_config (invalidates the doc-convert and
+#            doc-index caches)
+# "engine" → deliberately NOT reloadable. The session's options are
+#            built once at connect time, so a reload would clear a
+#            cache nobody reads and report success for a change that
+#            hasn't happened. A new session is the honest answer.
 
 _RELOADABLE_TYPES = frozenset({"app"})
 
@@ -257,20 +254,6 @@ class Settings:
         switched model mid-session.
         """
         return {"config_dir": str(self._config.config_dir)}
-
-    def get_snippets(self) -> list[dict[str, str]]:
-        """Return code-mode snippets.
-
-        :meth:`ClaudeCodeService.get_snippets` is the mode-aware
-        version the chat panel uses. This Settings-level helper is a
-        simpler direct access to the code snippets, used by the snippet
-        editor in the Settings UI.
-        """
-        return self._config.get_snippets("code")
-
-    def get_review_snippets(self) -> list[dict[str, str]]:
-        """Return review-mode snippets."""
-        return self._config.get_snippets("review")
 
     # ------------------------------------------------------------------
     # Write operations (localhost-only)

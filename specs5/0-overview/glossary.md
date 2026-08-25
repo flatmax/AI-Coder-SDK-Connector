@@ -17,7 +17,7 @@ SDK actually does.
 - **Framing** — the small deterministic block the server prepends to a turn describing UI state the agent cannot otherwise observe: selected file paths, the active file, a cursor range, review-mode facts. Bounded, and never file content. Framing plus attached images are the whole of AIC⚡DC's contribution to what the model sees.
 - **Message pump** — the single component that reads the SDK message stream and translates it into AIC⚡DC events. The only code in the system that knows SDK message types. Always drains to `ResultMessage`, including on cancellation.
 - **Terminal reason** — why a turn ended, as reported on `ResultMessage`: normal completion, `aborted_streaming`, `aborted_tools`, error. Rendered in the turn footer.
-- **Preset** — a named bundle of snippet set, default tool hint, and optionally a Claude Code skill or agent definition, replacing the old code/document/cross-reference modes. Switching a preset changes UI affordances only: it does not swap a system prompt, reset context, or invalidate a cache. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
+- **Preset** — a named bundle of a default tool hint and optionally a Claude Code skill or agent definition, replacing the old code/document/cross-reference modes. Switching a preset changes UI affordances only: it does not swap a system prompt, reset context, or invalidate a cache. See [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
 - **Subagent** — an agent the engine spawns through its `Task` tool, with its own context and transcript. Internal to the parent turn; not gated by the one-turn-at-a-time guard, and identified by a stable engine-issued agent ID.
 - **Hook** — an engine callback AIC⚡DC registers to observe or intercept lifecycle points (`PreToolUse`, `PostToolUse`, `Stop`, `PreCompact`). Hooks are how AIC⚡DC learns that files changed; they are not a display channel.
 
@@ -91,7 +91,7 @@ SDK actually does.
 
 - **Provenance header** — the HTML/XML comment at the top of each converted file recording source filename, SHA-256 of source content, and extracted image filenames. Lets the scanner classify output as `current` / `stale` / `conflict` without re-running conversion.
 - **Clean-tree gate** — the precondition requiring zero uncommitted changes before conversion or review mode can start, so the operation's diffs are clean and attributable.
-- **Managed file** — a config file safe to overwrite on release upgrade (default settings, snippets). The old version is backed up with a version suffix.
+- **Managed file** — a config file safe to overwrite on release upgrade (default settings, the commit-message request). The old version is backed up with a version suffix.
 - **User file** — a config file never touched on upgrade. Created only if missing on first run.
 
 ## Review

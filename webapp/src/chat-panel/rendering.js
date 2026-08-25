@@ -33,7 +33,6 @@
 //                           → renderPermissionModeSelector
 //                         → renderSearchBar
 //                         → renderInputSurface
-//                           → renderSnippetDrawer
 //                           → input-history
 //                           → renderPendingImages
 //                           → input row + send column
@@ -104,7 +103,6 @@ import {
 import {
   cancel,
   closeLightbox,
-  insertSnippet,
   onFileChipClick,
   onHistoryCancel,
   onHistorySelect,
@@ -120,7 +118,7 @@ import {
   reattachImage,
   removePendingImage,
   send,
-  toggleSnippetDrawer,
+  openSlashPalette,
   copyMessageText,
   speakMessage,
   onNewSession,
@@ -194,7 +192,6 @@ import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
  *   ├─ input-area ───────────────────────────────┤
  *   │  action-bar (permission mode + search)      │
  *   │  search-bar                                 │
- *   │  snippet drawer (if open)                   │
  *   │  aic-input-history                           │
  *   │  pending images (if any)                    │
  *   │  aic-slash-palette (when typing a /command)  │
@@ -295,13 +292,12 @@ export function render(panel) {
 }
 
 /**
- * Everything the user composes with: the snippet drawer, the
- * recalled-input list, the attached images and the textarea/send row.
+ * Everything the user composes with: the recalled-input list, the
+ * attached images, the `/` palette and the textarea/send row.
  * Absent on a read-only tab — see `render`'s note.
  */
 function renderInputSurface(panel) {
   return html`
-    ${panel._snippetDrawerOpen ? renderSnippetDrawer(panel) : ''}
     <aic-input-history
       @history-select=${(e) => onHistorySelect(panel, e)}
       @history-cancel=${(e) => onHistoryCancel(panel, e)}
@@ -323,19 +319,26 @@ function renderInputSurface(panel) {
       ></textarea>
       <div class="send-column">
         <div class="send-column-top">
+          <!--
+            Disabled while a turn streams because every command the
+            palette could offer is one the concurrency guard would
+            reject. The specified fix is a per-command during_turn flag
+            (specs5/3-engine/session.md § Slash Commands), which lets
+            the routed few stay live; until that lands, refusing to
+            open at all beats opening a list nothing in it can act on.
+          -->
           <button
-            class="action-button snippet-drawer-button ${panel
-              ._snippetDrawerOpen
-              ? 'active'
-              : ''}"
-            @click=${() => toggleSnippetDrawer(panel)}
-            aria-label=${panel._snippetDrawerOpen
-              ? 'Close snippet drawer'
-              : 'Open snippet drawer'}
-            aria-expanded=${panel._snippetDrawerOpen}
-            title="Quick-insert snippets"
+            class="action-button slash-palette-button"
+            ?disabled=${!panel.rpcConnected ||
+            panel._streaming ||
+            !!panel._input.trim()}
+            @click=${() => openSlashPalette(panel)}
+            aria-label="Browse slash commands"
+            title=${panel._input.trim()
+              ? 'Slash commands — clear the message first'
+              : 'Browse slash commands'}
           >
-            ✂️
+            /
           </button>
           <aic-speech-to-text
             @transcript=${(e) => panel._onTranscript(e)}
@@ -1352,51 +1355,6 @@ export function renderSearchBar(panel) {
   `;
 }
 
-// ---------------------------------------------------------------
-// Snippet drawer
-// ---------------------------------------------------------------
-
-export function renderSnippetDrawer(panel) {
-  // Empty list (pre-load, post-error, or
-  // genuinely no snippets configured) shows a
-  // placeholder rather than an empty box. Opening
-  // the drawer is a deliberate action so showing
-  // nothing would be confusing.
-  if (panel._snippets.length === 0) {
-    return html`
-      <div class="snippet-drawer" role="region"
-        aria-label="Snippet drawer">
-        <div class="snippet-empty">No snippets available</div>
-      </div>
-    `;
-  }
-  return html`
-    <div
-      class="snippet-drawer"
-      role="region"
-      aria-label="Snippet drawer"
-    >
-      ${panel._snippets.map(
-        (snippet) => html`
-          <button
-            class="snippet-button"
-            title=${snippet.tooltip || snippet.message || ''}
-            aria-label=${snippet.tooltip ||
-            `Insert snippet: ${snippet.message || ''}`}
-            @click=${() => insertSnippet(panel, snippet)}
-          >
-            <span class="snippet-icon">${snippet.icon || '✂'}</span>
-            ${snippet.tooltip
-              ? html`<span class="snippet-label"
-                  >${snippet.tooltip}</span
-                >`
-              : ''}
-          </button>
-        `,
-      )}
-    </div>
-  `;
-}
 
 // ---------------------------------------------------------------
 // File search overlay

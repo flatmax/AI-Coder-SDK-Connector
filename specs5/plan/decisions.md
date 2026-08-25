@@ -608,3 +608,54 @@ silent when the real mechanism is neither.
 - **The `@`-expansion is the CLI's, so we cannot report on it.** No UI can say "these three files
   were read" — the read shows up as `Read` tool calls in the transcript like any other. That is a
   loss of a promise we were never keeping.
+
+---
+
+## CC-22 — Snippets are deleted; the `/` palette replaces them **(user)**
+
+`snippets.json` and every mechanism that carried it are deleted: `Config.get_snippets`, the
+two-location repo-override loader behind it, `SettingsService.get_snippets` /
+`get_review_snippets`, `ClaudeCodeService.get_snippets`, the `snippets` entry in the config
+whitelist, the frontend's `_snippets` / `_snippetDrawerOpen` state and its `localStorage` key, the
+drawer's render and styles, the auto-close-on-send, the reload-on-preset-or-review-change wiring,
+and the drawer's rung in the Escape priority chain.
+
+Nothing replaces the twenty prompts themselves. **(user)**: *"remove snippets entirely. I can't see
+the use for them any more."* They are not ported to `.claude/commands/` — a user who wants a canned
+prompt writes one there, in the CLI's own format, and it appears in the palette without this
+codebase being told it exists.
+
+**Why it matters:** the app had two prompt libraries. One was a JSON file in this repo, hand-edited,
+keyed by a preset dimension the engine knows nothing about, reachable only through a bespoke RPC
+that had to be re-fetched every time review state or the preset changed. The other is the CLI's own
+inventory — skills, plugin commands, `.claude/commands/` — read from the initialize handshake,
+extensible by the user without touching our config, and already surfaced by a palette we had
+already built and specified. Keeping both meant maintaining the worse one forever.
+
+**What replaces the drawer is its button, not its contents.** The composer keeps a control in that
+slot; it opens the `/` palette by typing `/` into an empty composer. The drawer's real job was
+*discoverability* — a visible row of things you could say — and the palette does that job against a
+list that is actually true of the running CLI. See
+[`../5-webapp/chat.md` § Slash Palette](../5-webapp/chat.md#slash-palette).
+
+**Consequences:**
+
+- **A preset loses a third of its definition.** [CC-12](#cc-12--modes-become-prompt-presets-not-engine-states)
+  defined a preset as a snippet set, a framing hint, and optionally a skill or agent. The snippet
+  set is gone; the framing hint and the skill/agent remain, and the preset selector still earns its
+  place. The `presetChanged` event stays — it just no longer triggers a fetch.
+- **Review loses its snippet swap, not its framing.** `4-features/code-review.md` § Review Snippets
+  is deleted. Review entry still sends its framing message and still sets the read-only posture;
+  what goes is the RPC branch that checked review state to decide which canned prompts to return.
+- **The settings tab loses a file.** `snippets.json` was one of the three whitelisted config
+  entries and the only non-reloadable one whose non-reloadability needed explaining. The whitelist
+  is two entries now — `engine` and `app`.
+- **`snippets.json` stops being a managed file.** Packaging no longer writes it on install or backs
+  it up on upgrade, and a repo-local `.aic-dc/snippets.json` left over from an earlier version is
+  ignored rather than migrated — it is a file of prose, not state, and prose the user still wants
+  belongs in `.claude/commands/`.
+- **Composition at the cursor is genuinely lost.** A snippet inserted editable text into a
+  half-written draft; a command is the whole message and only works as the leading token. The
+  twenty defaults were nearly all whole messages already, so the loss is small — but it is real,
+  and the answer for anyone who hits it is to type the sentence, which is what they would have done
+  before the drawer existed.

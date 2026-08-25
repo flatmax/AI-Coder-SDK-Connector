@@ -201,7 +201,7 @@ export class PermissionDialog extends RpcMixin(LitElement) {
     window.addEventListener('role-changed', this._onRoleChanged);
     // Capture phase on `window`, which is the outermost target in the
     // bubble/capture path — so this handler runs before the chat panel's
-    // @-filter, the snippet drawer, the input-clear chain, and the
+    // @-filter, the `/` palette, the input-clear chain, and the
     // lightbox, all of which bind on document or on their own roots.
     // That ordering is the spec's "Escape takes priority over every
     // other Escape binding in the application".

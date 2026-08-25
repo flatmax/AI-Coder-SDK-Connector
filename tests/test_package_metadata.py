@@ -74,7 +74,6 @@ def test_all_expected_config_files_present() -> None:
     expected = {
         "engine.json",
         "app.json",
-        "snippets.json",
         "commit.md",
     }
     actual = {p.name for p in CONFIG_DIR.iterdir() if p.is_file()}
@@ -143,27 +142,6 @@ def test_app_config_is_valid_json_with_required_sections() -> None:
     for section in ("doc_convert", "doc_index"):
         assert section in data, f"missing app.json section: {section}"
         assert isinstance(data[section], dict)
-
-
-def test_snippets_json_has_all_three_modes() -> None:
-    """snippets.json uses the nested per-mode structure.
-
-    specs4/1-foundation/configuration.md#snippets defines keys for code,
-    review, and doc modes. Each value is a list of snippet objects with
-    icon, tooltip, and message fields.
-    """
-    data = json.loads((CONFIG_DIR / "snippets.json").read_text(encoding="utf-8"))
-    assert isinstance(data, dict)
-    for mode in ("code", "review", "doc"):
-        assert mode in data, f"snippets.json missing mode: {mode}"
-        assert isinstance(data[mode], list)
-        assert len(data[mode]) > 0, f"snippets.json[{mode}] is empty"
-        for snippet in data[mode]:
-            assert isinstance(snippet, dict)
-            # Required keys per spec.
-            assert "icon" in snippet
-            assert "tooltip" in snippet
-            assert "message" in snippet
 
 
 def test_the_commit_prompt_is_non_empty() -> None:

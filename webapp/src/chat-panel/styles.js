@@ -18,7 +18,7 @@
 //   - Streaming cursor
 //   - Input area, action bar, search bar,
 //     permission-mode selector
-//   - Snippet drawer
+//   - Slash-palette button
 //   - Send button column
 //   - Edit blocks (cards, diff lines, error messages)
 //   - Edit summary banner
@@ -1150,7 +1150,7 @@ export const STYLES = css`
   }
 
   /* Search bar — sits inside the action bar between the
-   * snippet-drawer toggle and the session buttons. Flex-1
+   * preset selector and the session buttons. Flex-1
    * to take the middle space. Inline toggles live inside
    * the input's border so the whole search area visually
    * groups as one element. */
@@ -1320,51 +1320,32 @@ export const STYLES = css`
       0 0 0 1px rgba(88, 166, 255, 0.55),
       0 0 8px rgba(88, 166, 255, 0.45);
   }
-  .snippet-drawer {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.375rem;
-    padding: 0.5rem 0;
-    margin-bottom: 0.5rem;
-    border-top: 1px solid rgba(240, 246, 252, 0.08);
-    border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+  /* The slash glyph stands where the snippet drawer's ✂️ did, and it is
+   * the one button in the column that is a character rather than an
+   * emoji — so it needs the accent colour and a mono face to read as a
+   * control at all. Sized and centred to match the emoji buttons'
+   * optical weight; without the fixed width it sits visibly narrower
+   * than the microphone beside it. */
+  .slash-palette-button {
+    justify-content: center;
+    min-width: 1.75rem;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--accent-primary, #58a6ff);
   }
-  .snippet-empty {
-    padding: 0.25rem 0.5rem;
-    color: var(--text-secondary, #8b949e);
-    font-style: italic;
-    font-size: 0.8125rem;
-  }
-  .snippet-button {
-    background: rgba(13, 17, 23, 0.6);
-    border: 1px solid rgba(240, 246, 252, 0.1);
-    color: var(--text-primary, #c9d1d9);
-    padding: 0.3rem 0.6rem;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.8125rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    transition: background 120ms ease, border-color 120ms ease;
-  }
-  .snippet-button:hover {
-    background: rgba(240, 246, 252, 0.06);
-    border-color: rgba(240, 246, 252, 0.2);
-  }
-  .snippet-icon {
-    font-size: 0.9375rem;
-  }
-  .snippet-label {
-    color: var(--text-secondary, #8b949e);
+  .slash-palette-button:hover:not(:disabled) {
+    color: var(--accent-primary, #58a6ff);
+    background: rgba(88, 166, 255, 0.12);
+    border-color: rgba(88, 166, 255, 0.3);
   }
   .input-row {
     display: flex;
     gap: 0.5rem;
     align-items: flex-end;
   }
-  /* Stack a top row (snippets + microphone, side by
-   * side) above the send button at the right edge of
+  /* Stack a top row (the slash-palette button + microphone,
+   * side by side) above the send button at the right edge of
    * the input row. align-items:stretch lets the top
    * row's combined width drive the send button's
    * width so the column sits on a clean vertical

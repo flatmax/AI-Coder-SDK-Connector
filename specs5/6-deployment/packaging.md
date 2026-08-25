@@ -50,9 +50,9 @@ Two constant sets in the config module control upgrade behavior:
 
 | Category | Files | Upgrade behavior |
 |---|---|---|
-| Managed | `app.json`, `snippets.json`, `commit.md` | Overwritten on upgrade; old version backed up with a timestamp/version suffix |
+| Managed | `app.json`, `commit.md` | Overwritten on upgrade; old version backed up with a timestamp/version suffix |
 | User | `engine.json` | Never overwritten; only created if missing |
-| Retired | `llm.json`, `system.md`, `system_doc.md`, `system_extra.md`, `compaction.md`, `review.md`, `system_reminder.md` | **Left on disk untouched.** Never read, never backed up, never deleted |
+| Retired | `llm.json`, `snippets.json`, `system.md`, `system_doc.md`, `system_extra.md`, `compaction.md`, `review.md`, `system_reminder.md` | **Left on disk untouched.** Never read, never backed up, never deleted |
 
 Files not in any set (e.g., the version marker, directory entries with a leading dot) are skipped during iteration.
 
@@ -139,13 +139,6 @@ with nothing in context but this file and the diff. It briefs a model on its rol
 has no other briefing — and possibly a small model, so the guidance carries its own examples rather
 than assuming judgement. Conventional-commit style is the substance.
 
-### Snippets
-
-- Single file, nested structure keyed by **preset** (the successor to mode)
-- Default snippets cover common agentic patterns — ask before editing, run the tests, explain the failure, review the diff, check the plan
-- Legacy flat format supported for backwards compatibility
-- Snippets that told the model how to emit edit blocks or spawn agents are deleted; the ones that survive are the ones that were always just useful things to say
-
 ## Per-Repository Working Directory
 
 A per-repo working directory at the repo root, hidden (leading dot). Created on first run by the config manager and added to the repo's `.gitignore` file.
@@ -162,11 +155,11 @@ state intact rather than a directory of records it cannot parse.
 | `index/` | Derived search and summary index | Built from `sessions/`; deletable, rebuilt on next start |
 | `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
 | `tex_preview/` | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |
-| `snippets.json` | Optional repo-local snippet override | User-edited |
 
 Gone: the symbol map snapshot (the map is rebuilt in memory and served through the MCP bridge, so a
-stale on-disk copy has no reader), the URL cache, and the `agents/` directory from the parallel-agent
-design.
+stale on-disk copy has no reader), the URL cache, the `agents/` directory from the parallel-agent
+design, and `snippets.json` ([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user))
+— a leftover copy is ignored rather than deleted, like any retired file.
 
 `sessions/` is the one entry whose growth is worth watching: it holds every turn of every session
 including subagent transcripts, and it is the engine's primary record rather than a cache. Layout and

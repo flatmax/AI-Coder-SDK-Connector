@@ -1779,18 +1779,6 @@ class ClaudeCodeService:
             return []
         return self.symbol_index.lsp_get_completions(path, line, col, prefix)
 
-    def get_snippets(self) -> list[dict[str, str]]:
-        """The prompt snippets for the current situation.
-
-        Two sets now, not three: ``review`` while a review is active and
-        ``code`` otherwise. The ``doc`` set went with the modes — there is
-        no longer a state in which documents are the only thing the agent
-        can see, so a document-specific snippet list has nothing to key off.
-        """
-        if self.review.active:
-            return self._config.get_snippets("review")
-        return self._config.get_snippets("code")
-
     def navigate_file(self, path: str) -> dict[str, Any]:
         """Ask every client to open ``path``.
 

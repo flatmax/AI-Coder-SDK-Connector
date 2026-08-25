@@ -58,11 +58,6 @@ class FakeConfig:
         if aic_dc_dir is None and repo_root is not None:
             aic_dc_dir = Path(repo_root) / ".aic-dc"
         self.aic_dc_dir = aic_dc_dir
-        self.snippet_calls: list[str] = []
-
-    def get_snippets(self, mode="code"):
-        self.snippet_calls.append(mode)
-        return [{"label": mode, "text": f"snippet for {mode}"}]
 
     def get_commit_prompt(self):
         return "Write a conventional commit message for this diff."
@@ -1845,7 +1840,6 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "get_commit_graph": (),
     "get_review_state": (),
     "get_review_file_diff": ("a.py",),
-    "get_snippets": (),
     # The symbol index answers questions about the tree and changes nothing.
     "lsp_get_hover": ("a.py", 1, 0),
     "lsp_get_definition": ("a.py", 1, 0),

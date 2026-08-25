@@ -468,13 +468,6 @@ class TestRefusalsDuringReview:
         # The reviewed content is still on disk.
         assert (repo_dir / "new.py").exists()
 
-    async def test_snippets_switch_to_the_review_set(self, service, feature_tip):
-        await service.start_review("feature", feature_tip)
-        assert service.get_snippets() == service._config.get_snippets("review")
-        await service.end_review()
-        assert service.get_snippets() == service._config.get_snippets("code")
-
-
 # ---------------------------------------------------------------------------
 # Collaboration
 # ---------------------------------------------------------------------------

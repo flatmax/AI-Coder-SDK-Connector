@@ -344,4 +344,4 @@ def review_end_content() -> str:
 
 
 def preset_switch_content(to_preset: str) -> str:
-    return f"Snippet preset switched to **{to_preset}**."
+    return f"Preset switched to **{to_preset}**."

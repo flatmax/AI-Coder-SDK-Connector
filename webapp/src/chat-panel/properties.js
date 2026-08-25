@@ -122,23 +122,6 @@ export const PROPERTIES = {
     noAccessor: true,
   },
   /**
-   * Whether the snippet drawer is expanded. Persisted to
-   * localStorage under `aic-dc-snippet-drawer` — the drawer
-   * state survives browser refreshes.
-   */
-  _snippetDrawerOpen: {
-    type: Boolean,
-    state: true,
-    noAccessor: true,
-  },
-  /**
-   * Snippets loaded from ClaudeCodeService.get_snippets. Each is
-   * `{icon, tooltip, message}`. Empty until RPC ready or on
-   * fetch error. Reloaded on mode / review state changes
-   * since the server returns mode-aware snippets.
-   */
-  _snippets: { type: Array, state: true, noAccessor: true },
-  /**
    * Images currently attached to the composition, as
    * data URIs. Accumulated from pastes and re-attaches;
    * cleared when the message is sent. Capped at

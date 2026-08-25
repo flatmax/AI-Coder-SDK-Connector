@@ -22,7 +22,6 @@ than one that says so.
 |---|---|---|
 | Engine config | JSON | Partially — `model` and `permission_mode` live; everything else on the next session |
 | App config | JSON | Yes — consumers read through accessors, so a saved value takes effect on next access |
-| Snippets | JSON | Yes — reloaded into the chat panel on next use |
 
 Card visual style — icon, label, optional subtitle. Clicking a card opens its content in the inline
 editor.
@@ -112,7 +111,6 @@ a Reload button, a Save button, and a Close button.
 
 - Engine config reload — re-reads the file, applies `model` and `permission_mode` to the live session, and reports the rest as pending. It does **not** touch the environment: nothing in this application writes `os.environ`, and a config that appeared to set credentials would silently redirect the CLI's billing (see [`../../specs-reference/1-foundation/configuration.md § The environment must not be written`](../../specs-reference/1-foundation/configuration.md))
 - App config reload — re-reads the file; consumers read through accessors rather than snapshot dicts, so values take effect on next access
-- Snippets reload — re-reads and broadcasts, so open chat panels pick up the new set
 
 There is no `refresh_system_prompt`, and no config change can invalidate the engine's context.
 

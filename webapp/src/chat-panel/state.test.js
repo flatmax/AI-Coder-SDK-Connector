@@ -70,9 +70,7 @@ describe('ChatPanel per-tab state — structure', () => {
     expect(tab.turnBlocks.subagents).toBeInstanceOf(Map);
     // UI
     expect(tab.historyOpen).toBe(false);
-    expect(typeof tab.snippetDrawerOpen).toBe('boolean');
     expect(tab.lightboxImage).toBeNull();
-    expect(tab.snippets).toEqual([]);
     // The URL fields — urlViewDialog, urlViewTab, urlDetectDebounceTimer,
     // urlDetectGeneration — went with the chips in phase 2. They tracked
     // URLs fetched into the native engine's context; the CLI has WebFetch.

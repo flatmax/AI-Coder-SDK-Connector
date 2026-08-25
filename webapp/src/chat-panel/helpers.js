@@ -36,9 +36,6 @@ export function generateRequestId() {
  */
 export const _AGENT_LABEL_MAX_LENGTH = 40;
 
-/** localStorage key for the snippet drawer's open/closed state. */
-export const _DRAWER_STORAGE_KEY = 'aic-dc-snippet-drawer';
-
 // The reasoning toggle's and effort selector's localStorage shims stood here
 // until conversion phase 3. Both fed arguments to the native
 // ``chat_streaming`` — ``reasoning`` and ``effort`` — that
@@ -49,22 +46,6 @@ export const _DRAWER_STORAGE_KEY = 'aic-dc-snippet-drawer';
 // vocabulary (``low``/``medium``/``high``/``xhigh``/``max``), so a user's
 // stored preference could not have been honoured even if something forwarded
 // it.
-
-export function _loadDrawerOpen() {
-  try {
-    return localStorage.getItem(_DRAWER_STORAGE_KEY) === 'true';
-  } catch (_) {
-    return false;
-  }
-}
-
-export function _saveDrawerOpen(open) {
-  try {
-    localStorage.setItem(_DRAWER_STORAGE_KEY, open ? 'true' : 'false');
-  } catch (_) {
-    // Best-effort.
-  }
-}
 
 /** Search toggle keys, kept compatible with specs3 history. */
 export const _SEARCH_IGNORE_CASE_KEY = 'aic-dc-search-ignore-case';

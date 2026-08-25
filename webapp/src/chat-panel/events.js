@@ -17,7 +17,6 @@
 //   - Mode toggles (RPC calls + broadcast sync)
 //   - Commit result handler (appends system event
 //     to the conversation)
-//   - Snippet loading + reload on mode/review
 //     changes
 //   - Mode hydration from `get_current_state`
 //   - Alt+` chat-tab cycling document listener
@@ -116,7 +115,6 @@ export function bindEventHandlers(panel) {
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
   panel._onPostResponseComplete = (e) => onPostResponseComplete(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
-  panel._onModeOrReviewChanged = () => onModeOrReviewChanged(panel);
   panel._onModeChanged = (e) => onModeChanged(panel, e);
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
@@ -292,9 +290,11 @@ export function resumeActiveStreams(panel, activeStreams) {
  *     (the last group is dropped here — the
  *     header progress bar handles them).
  *
- *   mode-changed / review-started / review-ended —
- *     mode-aware snippet reload + local mode
- *     state sync.
+ *   mode-changed — local mode state sync.
+ *     `review-started` / `review-ended` were also
+ *     listened for here, to refetch the mode-aware
+ *     snippet set; snippets are gone (CC-22) and
+ *     nothing else in this panel keyed off them.
  *
  *   commit-result — broadcast from background
  *     commit task; appends system event to
@@ -354,16 +354,7 @@ export function attachEventListeners(panel) {
     'compaction-event',
     panel._onCompactionEvent,
   );
-  window.addEventListener('mode-changed', panel._onModeOrReviewChanged);
   window.addEventListener('mode-changed', panel._onModeChanged);
-  window.addEventListener(
-    'review-started',
-    panel._onModeOrReviewChanged,
-  );
-  window.addEventListener(
-    'review-ended',
-    panel._onModeOrReviewChanged,
-  );
   window.addEventListener('commit-result', panel._onCommitResult);
   // Mirror the shared speech player's state onto the
   // per-message speaker toggle (see onSpeechPlayerState).
@@ -423,19 +414,7 @@ export function detachEventListeners(panel) {
     'compaction-event',
     panel._onCompactionEvent,
   );
-  window.removeEventListener(
-    'mode-changed',
-    panel._onModeOrReviewChanged,
-  );
   window.removeEventListener('mode-changed', panel._onModeChanged);
-  window.removeEventListener(
-    'review-started',
-    panel._onModeOrReviewChanged,
-  );
-  window.removeEventListener(
-    'review-ended',
-    panel._onModeOrReviewChanged,
-  );
   window.removeEventListener('commit-result', panel._onCommitResult);
   window.removeEventListener(
     SPEECH_STATE_EVENT,
@@ -826,24 +805,13 @@ export function onCompactionEvent(panel, event) {
 }
 
 // ---------------------------------------------------------------
-// Mode + snippets
+// Mode
 // ---------------------------------------------------------------
 //
 // The cross-reference toggle and its two RPC helpers stood here
 // until conversion phase 4. Both indexes are always available
 // to the agent as MCP tools, so there is nothing to switch on —
 // specs5/5-webapp/chat.md § Preset Selector.
-
-/**
- * Mode or review state changed — snippets are
- * mode-aware (code / doc / review), so refetch.
- * The fetch is idempotent and cheap; a stray
- * event that doesn't actually change the mode
- * just re-sets the same list.
- */
-export function onModeOrReviewChanged(panel) {
-  loadSnippets(panel);
-}
 
 /**
  * Sync mode state from the broadcast. Fires for
@@ -993,35 +961,6 @@ export function onPostResponseComplete(panel, event) {
   noteDiskWarning(panel, data.disk_warning);
 }
 
-/**
- * Fetch snippets from the server. Fire-and-
- * forget; errors leave the snippet list
- * unchanged (preserving any previously-loaded
- * snippets) and log to console. The drawer
- * renders a placeholder when the list is empty,
- * so pre-load state and post-error state look
- * the same from the user's perspective.
- *
- * Distinguishes "method not on proxy" (expected
- * when the backend is a stripped-down test
- * fixture or an older server) from a real
- * failure (network, server error). Only the
- * latter is worth surfacing.
- */
-export async function loadSnippets(panel) {
-  if (!panel.rpcConnected) return;
-  try {
-    const snippets = await panel.rpcExtract(
-      'ClaudeCodeService.get_snippets',
-    );
-    panel._snippets = Array.isArray(snippets) ? snippets : [];
-  } catch (err) {
-    const message = err?.message || '';
-    if (!message.includes('method not found')) {
-      console.error('[chat] get_snippets failed', err);
-    }
-  }
-}
 
 // The writable agent tab strip stood here: `onAgentsRehydrated`,
 // `onAgentClosed`, `rehydrateLiveAgents`, `loadAgentHistory` and

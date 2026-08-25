@@ -36,13 +36,13 @@
 //                    controllers
 //   input.js       — input handling, paste,
 //                    images, lightbox, speech,
-//                    snippets, file chips
+//                    the `/` palette, file chips
 //   rendering.js   — render() entry + per-region
 //                    helpers
 //   events.js      — connect/disconnect, all
 //                    window event listeners,
 //                    engine-state hydration,
-//                    snippet load, commit result
+//                    commit result
 //
 // Architectural contracts preserved here (the
 // modules cooperate to honour these — the
@@ -112,20 +112,16 @@ import {
   bindEventHandlers,
   detachEventListeners,
   loadEngineState,
-  loadSnippets,
   onUpdated,
   switchMode,
 } from './events.js';
 import { INITIAL_PERMISSION_MODE, probeModeAuthority } from './permission-mode.js';
 import {
   _AGENT_LABEL_MAX_LENGTH,
-  _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
   _SEARCH_WHOLE_WORD_KEY,
-  _loadDrawerOpen,
   _loadSearchToggle,
-  _saveDrawerOpen,
   _saveSearchToggle,
   generateRequestId,
 } from './helpers.js';
@@ -497,12 +493,12 @@ export class ChatPanel extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
-    // Fetch snippets + hydrate engine state once the
-    // proxy is published. RpcMixin defers this hook to
-    // the next microtask so every sibling component
-    // has received the proxy before any of them issues
-    // requests — we're safe to call straight away.
-    loadSnippets(this);
+    // Hydrate engine state once the proxy is published.
+    // RpcMixin defers this hook to the next microtask so
+    // every sibling component has received the proxy before
+    // any of them issues requests — we're safe to call
+    // straight away.
+    //
     // The engine's session outlives the websocket, so this is the reconnect
     // path as much as the startup one: permission mode, engine health, and any
     // turn still in flight all come from here.
@@ -623,9 +619,6 @@ customElements.define('aic-chat-panel', ChatPanel);
 export {
   generateRequestId,
   _AGENT_LABEL_MAX_LENGTH,
-  _loadDrawerOpen,
-  _saveDrawerOpen,
-  _DRAWER_STORAGE_KEY,
   _DRAFT_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,

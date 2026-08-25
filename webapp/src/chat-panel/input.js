@@ -10,13 +10,13 @@
 //     extraction with size/count caps)
 //   - Pending-image strip + lightbox
 //   - Speech-to-text transcript insertion
-//   - Snippet drawer toggle + insertion
 //   - History browser open/close/load
 //   - New session
 //   - File mention detection (the `@filter` bridge
 //     to the picker via `filter-from-chat`)
 //   - Slash-command detection (the `/palette` bridge
-//     to `aic-slash-palette`, and acting on what it
+//     to `aic-slash-palette`, opening it from the
+//     composer's button, and acting on what it
 //     hands back)
 //   - Message text extraction for copy/paste
 //   - File chip click + Add-All accumulation
@@ -43,7 +43,6 @@ import {
 import {
   AUTO_SCROLL_DISENGAGE_PX,
   AUTO_SCROLL_TOLERANCE_PX,
-  _saveDrawerOpen,
   generateRequestId,
 } from './helpers.js';
 import { resetTurnBlocks } from './blocks.js';
@@ -106,9 +105,6 @@ export function _saveDraft(value) {
 
 /**
  * Send the composed message + pending images to Claude Code.
- *
- * Drops the snippet drawer on send (auto-close —
- * users want vertical space back during streaming).
  *
  * `ClaudeCodeService.chat_streaming` takes four arguments —
  * `(request_id, message, images, viewer)`. What the native engine's
@@ -254,11 +250,6 @@ export async function send(panel) {
   {
     const ta = panel.shadowRoot?.querySelector('.input-textarea');
     if (ta) ta.style.height = 'auto';
-  }
-  // Auto-close the snippet drawer on send.
-  if (panel._snippetDrawerOpen) {
-    panel._snippetDrawerOpen = false;
-    _saveDrawerOpen(false);
   }
   try {
     const result = await panel.rpcExtract(
@@ -445,59 +436,11 @@ export function onHistorySessionLoaded(panel) {
   panel._historyOpen = false;
 }
 
-// ---------------------------------------------------------------
-// Snippet drawer
-// ---------------------------------------------------------------
-
-export function toggleSnippetDrawer(panel) {
-  panel._snippetDrawerOpen = !panel._snippetDrawerOpen;
-  _saveDrawerOpen(panel._snippetDrawerOpen);
-}
-
 // `toggleReasoning` and `setReasoningEffort` stood here until conversion
 // phase 3. Neither reached the wire after phase 2 — the ``reasoning`` and
 // ``effort`` arguments they wrote are not on ``chat_streaming``'s new
 // signature — and neither had a control on the action bar. See helpers.js for
 // why their stored preferences could not be carried across.
-
-/**
- * Insert a snippet's message into the textarea at
- * the current cursor position. If the textarea
- * has a selection, the selection is replaced.
- * Focuses the textarea after insertion so the
- * user can continue typing directly.
- */
-export function insertSnippet(panel, snippet) {
-  const message =
-    snippet && typeof snippet.message === 'string'
-      ? snippet.message
-      : '';
-  if (!message) return;
-  const ta = panel.shadowRoot?.querySelector('.input-textarea');
-  if (!ta) {
-    panel._input = `${panel._input}${message}`;
-    return;
-  }
-  // Compute the new value and cursor position
-  // from the CURRENT textarea state (not
-  // panel._input). If the user has been typing
-  // fast, panel._input might lag by one input
-  // event; reading directly from the textarea is
-  // authoritative.
-  const before = ta.value.slice(0, ta.selectionStart);
-  const after = ta.value.slice(ta.selectionEnd);
-  const next = `${before}${message}${after}`;
-  panel._input = next;
-  ta.value = next;
-  const cursor = before.length + message.length;
-  ta.setSelectionRange(cursor, cursor);
-  ta.focus();
-  // Fire an input event so the auto-resize logic
-  // runs. Without this, inserting a multi-line
-  // snippet doesn't grow the textarea until the
-  // next keystroke.
-  ta.dispatchEvent(new Event('input', { bubbles: true }));
-}
 
 // ---------------------------------------------------------------
 // Textarea input
@@ -655,6 +598,28 @@ export function updateSlashPalette(panel, ta) {
     const current = detectActiveSlash(ta.value, ta.selectionStart);
     if (current) palette.show(commands, current.query);
   });
+}
+
+/**
+ * Open the palette from the composer's button.
+ *
+ * Types the `/` rather than setting a flag the palette would have to
+ * trust. There is one condition under which the overlay is open — the
+ * cursor sitting inside a leading command token — and going through
+ * the composer means the button satisfies it instead of introducing a
+ * second one. Everything downstream (the filter, Escape, sending a
+ * `/typo` anyway) then works without knowing the button exists.
+ *
+ * Refuses on a non-empty composer even though the button is disabled
+ * there: the disabled attribute is a render behind a fast keystroke,
+ * and overwriting a half-written prompt is not recoverable.
+ */
+export function openSlashPalette(panel) {
+  const ta = panel.shadowRoot?.querySelector('.input-textarea');
+  const current = ta ? ta.value : panel._input || '';
+  if (current.trim()) return;
+  _setComposerValue(panel, ta, '/', 1);
+  if (ta) updateSlashPalette(panel, ta);
 }
 
 /**

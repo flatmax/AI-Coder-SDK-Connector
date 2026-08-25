@@ -24,7 +24,7 @@
 //      tool call does, and a user who cannot see the current mode cannot know
 //      whether the next edit will ask.
 //
-// The snippet drawer button and search bar were never gated and still are not.
+// The `/` palette button and search bar were never gated and still are not.
 
 import { describe, expect, it } from 'vitest';
 
@@ -196,13 +196,13 @@ describe('ChatPanel action bar — what it carries', () => {
       expect(panel.shadowRoot.querySelector('.search-bar')).toBeTruthy();
     });
 
-    it('renders the snippet drawer button on an agent tab', async () => {
+    it('renders the slash-palette button on an agent tab', async () => {
       const panel = mountPanel();
       seedLabeledTab(panel, 'agent-0', 'Agent 0');
       panel._activeTabId = 'agent-0';
       await settle(panel);
       expect(
-        panel.shadowRoot.querySelector('.snippet-drawer-button'),
+        panel.shadowRoot.querySelector('.slash-palette-button'),
       ).toBeTruthy();
     });
   });

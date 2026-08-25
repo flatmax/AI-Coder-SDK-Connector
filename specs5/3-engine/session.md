@@ -207,6 +207,11 @@ A second user turn arriving mid-turn is rejected with an explanatory message rat
 Queuing reads as a hang, and the user's intent is usually "stop and do this instead", which is a
 cancel followed by a send.
 
+**A routed slash command is not a turn and is not gated by this.** It never reaches `query()` — the
+service answers it from the route table and the webapp opens a surface — so there is no second turn
+for the guard to count. Which routes stay available mid-turn is a per-command property, not a
+property of being routed; see [§ Slash Commands](#slash-commands).
+
 ## Message Taxonomy → UI
 
 The pump is the only component that knows SDK message types. Everything downstream sees AIC⚡DC
@@ -307,12 +312,24 @@ that had since shipped and would have answered.
 surface for, or would desynchronise the session store. Answered with `{status: "routed", target}`;
 the webapp opens the surface named by `target`.
 
-| Command | Target | Surface |
-|---|---|---|
-| `/context` | `tab:context` | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
-| `/clear` | `new-session` | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
-| `/permissions` | `tab:settings` | The Settings tab's permission-mode control plus the rules list. |
-| `/resume` | `history` | The history browser. Not in the CLI's command list at all. |
+| Command | Target | Mid-turn | Surface |
+|---|---|---|---|
+| `/context` | `tab:context` | Yes | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
+| `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
+| `/permissions` | `tab:settings` | Yes | The Settings tab's permission-mode control plus the rules list. |
+| `/resume` | `history` | No | The history browser. Not in the CLI's command list at all. |
+
+**Mid-turn** is carried on the reply and on the `list_commands` entry as `during_turn`, and it is a
+per-command answer rather than a per-class one. `/context` and `/permissions` only open a surface the
+user could have clicked to anyway, and a turn in flight is exactly when someone wants to watch context
+fill or check what the agent is allowed to do. `/clear` and `/resume` swap the session out from under a
+live stream, which orphans the turn the user is watching — they stay gated until it ends, for the same
+reason the New Session button is disabled while streaming.
+
+Everything that is *not* routed is `during_turn: false`, without exception. A command that reaches the
+CLI is a turn, the guard above rejects it, and the CLI would process its input stream serially even if
+the guard did not — so `/cost` mid-turn could at best answer after the turn, not beside it. Advertising
+otherwise would be a promise the engine cannot keep.
 
 **Denied** — passing through would reach for something this deployment does not have, or act on the
 CLI host rather than the conversation. Answered with `{status: "unsupported"}` and the reason; never
@@ -330,13 +347,15 @@ forwarded as prose, which would turn a command into a question.
 
 `list_commands()` answers the composer's autocomplete: the CLI's advertised list, minus denied
 commands and minus names starting `_` (the CLI's marker for session plumbing), plus any routed
-command the CLI does not advertise. Each entry carries `action` — `route` or `send` — and a `target`,
-so the webapp holds no second copy of the mapping. Read from the initialize handshake rather than a
-table in the service, which is the only way a newly-authored skill can appear without the engine
-being told it exists.
+command the CLI does not advertise. Each entry carries `action` — `route` or `send` — a `target`, and
+`during_turn`, so the webapp holds no second copy of the mapping and no second copy of the mid-turn
+rule. Read from the initialize handshake rather than a table in the service, which is the only way a
+newly-authored skill can appear without the engine being told it exists.
 
 The palette opens when `/` is the first non-whitespace character in the composer and the cursor is
-still inside that token — the same rule the engine uses to decide a message is a command. Selecting a
+still inside that token — the same rule the engine uses to decide a message is a command, and the rule
+a composer button satisfies by typing the `/` rather than working around it (see
+[`../5-webapp/chat.md` § Slash Palette](../5-webapp/chat.md#slash-palette)). Selecting a
 `send` entry completes the text in place; selecting a `route` entry clears the token and opens the
 surface. With nothing matching, Enter is not consumed: a stray `/typo` stays sendable, because the
 CLI's answer about it is better than the palette's.
@@ -350,6 +369,13 @@ reaching for. Connecting from here instead would spend a 295 MB subprocess on a 
 `partial` is the webapp's signal that the cache is worth replacing once the engine reports itself
 connected; the flag is on the reply rather than inferred from the list's length, since a deployment
 whose CLI advertises nothing is not the same condition.
+
+**During a turn the palette still opens, and rows the turn blocks are visibly disabled with the reason
+on them** rather than filtered out. A list that silently shrinks while streaming teaches the user that
+commands come and go; a list where `/context` is live and `/cost` is greyed out with "available when
+the turn ends" teaches them the actual rule, which is the one they need in order to predict it. Enter
+and click are both refused on a disabled row, and focus skips it — an overlay that highlights a row it
+will not act on is worse than one that does not offer it.
 
 ## Errors and Degradation
 

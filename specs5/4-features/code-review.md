@@ -17,7 +17,7 @@ agent can now fetch itself — and fetch at the moment it needs it, rather than 
 - Server verifies clean working tree, computes merge-base, performs a controlled sequence of checkouts and a soft reset
 - Result — files on disk match branch tip, git HEAD at merge-base, all review changes appear as staged modifications
 - Existing file picker, diff viewer, and context engine work unchanged
-- Review preset activated — review snippets, review turn framing, and a read-only permission posture. No system prompt is involved
+- Review preset activated — review turn framing and a read-only permission posture. No system prompt is involved
 - The `review_state` MCP tool starts answering with review facts instead of "not in review"
 - Exit reverses the state — soft reset to branch tip, checkout original branch
 ## Prerequisites
@@ -140,7 +140,7 @@ Replaces the two-step (branch dropdown → commit search) flow with a single vis
 - Branch filtering — remove symbolic refs, arrow entries, bare remote aliases (e.g. `origin` when `origin/master` exists)
 ## Preset Swap
 
-- On review entry the review preset activates: review snippets, the review turn-framing hint, and the read-only posture
+- On review entry the review preset activates: the review turn-framing hint and the read-only posture. There is no snippet set to swap — snippets are deleted ([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user)), and a project that wants canned review prompts writes them as `.claude/commands/` entries, which the `/` palette lists in review exactly as it does elsewhere
 - No system prompt is swapped, because AIC⚡DC has none. A user who wants standing review instructions puts them in `CLAUDE.md`, which the CLI reads through `setting_sources` and which therefore applies in review exactly as it does elsewhere — see [decisions § CC-11](../plan/decisions.md#cc-11--setting_sources-includes-the-project-so-claudemd-is-live)
 - A project that wants a genuinely different reviewer persona uses a Claude Code **agent** or **skill**, named in the preset. That is the platform's mechanism for the job and it is versioned in the repo, which the old `review.md` never was
 - Preset state is not persisted. After a crash the next start comes up in the default preset, matching the fact that review git state is not persisted either
@@ -233,11 +233,6 @@ longer offers in any form ([CC-21](../plan/decisions.md#cc-21)).
 - The modal closes before the fetch resolves so the user sees the diff arrive in the viewer immediately
 - Empty diffs surface as an info toast ("No diff available for that commit")
 - The diff shown is `commit..working-tree`, not a pure parent-diff — useful during review because the user is asking "what did this commit touch in my current view's context"
-### Review Snippets
-- Review snippets stored alongside the code and doc preset groups in the unified snippets file
-- The snippet RPC checks review state first and returns review snippets when a review is active, ahead of the active preset
-- Frontend does not need to distinguish — always calls the single RPC and renders whatever is returned
-- Examples — full review, security review, commit walkthrough
 ## Review State
 Held in memory on the engine service:
 - Active flag

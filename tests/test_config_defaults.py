@@ -2,7 +2,7 @@
 
 Goes further than test_package_metadata: validates that numeric values
 are in sensible ranges, that the engine file defers to the CLI rather
-than second-guessing it, and that snippet content isn't obviously
+than second-guessing it, and that bundled content isn't obviously
 broken. These are the values a fresh user sees; shipping nonsense
 defaults wastes their first session.
 """
@@ -144,36 +144,6 @@ def test_doc_index_section_fields() -> None:
     for key in ("keywords_min_section_chars", "keywords_tfidf_fallback_chars"):
         value = cfg[key]
         assert isinstance(value, int) and value > 0
-
-
-# ---- snippets.json -------------------------------------------------------
-
-
-def test_snippet_icons_and_messages_are_non_empty() -> None:
-    """Every snippet has meaningful icon and message content."""
-    data = _load_json("snippets.json")
-    for mode in ("code", "review", "doc"):
-        for i, snippet in enumerate(data[mode]):
-            for field in ("icon", "tooltip", "message"):
-                value = snippet[field]
-                assert isinstance(value, str), (
-                    f"{mode}[{i}].{field} is not a string: {value!r}"
-                )
-                assert value.strip(), f"{mode}[{i}].{field} is empty or whitespace"
-
-
-def test_snippet_messages_do_not_reference_old_delimiters() -> None:
-    """Snippet messages don't leak the specs3 guillemet delimiters."""
-    data = _load_json("snippets.json")
-    for mode in ("code", "review", "doc"):
-        for i, snippet in enumerate(data[mode]):
-            msg = snippet["message"]
-            assert "\u00ab\u00ab\u00ab EDIT" not in msg, (
-                f"{mode}[{i}] snippet message references old start marker"
-            )
-            assert "\u00bb\u00bb\u00bb EDIT END" not in msg, (
-                f"{mode}[{i}] snippet message references old end marker"
-            )
 
 
 # ---- Prompt content sanity ----------------------------------------------

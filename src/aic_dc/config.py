@@ -6,8 +6,8 @@ Single class :class:`ConfigManager` owns:
   platform-specific user directory).
 - Version-aware upgrade — bundled managed files get overwritten on
   upgrade (with a timestamped backup); user files are never touched.
-- Cached but hot-reloadable access to the app config, the snippets and
-  the one remaining prompt (the commit-message one-shot's).
+- Cached but hot-reloadable access to the app config and the one
+  remaining prompt (the commit-message one-shot's).
 - Per-repo ``.aic-dc/`` working directory creation and gitignore wiring.
 
 Most of what this module used to hold went with the native engine. The
@@ -17,8 +17,8 @@ timeouts, retries, cache minimums, credential env vars) and the tiering
 parameters all described an engine AIC⚡DC no longer runs — the CLI owns
 its own prompt, its own model selection and its own context management.
 What is left is what AIC⚡DC still decides for itself: how it converts
-documents, how it indexes them, which snippets the composer offers, and
-how it asks a throwaway session for a commit message. The engine's own
+documents, how it indexes them, and how it asks a throwaway session for
+a commit message. The engine's own
 handful of settings live in ``engine.json``, read by
 :class:`aic_dc.claude_code.engine_config.EngineConfig` rather than here.
 
@@ -65,7 +65,6 @@ logger = logging.getLogger(__name__)
 _MANAGED_FILES = frozenset({
     "commit.md",
     "app.json",
-    "snippets.json",
 })
 
 _USER_FILES = frozenset({
@@ -128,7 +127,6 @@ def _int_at_least(value: Any, default: int, minimum: int) -> int:
 CONFIG_TYPES: dict[str, str] = {
     "engine": "engine.json",
     "app": "app.json",
-    "snippets": "snippets.json",
 }
 
 
@@ -628,87 +626,3 @@ class ConfigManager:
         :mod:`aic_dc.claude_code.commit`.
         """
         return self._read_user_file("commit.md")
-
-    # ------------------------------------------------------------------
-    # Snippets
-    # ------------------------------------------------------------------
-
-    def get_snippets(self, mode: str = "code") -> list[dict[str, str]]:
-        """Load quick-insert snippets for a mode.
-
-        Parameters
-        ----------
-        mode:
-            One of ``"code"`` (default), ``"review"``, or ``"doc"``.
-
-        Resolution order (two-location fallback):
-
-        1. Per-repo override at ``<repo_root>/.aic-dc/snippets.json``
-        2. User config directory ``snippets.json``
-
-        The first file that exists and parses is used; further
-        fallback is not attempted. Returns an empty list on any
-        failure rather than raising — a broken snippets file must
-        not break the chat UI.
-
-        Supports both the canonical nested format::
-
-            {"code": [...], "review": [...], "doc": [...]}
-
-        and the legacy flat format::
-
-            {"snippets": [{"mode": "code", ...}, ...]}
-
-        Legacy entries missing a ``mode`` field default to ``code``.
-        """
-        data = self._load_snippets_data()
-        if not data:
-            return []
-
-        # Nested format — the mode key maps directly to its list.
-        if mode in data and isinstance(data[mode], list):
-            return [s for s in data[mode] if isinstance(s, dict)]
-
-        # Legacy flat format — filter by mode field.
-        if isinstance(data.get("snippets"), list):
-            result: list[dict[str, str]] = []
-            for entry in data["snippets"]:
-                if not isinstance(entry, dict):
-                    continue
-                entry_mode = entry.get("mode", "code")
-                if entry_mode == mode:
-                    result.append(entry)
-            return result
-
-        return []
-
-    def _load_snippets_data(self) -> dict[str, Any]:
-        """Load and parse the snippets file with two-location fallback.
-
-        Per-repo override takes precedence so users can customise
-        snippets for individual repos without editing their global
-        config.
-        """
-        # 1. Per-repo override.
-        if self._repo_root is not None:
-            repo_override = self._repo_root / _AIC_DC_DIR / "snippets.json"
-            if repo_override.is_file():
-                try:
-                    parsed = json.loads(
-                        repo_override.read_text(encoding="utf-8")
-                    )
-                    if isinstance(parsed, dict):
-                        return parsed
-                    logger.warning(
-                        "Per-repo snippets root is not an object; "
-                        "falling back to user config"
-                    )
-                except (OSError, json.JSONDecodeError) as exc:
-                    logger.warning(
-                        "Failed to read per-repo snippets: %s; "
-                        "falling back to user config",
-                        exc,
-                    )
-
-        # 2. User config directory.
-        return self._read_user_json("snippets.json")

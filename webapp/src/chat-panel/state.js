@@ -47,7 +47,6 @@
 
 import { makeTurnBlocks } from './blocks.js';
 import {
-  _loadDrawerOpen,
   _loadSearchToggle,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
@@ -72,12 +71,11 @@ import {
  *                  fileSearchGeneration,
  *                  fileSearchDebounceTimer,
  *                  fileSearchScrollPaused
- *   UI           — historyOpen, snippetDrawerOpen,
- *                  lightboxImage, snippets
+ *   UI           — historyOpen, lightboxImage
  *   Misc         — autoScroll, suppressNextPaste,
  *                  activeMention
  *
- * Persisted toggles (drawer state, search toggles)
+ * Persisted toggles (the search toggles)
  * load their initial values from localStorage so
  * each new tab inherits the user's last choice.
  * Per-tab divergence after that is intentional —
@@ -136,9 +134,7 @@ export function makeTabState() {
     fileSearchScrollPaused: false,
     // UI
     historyOpen: false,
-    snippetDrawerOpen: _loadDrawerOpen(),
     lightboxImage: null,
-    snippets: [],
     // Misc non-reactive flags / state
     autoScroll: true,
     suppressNextPaste: false,
@@ -234,8 +230,6 @@ const REACTIVE_FIELDS = [
   ['_streaming', 'streaming'],
   ['_streamingContent', 'streamingContent'],
   ['_historyOpen', 'historyOpen'],
-  ['_snippetDrawerOpen', 'snippetDrawerOpen'],
-  ['_snippets', 'snippets'],
   ['_pendingImages', 'pendingImages'],
   ['_lightboxImage', 'lightboxImage'],
   ['_searchQuery', 'searchQuery'],

@@ -193,7 +193,7 @@ A subagent tab renders its transcript through the same pipeline as the main chat
 
 There is no input box, disabled or otherwise. A greyed-out textarea implies a channel that might open
 under some condition, and none exists. The whole composing surface goes with it — the recalled-input
-list, the snippet drawer, the attached-image strip, the send button — replaced by one line saying why:
+list, the `/` palette and its button, the attached-image strip, the send button — replaced by one line saying why:
 "Read-only transcript — there is no channel to a subagent. Switch to Main to send a message."
 
 Two things below the transcript do stay, because they are true on every tab rather than about this one:

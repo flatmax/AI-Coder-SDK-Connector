@@ -21,12 +21,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   generateRequestId,
-  _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
-  _loadDrawerOpen,
   _loadSearchToggle,
-  _saveDrawerOpen,
   _saveSearchToggle,
 } from '../chat-panel/index.js';
 // formatRunDuration isn't re-exported from index.js (it's an
@@ -57,25 +54,7 @@ describe('generateRequestId', () => {
 // localStorage helpers
 // ---------------------------------------------------------------------------
 
-describe('drawer / search-toggle persistence', () => {
-  it('drawer defaults to closed when localStorage has no value', () => {
-    expect(_loadDrawerOpen()).toBe(false);
-  });
-
-  it('drawer defaults to closed for unrecognised localStorage value', () => {
-    // Defensive — a value that isn't 'true' should parse as
-    // false rather than anything weird.
-    localStorage.setItem(_DRAWER_STORAGE_KEY, 'maybe');
-    expect(_loadDrawerOpen()).toBe(false);
-  });
-
-  it('drawer round-trips via save/load', () => {
-    _saveDrawerOpen(true);
-    expect(_loadDrawerOpen()).toBe(true);
-    _saveDrawerOpen(false);
-    expect(_loadDrawerOpen()).toBe(false);
-  });
-
+describe('search-toggle persistence', () => {
   it('search ignore-case defaults to true when no stored value', () => {
     expect(
       _loadSearchToggle(_SEARCH_IGNORE_CASE_KEY, true),

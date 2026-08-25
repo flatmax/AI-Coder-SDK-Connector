@@ -319,6 +319,8 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 ### Slash Palette
 - A separate component hosted inside the chat input area, on the same host/guest contract as [§ Input History](#input-history) — `show`/`hide`/`handleKey`, and the chat panel owns the lifecycle
 - Opens when `/` is the first non-whitespace character in the composer and the cursor is still inside that token; closes once whitespace settles the command or the token is gone. The same rule the engine applies to decide a message is a command, so the palette and the engine never disagree about what will be sent
+- **Also opens from a button** in the composer's send column, in the slot the snippet drawer's toggle used to hold. The button writes `/` into an empty composer and puts the cursor after it, which satisfies the rule above rather than bypassing it — there is one open condition, not two, and no state saying "opened by button" that the next keystroke could contradict. On a composer that already has text the button is disabled, because the engine only treats a leading `/` as a command and a button that silently did nothing would be worse than one visibly unavailable
+- The button is what makes the list **browsable**. Typing `/` is a discovery problem: it works only for a user who already suspects the commands exist. A visible control with the full list behind it is how they find out — which is the job the snippet drawer used to do, done against the CLI's real inventory instead of a hand-maintained file (see [decisions § CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user))
 - Entries come from `list_commands()`, fetched on first `/` and cached for the session. A failed fetch is not cached as an empty list, but is held off for a few seconds before re-asking, so a broken engine costs one RPC rather than one per keystroke
 - A reply marked `partial` is the routed commands only, because the engine had not connected yet — the state every fresh start is in, since the engine connects on the first turn. It is cached like any other list and re-asked exactly once, when the engine health broadcast reports itself connected. Checked on the next open rather than invalidated from the broadcast, so a dropped broadcast cannot leave the short list up forever. While the refresh is in flight the stale list stays on show: it is still correct, and an overlay that grows beats one that appears late
 - An empty list is not the same as a failure. When the engine genuinely advertises nothing, no overlay opens — one saying "0 of 0" tells the user nothing they cannot see
@@ -326,7 +328,7 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 - Up/Down navigate with wrapping; Enter and Tab select; Escape dismisses. Wrapping where history clamps, because this is a short relevance-ordered list being scanned for one known item, not a chronology being read through
 - Selecting a `send` entry completes the command in the composer, replacing the whole token so mid-token completion cannot leave `/contexttext` behind. Selecting a `route` entry clears the token and opens the surface — the row carries an "opens UI" badge, because a command that quietly does something other than its description promises is worse than no palette
 - With nothing matching, the overlay stays up to say so but consumes neither Enter nor the arrows: a stray `/typo` must still be sendable
-- Dismissing never touches the composer, so there is nothing to restore and no cancel event
+- Dismissing never touches the composer, so there is nothing to restore and no cancel event. This holds for a button-opened palette too: Escape closes the overlay and leaves the `/` the button typed, and a second Escape clears the composer by the default rung of the [§ Escape Priority Chain](#escape-priority-chain). Retracting the `/` on dismiss would make the button the one path that edits the composer on the way out, and a lone `/` is both visible and sendable — the CLI names it better than a silent revert would
 ### Paste Suppression
 - When middle-click inserts a path into the textarea, a flag on the chat panel tells the paste handler to suppress the browser's selection-buffer paste
 - Flag is a one-shot — set on insert, consumed by the next paste event
@@ -336,8 +338,7 @@ prompt for the user to send would be racing the agent's own recovery, and would 
 ### Escape Priority Chain
 1. An open overlay in the input area — the history recall list, or the slash palette — takes it first and closes itself. Whoever is open wins; neither can be open at once, since recall needs cursor 0 and the palette needs the cursor inside a leading `/token`
 2. @-filter active — remove query, clear filter
-3. Snippet drawer open — close drawer
-4. Default — clear textarea
+3. Default — clear textarea
 
 The permission dialog is modal and takes Escape before any of this; Escape there is an explicit deny,
 never a dismiss (see [permission-dialog.md](permission-dialog.md)).
@@ -355,11 +356,6 @@ never a dismiss (see [permission-dialog.md](permission-dialog.md)).
 - Session seeding — when a session is resumed, all user messages from that session are added to the input history for up-arrow recall
 - Long entries (including multi-line messages) collapse to a single ellipsis-clipped line; the full text is disclosed via native `title` tooltip on hover. No inline preview pane
 - Overflow — when entries exceed the initial visible window, the list scrolls within a bounded height. Filter input is the primary discovery mechanism for older entries
-### Snippet Drawer
-- Toggleable quick-insert buttons from config
-- Click inserts at cursor
-- Open/closed state persisted to localStorage
-- Automatically closed (and state persisted) when a message is sent
 ### Speech
 - **Dictation** — toggle button for continuous voice dictation; transcribed text inserted at cursor position (not appended) with automatic space separators
 - **Read aloud** — the per-message speaker button (see [§ Message Action Buttons](#message-action-buttons)) reads a message back via text-to-speech, surfacing a floating play/pause/speed/position transport
@@ -410,12 +406,15 @@ The **permission-mode indicator is exempt from collapse.** It is the one control
 
 ## Preset Selector
 
-Replaces the mode toggle. A preset is a bundle of snippets, turn framing, and optionally a Claude Code
-skill or agent — see [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
+Replaces the mode toggle. A preset is a bundle of turn framing and optionally a Claude Code skill or
+agent — see [decisions § CC-12](../plan/decisions.md#cc-12--modes-become-prompt-presets-not-engine-states).
+The snippet set that was a preset's third component is gone with snippets themselves
+([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user)); a preset now
+shapes only how a turn is framed, not what the composer offers to say.
 
 - A small segmented control at the right end of the search bar, one button per configured preset (`💻` code, `📄` doc by default; the review preset activates from review state, not from this control)
 - Active button shows accent-coloured background, a 1px ring, and a soft outer halo in the same accent colour — the halo is the load-bearing affordance because the icon-only buttons live on a dark background where a tint shift alone is hard to read at a glance
-- Clicking an inactive button changes the preset. The change is **local and immediate**: it swaps the snippet set and the framing hint for the next turn. There is no RPC round-trip to wait on and no engine state to reconcile, because the engine has no idea presets exist
+- Clicking an inactive button changes the preset. The change is **local and immediate**: it swaps the framing hint for the next turn. There is no RPC round-trip to wait on and no engine state to reconcile, because the engine has no idea presets exist
 - No cross-reference toggle. Both indexes are always available as tools; there is nothing to switch on
 - Rendered on every tab. There is no per-tab preset gating, because subagent views are read-only and have no input to frame
 
@@ -424,7 +423,7 @@ skill or agent — see [decisions § CC-12](../plan/decisions.md#cc-12--modes-be
 The mode toggle was a *backend* control: it swapped the system prompt, changed which index fed prompt
 assembly, reset the cross-reference flag, broadcast `modeChanged`, and had to be synchronised across
 clients so nobody sent a turn under a stale assumption. None of that applies. Preset state is browser
-state, the way the snippet drawer's open/closed state is browser state.
+state, the way the draft in the composer is browser state.
 
 The consequence for collaboration: presets are **per-client**, not global. Two collaborators can hold
 different presets without conflict, because a preset only shapes the turn its holder sends. This is a
@@ -447,14 +446,6 @@ deliberate simplification, not an oversight — the old global mode existed beca
 - No diff-inclusion count; nothing about the review is injected, so there is no in-context set to count
 - Commit button is disabled during review
 - See [code-review.md](../4-features/code-review.md)
-
-### Snippet Reloading
-
-- Snippets reloaded from the server whenever context changes:
-  - On RPC ready (initial connection and reconnect)
-  - On review state change (entering or exiting review mode)
-  - On preset change
-- Server returns review snippets when a review is active, otherwise the active preset's set; the frontend does not distinguish
 
 ## Subagent Activity
 

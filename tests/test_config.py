@@ -6,8 +6,6 @@ Layer 1 scope — covers:
   no-op, user file preservation)
 - Accessor read-through (hot-reload changes are observed without
   reconstruction)
-- Snippet fallback chain (per-repo override precedence, legacy flat
-  format, nested format)
 - Per-repo working directory creation and .gitignore wiring
 - The commit prompt, which is the one prompt file the config layer
   still loads
@@ -106,7 +104,6 @@ def test_first_install_copies_all_files(isolated_config_dir):
     for filename in (
         "commit.md",
         "app.json",
-        "snippets.json",
         "engine.json",
     ):
         assert (isolated_config_dir / filename).is_file(), f"missing {filename}"
@@ -441,149 +438,6 @@ def test_gitignore_handles_missing_trailing_newline(
     assert "*.pyc" in lines
     assert ".aic-dc/" in lines
 # ---------------------------------------------------------------------------
-# Snippets — fallback chain and format support
-# ---------------------------------------------------------------------------
-def test_get_snippets_nested_format(isolated_config_dir):
-    """Default bundled snippets.json uses nested format with all three modes."""
-    cfg = ConfigManager()
-    for mode in ("code", "review", "doc"):
-        snippets = cfg.get_snippets(mode)
-        assert isinstance(snippets, list)
-        assert len(snippets) > 0
-        for snip in snippets:
-            assert "icon" in snip
-            assert "tooltip" in snip
-            assert "message" in snip
-def test_get_snippets_unknown_mode_returns_empty(isolated_config_dir):
-    """Unknown mode returns empty list, not an error."""
-    cfg = ConfigManager()
-    assert cfg.get_snippets("nonexistent") == []
-def test_get_snippets_legacy_flat_format(isolated_config_dir):
-    """Legacy flat format ({snippets: [...]}) is still parsed."""
-    snippets_json = isolated_config_dir / "snippets.json"
-    snippets_json.parent.mkdir(parents=True, exist_ok=True)
-    legacy = {
-        "snippets": [
-            {"icon": "A", "tooltip": "t1", "message": "m1", "mode": "code"},
-            {"icon": "B", "tooltip": "t2", "message": "m2", "mode": "review"},
-            {"icon": "C", "tooltip": "t3", "message": "m3", "mode": "doc"},
-            # No mode field — defaults to code.
-            {"icon": "D", "tooltip": "t4", "message": "m4"},
-        ]
-    }
-    snippets_json.write_text(json.dumps(legacy), encoding="utf-8")
-    # Seed the marker so construction doesn't overwrite our file.
-    (isolated_config_dir / ".bundled_version").write_text(
-        "seeded", encoding="utf-8"
-    )
-    with patch("aic_dc.config._bundled_version", return_value="seeded"):
-        cfg = ConfigManager()
-    code = cfg.get_snippets("code")
-    # Two code entries — explicit and default.
-    icons = {s["icon"] for s in code}
-    assert icons == {"A", "D"}
-    review = cfg.get_snippets("review")
-    assert [s["icon"] for s in review] == ["B"]
-    doc = cfg.get_snippets("doc")
-    assert [s["icon"] for s in doc] == ["C"]
-def test_get_snippets_missing_user_file_falls_back_to_bundle(
-    isolated_config_dir,
-):
-    """Missing user snippets.json falls back to the bundled copy.
-
-    Contract: ``_read_user_file`` falls back to the bundled copy for
-    any file absent from the user dir. This keeps quick-insert
-    buttons working if a user accidentally deletes ``snippets.json``
-    — a silently empty drawer would be worse UX than the default set.
-
-    The test seeds a version marker so the upgrade pass doesn't
-    re-copy the bundle into the user dir. Without the marker-seed,
-    ``_run_upgrade`` would see the missing file, treat it as new,
-    and copy it back — masking the fallback path this test is about.
-    """
-    ConfigManager()
-    # Delete the snippets file after install, then seed the marker so
-    # the next ConfigManager construction skips the upgrade pass.
-    (isolated_config_dir / "snippets.json").unlink()
-    (isolated_config_dir / ".bundled_version").write_text(
-        "seeded", encoding="utf-8"
-    )
-    with patch("aic_dc.config._bundled_version", return_value="seeded"):
-        cfg = ConfigManager()
-    # Upgrade was skipped, so the file is still absent from user dir.
-    assert not (isolated_config_dir / "snippets.json").exists()
-    # But ``get_snippets`` still returns the bundled defaults via the
-    # ``_read_user_file`` fallback.
-    code_snippets = cfg.get_snippets("code")
-    assert len(code_snippets) > 0
-    for snip in code_snippets:
-        assert "icon" in snip
-        assert "tooltip" in snip
-        assert "message" in snip
-def test_get_snippets_corrupt_file_returns_empty(isolated_config_dir):
-    """Malformed snippets.json logs a warning and returns []."""
-    ConfigManager()
-    (isolated_config_dir / "snippets.json").write_text(
-        "{not json", encoding="utf-8"
-    )
-    with patch("aic_dc.config._bundled_version", return_value="seeded"):
-        (isolated_config_dir / ".bundled_version").write_text(
-            "seeded", encoding="utf-8"
-        )
-        cfg = ConfigManager()
-    # Must not raise — a broken snippets file cannot break the chat UI.
-    assert cfg.get_snippets("code") == []
-def test_get_snippets_per_repo_override_takes_precedence(
-    isolated_config_dir, repo_root
-):
-    """Per-repo snippets.json is consulted before the user config dir."""
-    cfg = ConfigManager(repo_root=repo_root)
-    # Write a per-repo override with distinctive content.
-    override_path = repo_root / ".aic-dc" / "snippets.json"
-    override = {
-        "code": [
-            {"icon": "REPO", "tooltip": "repo-specific", "message": "from repo"}
-        ],
-    }
-    override_path.write_text(json.dumps(override), encoding="utf-8")
-    result = cfg.get_snippets("code")
-    assert len(result) == 1
-    assert result[0]["icon"] == "REPO"
-    # User-config-dir snippets still exist and remain unread.
-    user_result_for_review = cfg.get_snippets("review")
-    # The override only defined "code"; "review" falls through to user dir?
-    # No — the per-repo file is consulted as a complete replacement when it
-    # parses. If the user wants review-mode snippets, they must include them
-    # in the override. This is the contract specs4/1-foundation/configuration.md
-    # establishes ("two-location fallback" — first file that exists and parses wins).
-    assert user_result_for_review == []
-def test_get_snippets_per_repo_corrupt_falls_through(
-    isolated_config_dir, repo_root
-):
-    """Corrupt per-repo snippets.json falls through to user config dir.
-    Contract: the per-repo override is a convenience, not a replacement.
-    If it's unparseable the chat UI must still work with the user's
-    global snippets.
-    """
-    cfg = ConfigManager(repo_root=repo_root)
-    # Write garbage to the per-repo override.
-    override_path = repo_root / ".aic-dc" / "snippets.json"
-    override_path.write_text("{not valid json", encoding="utf-8")
-    # User-config snippets still deliver defaults for code mode.
-    result = cfg.get_snippets("code")
-    assert len(result) > 0
-def test_get_snippets_per_repo_non_object_falls_through(
-    isolated_config_dir, repo_root
-):
-    """Per-repo snippets.json whose root is not an object falls through."""
-    cfg = ConfigManager(repo_root=repo_root)
-    override_path = repo_root / ".aic-dc" / "snippets.json"
-    # Valid JSON, but the root is a list — snippets expect a dict.
-    override_path.write_text("[]", encoding="utf-8")
-    # Falls through to the bundled defaults.
-    result = cfg.get_snippets("code")
-    assert len(result) > 0
-# ---------------------------------------------------------------------------
 # The commit prompt
 # ---------------------------------------------------------------------------
 def test_get_commit_prompt_loads_as_is(isolated_config_dir):
@@ -614,12 +468,13 @@ def test_config_types_covers_editable_files():
     """CONFIG_TYPES is exactly the three files the Settings UI edits.
 
     ``specs5/1-foundation/configuration.md`` § The Whitelist names these
-    three and no others. The list was eight entries while the native
+    two and no others. The list was eight entries while the native
     engine owned prompt assembly; five of them described a prompt or a
     provider knob that no longer has a reader, and a settings editor
     offering an edit that changes nothing is worse than not offering it.
+    ``snippets`` left with the snippet mechanism itself (CC-22).
     """
-    assert set(CONFIG_TYPES.keys()) == {"engine", "app", "snippets"}
+    assert set(CONFIG_TYPES.keys()) == {"engine", "app"}
 
 
 def test_config_types_excludes_the_commit_prompt():

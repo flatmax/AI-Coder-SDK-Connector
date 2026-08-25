@@ -43,7 +43,6 @@ import { RpcMixin } from './rpc-mixin.js';
 const CONFIG_CARDS = [
   { key: 'engine', icon: '🤖', label: 'Engine Config', format: 'json', reloadable: false },
   { key: 'app', icon: '⚙️', label: 'App Config', format: 'json', reloadable: true },
-  { key: 'snippets', icon: '✂️', label: 'Snippets', format: 'json', reloadable: false },
 ];
 
 export class SettingsTab extends RpcMixin(LitElement) {
@@ -323,12 +322,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
   /**
    * Re-read the active config into the running process.
    *
-   * Only app.json is reloadable, so there is one target. Cards
-   * marked `reloadable: false` — engine.json and snippets.json —
-   * return early rather than calling a reload that would either
+   * Only app.json is reloadable, so there is one target. A card
+   * marked `reloadable: false` — engine.json is the only one left —
+   * returns early rather than calling a reload that would either
    * fail or lie: engine.json's values were consumed when the
-   * subprocess started, and snippets are read fresh on each
-   * render.
+   * subprocess started.
    */
   async _reload() {
     if (!this._activeKey) return;

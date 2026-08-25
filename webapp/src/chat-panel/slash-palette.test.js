@@ -9,6 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { openSlashPalette } from './input.js';
 import { mountPanel, publishFakeRpc, settle } from './test-helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -368,5 +369,115 @@ describe('ChatPanel slash palette selection', () => {
     expect(palette(p).handleKey(event)).toBe(false);
     expect(ta.value).toBe('/zzz');
     expect(started).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The composer's palette button
+// ---------------------------------------------------------------------------
+//
+// The button is the drawer's replacement (CC-22), and it opens the palette by
+// typing `/` rather than by setting a flag — so what these tests check is that
+// the composer really holds a `/` afterwards, not just that an overlay is up.
+// If the button ever short-circuits into `palette.show()`, the filter, Escape
+// and send-anyway paths all stop agreeing with the engine, and only the
+// composer assertions here would notice.
+
+const button = (panel) =>
+  panel.shadowRoot.querySelector('.slash-palette-button');
+
+describe('ChatPanel slash palette button', () => {
+  it('types a slash and opens the palette', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    button(p).click();
+    await landFetch(p);
+    expect(p.shadowRoot.querySelector('.input-textarea').value).toBe('/');
+    expect(p._input).toBe('/');
+    expect(palette(p).isOpen).toBe(true);
+    // Nothing typed after the slash, so the whole list is on show.
+    expect(palette(p).filtered).toHaveLength(FULL.length);
+  });
+
+  it('leaves the cursor after the slash so typing filters', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    button(p).click();
+    await landFetch(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    expect(ta.selectionStart).toBe(1);
+    // Continue as the user would, from where the button left them.
+    ta.value = '/con';
+    ta.selectionStart = ta.selectionEnd = 4;
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    expect(palette(p).filtered.map((c) => c.name)).toEqual(['context']);
+  });
+
+  it('is disabled once the composer has text', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    expect(button(p).disabled).toBe(false);
+    type(p, 'half a thought');
+    await settle(p);
+    expect(button(p).disabled).toBe(true);
+  });
+
+  it('refuses to overwrite a draft even when invoked directly', async () => {
+    // The disabled attribute is a render behind a fast keystroke, so
+    // the guard has to be in the handler too — losing a half-written
+    // prompt is not recoverable.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const ta = type(p, 'half a thought');
+    openSlashPalette(p);
+    await settle(p);
+    expect(ta.value).toBe('half a thought');
+    expect(palette(p).isOpen).toBe(false);
+  });
+
+  it('is disabled while a turn streams', async () => {
+    // Until `during_turn` lands, every command the palette could offer
+    // is one the engine's concurrency guard would reject — so the
+    // button refuses rather than opening a list nothing in it can act
+    // on. See specs5/impl-history/work-log.md § Specified but not yet
+    // built.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._streaming = true;
+    await settle(p);
+    expect(button(p).disabled).toBe(true);
+  });
+
+  it('Escape closes the overlay and leaves the slash behind', async () => {
+    // Dismissing never edits the composer — including when the button
+    // is what put the `/` there. A second Escape is the input-clear
+    // rung, which is the composer's job and not the palette's.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    button(p).click();
+    await landFetch(p);
+    palette(p).handleKey(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle(p);
+    expect(palette(p).isOpen).toBe(false);
+    expect(p.shadowRoot.querySelector('.input-textarea').value).toBe('/');
   });
 });

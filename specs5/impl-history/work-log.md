@@ -426,6 +426,21 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 - **`webapp/src/app-shell.test.js` — `describe('setupDone')` console.error silence.** The `beforeEach`/`afterEach` pair in the setupDone describe block installs a `vi.spyOn(console, 'error').mockImplementation(() => {})` to swallow errors from the files-tab's `onRpcReady` handler when it tries `Repo.get_file_tree` on a fake proxy that doesn't implement it. The errors are genuine — the files-tab genuinely can't fetch the tree — but they're out of scope for app-shell tests which focus on shell-level wire-up, not files-tab RPC behavior. **Remove when:** Phase 2d expands these shell tests (or adds a separate integration test class) that publishes a richer fake proxy including `Repo.get_file_tree`, at which point the files-tab's RPC call succeeds and the console.error goes away naturally. The TODO comment in the test file references `TODO(phase-2d)` so it shows up in that phase's grep sweep.
 
+## Specified but not yet built
+
+- **`during_turn` on `list_commands` entries.** [`3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
+  specifies a per-command mid-turn flag: `/context` and `/permissions` stay available while a turn
+  streams, `/clear` and `/resume` do not, and everything reaching the CLI is `false` because the
+  concurrency guard rejects it and the CLI's input stream is serial anyway. The palette is specified to
+  render blocked rows disabled-with-a-reason rather than filtering them out.
+
+  **Not implemented.** The service does not emit the field and the palette does not read it. Until it
+  lands, the composer's palette button is disabled while streaming — the same treatment the New Session
+  button gets — so no row can be picked that could not be acted on. Landing it means: add `during_turn`
+  to `SLASH_ROUTES` and to the `list_commands` reply, thread `panel._streaming` into
+  `updateSlashPalette`, and give `aic-slash-palette` a disabled-row state that `_moveFocus` skips and
+  `_selectFocused` refuses.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:

@@ -65,9 +65,6 @@ class FakeConfig:
         self.config_dir = None
         self.aic_dc_dir = Path(repo_root) / ".aic-dc"
 
-    def get_snippets(self, mode="code"):
-        return []
-
     def get_commit_prompt(self):
         return "Write a conventional commit message for this diff."
 

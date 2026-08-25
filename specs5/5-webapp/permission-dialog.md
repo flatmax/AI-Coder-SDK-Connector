@@ -302,7 +302,7 @@ over a UI the user was mid-gesture in. And a dismiss that resolved nothing would
 behind a dialog the user believes they closed, which is the worst of the three outcomes.
 
 Escape takes priority over every other Escape binding in the application — the chat panel's @-filter,
-the snippet drawer, the input-clear chain, the lightbox (see
+the `/` palette, the input-clear chain, the lightbox (see
 [chat.md § Escape Priority Chain](chat.md#escape-priority-chain)).
 
 ## Anti-Click-Through

@@ -136,8 +136,8 @@ class TestWhitelist:
     def test_unknown_type_returns_none(self, settings):
         assert settings._resolve_filename("bogus") is None
 
-    def test_the_whitelist_is_the_three_live_files(self, settings):
-        assert set(CONFIG_TYPES) == {"engine", "app", "snippets"}
+    def test_the_whitelist_is_the_two_live_files(self, settings):
+        assert set(CONFIG_TYPES) == {"engine", "app"}
 
     def test_retired_types_no_longer_resolve(self, settings):
         """The five types that described the native engine are gone.
@@ -252,33 +252,6 @@ class TestGetConfigInfo:
         settings._collab = _StubCollab(is_localhost=False)
         info = settings.get_config_info()
         assert "config_dir" in info  # Not restricted.
-
-
-# ---------------------------------------------------------------------------
-# Snippet reads — always allowed
-# ---------------------------------------------------------------------------
-
-
-class TestSnippets:
-    def test_get_snippets_returns_code_mode(self, settings):
-        snips = settings.get_snippets()
-        assert isinstance(snips, list)
-        assert len(snips) > 0
-        for s in snips:
-            assert "icon" in s
-            assert "tooltip" in s
-            assert "message" in s
-
-    def test_get_review_snippets_returns_review_mode(self, settings):
-        snips = settings.get_review_snippets()
-        assert isinstance(snips, list)
-        assert len(snips) > 0
-
-    def test_snippets_allowed_for_non_localhost(self, settings):
-        settings._collab = _StubCollab(is_localhost=False)
-        # Not restricted.
-        assert isinstance(settings.get_snippets(), list)
-        assert isinstance(settings.get_review_snippets(), list)
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +432,6 @@ class TestNoEngineReload:
 class TestIsReloadable:
     def test_only_app_is_reloadable(self):
         assert Settings.is_reloadable("app") is True
-        assert Settings.is_reloadable("snippets") is False
         assert Settings.is_reloadable("engine") is False
 
     def test_every_whitelisted_type_has_an_answer(self):

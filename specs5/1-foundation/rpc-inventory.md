@@ -42,10 +42,9 @@ wire; nothing forwards the old namespace.
 - History — list sessions, load a session's messages, search history, delete a session (localhost-only), fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There are no separate engine-session listing or deletion RPCs: with one store each would be a second answer to a question the history surface already answers
 - Subagents — list subagent transcripts, get a subagent transcript
 - Introspection — context usage, MCP server status, reconnect an MCP server, toggle an MCP server, server info (advertised commands, tools, output styles), the SDK surface report
-- Slash commands — list the commands the `/` palette offers: the CLI's advertised list filtered and annotated with what selecting each one does. See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
+- Slash commands — list the commands the `/` palette offers: the CLI's advertised list filtered and annotated with what selecting each one does and whether it stays available mid-turn. See [`../3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
 - Commit workflow — generate commit message, commit-all (background)
 - Reset — reset-to-HEAD (records a system event)
-- Snippets — current snippets for the active preset, review-specific snippets
 - Review — check ready, start, end, get state, get file diff
 - LSP — hover, definition, references, completions (coordinates are 1-indexed). Served from the surviving symbol index
 - Navigation — broadcast file navigation to all clients
@@ -59,13 +58,16 @@ mode get/switch/cross-reference, the seven URL methods, `load_session_into_conte
 Deleted later, by [CC-21](../plan/decisions.md#cc-21): `get_selected_files` and `set_selected_files`.
 `chat_streaming` lost its `files` parameter with them.
 
+Deleted by [CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user):
+`get_snippets` on both services, and `get_review_snippets` on Settings. The `/` palette's
+`list_commands` is the only composer-facing inventory now.
+
 ## Service: Settings (browser → server)
 
 - Config read — get content for a whitelisted config type
 - Config write — save content (triggers reload for reloadable types)
 - Explicit reload — engine config, app config
 - Info — current model name and config paths
-- Snippets — get standard or review-specific (direct access, bypassing preset logic)
 
 The whitelist shrank with the prompt files it used to gate; see
 [`configuration.md`](configuration.md).
