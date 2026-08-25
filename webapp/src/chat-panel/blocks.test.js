@@ -716,6 +716,39 @@ describe('applySubagentEvent', () => {
     });
   });
 
+  it('keeps the task it was asked, not the activity it is on', () => {
+    // The CLI reuses `description` for two things: `task_started` names the
+    // task, then every `task_progress` overwrites it with what the subagent
+    // is doing this second. Patching left the settled row headed with the
+    // last activity string — "Reading README.md" over a task called "Find
+    // magic word in README" — so the first description latches.
+    const turn = makeTurnBlocks();
+    applySubagentEvent(turn, {
+      task_id: 'task_1',
+      description: 'Find magic word in README',
+    });
+    applySubagentEvent(turn, {
+      task_id: 'task_1',
+      description: 'Reading README.md',
+      last_tool_name: 'Read',
+    });
+    expect(turn.subagents.get('task_1')).toMatchObject({
+      description: 'Find magic word in README',
+      // Not lost — the activity is what this chip is for.
+      last_tool_name: 'Read',
+    });
+  });
+
+  it('a row opened by a progress event still takes a description', () => {
+    // The latch is "first non-empty wins", not "only `started` may set it":
+    // a row whose `started` event was missed must still be able to name
+    // itself rather than stay blank forever.
+    const turn = makeTurnBlocks();
+    applySubagentEvent(turn, { task_id: 'task_1', status: 'running' });
+    applySubagentEvent(turn, { task_id: 'task_1', description: 'Reading README.md' });
+    expect(turn.subagents.get('task_1').description).toBe('Reading README.md');
+  });
+
   it('an agent id arriving later fills the row instead of opening a second', () => {
     // `agent_id` is the transcript key but the CLI reports it in the payload
     // rather than the dataclass, so it can be absent on the first event.

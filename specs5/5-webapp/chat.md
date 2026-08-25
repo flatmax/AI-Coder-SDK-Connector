@@ -482,6 +482,11 @@ Two of the four are dropped at the row.
   subagent at all), and `subagent_type` is the agent's own kind (`Explore`, `general-purpose`). Only the
   second means anything to a reader; the first is identical on every subagent row. This applies wherever
   a subagent is labelled — the row's chip, its inline label, the tab strip, the Stop confirmation.
+- **The head names the task, not the activity.** The CLI reuses `description` for both: `task_started`
+  names the task, then each `task_progress` overwrites it with what the subagent is doing this second.
+  The first non-empty one wins, so a settled row is still headed with what the subagent was *asked*
+  rather than whatever it was doing last. The activity is not lost — it is the `last_tool_name` chip
+  beside it. The tab strip already worked this way; the row now agrees with its own label.
 - **The summary stays, and renders as markdown.** It is the notification's `summary`, which is the
   subagent's own closing answer rather than a restatement of its description — verified against a
   headless CLI capture on 2026-08-25, where a task described as "Find magic word in README" reported

@@ -119,6 +119,39 @@ describe('view-subagents handler — reading the transcript', () => {
     );
   });
 
+  it('truncates a long description to the strip budget', async () => {
+    // The last surviving behaviour of `_AGENT_LABEL_MAX_LENGTH`, which used
+    // to be exercised through `deriveAgentTabLabel` in
+    // `chat-panel-agent-labels.test.js`. That helper went with the
+    // agent-spawn protocol in `a0cb83b` and its suite was removed; the cap
+    // itself is still read here, so the case moved rather than went.
+    publishFakeRpc({
+      'ClaudeCodeService.get_subagent_transcript': vi
+        .fn()
+        .mockResolvedValue(TRANSCRIPT),
+    });
+    const p = mountPanel();
+    await settle(p);
+    ask(p, [agent('agent_abc', 'x'.repeat(60))]);
+    await settle(p);
+    const label = p._tabLabels.get('historical:agent_abc');
+    // The ellipsis counts toward the budget, so the text is one short of it.
+    expect(label).toBe(`📜 ${'x'.repeat(39)}…`);
+  });
+
+  it('leaves a description at the cap alone', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_subagent_transcript': vi
+        .fn()
+        .mockResolvedValue(TRANSCRIPT),
+    });
+    const p = mountPanel();
+    await settle(p);
+    ask(p, [agent('agent_abc', 'y'.repeat(40))]);
+    await settle(p);
+    expect(p._tabLabels.get('historical:agent_abc')).toBe(`📜 ${'y'.repeat(40)}`);
+  });
+
   it('falls back to the id when the row had no description', async () => {
     publishFakeRpc({
       'ClaudeCodeService.get_subagent_transcript': vi

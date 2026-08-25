@@ -676,6 +676,16 @@ class TurnTranslator:
         status would otherwise blank the description the tab is labelled with.
         Only truthy values patch, and ``terminal`` latches once set: a task
         that ended stays ended even if a trailing message omits the status.
+
+        ``description`` is the exception: the *first* one wins. The CLI
+        overwrites it as the task runs — ``task_started`` names the task,
+        then each ``task_progress`` replaces it with the current activity —
+        so patching would leave a reconnecting browser headed with whatever
+        the subagent happened to be doing when the socket came back. The
+        activity is still reported, as ``last_tool_name``. Same rule as
+        ``applySubagentEvent`` in webapp/src/chat-panel/blocks.js, because a
+        row rebuilt from this snapshot and one folded from the live events
+        must not disagree about what the subagent was asked.
         """
         key = self._task_key(payload)
         if key is None:
@@ -686,7 +696,7 @@ class TurnTranslator:
             self._subagents[key] = row
         for name in _SUBAGENT_FIELDS:
             value = payload.get(name)
-            if value:
+            if value and not (name == "description" and row.get("description")):
                 row[name] = value
         row.setdefault("description", "")
         if payload.get("terminal"):

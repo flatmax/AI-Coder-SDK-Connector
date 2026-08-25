@@ -1437,6 +1437,62 @@ class TestReplay:
         # Goes over the wire inside `active_streams`.
         json.dumps(rows)
 
+    def test_the_row_keeps_the_task_not_the_activity(self, translator):
+        """`description` is two things on the wire, and only one is the task.
+
+        `task_started` names it; every `task_progress` overwrites it with what
+        the subagent is doing right now. Patching left a reconnecting browser
+        headed with whatever it happened to be doing when the socket came
+        back — and the activity is already reported as `last_tool_name`.
+        """
+        translator.translate(
+            TaskStartedMessage(
+                subtype="task_started",
+                data={"agent_id": "agent-7", "subagent_type": "Explore"},
+                task_id="task-1",
+                description="Find magic word in README",
+                uuid="u",
+                session_id="s",
+                tool_use_id="toolu_1",
+                task_type="local_agent",
+            )
+        )
+        translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="task-1",
+                description="Reading README.md",
+                usage={"total_tokens": 500, "tool_uses": 1, "duration_ms": 900},
+                uuid="u",
+                session_id="s",
+                last_tool_name="Read",
+            )
+        )
+        (row,) = translator.rendered_subagents()
+        assert row["description"] == "Find magic word in README"
+        assert row["last_tool_name"] == "Read"
+
+    def test_a_row_opened_by_a_progress_message_still_takes_a_description(
+        self, translator
+    ):
+        """First non-empty wins, not "only `started` may set it" — a row whose
+        start was missed must still be able to name itself."""
+        translator.translate(
+            TaskProgressMessage(
+                subtype="task_progress",
+                data={},
+                task_id="task-1",
+                description="Reading README.md",
+                usage={"total_tokens": 1, "tool_uses": 1, "duration_ms": 1},
+                uuid="u",
+                session_id="s",
+                last_tool_name="Read",
+            )
+        )
+        (row,) = translator.rendered_subagents()
+        assert row["description"] == "Reading README.md"
+
     def test_a_finished_subagent_stays_finished(self, translator):
         """A trailing non-terminal message must not revive a task that ended."""
         translator.translate(

@@ -353,6 +353,17 @@ export function toolStatus(block) {
  * A task can reach a terminal status through `updated` with no notification
  * at all (`stop_task` reports `killed` that way), so `terminal` latches from
  * either message and the row stops spinning without waiting for one.
+ *
+ * `description` is the exception to the patch rule: the *first* one wins. The
+ * CLI overwrites it as the task runs — `task_started` names the task ("Find
+ * magic word in README"), then each `task_progress` replaces it with what the
+ * subagent is doing this second ("Reading README.md"), and whatever it was
+ * doing last is what the settled row was left headed with. The live activity
+ * is not lost by latching: it is the `last_tool_name` chip beside it, which
+ * says the same thing without overwriting the only record of what the
+ * subagent was *asked*. `subagent-tabs.js` already latched this for the tab
+ * strip — "the SDK's live description is an *activity* string, not the task"
+ * — and the row now agrees with the label instead of drifting away from it.
  */
 export function applySubagentEvent(turn, payload) {
   if (!turn || !payload || typeof payload !== 'object') return false;
@@ -382,7 +393,9 @@ export function applySubagentEvent(turn, payload) {
   if (payload.agent_id) patched.agent_id = payload.agent_id;
   if (payload.task_id) patched.task_id = payload.task_id;
   if (payload.tool_use_id) patched.tool_use_id = payload.tool_use_id;
-  if (payload.description) patched.description = payload.description;
+  if (payload.description && !patched.description) {
+    patched.description = payload.description;
+  }
   if (payload.task_type) patched.task_type = payload.task_type;
   if (payload.subagent_type) patched.subagent_type = payload.subagent_type;
   if (payload.status) patched.status = payload.status;

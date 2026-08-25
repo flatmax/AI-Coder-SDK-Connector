@@ -194,7 +194,10 @@ export function makeTabState() {
     //                `findTabForRequest`.
     //   description / task_type / subagent_type / status / last_tool_name /
     //   usage / summary
-    //                as reported, patched cumulatively across events.
+    //                as reported, patched cumulatively across events —
+    //                except `description`, where the first non-empty one
+    //                wins: the CLI reuses the field for the live activity
+    //                string, which is already the `last_tool_name` chip.
     //                `task_type` is the transport ("local_agent");
     //                `subagent_type` is the agent's kind ("Explore") and is
     //                the one anything user-facing labels with.

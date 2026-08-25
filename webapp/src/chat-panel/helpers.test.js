@@ -1,9 +1,14 @@
 // Pure-function tests for chat-panel helpers.
 //
-// `generateRequestId`, `parseAgentTabId`, and the localStorage
-// load/save helpers are all exported from `chat-panel/index.js`.
-// They have no DOM dependencies, so most tests here exercise them
-// directly without mounting a panel.
+// `generateRequestId` and the localStorage load/save helpers are all
+// exported from `chat-panel/index.js`. They have no DOM dependencies, so
+// most tests here exercise them directly without mounting a panel.
+//
+// `parseAgentTabId` was tested here too. It mapped a tab id back to the
+// LLM-chosen agent id that every tagged RPC carried, and went with the
+// agent-spawn protocol in `a0cb83b`: subagent tabs are keyed by the
+// spawning call's `tool_use_id` and are not writable, so there is no
+// tagged call left to address.
 //
 // The retry-prompt builders used to be tested here. They composed a
 // follow-up prompt out of the native engine's edit-application report
@@ -16,7 +21,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
   generateRequestId,
-  parseAgentTabId,
   _DRAWER_STORAGE_KEY,
   _SEARCH_IGNORE_CASE_KEY,
   _SEARCH_REGEX_KEY,
@@ -46,71 +50,6 @@ describe('generateRequestId', () => {
     const ids = new Set();
     for (let i = 0; i < 100; i += 1) ids.add(generateRequestId());
     expect(ids.size).toBe(100);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseAgentTabId (C2b)
-// ---------------------------------------------------------------------------
-
-describe('parseAgentTabId', () => {
-  // Per specs4/5-webapp/agent-browser.md and
-  // specs4/7-future/parallel-agents.md § "Agent Reuse by
-  // ID", agent identity is flat — the agent's LLM-chosen
-  // id from its `🟧🟧🟧 AGENT` block IS the tab id IS the
-  // backend registry key. parseAgentTabId returns the id
-  // directly with no parsing. The literal "main" is
-  // reserved for the main conversation; everything else
-  // is treated as an agent id.
-
-  it('returns null for the main tab', () => {
-    // Untagged path — the caller drops the agent_tag
-    // argument so the backend uses the main conversation.
-    expect(parseAgentTabId('main')).toBeNull();
-  });
-
-  it('returns the id verbatim for descriptive agent ids', () => {
-    // Real LLM-chosen ids look like "frontend-trivial",
-    // "backend-auth-refactor", etc. The parser is the
-    // identity function for any non-"main" string.
-    expect(parseAgentTabId('frontend-trivial')).toBe(
-      'frontend-trivial',
-    );
-    expect(parseAgentTabId('backend-auth-refactor')).toBe(
-      'backend-auth-refactor',
-    );
-  });
-
-  it('returns the id verbatim for short ids', () => {
-    // The parser does not impose a minimum length or
-    // require any specific shape — any non-empty non-
-    // "main" string is a valid agent id.
-    expect(parseAgentTabId('a')).toBe('a');
-    expect(parseAgentTabId('agent-0')).toBe('agent-0');
-  });
-
-  it('preserves arbitrary characters in the id', () => {
-    // The backend does not validate id shape beyond
-    // non-emptiness, so the frontend parser shouldn't
-    // either. Slashes, spaces, punctuation — all pass
-    // through unchanged.
-    expect(parseAgentTabId('a/b/c')).toBe('a/b/c');
-    expect(parseAgentTabId('with spaces')).toBe('with spaces');
-    expect(parseAgentTabId('punct!@#')).toBe('punct!@#');
-  });
-
-  it('returns null for empty string', () => {
-    expect(parseAgentTabId('')).toBeNull();
-  });
-
-  it('returns null for non-string input', () => {
-    // Defensive — tab IDs come from Map keys so should
-    // always be strings, but malformed data shouldn't
-    // crash the send path.
-    expect(parseAgentTabId(null)).toBeNull();
-    expect(parseAgentTabId(undefined)).toBeNull();
-    expect(parseAgentTabId(42)).toBeNull();
-    expect(parseAgentTabId({})).toBeNull();
   });
 });
 

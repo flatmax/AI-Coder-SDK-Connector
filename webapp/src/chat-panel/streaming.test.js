@@ -734,37 +734,27 @@ describe('ChatPanel agent tabs', () => {
     expect(p.messages[1].turn_id).toBeUndefined();
   });
 
-  it('the agentsSpawned broadcast still spawns tabs', async () => {
+  it('a well-formed agentsSpawned payload spawns nothing either', async () => {
+    // This asserted the opposite until `a0cb83b` removed the agent-spawn
+    // protocol: a full payload used to open a tab per block, labelled
+    // `Agent NN: {task}`. Nothing consumes the broadcast now — subagents
+    // arrive as `Task*` events and render as rows inside the turn — so the
+    // well-formed case is pinned beside the malformed one below, because
+    // "spawns nothing" is only meaningful if a *valid* payload also does.
     const p = mountPanel();
     const reqId = await startMainStream(p);
     pushEvent('agents-spawned', {
       turn_id: 'turn_abc',
       parent_request_id: reqId,
       agent_blocks: [
-        {
-          id: 'auth-refactor',
-          task: 'refactor the auth module',
-          agent_idx: 0,
-        },
+        { id: 'auth-refactor', task: 'refactor the auth module', agent_idx: 0 },
         { id: 'a1', task: '', agent_idx: 1 },
       ],
     });
     await settle(p);
-    expect(p._tabs.size).toBe(3);
-    // Keyed by the block id verbatim, labelled by index and task.
-    expect(p._tabLabels.get('auth-refactor')).toBe(
-      'Agent 00: refactor the auth module',
-    );
-    expect(p._tabLabels.get('a1')).toBe('Agent 01');
-    const tab = p._tabs.get('auth-refactor');
-    // Seeded with the task, so the tab opens showing what it was asked.
-    expect(tab.messages).toEqual([
-      { role: 'user', content: 'refactor the auth module' },
-    ]);
-    // A spawned tab used to inherit a COPY of main's selected-files
-    // list, so that an agent tab ticking its own boxes didn't move the
-    // main tab's. Tab state carries no file list at all now (CC-21).
-    // Focus stays where the user left it.
+    expect(p._tabs.size).toBe(1);
+    expect(p._tabs.has('main')).toBe(true);
+    expect(p._tabLabels.get('auth-refactor')).toBeUndefined();
     expect(p._activeTabId).toBe('main');
   });
 

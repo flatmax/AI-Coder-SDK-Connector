@@ -1,8 +1,9 @@
 # Open Work — Background-Subagent Fix List
 
-**Status:** resumed 2026-08-25. Items 1–5 are done, and 6 is done bar one fault that would not
-reproduce (6c below — worth one check against the live session). This file is the handoff note for
-resuming, and should be deleted once 6c is settled.
+**Status:** resumed 2026-08-25. Items 1–6 are done bar one fault that would not reproduce (6c — worth
+one check against the live session), the frontend test baseline is green again, and `spare_subagents`
+has finally been exercised live. This file is the handoff note for resuming, and should be deleted once
+6c is settled.
 
 The list came out of one live run on the dev backend: a turn that delegated to a background subagent,
 watched from the browser rather than from tests. Everything below is something that run surfaced, in the
@@ -16,7 +17,8 @@ order it was worth fixing.
 | 3(a) | The drain emits every result; the browser revises the settled message | `e3d0e9c` |
 | 3(b) | A background agent's wake-up renders as a system note on replay | `fa572ce` |
 | 4 | Raw HTML in a message renders as the text it was written as | `1d40022` |
-| 5 | The inline subagent block collapses; the type chip names the agent | *this change* |
+| 5 | The inline subagent block collapses; the type chip names the agent | `5ca28b7` |
+| 6a–6b | A settled turn keeps its subagent rows on refresh; the boot LED reads idle | *uncommitted* |
 
 Each has specs: `specs5/3-engine/session.md` § *Every result the drain reads is emitted*,
 `specs5/3-engine/history.md` § *A background agent's wake-up*, `specs5/5-webapp/chat.md`
@@ -36,16 +38,19 @@ kind** (`local_agent`, `local_bash`), not the agent's. The agent's own kind ride
 which no SDK dataclass hoists, so the engine never forwarded it and every subagent chip and label
 fallback read "local_agent". The engine now forwards it and everything user-facing labels with it.
 
-### Left over from item 5: the row head follows the activity string
+### Left over from item 5: the row head followed the activity string — **fixed**
 
-The row's head shows the *last* description an event carried, and the CLI overwrites it as the task
-runs: `task_started` gave "Find magic word in README", `task_progress` replaced it with "Reading
-README.md", which is what the settled row is still headed with. The tab strip already solved this —
-`resolveLabel` in `subagent-tabs.js` latches the `Task` card's description and comments that "the SDK's
-live description is an *activity* string, not the task" — but the inline row has no such latch, and its
-live activity is already carried by the `last_tool_name` chip beside it. Not fixed here: it changes what
-`description` means in the fold (`applySubagentEvent` and `_record_subagent` both patch cumulatively, and
-the spec says so), which is a decision of its own rather than part of the collapse.
+The row's head showed the *last* description an event carried, because the CLI overwrites the field as
+the task runs: `task_started` gave "Find magic word in README", then `task_progress` replaced it with
+"Reading README.md", and that is what the settled row was left headed with. The first non-empty
+description now latches, in both folds — `applySubagentEvent` and `_record_subagent` — so a row rebuilt
+from a reconnect snapshot and one folded from live events agree. The activity is not lost: it is the
+`last_tool_name` chip beside it. The tab strip had already made this decision for its labels
+(`resolveLabel`: "the SDK's live description is an *activity* string, not the task"), so the row now
+agrees with its own label instead of drifting away from it.
+
+The latch is "first non-empty wins", not "only `task_started` may set it" — a row whose start event was
+missed must still be able to name itself. Both sides have a test for that case.
 
 ## 6. Post-refresh and boot state
 
@@ -103,9 +108,34 @@ start over.
 - **Option B — session-lifetime pump, or per-translator routing.** The alternative to the drain that
   3(a) built on. Left open deliberately: the agreement was to watch for A's residual mis-attribution
   first and only take B if it shows up. Nothing has shown up yet.
-- **A subagent permission ask landing inside the turn window.** `spare_subagents` in
-  `src/aic_dc/claude_code/permissions.py` still has not been exercised by any live run — every run so
-  far had the subagent's asks land outside the window. Worth engineering a run that hits it.
+- ~~**A subagent permission ask landing inside the turn window.**~~ **Done — exercised live on
+  2026-08-25, and it works.** See below for what it took and what it showed.
+
+## `spare_subagents`, finally exercised
+
+It works end to end. The run: a turn spawns a background `general-purpose` subagent whose first act is a
+gated `Bash`, **and** then runs a gated `Bash` of its own. Both asks land against the same turn. Answer
+only main's; the turn ends, and the engine logs
+
+```
+Permission perm-…-2vpe98 for Bash left open past the end of turn 1787620595247-76z4se:
+subagent aa28597609d094a45 is still waiting on it
+```
+
+The subagent's dialog survived the turn, and answering it afterwards let the subagent run — its
+`touch` landed after its parent turn was over.
+
+**Why every earlier run missed it, precisely.** `note_permission_prompt` attributes a request to
+`session._active_turn`, and that is cleared when the turn's **result** arrives, not when the drain ends.
+A background subagent normally reaches its first gated call a second or two *after* the parent has
+finished replying, so the request carries no `request_id` at all — the logs read `turn None` — and
+`cancel_for_turn` skips it on the `request_id` mismatch before `spare_subagents` is ever consulted.
+Two attempts missed by about one second each.
+
+So the branch only matters in the narrow case where the subagent is *already blocked* when the parent's
+result arrives; the thing that protects a background subagent's dialog the rest of the time is
+`cancel_for_agent`, when the subagent reaches a terminal status. Making main block on its own permission
+is what holds the turn open long enough to engineer the narrow case, and is the recipe to reuse.
 
 ## Noticed, deliberately not acted on
 
@@ -149,10 +179,31 @@ Three traps that cost time on 2026-08-25:
 
 ## Test baselines
 
-- **Python:** `pytest tests/ -q` — **3351 passed**, nothing failing or skipped, measured with items 5
-  and 6 applied.
-- **Frontend:** `npx vitest run src/` in `webapp/` reports **63 failures that predate this list**, all
-  in `deriveAgentTabLabel`, `parseAgentTabId` and the chat-panel tab suites — leftovers from `a0cb83b`
-  removing the agent-spawn protocol. Measure a baseline with `git stash` before believing a new failure
-  is yours; the whole list so far has introduced none. Item 5 was checked exactly that way — 68 with the
-  change, 63 stashed, and the five were its own fixtures asserting the old `task_type` vocabulary.
+**Both suites are green.** A new failure is now yours, and no longer has to be diffed against a list of
+expected ones.
+
+- **Python:** `pytest tests/ -q` — **3353 passed**, nothing failing or skipped.
+- **Frontend:** `npx vitest run src/` in `webapp/` — **3974 passed across 99 files**, none failing.
+
+The frontend was carrying **63 failures predating this list**, all left by `a0cb83b` removing the
+agent-spawn protocol. Cleared on 2026-08-25, by deletion where the subject was gone and by rewriting
+where the behaviour survived:
+
+- `chat-panel-agent-labels.test.js` — deleted whole (30). Every test drove `deriveAgentTabLabel`, which
+  went with the protocol. Its one surviving concern, truncation at `_AGENT_LABEL_MAX_LENGTH`, moved to
+  `view-subagents-load.test.js`, which covers the `📜` transcript labels that still read the cap.
+- `tabs.test.js` — three suites deleted (26). "tab close — behavior" and "— guards" drove `_onTabClose`;
+  "close-tab backend wiring" asserted it fired `close_agent_context`. `tabs.js` records that the
+  primitive is gone, that no UI gesture ever bound to it, and that both surviving kinds of tab sweep
+  themselves. The "tab close — rendering" group stays: that the button is *absent* is still worth
+  pinning. "tab mode storage" went too — see the `_tabModes` note below.
+- `helpers.test.js` — the `parseAgentTabId` group deleted (6); the function is gone.
+- `streaming.test.js` — one test rewritten (1). It asserted `agents-spawned` *did* spawn tabs, directly
+  contradicting the test above it. It now pins that a well-formed payload spawns nothing, beside the
+  malformed case — "spawns nothing" only means something if a valid payload also does.
+
+**Found while clearing them: `panel._tabModes` has no writer.** It is read by the tab chips and the LED
+tooltip and is filled only by `test-helpers.js`, so in production it is permanently empty and the mode
+segment those two render can never appear. Retiring the map (and the `mode` parameter threaded through
+`renderLedRow` and `formatLedTooltip`) is a small, separate cleanup — not done here because it is a
+production change and clearing the baseline was meant to be a test-only one.
