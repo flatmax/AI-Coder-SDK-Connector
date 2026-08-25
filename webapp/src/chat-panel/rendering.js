@@ -303,7 +303,15 @@ function renderInputSurface(panel) {
       @history-cancel=${(e) => onHistoryCancel(panel, e)}
     ></aic-input-history>
     ${panel._pendingImages.length > 0 ? renderPendingImages(panel) : ''}
+    <!--
+      The streaming flag is bound as a property rather than passed to
+      show(): a turn can start or end while the overlay is already up,
+      and show() only fires on composer input. Bound, the rows re-enable
+      the moment the turn ends. (No backticks in here — this comment is
+      inside the html template literal.)
+    -->
     <aic-slash-palette
+      .streaming=${panel._streaming}
       @command-select=${(e) => onSlashCommandSelect(panel, e)}
     ></aic-slash-palette>
     <div class="input-row">
@@ -320,18 +328,20 @@ function renderInputSurface(panel) {
       <div class="send-column">
         <div class="send-column-top">
           <!--
-            Disabled while a turn streams because every command the
-            palette could offer is one the concurrency guard would
-            reject. The specified fix is a per-command during_turn flag
-            (specs5/3-engine/session.md § Slash Commands), which lets
-            the routed few stay live; until that lands, refusing to
-            open at all beats opening a list nothing in it can act on.
+            Live during a turn. Part of the list is reachable while one
+            streams — the routed commands never reach the engine's turn
+            entry point at all — and which part is a per-row fact the
+            rows carry themselves (specs5/3-engine/session.md § Mid-turn
+            availability). Disabling this button would withhold the
+            reachable rows to avoid explaining the unreachable ones, at
+            the moment the reachable ones are most wanted.
+
+            No backticks in this comment: it sits inside the html
+            template literal, and one would end the literal.
           -->
           <button
             class="action-button slash-palette-button"
-            ?disabled=${!panel.rpcConnected ||
-            panel._streaming ||
-            !!panel._input.trim()}
+            ?disabled=${!panel.rpcConnected || !!panel._input.trim()}
             @click=${() => openSlashPalette(panel)}
             aria-label="Browse slash commands"
             title=${panel._input.trim()

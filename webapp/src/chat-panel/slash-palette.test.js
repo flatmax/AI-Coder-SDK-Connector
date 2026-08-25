@@ -24,6 +24,7 @@ const FULL = [
     description: 'Free up context',
     action: 'send',
     target: '',
+    during_turn: false,
   },
   {
     name: 'context',
@@ -32,6 +33,7 @@ const FULL = [
     description: 'Show context usage',
     action: 'route',
     target: 'tab:context',
+    during_turn: true,
   },
 ];
 
@@ -43,6 +45,7 @@ const ROUTES_ONLY = [
     description: 'Start a new session',
     action: 'route',
     target: 'new-session',
+    during_turn: false,
   },
   {
     name: 'resume',
@@ -51,6 +54,7 @@ const ROUTES_ONLY = [
     description: 'Browse and resume an earlier session',
     action: 'route',
     target: 'history',
+    during_turn: false,
   },
 ];
 
@@ -448,12 +452,11 @@ describe('ChatPanel slash palette button', () => {
     expect(palette(p).isOpen).toBe(false);
   });
 
-  it('is disabled while a turn streams', async () => {
-    // Until `during_turn` lands, every command the palette could offer
-    // is one the engine's concurrency guard would reject — so the
-    // button refuses rather than opening a list nothing in it can act
-    // on. See specs5/impl-history/work-log.md § Specified but not yet
-    // built.
+  it('stays live while a turn streams', async () => {
+    // Part of the list is reachable mid-turn — the routed commands are
+    // answered from the route table and never start a turn — so the
+    // entry point stays open and the rows say which ones. Disabling it
+    // would withhold the reachable rows to avoid explaining the rest.
     publishFakeRpc({
       'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
     });
@@ -461,7 +464,54 @@ describe('ChatPanel slash palette button', () => {
     await settle(p);
     p._streaming = true;
     await settle(p);
-    expect(button(p).disabled).toBe(true);
+    expect(button(p).disabled).toBe(false);
+    button(p).click();
+    await landFetch(p);
+    expect(palette(p).isOpen).toBe(true);
+  });
+
+  it('tells the palette a turn is streaming', async () => {
+    // Bound as a property rather than passed to show(), so a turn
+    // starting or ending while the overlay is up re-renders the rows.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p).streaming).toBe(false);
+    p._streaming = true;
+    await settle(p);
+    expect(palette(p).streaming).toBe(true);
+    expect(palette(p).isOpen).toBe(true);
+  });
+
+  it('routes a mid-turn command without sending anything', async () => {
+    // The whole point of the exercise: /context opens the tab while the
+    // turn it is reporting on is still running.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const tabs = [];
+    p.addEventListener('request-dialog-tab', (e) => tabs.push(e.detail.tab));
+    p._streaming = true;
+    await settle(p);
+    button(p).click();
+    await landFetch(p);
+    const ta = p.shadowRoot.querySelector('.input-textarea');
+    ta.value = '/context';
+    ta.selectionStart = ta.selectionEnd = 8;
+    ta.dispatchEvent(new Event('input'));
+    await settle(p);
+    palette(p).handleKey(
+      new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+    );
+    await settle(p);
+    expect(tabs).toEqual(['context']);
+    expect(p._input).toBe('');
   });
 
   it('Escape closes the overlay and leaves the slash behind', async () => {

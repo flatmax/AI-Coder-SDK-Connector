@@ -683,6 +683,25 @@ class TestSlashCommands:
         """``list_commands`` falls back to it for a route the CLI omits."""
         assert SLASH_ROUTES[command]["palette"]
 
+    @pytest.mark.parametrize("command", sorted(SLASH_ROUTES))
+    def test_every_route_answers_whether_it_survives_a_turn(self, command):
+        """A missing flag would default to False and silently withhold a
+        command that works perfectly well beside a streaming turn — the
+        failure this whole field exists to correct."""
+        assert isinstance(SLASH_ROUTES[command]["during_turn"], bool)
+
+    def test_only_the_session_swaps_are_withheld_mid_turn(self):
+        """The mid-turn question is "does answering this need a model turn?",
+        and for a routed command the answer is no — it never reaches
+        ``query()``. So the exceptions are not about cost or concurrency:
+        they are the two commands that would swap the session out from under
+        the stream the user is watching.
+        """
+        withheld = {
+            name for name, route in SLASH_ROUTES.items() if not route["during_turn"]
+        }
+        assert withheld == {"clear", "resume"}
+
 
 # ---------------------------------------------------------------------------
 # The `/` palette's command list
@@ -713,6 +732,7 @@ class TestListCommands:
             "description": "Review a diff",
             "action": "send",
             "target": "",
+            "during_turn": False,
         }
 
     async def test_a_routed_command_carries_its_target(self, service):
@@ -722,8 +742,55 @@ class TestListCommands:
         commands = _commands_by_name(await service.list_commands())
         assert commands["context"]["action"] == "route"
         assert commands["context"]["target"] == "tab:context"
-        # The CLI's own description survives; only the action changes.
-        assert commands["context"]["description"] == "Visualize context"
+
+    async def test_a_routed_row_is_described_by_where_it_goes(self, service):
+        """Our description wins over the CLI's for a routed command.
+
+        The CLI describes what *its* version does, and selecting the row
+        does not do that — it opens a surface, and the row says so with an
+        "opens UI" badge. "Show total cost and duration of the current
+        session" beside that badge is the row contradicting itself.
+        """
+        service.session.server_info = {
+            "commands": [
+                {"name": "cost", "description": "Show total cost and duration"}
+            ]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["cost"]["description"] == SLASH_ROUTES["cost"]["palette"]
+
+    async def test_a_routed_row_keeps_the_clis_aliases(self, service):
+        """Only the description is overridden — the CLI still knows the
+        names and argument shape better than this module does."""
+        service.session.server_info = {
+            "commands": [
+                {"name": "context", "aliases": ["ctx"], "argumentHint": "<n>"}
+            ]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["context"]["aliases"] == ["ctx"]
+        assert commands["context"]["argument_hint"] == "<n>"
+
+    async def test_a_passthrough_command_is_never_offered_mid_turn(self, service):
+        """A ``send`` entry is a turn, and the guard allows one.
+
+        True however cheaply the CLI answers it: ``/compact`` costs no model
+        call, but it still arrives as a prompt on an input stream the CLI
+        reads serially, so it could at best answer after the turn rather
+        than beside it.
+        """
+        service.session.server_info = {"commands": [{"name": "compact"}]}
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["compact"]["during_turn"] is False
+
+    async def test_a_routed_command_reports_the_route_tables_answer(self, service):
+        """The palette holds no second copy of the mid-turn rule."""
+        service.session.server_info = {
+            "commands": [{"name": "mcp"}, {"name": "clear"}]
+        }
+        commands = _commands_by_name(await service.list_commands())
+        assert commands["mcp"]["during_turn"] is True
+        assert commands["clear"]["during_turn"] is False
 
     async def test_a_denied_command_is_not_offered(self, service):
         """Offering one and then refusing it is worse than never showing it."""

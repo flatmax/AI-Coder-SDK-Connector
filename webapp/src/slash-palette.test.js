@@ -13,6 +13,10 @@ import { SlashPalette } from './slash-palette.js';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// `during_turn` mirrors the service's real answers: the two
+// session-swapping routes are withheld mid-turn, the passthrough
+// command is a turn of its own, and `/context` is a control request
+// the streaming turn does not block.
 const COMMANDS = [
   {
     name: 'clear',
@@ -21,6 +25,7 @@ const COMMANDS = [
     description: 'Start a new session',
     action: 'route',
     target: 'new-session',
+    during_turn: false,
   },
   {
     name: 'compact',
@@ -29,6 +34,7 @@ const COMMANDS = [
     description: 'Free up context',
     action: 'send',
     target: '',
+    during_turn: false,
   },
   {
     name: 'context',
@@ -37,6 +43,7 @@ const COMMANDS = [
     description: 'Show context usage',
     action: 'route',
     target: 'tab:context',
+    during_turn: true,
   },
 ];
 
@@ -297,5 +304,196 @@ describe('SlashPalette rendering', () => {
     const rows = el.shadowRoot.querySelectorAll('.entry');
     expect(rows[0].getAttribute('aria-selected')).toBe('true');
     expect(rows[1].getAttribute('aria-selected')).toBe('false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mid-turn availability
+// ---------------------------------------------------------------------------
+//
+// Only `query()` starts a turn, so a routed command is answerable while
+// one streams and a passthrough one is not. The palette shows the whole
+// list either way and marks the difference on the rows, because a list
+// that silently shrinks teaches the user that commands come and go.
+
+describe('SlashPalette while a turn streams', () => {
+  /** Two rows the turn allows, so navigation has somewhere to go. */
+  const TWO_LIVE = [
+    { name: 'clear', description: 'Start a new session', action: 'route', during_turn: false },
+    { name: 'context', description: 'Show context usage', action: 'route', during_turn: true },
+    { name: 'cost', description: 'Session cost', action: 'route', during_turn: true },
+  ];
+
+  it('blocks the rows the turn holds and leaves the rest alone', async () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    const rows = el.shadowRoot.querySelectorAll('.entry');
+    expect(rows[0].classList.contains('blocked')).toBe(true);
+    expect(rows[1].classList.contains('blocked')).toBe(true);
+    expect(rows[2].classList.contains('blocked')).toBe(false);
+  });
+
+  it('says when a blocked row comes back, on the row', async () => {
+    // Visible text rather than a tooltip: this list is navigated by
+    // keyboard, and a tooltip is unreachable from there.
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    const rows = el.shadowRoot.querySelectorAll('.entry');
+    expect(rows[0].querySelector('.badge.waiting').textContent).toContain(
+      'when the turn ends',
+    );
+    expect(rows[2].querySelector('.badge.waiting')).toBeNull();
+  });
+
+  it('drops the opens-UI badge from a blocked routed row', async () => {
+    // That badge warns "this does something other than send text". A
+    // row that does nothing right now has no such warning to give.
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    const clear = el.shadowRoot.querySelectorAll('.entry')[0];
+    expect(clear.textContent).not.toContain('opens UI');
+    expect(clear.getAttribute('aria-disabled')).toBe('true');
+  });
+
+  it('opens with focus on the first row that can be picked', () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    expect(el._focusedIndex).toBe(2);
+  });
+
+  it('highlights nothing when the whole list is waiting', async () => {
+    // A highlight promises Enter does something. With nothing
+    // actionable, -1 is the honest answer.
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS.slice(0, 2), '');
+    await settle(el);
+    expect(el._focusedIndex).toBe(-1);
+    expect(el.shadowRoot.querySelector('.entry.focused')).toBeNull();
+  });
+
+  it('skips blocked rows when navigating', () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(TWO_LIVE, '');
+    expect(el._focusedIndex).toBe(1);
+    el.handleKey(keyEvent('ArrowDown'));
+    expect(el._focusedIndex).toBe(2);
+    // Wrapping past the blocked row rather than stopping on it.
+    el.handleKey(keyEvent('ArrowDown'));
+    expect(el._focusedIndex).toBe(1);
+    el.handleKey(keyEvent('ArrowUp'));
+    expect(el._focusedIndex).toBe(2);
+  });
+
+  it('leaves the highlight alone when a full lap finds nothing', () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    el.handleKey(keyEvent('ArrowDown'));
+    expect(el._focusedIndex).toBe(2);
+  });
+
+  it('consumes Enter on a blocked row and selects nothing', () => {
+    // Consumed rather than passed through: the host's send refuses
+    // mid-turn anyway, so letting it go would give the same silence
+    // minus the overlay that was explaining it.
+    const el = mountPalette();
+    const seen = [];
+    el.addEventListener('command-select', (e) => seen.push(e.detail.command));
+    el.streaming = true;
+    el.show(COMMANDS, 'clear');
+    const event = keyEvent('Enter');
+    expect(el.handleKey(event)).toBe(true);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(seen).toEqual([]);
+    expect(el.isOpen).toBe(true);
+  });
+
+  it('refuses a click on a blocked row', async () => {
+    const el = mountPalette();
+    const seen = [];
+    el.addEventListener('command-select', (e) => seen.push(e.detail.command));
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.entry')[0].click();
+    expect(seen).toEqual([]);
+    expect(el.isOpen).toBe(true);
+  });
+
+  it('still selects a row the turn allows', async () => {
+    const el = mountPalette();
+    const seen = [];
+    el.addEventListener('command-select', (e) => seen.push(e.detail.command));
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    el.shadowRoot.querySelectorAll('.entry')[2].click();
+    expect(seen.map((c) => c.name)).toEqual(['context']);
+  });
+
+  it('moves the highlight off a row a starting turn just blocked', async () => {
+    // The overlay can be up when the turn starts. Leaving focus where
+    // it was would point Enter at a row it now refuses.
+    const el = mountPalette();
+    el.show(COMMANDS, '');
+    await settle(el);
+    expect(el._focusedIndex).toBe(0);
+    el.streaming = true;
+    await settle(el);
+    expect(el._focusedIndex).toBe(2);
+  });
+
+  it('re-enables every row when the turn ends', async () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    el.streaming = false;
+    await settle(el);
+    const rows = el.shadowRoot.querySelectorAll('.entry');
+    expect([...rows].some((row) => row.classList.contains('blocked'))).toBe(
+      false,
+    );
+  });
+
+  it('counts what is waiting in the hint line', async () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, '');
+    await settle(el);
+    const hint = el.shadowRoot.querySelector('.hint').textContent;
+    expect(hint).toContain('3 of 3');
+    expect(hint).toContain('2 wait for the turn');
+  });
+
+  it('says nothing about waiting when no row is', async () => {
+    const el = mountPalette();
+    el.show(COMMANDS, '');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.hint').textContent).not.toContain(
+      'wait for the turn',
+    );
+  });
+
+  it('treats an entry with no during_turn as waiting', async () => {
+    // A list cached from a service that predates the field. Withholding
+    // a command that would have worked is recoverable by waiting;
+    // offering one the guard then refuses is the confusing failure.
+    const el = mountPalette();
+    el.streaming = true;
+    el.show([{ name: 'context', description: 'Show context usage', action: 'route' }], '');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.entry').classList).toContain(
+      'blocked',
+    );
   });
 });

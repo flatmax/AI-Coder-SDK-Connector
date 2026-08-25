@@ -29,6 +29,14 @@
 // sending text, and the row says so, because a command that
 // silently does something other than what its CLI description
 // promises is worse than no palette at all.
+//
+// It also carries `during_turn`: whether it is still reachable
+// while a turn streams. Rows it withholds are rendered disabled
+// with when they come back, not filtered out — a list that
+// silently shrinks while streaming teaches the user that
+// commands come and go, where a list with some rows greyed out
+// teaches them the actual rule (specs5/3-engine/session.md
+// § Mid-turn availability).
 
 import { LitElement, css, html } from 'lit';
 
@@ -36,6 +44,16 @@ import { filterCommands } from './slash-commands.js';
 
 export class SlashPalette extends LitElement {
   static properties = {
+    /**
+     * Whether a turn is streaming right now.
+     *
+     * A public property the host binds to its own streaming
+     * flag, rather than a `show()` argument: a turn can start or
+     * end while the overlay is already up, and `show()` is only
+     * called on composer input. Bound this way, Lit re-renders
+     * the rows the moment the turn does either.
+     */
+    streaming: { type: Boolean },
     /**
      * Whether the overlay is showing. Driven by `show()` /
      * `hide()` from the host, never by this component's own
@@ -54,11 +72,16 @@ export class SlashPalette extends LitElement {
      */
     _query: { type: String, state: true },
     /**
-     * Index into the *filtered* list. Always a valid index
-     * when the filtered list is non-empty — unlike
-     * aic-input-history's -1-means-nothing-yet, because a
+     * Index into the *filtered* list. A valid index whenever
+     * the filtered list holds a row that can be acted on —
+     * unlike aic-input-history's -1-means-nothing-yet, because a
      * palette that opens with nothing selected makes Enter
      * ambiguous.
+     *
+     * -1 is the one case that ambiguity is the honest answer:
+     * every matching row is waiting on the turn, so there is
+     * nothing for Enter to mean and highlighting a row would
+     * promise otherwise.
      */
     _focusedIndex: { type: Number, state: true },
   };
@@ -119,6 +142,17 @@ export class SlashPalette extends LitElement {
       border-left: 3px solid var(--accent-primary, #58a6ff);
       padding-left: calc(0.6rem - 3px);
     }
+    /* Dimmed but still legible, and it keeps its place in the
+     * list. The row is here to be read, not to be picked: the
+     * user needs to see that the command exists and that the
+     * turn is what is holding it. */
+    .entry.blocked {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .entry.blocked:hover {
+      background: none;
+    }
     .name {
       flex: 0 0 auto;
       font-family: var(--font-mono, ui-monospace, monospace);
@@ -160,6 +194,14 @@ export class SlashPalette extends LitElement {
       font-size: 0.6875rem;
       color: var(--accent-primary, #58a6ff);
     }
+    /* Not the accent colour: the accent means "this row does
+     * something", and this badge means the opposite. Amber
+     * rather than red because nothing has gone wrong. */
+    .badge.waiting {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      white-space: nowrap;
+    }
     .empty {
       padding: 0.75rem;
       color: var(--text-secondary, #8b949e);
@@ -180,10 +222,27 @@ export class SlashPalette extends LitElement {
 
   constructor() {
     super();
+    this.streaming = false;
     this._open = false;
     this._commands = [];
     this._query = '';
     this._focusedIndex = 0;
+  }
+
+  /**
+   * Keep the highlight on a row that can actually be picked.
+   *
+   * A turn starting while the overlay is up disables rows
+   * underneath the highlight, and a turn ending re-enables them
+   * — either way `streaming` changing can leave `_focusedIndex`
+   * pointing at a row Enter would refuse, which is precisely the
+   * state this whole feature exists to avoid.
+   */
+  willUpdate(changed) {
+    if (!changed.has('streaming') || !this._open) return;
+    const filtered = this.filtered;
+    if (this._actionable(filtered[this._focusedIndex])) return;
+    this._focusedIndex = this._firstActionableIndex(filtered);
   }
 
   // ---------------------------------------------------------------
@@ -208,7 +267,9 @@ export class SlashPalette extends LitElement {
     const queryChanged = query !== this._query;
     this._commands = next;
     this._query = query;
-    if (!this._open || queryChanged) this._focusedIndex = 0;
+    if (!this._open || queryChanged) {
+      this._focusedIndex = this._firstActionableIndex(this.filtered);
+    }
     this._open = true;
   }
 
@@ -231,6 +292,12 @@ export class SlashPalette extends LitElement {
    * stays open to explain itself, but a stray `/typo` must
    * still be sendable, and the engine gives a better answer
    * about an unknown command than this list can.
+   *
+   * They *are* consumed when the match is a row the turn is
+   * holding, and do nothing. Letting the key through instead
+   * would reach `send`, which refuses mid-turn anyway — so the
+   * outcome is the same silence, minus the overlay that was
+   * explaining why.
    */
   handleKey(event) {
     if (!this._open) return false;
@@ -276,23 +343,62 @@ export class SlashPalette extends LitElement {
   // ---------------------------------------------------------------
 
   /**
-   * Move the highlight, wrapping at both ends.
+   * Whether this row can be picked right now.
+   *
+   * `during_turn` is read strictly: an entry without it — a list
+   * cached from an older service — counts as blocked while
+   * streaming. Withholding a command that would have worked is
+   * recoverable by waiting; offering one that the guard then
+   * refuses is the confusing failure.
+   */
+  _actionable(command) {
+    if (!command) return false;
+    return !this.streaming || command.during_turn === true;
+  }
+
+  /**
+   * The first row Enter could act on, or -1 when there is none.
+   *
+   * -1 rather than 0, so that a list entirely held by the turn
+   * opens with nothing highlighted. A highlight is a promise
+   * that Enter does something.
+   */
+  _firstActionableIndex(filtered) {
+    return filtered.findIndex((command) => this._actionable(command));
+  }
+
+  /**
+   * Move the highlight, wrapping at both ends, skipping rows the
+   * turn is holding.
    *
    * Wraps where `aic-input-history` clamps, and the difference
    * is the list itself: history is a long chronology the user
    * reads through, where wrapping loses their place, while
    * this is a short list ordered by relevance that they are
    * scanning for one known item.
+   *
+   * Skipping rather than stopping at a blocked row: the arrows
+   * are how the user reaches the routed few among thirty-odd
+   * passthrough commands mid-turn, and stopping would make that
+   * a tour of everything they cannot have. A full lap finding
+   * nothing leaves the highlight alone.
    */
   _moveFocus(delta, filtered) {
     const count = filtered.length;
-    this._focusedIndex = (this._focusedIndex + delta + count) % count;
-    this.updateComplete.then(() => {
-      const el = this.shadowRoot?.querySelector('.entry.focused');
-      if (el && typeof el.scrollIntoView === 'function') {
-        el.scrollIntoView({ block: 'nearest' });
-      }
-    });
+    if (count === 0) return;
+    const from = this._focusedIndex >= 0 ? this._focusedIndex : -delta;
+    for (let step = 1; step <= count; step += 1) {
+      const index = (((from + delta * step) % count) + count) % count;
+      if (!this._actionable(filtered[index])) continue;
+      this._focusedIndex = index;
+      this.updateComplete.then(() => {
+        const el = this.shadowRoot?.querySelector('.entry.focused');
+        if (el && typeof el.scrollIntoView === 'function') {
+          el.scrollIntoView({ block: 'nearest' });
+        }
+      });
+      return;
+    }
   }
 
   _selectFocused(filtered) {
@@ -302,6 +408,10 @@ export class SlashPalette extends LitElement {
         : 0;
     const command = filtered[index];
     if (!command) return;
+    // The row said it was waiting on the turn. Refusing here is
+    // what makes that true for a click as well as for Enter, and
+    // the overlay stays up still saying it.
+    if (!this._actionable(command)) return;
     this.hide();
     this.dispatchEvent(
       new CustomEvent('command-select', {
@@ -313,6 +423,7 @@ export class SlashPalette extends LitElement {
   }
 
   _onEntryClick(index, filtered) {
+    if (!this._actionable(filtered[index])) return;
     this._focusedIndex = index;
     this._selectFocused(filtered);
   }
@@ -321,6 +432,9 @@ export class SlashPalette extends LitElement {
     if (!this._open) return html``;
     const filtered = this.filtered;
     const total = this._commands.length;
+    const waiting = filtered.filter(
+      (command) => !this._actionable(command),
+    ).length;
     return html`
       <div class="overlay" role="listbox" aria-label="Slash commands">
         ${filtered.length === 0
@@ -328,39 +442,51 @@ export class SlashPalette extends LitElement {
               No command matches /${this._query}
             </div>`
           : html`<div class="entries">
-              ${filtered.map(
-                (command, index) => html`
-                  <div
-                    class="entry ${index === this._focusedIndex
-                      ? 'focused'
-                      : ''}"
-                    role="option"
-                    aria-selected=${index === this._focusedIndex}
-                    title=${command.description || ''}
-                    @click=${() => this._onEntryClick(index, filtered)}
-                  >
-                    <span class="name">/${command.name}</span>
-                    ${command.argument_hint
-                      ? html`<span class="hint-args"
-                          >${command.argument_hint}</span
-                        >`
-                      : ''}
-                    <span class="description"
-                      >${command.description || ''}</span
-                    >
-                    ${command.action === 'route'
-                      ? html`<span class="badge" title="Opens an AIC⚡DC surface"
-                          >opens UI</span
-                        >`
-                      : ''}
-                  </div>
-                `,
+              ${filtered.map((command, index) =>
+                this._renderEntry(command, index, filtered),
               )}
             </div>`}
         <div class="hint">
-          ${filtered.length} of ${total} · ↑↓ navigate · Enter select · Esc
-          dismiss
+          ${filtered.length} of ${total}${waiting
+            ? html` · ${waiting} wait for the turn`
+            : ''}
+          · ↑↓ navigate · Enter select · Esc dismiss
         </div>
+      </div>
+    `;
+  }
+
+  _renderEntry(command, index, filtered) {
+    const blocked = !this._actionable(command);
+    return html`
+      <div
+        class="entry ${index === this._focusedIndex ? 'focused' : ''} ${blocked
+          ? 'blocked'
+          : ''}"
+        role="option"
+        aria-selected=${index === this._focusedIndex}
+        aria-disabled=${blocked}
+        title=${command.description || ''}
+        @click=${() => this._onEntryClick(index, filtered)}
+      >
+        <span class="name">/${command.name}</span>
+        ${command.argument_hint
+          ? html`<span class="hint-args">${command.argument_hint}</span>`
+          : ''}
+        <span class="description">${command.description || ''}</span>
+        ${blocked
+          ? html`<span
+              class="badge waiting"
+              title=${command.action === 'route'
+                ? 'It would swap the session out from under the turn you are watching'
+                : 'It needs a turn of its own, and one is already running'}
+              >when the turn ends</span
+            >`
+          : command.action === 'route'
+            ? html`<span class="badge" title="Opens an AIC⚡DC surface"
+                >opens UI</span
+              >`
+            : ''}
       </div>
     `;
   }

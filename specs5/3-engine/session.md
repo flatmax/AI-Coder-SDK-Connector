@@ -210,7 +210,7 @@ cancel followed by a send.
 **A routed slash command is not a turn and is not gated by this.** It never reaches `query()` — the
 service answers it from the route table and the webapp opens a surface — so there is no second turn
 for the guard to count. Which routes stay available mid-turn is a per-command property, not a
-property of being routed; see [§ Slash Commands](#slash-commands).
+property of being routed; see [§ Mid-turn availability](#mid-turn-availability).
 
 ## Message Taxonomy → UI
 
@@ -299,8 +299,8 @@ and is subtly wrong in the model's view. See [history.md](history.md).
 ## Slash Commands
 
 **A slash command goes to the CLI unless this deployment answers it better.** The CLI dispatches its
-own built-ins in-process, before a model turn is billed — `/compact`, `/cost`, `/agents`, `/mcp` and
-the rest return real answers for zero turns and zero dollars, and `.claude/commands/`, skills and
+own built-ins in-process, before a model turn is billed — `/compact`, `/config`, `/effort`, `/doctor`
+and the rest return real answers for zero turns and zero dollars, and `.claude/commands/`, skills and
 plugin commands arrive the same way. Passthrough is therefore the default, and the two tables below
 are the exceptions.
 
@@ -315,21 +315,58 @@ the webapp opens the surface named by `target`.
 | Command | Target | Mid-turn | Surface |
 |---|---|---|---|
 | `/context` | `tab:context` | Yes | The Context tab — live, not a one-shot print. See [context-visibility.md](context-visibility.md). |
-| `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
+| `/usage`, `/cost` | `tab:context` | Yes | The same tab's cost and per-model breakdown ([`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)). AIC⚡DC computes these figures itself from every result message, so the tab knows more than the CLI's one-shot print does — and unlike the print, it keeps being true. |
+| `/mcp` | `tab:context` | Yes | The Context tab's MCP section: per-server connection state from `get_mcp_status()`, plus each server's tools and their token cost. |
+| `/agents` | `tab:context` | Yes | The Context tab's subagent list — the definitions this session can delegate to, with what they have spent. |
 | `/permissions` | `tab:settings` | Yes | The Settings tab's permission-mode control plus the rules list. |
+| `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
 | `/resume` | `history` | No | The history browser. Not in the CLI's command list at all. |
 
-**Mid-turn** is carried on the reply and on the `list_commands` entry as `during_turn`, and it is a
-per-command answer rather than a per-class one. `/context` and `/permissions` only open a surface the
-user could have clicked to anyway, and a turn in flight is exactly when someone wants to watch context
-fill or check what the agent is allowed to do. `/clear` and `/resume` swap the session out from under a
-live stream, which orphans the turn the user is watching — they stay gated until it ends, for the same
-reason the New Session button is disabled while streaming.
+#### Mid-turn availability
 
-Everything that is *not* routed is `during_turn: false`, without exception. A command that reaches the
-CLI is a turn, the guard above rejects it, and the CLI would process its input stream serially even if
-the guard did not — so `/cost` mid-turn could at best answer after the turn, not beside it. Advertising
-otherwise would be a promise the engine cannot keep.
+**Mid-turn** is carried on the reply and on the `list_commands` entry as `during_turn`. The question it
+answers is **"does answering this need a model turn?"** — not "is it routed?", and not "does it reach
+the engine?". Those are three different questions, and conflating the first two is how an earlier
+version of this section came to claim that nothing but local UI could run beside a live stream.
+
+The SDK client exposes fifteen methods and **only `query()` starts a turn**. The rest are control
+requests on a channel that runs *concurrently with* a streaming turn — `can_use_tool` is the proof,
+since a turn blocks waiting for the browser to answer a permission dialog on exactly that channel. So:
+
+| Class | Mid-turn | Why | Examples |
+|---|---|---|---|
+| Local UI | Yes | Nothing is asked of the engine at all. | `/permissions` → the Settings tab |
+| Control request | Yes | Answered on the concurrent channel. | `/mcp` → `get_mcp_status()`, `/agents` and `/context` → `get_server_info()` / `get_context_usage()` |
+| Needs a model turn | No | It is a turn, and the guard above allows one. | `.claude/commands/`, skills, anything answered in prose |
+| Session swap | No | Would orphan the stream the user is watching. | `/clear`, `/resume` |
+
+The mechanism that makes a control-request command available mid-turn is **routing it**. Routing is what
+keeps a command off `query()`; the surface it opens then issues the control request itself, which the
+Context tab already does for all three of `get_context_usage`, `get_mcp_status` and `get_server_info`.
+A control-request command left as passthrough is not mid-turn-capable, because passthrough means
+`query()` — so `/mcp` as a `send` entry would be rejected by the guard however concurrent
+`get_mcp_status()` is.
+
+That is why the table above routes `/usage`, `/cost`, `/mcp` and `/agents` even though the CLI answers
+all four for free. They are not *refused* passthrough; they are commands whose answer already exists
+here, live and cumulative, in the one surface the user would otherwise have opened by hand.
+
+Two consequences worth stating:
+
+- **A command that is not routed is `during_turn: false`, without exception.** This is a fact about
+  passthrough, not about the engine's concurrency: the CLI also processes its input stream serially, so
+  such a command could at best answer *after* the turn rather than beside it.
+- **`during_turn` gates the palette, not the RPC.** The two commands it withholds are already refused
+  where they land — `new_session` and `resume_session` both answer `turn_in_progress` — so a second
+  guard in the route table would only duplicate an answer that is better phrased at the surface that
+  owns it. What `during_turn` buys is a palette that does not offer them.
+
+`/model` is deliberately **not** routed, despite being a control request (`set_model`). There is no
+model-selector surface to route it to: the Settings tab edits `engine.json`, where the model is a
+*request* the engine may answer with a different one, and the model actually in force is reported per
+turn in the usage HUD. Routing it to a tab with no model control would open the wrong thing
+confidently. It stays passthrough and `during_turn: false` until that surface exists — see
+[`../impl-history/work-log.md`](../impl-history/work-log.md).
 
 **Denied** — passing through would reach for something this deployment does not have, or act on the
 CLI host rather than the conversation. Answered with `{status: "unsupported"}` and the reason; never
@@ -372,10 +409,15 @@ whose CLI advertises nothing is not the same condition.
 
 **During a turn the palette still opens, and rows the turn blocks are visibly disabled with the reason
 on them** rather than filtered out. A list that silently shrinks while streaming teaches the user that
-commands come and go; a list where `/context` is live and `/cost` is greyed out with "available when
+commands come and go; a list where `/context` is live and `/compact` is greyed out with "available when
 the turn ends" teaches them the actual rule, which is the one they need in order to predict it. Enter
 and click are both refused on a disabled row, and focus skips it — an overlay that highlights a row it
 will not act on is worse than one that does not offer it.
+
+Most of the list is disabled while a turn runs, since most of it is passthrough. That is the honest
+picture rather than an unfortunate one: the palette's job during a turn is to show which of these the
+user can reach *now*, and the routed handful — context, cost, MCP, subagents, permissions — is exactly
+the set someone watching a turn go by reaches for.
 
 ## Errors and Degradation
 

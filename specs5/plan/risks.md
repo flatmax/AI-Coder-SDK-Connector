@@ -95,13 +95,18 @@ SDK call or a UI affordance.
 **Why it bites:** it is the gap between "same harness" and "same interface", and it is the part most
 likely to be under-scoped, because each individual mapping is trivial.
 
-**Mitigation:** an explicit mapping table in
-[`../3-engine/session.md`](../3-engine/session.md#slash-command-equivalents), maintained as a
-checklist. Commands with no mapping are listed as unsupported rather than silently swallowed — a
-user typing `/cost` gets "not available here, see the usage HUD", not silence.
+**Mitigation:** two exception tables in
+[`../3-engine/session.md`](../3-engine/session.md#slash-commands) — routed and denied — over a
+**passthrough default**. The premise above is the part that turned out to be wrong: the CLI dispatches
+its own built-ins in-process, before a model turn is billed, so most of them need no mapping and get
+one only where an AIC⚡DC surface answers better (`/context`, `/usage`, `/cost`, `/mcp`, `/agents`,
+`/permissions`) or where passing through would desynchronise the session store (`/clear`, `/resume`).
+The first version of this did map every command, by refusing seventeen of them — including several
+that would have answered.
 
-**Tripwire:** typing an unmapped `/command` in the chat input produces an explicit
-unsupported-command response. If it is sent to the model as prose, the mapping layer is missing.
+**Tripwire:** typing an unmapped `/command` produces the CLI's own answer, including
+`Unknown command: /xyz` for a typo. A deployment-authored refusal for a command the CLI would have
+handled is the failure this now watches for, in the direction opposite to the original.
 
 ---
 

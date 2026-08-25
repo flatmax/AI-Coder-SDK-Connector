@@ -428,18 +428,32 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 ## Specified but not yet built
 
-- **`during_turn` on `list_commands` entries.** [`3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands)
-  specifies a per-command mid-turn flag: `/context` and `/permissions` stay available while a turn
-  streams, `/clear` and `/resume` do not, and everything reaching the CLI is `false` because the
-  concurrency guard rejects it and the CLI's input stream is serial anyway. The palette is specified to
-  render blocked rows disabled-with-a-reason rather than filtering them out.
+- **A model-selector surface, and `/model` routed to it.** `set_model` is an SDK control request, so it
+  would work mid-turn like `/mcp` and `/agents` do — but there is nothing to route it *to*. The Settings
+  tab edits `engine.json`, where the model is a *request* the engine may answer with a different one
+  (a rate-limit fallback, a mid-session `set_model`), and the model actually in force is reported per
+  turn in the usage HUD. So `/model` stays passthrough and `during_turn: false`; routing it to a tab
+  with no model control would open the wrong thing confidently, which is the failure
+  [`applySlashRoute`'s](../../webapp/src/chat-panel/input.js) unknown-target branch exists to avoid.
+  The RPC is localhost-only and currently has no caller.
 
-  **Not implemented.** The service does not emit the field and the palette does not read it. Until it
-  lands, the composer's palette button is disabled while streaming — the same treatment the New Session
-  button gets — so no row can be picked that could not be acted on. Landing it means: add `during_turn`
-  to `SLASH_ROUTES` and to the `list_commands` reply, thread `panel._streaming` into
-  `updateSlashPalette`, and give `aic-slash-palette` a disabled-row state that `_moveFocus` skips and
-  `_selectFocused` refuses.
+- **Sub-anchors on a route target.** `/context`, `/usage`, `/cost`, `/mcp` and `/agents` all resolve to
+  `tab:context` and all open it at the top. The tab holds a section for each, so the honest target
+  would name the section — but the target vocabulary is a flat string the webapp switches on, and
+  teaching it to scroll is a second feature. Four commands landing on the right tab and the wrong
+  scroll position is a smaller miss than four commands landing nowhere.
+
+### Landed since
+
+- **`during_turn` on `list_commands` entries** — built. `SLASH_ROUTES` carries the flag, `list_commands`
+  and `_routed_commands` emit it, the chat panel binds `panel._streaming` onto `aic-slash-palette`, and
+  the palette renders blocked rows dimmed with "when the turn ends" on them, skips them with the arrow
+  keys, and refuses Enter and click. The composer's palette button is no longer disabled while
+  streaming. Correcting the spec was the larger part of the work: the claim that *everything* reaching
+  the CLI is `during_turn: false` had been generalised into "only local UI can run mid-turn", which is
+  wrong — the SDK's fifteen client methods include exactly one that starts a turn, and `can_use_tool`
+  already answers on the concurrent channel while a turn blocks on it. See
+  [`3-engine/session.md` § Mid-turn availability](../3-engine/session.md#mid-turn-availability).
 
 ## Resumption protocol
 

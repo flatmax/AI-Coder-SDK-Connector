@@ -112,11 +112,61 @@ EventCallback = Callable[..., Awaitable[Any]]
 # by a block of CLI text. The reply names a `target` for the webapp to act
 # on and no turn starts. `surface` completes "…is $surface here"; `palette`
 # is the one-line description the `/` palette shows.
-SLASH_ROUTES: dict[str, dict[str, str]] = {
+#
+# `during_turn` is whether the command is still reachable while a turn
+# streams. It is not a property of being routed — it is the answer to "does
+# answering this need a model turn?". Only `query()` starts one; the SDK's
+# other client methods are control requests on a channel that runs *beside*
+# a live stream, which is how `can_use_tool` answers a permission dialog
+# while the turn blocks on it. So a command whose answer is a control
+# request stays available mid-turn — and routing is the mechanism that makes
+# it so, because routing is what keeps it off `query()`. The two `False`
+# entries are the session swaps, which would orphan the stream the user is
+# watching (specs5/3-engine/session.md § Mid-turn availability).
+SLASH_ROUTES: dict[str, dict[str, Any]] = {
     "context": {
         "target": "tab:context",
         "surface": "the Context tab, which is live rather than a one-shot print",
         "palette": "Show context usage in the Context tab",
+        "during_turn": True,
+    },
+    # `/usage` and `/cost` both print a one-shot summary in the CLI. AIC⚡DC
+    # computes the same figures itself from every result message and keeps
+    # them cumulative over the session (`cost.py`), so the tab does not just
+    # show them prettier — it stays true afterwards, and it is where the
+    # per-model breakdown already lives.
+    "usage": {
+        "target": "tab:context",
+        "surface": "the Context tab's cost and per-model token breakdown",
+        "palette": "Session cost and token usage, in the Context tab",
+        "during_turn": True,
+    },
+    "cost": {
+        "target": "tab:context",
+        "surface": "the Context tab's cost and per-model token breakdown",
+        "palette": "Session cost and token usage, in the Context tab",
+        "during_turn": True,
+    },
+    # Routed to reach `get_mcp_status()` — the live per-server connection
+    # state, which the CLI's text block cannot keep current — and because
+    # the reconnect and toggle controls are on that surface too.
+    "mcp": {
+        "target": "tab:context",
+        "surface": "the Context tab's MCP section, with live per-server connection state",
+        "palette": "MCP server status and tools, in the Context tab",
+        "during_turn": True,
+    },
+    "agents": {
+        "target": "tab:context",
+        "surface": "the Context tab's subagent list",
+        "palette": "The subagents this session can delegate to",
+        "during_turn": True,
+    },
+    "permissions": {
+        "target": "tab:settings",
+        "surface": "the Settings tab's permission-mode control and rules list",
+        "palette": "Permission mode and rules, in the Settings tab",
+        "during_turn": True,
     },
     # Routed rather than passed through because the CLI's own `/clear` would
     # start a session the store never saw minted, and every other client
@@ -125,16 +175,13 @@ SLASH_ROUTES: dict[str, dict[str, str]] = {
         "target": "new-session",
         "surface": "New Session",
         "palette": "Start a new session",
-    },
-    "permissions": {
-        "target": "tab:settings",
-        "surface": "the Settings tab's permission-mode control and rules list",
-        "palette": "Permission mode and rules, in the Settings tab",
+        "during_turn": False,
     },
     "resume": {
         "target": "history",
         "surface": "the history browser",
         "palette": "Browse and resume an earlier session",
+        "during_turn": False,
     },
 }
 
@@ -1558,6 +1605,10 @@ class ClaudeCodeService:
         surface, ``send`` puts the command in the composer for the engine.
         ``target`` names the surface for a routed entry and is empty
         otherwise, so the webapp never needs its own copy of the mapping.
+        ``during_turn`` is whether the row stays actionable while a turn
+        streams — carried per entry so the palette holds no copy of the
+        mid-turn rule either, and can grey a row out with a reason instead
+        of dropping it from a list that would then appear to shrink.
 
         **A disconnected engine answers with the routed commands and
         ``partial: True``, not an error.** The engine connects on the first
@@ -1589,6 +1640,7 @@ class ClaudeCodeService:
             # session-plumbing rather than something a person invokes.
             if name.startswith("_") or name in SLASH_DENIED:
                 continue
+            route = SLASH_ROUTES.get(name)
             commands.append(
                 {
                     "name": name,
@@ -1598,9 +1650,21 @@ class ClaudeCodeService:
                         if isinstance(alias, str)
                     ],
                     "argument_hint": entry.get("argumentHint") or "",
-                    "description": entry.get("description") or "",
-                    "action": "route" if name in SLASH_ROUTES else "send",
-                    "target": SLASH_ROUTES.get(name, {}).get("target", ""),
+                    # A routed row's description is ours, even when the CLI
+                    # advertises one. The CLI describes what *its* version
+                    # does, and selecting this row does not do that — it
+                    # opens a surface. "Show total cost and duration of the
+                    # current session" beside an "opens UI" badge is the row
+                    # contradicting its own badge.
+                    "description": (
+                        route["palette"] if route else entry.get("description") or ""
+                    ),
+                    "action": "route" if route else "send",
+                    "target": route["target"] if route else "",
+                    # A `send` entry is a turn, and the concurrency guard
+                    # allows one — so everything the CLI answers is False
+                    # here regardless of how cheaply it answers it.
+                    "during_turn": bool(route["during_turn"]) if route else False,
                 }
             )
         advertised = {command["name"] for command in commands}
@@ -1614,13 +1678,17 @@ class ClaudeCodeService:
 
     @staticmethod
     def _routed_commands() -> list[dict[str, Any]]:
-        """`SLASH_ROUTES` as palette entries, for the CLI to override.
+        """`SLASH_ROUTES` as palette entries, for the pre-connect list.
 
-        These are this deployment's own, not the CLI's to supply: two of
-        them (``/permissions``, ``/resume``) it does not advertise at all,
-        and the rest it describes in terms of what its own version does
-        rather than the surface that opens here. Where it does advertise
-        one, its description wins — it is the more specific answer.
+        These are this deployment's own, not the CLI's to supply:
+        ``/permissions`` and ``/resume`` it does not advertise at all, and
+        the rest it describes in terms of what its own version does rather
+        than the surface that opens here. So where it *does* advertise one,
+        only the aliases and argument hint are taken from it — the
+        description stays ours, because the row's action is ours.
+
+        This list is also the whole answer before the engine connects, which
+        is why it is complete rather than only the unadvertised pair.
         """
         return sorted(
             (
@@ -1631,6 +1699,7 @@ class ClaudeCodeService:
                     "description": route["palette"],
                     "action": "route",
                     "target": route["target"],
+                    "during_turn": bool(route["during_turn"]),
                 }
                 for name, route in SLASH_ROUTES.items()
             ),
