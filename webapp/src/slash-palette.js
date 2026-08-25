@@ -10,9 +10,12 @@
 // Host/guest contract, deliberately the same shape as
 // `aic-input-history` so the chat panel's keydown handler can
 // treat both the same way:
-//   - `show(commands, query)` — called on every input event
-//     while the cursor is inside a command token; opens if
-//     closed, re-filters if already open
+//   - `show(commands, query, {partial})` — called on every
+//     input event while the cursor is inside a command token;
+//     opens if closed, re-filters if already open. `partial`
+//     says the list is short because the engine has not
+//     connected yet; it travels with the list rather than as a
+//     bound property, because the list only ever changes here
 //   - `hide()` — called when the token is gone
 //   - `handleKey(e)` — called from the host's keydown handler
 //     while open; returns true if consumed
@@ -66,6 +69,17 @@ export class SlashPalette extends LitElement {
      * caches the reply across opens.
      */
     _commands: { type: Array, state: true },
+    /**
+     * Whether `_commands` is the short list — the routes AIC⚡DC
+     * answers itself, with none of the CLI's own commands,
+     * because the engine had not connected when it was asked.
+     *
+     * Rendered as a line of explanation rather than used to
+     * suppress anything. Every count in this overlay is a count
+     * of a list the user has no other way to size, so "4 of 4"
+     * with nothing else said reads as "four commands exist".
+     */
+    _partial: { type: Boolean, state: true },
     /**
      * The token after `/`, left of the cursor. Filtering
      * input, not a display string.
@@ -218,6 +232,22 @@ export class SlashPalette extends LitElement {
       font-size: 0.6875rem;
       text-align: center;
     }
+    /* Its own row above the counts, and allowed to wrap: it is a
+     * sentence, where the hint below it is a legend. Muted and
+     * italic like .empty rather than amber like .badge.waiting —
+     * amber already means "the turn is holding this" in here, and
+     * nothing has gone wrong with a list that is merely early. */
+    .hint-partial {
+      flex-shrink: 0;
+      padding: 0.3rem 0.6rem;
+      background: rgba(13, 17, 23, 0.4);
+      border-top: 1px solid rgba(240, 246, 252, 0.05);
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.6875rem;
+      font-style: italic;
+      line-height: 1.35;
+      text-align: center;
+    }
   `;
 
   constructor() {
@@ -225,6 +255,7 @@ export class SlashPalette extends LitElement {
     this.streaming = false;
     this._open = false;
     this._commands = [];
+    this._partial = false;
     this._query = '';
     this._focusedIndex = 0;
   }
@@ -261,11 +292,16 @@ export class SlashPalette extends LitElement {
    *
    * @param {Array<object>} commands
    * @param {string} query
+   * @param {{partial?: boolean}} [options] `partial` marks the
+   *   list as the short pre-handshake one. Defaults to false on
+   *   every call rather than sticking, so a full list replacing
+   *   a partial one clears the notice without the host saying so.
    */
-  show(commands, query = '') {
+  show(commands, query = '', { partial = false } = {}) {
     const next = Array.isArray(commands) ? commands : [];
     const queryChanged = query !== this._query;
     this._commands = next;
+    this._partial = partial === true;
     this._query = query;
     if (!this._open || queryChanged) {
       this._focusedIndex = this._firstActionableIndex(this.filtered);
@@ -446,6 +482,12 @@ export class SlashPalette extends LitElement {
                 this._renderEntry(command, index, filtered),
               )}
             </div>`}
+        ${this._partial
+          ? html`<div class="hint-partial" role="note">
+              Only the commands AIC⚡DC routes itself — the CLI's own list
+              arrives once the engine connects, on your first turn.
+            </div>`
+          : ''}
         <div class="hint">
           ${filtered.length} of ${total}${waiting
             ? html` · ${waiting} wait for the turn`

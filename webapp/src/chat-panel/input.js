@@ -578,25 +578,32 @@ export function updateSlashPalette(panel, ta) {
     palette.hide();
     return;
   }
+  const partial = { partial: panel._slashCommandsPartial === true };
   if (Array.isArray(panel._slashCommands) && !slashListIsStale(panel)) {
     // An empty list means the engine advertised nothing —
     // show no overlay rather than one that says "0 of 0".
     if (panel._slashCommands.length === 0) palette.hide();
-    else palette.show(panel._slashCommands, token.query);
+    else palette.show(panel._slashCommands, token.query, partial);
     return;
   }
   // Serve the stale list meanwhile: it is the routed commands,
   // which are still correct, and an overlay that appears late
   // is worse than one that grows.
   if (panel._slashCommands?.length) {
-    palette.show(panel._slashCommands, token.query);
+    palette.show(panel._slashCommands, token.query, partial);
   }
   ensureSlashCommands(panel).then((commands) => {
     if (commands.length === 0) return;
     // Re-read the composer: the RPC is a round trip, and the
     // token may be gone or changed by the time it lands.
     const current = detectActiveSlash(ta.value, ta.selectionStart);
-    if (current) palette.show(commands, current.query);
+    // Re-read the flag too: this is the call that lands the reply
+    // that set it, so the object built above predates the answer.
+    if (current) {
+      palette.show(commands, current.query, {
+        partial: panel._slashCommandsPartial === true,
+      });
+    }
   });
 }
 
@@ -617,9 +624,30 @@ export function updateSlashPalette(panel, ta) {
 export function openSlashPalette(panel) {
   const ta = panel.shadowRoot?.querySelector('.input-textarea');
   const current = ta ? ta.value : panel._input || '';
-  if (current.trim()) return;
+  if (!canOpenSlashPalette(current)) return;
   _setComposerValue(panel, ta, '/', 1);
   if (ta) updateSlashPalette(panel, ta);
+}
+
+/**
+ * Whether the palette button may act on this composer.
+ *
+ * Empty, or holding nothing but the `/` the button itself typed.
+ * That second case is what makes the button reusable: it types a
+ * `/`, and dismissing the overlay with Escape deliberately leaves
+ * the `/` behind, so treating any non-empty composer as a draft
+ * left the button dead after one press with no way back but
+ * clearing the box by hand.
+ *
+ * Re-typing the same `/` over itself is a no-op, so the button
+ * re-opening the overlay is all that happens.
+ *
+ * Shared with the render so the disabled attribute and the
+ * handler's own guard cannot disagree about what a draft is.
+ */
+export function canOpenSlashPalette(value) {
+  const trimmed = (value || '').trim();
+  return trimmed === '' || trimmed === '/';
 }
 
 /**

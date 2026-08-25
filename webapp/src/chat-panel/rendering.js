@@ -101,6 +101,7 @@ import {
   totalFileSearchMatches,
 } from './search.js';
 import {
+  canOpenSlashPalette,
   cancel,
   closeLightbox,
   onFileChipClick,
@@ -336,17 +337,23 @@ function renderInputSurface(panel) {
             reachable rows to avoid explaining the unreachable ones, at
             the moment the reachable ones are most wanted.
 
+            Enabled on an empty composer and on one holding nothing
+            but the slash this button typed — see canOpenSlashPalette.
+            Escape leaves that slash behind, so the stricter test left
+            the button dead after a single press.
+
             No backticks in this comment: it sits inside the html
             template literal, and one would end the literal.
           -->
           <button
             class="action-button slash-palette-button"
-            ?disabled=${!panel.rpcConnected || !!panel._input.trim()}
+            ?disabled=${!panel.rpcConnected ||
+            !canOpenSlashPalette(panel._input)}
             @click=${() => openSlashPalette(panel)}
             aria-label="Browse slash commands"
-            title=${panel._input.trim()
-              ? 'Slash commands — clear the message first'
-              : 'Browse slash commands'}
+            title=${canOpenSlashPalette(panel._input)
+              ? 'Browse slash commands'
+              : 'Slash commands — clear the message first'}
           >
             /
           </button>

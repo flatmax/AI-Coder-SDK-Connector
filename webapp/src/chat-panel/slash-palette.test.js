@@ -204,6 +204,51 @@ describe('ChatPanel slash palette before the engine connects', () => {
     ]);
   });
 
+  it('tells the palette the list is partial, so it can say why', async () => {
+    // Without this the overlay reads "2 of 2", which is also what a
+    // complete list of two commands looks like.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({
+        commands: ROUTES_ONLY,
+        partial: true,
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p).shadowRoot.querySelector('.hint-partial')).not.toBeNull();
+  });
+
+  it('drops the notice once the full list lands', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce({ commands: ROUTES_ONLY, partial: true })
+      .mockResolvedValueOnce({ commands: FULL });
+    publishFakeRpc({ 'ClaudeCodeService.list_commands': list });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p).shadowRoot.querySelector('.hint-partial')).not.toBeNull();
+
+    p._engineHealth = { connected: true };
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p).shadowRoot.querySelector('.hint-partial')).toBeNull();
+  });
+
+  it('says nothing about a partial list when the list is whole', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p).shadowRoot.querySelector('.hint-partial')).toBeNull();
+  });
+
   it('stops re-asking once the full list is in hand', async () => {
     const list = vi.fn(async () => ({ commands: FULL }));
     publishFakeRpc({ 'ClaudeCodeService.list_commands': list });
@@ -432,6 +477,41 @@ describe('ChatPanel slash palette button', () => {
     await settle(p);
     expect(button(p).disabled).toBe(false);
     type(p, 'half a thought');
+    await settle(p);
+    expect(button(p).disabled).toBe(true);
+  });
+
+  it('stays live when the composer holds only the slash it typed', async () => {
+    // Escape leaves the `/` behind by design, so if a lone `/` counted
+    // as a draft the button would be dead after one press with no way
+    // back but clearing the composer by hand.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    button(p).click();
+    await landFetch(p);
+    palette(p).handleKey(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle(p);
+    expect(palette(p).isOpen).toBe(false);
+    expect(button(p).disabled).toBe(false);
+    button(p).click();
+    await landFetch(p);
+    expect(palette(p).isOpen).toBe(true);
+    // Re-typing the same slash over itself, not appending to it.
+    expect(p.shadowRoot.querySelector('.input-textarea').value).toBe('/');
+  });
+
+  it('is still disabled once a command is typed past the slash', async () => {
+    // The exemption is the bare `/` and nothing more: `/comp` is a
+    // draft, and the overlay is already up for it anyway.
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/comp');
     await settle(p);
     expect(button(p).disabled).toBe(true);
   });

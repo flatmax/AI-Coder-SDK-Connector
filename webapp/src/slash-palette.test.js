@@ -484,6 +484,23 @@ describe('SlashPalette while a turn streams', () => {
     );
   });
 
+  it('counts the waiting rows among the matches, not the whole list', async () => {
+    const el = mountPalette();
+    el.streaming = true;
+    el.show(COMMANDS, 'c');
+    await settle(el);
+    // /clear and /compact match and both wait; /context matches and
+    // does not. The count describes the rows on screen.
+    const hint = el.shadowRoot.querySelector('.hint').textContent;
+    expect(hint).toContain('3 of 3');
+    expect(hint).toContain('2 wait for the turn');
+    el.show(COMMANDS, 'cont');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.hint').textContent).not.toContain(
+      'wait for the turn',
+    );
+  });
+
   it('treats an entry with no during_turn as waiting', async () => {
     // A list cached from a service that predates the field. Withholding
     // a command that would have worked is recoverable by waiting;
@@ -495,5 +512,71 @@ describe('SlashPalette while a turn streams', () => {
     expect(el.shadowRoot.querySelector('.entry').classList).toContain(
       'blocked',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The pre-handshake list
+// ---------------------------------------------------------------------------
+//
+// Before the engine connects, `list_commands` answers with the routed
+// commands and `partial: true` — the CLI's own list comes out of a
+// handshake that has not happened. The counts alone cannot say that:
+// "2 of 2" is what a complete list of two commands looks like too.
+
+describe('SlashPalette with a partial list', () => {
+  const ROUTES_ONLY = [
+    { name: 'clear', description: 'Start a new session', action: 'route', during_turn: false },
+    { name: 'context', description: 'Show context usage', action: 'route', during_turn: true },
+  ];
+
+  it('says why the list is short', async () => {
+    const el = mountPalette();
+    el.show(ROUTES_ONLY, '', { partial: true });
+    await settle(el);
+    const note = el.shadowRoot.querySelector('.hint-partial');
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain('on your first turn');
+  });
+
+  it('says nothing when the list is whole', async () => {
+    const el = mountPalette();
+    el.show(ROUTES_ONLY, '');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.hint-partial')).toBeNull();
+  });
+
+  it('keeps saying it while the query narrows', async () => {
+    // The explanation matters most on a miss, and a miss is reached by
+    // typing — so it cannot be tied to the unfiltered view.
+    const el = mountPalette();
+    el.show(ROUTES_ONLY, '', { partial: true });
+    await settle(el);
+    el.show(ROUTES_ONLY, 'zzz', { partial: true });
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.empty')).not.toBeNull();
+    expect(el.shadowRoot.querySelector('.hint-partial')).not.toBeNull();
+  });
+
+  it('drops the notice when the full list replaces it', async () => {
+    // Defaulting to false on every show is what does this: the host
+    // stops passing the flag rather than having to unset it.
+    const el = mountPalette();
+    el.show(ROUTES_ONLY, '', { partial: true });
+    await settle(el);
+    el.show(COMMANDS, '');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.hint-partial')).toBeNull();
+  });
+
+  it('still counts and still navigates', async () => {
+    const el = mountPalette();
+    el.show(ROUTES_ONLY, '', { partial: true });
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.hint').textContent).toContain(
+      '2 of 2',
+    );
+    el.handleKey(keyEvent('ArrowDown'));
+    expect(el._focusedIndex).toBe(1);
   });
 });
