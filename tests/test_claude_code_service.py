@@ -636,6 +636,23 @@ class TestSlashCommands:
         answer = await service.chat_streaming(REQUEST_ID, "/clear now")
         assert answer["command"] == "clear"
 
+    async def test_a_routed_command_says_its_argument_was_dropped(self, service):
+        """Routing opens a surface; a surface takes no argument.
+
+        ``/model sonnet`` is a reasonable thing to type — the CLI takes it — and
+        swallowing the word would leave the user believing they had switched
+        models. So the reply names what did not travel.
+        """
+        answer = await service.chat_streaming(REQUEST_ID, "/model sonnet")
+        assert "sonnet" in answer["message"]
+        assert "not applied" in answer["message"]
+
+    async def test_a_routed_command_with_no_argument_says_nothing_extra(
+        self, service
+    ):
+        answer = await service.chat_streaming(REQUEST_ID, "/model")
+        assert "not applied" not in answer["message"]
+
     async def test_case_and_whitespace_do_not_hide_the_command(self, service):
         answer = await service.chat_streaming(REQUEST_ID, "  /CLEAR  ")
         assert answer["command"] == "clear"
@@ -731,6 +748,24 @@ class TestSlashCommands:
         and the subagent list are on Session.
         """
         assert SLASH_ROUTES[command]["target"] == f"tab:context#{section}"
+
+    def test_model_lands_on_the_panel_that_holds_the_control(self):
+        """A bare ``tab:settings`` opens onto the card grid, and the model panel
+        is above it — reachable by scrolling, which is not the same as being
+        shown. The anchor is what makes the command point at its own answer.
+        """
+        assert SLASH_ROUTES["model"]["target"] == "tab:settings#model"
+
+    def test_permissions_does_not_promise_a_control_it_lacks(self):
+        """The Settings tab has no live permission-mode control — that selector
+        is beside the composer, deliberately always visible, and not reachable
+        by a route. What Settings holds is ``engine.json``, which is the mode the
+        *next* session starts in. The earlier wording promised "the Settings
+        tab's permission-mode control and rules list" and neither exists.
+        """
+        surface = SLASH_ROUTES["permissions"]["surface"]
+        assert "engine.json" in surface
+        assert "composer" in surface
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1673,89 @@ class TestLiveControls:
         assert await service.set_model("claude-opus-5") == {"model": "claude-opus-5"}
         assert await service.set_model(None) == {"model": None}
 
+    async def test_a_model_change_is_broadcast(self, service, events):
+        """The model in force is session state, not one window's state.
+
+        Without this, a second browser goes on naming the model the session
+        started on — which is the one thing the Settings panel exists to stop
+        being wrong about.
+        """
+        await service.set_model("haiku")
+        assert events.payload_of("modelChanged") == {
+            "model": "haiku",
+            "by": "user",
+        }
+
+    async def test_a_failed_model_change_broadcasts_nothing(self, service, events):
+        service.session.control_error = RuntimeError("no response")
+        answer = await service.set_model("haiku")
+        assert "Could not change the model" in answer["error"]
+        assert "modelChanged" not in events.names()
+
+    async def test_the_model_reply_pairs_the_alias_with_its_resolution(
+        self, service
+    ):
+        """Two facts, and they are allowed to disagree: the alias is what was
+        asked for, ``resolvedModel`` is what will answer. The resolution is the
+        CLI's own — nothing here derives it.
+        """
+        service.session.model = "opus"
+        service.session.server_info = {
+            "models": [
+                {
+                    "value": "opus",
+                    "resolvedModel": "au.anthropic.claude-opus-5",
+                    "displayName": "Opus",
+                },
+                {"value": "haiku", "resolvedModel": "au.anthropic.claude-haiku-4-5"},
+            ]
+        }
+        answer = await service.get_model()
+        assert answer["model"] == "opus"
+        assert answer["resolved"] == "au.anthropic.claude-opus-5"
+        assert [entry["value"] for entry in answer["models"]] == ["opus", "haiku"]
+
+    async def test_a_session_that_pins_no_model_says_so_as_null(self, service):
+        """Not the string "default". "Nothing is pinned" and ""default" is
+        pinned" land in the same place today and need not after a CLI upgrade,
+        so the surface is told which of the two it is looking at.
+        """
+        service.session.model = None
+        service.session.server_info = {
+            "models": [{"value": "default", "resolvedModel": "au.anthropic.opus"}]
+        }
+        answer = await service.get_model()
+        assert answer["model"] is None
+        # No alias matched, so no resolution is claimed for one.
+        assert answer["resolved"] is None
+
+    async def test_an_unlisted_alias_gets_no_invented_resolution(self, service):
+        service.session.model = "some-private-deployment"
+        service.session.server_info = {"models": [{"value": "haiku"}]}
+        answer = await service.get_model()
+        assert answer["model"] == "some-private-deployment"
+        assert answer["resolved"] is None
+
+    async def test_the_model_reply_survives_a_cold_engine(self, service):
+        """The list comes from the initialize handshake and the engine connects
+        lazily, so an empty list before the first turn is the ordinary state.
+        The alias is still known — it came from the config, not the engine — and
+        withholding it would blank the one line a user asks for first.
+        """
+        service.session.model = "haiku"
+        service.session.control_error = EngineNotReadyError("not connected")
+        assert await service.get_model() == {
+            "model": "haiku",
+            "resolved": None,
+            "models": [],
+        }
+
+    async def test_a_junk_models_field_yields_an_empty_list(self, service):
+        """The payload is the CLI's initialize reply and ships independently of
+        this wheel, so its shape is checked rather than trusted."""
+        service.session.server_info = {"models": "opus"}
+        assert (await service.get_model())["models"] == []
+
     async def test_rewind_does_not_claim_to_know_what_was_restored(self, service):
         """The SDK's rewind_files() returns nothing; refresh the tree instead."""
         service.session.file_checkpointing = True
@@ -1671,7 +1789,36 @@ class TestLiveControls:
 
     async def test_context_usage_on_a_cold_engine_reports_the_reason(self, service):
         service.session.control_error = EngineNotReadyError("not connected")
-        assert await service.get_context_usage() == {"error": "not connected"}
+        assert await service.get_context_usage() == {
+            "error": "not connected",
+            "reason": "no-engine",
+        }
+
+    async def test_a_lost_session_is_also_a_no_engine_failure(self, service):
+        """Both mean there is nothing to ask, so both mean wait."""
+        service.session.control_error = SessionLostError("session lost")
+        answer = await service.get_context_usage()
+        assert answer["reason"] == "no-engine"
+
+    async def test_a_request_that_reached_the_engine_and_failed_says_so(self, service):
+        """The opposite advice: this one is worth retrying now.
+
+        A control request that times out inside the SDK arrives here as a
+        plain exception, and a viewer holding only the message cannot tell
+        it apart from having no session at all — which is how a reader
+        with a live session came to be told to connect one.
+        """
+        service.session.control_error = RuntimeError(
+            "Control request timeout: get_context_usage"
+        )
+        answer = await service.get_context_usage()
+        assert answer["reason"] == "failed"
+        assert "Control request timeout" in answer["error"]
+
+    async def test_a_reason_never_rides_along_with_an_answer(self, service):
+        """Only a failure is classified; success has nothing to explain."""
+        answer = await service.get_context_usage()
+        assert "reason" not in answer
 
     async def test_a_memory_file_inside_the_repo_gets_a_relative_path(self, service):
         """The Context tab can only open what the repo layer will read.
@@ -1923,6 +2070,11 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "get_context_usage": (),
     "get_mcp_status": (),
     "get_server_info": (),
+    # The model in force, and the menu. Reading it is not the same as
+    # switching it — `set_model` is gated — and a participant who could not
+    # see which model is answering could not tell why a turn came back
+    # cheaper, faster or worse than the last one.
+    "get_model": (),
     # What the `/` palette lists. Reads the handshake payload and nothing
     # else; a participant who could not see the commands would be typing
     # into a composer whose autocomplete never opened.

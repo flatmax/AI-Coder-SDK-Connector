@@ -337,9 +337,83 @@ describe('ContextUsageTab fetching', () => {
     expect(el.shadowRoot.querySelector('.error').textContent).toContain(
       'engine is not ready',
     );
+    // No reason on the envelope — a backend older than the field. The
+    // note gives the advice that holds either way rather than guessing.
+    expect(el._errorReason).toBe('');
+    expect(el.shadowRoot.querySelector('.note').textContent).toContain(
+      'Refresh asks again',
+    );
+    expect(el.shadowRoot.querySelector('.note').textContent).toContain(
+      'with no session yet',
+    );
+  });
+
+  it('tells a reader with no session to wait for one', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'The Claude Code engine is not connected.',
+        reason: 'no-engine',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._errorReason).toBe('no-engine');
     expect(el.shadowRoot.querySelector('.note').textContent).toContain(
       'unavailable until a session is connected',
     );
+  });
+
+  it('tells a reader whose request failed to try it again', async () => {
+    // The case that used to read as a missing session: the engine was
+    // there, the control request went out, and it did not come back.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'Could not read context usage: Control request timeout',
+        reason: 'failed',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._errorReason).toBe('failed');
+    const note = el.shadowRoot.querySelector('.note').textContent;
+    expect(note).toContain('not a session that is missing');
+    expect(note).not.toContain('until a session is connected');
+  });
+
+  it('counts a dropped call as a failure, not a missing session', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => {
+        throw new Error('Timed out waiting for response');
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._errorReason).toBe('failed');
+    expect(el.shadowRoot.querySelector('.note').textContent).toContain(
+      'Refresh',
+    );
+  });
+
+  it('clears the reason once a fetch succeeds', async () => {
+    let fail = true;
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () =>
+        fail
+          ? { error: 'nope', reason: 'failed' }
+          : { usage: { totalTokens: 5 }, fetched_at: 'now' },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._errorReason).toBe('failed');
+    fail = false;
+    // Through the toolbar, which is exactly the retry the note advises.
+    [...el.shadowRoot.querySelectorAll('.toolbar button')][1].click();
+    await settle(el);
+    expect(el._errorReason).toBe('');
+    // The footer shares the note class, so the error paragraph going
+    // away is the thing to assert — along with the advice going with it.
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+    expect(el.shadowRoot.textContent).not.toContain('Refresh asks again');
   });
 
   it('reports a missing usage payload rather than rendering blank', async () => {

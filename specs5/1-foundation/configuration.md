@@ -132,7 +132,7 @@ and the UI must be honest about it:
 
 | Change | Effect |
 |---|---|
-| Model | Live, via `set_model()` |
+| Model | Live, via `set_model()` — but not from this file. Editing `engine.json`'s `model` changes what the *next* session requests; the running session's model is the Settings tab's model panel, which calls `set_model()` directly ([`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel)) |
 | Permission mode | Live, via `set_permission_mode()` |
 | Effort, thinking display, budget, CLI path | Requires a new session. The Settings tab says so, and offers the action, rather than appearing to apply and quietly not |
 | App config (indexing, doc index, presets, timeouts) | Live on the next use — nothing in it reaches the engine's options |

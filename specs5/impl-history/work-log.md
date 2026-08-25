@@ -428,16 +428,144 @@ Temporary scaffolding installed to keep a test/output path quiet, with the fix s
 
 ## Specified but not yet built
 
-- **A model-selector surface, and `/model` routed to it.** `set_model` is an SDK control request, so it
-  would work mid-turn like `/mcp` and `/agents` do — but there is nothing to route it *to*. The Settings
-  tab edits `engine.json`, where the model is a *request* the engine may answer with a different one
-  (a rate-limit fallback, a mid-session `set_model`), and the model actually in force is reported per
-  turn in the usage HUD. So `/model` stays passthrough and `during_turn: false`; routing it to a tab
-  with no model control would open the wrong thing confidently, which is the failure
-  [`applySlashRoute`'s](../../webapp/src/chat-panel/input.js) unknown-target branch exists to avoid.
-  The RPC is localhost-only and currently has no caller.
+Entries land here when a spec commits to something the implementation has not caught up to; they move
+to § Landed since when it does.
+
+### The Settings tab spec describes a tab three times its size
+
+Found while building the model panel, by reading
+[`../5-webapp/settings.md`](../5-webapp/settings.md) against `webapp/src/settings-tab.js` line by line.
+The tab renders a toolbar, a one-row info banner, the model panel, a two-card grid and an inline
+editor. The spec describes all of that plus five preference cards, four session controls, a
+retired-files note, and a per-field save disposition. None of the latter exist.
+
+This was not a case of the spec running ahead of a build — `/permissions` had been *routing* to one of
+the missing controls, and the route's own copy promised "the Settings tab's permission-mode control plus
+the rules list". Correcting that copy is what exposed the rest. So the entry is worth more than a
+to-do list: it is the record of a spec section that drifted far enough to make a shipped command lie.
+
+**Three different problems, needing three different fixes.** Lumping them together is what let the
+whole section rot unnoticed.
+
+**(a) Right feature, wrong tab — a spec fix, not a code fix.** These exist and work; the spec files them
+under Settings and they live in the Context tab or the permission dialog. `get_config_info` returns
+`{"config_dir": ...}` and nothing else, so the § Info Banner bullets asking for credential source and
+CLI version describe a banner that could not render them from the RPC it reads.
+
+| Specified as | Actually in | Read from |
+|---|---|---|
+| § Info Banner "credential source", "resolved `claude` path and version" | Context tab; also the chat panel's health banner | `get_engine_health` |
+| § Session Controls "Engine health" | Context tab | `get_engine_health` |
+| § Session Controls "MCP servers" status | Context tab § Session — which is where `/mcp` already routes | `get_mcp_status` |
+| § Preference Cards "Permission chime" | The permission dialog | `localStorage` |
+
+The resolution is almost certainly to move these in the spec rather than build second copies: a second
+engine-health panel would be a second thing to keep true, and `/mcp` routing to the Context tab is
+already the better answer. Recorded rather than done because it is nine items of spec arbitration and
+the call on each is the author's, not the implementer's.
+
+**(b) Backend built, no caller — the shape `set_model` was in.** Two MCP control RPCs exist in
+`service.py`, both localhost-gated, both with **zero callers anywhere in `webapp/src`**:
+
+| RPC | What it does | Surface it needs |
+|---|---|---|
+| `reconnect_mcp_server(name)` | Re-dials one server | An action on a row the Context tab already renders |
+| `toggle_mcp_server(name, enabled)` | Enables or disables one server | The same row |
+
+This is precisely the position `set_model` occupied before this session: working control requests that
+nothing can reach. Unlike `set_model` they do not even need a new surface — the Context tab already
+lists every server with its connection state and token cost, so both are actions on a row that is
+already on screen. Cheapest items in this section, and the ones most likely to be wanted: the state
+`reconnect` repairs is one the tab can already show you and currently cannot do anything about.
+
+`toggle_mcp_server` deserves a moment's thought before it gets a button, though — its docstring makes
+the argument itself: *"Enabling a server hands the agent a new set of tools; the host is the one who
+decides which tools exist."* That is a permissions-shaped decision wearing a toggle, and the localhost
+gate is doing real work rather than being boilerplate.
+
+**(c) Neither side exists.** Specified, with nothing behind it on either the engine or the browser:
+
+- **Restart session.** No RPC, no control. This one is load-bearing for a claim the spec makes
+  elsewhere: § The Applies Column Is Load-Bearing says that after a save touching a next-session field
+  the editor "offers the only thing that would apply it: **restart the session**". It does not, because
+  there is nothing to offer. The section exists to prevent "a success toast over an unchanged session",
+  which is the exact failure it currently permits.
+- **Per-field save disposition.** § Save Behavior has the save reply driving an "applied / applies next
+  session" summary. `save_config_content` returns `{"status": "ok"}` (plus an optional JSON warning),
+  and the tab renders no summary. Same root as the item above, and an invariant depends on it: *"a save
+  never shows an unqualified success for a field that did not apply."*
+- **Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.
+- **Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.
+- **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
+- **Session storage size** — nothing to call. The backend measures the session directory only as a
+  turn-time warning (`_disk_warning`), not as a readable RPC.
+- **The retired-files note.** § Deleted cards argues for it at some length — a user who customised
+  `system_extra.md` over months and finds the card gone "deserves to know why" — and then no note is
+  rendered. Of everything in this list it is the cheapest to build and the only one whose absence the
+  spec has already called out as a mistake.
+
+**Where to start.** (b) is an afternoon and closes a real gap. Then (a), because a spec that names the
+wrong tab is how `/permissions` came to lie and the same trap is still set for eight more items. (c)
+last, and within it the restart-session pair first, since two invariants currently have nothing behind
+them.
+
+**How to keep this from recurring.** The drift was invisible because nothing reads a spec section
+against the component that implements it. The two mechanisms that *did* catch things this session were
+both cheap and both mechanical: `test_every_rpc_is_classified` refused `get_model` until it was
+classified, and the `/permissions` route made a claim specific enough to check by opening the tab. A
+`test_every_rpc_has_a_caller_or_is_listed_as_dormant`, in the same shape as the classification test,
+would have caught `reconnect_mcp_server` and `toggle_mcp_server` years earlier.
+
+The precedent for the *annotation* half is [`../plan/delivery.md` § Dormant, annotated, not
+deleted](../plan/delivery.md) — but note it tracks the opposite direction of dead wiring: push receivers
+with no emitter, and browser call sites into a retired `LLMService`. A caller-less **RPC** is the mirror
+image and appears on no list, which is exactly why two of them sat unnoticed. Modelled on that section
+rather than already covered by it.
 
 ### Landed since
+
+- **A model-selector surface, and `/model` routed to it** — built. `set_model` had been localhost-only
+  with no caller and `/model` was passthrough, for a reason this entry stated correctly: there was
+  nothing to route it *to*, and routing to a tab with no model control would have opened the wrong
+  thing confidently.
+
+  The surface is the Settings tab's own panel, above the card grid and explicitly outside it, because
+  every card there applies to the next session and `set_model` applies now. It reads a new cheap
+  `get_model()` — the alias in force, the CLI's `alias → resolvedModel` mapping from the handshake, and
+  the advertised list — rather than `get_current_state`, which would have shipped the whole rendered
+  transcript to answer one string. `get_model` is classified read-only: switching is gated, but a
+  participant who cannot see which model is answering cannot tell why a turn came back cheaper, faster
+  or worse than the last one.
+
+  Three things the surface refuses to invent. A null alias stays null instead of becoming the string
+  `"default"` — "nothing pinned" and "`default` pinned" land in the same place today and need not after
+  a CLI upgrade. A resolution absent from the handshake stays absent, because this repo does not resolve
+  aliases and a guessed model id is one somebody would quote back while deciding what to spend. An
+  empty model list before the first turn is reported as "the engine has not connected yet", which is
+  the ordinary pre-first-turn state rather than an error — the same lazy-connect window that makes
+  `list_commands` answer `partial: true`.
+
+  The control moves on the RPC reply rather than the click, which is a documented departure from the
+  permission-mode control's never-optimistic rule and is allowed because `Session.set_model` records the
+  alias only after the control request returned. `modelChanged` still broadcasts, for the windows that
+  did not make the call. The chat panel's gesture latch was kept even though there is no dialog to
+  intercept a phantom `change` here — which is the stronger reason to keep it, since what it guards is
+  the host's bill.
+
+  The one thing that had to be measured rather than reasoned was *when* a mid-turn switch takes effect.
+  `set_model('haiku')` fired 22.8s into a live 34s turn answered in 252ms and did not interrupt it — and
+  the turn went on billing opus, including a usage report 124ms after the switch was broadcast. The next
+  turn billed haiku. So the panel says "a switch takes effect from your next turn", unconditionally,
+  because the reader most likely to reach for a cheaper model mid-turn is the one watching an expensive
+  turn run away, and letting them think they had just stopped it would be the worst thing this panel
+  could do.
+
+  Two committed falsehoods fell out of the work. `/permissions` advertised "the Settings tab's
+  permission-mode control plus the rules list" and neither exists — the live mode is the selector beside
+  the composer, and the tab holds only `engine.json`'s next-session value. And a routed command's
+  argument never travelled, silently; `/model sonnet` now answers with what it dropped and why. See
+  [`3-engine/session.md` § Slash Commands](../3-engine/session.md#slash-commands) and
+  [`5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel).
 
 - **Sections on a route target** — built, and it was a correctness fix rather than the polish this
   entry first called it. The earlier framing said the five Context routes landed "on the right tab and

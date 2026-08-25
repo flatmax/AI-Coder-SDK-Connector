@@ -229,6 +229,18 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      * that is allowed to fail on its own.
      */
     _mcpStatus: { type: Object, state: true },
+    /**
+     * Which kind of failure `_error` was: 'no-engine' when there is no
+     * session to ask, 'failed' when a request went out and did not come
+     * back with an answer. Empty when nothing has failed.
+     *
+     * Only the advice under the error changes, and it changes to the
+     * opposite advice — wait for a session, or retry the one you have.
+     * The service names it rather than the viewer guessing from the
+     * error string, which would go wrong the first time either side
+     * reworded anything.
+     */
+    _errorReason: { type: String, state: true },
   };
 
   static styles = css`
@@ -547,6 +559,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._usage = null;
     this._fetchedAt = '';
     this._error = '';
+    this._errorReason = '';
     this._loading = false;
     this._stale = false;
     this._section = _loadSection();
@@ -752,19 +765,31 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       this._mcpStatus = status;
       if (res && res.error) {
         this._error = String(res.error);
+        // A backend older than the reason field leaves this empty, and
+        // the note falls back to the general advice rather than picking
+        // one of the two specific ones on a guess.
+        this._errorReason = res.reason ? String(res.reason) : '';
         return;
       }
       const usage = res && res.usage ? res.usage : null;
       if (!usage) {
         this._error = 'The engine returned no context usage.';
+        // An answer arrived, so a session answered — 'failed' is the
+        // honest half of what we know.
+        this._errorReason = 'failed';
         return;
       }
       this._usage = usage;
       this._fetchedAt = res.fetched_at || '';
       this._error = '';
+      this._errorReason = '';
       this._stale = false;
     } catch (err) {
       this._error = err?.message || 'Could not read context usage.';
+      // The request left and did not come back — a timeout, or a socket
+      // that dropped under it. Either way a request failed, which is
+      // what 'failed' claims; whether an engine is up it cannot say.
+      this._errorReason = 'failed';
     }
   }
 
@@ -1027,10 +1052,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (this._error && !this._usage) {
       return html`
         <p class="error">${this._error}</p>
-        <p class="note">
-          The breakdown comes from the running engine, so it is
-          unavailable until a session is connected.
-        </p>
+        ${this._renderErrorNote()}
       `;
     }
     if (!this._usage) {
@@ -1044,6 +1066,39 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
         : this._renderUsageSection()}
       ${this._renderFooter()}
     `;
+  }
+
+  /**
+   * What to do about the error above it.
+   *
+   * There is no session and a request failed are opposite situations
+   * with opposite answers — wait, or try again — and this note used to
+   * give the waiting answer to both. A reader with a perfectly healthy
+   * session was told to connect one, which reads as the tab being
+   * broken rather than the call having been slow.
+   *
+   * The unlabelled case gets the advice that is true either way. A
+   * backend too old to send a reason lands there, and so would a
+   * reason this build has never heard of.
+   */
+  _renderErrorNote() {
+    if (this._errorReason === 'no-engine') {
+      return html`<p class="note">
+        The breakdown comes from the running engine, so it is
+        unavailable until a session is connected.
+      </p>`;
+    }
+    if (this._errorReason === 'failed') {
+      return html`<p class="note">
+        A request that failed, not a session that is missing — Refresh
+        asks again. The engine answers this one beside a live turn, so a
+        turn in flight makes it slow rather than unavailable.
+      </p>`;
+    }
+    return html`<p class="note">
+      The breakdown comes from the running engine. Refresh asks again;
+      with no session yet, it stays unavailable until one starts.
+    </p>`;
   }
 
   /**

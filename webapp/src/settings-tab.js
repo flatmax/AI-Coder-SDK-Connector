@@ -17,6 +17,20 @@
 // would report success while the running engine kept its
 // original values.
 //
+// The model panel is the exception to that sentence, and the
+// reason it is here. `specs5/5-webapp/settings.md § Info
+// Banner` asks for the "resolved model — what the CLI actually
+// resolved, which can legitimately differ from the configured
+// alias", and for a long time nothing could answer it: the
+// banner's old model name came from `get_config_info`, which is
+// the *file's* request, and that field was removed rather than
+// left to mislead. `ClaudeCodeService.get_model` answers it
+// properly — the session's alias paired with the CLI's own
+// resolution of it — and `set_model` is a control request, so
+// unlike everything else on this tab it takes effect on the
+// running session. It is also where `/model` lands
+// (specs5/3-engine/session.md § Slash Commands).
+//
 // Governing spec: specs5/1-foundation/configuration.md
 
 import { LitElement, css, html } from 'lit';
@@ -45,6 +59,63 @@ const CONFIG_CARDS = [
   { key: 'app', icon: '⚙️', label: 'App Config', format: 'json', reloadable: true },
 ];
 
+/**
+ * The CLI's own alias for "whatever you would have picked anyway".
+ *
+ * A session's model is null when nothing named one: engine.json may omit it, in
+ * which case no model argument was passed and the CLI used its own default.
+ * That lands where this alias lands, and the CLI advertises the alias as a
+ * `models` entry with a resolution filled in — so a null model shows as this
+ * entry rather than as a blank select. The distinction is not thrown away: the
+ * note under the control says the file pins nothing, because somebody who
+ * wants a model pinned needs to know that it is not.
+ */
+export const DEFAULT_MODEL_ALIAS = 'default';
+
+/** How long the panel stays marked after a `/model` route lands on it. */
+const _FLASH_MS = 2200;
+
+/**
+ * The engine's `models` list, normalised, and guaranteed to contain `current`.
+ *
+ * Same lesson as the chat panel's `permissionModeOptions`: a `<select>` whose
+ * value is not among its options renders as the *first* option, so an alias the
+ * engine does not advertise — a custom one from engine.json, a session resumed
+ * from a newer CLI — would silently read as whatever happens to be at the top
+ * of the list. Appended rather than dropped, and marked as unlisted.
+ *
+ * An empty list stays empty. The engine connects lazily, so having nothing to
+ * offer is the ordinary state before the first turn, and a one-item menu built
+ * from the alias would look like a choice the user had.
+ */
+export function modelEntries(models, current) {
+  const entries = [];
+  for (const m of Array.isArray(models) ? models : []) {
+    if (!m || typeof m !== 'object') continue;
+    const value = typeof m.value === 'string' ? m.value : '';
+    if (!value) continue;
+    entries.push({
+      value,
+      label: typeof m.displayName === 'string' && m.displayName
+        ? m.displayName
+        : value,
+      resolved: typeof m.resolvedModel === 'string' ? m.resolvedModel : '',
+      detail: typeof m.description === 'string' ? m.description : '',
+    });
+  }
+  if (entries.length === 0) return entries;
+  const alias = current || DEFAULT_MODEL_ALIAS;
+  if (!entries.some((e) => e.value === alias)) {
+    entries.push({
+      value: alias,
+      label: alias,
+      resolved: '',
+      detail: 'In force for this session, but not in the engine list.',
+    });
+  }
+  return entries;
+}
+
 export class SettingsTab extends RpcMixin(LitElement) {
   static properties = {
     /** Info banner data from get_config_info. */
@@ -57,6 +128,38 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _loading: { type: Boolean, state: true },
     /** Whether a save is in flight. */
     _saving: { type: Boolean, state: true },
+    /**
+     * The models the engine advertises, from `get_model().models`. Empty
+     * before the engine's handshake, which is every load before the first
+     * turn — an ordinary state, not a failure.
+     */
+    _models: { type: Array, state: true },
+    /**
+     * The model alias in force, or '' when the session pins none.
+     *
+     * Written from `get_model`, from `set_model`'s reply, and from a
+     * `modelChanged` broadcast — never from the `<select>`'s own value on
+     * change. The select is a request; this is the answer.
+     */
+    _model: { type: String, state: true },
+    /** What the engine says `_model` resolves to, or '' if it has not said. */
+    _resolved: { type: String, state: true },
+    /** True while a `set_model` call is in flight. */
+    _modelPending: { type: Boolean, state: true },
+    /**
+     * False once `Collab.get_collab_role` reports this client is not the host.
+     * `set_model` is localhost-only, so an enabled control for a participant
+     * would be one that always fails. Only ever narrows what is offered — the
+     * engine keeps the real gate.
+     */
+    _canSetModel: { type: Boolean, state: true },
+    /**
+     * True for a moment after `/model` routed here, so the panel the command
+     * meant is visibly the one it landed on. A route can arrive with this tab
+     * already open and already scrolled to the panel, where scrolling alone
+     * changes nothing on screen and the command looks like it did nothing.
+     */
+    _modelFlash: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -118,6 +221,78 @@ export class SettingsTab extends RpcMixin(LitElement) {
     .info-label {
       opacity: 0.7;
       min-width: 5rem;
+    }
+
+    /*
+      The model panel. Same card chrome as the info banner so it
+      reads as part of the header rather than as a config card —
+      it is not one: every card below opens an editor on a file,
+      and this control reaches the running session.
+    */
+    .model-panel {
+      background: rgba(22, 27, 34, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.8125rem;
+      transition: border-color 240ms ease, background 240ms ease;
+    }
+    /*
+      The mark a routed command leaves. Border and background
+      only, no animation: the tab may already be scrolled here,
+      and a moving thing is the one way to be sure the reader
+      sees that something answered.
+    */
+    .model-panel.flash {
+      border-color: var(--accent-primary, #58a6ff);
+      background: rgba(88, 166, 255, 0.08);
+    }
+    .model-head {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .model-title {
+      font-weight: 600;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .model-select {
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-primary, #c9d1d9);
+      border-radius: 4px;
+      padding: 0.25rem 0.4rem;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      max-width: 16rem;
+    }
+    .model-select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .model-pending {
+      color: var(--text-secondary, #8b949e);
+    }
+    .model-resolved {
+      margin-top: 0.4rem;
+      color: var(--text-secondary, #8b949e);
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      font-size: 0.75rem;
+      word-break: break-all;
+    }
+    .model-note {
+      margin: 0.4rem 0 0;
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      line-height: 1.45;
+    }
+    .model-note code {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      background: rgba(240, 246, 252, 0.06);
+      border-radius: 3px;
+      padding: 0 0.2rem;
     }
 
     .card-grid {
@@ -235,10 +410,50 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._editorContent = '';
     this._loading = false;
     this._saving = false;
+    this._models = [];
+    this._model = '';
+    this._resolved = '';
+    this._modelPending = false;
+    this._canSetModel = true;
+    this._modelFlash = false;
+    /** Pending flash-clear timer, so a second route restarts it. */
+    this._flashTimer = null;
+    // Bound so add/removeEventListener find the same reference.
+    this._onModelChanged = this._onModelChanged.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    // Another window's switch. The window that made the call has the answer in
+    // its reply and does not need this, but it arrives there too and says the
+    // same thing, so no guard is needed.
+    window.addEventListener('model-changed', this._onModelChanged);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener('model-changed', this._onModelChanged);
+    if (this._flashTimer) {
+      clearTimeout(this._flashTimer);
+      this._flashTimer = null;
+    }
+    super.disconnectedCallback();
   }
 
   onRpcReady() {
     this._loadInfo();
+    this._loadModel();
+  }
+
+  /**
+   * Re-read the model when this tab comes back on screen.
+   *
+   * The list is empty until the engine's handshake, and the engine connects on
+   * the first turn — so a tab opened before that turn holds an empty menu with
+   * nothing to tell it otherwise. `get_model` is answered from the stored
+   * initialize reply, so this costs a round trip and no control request.
+   */
+  onTabVisible() {
+    this._loadModel();
   }
 
   async _loadInfo() {
@@ -249,6 +464,177 @@ export class SettingsTab extends RpcMixin(LitElement) {
     } catch (err) {
       console.warn('[settings] get_config_info failed', err);
     }
+  }
+
+  /**
+   * Read the model in force and the menu the engine offers.
+   *
+   * One RPC, because the two halves are one fact and `get_model` pairs them on
+   * the server where the list already is. A failure is warned and left alone
+   * rather than blanking what is on screen: the alias last read is still the
+   * best answer available, and a panel that empties itself on a transient RPC
+   * error would claim the session has no model.
+   */
+  async _loadModel() {
+    if (!this.rpcConnected) return;
+    try {
+      const res = await this.rpcExtract('ClaudeCodeService.get_model');
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] get_model failed', res?.error);
+        return;
+      }
+      this._model = typeof res.model === 'string' ? res.model : '';
+      this._resolved = typeof res.resolved === 'string' ? res.resolved : '';
+      this._models = Array.isArray(res.models) ? res.models : [];
+    } catch (err) {
+      console.warn('[settings] get_model failed', err);
+      return;
+    }
+    this._probeModelAuthority();
+  }
+
+  /**
+   * Find out whether this client may change the model.
+   *
+   * Same probe and the same defaults as the chat panel's
+   * `probeModeAuthority`: no collab service registered means single-user, which
+   * means we are the host. It only narrows the UI — `set_model` enforces the
+   * real gate, so being wrong here costs a rejected call, not an unauthorised
+   * one.
+   */
+  async _probeModelAuthority() {
+    try {
+      const role = await this.rpcExtract('Collab.get_collab_role');
+      if (role && typeof role === 'object' && !role.error) {
+        this._canSetModel = role.is_localhost !== false;
+        return;
+      }
+    } catch (_) {
+      // No collab service — single-user, and we are the host.
+    }
+    this._canSetModel = true;
+  }
+
+  /** Another window changed the model. */
+  _onModelChanged(event) {
+    const model = event?.detail?.model;
+    if (typeof model !== 'string' && model !== null) return;
+    this._model = model || '';
+    this._resolved = this._resolvedFor(this._model);
+    this._modelPending = false;
+  }
+
+  /** What the engine's list says an alias resolves to, or ''. */
+  _resolvedFor(alias) {
+    const entry = modelEntries(this._models, alias)
+      .find((e) => e.value === (alias || DEFAULT_MODEL_ALIAS));
+    return entry?.resolved || '';
+  }
+
+  /**
+   * Handle a selection.
+   *
+   * The `<select>`'s DOM value goes straight back to the alias in force, before
+   * the RPC resolves — the native element flips itself and Lit will not put it
+   * back, because `_model` has not changed yet. The real flip comes from the
+   * reply, which is authoritative: the service records the new alias only after
+   * the engine's control request came back.
+   *
+   * The gesture latch is the one from the chat panel's permission-mode
+   * selector, and it is here for the same reason a switch that costs money
+   * should not be reachable by an event nobody raised — a browser restoring
+   * form state on load raises a trusted `change` with no pointer or key in
+   * front of it. See `webapp/src/chat-panel/permission-mode.js` for the full
+   * account; the difference is that a model switch has no confirmation to
+   * intercept it, so the latch is the only guard there is.
+   */
+  _onModelSelect(event) {
+    const select = event?.target;
+    const picked = select?.value;
+    const current = this._model || DEFAULT_MODEL_ALIAS;
+    if (select) select.value = current;
+    const gesture = this._modelGesture === true;
+    this._modelGesture = false;
+    if (!gesture) return;
+    if (typeof picked !== 'string' || !picked || picked === current) return;
+    this._setModel(picked);
+  }
+
+  /** Record that a user is actually operating the control. */
+  _noteModelGesture() {
+    this._modelGesture = true;
+  }
+
+  /**
+   * Ask the engine to switch models.
+   *
+   * `_modelPending` disables the control while the call is out: two switches in
+   * flight would race, and the reply that landed last would win regardless of
+   * which the user picked last.
+   */
+  async _setModel(value) {
+    if (!this.rpcConnected || this._modelPending) return;
+    this._modelPending = true;
+    try {
+      const res = await this.rpcExtract('ClaudeCodeService.set_model', value);
+      if (res && typeof res === 'object' && res.error) {
+        const reason = res.error === 'restricted'
+          ? res.reason || 'Only the host can change the model'
+          : res.error;
+        this._emitToast(reason, 'warning');
+        return;
+      }
+      const applied = res && typeof res === 'object' ? res.model : undefined;
+      this._model = typeof applied === 'string' ? applied : '';
+      this._resolved = this._resolvedFor(this._model);
+      this._emitToast(`Model: ${this._modelLabel()}`, 'success');
+    } catch (err) {
+      this._emitToast(
+        `Could not change the model: ${err?.message || err}`,
+        'error',
+      );
+    } finally {
+      this._modelPending = false;
+    }
+  }
+
+  /** The display name for the alias in force, falling back to the alias. */
+  _modelLabel() {
+    const alias = this._model || DEFAULT_MODEL_ALIAS;
+    const entry = modelEntries(this._models, alias)
+      .find((e) => e.value === alias);
+    return entry?.label || alias;
+  }
+
+  /**
+   * A routed command asked for one part of this tab.
+   *
+   * Duck-typed hook the shell calls after switching tabs. This tab has no
+   * segmented control, so "show a section" means scroll the panel into view and
+   * mark it — and re-read it, because the command asked about the model and the
+   * menu may have arrived since this tab last looked.
+   *
+   * An id this tab does not have is ignored, which is what keeps a service that
+   * grows a new anchor from making the tab itself unreachable.
+   *
+   * @param {string} id
+   */
+  showSection(id) {
+    if (id !== 'model') return;
+    this._loadModel();
+    this._modelFlash = true;
+    if (this._flashTimer) clearTimeout(this._flashTimer);
+    this._flashTimer = setTimeout(() => {
+      this._flashTimer = null;
+      this._modelFlash = false;
+    }, _FLASH_MS);
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector('.model-panel');
+      // jsdom has no scrollIntoView, and neither does an older engine.
+      if (panel && typeof panel.scrollIntoView === 'function') {
+        panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }
+    });
   }
 
   async _openCard(key) {
@@ -433,6 +819,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
           `
         : ''}
 
+      ${this._renderModelPanel()}
+
       <div class="card-grid">
         ${CONFIG_CARDS.map(
           (card) => html`
@@ -449,6 +837,118 @@ export class SettingsTab extends RpcMixin(LitElement) {
       </div>
 
       ${this._activeKey ? this._renderEditor() : ''}
+    `;
+  }
+
+  /**
+   * The model in force, what it resolves to, and a switch.
+   *
+   * Three lines rather than one because the alias and the model are different
+   * facts and the spec's Info Banner asks for both — an alias like `opus` says
+   * what was requested, `au.anthropic.claude-opus-5` says what will answer, and
+   * they are allowed to disagree. The resolution is the CLI's own, from its
+   * `models` list, never derived here.
+   *
+   * Above the card grid and outside it: every card below opens an editor on a
+   * file that mostly applies next session, and this one control reaches the
+   * session that is running. Putting it in the grid would file it under the
+   * same "applies later" promise the rest of the tab has to make.
+   */
+  _renderModelPanel() {
+    const entries = modelEntries(this._models, this._model);
+    const alias = this._model || DEFAULT_MODEL_ALIAS;
+    const entry = entries.find((e) => e.value === alias);
+    const readOnly = this._canSetModel === false;
+    const offline = entries.length === 0;
+    const disabled =
+      !this.rpcConnected || readOnly || this._modelPending || offline;
+    const title = readOnly
+      ? 'Only the host can change the model'
+      : this._modelPending
+        ? 'Waiting for the engine to confirm the switch'
+        : entry?.detail || 'The model this session runs on';
+    return html`
+      <div
+        class="model-panel ${this._modelFlash ? 'flash' : ''}"
+        role="group"
+        aria-label="Model"
+      >
+        <div class="model-head">
+          <span class="model-title">🧠 Model</span>
+          <select
+            class="model-select"
+            .value=${alias}
+            ?disabled=${disabled}
+            autocomplete="off"
+            aria-label="Model"
+            title=${title}
+            @pointerdown=${() => this._noteModelGesture()}
+            @keydown=${() => this._noteModelGesture()}
+            @change=${(e) => this._onModelSelect(e)}
+          >
+            ${entries.map(
+              (option) => html`<option
+                value=${option.value}
+                ?selected=${option.value === alias}
+                title=${option.detail}
+              >
+                ${option.label}
+              </option>`,
+            )}
+          </select>
+          ${this._modelPending
+            ? html`<span class="model-pending" aria-hidden="true">…</span>`
+            : ''}
+        </div>
+        ${offline
+          ? ''
+          : html`
+              <div class="model-resolved">
+                ${alias} →
+                ${this._resolved
+                  || entry?.resolved
+                  || '(the engine did not say what this resolves to)'}
+              </div>
+            `}
+        ${this._renderModelNote(offline, readOnly)}
+      </div>
+    `;
+  }
+
+  /**
+   * The sentences under the control, one per thing that is true.
+   *
+   * "From your next turn" is measured, not reasoned. A `set_model` fired 22.8s
+   * into a live 34s turn answered in 252ms without interrupting it — and the
+   * turn went on billing `claude-opus-5`, including a usage report 124ms
+   * *after* the switch landed; the turn after it billed haiku. So the switch is
+   * accepted mid-turn and applies to the next one, which is exactly the thing
+   * somebody reaching for a cheaper model to rescue a runaway turn needs told.
+   * Said unconditionally rather than only while streaming: it is true either
+   * way, and a sentence that appears only sometimes is one nobody learns.
+   */
+  _renderModelNote(offline, readOnly) {
+    if (offline) {
+      return html`<p class="model-note">
+        The engine has not connected yet, so it has not said which models it
+        offers — the list arrives with the first turn.
+      </p>`;
+    }
+    return html`
+      <p class="model-note">
+        ${readOnly
+          ? html`Only the host can change the model. `
+          : ''}
+        ${this._model
+          ? html`Set for this session rather than in a file: a switch here
+              leaves <code>engine.json</code> alone and lasts as long as the
+              session. `
+          : html`<code>engine.json</code> pins no model, so the CLI uses its
+              own default. `}
+        A switch takes effect from your <strong>next</strong> turn — a turn
+        already running finishes on the model it started with. Which model
+        actually answered is reported per turn, by model, in the usage HUD.
+      </p>
     `;
   }
 

@@ -107,6 +107,18 @@ Two more limits worth stating:
   release train and can gain a command or a tool without any Python type changing. It is a live read, so it
   is absent when no engine is connected — the static half renders regardless, which is the point, since a
   diagnostic panel is most often opened when something is broken.
+- **`get_server_info()` does not say which model is in force.** It carries a `models` list, which is the
+  CLI's alias→id *mapping* rather than its current selection. The panel reads four keys off each entry —
+  `value`, `displayName`, `resolvedModel`, `description` — and treats every one but `value` as optional,
+  since the list arrives from the CLI's own release train. A live read on CLI 2.1.229 returned seven
+  entries mixing bare aliases (`default`, `opus`, `haiku`) with fully-qualified ids
+  (`au.anthropic.claude-sonnet-4-6`, and a `[1m]`-suffixed long-context variant), with `displayName` and
+  `resolvedModel` populated throughout. Worth stating because it reads like the obvious place to look: building the
+  model panel started there, found no such field, and had to take the alias from `Session.model` (the
+  value `set_model` records) and pair it against this list for the resolution. The mapping half is still
+  only available here, so the two reads belong together in one RPC — hence
+  `ClaudeCodeService.get_model()`. Answered from the stored `initialize` reply, so it costs ~2ms and no
+  control request even mid-turn.
 - **`KNOWN_BETAS` exists so the gate fails only on a *new* beta.** Without it, the one beta we have declined
   (`context-1m-2025-08-07`) failed the gate as untriaged — a test that goes red for a thing already decided
   is a test that gets deleted.
@@ -173,9 +185,9 @@ to that question.
 | `receive_messages()` / `receive_response()` | The latter stops after `ResultMessage` — which ends a turn, not the run, so a turn with background tasks in flight is followed with the former. Both read one buffer the client owns: a second iterator resumes rather than replaying, and two at once would split the stream. |
 | `interrupt()` | Replaces our cancellation flag. |
 | `set_permission_mode(mode)` | Live switch; no reconnect. |
-| `set_model(model)` | Live switch. |
+| `set_model(model)` | Live switch, and "live" needed measuring. Fired 22.8s into a live 34s turn it answered in **252ms** without interrupting the stream — but the running turn kept billing its original model, including a usage report 124ms after the switch returned; the *next* turn used the new one. So it is accepted mid-turn and applies to the turn after. See [`../3-engine/session.md` § A mid-turn switch lands on the next turn](../3-engine/session.md#a-mid-turn-switch-lands-on-the-next-turn). |
 | `get_context_usage()` | **The `/context` data.** Basis of CC-4. |
-| `get_mcp_status()` / `reconnect_mcp_server(name)` / `toggle_mcp_server(name, enabled)` | MCP server health surface. |
+| `get_mcp_status()` / `reconnect_mcp_server(name)` / `toggle_mcp_server(name, enabled)` | MCP server health surface. `get_mcp_status` is wired to the Context tab; the other two are exposed as RPCs with **no browser caller** — see [`../impl-history/work-log.md` § Specified but not yet built](../impl-history/work-log.md#specified-but-not-yet-built). |
 | `get_server_info()` | Advertised commands, tools, output styles. |
 | `stop_task(task_id)` | Cancels a single background task / subagent. |
 | `rewind_files(user_message_id)` | File-level undo to a checkpoint. Unreachable while a `session_store` is set — see below. |

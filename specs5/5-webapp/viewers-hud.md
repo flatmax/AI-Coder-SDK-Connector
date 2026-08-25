@@ -172,6 +172,33 @@ The segmented control appears once there is a breakdown **or an error**. Gating 
 hid Debug in the one situation it is worth the most — the breakdown itself failing — so the Debug
 section renders ahead of the error branch, from sources that do not depend on the breakdown at all.
 
+### When the breakdown fails
+
+**The advice under the error is chosen by a `reason` the service sends, not by reading the error
+string.** There are two situations and they call for opposite actions:
+
+| `reason` | Situation | What the note says |
+|---|---|---|
+| `no-engine` | No session to ask — not connected, or lost. | It is unavailable until a session is connected. Waiting is the answer; retrying is not. |
+| `failed` | A request went out to a live engine and no answer came back. | A request that failed, not a session that is missing — Refresh asks again, and a turn in flight makes this slow rather than unavailable. |
+| absent | A backend older than the field, or a reason this build does not know. | The advice that holds either way. Never one of the two specific ones on a guess. |
+
+One note used to serve both, and it was the waiting one — so a reader whose session was perfectly
+healthy was told to connect a session, which reads as the tab being broken rather than the call having
+been slow. A client-side failure (the transport dropped it, the deadline fired) is `failed` too: a
+request did leave and did not come back, which is all `failed` claims. Whether an engine is up is not
+something the browser can conclude from its own timeout.
+
+**Deadlines are laid out so the innermost one fires first.** The engine bounds a control request at
+60s; the transport waits 75s; this tab's own deadline is 90s. Each layer knows more about the call than
+the layer outside it, so the useful error is the innermost one, and a layer that fires first steals the
+message. At 60s for the transport — the value it shipped with — the two 60s clocks raced and the
+transport won by the width of the socket, so every timeout read as the contentless "Timed out waiting
+for response" and the 90s deadline could never fire at all. The tab's deadline is deliberately the
+outermost: this call is slow (3-14s measured, and past 60s often enough to log eight engine timeouts in
+one half-hour run), and a deadline that pre-empts a reply on its way stacks a retry onto a subprocess
+already struggling with the first.
+
 ## Usage HUD
 
 Floating overlay on the viewer background, appearing after each turn.

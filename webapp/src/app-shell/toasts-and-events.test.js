@@ -192,6 +192,21 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('permission-deadline', listener);
     });
 
+    it('modelChanged dispatches a session-wide window event', () => {
+      // Session-wide, not turn-scoped: no request id, because the model in
+      // force outlives the turn that changed it. The window that made the
+      // call already flipped its own control on the RPC reply — this event
+      // is what every *other* window has instead, and without it they would
+      // go on naming the model the session started on.
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('model-changed', listener);
+      expect(shell.modelChanged({ model: 'haiku', by: 'user' })).toBe(true);
+      const event = listener.mock.calls[0][0];
+      expect(event.detail).toEqual({ model: 'haiku', by: 'user' });
+      window.removeEventListener('model-changed', listener);
+    });
+
     it('sessionDeleted dispatches window event with the session id', () => {
       // Reaches the client that asked for the delete as well as the
       // ones that did not: a session list still offering the row is a
@@ -341,9 +356,32 @@ describe('AppShell events and toasts', () => {
     });
 
     it('survives a tab with no section hook', async () => {
+      // The files tab has none. Deliberately not the settings tab,
+      // which grew one for `/model`.
       const shell = mountShell();
       await shell.updateComplete;
-      request({ tab: 'settings', section: 'session' });
+      request({ tab: 'files', section: 'model' });
+      await settleSwitch(shell);
+      expect(shell.activeTab).toBe('files');
+    });
+
+    it('asks the settings tab for its model panel', async () => {
+      // `/model` names `tab:settings#model`. The shell does not know
+      // that the settings tab answers a section by scrolling rather
+      // than by picking a segment, and should not.
+      const shell = mountShell();
+      await shell.updateComplete;
+      const tab = shell.shadowRoot.querySelector('aic-settings-tab');
+      const spy = vi.spyOn(tab, 'showSection');
+      request({ tab: 'settings', section: 'model' });
+      await settleSwitch(shell);
+      expect(spy).toHaveBeenCalledWith('model');
+    });
+
+    it('survives a section the settings tab does not have', async () => {
+      const shell = mountShell();
+      await shell.updateComplete;
+      request({ tab: 'settings', section: 'nope' });
       await settleSwitch(shell);
       expect(shell.activeTab).toBe('settings');
     });

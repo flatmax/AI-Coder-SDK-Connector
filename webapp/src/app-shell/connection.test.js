@@ -42,6 +42,18 @@ describe('AppShell connection lifecycle', () => {
       await shell.updateComplete;
       expect(shell.activeTab).toBe('files');
     });
+
+    it('outwaits the engine so the engine names the failure', async () => {
+      // The SDK bounds a control request at 60s. A transport deadline of
+      // the same 60s starts marginally earlier and so always wins the
+      // race, replacing "Control request timeout: get_context_usage"
+      // with the transport's contentless "Timed out waiting for
+      // response". Anything above 60 hands the reader the error from the
+      // layer that knows which call it was.
+      const shell = mountShell();
+      await shell.updateComplete;
+      expect(shell.remoteTimeout).toBeGreaterThan(60);
+    });
   });
 
   describe('base-class lifecycle', () => {

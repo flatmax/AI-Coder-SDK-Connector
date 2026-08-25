@@ -129,7 +129,11 @@ EventCallback = Callable[..., Awaitable[Any]]
 # remembers the section its reader last chose, so `/mcp` without the anchor
 # opens onto whatever that was — usually Usage, which has no MCP status on it
 # at all. The command would then have opened the right tab and still not shown
-# the thing it names.
+# the thing it names. What the section *means* is the surface's business and
+# not this table's: on the Context tab it picks a segment, on the Settings tab
+# it scrolls a panel into view and marks it. Both answer the same question —
+# "which part of this tab did the command mean?" — and the shell forwards the
+# fragment without knowing either answer.
 SLASH_ROUTES: dict[str, dict[str, Any]] = {
     "context": {
         "target": "tab:context#usage",
@@ -169,10 +173,29 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
         "palette": "The subagents this session can delegate to",
         "during_turn": True,
     },
+    # Routed because the model *in force* is not in any file. `engine.json`
+    # holds a request the CLI resolves — an alias like `opus`, or nothing at
+    # all — and a `set_model` since then overrides it. Only the session knows
+    # the answer, so the surface reads it from `get_current_state` and pairs it
+    # with the CLI's own alias→`resolvedModel` mapping from the handshake.
+    "model": {
+        "target": "tab:settings#model",
+        "surface": "the Settings tab's model control, which names what the alias resolves to",
+        "palette": "The model in force, and switch it for this session",
+        "during_turn": True,
+    },
+    # The mode this opens onto is `engine.json`'s — the one the *next* session
+    # starts in. The running session's mode is the composer's own selector,
+    # which is deliberately always visible and is not reachable by a route.
+    # Said plainly here because the earlier wording promised "the Settings
+    # tab's permission-mode control and rules list", and neither is there.
     "permissions": {
         "target": "tab:settings",
-        "surface": "the Settings tab's permission-mode control and rules list",
-        "palette": "Permission mode and rules, in the Settings tab",
+        "surface": (
+            "the Settings tab, where engine.json holds the mode the next session "
+            "starts in — the live mode is the selector beside the composer"
+        ),
+        "palette": "Permission mode in engine.json, in the Settings tab",
         "during_turn": True,
     },
     # Routed rather than passed through because the CLI's own `/clear` would
@@ -1400,12 +1423,68 @@ class ClaudeCodeService:
         )
         return {"mode": applied}
 
+    async def get_model(self) -> dict[str, Any]:
+        """The model in force, and the models this engine offers.
+
+        One call rather than two, because the answer is one fact in two halves:
+        the alias the session runs under, and the CLI's own mapping from alias
+        to model id. Splitting them would have the browser fetch
+        ``get_current_state`` — which carries the whole rendered transcript —
+        for one string.
+
+        ``model`` is the *alias*, and it is ``None`` when nothing named one:
+        ``engine.json`` may omit it, in which case no ``--model`` was passed and
+        the CLI used its own default. That is worth reporting as null rather
+        than as the string ``"default"``, because "nothing is pinned" and
+        "``default`` is pinned" are the same destination today and not
+        necessarily the same one after a CLI upgrade.
+
+        ``resolved`` is what the CLI says the alias resolves to, and ``None``
+        when the engine has not connected or does not list that alias. Never
+        derived here: this repo does not resolve aliases, and a guessed model id
+        is one the browser would quote back to someone deciding what to spend.
+
+        ``models`` is empty before the first turn, which is not an error — the
+        engine connects lazily, so there is no handshake to read yet. The
+        surface says so rather than showing an empty menu.
+        """
+        model = self.session.model
+        models: list[dict[str, Any]] = []
+        try:
+            info = await self.session.get_server_info()
+        except Exception:
+            # No engine yet is the ordinary pre-first-turn state, and this call
+            # exists partly to be made in it. Debug, not exception: a warning
+            # per Settings-tab open would be noise on every cold start.
+            logger.debug("get_model: no server info to read yet", exc_info=True)
+            info = None
+        if isinstance(info, dict):
+            advertised = info.get("models")
+            if isinstance(advertised, list):
+                models = [m for m in advertised if isinstance(m, dict)]
+        resolved: str | None = None
+        for entry in models:
+            if entry.get("value") == model:
+                candidate = entry.get("resolvedModel")
+                resolved = candidate if isinstance(candidate, str) else None
+                break
+        return {"model": model, "resolved": resolved, "models": models}
+
     async def set_model(self, model: str | None = None) -> dict[str, Any]:
         """Switch models mid-session. ``None`` restores the CLI default.
         **Localhost only.**
 
         Models differ in what a turn costs the host, and the host is the one
         paying — under a subscription, in rate-limit headroom.
+
+        Broadcast for the same reason ``set_permission_mode`` is: the model in
+        force is session state, not this client's state, and a second window
+        left showing the model the session *started* on would be naming a model
+        that is no longer answering. Unlike the permission mode, the reply is
+        also authoritative on its own — ``Session.set_model`` records the new
+        alias only after the control request came back — so a caller may flip
+        its own control on the reply and does not have to wait for this event.
+        The broadcast is what the *other* windows have instead.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -1417,6 +1496,9 @@ class ClaudeCodeService:
         except Exception as exc:
             logger.exception("set_model(%r) failed", model)
             return {"error": f"Could not change the model: {exc}"}
+        await self._broadcast(
+            Event("modelChanged", {"model": applied, "by": "user"}, turn_scoped=False)
+        )
         return {"model": applied}
 
     async def rewind_files(self, user_message_id: str) -> dict[str, Any]:
@@ -1489,14 +1571,26 @@ class ClaudeCodeService:
     # ------------------------------------------------------------------
 
     async def get_context_usage(self) -> dict[str, Any]:
-        """The live context breakdown, plus when we fetched it."""
+        """The live context breakdown, plus when we fetched it.
+
+        ``reason`` names *which* failure this was, because the two read
+        the same to a browser holding one error string and mean opposite
+        things to the reader. There being no engine is a state that ends
+        when a session starts; a control request that went out to a live
+        engine and failed is a request worth retrying now. The viewer
+        told everyone to wait for a session either way, which sent
+        readers off to fix a session that was already connected.
+        """
         try:
             usage = await self.session.get_context_usage()
         except (EngineNotReadyError, SessionLostError) as exc:
-            return {"error": str(exc)}
+            return {"error": str(exc), "reason": "no-engine"}
         except Exception as exc:
             logger.exception("get_context_usage failed")
-            return {"error": f"Could not read context usage: {exc}"}
+            return {
+                "error": f"Could not read context usage: {exc}",
+                "reason": "failed",
+            }
         return {"usage": self._mark_openable_memory_files(usage), "fetched_at": _now()}
 
     def _mark_openable_memory_files(self, usage: Any) -> Any:
@@ -2544,14 +2638,27 @@ class ClaudeCodeService:
         text = (message or "").strip()
         if not text.startswith("/") or len(text) < 2:
             return None
-        command = text[1:].split(None, 1)[0].lower()
+        parts = text[1:].split(None, 1)
+        command = parts[0].lower()
         route = SLASH_ROUTES.get(command)
         if route is not None:
+            reply = f"/{command} is {route['surface']} here."
+            # Anything typed after the command does not travel. Routing opens a
+            # surface; there is no argument for a surface to take. Said out loud
+            # because `/model sonnet` is a reasonable thing to type — the CLI
+            # takes it — and dropping the word silently would leave the user
+            # believing they had switched models.
+            argument = parts[1].strip() if len(parts) > 1 else ""
+            if argument:
+                reply += (
+                    f" What follows it — {argument!r} — was not applied:"
+                    " routing opens a surface rather than running a command."
+                )
             return {
                 "status": "routed",
                 "command": command,
                 "target": route["target"],
-                "message": f"/{command} is {route['surface']} here.",
+                "message": reply,
             }
         denial = SLASH_DENIED.get(command)
         if denial is not None:

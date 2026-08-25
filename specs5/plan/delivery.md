@@ -610,6 +610,12 @@ The banner names no model even if a stale backend volunteers one. `engine.json`'
 *request*; the engine can answer on a different model (a rate-limit fallback, a mid-session
 `set_model`), and the model actually used is reported per turn by the HUD.
 
+The model in force *is* now named on that tab — in its own panel below the banner, reading a live
+`get_model()` rather than the banner's launch-time `get_config_info`, and carrying the switch that
+makes `set_model` a call somebody can actually make. It is the one control on the Settings tab that
+applies to the running session, which is why it is not in the card grid. See
+[`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel).
+
 ### Dormant, annotated, not deleted
 
 Five push receivers have no emitter after this phase — `modeChanged`, `agentModeChanged`,

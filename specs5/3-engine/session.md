@@ -318,7 +318,8 @@ the webapp opens the surface named by `target`.
 | `/usage`, `/cost` | `tab:context#usage` | Yes | The same tab's cost and per-model breakdown ([`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)). AIC⚡DC computes these figures itself from every result message, so the tab knows more than the CLI's one-shot print does — and unlike the print, it keeps being true. |
 | `/mcp` | `tab:context#session` | Yes | The Context tab's MCP section: per-server connection state from `get_mcp_status()`, plus each server's tools and their token cost. |
 | `/agents` | `tab:context#session` | Yes | The Context tab's subagent list — the definitions this session can delegate to, with what they have spent. |
-| `/permissions` | `tab:settings` | Yes | The Settings tab's permission-mode control plus the rules list. |
+| `/model` | `tab:settings#model` | Yes | The Settings tab's model panel: the alias in force, what the CLI resolves it to, and a switch that calls `set_model` for this session. See [`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel). |
+| `/permissions` | `tab:settings` | Yes | The Settings tab, where `engine.json` holds the mode the *next* session starts in. The running session's mode is the selector beside the composer, which is always visible and deliberately not routable. |
 | `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
 | `/resume` | `history` | No | The history browser. Not in the CLI's command list at all. |
 
@@ -353,9 +354,17 @@ since a turn blocks waiting for the browser to answer a permission dialog on exa
 | Class | Mid-turn | Why | Examples |
 |---|---|---|---|
 | Local UI | Yes | Nothing is asked of the engine at all. | `/permissions` → the Settings tab |
-| Control request | Yes | Answered on the concurrent channel. | `/mcp` → `get_mcp_status()`, `/agents` and `/context` → `get_server_info()` / `get_context_usage()` |
+| Control request | Yes | Answered on the concurrent channel. | `/mcp` → `get_mcp_status()`, `/agents` and `/context` → `get_server_info()` / `get_context_usage()`, `/model` → `set_model()` |
 | Needs a model turn | No | It is a turn, and the guard above allows one. | `.claude/commands/`, skills, anything answered in prose |
 | Session swap | No | Would orphan the stream the user is watching. | `/clear`, `/resume` |
+
+**Measured, not reasoned.** A prompt was sent on an isolated instance, and three seconds into the turn
+`get_context_usage` and `get_mcp_status` were fired at it. Both answered 4.8s later with the stream
+still running; the turn itself ran 42s. So the concurrency is real — and so is the latency. These
+answer in seconds, not instantly, which is a fact the surfaces have to carry: the Context tab reads
+"Reading context…" for several seconds when a command opens it mid-turn, and that is the feature
+working. `get_server_info` came back in 2ms because it is answered from what `initialize` already
+returned, without a control request at all.
 
 The mechanism that makes a control-request command available mid-turn is **routing it**. Routing is what
 keeps a command off `query()`; the surface it opens then issues the control request itself, which the
@@ -378,12 +387,58 @@ Two consequences worth stating:
   guard in the route table would only duplicate an answer that is better phrased at the surface that
   owns it. What `during_turn` buys is a palette that does not offer them.
 
-`/model` is deliberately **not** routed, despite being a control request (`set_model`). There is no
-model-selector surface to route it to: the Settings tab edits `engine.json`, where the model is a
-*request* the engine may answer with a different one, and the model actually in force is reported per
-turn in the usage HUD. Routing it to a tab with no model control would open the wrong thing
-confidently. It stays passthrough and `during_turn: false` until that surface exists — see
-[`../impl-history/work-log.md`](../impl-history/work-log.md).
+`/model` is routed, and was the last control-request command that was not. What held it back was the
+absence of a surface, not any doubt about `set_model`: routing a command to a tab with no model
+control would have opened the wrong thing confidently. The Settings tab now has that control — its
+own panel, above the card grid and outside it, because every card there applies to the *next*
+session and this one applies now.
+
+**A routed command's argument does not travel.** `/model sonnet` is a reasonable thing to type — the
+CLI takes it that way — but routing opens a surface, and a surface takes no argument. The reply
+therefore names what it dropped (`What follows it — 'sonnet' — was not applied`) rather than letting
+the user believe they had switched models. This is a general property of routing, stated here because
+`/model` is the command most likely to be typed with one.
+
+#### What the model surface has to read
+
+The model *in force* is in no file. `engine.json` holds a **request** — an alias like `opus`, or
+nothing at all — the CLI resolves, and a `set_model` since then overrides it. So the surface reads
+`get_model()`, which answers the alias, the CLI's own `alias → resolvedModel` mapping from the
+handshake, and the list of models this engine offers. One call rather than two: the alternative was
+`get_current_state`, which carries the whole rendered transcript, for one string.
+
+Three answers it is careful about:
+
+- **A null alias means nothing is pinned**, and is reported as null rather than as the string
+  `"default"`. "Nothing is pinned" and "`default` is pinned" reach the same model today and need not
+  after a CLI upgrade.
+- **A resolution is never derived here.** This repo does not resolve aliases; if the handshake does
+  not list the alias in force, `resolved` is null. A guessed model id is one the browser would quote
+  back to somebody deciding what to spend.
+- **An empty model list before the first turn is not an error.** The engine connects lazily, so there
+  is no handshake to read yet — the same window that makes `list_commands` answer `partial: true`.
+  The surface says so rather than showing an empty menu.
+
+#### A mid-turn switch lands on the *next* turn
+
+**Measured.** `set_model('haiku')` was fired 22.8s into a live 34s turn on an isolated instance. It
+answered in **252ms** — an order of magnitude faster than `get_context_usage`, which gathers something —
+and the turn kept streaming. The turn then went on billing `claude-opus-5`, including a `turnUsage`
+report 124ms *after* the switch had landed and been broadcast. The next turn billed
+`claude-haiku-4-5-20251001`.
+
+So a mid-turn `set_model` is **accepted** mid-turn and **applies** to the turn after. Both halves are
+load-bearing and neither is obvious: "the control request answers beside a live stream" is what makes
+`during_turn: true` correct, and "the running turn keeps its model" is what the surface has to say out
+loud. The person most likely to switch models mid-turn is the person watching an expensive turn run
+away, and letting them believe they had just made it cheaper would be the worst thing this panel could
+do.
+
+`set_model` broadcasts `modelChanged` for the reason `set_permission_mode` broadcasts its own: the
+model in force is session-wide, and another window would otherwise go on naming the model the session
+started on. Unlike the permission mode, though, the *reply* is authoritative on its own — `Session.set_model`
+records the new alias only after the control request came back — so the calling window may flip its
+own control on the reply without waiting for the event.
 
 **Denied** — passing through would reach for something this deployment does not have, or act on the
 CLI host rather than the conversation. Answered with `{status: "unsupported"}` and the reason; never

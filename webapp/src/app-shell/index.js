@@ -213,7 +213,19 @@ export class AppShell extends JRPCClient {
     super();
     // JRPCClient configuration — serverURI set in connectedCallback
     // so the port is read at the right time.
-    this.remoteTimeout = 60;
+    //
+    // 75 rather than 60 because the SDK bounds its own control requests
+    // at exactly 60s, and this clock starts a few milliseconds earlier
+    // than that one — so at 60 the two race and jrpc always wins by the
+    // width of the socket. The reader got "Timed out waiting for
+    // response" from the transport instead of the engine's own "Control
+    // request timeout: get_context_usage", which is the same event
+    // described by the layer that knows nothing about it. Losing that
+    // race also stranded the deliberately-longer 90s deadlines in
+    // context-usage-tab.js and usage-hud.js, which can only fire once
+    // this one is past 60. Waiting 15 extra seconds for a call that is
+    // already lost buys an error that names which call and why.
+    this.remoteTimeout = 75;
 
     this.connectionState = 'connecting';
     this.startupStage = '';
@@ -1151,6 +1163,20 @@ export class AppShell extends JRPCClient {
 
   permissionModeChanged(data) {
     window.dispatchEvent(new CustomEvent('permission-mode-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * The model in force changed — in this window or another one.
+   *
+   * Session-wide like `permissionModeChanged`. The window that made the call
+   * already has the answer in its reply; this event is for every other one,
+   * which would otherwise keep naming the model the session started on.
+   */
+  modelChanged(data) {
+    window.dispatchEvent(new CustomEvent('model-changed', {
       detail: data,
     }));
     return true;
