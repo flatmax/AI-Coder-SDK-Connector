@@ -68,10 +68,14 @@ export function restoreMessage(m) {
   // a Claude Code turn at all, and the rest hangs off that decision.
   if (Array.isArray(m.blocks)) out.blocks = m.blocks;
   // Rows for the subagents the turn spawned, which is also what the
-  // "View subagents" affordance counts. A turn read back off disk carries
-  // none — the transcript does not attribute a subagent to the turn that
-  // spawned it — so the affordance appears on turns from this run and the
-  // history browser is the way in for the rest.
+  // "View subagents" affordance counts. A turn read back off disk used to
+  // carry none, on the belief that the transcript does not attribute a
+  // subagent to the turn that spawned it. It does: the spawn call is a tool
+  // block in the turn, carrying the description and the agent type, and its
+  // result names the `agentId`. The engine rebuilds rows from that
+  // (`_note_subagent` in src/aic_dc/claude_code/history.py), so a refreshed
+  // page keeps both the row and the way into the transcript. What a restored
+  // row lacks is the live-only half — status, usage, the closing summary.
   if (Array.isArray(m.subagents)) out.subagents = m.subagents;
   if (Array.isArray(m.files) && m.files.length > 0) out.files = m.files;
   if (m.turn && typeof m.turn === 'object') out.turn = m.turn;

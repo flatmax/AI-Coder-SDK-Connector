@@ -44,7 +44,22 @@ async function mountWithSetter(impl, props = {}) {
 }
 
 /** Drive a real selection through the native element. */
+/**
+ * Pick a mode the way a user does: a press on the control, then the change it
+ * produces. The pointer half is not decoration — the handler ignores a
+ * `change` with no gesture in front of it, because a browser restoring form
+ * state can raise one and a bypass confirmation must not answer to that.
+ */
 async function choose(panel, value) {
+  const el = select(panel);
+  el.dispatchEvent(new Event('pointerdown'));
+  el.value = value;
+  el.dispatchEvent(new Event('change'));
+  await settle(panel);
+}
+
+/** A `change` with no gesture behind it — what a restored control raises. */
+async function chooseWithoutGesture(panel, value) {
   const el = select(panel);
   el.value = value;
   el.dispatchEvent(new Event('change'));
@@ -327,6 +342,46 @@ describe('choosing a mode', () => {
     } finally {
       confirm.mockRestore();
     }
+  });
+
+  it('a change with no gesture behind it neither confirms nor sets', async () => {
+    // What a browser raises when it restores this control's value on load.
+    // Nothing about that is a user asking to turn the permission gate off, and
+    // a confirmation drawn from it asks about a change nobody made.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const { panel, setMode } = await mountWithSetter();
+      await chooseWithoutGesture(panel, 'bypassPermissions');
+      expect(confirm).not.toHaveBeenCalled();
+      expect(setMode).not.toHaveBeenCalled();
+      // And the control is left telling the truth about the session.
+      expect(select(panel).value).toBe('default');
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('one gesture authorises one change', async () => {
+    // The latch is spent by the change it authorised, so a restored event
+    // arriving afterwards cannot ride in on it.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      const { panel, setMode } = await mountWithSetter();
+      await choose(panel, 'plan');
+      expect(setMode).toHaveBeenCalledTimes(1);
+      await chooseWithoutGesture(panel, 'bypassPermissions');
+      expect(setMode).toHaveBeenCalledTimes(1);
+    } finally {
+      confirm.mockRestore();
+    }
+  });
+
+  it('opts the control out of form-state restoration', async () => {
+    // The declarative half of the same guard: the HTML spec exempts an
+    // `autocomplete="off"` control from being restored at all.
+    const panel = mountPanel();
+    await settle(panel);
+    expect(select(panel).getAttribute('autocomplete')).toBe('off');
   });
 });
 

@@ -292,6 +292,24 @@ The native engine's `agent_idx`-versus-`id` two-namespace problem, the `agent_bl
 cross-turn reconstruction algorithm are all deleted: SDK agent IDs are stable, so there is nothing to
 reconstruct.
 
+### A rendered turn reports the subagents it spawned
+
+`render_messages` fills each turn's `subagents` list from the turn's own spawn calls, so a session read
+back off disk still shows which turn delegated and offers the way into each subagent's transcript. The
+list was previously always empty, on the belief that nothing on disk attributes a subagent to the turn
+that started it. The turn's transcript does: the spawn call is an `Agent` tool block in the turn — the
+name is `Task` in transcripts written before the CLI renamed it, and both are on disk in sessions users
+still resume — carrying `description` and `subagent_type` in its input, and its result names the
+subagent as `agentId: <id>` in prose. That prose is the only place the parent turn records the id, so it
+is parsed rather than read from a field.
+
+Only what the transcript states is reported. A row carries the description, the agent type, the spawning
+`tool_use_id` and the `agent_id` when the result named one — a synchronous spawn answers with the
+subagent's output instead and names none, which leaves a row that is still evidence the turn delegated
+but has no transcript to address. Status, last tool, usage and the closing summary are `Task*` event
+fields with no home on disk and are omitted rather than defaulted. `terminal` is set, because it says
+the *turn* ended.
+
 A subagent tab is rendered the same way the main transcript is, from the same code, so what the RPC
 returns is a message list rather than the store's own entries. The session's operational events are not
 interleaved into it: an event belongs to the session, and filing a commit under whichever subagent was

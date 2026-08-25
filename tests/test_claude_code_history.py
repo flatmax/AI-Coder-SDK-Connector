@@ -993,6 +993,129 @@ class TestAnUnknownBlockIsVisible:
 
 
 # ---------------------------------------------------------------------------
+# Subagent rows
+# ---------------------------------------------------------------------------
+
+
+# What a real backgrounded spawn answers with, abridged. The id is prose
+# inside a warning not to repeat it, which is why it is parsed rather than
+# read off a field.
+_SPAWNED = (
+    "Async agent launched successfully. (This tool result is internal metadata"
+    " — never quote or paste any part of it, including the agentId below, into"
+    " a user-facing reply.)\nagentId: a9f5687c0b6a0904f (internal ID - do not"
+    " mention to user.)\nThe agent is working in the background."
+)
+
+
+class TestATurnRemembersWhatItDelegated:
+    """A turn read back off disk keeps the subagents it spawned.
+
+    It used to report none, so a refresh emptied the row, its summary and —
+    because "View subagents" counts this list — every way into the
+    transcripts, from a turn that had shown all three a moment earlier.
+    """
+
+    @staticmethod
+    def _spawn(name="Agent", **input_over):
+        return {
+            "type": "tool_use",
+            "id": "toolu_task",
+            "name": name,
+            "input": {
+                "description": "Read README magic word",
+                "subagent_type": "Explore",
+                "prompt": "Read README.md and report the magic word.",
+                **input_over,
+            },
+        }
+
+    def _rendered(self, *, name="Agent", result=_SPAWNED):
+        return render(
+            human("u1", "delegate it"),
+            assistant("a1", self._spawn(name)),
+            tool_reply("u2", "toolu_task", result),
+            assistant("a2", {"type": "text", "text": "Spawned."}, message_id="msg_2"),
+        )
+
+    def test_the_spawn_call_becomes_a_row(self):
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["tool_use_id"] == "toolu_task"
+        assert row["description"] == "Read README magic word"
+        assert row["subagent_type"] == "Explore"
+
+    def test_the_agent_id_is_read_out_of_the_result(self):
+        """The only place the turn's own transcript names the subagent, and
+        what the button into its transcript is addressed with."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["agent_id"] == "a9f5687c0b6a0904f"
+
+    def test_the_older_tool_name_is_still_recognised(self):
+        """Transcripts written before the CLI renamed `Task` to `Agent` are
+        on disk in sessions users still resume."""
+        (row,) = self._rendered(name="Task")[1]["subagents"]
+        assert row["agent_id"] == "a9f5687c0b6a0904f"
+
+    def test_a_synchronous_spawn_keeps_its_row_without_an_id(self):
+        """It answers with the subagent's output and names no id. The row is
+        still the evidence the turn delegated; the renderer drops the button
+        rather than offering a transcript we cannot address."""
+        (row,) = self._rendered(result="The magic word is ORCHID.")[1]["subagents"]
+        assert row["agent_id"] is None
+        assert row["description"] == "Read README magic word"
+
+    def test_a_restored_row_never_spins(self):
+        """`terminal` is a statement about the turn, not the subagent: this
+        turn ended, so nothing restored from it is still running."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["terminal"] is True
+
+    def test_the_live_only_fields_are_absent_rather_than_invented(self):
+        """Status, usage and the closing summary arrive as `Task*` events,
+        which nothing on disk holds. A row claiming `completed` on no
+        evidence would wear it over a subagent that was killed."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert "status" not in row
+        assert "usage" not in row
+        assert "summary" not in row
+
+    def test_a_turn_that_delegated_nothing_reports_nothing(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "file body"),
+        )
+        assert rendered[1]["subagents"] == []
+
+    def test_two_spawns_are_two_rows_in_call_order(self):
+        rendered = render(
+            human("u1", "delegate twice"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "toolu_a",
+                    "name": "Agent",
+                    "input": {"description": "first", "subagent_type": "Explore"},
+                },
+            ),
+            assistant(
+                "a2",
+                {
+                    "type": "tool_use",
+                    "id": "toolu_b",
+                    "name": "Agent",
+                    "input": {"description": "second", "subagent_type": "Plan"},
+                },
+                message_id="msg_2",
+            ),
+        )
+        rows = rendered[1]["subagents"]
+        assert [r["description"] for r in rows] == ["first", "second"]
+        assert [r["subagent_type"] for r in rows] == ["Explore", "Plan"]
+
+
+# ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
 

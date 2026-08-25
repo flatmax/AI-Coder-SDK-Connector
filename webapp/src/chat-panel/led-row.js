@@ -77,9 +77,21 @@ function scrollTabIntoView(panel, tabId) {
  *
  * Streaming → cyan (flashing). Resting state reads
  * `lastEditOutcome.status`: clean → green, error →
- * red. A tab that exists but has neither streamed nor
- * completed (defensive — agentsSpawned populates
- * `streaming = true` synchronously) defaults to cyan.
+ * red. A tab that has neither streamed nor completed
+ * is **idle**, and draws the dot's own grey.
+ *
+ * That fallback used to be cyan, on the reasoning that a
+ * tab only existed because `agentsSpawned` had just
+ * created it for a stream already in flight. `a0cb83b`
+ * removed that protocol, and what is left hitting this
+ * branch is Main on a freshly loaded page — which had
+ * never streamed, so every refresh showed a flashing
+ * "Main: running" over an idle engine until the first
+ * turn of the new page finished. Every finished turn
+ * writes an outcome (`computeTurnOutcome` returns
+ * `clean` even for a cancelled one), so "no outcome and
+ * not streaming" now means only "nothing has run here
+ * yet", which is neither running nor finished.
  *
  * A live subagent's tab is read from its own row instead: it has no
  * `lastEditOutcome` (nothing here completes *its* turn) and it needs a fourth
@@ -97,20 +109,22 @@ export function getLedState(tab) {
   const outcome = tab.lastEditOutcome;
   if (outcome && outcome.status === 'error') return 'red';
   if (outcome && outcome.status === 'clean') return 'green';
-  // Tab exists but no stream has produced an outcome
-  // yet. Treat as in-flight; a real "agent finished
-  // with nothing to report" produces a clean outcome.
-  return 'cyan';
+  return 'idle';
 }
 
 /**
  * Build the LED hover tooltip string per spec.
  *
- * Three forms based on state:
+ * Four forms based on state:
  *
  *   cyan   → `<id> (<mode>): running`
  *   green  → `<id> (<mode>): completed (N edits applied)`
  *   red    → `<id> (<mode>): <diagnostic>`
+ *   idle   → `<id> (<mode>): idle`
+ *
+ * `idle` is named rather than left to fall through to the
+ * red branch, which would have reported a freshly loaded
+ * page's Main tab as "failed".
  *
  * Mode segment omitted when mode is missing — older
  * backends not yet reporting mode in `agentsSpawned`
@@ -124,6 +138,9 @@ export function formatLedTooltip(agentId, mode, state, outcome) {
   const prefix = `${agentId}${modeSegment}`;
   if (state === 'cyan') {
     return `${prefix}: running`;
+  }
+  if (state === 'idle') {
+    return `${prefix}: idle`;
   }
   if (state === 'green') {
     const n = outcome?.appliedCount ?? 0;

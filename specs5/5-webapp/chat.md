@@ -438,6 +438,7 @@ deliberate simplification, not an oversight — the old global mode existed beca
 - A mode change is recorded in the transcript as a system event naming who changed it — the posture is part of the conversation's history, because it changes what the rest of the conversation could do
 - Non-localhost participants see the control in a read-only form. The RPC would reject them; showing a live-looking control that always fails is worse than showing the truth
 - During review the mode is read-only-by-default and the control says why, with an override path (see [`../4-features/code-review.md` § Read-Only Mode](../4-features/code-review.md#read-only-mode))
+- A `change` on the control only counts as a choice when a pointer or a key on it came first. A browser restoring form state on load raises `change` too, and `isTrusted` is true for both — so without the gesture the bypass confirmation can be drawn by a page load, asking about a change nobody made. The control is also marked `autocomplete="off"`, which asks the browser not to restore it in the first place
 
 ### Review Status Bar
 

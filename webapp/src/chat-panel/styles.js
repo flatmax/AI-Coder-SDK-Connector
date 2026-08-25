@@ -377,6 +377,7 @@ export const STYLES = css`
    *   .led-green — last completion clean
    *   .led-red   — last completion errored
    *   .led-amber — subagent stopped, or outcome unknown
+   *   .led-idle  — nothing has run in this tab yet
    *
    * The row hides itself by being empty when there are
    * no agent tabs — renderLedRow returns an empty
@@ -453,6 +454,14 @@ export const STYLES = css`
    * specs5/5-webapp/subagent-browser.md § Status LEDs. */
   .led-dot.led-amber {
     background: #d29922;
+  }
+  /* Fifth state, and the only one that is not an outcome:
+   * a tab where nothing has run yet — Main on a freshly
+   * loaded page. Explicit rather than left to the base
+   * .led-dot grey, so a reader of this file finds the
+   * state named alongside the other four. */
+  .led-dot.led-idle {
+    background: var(--text-secondary, #8b949e);
   }
   @keyframes led-pulse {
     0%, 100% {

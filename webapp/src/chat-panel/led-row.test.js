@@ -66,20 +66,22 @@ describe('getLedState', () => {
     ).toBe('red');
   });
 
-  it('no outcome and not streaming → cyan', () => {
-    // Defensive — agentsSpawned populates streaming=true
-    // synchronously, but if a tab somehow exists without
-    // either signal the row should reflect that work is
-    // expected to happen on it.
+  it('no outcome and not streaming → idle', () => {
+    // Nothing has run in this tab yet. It used to read cyan, on the reasoning
+    // that a tab only existed because `agentsSpawned` had created it for a
+    // stream already in flight; `a0cb83b` removed that protocol, and what is
+    // left hitting this branch is Main on a freshly loaded page. Every
+    // finished turn writes an outcome, so "neither" is now only ever "nothing
+    // yet" — which is not running.
     expect(
       getLedState({ streaming: false, lastEditOutcome: null }),
-    ).toBe('cyan');
+    ).toBe('idle');
     expect(
       getLedState({
         streaming: false,
         lastEditOutcome: undefined,
       }),
-    ).toBe('cyan');
+    ).toBe('idle');
   });
 });
 
@@ -98,6 +100,12 @@ describe('formatLedTooltip', () => {
     expect(
       formatLedTooltip('docs-update', '', 'cyan', null),
     ).toBe('docs-update: running');
+  });
+
+  it('idle says so rather than falling through to the failure branch', () => {
+    // Everything unrecognised lands on the red wording, so an unnamed idle
+    // state would report a freshly loaded page's Main tab as "failed".
+    expect(formatLedTooltip('Main', '', 'idle', null)).toBe('Main: idle');
   });
 
   it('green with applied count plural', () => {
@@ -268,7 +276,7 @@ describe('renderLedRow — state classes', () => {
     expect(dots[1].dataset.ledState).toBe('red');
   });
 
-  it('no outcome & not streaming defaults to cyan', async () => {
+  it('no outcome & not streaming draws idle, not a spinner', async () => {
     const p = mountPanel();
     seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
     const tab = p._tabs.get('a0');
@@ -277,7 +285,8 @@ describe('renderLedRow — state classes', () => {
     p.requestUpdate();
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[1].classList.contains('led-cyan')).toBe(true);
+    expect(dots[1].classList.contains('led-idle')).toBe(true);
+    expect(dots[1].classList.contains('led-cyan')).toBe(false);
   });
 
   it('mixed states render independently', async () => {
@@ -401,7 +410,10 @@ describe('renderLedRow — tooltip wiring', () => {
     await settle(p);
     const dot = p.shadowRoot.querySelector('.led-dot');
     expect(dot.dataset.ledTabId).toBe('main');
-    expect(dot.title).toBe('Main: running');
+    // A panel that has just mounted has run nothing. This asserted
+    // "Main: running" for as long as the cyan fallback stood, which is exactly
+    // what a refreshed page reported over an idle engine.
+    expect(dot.title).toBe('Main: idle');
   });
 });
 

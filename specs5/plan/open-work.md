@@ -1,7 +1,8 @@
 # Open Work — Background-Subagent Fix List
 
-**Status:** resumed 2026-08-25. Items 1–5 are done; 6 is not started. This file is the handoff note for
-resuming, and should be deleted when the list is finished.
+**Status:** resumed 2026-08-25. Items 1–5 are done, and 6 is done bar one fault that would not
+reproduce (6c below — worth one check against the live session). This file is the handoff note for
+resuming, and should be deleted once 6c is settled.
 
 The list came out of one live run on the dev backend: a turn that delegated to a background subagent,
 watched from the browser rather than from tests. Everything below is something that run surfaced, in the
@@ -48,13 +49,54 @@ the spec says so), which is a decision of its own rather than part of the collap
 
 ## 6. Post-refresh and boot state
 
-Three separate faults, all about state that does not survive a page load:
+Three separate faults, all about state that does not survive a page load. Two are fixed and verified
+live; the third did not reproduce.
 
-- Subagent tabs are lost on refresh. Re-confirmed on 2026-08-25 by accident: a Vite HMR reload during
-  item 5's verification took the settled turn's subagent row and tab with it, mid-inspection.
-- A stale `Main: running` LED at boot.
-- The `Bypass permissions?` confirm replays on page load, with the mode selector still reading "Ask" —
-  so the dialog asks about a change that is not in effect.
+### 6a. A settled turn's subagents are lost on refresh — **fixed**
+
+The row, its summary and the "View subagents" affordance all vanished from a turn that had shown them a
+moment earlier, because `render_messages` reported an empty `subagents` list for every turn read off
+disk. The belief behind that — "the transcript does not attribute a subagent to the turn that spawned
+it" — turned out to be false. The spawn call is a tool block in the turn (`Agent`, or `Task` in older
+transcripts) carrying `description` and `subagent_type`, and its result names the subagent in prose:
+`agentId: a9f5687c0b6a0904f`. `_note_subagent` in `src/aic_dc/claude_code/history.py` rebuilds a row per
+spawn call from those; `restoreMessage` already passed `subagents` through, so nothing changed in the
+browser. Verified on the dev backend: four restored turns came back with their rows, and a row's button
+opened the subagent's real transcript from disk.
+
+A restored row has no status, usage or summary — those are `Task*` event fields with no home on disk,
+and are left absent rather than defaulted. Spec: `specs5/3-engine/history.md` § *A rendered turn reports
+the subagents it spawned*.
+
+### 6b. A stale `Main: running` LED at boot — **fixed**
+
+`getLedState` fell through to cyan for a tab with no outcome that was not streaming, on the reasoning
+that a tab only existed because `agentsSpawned` had created it for a stream in flight. `a0cb83b` removed
+that protocol, so the branch was only ever reached by Main on a freshly loaded page. Every finished turn
+writes an outcome — `computeTurnOutcome` returns `clean` even for a cancelled turn — so "neither" now
+means only "nothing has run here yet", which is a fifth LED state: grey, `idle`. Verified live: a
+reloaded page reads `Main: idle` and does not pulse. One test had been pinning the bug, asserting a
+freshly mounted panel's tooltip was `Main: running`.
+
+### 6c. The `Bypass permissions?` confirm on page load — **not reproduced**
+
+This did not reproduce on the dev backend. Instrumenting `onPermissionModeSelect` to record every
+`change` it received showed **nothing at all** on the loads where a dialog appeared — the app was not
+raising it. What was: the CDP harness re-surfacing a native `confirm` it had already handled, once per
+navigation after one had been raised. With `window.confirm` stubbed in-page so no native dialog ever
+existed, reloads were clean.
+
+Note that the "selector still reads Ask" half needs no page-load story at all: `onPermissionModeSelect`
+resets the control to the engine's mode *before* drawing the confirmation, so the mismatch is on screen
+the first time too — and on a backend not launched with `--dangerously-skip-permissions` the engine
+refuses the change, so the mode never moves.
+
+Guards went in anyway, since a `change` here authorises a destructive confirmation and a browser
+restoring form state can raise one: `autocomplete="off"` on the control, plus a gesture latch — a
+pointer or key on the `<select>` must precede the `change`, because `isTrusted` cannot separate a
+restored event from a click. **Worth checking against the live session**, where it was originally seen;
+if it still happens there with these in place, the mechanism is something else and this is the place to
+start over.
 
 ## Undecided / watch-list
 
@@ -93,10 +135,22 @@ Frontend DOM notes for driving it: `aic-chat-panel` is at shadow-DOM depth 2 (wa
 recursively), `panel._tabs` is a `Map`, and `panel.messages` is the active tab's view. RPC goes through
 `document.querySelector('aic-app-shell').call['ClaudeCodeService.<method>'](...)`.
 
+Three traps that cost time on 2026-08-25:
+
+- **Send through the input box, not `chat_streaming` directly.** The panel routes chunks by request id,
+  so a turn it did not start lands in no tab: the transcript stays empty and no subagent row appears.
+  Set `.input-textarea`'s value, fire `input`, then a `keydown` of Enter.
+- **A native `confirm` handled through CDP re-appears on the next navigation.** It looks exactly like
+  the dialog replaying on page load, and it is what 6c chased. Stub `window.confirm` in the page when
+  testing anything that raises one, and trust in-page instrumentation over what the harness reports.
+- **Editing frontend source while the page is open triggers a Vite reload**, which drops live subagent
+  tabs mid-inspection. Backend edits need a full restart — Python is not hot-reloaded, so a
+  `history.py` change is invisible until you stop and relaunch.
+
 ## Test baselines
 
-- **Python:** `pytest tests/ -q` — **3343 passed**, nothing failing or skipped, measured with item 5
-  applied.
+- **Python:** `pytest tests/ -q` — **3351 passed**, nothing failing or skipped, measured with items 5
+  and 6 applied.
 - **Frontend:** `npx vitest run src/` in `webapp/` reports **63 failures that predate this list**, all
   in `deriveAgentTabLabel`, `parseAgentTabId` and the chat-panel tab suites — leftovers from `a0cb83b`
   removing the agent-spawn protocol. Measure a baseline with `git stash` before believing a new failure

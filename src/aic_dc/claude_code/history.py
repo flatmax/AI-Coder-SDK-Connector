@@ -989,6 +989,10 @@ class _Turn:
         self._tool_calls = 0
         self._files: list[str] = []
         self._text: list[str] = []
+        # tool_use_id → the subagent row that spawn call stands for. Keyed by
+        # the call rather than by `agent_id`, because the id arrives later,
+        # in the call's result.
+        self._subagents: dict[str, dict[str, Any]] = {}
 
     # -- accumulation ---------------------------------------------------
 
@@ -1056,6 +1060,9 @@ class _Turn:
             tool_input = {}
         self._tool_calls += 1
 
+        if _is_subagent_spawn(name):
+            self._note_subagent(tool_use_id, tool_input)
+
         if _is_todo_write(name):
             # One live plan per turn, not fifteen snapshots. The superseded
             # cards stay in the list because dropping them would renumber
@@ -1098,6 +1105,42 @@ class _Turn:
         if isinstance(timestamp, str):
             self._started[tool_use_id] = timestamp
 
+    def _note_subagent(self, tool_use_id: str, tool_input: dict[str, Any]) -> None:
+        """Open a subagent row for one spawn call.
+
+        A turn that delegated used to come back from disk with no evidence
+        that it had: ``freeze`` reported an empty ``subagents`` list, so a
+        refreshed page lost the row, the summary and — because "View
+        subagents" counts that list — every way into the transcripts the
+        subagents wrote, while the same turn still showed them before the
+        reload. The transcript can answer this after all. The spawn call is
+        right there in the turn, and it carries what a row is mostly made of.
+
+        What the live path has and this does not: status, the last tool, token
+        usage, and the subagent's closing summary. Those are reported by
+        ``Task*`` messages, which are events rather than transcript entries,
+        and nothing on disk holds them. They are left out rather than
+        defaulted, the same rule the rest of this class follows — a row
+        claiming ``completed`` on no evidence is the failure worth avoiding,
+        and a subagent that was killed would wear it.
+
+        ``terminal`` is the one field asserted without a transcript to read it
+        from, and it is safe because it is a statement about the *turn*: this
+        one ended, whatever its subagents were doing at the time, so no row
+        restored from it may spin.
+        """
+        description = tool_input.get("description")
+        subagent_type = tool_input.get("subagent_type")
+        self._subagents[tool_use_id] = {
+            "key": tool_use_id,
+            "task_id": None,
+            "tool_use_id": tool_use_id,
+            "agent_id": None,
+            "description": description if isinstance(description, str) else "",
+            "subagent_type": subagent_type if isinstance(subagent_type, str) else None,
+            "terminal": True,
+        }
+
     def absorb_results(self, body: dict[str, Any], entry: dict[str, Any]) -> None:
         """Attach a tool-reply entry's results to the calls they answer."""
         self._note_time(entry)
@@ -1121,6 +1164,16 @@ class _Turn:
         preview, truncated = truncate_tool_result(text)
         is_error = bool(block.get("is_error"))
         name = (rendered.get("tool") or {}).get("name") or ""
+        row = self._subagents.get(tool_use_id)
+        if row is not None and row.get("agent_id") is None:
+            # A backgrounded spawn answers with the agent's id; a synchronous
+            # one answers with the subagent's output and names no id at all.
+            # The row is kept either way — it is still the evidence the turn
+            # delegated — and one without an id renders without the button
+            # into a transcript we could not address.
+            match = _AGENT_ID_IN_RESULT.search(text)
+            if match:
+                row["agent_id"] = match.group(1)
         files = [] if is_error else files_written_by(name, rendered["tool"]["input"])
         for path in files:
             if path not in self._files:
@@ -1215,7 +1268,7 @@ class _Turn:
             "role": "assistant",
             "content": "".join(self._text),
             "blocks": self.blocks,
-            "subagents": [],
+            "subagents": list(self._subagents.values()),
             "files": list(self._files),
             "turn": summary,
             # Absent from the transcript. Null draws no badge at all, which
@@ -1241,6 +1294,26 @@ def _text_block(block_id: str, kind: str, content: str) -> dict[str, Any]:
 
 def _is_todo_write(name: str) -> bool:
     return name == "TodoWrite" or name.endswith("__TodoWrite")
+
+
+# The tool that spawns a subagent. Two names because the CLI renamed it:
+# transcripts written before the rename say `Task`, current ones say `Agent`,
+# and both are on disk in sessions users still resume.
+_SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
+
+
+def _is_subagent_spawn(name: str) -> bool:
+    return name in _SUBAGENT_TOOLS or any(
+        name.endswith(f"__{tool}") for tool in _SUBAGENT_TOOLS
+    )
+
+
+# `agentId: a9f5687c0b6a0904f` inside the spawn call's result. The CLI writes
+# it as prose wrapped in a warning not to quote it to the user, so there is no
+# structured field to read — this is the only place a turn's transcript names
+# the subagent it started, and without it a restored row has no way into the
+# transcript the subagent wrote.
+_AGENT_ID_IN_RESULT = re.compile(r"\bagentId:\s*([A-Za-z0-9_-]+)")
 
 
 # ---------------------------------------------------------------------------

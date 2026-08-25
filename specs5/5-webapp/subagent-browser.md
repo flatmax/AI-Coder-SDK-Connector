@@ -92,9 +92,24 @@ A refresh rebuilds the chat panel without disturbing the engine. Rehydration is 
 - A tab read from **disk** fetches with `get_subagent_transcript(agent_id)` when the user opens it, not eagerly. A turn that fanned out to twelve subagents should not cost twelve transcript reads on reconnect.
 - Live status resumes from subsequent `subagentEvent` messages. A subagent that reached a terminal status while the browser was away shows as terminal on reconnect, because status comes from the snapshot rather than from having watched the event go by.
 
-What is lost across refresh: per-tab scroll position, and the in-flight tail of any subagent whose
-events were emitted while the socket was down. The transcript on disk is authoritative and the tab
-reads from it, so the loss is cosmetic rather than a gap in the record.
+A **settled** turn is rebuilt from the transcript instead, because `active_streams` only reports the
+turn in flight. The turn's own spawn calls are the source: an `Agent` (older transcripts: `Task`) tool
+block carries the description and the `subagent_type`, and its result names the `agentId`. The engine
+rebuilds a row per spawn call from those and reports them as the turn's `subagents`, so a refreshed
+page keeps the row and the button into the transcript on every delegated turn it can still see — not
+only the ones it watched happen. Without it, a turn that had just shown a row, a summary and a "View
+subagents" affordance came back from a reload showing none of the three, and the transcripts were
+reachable only through the history browser.
+
+A restored row is missing the live-only half — status, last tool, usage and the subagent's closing
+summary. Those arrive as `Task*` events and nothing on disk holds them, so they are left absent rather
+than defaulted: a row claiming `completed` on no evidence would wear it over a subagent that was
+killed. `terminal` is asserted, because it is a statement about the turn — that turn ended, so nothing
+restored from it may spin.
+
+What is lost across refresh: per-tab scroll position, the live-only fields above, and the in-flight tail
+of any subagent whose events were emitted while the socket was down. The transcript on disk is
+authoritative and the tab reads from it, so the loss is cosmetic rather than a gap in the record.
 
 There is no `list_live_agents()` and no `get_agent_history()`. Both read a registry that does not exist.
 
@@ -114,6 +129,13 @@ Each LED has four states:
 - **Solid green** — terminal status `completed`.
 - **Solid red** — terminal status `failed`, or the parent turn ended in an error while this subagent was live.
 - **Solid amber** — terminal status `stopped` / `killed` (the user stopped it), or *status unknown* at turn end.
+- **Grey** — idle: nothing has run in this tab yet. In practice this is Main on a freshly loaded page, and it is the only one of the five that is not an outcome.
+
+Grey exists because the fallback used to be flashing cyan, on the reasoning that a tab only existed
+because a spawn had just created it for a stream already in flight. That protocol is gone, so the branch
+is now reached by a tab that has simply never streamed — and every finished turn writes an outcome, so
+"no outcome and not streaming" means only "nothing yet". Reporting that as *running* made every refresh
+open on a pulsing "Main: running" over an idle engine.
 
 Amber is new, and it exists because a stopped subagent is neither a success nor a failure and rendering
 it as either is a lie. The old spec's green rule — "every `EditResult` in the result reports success" —
