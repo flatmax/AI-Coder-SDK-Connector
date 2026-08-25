@@ -10,24 +10,28 @@
 //
 // This module is purely presentational. State writes
 // live in ``streaming.js`` (`onStreamComplete` and
-// `onStreamChunk`) and the per-agent-mode store in
-// ``tabs.js`` (`spawnAgentTabs`). The LED row reads
-// that state directly off `panel._tabs` and
-// `panel._tabModes` on each render.
+// `onStreamChunk`); the LED row reads that state
+// directly off `panel._tabs` on each render.
+//
+// A per-tab *mode* used to be read here too, from
+// `panel._tabModes`, and appended to every tooltip as
+// `(code)` / `(doc+xref)`. Those were the native
+// engine's per-agent modes, written by the spawn
+// protocol `a0cb83b` removed; nothing has filled the
+// map since, so the segment could never render.
 //
 // Three exports:
 //
 //   - `getLedState(tab)` — pure function returning
-//     'cyan' | 'green' | 'red' | 'amber'. Streaming wins
+//     'cyan' | 'green' | 'red' | 'amber' | 'idle'. Streaming wins
 //     over completion state (a tab that just started a new
 //     stream after a previous failure should flash
 //     cyan, not stay red). Amber belongs to subagent
 //     tabs alone — a stopped subagent, or one whose
 //     outcome the turn never reported. Pinned in tests.
 //
-//   - `formatLedTooltip(agentId, mode, state, outcome)`
-//     — pure tooltip-string builder, three forms per
-//     spec.
+//   - `formatLedTooltip(agentId, state, outcome)` —
+//     pure tooltip-string builder, one form per state.
 //
 //   - `renderLedRow(panel)` — Lit template returning
 //     the row, or an empty fragment when no agent tabs
@@ -117,25 +121,25 @@ export function getLedState(tab) {
  *
  * Four forms based on state:
  *
- *   cyan   → `<id> (<mode>): running`
- *   green  → `<id> (<mode>): completed (N edits applied)`
- *   red    → `<id> (<mode>): <diagnostic>`
- *   idle   → `<id> (<mode>): idle`
+ *   cyan   → `<id>: running`
+ *   green  → `<id>: completed (N edits applied)`
+ *   red    → `<id>: <diagnostic>`
+ *   idle   → `<id>: idle`
  *
  * `idle` is named rather than left to fall through to the
  * red branch, which would have reported a freshly loaded
  * page's Main tab as "failed".
  *
- * Mode segment omitted when mode is missing — older
- * backends not yet reporting mode in `agentsSpawned`
- * still produce a useful tooltip, just without the
- * mode hint.
+ * A `mode` argument sat between the id and the state, and
+ * appended `(code)` / `(doc+xref)` to the prefix. It came
+ * from the spawn protocol's per-agent modes and had no
+ * source left after `a0cb83b`, so every caller passed the
+ * empty string and the segment never drew.
  *
  * Pure function for testability.
  */
-export function formatLedTooltip(agentId, mode, state, outcome) {
-  const modeSegment = mode ? ` (${mode})` : '';
-  const prefix = `${agentId}${modeSegment}`;
+export function formatLedTooltip(agentId, state, outcome) {
+  const prefix = `${agentId}`;
   if (state === 'cyan') {
     return `${prefix}: running`;
   }
@@ -188,12 +192,6 @@ export function renderLedRow(panel) {
         const tab = panel._tabs.get(tabId);
         if (!tab) return html``;
         const isMain = tabId === 'main';
-        // Main tab has no per-tab mode entry (mode for
-        // main is reflected in the action-bar toggle);
-        // agents carry an explicit mode in `_tabModes`.
-        const mode = isMain
-          ? ''
-          : panel._tabModes.get(tabId) || '';
         const state = getLedState(tab);
         // Tooltip uses a friendlier label for main
         // ("Main") instead of the raw tab id, since
@@ -205,7 +203,7 @@ export function renderLedRow(panel) {
         // outcome. An SDK agent id in a tooltip tells the reader nothing.
         const tooltip = tab.subagent
           ? subagentLedTooltip(tab.subagent, state)
-          : formatLedTooltip(label, mode, state, tab.lastEditOutcome);
+          : formatLedTooltip(label, state, tab.lastEditOutcome);
         const active = tabId === panel._activeTabId;
         const classes = [
           'led-dot',

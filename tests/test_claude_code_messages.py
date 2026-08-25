@@ -797,7 +797,49 @@ class TestAssistantMessages:
                 message_id="msg_1",
             )
         )
+        # The model's own trailing space already separates these, so they
+        # join as written — no invented paragraph break inside one message.
         assert translator.response_text() == "one two"
+
+    def test_two_runs_that_would_otherwise_glue_get_a_blank_line(
+        self, translator
+    ):
+        """An agentic turn speaks once before each tool call, and those blocks
+        carry no trailing whitespace to join on. Concatenating them produced
+        `"I'll read the file.SPAWNED"`, which is what the copy button copies
+        and the 🔊 button reads."""
+        translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="I'll read the file.")],
+                model="claude-opus-5",
+                message_id="msg_1",
+            )
+        )
+        translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="SPAWNED")],
+                model="claude-opus-5",
+                message_id="msg_2",
+            )
+        )
+        assert translator.response_text() == "I'll read the file.\n\nSPAWNED"
+
+    def test_an_empty_text_block_does_not_add_a_separator(self, translator):
+        translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="only this")],
+                model="claude-opus-5",
+                message_id="msg_1",
+            )
+        )
+        translator.translate(
+            AssistantMessage(
+                content=[TextBlock(text="")],
+                model="claude-opus-5",
+                message_id="msg_2",
+            )
+        )
+        assert translator.response_text() == "only this"
 
 
 # ---------------------------------------------------------------------------

@@ -94,22 +94,12 @@ export function seedLabeledTab(panel, tabId, label) {
   }
 }
 
-/**
- * Same as `seedLabeledTab` but also stores a mode string so
- * the tab strip / overflow menu / LED tooltip render the
- * full ``<label> (<mode>)`` form. Mode strings are one of
- * ``code``, ``doc``, ``code+xref``, ``doc+xref`` (matching
- * the backend's resolved values).
- */
-export function seedLabeledTabWithMode(panel, tabId, label, mode) {
-  panel._tabs.set(tabId, panel._makeTabState());
-  if (typeof label === 'string' && label) {
-    panel._tabLabels.set(tabId, label);
-  }
-  if (typeof mode === 'string' && mode) {
-    panel._tabModes.set(tabId, mode);
-  }
-}
+// `seedLabeledTabWithMode` stood here, writing `panel._tabModes` so the tab
+// strip and LED tooltips would render the `<label> (<mode>)` form. Production
+// stopped filling that map when `a0cb83b` removed the spawn protocol, so this
+// helper was the only thing keeping the mode branches reachable — and the
+// tests that used it were checking a shape no session could produce. Both the
+// map and the helper are gone; `seedLabeledTab` above is the whole story.
 
 afterEach(() => {
   while (_mounted.length) {

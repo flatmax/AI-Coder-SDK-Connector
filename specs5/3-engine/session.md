@@ -255,7 +255,10 @@ coalescing is unchanged — the browser still batches to one render per animatio
   the browser has already settled (§ *A result message ends a turn, not the run*).
 - `postResponseComplete` fires after post-turn housekeeping (transcript mirroring flushed,
   re-indexing of touched files settled, context-usage refetched). Consumers that need consistent
-  derived state — the Context tab, the file tree — wait for it.
+  derived state — the Context tab, the file tree — wait for it. It fires a second time when a turn's
+  background work finishes, because that housekeeping is exactly as stale then as it was at the first
+  result; consumers must therefore be idempotent, and are (the browser re-dispatches it as a window
+  event and the listeners refetch).
 
 The split exists for the same reason it did before: the chat panel wants immediacy, the derived
 views want consistency. Only the housekeeping behind the second event has changed.
@@ -388,9 +391,12 @@ whose CLI advertises nothing is not the same condition.
 - Only one user-initiated turn is in flight at a time; engine-internal subagent activity is not
   gated by that guard.
 - Turn framing never contains file content — only paths, ranges, and mode facts.
-- `streamComplete` always precedes `postResponseComplete` for the same turn. Housekeeping runs once,
-  after the turn's *first* result: a continuation arriving later revises the chat panel's turn but does
-  not refresh the derived views, which pick the change up on the next turn.
+- `streamComplete` always precedes `postResponseComplete` for the same turn. Housekeeping runs after the
+  turn's first result, and **again when background work ends** — the drain flags its last continuation
+  `background_finished`, and the service repeats the housekeeping on it. So a turn with no background
+  work fires one `postResponseComplete`, and one that outlived itself fires two. Before the second, the
+  derived views kept describing the session as it was before the background work and only picked the
+  change up on the next turn.
 - No component outside the message pump references an SDK message type.
 - AIC⚡DC never constructs a conversation history to hand to the model; resumption is always via
   `resume` or `fork_session`.

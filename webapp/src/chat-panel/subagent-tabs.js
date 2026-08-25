@@ -501,7 +501,6 @@ export function clearSubagentTabs(panel) {
   for (const { tabId } of open) {
     panel._tabs.delete(tabId);
     panel._tabLabels.delete(tabId);
-    panel._tabModes.delete(tabId);
   }
   return true;
 }

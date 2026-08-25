@@ -1162,6 +1162,50 @@ class TestEventDispatch:
         assert payload["context_usage"] == {"total_tokens": 1000}
         assert payload["disk_warning"] is None
 
+    async def test_background_work_ending_runs_the_housekeeping_again(
+        self, service, events
+    ):
+        """The first run happens when `run_turn` returns, which is the turn's
+        first result — but a background subagent outlives that, and the drain
+        follows it. Without a second run the Context tab and the file tree
+        described the session as it was before the background work until the
+        next turn moved them on."""
+        service.session.turn_events = [
+            Event("streamComplete", {"response": "spawned"}),
+            # The drain's own continuations, as `_drain_background` emits
+            # them: one per result, only the last ending the run.
+            Event(
+                "streamComplete",
+                {"response": "still going", "continuation": True,
+                 "background_finished": False},
+            ),
+            Event(
+                "streamComplete",
+                {"response": "all done", "continuation": True,
+                 "background_finished": True},
+            ),
+        ]
+        await send(service)
+        # Twice: once for the turn, once for the run.
+        assert events.names().count("postResponseComplete") == 2
+
+    async def test_a_continuation_that_is_not_the_last_does_not_repeat_it(
+        self, service, events
+    ):
+        """A turn that fans out produces a continuation per result, and
+        refetching the context on each would cost a round trip apiece for a
+        run that is not over."""
+        service.session.turn_events = [
+            Event("streamComplete", {"response": "spawned"}),
+            Event(
+                "streamComplete",
+                {"response": "one down", "continuation": True,
+                 "background_finished": False},
+            ),
+        ]
+        await send(service)
+        assert events.names().count("postResponseComplete") == 1
+
     async def test_post_response_complete_fires_even_when_the_turn_fails(
         self, service, events
     ):

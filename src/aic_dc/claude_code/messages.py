@@ -335,8 +335,35 @@ class TurnTranslator:
         return [dict(row) for row in self._subagents.values()]
 
     def response_text(self) -> str:
-        """Assistant text for this turn, blocks concatenated in order."""
-        return "".join(b.content for b in self._blocks.values() if b.kind == "text")
+        """Assistant text for this turn, its text blocks in order.
+
+        Runs are separated by a blank line where the text does not already
+        separate itself. A plain ``"".join`` produced
+        ``"I'll read the file.SPAWNED"`` — an agentic turn speaks once before
+        each tool call, and those are separate blocks with no trailing
+        whitespace to join them on. That string is not what the transcript
+        renders (the browser draws the blocks), but it *is* what the result's
+        ``response`` field carries, which becomes the settled message's
+        ``content`` — the text the copy button copies, the 🔊 button reads and
+        search matches. So the join is a user-visible decision, not a
+        formatting detail.
+
+        The separator is conditional rather than unconditional because two
+        text blocks inside a *single* assistant message are usually one
+        sentence split in two, and the model's own trailing space is the
+        evidence: joining those with a blank line would invent a paragraph
+        break that was never written. Inserting only at a boundary with no
+        whitespace on either side gets both cases right without needing to
+        know which message each block came from.
+        """
+        out: list[str] = []
+        for block in self._blocks.values():
+            if block.kind != "text" or not block.content:
+                continue
+            if out and not out[-1][-1:].isspace() and not block.content[:1].isspace():
+                out.append("\n\n")
+            out.append(block.content)
+        return "".join(out)
 
     def turn_usage(self) -> dict[str, dict[str, int]]:
         """Token counters for this turn so far, per model.

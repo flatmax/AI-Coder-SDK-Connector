@@ -842,12 +842,26 @@ class EngineSession:
                     # a turn the user has read: every field is cumulative over
                     # the request, so this result *supersedes* the last one
                     # rather than adding to it.
+                    #
+                    # `background_finished` marks the *last* of these. The
+                    # service's post-turn housekeeping runs when `run_turn`
+                    # returns, which is at the first result — this drain is a
+                    # detached task that outlives it — so the Context tab and
+                    # the file tree were left describing the session as it was
+                    # before the background work, until the next turn moved
+                    # them on. The flag is what lets the service run that
+                    # housekeeping a second time, at the point the run really
+                    # ends.
                     finished = not active.tasks_in_flight
                     await self._emit(
                         emit,
                         Event(
                             "streamComplete",
-                            {**event.payload, "continuation": True},
+                            {
+                                **event.payload,
+                                "continuation": True,
+                                "background_finished": finished,
+                            },
                             turn_scoped=event.turn_scoped,
                         ),
                     )

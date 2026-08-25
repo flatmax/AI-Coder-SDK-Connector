@@ -10,7 +10,6 @@ import {
   publishFakeRpc,
   pushEvent,
   seedLabeledTab,
-  seedLabeledTabWithMode,
   seedTab,
   settle,
 } from './test-helpers.js';
@@ -844,48 +843,17 @@ describe('ChatPanel tab tooltip enrichment', () => {
     );
   });
 
-  it('agent tab with mode includes mode in tooltip', async () => {
+  it('overflow menu items carry the label as their tooltip', async () => {
+    // Four tests stood here pinning a `(code)` / `(doc+xref)` mode segment
+    // on tab and overflow tooltips, seeded through a helper that wrote
+    // `panel._tabModes` by hand. Production stopped filling that map when
+    // `a0cb83b` removed the spawn protocol, so the segment could not appear
+    // in a real session and the tests were describing a shape no session
+    // could produce. The map is gone; what survives is the tooltip itself,
+    // and the overflow menu is the path the others did not cover.
     const p = mountPanel();
     await settle(p);
-    seedLabeledTabWithMode(
-      p, 'agent-0', 'Agent 00: refactor', 'code',
-    );
-    p.requestUpdate();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"]',
-    );
-    expect(btn.getAttribute('title')).toBe(
-      'Agent 00: refactor (code)',
-    );
-  });
-
-  it('an archived +xref mode string renders verbatim', async () => {
-    // The cross-reference axis was retired in phase 4, so no
-    // client can produce this any more — but a rehydrated tab
-    // from an older session still carries it, and a tooltip
-    // that swallowed it would leave the user guessing.
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTabWithMode(
-      p, 'agent-0', 'Agent 00: span', 'doc+xref',
-    );
-    p.requestUpdate();
-    await settle(p);
-    const btn = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="agent-0"]',
-    );
-    expect(btn.getAttribute('title')).toBe(
-      'Agent 00: span (doc+xref)',
-    );
-  });
-
-  it('overflow menu items include mode in tooltip', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTabWithMode(
-      p, 'agent-0', 'Agent 00: refactor', 'code+xref',
-    );
+    seedLabeledTab(p, 'agent-0', 'Agent 00: refactor');
     p.requestUpdate();
     await settle(p);
     p.shadowRoot.querySelector('.tab-strip-overflow').click();
@@ -893,39 +861,7 @@ describe('ChatPanel tab tooltip enrichment', () => {
     const item = p.shadowRoot.querySelector(
       '.tab-strip-overflow-item[data-tab-id="agent-0"]',
     );
-    expect(item.getAttribute('title')).toBe(
-      'Agent 00: refactor (code+xref)',
-    );
-  });
-
-  it('mixed-mode tabs each show their own mode', async () => {
-    const p = mountPanel();
-    await settle(p);
-    seedLabeledTabWithMode(
-      p, 'a', 'Agent 00: a', 'code',
-    );
-    seedLabeledTabWithMode(
-      p, 'b', 'Agent 01: b', 'doc',
-    );
-    seedLabeledTabWithMode(
-      p, 'c', 'Agent 02: c', 'code+xref',
-    );
-    p.requestUpdate();
-    await settle(p);
-    const a = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="a"]',
-    );
-    const b = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="b"]',
-    );
-    const c = p.shadowRoot.querySelector(
-      '.tab-strip-tab[data-tab-id="c"]',
-    );
-    expect(a.getAttribute('title')).toBe('Agent 00: a (code)');
-    expect(b.getAttribute('title')).toBe('Agent 01: b (doc)');
-    expect(c.getAttribute('title')).toBe(
-      'Agent 02: c (code+xref)',
-    );
+    expect(item.getAttribute('title')).toBe('Agent 00: refactor');
   });
 });
 

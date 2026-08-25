@@ -188,17 +188,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._tabLabels = new Map();
     this._tabLabels.set('main', 'Main');
 
-    // Per-agent mode strings — one of 'code', 'doc',
-    // 'code+xref', 'doc+xref'. Populated by
-    // spawnAgentTabs from the agentsSpawned payload's
-    // resolved mode field. Stable for the agent's
-    // lifetime (mode is fixed at spawn time per spec
-    // ``specs4/7-future/parallel-agents.md``).
-    // Surfaced in the tab strip tooltip and the LED
-    // row's hover state. Main tab has no entry — the
-    // orchestrator's mode is shown via the action-bar
-    // mode toggle, not via tooltip.
-    this._tabModes = new Map();
+    // `_tabModes` stood here: per-agent mode strings — 'code', 'doc',
+    // 'code+xref', 'doc+xref' — filled by `spawnAgentTabs` from the
+    // `agentsSpawned` payload and appended to the tab-strip tooltip and the
+    // LED hover text. `a0cb83b` removed the spawn protocol and with it the
+    // only writer, so the map sat empty for the life of every session while
+    // three call sites went on reading it. The tabs that remain have no mode
+    // to carry: a subagent's kind is its `subagent_type`, and the session's
+    // permission posture is the action bar's, not a per-tab fact.
 
     // Overflow menu open state. Reactive (declared in
     // properties.js) rather than per-tab because it's a

@@ -1650,6 +1650,32 @@ class TestBackgroundDrain:
         # settled message the right move rather than appending to it.
         assert "The background agent finished." in footers[1]["response"]
 
+    async def test_only_the_last_continuation_says_the_run_has_ended(self, engine):
+        """The service repeats its post-turn housekeeping on this flag, and a
+        turn can produce several continuations — one per result while tasks
+        are still in flight. Flagging every one would refetch the context and
+        the file tree on each, for a run that is not over."""
+        events, first = await self.drained(
+            engine,
+            [
+                task_started(task_id="task-1"),
+                task_started(task_id="task-2"),
+                result_message(),
+                # One task done, one still going: the run continues.
+                task_notification(task_id="task-1"),
+                result_message(),
+                task_notification(task_id="task-2"),
+                result_message(),
+            ],
+        )
+        footers = [e.payload for e in events if e.name == "streamComplete"]
+        # The first result is the turn's own; it is not a continuation and
+        # carries no flag, because `_run_turn` does the housekeeping for it.
+        assert first.get("background_finished") is None
+        flags = [f.get("background_finished") for f in footers[1:]]
+        assert flags[-1] is True
+        assert all(flag is False for flag in flags[:-1])
+
     async def test_every_result_of_one_turn_reports_that_turns_whole_cost(self, engine):
         """The footer the browser ends up rendering is built from the last
         result it receives, and a background subagent spends most of its

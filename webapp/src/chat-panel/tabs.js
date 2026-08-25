@@ -305,15 +305,14 @@ export function renderTabStrip(panel) {
           // read off disk. Both are read-only; only this one can still be
           // stopped, and only this one is a stream rather than a file.
           const subagent = tab ? tab.subagent : null;
-          // Tooltip carries the agent's mode so users
-          // can disambiguate at a glance — two agents
-          // tasked with similar prose differ only in
-          // their mode. Main tab uses its
-          // bare label (mode is reflected in the
-          // action-bar toggle). A subagent transcript
-          // appends a hint that it is read-only.
-          const mode = panel._tabModes?.get(tabId);
-          const baseTooltip = mode ? `${label} (${mode})` : label;
+          // The tooltip is the label, plus a hint on a subagent
+          // transcript that it is read-only. It used to carry the agent's
+          // *mode* as well — `(code)`, `(doc+xref)` — so that two agents
+          // tasked with similar prose could be told apart. Those were the
+          // spawn protocol's per-agent modes; `a0cb83b` took the writer
+          // with the protocol, so `_tabModes` was permanently empty and the
+          // segment never drew.
+          const baseTooltip = label;
           let tooltip = baseTooltip;
           if (subagent) {
             // Not built from the label: this label is an ordinal and a keyword
@@ -480,8 +479,7 @@ export function renderOverflowMenu(panel, tabs) {
         const active = tabId === panel._activeTabId;
         const tab = panel._tabs.get(tabId);
         const streaming = !!(tab && tab.streaming);
-        const mode = panel._tabModes?.get(tabId);
-        const tooltip = mode ? `${label} (${mode})` : label;
+        const tooltip = label;
         return html`
           <button
             class="tab-strip-overflow-item ${active ? 'active' : ''}"
@@ -630,7 +628,6 @@ export function clearHistoricalTabs(panel) {
   for (const tabId of historical) {
     panel._tabs.delete(tabId);
     panel._tabLabels.delete(tabId);
-    panel._tabModes.delete(tabId);
   }
 }
 

@@ -1,9 +1,9 @@
 # Open Work — Background-Subagent Fix List
 
-**Status:** resumed 2026-08-25. Items 1–6 are done bar one fault that would not reproduce (6c — worth
-one check against the live session), the frontend test baseline is green again, and `spare_subagents`
-has finally been exercised live. This file is the handoff note for resuming, and should be deleted once
-6c is settled.
+**Status:** resumed 2026-08-25. **One thing is left: 6c**, a fault that would not reproduce here and
+needs one check against the live session. Everything else on this list is done — items 1–6, the
+leftovers each turned up, both test baselines green, and `spare_subagents` exercised live at last.
+Delete this file once 6c is settled.
 
 The list came out of one live run on the dev backend: a turn that delegated to a background subagent,
 watched from the browser rather than from tests. Everything below is something that run surfaced, in the
@@ -137,16 +137,26 @@ result arrives; the thing that protects a background subagent's dialog the rest 
 `cancel_for_agent`, when the subagent reaches a terminal status. Making main block on its own permission
 is what holds the turn open long enough to engineer the narrow case, and is the recipe to reuse.
 
-## Noticed, deliberately not acted on
+## Previously "noticed, not acted on" — two of the three are now fixed
 
-- **`postResponseComplete` fires only after a turn's *first* result**, so the Context tab does not
-  refresh after background work finishes; it picks the change up on the next turn. Recorded as an
-  invariant caveat in `specs5/3-engine/session.md`.
-- **`response_text()` joins blocks with no separator** (`"I'll read the file.SPAWNED"`). Harmless
-  because the UI renders blocks rather than that string, but it is a trap for the next caller.
-- **The notification system-event card still carries the message toolbar** (📋 ↩ 🔊), consistent with
-  the other `system_event` cards (commit, reset, permission-mode) and unlike the compaction divider,
-  which has a dedicated renderer and no toolbar.
+- **`postResponseComplete` fired only after a turn's *first* result — fixed.** The drain is a detached
+  task that outlives `run_turn`, so the housekeeping ran while the background work was still going and
+  the Context tab and file tree stayed stale until the next turn. `_drain_background` now flags its last
+  continuation `background_finished`, and the service repeats the housekeeping on it — keyed on that
+  rather than on `continuation`, because a turn that fans out produces one continuation per result and
+  only one of them ends the run. Verified live: a delegated turn fired two `postResponseComplete` for
+  the same request id, 5.7s apart, the second as the drain ended.
+- **`response_text()` joined blocks with no separator — fixed.** The old note called it harmless
+  "because the UI renders blocks rather than that string", and that turned out to be only half true:
+  the string is the result's `response`, which becomes the settled message's `content` — what the copy
+  button copies, the 🔊 button reads, and search matches. It now inserts a blank line at a boundary
+  where neither side has whitespace, which separates `"I'll read the file."` from `"SPAWNED"` without
+  inventing a paragraph break between two blocks of one message that the model's own trailing space
+  already joined.
+- **The notification system-event card still carries the message toolbar** (📋 ↩ 🔊) — left alone.
+  Consistent with the other `system_event` cards (commit, reset, permission-mode) and unlike the
+  compaction divider, which has a dedicated renderer and no toolbar. This one is a deliberate
+  consistency choice, not an oversight.
 
 ## Resuming the dev backend
 
@@ -182,8 +192,8 @@ Three traps that cost time on 2026-08-25:
 **Both suites are green.** A new failure is now yours, and no longer has to be diffed against a list of
 expected ones.
 
-- **Python:** `pytest tests/ -q` — **3353 passed**, nothing failing or skipped.
-- **Frontend:** `npx vitest run src/` in `webapp/` — **3974 passed across 99 files**, none failing.
+- **Python:** `pytest tests/ -q` — **3358 passed**, nothing failing or skipped.
+- **Frontend:** `npx vitest run src/` in `webapp/` — **3968 passed across 99 files**, none failing.
 
 The frontend was carrying **63 failures predating this list**, all left by `a0cb83b` removing the
 agent-spawn protocol. Cleared on 2026-08-25, by deletion where the subject was gone and by rewriting
@@ -202,8 +212,9 @@ where the behaviour survived:
   contradicting the test above it. It now pins that a well-formed payload spawns nothing, beside the
   malformed case — "spawns nothing" only means something if a valid payload also does.
 
-**Found while clearing them: `panel._tabModes` has no writer.** It is read by the tab chips and the LED
-tooltip and is filled only by `test-helpers.js`, so in production it is permanently empty and the mode
-segment those two render can never appear. Retiring the map (and the `mode` parameter threaded through
-`renderLedRow` and `formatLedTooltip`) is a small, separate cleanup — not done here because it is a
-production change and clearing the baseline was meant to be a test-only one.
+**Found while clearing them, and since fixed: `panel._tabModes` had no writer.** It was read by the tab
+chips and the LED tooltip but filled only by `test-helpers.js`, so in production it was permanently
+empty and the `(code)` / `(doc+xref)` segment those two render could never appear — dead code held up
+by its own test helper. The map is gone, along with `seedLabeledTabWithMode` and the `mode` parameter
+that was threaded through `renderLedRow` and `formatLedTooltip`. The tests that existed solely to pin
+the parenthesised form went with it; the tooltip cases that describe reachable behaviour stayed.

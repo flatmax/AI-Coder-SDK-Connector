@@ -3,9 +3,8 @@
 // `getLedState` and `formatLedTooltip` are pure
 // functions and tested in isolation. `renderLedRow`
 // is exercised through a mounted ChatPanel because
-// it depends on `panel._tabs`, `panel._tabModes`,
-// and `panel._activeTabId` — wiring those up by
-// hand re-implements the panel.
+// it depends on `panel._tabs` and `panel._activeTabId`
+// — wiring those up by hand re-implements the panel.
 
 import { describe, expect, it } from 'vitest';
 
@@ -16,7 +15,7 @@ import {
 } from './led-row.js';
 import {
   mountPanel,
-  seedLabeledTabWithMode,
+  seedLabeledTab,
   settle,
 } from './test-helpers.js';
 
@@ -90,91 +89,78 @@ describe('getLedState', () => {
 // ---------------------------------------------------------------
 
 describe('formatLedTooltip', () => {
-  it('cyan with mode', () => {
+  // A `mode` argument sat between the id and the state, appending `(code)` /
+  // `(doc+xref)`. It came from the spawn protocol's per-agent modes, whose
+  // only writer `a0cb83b` removed — so every caller passed the empty string
+  // and the segment never drew. The cases that existed solely to pin the
+  // parenthesised form went with the argument.
+  it('cyan reads as running', () => {
     expect(
-      formatLedTooltip('frontend-trivial', 'code', 'cyan', null),
-    ).toBe('frontend-trivial (code): running');
-  });
-
-  it('cyan without mode omits parens', () => {
-    expect(
-      formatLedTooltip('docs-update', '', 'cyan', null),
-    ).toBe('docs-update: running');
+      formatLedTooltip('frontend-trivial', 'cyan', null),
+    ).toBe('frontend-trivial: running');
   });
 
   it('idle says so rather than falling through to the failure branch', () => {
     // Everything unrecognised lands on the red wording, so an unnamed idle
     // state would report a freshly loaded page's Main tab as "failed".
-    expect(formatLedTooltip('Main', '', 'idle', null)).toBe('Main: idle');
+    expect(formatLedTooltip('Main', 'idle', null)).toBe('Main: idle');
   });
 
   it('green with applied count plural', () => {
     expect(
-      formatLedTooltip('agent-0', 'doc', 'green', {
+      formatLedTooltip('agent-0', 'green', {
         status: 'clean',
         appliedCount: 3,
         failureReason: null,
       }),
-    ).toBe('agent-0 (doc): completed (3 edits applied)');
+    ).toBe('agent-0: completed (3 edits applied)');
   });
 
   it('green with applied count singular', () => {
     expect(
-      formatLedTooltip('agent-0', 'code', 'green', {
+      formatLedTooltip('agent-0', 'green', {
         status: 'clean',
         appliedCount: 1,
         failureReason: null,
       }),
-    ).toBe('agent-0 (code): completed (1 edit applied)');
+    ).toBe('agent-0: completed (1 edit applied)');
   });
 
   it('green with zero edits', () => {
     expect(
-      formatLedTooltip('agent-0', 'code+xref', 'green', {
+      formatLedTooltip('agent-0', 'green', {
         status: 'clean',
         appliedCount: 0,
         failureReason: null,
       }),
-    ).toBe('agent-0 (code+xref): completed (0 edits applied)');
+    ).toBe('agent-0: completed (0 edits applied)');
   });
 
   it('green tolerates missing outcome', () => {
     expect(
-      formatLedTooltip('agent-0', 'code', 'green', null),
-    ).toBe('agent-0 (code): completed (0 edits applied)');
+      formatLedTooltip('agent-0', 'green', null),
+    ).toBe('agent-0: completed (0 edits applied)');
   });
 
   it('red surfaces failure reason', () => {
     expect(
-      formatLedTooltip('agent-1', 'doc+xref', 'red', {
+      formatLedTooltip('agent-1', 'red', {
         status: 'error',
         appliedCount: 0,
         failureReason: 'a.py: anchor not found',
       }),
-    ).toBe('agent-1 (doc+xref): a.py: anchor not found');
+    ).toBe('agent-1: a.py: anchor not found');
   });
 
   it('red falls back to "failed" when reason missing', () => {
     expect(
-      formatLedTooltip('agent-1', 'doc', 'red', {
+      formatLedTooltip('agent-1', 'red', {
         status: 'error',
         appliedCount: 0,
         failureReason: null,
       }),
-    ).toBe('agent-1 (doc): failed');
-    expect(
-      formatLedTooltip('agent-1', 'doc', 'red', null),
-    ).toBe('agent-1 (doc): failed');
-  });
-
-  it('red without mode omits parens', () => {
-    expect(
-      formatLedTooltip('agent-1', '', 'red', {
-        status: 'error',
-        appliedCount: 0,
-        failureReason: 'oops',
-      }),
-    ).toBe('agent-1: oops');
+    ).toBe('agent-1: failed');
+    expect(formatLedTooltip('agent-1', 'red', null)).toBe('agent-1: failed');
   });
 });
 
@@ -195,7 +181,7 @@ describe('renderLedRow — visibility', () => {
 
   it('one agent tab → main + agent dot', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     await settle(p);
     const strip = p.shadowRoot.querySelector('.led-strip');
     expect(strip).not.toBeNull();
@@ -207,9 +193,9 @@ describe('renderLedRow — visibility', () => {
 
   it('multiple agent tabs → main + each agent in insertion order', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
-    seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
-    seedLabeledTabWithMode(p, 'a2', 'Agent 02', 'code+xref');
+    seedLabeledTab(p, 'a0', 'Agent 00');
+    seedLabeledTab(p, 'a1', 'Agent 01');
+    seedLabeledTab(p, 'a2', 'Agent 02');
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
     expect(dots.length).toBe(4);
@@ -221,7 +207,7 @@ describe('renderLedRow — visibility', () => {
 
   it('main dot carries the led-main marker class', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
     expect(dots[0].classList.contains('led-main')).toBe(true);
@@ -232,7 +218,7 @@ describe('renderLedRow — visibility', () => {
 describe('renderLedRow — state classes', () => {
   it('streaming agent → cyan dot', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     p._tabs.get('a0').streaming = true;
     p.requestUpdate();
     await settle(p);
@@ -244,7 +230,7 @@ describe('renderLedRow — state classes', () => {
 
   it('clean outcome → green dot', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     const tab = p._tabs.get('a0');
     tab.streaming = false;
     tab.lastEditOutcome = {
@@ -261,7 +247,7 @@ describe('renderLedRow — state classes', () => {
 
   it('error outcome → red dot', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     const tab = p._tabs.get('a0');
     tab.streaming = false;
     tab.lastEditOutcome = {
@@ -278,7 +264,7 @@ describe('renderLedRow — state classes', () => {
 
   it('no outcome & not streaming draws idle, not a spinner', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     const tab = p._tabs.get('a0');
     tab.streaming = false;
     tab.lastEditOutcome = null;
@@ -291,9 +277,9 @@ describe('renderLedRow — state classes', () => {
 
   it('mixed states render independently', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
-    seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
-    seedLabeledTabWithMode(p, 'a2', 'Agent 02', 'code+xref');
+    seedLabeledTab(p, 'a0', 'Agent 00');
+    seedLabeledTab(p, 'a1', 'Agent 01');
+    seedLabeledTab(p, 'a2', 'Agent 02');
     p._tabs.get('a0').streaming = true;
     p._tabs.get('a1').streaming = false;
     p._tabs.get('a1').lastEditOutcome = {
@@ -320,8 +306,8 @@ describe('renderLedRow — state classes', () => {
 describe('renderLedRow — active marker', () => {
   it('active agent tab dot gets active class', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
-    seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
+    seedLabeledTab(p, 'a0', 'Agent 00');
+    seedLabeledTab(p, 'a1', 'Agent 01');
     p._activeTabId = 'a1';
     await settle(p);
     // dots[0] is main, dots[1] is a0, dots[2] is a1.
@@ -333,8 +319,8 @@ describe('renderLedRow — active marker', () => {
 
   it('main active → main dot carries active marker', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
-    seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
+    seedLabeledTab(p, 'a0', 'Agent 00');
+    seedLabeledTab(p, 'a1', 'Agent 01');
     expect(p._activeTabId).toBe('main');
     await settle(p);
     const actives = p.shadowRoot.querySelectorAll('.led-dot.active');
@@ -344,23 +330,21 @@ describe('renderLedRow — active marker', () => {
 });
 
 describe('renderLedRow — tooltip wiring', () => {
-  it('streaming tab gets running tooltip with mode', async () => {
+  it('streaming tab gets a running tooltip', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code+xref');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     p._tabs.get('a0').streaming = true;
     p.requestUpdate();
     await settle(p);
     // dots[0] is main, dots[1] is the agent.
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[1].title).toBe('a0 (code+xref): running');
-    expect(dots[1].getAttribute('aria-label')).toBe(
-      'a0 (code+xref): running',
-    );
+    expect(dots[1].title).toBe('a0: running');
+    expect(dots[1].getAttribute('aria-label')).toBe('a0: running');
   });
 
   it('clean tab tooltip carries applied count', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'doc');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     const tab = p._tabs.get('a0');
     tab.streaming = false;
     tab.lastEditOutcome = {
@@ -371,12 +355,12 @@ describe('renderLedRow — tooltip wiring', () => {
     p.requestUpdate();
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[1].title).toBe('a0 (doc): completed (4 edits applied)');
+    expect(dots[1].title).toBe('a0: completed (4 edits applied)');
   });
 
   it('error tab tooltip carries diagnostic', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'doc+xref');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     const tab = p._tabs.get('a0');
     tab.streaming = false;
     tab.lastEditOutcome = {
@@ -387,22 +371,7 @@ describe('renderLedRow — tooltip wiring', () => {
     p.requestUpdate();
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[1].title).toBe(
-      'a0 (doc+xref): a.py: anchor not found',
-    );
-  });
-
-  it('tooltip omits mode segment when missing', async () => {
-    const p = mountPanel();
-    // seedLabeledTabWithMode is the only seeder we have
-    // here, but pass empty mode to mirror an older
-    // backend payload.
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', '');
-    p._tabs.get('a0').streaming = true;
-    p.requestUpdate();
-    await settle(p);
-    const dots = p.shadowRoot.querySelectorAll('.led-dot');
-    expect(dots[1].title).toBe('a0: running');
+    expect(dots[1].title).toBe('a0: a.py: anchor not found');
   });
 
   it('main dot tooltip uses Main label, not the raw id', async () => {
@@ -420,8 +389,8 @@ describe('renderLedRow — tooltip wiring', () => {
 describe('renderLedRow — click activates tab', () => {
   it('clicking agent dot flips _activeTabId', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
-    seedLabeledTabWithMode(p, 'a1', 'Agent 01', 'doc');
+    seedLabeledTab(p, 'a0', 'Agent 00');
+    seedLabeledTab(p, 'a1', 'Agent 01');
     expect(p._activeTabId).toBe('main');
     await settle(p);
     // dots[0] is main, dots[1] is a0, dots[2] is a1.
@@ -433,7 +402,7 @@ describe('renderLedRow — click activates tab', () => {
 
   it('clicking main dot returns focus to main', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     p._activeTabId = 'a0';
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
@@ -445,7 +414,7 @@ describe('renderLedRow — click activates tab', () => {
 
   it('clicking already-active dot is a no-op', async () => {
     const p = mountPanel();
-    seedLabeledTabWithMode(p, 'a0', 'Agent 00', 'code');
+    seedLabeledTab(p, 'a0', 'Agent 00');
     p._activeTabId = 'a0';
     await settle(p);
     const dots = p.shadowRoot.querySelectorAll('.led-dot');
@@ -465,7 +434,6 @@ describe('renderLedRow — direct call', () => {
   it('renders a main-only strip when no agents exist', () => {
     const fakePanel = {
       _tabs: new Map([['main', { streaming: false }]]),
-      _tabModes: new Map(),
       _activeTabId: 'main',
     };
     const result = renderLedRow(fakePanel);
@@ -482,7 +450,6 @@ describe('renderLedRow — direct call', () => {
   it('returns truly empty template when _tabs is empty', () => {
     const fakePanel = {
       _tabs: new Map(),
-      _tabModes: new Map(),
       _activeTabId: 'main',
     };
     const result = renderLedRow(fakePanel);

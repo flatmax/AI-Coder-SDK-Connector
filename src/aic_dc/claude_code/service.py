@@ -2538,6 +2538,30 @@ class ClaudeCodeService:
         # and the terminal status is what explains the denial that follows.
         if event.name == "subagentEvent":
             await self._sweep_ended_subagent(event.payload)
+        elif event.name == "streamComplete" and request_id:
+            await self._post_response_for_background(event.payload, request_id)
+
+    async def _post_response_for_background(
+        self, payload: Any, request_id: str
+    ) -> None:
+        """Run the post-turn housekeeping again when background work ends.
+
+        ``_post_response`` runs in ``_run_turn``'s ``finally``, which is
+        reached at the turn's *first* result. A background subagent outlives
+        that: the drain follows the stream past it (``session.py`` §
+        ``_drain_background``) and only the last of its continuations reports
+        the run as over. Until this, the Context tab and the file tree kept
+        describing the session as it was before the background work — the
+        turn's own footer revised itself, but the derived state around it did
+        not, and only the *next* turn moved it on.
+
+        Keyed on the drain's ``background_finished`` flag rather than on
+        ``continuation``, because a turn that spawns several subagents
+        produces a continuation per result and only one of them ends the run.
+        """
+        if not isinstance(payload, dict) or not payload.get("background_finished"):
+            return
+        await self._post_response(request_id)
 
     async def _sweep_ended_subagent(self, payload: Any) -> None:
         """Close any permission dialog a subagent left open when it ended.
