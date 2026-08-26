@@ -154,6 +154,30 @@ export function fieldLineRange(content, field) {
   return null;
 }
 
+/**
+ * One list out of a save's disposition, defensively.
+ *
+ * `null` is a real answer from the RPC — content that did not parse has no
+ * fields to diff — and so is an absent key from an older backend. Both read as
+ * "nothing to report" rather than throwing on the render path.
+ *
+ * @param {object|null} disposition
+ * @param {'live'|'next_session'|'changed'} which
+ * @returns {string[]}
+ */
+export function fieldList(disposition, which) {
+  if (!disposition || typeof disposition !== 'object') return [];
+  const list = disposition[which];
+  return Array.isArray(list) ? list.filter((f) => typeof f === 'string') : [];
+}
+
+/** `a`, `a and b`, `a, b and c` — for a sentence, not a table. */
+export function joinFields(fields) {
+  const list = [...fields];
+  if (list.length <= 1) return list.join('');
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
 export class SettingsTab extends RpcMixin(LitElement) {
   static properties = {
     /** Info banner data from get_config_info. */
@@ -186,11 +210,32 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _modelPending: { type: Boolean, state: true },
     /**
      * False once `Collab.get_collab_role` reports this client is not the host.
-     * `set_model` is localhost-only, so an enabled control for a participant
-     * would be one that always fails. Only ever narrows what is offered — the
-     * engine keeps the real gate.
+     * `set_model` and `restart_session` are both localhost-only, so an enabled
+     * control for a participant would be one that always fails. Only ever
+     * narrows what is offered — the engine keeps the real gate.
      */
-    _canSetModel: { type: Boolean, state: true },
+    _isHost: { type: Boolean, state: true },
+    /**
+     * What the last save did, from the RPC's per-field disposition, or null
+     * before the first one.
+     * `{type, changed, applied, pending, controls, compared}`. `changed` is
+     * kept alongside the other two because they do not have to cover it: a
+     * reloadable type whose reload failed has a changed field that is neither
+     * applied nor waiting for a restart, and that case needs saying.
+     *
+     * Rendered rather than only toasted because the toast goes away and the
+     * question it answers — is the thing I just saved in force? — does not.
+     */
+    _summary: { type: Object, state: true },
+    /**
+     * Every field saved since the last restart that the running session has
+     * not picked up. A Set, and accumulated across saves rather than replaced:
+     * two saves each touching one field leave two fields waiting, and a
+     * restart applies the whole file either way.
+     */
+    _pendingFields: { type: Object, state: true },
+    /** True while `restart_session` is in flight. */
+    _restarting: { type: Boolean, state: true },
     /**
      * True for a moment after `/model` routed here, so the panel the command
      * meant is visibly the one it landed on. A route can arrive with this tab
@@ -423,6 +468,65 @@ export class SettingsTab extends RpcMixin(LitElement) {
     .toolbar-button.primary:hover {
       filter: brightness(1.1);
     }
+    /*
+      Between the toolbar and the textarea, so it reads as being about the
+      file above the one it sits under. Bordered rather than tinted amber:
+      "applies later" is the ordinary outcome of a save on this tab, not a
+      fault, and colouring it as one would train the reader past it.
+    */
+    .save-summary {
+      padding: 0.5rem 0.75rem;
+      background: rgba(88, 166, 255, 0.06);
+      border-bottom: 1px solid rgba(240, 246, 252, 0.08);
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+    .save-summary strong {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .save-summary-note {
+      padding-left: 0.75rem;
+    }
+
+    .session-controls {
+      background: rgba(22, 27, 34, 0.6);
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-top: 1rem;
+      font-size: 0.8125rem;
+    }
+    .session-head {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .session-title {
+      font-weight: 600;
+      color: var(--text-primary, #c9d1d9);
+      flex: 1;
+    }
+    .session-note {
+      margin: 0.4rem 0 0;
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      line-height: 1.45;
+    }
+    .session-note code {
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      background: rgba(240, 246, 252, 0.06);
+      border-radius: 3px;
+      padding: 0 0.2rem;
+    }
+    .session-note strong {
+      color: var(--text-primary, #c9d1d9);
+    }
+
     .editor-textarea {
       flex: 1;
       min-height: 200px;
@@ -459,7 +563,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._model = '';
     this._resolved = '';
     this._modelPending = false;
-    this._canSetModel = true;
+    this._isHost = true;
+    this._summary = null;
+    this._pendingFields = new Set();
+    this._restarting = false;
     this._modelFlash = false;
     this._editorFlash = false;
     /** Pending flash-clear timer, so a second route restarts it. */
@@ -538,29 +645,30 @@ export class SettingsTab extends RpcMixin(LitElement) {
       console.warn('[settings] get_model failed', err);
       return;
     }
-    this._probeModelAuthority();
+    this._probeHostAuthority();
   }
 
   /**
-   * Find out whether this client may change the model.
+   * Find out whether this client is the host.
    *
-   * Same probe and the same defaults as the chat panel's
-   * `probeModeAuthority`: no collab service registered means single-user, which
-   * means we are the host. It only narrows the UI — `set_model` enforces the
-   * real gate, so being wrong here costs a rejected call, not an unauthorised
-   * one.
+   * One question for both of this tab's engine controls — the model switch and
+   * the session restart — because it is one answer. Same probe and the same
+   * defaults as the chat panel's `probeModeAuthority`: no collab service
+   * registered means single-user, which means we are the host. It only narrows
+   * the UI — both RPCs enforce the real gate, so being wrong here costs a
+   * rejected call, not an unauthorised one.
    */
-  async _probeModelAuthority() {
+  async _probeHostAuthority() {
     try {
       const role = await this.rpcExtract('Collab.get_collab_role');
       if (role && typeof role === 'object' && !role.error) {
-        this._canSetModel = role.is_localhost !== false;
+        this._isHost = role.is_localhost !== false;
         return;
       }
     } catch (_) {
       // No collab service — single-user, and we are the host.
     }
-    this._canSetModel = true;
+    this._isHost = true;
   }
 
   /** Another window changed the model. */
@@ -762,6 +870,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
   async _openCard(key) {
     if (this._activeKey === key) return;
     this._activeKey = key;
+    // Belongs to the file being left. `_pendingFields` does not — those are
+    // waiting on the session, not on the editor.
+    this._summary = null;
     this._editorContent = '';
     this._loading = true;
     try {
@@ -792,6 +903,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
   _closeEditor() {
     this._activeKey = null;
     this._editorContent = '';
+    this._summary = null;
   }
 
   async _save() {
@@ -800,26 +912,51 @@ export class SettingsTab extends RpcMixin(LitElement) {
     try {
       const textarea = this.shadowRoot?.querySelector('.editor-textarea');
       const content = textarea ? textarea.value : this._editorContent;
+      const key = this._activeKey;
       const result = await this.rpcExtract(
         'Settings.save_config_content',
-        this._activeKey,
+        key,
         content,
       );
       if (result && typeof result === 'object' && result.error) {
         this._emitToast(result.error, 'error');
         return;
       }
+      const disposition = result ? result.disposition : null;
+      const pending = fieldList(disposition, 'next_session');
       // Advisory JSON warning from save.
       if (result && result.warning) {
         this._emitToast(result.warning, 'warning');
+      } else if (pending.length) {
+        // Qualified, not "Saved": the invariant this tab has to keep is that
+        // a save never shows an unqualified success for a field that did not
+        // apply (`specs5/5-webapp/settings.md` § Invariants). The panel says
+        // the same thing at more length, and outlives the toast.
+        this._emitToast(
+          `Saved. ${joinFields(pending)} ${pending.length === 1 ? 'applies' : 'apply'}`
+          + ' when the session next starts.',
+          'info',
+        );
       } else {
         this._emitToast('Saved', 'success');
       }
-      // Auto-reload for reloadable configs.
-      const card = CONFIG_CARDS.find((c) => c.key === this._activeKey);
-      if (card && card.reloadable) {
-        await this._reload();
-      }
+      for (const field of pending) this._pendingFields.add(field);
+      // Auto-reload for reloadable configs. `applied` is joined here rather
+      // than reported by the save, because the save cannot know: the reload
+      // is this next call, and it can fail.
+      const card = CONFIG_CARDS.find((c) => c.key === key);
+      const reloaded = card && card.reloadable ? await this._reload() : false;
+      this._summary = disposition
+        ? {
+          type: key,
+          changed: fieldList(disposition, 'changed'),
+          applied: reloaded ? fieldList(disposition, 'live') : [],
+          pending,
+          controls: disposition.live_control || {},
+          compared: disposition.compared !== false,
+        }
+        : null;
+      this.requestUpdate();
     } catch (err) {
       this._emitToast(`Save failed: ${err?.message || err}`, 'error');
     } finally {
@@ -835,21 +972,83 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * returns early rather than calling a reload that would either
    * fail or lie: engine.json's values were consumed when the
    * subprocess started.
+   *
+   * @returns {Promise<boolean>} whether the reload applied. The save's
+   *   summary reports fields as applied only on a true, so a reload that
+   *   failed leaves them unclaimed rather than claimed by the call before it.
    */
   async _reload() {
-    if (!this._activeKey) return;
+    if (!this._activeKey) return false;
     const card = CONFIG_CARDS.find((c) => c.key === this._activeKey);
-    if (!card || !card.reloadable) return;
+    if (!card || !card.reloadable) return false;
     try {
       const result = await this.rpcExtract('Settings.reload_app_config');
       if (result && typeof result === 'object' && result.error) {
         this._emitToast(`Reload failed: ${result.error}`, 'error');
-      } else {
-        this._emitToast('Config reloaded', 'success');
+        return false;
       }
+      this._emitToast('Config reloaded', 'success');
+      return true;
     } catch (err) {
       this._emitToast(`Reload failed: ${err?.message || err}`, 'error');
+      return false;
     }
+  }
+
+  /**
+   * Replace the CLI subprocess so the file's options are the running ones.
+   *
+   * The confirmation names the fields waiting, because a restart is not free —
+   * it ends the CLI's warm state — and "restart the session?" with nothing
+   * named is a question nobody can weigh. It also states the one thing the
+   * pending list cannot cover: a model or mode changed by hand this session
+   * goes back to what the file says, whether or not this save touched it.
+   */
+  async _restartSession() {
+    if (this._restarting || !this.rpcConnected || this._isHost === false) return;
+    if (!window.confirm(this.restartConfirmText())) return;
+    this._restarting = true;
+    try {
+      const result = await this.rpcExtract('ClaudeCodeService.restart_session');
+      if (result && typeof result === 'object' && result.error) {
+        this._emitToast(result.error, 'error');
+        return;
+      }
+      // Nothing is waiting any more either way: a restarted session was built
+      // from the file, and a cold one has now adopted it.
+      this._pendingFields = new Set();
+      this._summary = null;
+      this._emitToast(
+        result && result.status === 'adopted'
+          ? 'The engine had not started yet, so there was nothing to replace —'
+            + ' it will start on the file as you have just saved it'
+          : 'Session restarted. The conversation was resumed.',
+        result && result.status === 'adopted' ? 'info' : 'success',
+      );
+      // The file may have taken the model back from a mid-session switch. The
+      // broadcast says so too, and does not carry the resolution line.
+      this._loadModel();
+    } catch (err) {
+      this._emitToast(`Restart failed: ${err?.message || err}`, 'error');
+    } finally {
+      this._restarting = false;
+    }
+  }
+
+  /**
+   * The confirmation text. Public for the test that reads it without a
+   * `window.confirm` to intercept.
+   */
+  restartConfirmText() {
+    const waiting = [...this._pendingFields].sort();
+    return `Restart the session?\n\n${
+      waiting.length
+        ? `This applies ${joinFields(waiting)}.`
+        : 'This applies engine.json as it is on disk.'
+    }\n\nThe conversation is resumed, so the transcript and the model's own `
+      + 'context come back. The CLI starts again, so the session\'s cost '
+      + 'totals start from zero. A model or permission mode you changed by '
+      + 'hand this session goes back to what engine.json says.';
   }
 
   _onEditorKeyDown(event) {
@@ -959,6 +1158,113 @@ export class SettingsTab extends RpcMixin(LitElement) {
       </div>
 
       ${this._activeKey ? this._renderEditor() : ''}
+      ${this._renderSessionControls()}
+    `;
+  }
+
+  /**
+   * What the last save did, and where each field it moved took effect.
+   *
+   * Inside the editor area rather than under the grid: it is about the file in
+   * the textarea above it, and a reader who has just pressed Save is looking
+   * there. Absent until a save has happened — there is nothing to report
+   * about a file that has only been read.
+   */
+  _renderSaveSummary() {
+    const summary = this._summary;
+    if (!summary) return '';
+    const {
+      applied, pending, controls, changed,
+    } = summary;
+    if (!changed.length) {
+      return html`<div class="save-summary" role="status">
+        Saved. Nothing in the file changed, so nothing is waiting.
+      </div>`;
+    }
+    if (!applied.length && !pending.length) {
+      // Reloadable type, `live` non-empty, and the reload came back false.
+      // "Nothing is waiting" would be the one wrong answer here: the fields
+      // moved on disk and the running process is still on the old ones.
+      return html`<div class="save-summary" role="status">
+        Saved to the file. The reload did not apply, so
+        ${joinFields(changed)}
+        ${changed.length === 1 ? 'is' : 'are'} not in force yet.
+      </div>`;
+    }
+    const shortcuts = pending.filter((f) => controls && controls[f]);
+    return html`
+      <div class="save-summary" role="status">
+        ${applied.length
+          ? html`<div>
+              <strong>Applied now:</strong> ${joinFields(applied)} — read
+              through accessors, so the new value is what the next use sees.
+            </div>`
+          : ''}
+        ${pending.length
+          ? html`
+              <div>
+                <strong>Applies when the session next starts:</strong>
+                ${joinFields(pending)}.
+                ${summary.compared
+                  ? ''
+                  : html`<em>
+                      The previous file could not be read, so every field in it
+                      is listed rather than only the ones that moved.
+                    </em>`}
+              </div>
+              ${shortcuts.map(
+                (field) => html`<div class="save-summary-note">
+                  ${field} can also be changed now, without a restart:
+                  ${controls[field]}.
+                </div>`,
+              )}
+            `
+          : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Restart, and the two sentences that make it a decision rather than a dare.
+   *
+   * Always rendered, not only after a save that needs it: a user who edited
+   * `engine.json` in another editor has the same problem and no save on this
+   * tab to hang the offer off. Session storage — the other half of
+   * `specs5/5-webapp/settings.md` § Session Controls — is not here, because the
+   * backend measures the session directory only as a turn-time warning and
+   * there is no RPC to read it.
+   */
+  _renderSessionControls() {
+    const readOnly = this._isHost === false;
+    const waiting = [...this._pendingFields].sort();
+    return html`
+      <div class="session-controls" role="group" aria-label="Session controls">
+        <div class="session-head">
+          <span class="session-title">🔄 Session</span>
+          <button
+            class="toolbar-button"
+            @click=${() => this._restartSession()}
+            ?disabled=${!this.rpcConnected || readOnly || this._restarting}
+            title=${readOnly
+              ? 'Only the host can restart the session'
+              : 'Reconnect the engine on engine.json as it is on disk'}
+          >
+            ${this._restarting ? 'Restarting…' : '↻ Restart session'}
+          </button>
+        </div>
+        <p class="session-note">
+          ${readOnly
+            ? html`Only the host can restart the session. `
+            : ''}
+          Every field in <code>engine.json</code> except the model and the
+          permission mode is read when the CLI starts, so a restart is the only
+          thing that applies one. The conversation is resumed, so the transcript
+          stays — the cost totals start again.
+          ${waiting.length
+            ? html`<strong>Waiting to apply:</strong> ${joinFields(waiting)}.`
+            : ''}
+        </p>
+      </div>
     `;
   }
 
@@ -980,7 +1286,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const entries = modelEntries(this._models, this._model);
     const alias = this._model || DEFAULT_MODEL_ALIAS;
     const entry = entries.find((e) => e.value === alias);
-    const readOnly = this._canSetModel === false;
+    const readOnly = this._isHost === false;
     const offline = entries.length === 0;
     const disabled =
       !this.rpcConnected || readOnly || this._modelPending || offline;
@@ -1111,6 +1417,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ✕
           </button>
         </div>
+        ${this._renderSaveSummary()}
         ${this._loading
           ? html`<div class="loading-note">Loading…</div>`
           : html`

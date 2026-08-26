@@ -290,7 +290,41 @@ views want consistency. Only the housekeeping behind the second event has change
 | Load a previous session from the history browser | `resume=<that session_id>`. |
 | Branch from a point in history | `fork_session` — leaves the original session intact. |
 | New session | Connect without `resume`; a fresh session ID is issued. |
+| Apply an `engine.json` change | `restart_session()` — disconnect, re-read the file, reconnect with `resume=<the current session id>` and no fork. |
 | Undo a file change | `rewind_files(user_message_id)` back to a checkpoint — unavailable while the transcript is mirrored, which is every run with a repo (CC-20). Git is the answer there. |
+
+### Restart is the only thing that applies an option
+
+Options are assembled **once**, at connect (§ Session Options), and only `permission_mode` and `model`
+have live setters. So every other field in `engine.json` — `effort`, `thinking_display`, `cli_path`,
+`max_budget_usd`, `max_buffer_size` — is applied by replacing the subprocess or not at all. That is
+what `restart_session()` is: a disconnect, a re-read of the file, and a reconnect. It is the same
+mechanism as a server restart, aimed at the config rather than at a crash.
+
+Three things about it are load-bearing:
+
+- **The conversation continues; the cost ledger does not.** The reconnect resumes the current session
+  id without forking, so the transcript and the model's own context come back. The CLI's per-session
+  cost totals start again from zero, because it is a new subprocess. Both halves are in the
+  confirmation the browser shows, because a user weighing a restart is weighing exactly this.
+- **The file wins over a live override.** A `set_model` or a mode switch made by hand this session is
+  reverted, because the restart applies the file and the file is what it re-read. One rule rather than
+  a per-field carve-out: the alternative — keeping an override the user has since forgotten making —
+  makes the confirmation wrong about the two fields it names. A mode or model that moved is broadcast
+  (`permissionModeChanged`, `modelChanged`) with `by: "restart"`, and a mode change is recorded in the
+  events log.
+- **Two refusals and one shortcut.** A turn in flight is refused (`turn_in_progress`), like
+  `new_session` and `resume_session`. An active review is refused too: review holds `plan` and restores
+  the entering mode when it ends, so a restart would put the file's mode in force while the UI still
+  showed review's posture. And an engine that has not connected yet takes the shortcut of adopting the
+  re-read config in place — not an early return, because the config was loaded at startup and a cold
+  session is still holding the old one.
+
+No `sessionChanged` is broadcast. The session on screen is still this one, and that event replaces the
+message list wholesale in every client.
+
+The control that calls this is on the Settings tab, beside the file it applies — see
+[`../5-webapp/settings.md` § Session Controls](../5-webapp/settings.md).
 
 Context continuity is entirely the SDK's. AIC⚡DC never reconstructs a conversation by replaying
 messages into a prompt — the failure mode of that approach is a session that looks right in the UI
@@ -553,3 +587,9 @@ the set someone watching a turn go by reaches for.
 - No component outside the message pump references an SDK message type.
 - AIC⚡DC never constructs a conversation history to hand to the model; resumption is always via
   `resume` or `fork_session`.
+- Nothing in the config path replaces the subprocess on its own. A saved `engine.json` is applied by a
+  user-initiated `restart_session()` and by nothing else — which is why a save reports what it did
+  *not* apply rather than reconnecting to make itself true.
+- The options a restart reports are the options it built: the re-read config is adopted only while
+  disconnected, so a live `permission_mode` or `model` override cannot survive into a session whose
+  confirmation said the file was in force.

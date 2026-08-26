@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import './settings-tab.js';
-import { fieldLineRange } from './settings-tab.js';
+import { fieldLineRange, fieldList, joinFields } from './settings-tab.js';
 import { SharedRpc } from './rpc.js';
 
 // -----------------------------------------------------------
@@ -744,6 +744,561 @@ describe('aic-settings-tab permission-mode section', () => {
     await settle(el);
     expect(el._activeKey).toBeNull();
     expect(modelPanel(el).classList.contains('flash')).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------
+// What a save applied, and what is still waiting
+// -----------------------------------------------------------
+//
+// The invariant this section exists for: a save never shows an
+// unqualified success for a field that did not apply
+// (specs5/5-webapp/settings.md § Invariants). A save calls
+// neither live setter, so for engine.json that means *every*
+// field — the toast has to say so, not just the panel, because
+// the toast is what a reader sees and the panel is what they
+// read next.
+//
+// The disposition comes from the backend (`Settings`, tested in
+// tests/test_settings.py § TestSaveDisposition). The tab's job is
+// to say it in a sentence, and to join "applied" itself: the save
+// cannot know whether the reload it asks for afterwards worked.
+
+/** A save that reports `disposition`, plus a counter per call. */
+function publishSaveRpc(disposition, extra = {}) {
+  const calls = { save: [], reload: 0, restart: 0 };
+  publishEngineRpc(ENGINE_JSON, {
+    'Settings.save_config_content': (key, content) => {
+      calls.save.push([key, content]);
+      return { status: 'ok', type: key, disposition };
+    },
+    'Settings.reload_app_config': () => {
+      calls.reload += 1;
+      return { status: 'ok' };
+    },
+    'ClaudeCodeService.restart_session': () => {
+      calls.restart += 1;
+      return {
+        status: 'restarted',
+        session_id: 'sess-1',
+        permission_mode: 'acceptEdits',
+        model: 'opus',
+      };
+    },
+    ...extra,
+  });
+  return calls;
+}
+
+function saveSummary(el) {
+  return el.shadowRoot.querySelector('.save-summary');
+}
+
+function sessionControls(el) {
+  return el.shadowRoot.querySelector('.session-controls');
+}
+
+function restartButton(el) {
+  return sessionControls(el).querySelector('button');
+}
+
+/** Rendered text with the template's line breaks collapsed. */
+function flat(node) {
+  return node ? node.textContent.replace(/\s+/g, ' ').trim() : '';
+}
+
+const _toastListeners = [];
+
+function captureToasts() {
+  const toasts = [];
+  const onToast = (e) => toasts.push(e.detail);
+  window.addEventListener('aic-toast', onToast);
+  _toastListeners.push(() => window.removeEventListener('aic-toast', onToast));
+  return toasts;
+}
+
+afterEach(() => {
+  while (_toastListeners.length) _toastListeners.pop()();
+});
+
+/** Open a card and press Save, the way the toolbar button does. */
+async function saveCard(el, key) {
+  await el._openCard(key);
+  await settle(el);
+  await el._save();
+  await settle(el);
+}
+
+describe('aic-settings-tab save disposition', () => {
+  it('qualifies the toast for a field the save could not apply', async () => {
+    // "Saved" on its own is the bug: nothing about writing engine.json
+    // reaches the running CLI, so a bare success reads as "in force".
+    const toasts = captureToasts();
+    publishSaveRpc({
+      compared: true,
+      changed: ['effort'],
+      live: [],
+      next_session: ['effort'],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    expect(toasts.map((t) => t.message)).not.toContain('Saved');
+    expect(toasts[0].message)
+      .toBe('Saved. effort applies when the session next starts.');
+    expect(toasts[0].type).toBe('info');
+  });
+
+  it('lists the fields waiting, and pluralises the verb with them', async () => {
+    const toasts = captureToasts();
+    publishSaveRpc({
+      compared: true,
+      changed: ['cli_path', 'effort', 'model'],
+      live: [],
+      next_session: ['cli_path', 'effort', 'model'],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    expect(toasts[0].message)
+      .toBe('Saved. cli_path, effort and model apply when the session next'
+        + ' starts.');
+    expect(flat(saveSummary(el)))
+      .toContain('Applies when the session next starts: cli_path, effort and'
+        + ' model.');
+  });
+
+  it('points at the control that would apply a field now', async () => {
+    // The two fields with live setters are the ones a reader is most likely
+    // to have edited here expecting them to take. Naming the shortcut is
+    // cheaper for them than a restart, and the restart button is right below.
+    publishSaveRpc({
+      compared: true,
+      changed: ['model', 'permission_mode'],
+      live: [],
+      next_session: ['model', 'permission_mode'],
+      live_control: {
+        model: 'the model panel on the Settings tab',
+        permission_mode: 'the permission-mode selector beside the composer',
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    const text = flat(saveSummary(el));
+    expect(text).toContain('model can also be changed now, without a restart:'
+      + ' the model panel on the Settings tab.');
+    expect(text).toContain('the permission-mode selector beside the composer');
+  });
+
+  it('says nothing changed rather than claiming an application', async () => {
+    const toasts = captureToasts();
+    publishSaveRpc({
+      compared: true,
+      changed: [],
+      live: [],
+      next_session: [],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    expect(toasts[0].message).toBe('Saved');
+    expect(flat(saveSummary(el)))
+      .toBe('Saved. Nothing in the file changed, so nothing is waiting.');
+    expect(flat(sessionControls(el))).not.toContain('Waiting to apply');
+  });
+
+  it('claims applied only for a reload that came back', async () => {
+    publishSaveRpc({
+      compared: true,
+      changed: ['history_limit'],
+      live: ['history_limit'],
+      next_session: [],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'app');
+    expect(flat(saveSummary(el))).toContain('Applied now: history_limit');
+    expect(flat(saveSummary(el))).not.toContain('next starts');
+  });
+
+  it('does not report a field as waiting when the reload failed', async () => {
+    // The reload is what applies an app.json field, and it can fail. Neither
+    // "applied" nor "waiting for a restart" is true then — a restart is not
+    // what applies it — so the panel says the third thing.
+    publishSaveRpc(
+      {
+        compared: true,
+        changed: ['history_limit'],
+        live: ['history_limit'],
+        next_session: [],
+        live_control: {},
+      },
+      { 'Settings.reload_app_config': () => ({ error: 'no config loaded' }) },
+    );
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'app');
+    const text = flat(saveSummary(el));
+    expect(text).toBe('Saved to the file. The reload did not apply, so'
+      + ' history_limit is not in force yet.');
+    expect(text).not.toContain('Nothing in the file changed');
+    expect(flat(sessionControls(el))).not.toContain('Waiting to apply');
+  });
+
+  it('says why every field is listed when the previous file was unreadable',
+    async () => {
+      publishSaveRpc({
+        compared: false,
+        changed: ['cli_path', 'effort', 'model'],
+        live: [],
+        next_session: ['cli_path', 'effort', 'model'],
+        live_control: {},
+      });
+      const el = mountTab();
+      await settle(el);
+      await saveCard(el, 'engine');
+      expect(flat(saveSummary(el)))
+        .toContain('previous file could not be read');
+    });
+
+  it('reports no disposition rather than inventing one', async () => {
+    // Content that does not parse has no fields to diff, and an older
+    // backend sends no `disposition` at all. Both have to render.
+    const toasts = captureToasts();
+    publishEngineRpc(ENGINE_JSON, {
+      'Settings.save_config_content': (key) => ({
+        status: 'ok',
+        type: key,
+        disposition: null,
+        warning: 'Saved, but the file is not valid JSON',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    expect(toasts[0].message).toContain('not valid JSON');
+    expect(toasts[0].type).toBe('warning');
+    expect(saveSummary(el)).toBeNull();
+  });
+
+  it('keeps the waiting list across saves, and drops the panel per card',
+    async () => {
+      // Two saves each touching one field leave two fields waiting: a
+      // restart applies the whole file, so the list is about the session,
+      // not about the last press of Save. The panel is the opposite — it
+      // describes the file in the textarea, and goes when that changes.
+      let nth = 0;
+      publishEngineRpc(ENGINE_JSON, {
+        'Settings.save_config_content': (key) => {
+          nth += 1;
+          const field = nth === 1 ? 'effort' : 'cli_path';
+          return {
+            status: 'ok',
+            type: key,
+            disposition: {
+              compared: true,
+              changed: [field],
+              live: [],
+              next_session: [field],
+              live_control: {},
+            },
+          };
+        },
+      });
+      const el = mountTab();
+      await settle(el);
+      await saveCard(el, 'engine');
+      await el._save();
+      await settle(el);
+      expect(flat(sessionControls(el)))
+        .toContain('Waiting to apply: cli_path and effort.');
+
+      await el._openCard('app');
+      await settle(el);
+      expect(saveSummary(el)).toBeNull();
+      expect(flat(sessionControls(el)))
+        .toContain('Waiting to apply: cli_path and effort.');
+    });
+});
+
+// -----------------------------------------------------------
+// Session controls
+// -----------------------------------------------------------
+//
+// The other half of the same invariant: something has to *be* the
+// thing that applies a field the save could not. `restart_session`
+// replaces the CLI subprocess on the file as it is on disk and
+// resumes the conversation, so the transcript survives and the
+// cost totals do not.
+//
+// Always offered, not only after a save: a user who edited
+// engine.json in another editor has the same problem and no save
+// here to hang the offer off.
+
+describe('aic-settings-tab session controls', () => {
+  let confirmSpy;
+
+  beforeEach(() => {
+    // Stubbed rather than native: jsdom's `confirm` is unimplemented and
+    // logs, and it returns undefined — which would read as a decline and
+    // pass the tests that matter for the wrong reason.
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    confirmSpy.mockRestore();
+  });
+
+  it('offers a restart with no save in front of it', async () => {
+    publishSaveRpc(null);
+    const el = mountTab();
+    await settle(el);
+    expect(restartButton(el).textContent.trim()).toBe('↻ Restart session');
+    expect(restartButton(el).disabled).toBe(false);
+    expect(flat(sessionControls(el)))
+      .toContain('a restart is the only thing that applies one');
+  });
+
+  it('names the waiting fields in the confirmation', async () => {
+    publishSaveRpc({
+      compared: true,
+      changed: ['effort'],
+      live: [],
+      next_session: ['effort'],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    await saveCard(el, 'engine');
+    restartButton(el).click();
+    await settle(el);
+    expect(confirmSpy.mock.calls[0][0]).toContain('This applies effort.');
+  });
+
+  it('names the file when nothing was saved here to wait for', async () => {
+    publishSaveRpc(null);
+    const el = mountTab();
+    await settle(el);
+    expect(el.restartConfirmText())
+      .toContain('This applies engine.json as it is on disk.');
+  });
+
+  it('says a hand-set model or mode goes back to the file, always', async () => {
+    // Unconditional on purpose. A mid-session `set_model` this save did not
+    // touch is invisible to the pending list, and the restart reverts it —
+    // so the only honest place for the clause is every confirmation.
+    publishSaveRpc({
+      compared: true,
+      changed: ['effort'],
+      live: [],
+      next_session: ['effort'],
+      live_control: {},
+    });
+    const el = mountTab();
+    await settle(el);
+    for (const stage of ['before', 'after']) {
+      if (stage === 'after') await saveCard(el, 'engine');
+      const asked = el.restartConfirmText();
+      expect(asked).toContain('cost totals start from zero');
+      expect(asked)
+        .toContain('goes back to what engine.json says');
+      expect(asked).toContain('conversation is resumed');
+    }
+  });
+
+  it('asks before restarting, and stops on a decline', async () => {
+    confirmSpy.mockReturnValue(false);
+    const calls = publishSaveRpc(null);
+    const el = mountTab();
+    await settle(el);
+    restartButton(el).click();
+    await settle(el);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(calls.restart).toBe(0);
+  });
+
+  it('clears the waiting list on a restart, because the file is in force',
+    async () => {
+      const toasts = captureToasts();
+      const calls = publishSaveRpc({
+        compared: true,
+        changed: ['effort'],
+        live: [],
+        next_session: ['effort'],
+        live_control: {},
+      });
+      const el = mountTab();
+      await settle(el);
+      await saveCard(el, 'engine');
+      restartButton(el).click();
+      await settle(el);
+      expect(calls.restart).toBe(1);
+      expect(toasts.at(-1).message)
+        .toBe('Session restarted. The conversation was resumed.');
+      expect(flat(sessionControls(el))).not.toContain('Waiting to apply');
+      expect(saveSummary(el)).toBeNull();
+    });
+
+  it('says nothing was replaced when the engine had not started', async () => {
+    // `status: "adopted"`. "Session restarted" would be a claim about a
+    // subprocess that never existed, and the reader's next question — is my
+    // edit in force? — has a different answer: it will be, on first use.
+    const toasts = captureToasts();
+    publishSaveRpc(null, {
+      'ClaudeCodeService.restart_session': () => ({
+        status: 'adopted',
+        session_id: null,
+        permission_mode: 'default',
+        model: null,
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    restartButton(el).click();
+    await settle(el);
+    expect(toasts.at(-1).message).toContain('had not started yet');
+    expect(toasts.at(-1).type).toBe('info');
+  });
+
+  it('reports a refusal in the engine\'s own words, and keeps the list',
+    async () => {
+      // A turn in flight and an open review are both refusals. Clearing the
+      // waiting list on one would tell the reader the file had been applied.
+      const toasts = captureToasts();
+      publishSaveRpc(
+        {
+          compared: true,
+          changed: ['effort'],
+          live: [],
+          next_session: ['effort'],
+          live_control: {},
+        },
+        {
+          'ClaudeCodeService.restart_session': () => ({
+            error: 'A turn is still running',
+            reason: 'turn_in_progress',
+          }),
+        },
+      );
+      const el = mountTab();
+      await settle(el);
+      await saveCard(el, 'engine');
+      restartButton(el).click();
+      await settle(el);
+      expect(toasts.at(-1).message).toBe('A turn is still running');
+      expect(toasts.at(-1).type).toBe('error');
+      expect(flat(sessionControls(el))).toContain('Waiting to apply: effort.');
+    });
+
+  it('asks once while a restart is in flight', async () => {
+    let resolve;
+    const calls = { restart: 0 };
+    publishEngineRpc(ENGINE_JSON, {
+      'ClaudeCodeService.restart_session': () => {
+        calls.restart += 1;
+        return new Promise((r) => { resolve = r; });
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    restartButton(el).click();
+    await settle(el);
+    expect(restartButton(el).textContent.trim()).toBe('Restarting…');
+    expect(restartButton(el).disabled).toBe(true);
+    restartButton(el).click();
+    await settle(el);
+    expect(calls.restart).toBe(1);
+    resolve({ status: 'restarted', session_id: 's' });
+    await settle(el);
+    expect(restartButton(el).textContent.trim()).toBe('↻ Restart session');
+  });
+
+  it('offers a participant no restart it cannot use', async () => {
+    // `restart_session` is localhost-only, like `set_model`.
+    publishSaveRpc(null, {
+      'Collab.get_collab_role': () => ({ is_localhost: false }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(restartButton(el).disabled).toBe(true);
+    expect(flat(sessionControls(el)))
+      .toContain('Only the host can restart the session');
+    await el._restartSession();
+    await settle(el);
+    expect(window.confirm).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the model, because the file may have taken it back', async () => {
+    // The restart reverts a mid-session `set_model` to what engine.json
+    // says. The tab's own panel would otherwise keep showing the override.
+    let reads = 0;
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+      'ClaudeCodeService.get_model': () => {
+        reads += 1;
+        return reads === 1
+          ? { model: 'haiku', resolved: 'x', models: MODELS }
+          : { model: 'opus', resolved: 'y', models: MODELS };
+      },
+      'ClaudeCodeService.restart_session': () => ({
+        status: 'restarted',
+        session_id: 's',
+        permission_mode: 'acceptEdits',
+        model: 'opus',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(modelSelect(el).value).toBe('haiku');
+    restartButton(el).click();
+    await settle(el);
+    expect(modelSelect(el).value).toBe('opus');
+  });
+
+  it('is not a config card, and grows no second permission control', async () => {
+    publishSaveRpc(null);
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.card-grid .session-controls'))
+      .toBeNull();
+    expect([...el.shadowRoot.querySelectorAll('select')]
+      .filter((s) => s !== modelSelect(el))).toEqual([]);
+  });
+});
+
+describe('fieldList and joinFields', () => {
+  it('reads one list out of a disposition', () => {
+    const d = { changed: ['a', 'b'], live: [], next_session: ['a'] };
+    expect(fieldList(d, 'changed')).toEqual(['a', 'b']);
+    expect(fieldList(d, 'live')).toEqual([]);
+  });
+
+  it('treats a missing disposition as nothing to report', () => {
+    // `null` is a real answer — unparseable content has no fields to diff —
+    // and an older backend sends no key at all. Neither may throw on the
+    // render path.
+    expect(fieldList(null, 'changed')).toEqual([]);
+    expect(fieldList({}, 'changed')).toEqual([]);
+    expect(fieldList('nope', 'changed')).toEqual([]);
+    expect(fieldList({ changed: 'effort' }, 'changed')).toEqual([]);
+    expect(fieldList({ changed: ['a', 7, null] }, 'changed')).toEqual(['a']);
+  });
+
+  it('reads as a sentence, not a table', () => {
+    expect(joinFields([])).toBe('');
+    expect(joinFields(['a'])).toBe('a');
+    expect(joinFields(['a', 'b'])).toBe('a and b');
+    expect(joinFields(['a', 'b', 'c'])).toBe('a, b and c');
+  });
+
+  it('leaves a Set in the order it was given', () => {
+    expect(joinFields(new Set(['b', 'a']))).toBe('b and a');
   });
 });
 

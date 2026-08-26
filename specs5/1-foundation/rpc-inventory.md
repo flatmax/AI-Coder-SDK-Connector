@@ -38,7 +38,7 @@ wire; nothing forwards the old namespace.
 - Denied-read files — get, set. Written as `Read(path)` deny rules the CLI enforces. The only per-path list the picker owns — there is no file-selection pair beside it ([CC-21](../plan/decisions.md#cc-21))
 - Turns — start streaming chat (request id, message, images, viewer framing), cancel streaming
 - Live controls — set permission mode, set model, rewind files to a checkpoint, stop a subagent task, resolve a permission request
-- Sessions — new session, resume session (optionally forking)
+- Sessions — new session, resume session (optionally forking), restart session (localhost-only: re-reads `engine.json`, replaces the CLI subprocess, resumes the same conversation — see [`../3-engine/session.md` § Session Continuity](../3-engine/session.md#session-continuity))
 - History — list sessions, load a session's messages, search history, delete a session (localhost-only), fetch one image's bytes by pointer. All read the one mirrored transcript through the SDK's parsers, never raw entries. There are no separate engine-session listing or deletion RPCs: with one store each would be a second answer to a question the history surface already answers
 - Subagents — list subagent transcripts, get a subagent transcript
 - Introspection — context usage, MCP server status, reconnect an MCP server, toggle an MCP server, server info (advertised commands, tools, output styles), the SDK surface report
@@ -65,9 +65,9 @@ Deleted by [CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette
 ## Service: Settings (browser → server)
 
 - Config read — get content for a whitelisted config type
-- Config write — save content (triggers reload for reloadable types)
-- Explicit reload — engine config, app config
-- Info — current model name and config paths
+- Config write — save content. Answers a per-field disposition — what changed, what that means for the running session, and which changed field has a live control elsewhere — so the browser can qualify its own success message. See [`../5-webapp/settings.md` § Save Behavior](../5-webapp/settings.md)
+- Explicit reload — app config only. There is no engine-config reload: session options are assembled when the CLI subprocess starts, so applying one is `ClaudeCodeService.restart_session`
+- Info — the config directory. Not the model: `engine.json`'s value is a request, and what is answering is `ClaudeCodeService.get_model`
 
 The whitelist shrank with the prompt files it used to gate; see
 [`configuration.md`](configuration.md).

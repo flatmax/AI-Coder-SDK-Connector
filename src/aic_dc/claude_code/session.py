@@ -579,6 +579,39 @@ class EngineSession:
                 f", resume={resume}" if resume else "",
             )
 
+    def adopt_config(self, config: EngineConfig) -> None:
+        """Replace the config the *next* :meth:`connect` builds options from.
+
+        What a session restart needs: ``engine.json`` is read once, at
+        startup, so re-reading it is the only way a saved ``effort`` or
+        ``cli_path`` can reach the CLI.
+
+        The mode and model go back to the file too, and that is the point
+        rather than a side effect. Both are live state a mid-session
+        :meth:`set_permission_mode` or :meth:`set_model` may have moved away
+        from what the file says; a restart is "start the session this file
+        describes", and silently keeping an override would make the
+        restart's own confirmation — which names the fields it is about to
+        apply — wrong about two of them.
+
+        Raises
+        ------
+        RuntimeError
+            While connected. Options are read at connect time, so swapping
+            the config under a live client would change what
+            :attr:`permission_mode` and :attr:`model` report without
+            changing anything the CLI is doing. Callers
+            :meth:`reset` or :meth:`disconnect` first.
+        """
+        if self._client is not None:
+            raise RuntimeError(
+                "adopt_config() while connected: disconnect first, or the "
+                "reported options would not be the running ones"
+            )
+        self.config = config
+        self._permission_mode = config.effective_permission_mode
+        self._model = config.model
+
     async def reset(self) -> None:
         """Disconnect and forget which session this was.
 

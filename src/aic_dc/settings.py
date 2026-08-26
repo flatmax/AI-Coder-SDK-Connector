@@ -23,7 +23,10 @@ and specs5/1-foundation/rpc-inventory.md:
   use. ``engine.json`` has **no reload RPC at all**: session options are
   assembled once, at connect time, so most of that file only takes
   effect on a new session and a reload call would be a lie. The
-  Settings tab says so and offers a restart instead.
+  Settings tab says so and offers a restart instead — an offer it makes
+  from the per-field disposition every save returns
+  (:func:`_save_disposition`), so it names the fields that are waiting
+  rather than warning about the file in general.
 
 - **Localhost-only for writes and reloads.** The collaboration policy
   treats config edits as mutation-class operations. Read methods
@@ -83,6 +86,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from aic_dc.claude_code.engine_config import LIVE_CONTROLS
 from aic_dc.config import CONFIG_TYPES
 
 if TYPE_CHECKING:
@@ -105,6 +109,89 @@ logger = logging.getLogger(__name__)
 #            hasn't happened. A new session is the honest answer.
 
 _RELOADABLE_TYPES = frozenset({"app"})
+
+#: The config type whose fields :data:`LIVE_CONTROLS` describes.
+_ENGINE_TYPE = "engine"
+
+
+# ---------------------------------------------------------------------------
+# Per-field save disposition
+# ---------------------------------------------------------------------------
+
+
+def _parsed_object(content: str) -> dict[str, Any] | None:
+    """``content`` as a JSON object, or ``None`` if it is not one."""
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _changed_fields(
+    before: dict[str, Any] | None, after: dict[str, Any]
+) -> list[str]:
+    """Top-level keys whose effective value differs between two configs.
+
+    A key that was *removed* counts as changed: dropping ``effort`` hands
+    the decision back to the CLI, which changes what the next session runs.
+
+    Absent and explicitly ``null`` are the same value here, because they are
+    the same value in both files — ``engine.json``'s null means "omit the
+    option" and ``app.json``'s consumers read through accessors with
+    defaults. Distinguishing them would offer a restart to apply a save that
+    changed only how "unset" was spelled.
+
+    ``before is None`` means the old content could not be read or parsed, so
+    every key present now is reported. See :func:`_save_disposition`.
+    """
+    if before is None:
+        return sorted(after)
+    return sorted(
+        key
+        for key in before.keys() | after.keys()
+        if before.get(key) != after.get(key)
+    )
+
+
+def _save_disposition(
+    type_key: str, content: str, previous: str | None
+) -> dict[str, Any] | None:
+    """Where each field this save changed can take effect.
+
+    ``None`` when ``content`` is not a JSON object: there is nothing to
+    diff, and the save is already reporting the parse error as a warning.
+    Distinct from an empty ``changed`` list, which is a real answer — the
+    user saved a file that says what it said before.
+
+    ``compared`` is False when the previous content was missing or would not
+    parse. Every key in the new content is then reported as changed, because
+    "nothing changed" is a claim this call cannot support and it would be
+    wrong in the direction that drops a field from the summary.
+
+    ``live`` is a disposition, not a receipt. The reload that applies those
+    fields is a separate RPC the caller makes next, so the caller is the one
+    that knows whether it succeeded; reporting them as applied from here
+    would claim a reload that has not happened yet.
+    """
+    after = _parsed_object(content)
+    if after is None:
+        return None
+    before = _parsed_object(previous) if previous is not None else None
+    changed = _changed_fields(before, after)
+    reloadable = type_key in _RELOADABLE_TYPES
+    live_control: dict[str, str] = {}
+    if type_key == _ENGINE_TYPE:
+        live_control = {
+            field: LIVE_CONTROLS[field] for field in changed if field in LIVE_CONTROLS
+        }
+    return {
+        "compared": before is not None,
+        "changed": changed,
+        "live": changed if reloadable else [],
+        "next_session": [] if reloadable else changed,
+        "live_control": live_control,
+    }
 
 
 class Settings:
@@ -271,6 +358,14 @@ class Settings:
         written. Users may save a partially-edited file and
         continue editing.
 
+        Carries a **per-field disposition** for JSON types: which top-level
+        keys the edit changed, and whether each one reaches anything already
+        running. Without it a save can only report "saved", and a save that
+        moved ``effort`` — which nothing will pick up until a new session —
+        shows the same unqualified success as one that moved a field the
+        running session does pick up. See
+        ``specs5/5-webapp/settings.md`` § The Applies Column Is Load-Bearing.
+
         Parameters
         ----------
         type_key:
@@ -281,8 +376,10 @@ class Settings:
         Returns
         -------
         dict
-            ``{"status": "ok", "type": type_key}`` on success.
-            ``{"status": "ok", "type": type_key, "warning": "..."}``
+            ``{"status": "ok", "type": type_key, "disposition": {...}}`` on
+            success; ``disposition`` is null when the content is not a JSON
+            object (:func:`_save_disposition`).
+            ``{"status": "ok", ..., "warning": "..."}``
             when JSON validation failed but the write succeeded.
             ``{"error": "..."}`` on unknown type or write failure.
         """
@@ -293,6 +390,17 @@ class Settings:
         if filename is None:
             return {"error": f"Unknown config type: {type_key!r}"}
         path = self._config.config_dir / filename
+        # Before the write, or there is nothing left to diff against. A read
+        # failure is not a save failure: it costs the comparison, which the
+        # disposition then reports as uncompared, and the user's edit still
+        # lands.
+        previous: str | None = None
+        try:
+            previous = path.read_text(encoding="utf-8")
+        except OSError:
+            logger.debug(
+                "No readable previous %s; reporting every field as changed", filename
+            )
         try:
             # Ensure the directory exists. The config manager
             # creates it at construction, but a later directory
@@ -312,6 +420,7 @@ class Settings:
         # the user they've got a parse error.
         result: dict[str, Any] = {"status": "ok", "type": type_key}
         if filename.endswith(".json"):
+            result["disposition"] = _save_disposition(type_key, content, previous)
             try:
                 json.loads(content)
             except json.JSONDecodeError as exc:

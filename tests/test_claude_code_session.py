@@ -1454,6 +1454,56 @@ class TestLiveControls:
 
 
 # ---------------------------------------------------------------------------
+# adopt_config — what a session restart needs
+# ---------------------------------------------------------------------------
+
+
+class TestAdoptConfig:
+    """``engine.json`` is read once, so re-reading it is the only way a
+    saved ``effort`` or ``cli_path`` can reach the CLI."""
+
+    async def test_the_next_connect_builds_from_the_new_config(self, tmp_path):
+        session = EngineSession(tmp_path, EngineConfig(effort="low"))
+        session.adopt_config(EngineConfig(effort="max"))
+        await session.connect()
+        assert FakeClient.instances[-1].options.effort == "max"
+        await session.disconnect()
+
+    async def test_a_hand_set_mode_goes_back_to_the_file(self, engine):
+        """Deliberate, not a side effect: the mode is live state a
+        mid-session switch may have moved away from the file, and a restart
+        is "start the session this file describes". Keeping the override
+        would make the restart's own confirmation wrong about it."""
+        await engine.set_permission_mode("bypassPermissions")
+        await engine.disconnect()
+        engine.adopt_config(EngineConfig(permission_mode="plan"))
+        assert engine.permission_mode == "plan"
+
+    async def test_an_unnamed_mode_falls_back_to_default(self, engine):
+        await engine.set_permission_mode("acceptEdits")
+        await engine.disconnect()
+        engine.adopt_config(EngineConfig())
+        assert engine.permission_mode == "default"
+
+    async def test_a_hand_set_model_goes_back_to_the_file(self, engine):
+        await engine.set_model("claude-opus-5")
+        await engine.disconnect()
+        engine.adopt_config(EngineConfig(model="claude-sonnet-5"))
+        assert engine.model == "claude-sonnet-5"
+        engine.adopt_config(EngineConfig())
+        assert engine.model is None
+
+    async def test_adopting_while_connected_is_refused(self, engine):
+        """Options are read at connect time, so a swap under a live client
+        would change what ``permission_mode`` reports without changing
+        anything the CLI is doing."""
+        with pytest.raises(RuntimeError, match="while connected"):
+            engine.adopt_config(EngineConfig(permission_mode="plan"))
+        assert engine.permission_mode == "default"
+        assert engine.config.permission_mode is None
+
+
+# ---------------------------------------------------------------------------
 # Connection-failure classification
 # ---------------------------------------------------------------------------
 

@@ -331,7 +331,7 @@ def permission_mode_content(mode: str) -> str:
 
 
 def session_switch_content(action: str, session_id: str) -> str:
-    """``action`` is ``"resumed"`` or ``"forked"``."""
+    """``action`` is ``"resumed"``, ``"forked"`` or ``"restarted"``."""
     return f"{action.capitalize()} session `{session_id}`."
 
 

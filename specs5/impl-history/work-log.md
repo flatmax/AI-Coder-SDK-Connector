@@ -437,7 +437,10 @@ Found while building the model panel, by reading
 [`../5-webapp/settings.md`](../5-webapp/settings.md) against `webapp/src/settings-tab.js` line by line.
 The tab renders a toolbar, a one-row info banner, the model panel, a two-card grid and an inline
 editor. The spec describes all of that plus five preference cards, four session controls, a
-retired-files note, and a per-field save disposition. None of the latter exist.
+retired-files note, and a per-field save disposition. None of the latter existed. Six have since been
+settled: two were built (the save disposition and restart session) and four turned out to belong to
+another surface — engine health and MCP status to the Context tab, the permission chime and the live
+permission mode away from the preference cards entirely.
 
 This was not a case of the spec running ahead of a build — `/permissions` had been *routing* to one of
 the missing controls, and the route's own copy promised "the Settings tab's permission-mode control plus
@@ -487,15 +490,15 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
 
 **(c) Neither side exists.** Specified, with nothing behind it on either the engine or the browser:
 
-- **Restart session.** No RPC, no control. This one is load-bearing for a claim the spec makes
-  elsewhere: § The Applies Column Is Load-Bearing says that after a save touching a next-session field
-  the editor "offers the only thing that would apply it: **restart the session**". It does not, because
-  there is nothing to offer. The section exists to prevent "a success toast over an unchanged session",
-  which is the exact failure it currently permits.
-- **Per-field save disposition.** § Save Behavior has the save reply driving an "applied / applies next
-  session" summary. `save_config_content` returns `{"status": "ok"}` (plus an optional JSON warning),
-  and the tab renders no summary. Same root as the item above, and an invariant depends on it: *"a save
-  never shows an unqualified success for a field that did not apply."*
+- ~~**Restart session.** No RPC, no control.~~ **Built 2026-08-26 — see § Landed since**, together with
+  the per-field save disposition it was paired with. The two were one item in practice: § The Applies
+  Column Is Load-Bearing says a save touching a next-session field "offers the only thing that would
+  apply it", so a disposition with no restart to offer would have named the problem and left it, and a
+  restart with no disposition would have had nothing to name.
+- ~~**Per-field save disposition.** § Save Behavior has the save reply driving an "applied / applies next
+  session" summary.~~ **Built 2026-08-26 — see § Landed since.** The invariant that depended on it —
+  *"a save never shows an unqualified success for a field that did not apply"* — is now enforced at the
+  toast, not only in the panel.
 - **Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.
 - **Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.
 - **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
@@ -516,8 +519,10 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
 spec that names the wrong tab is how `/permissions` came to lie and the same trap is still set for eight
 more items~~ **— (a) is done too** — and note that (b) turned up a ninth of exactly that kind, since this
 section's own table filed the MCP server list under Settings when the right home for it was the Context
-tab all along. **(c) is what is left**, and within it the restart-session pair first, since two invariants
-currently have nothing behind them.
+tab all along. ~~**(c) is what is left**, and within it the restart-session pair first, since two
+invariants currently have nothing behind them.~~ **That pair is built.** What is left of (c) is the three
+preference-card items (thinking display, doc enrichment, deny-read scope), session-storage size — which
+still has no RPC to call — and the retired-files note, which remains the cheapest thing on this list.
 
 **How to keep this from recurring.** The drift was invisible because nothing reads a spec section
 against the component that implements it. The two mechanisms that *did* catch things this session were
@@ -533,6 +538,53 @@ image and appears on no list, which is exactly why two of them sat unnoticed. Mo
 rather than already covered by it.
 
 ### Landed since
+
+- **A save now says what it did not apply, and a restart applies it** — item (c)'s restart-session pair,
+  built 2026-08-26. Two invariants that had nothing behind them now do.
+
+  **What the shape turned on is that a save applies nothing live.** The obvious design — report `model`
+  and `permission_mode` as applied, since they have live setters — would have been false: those setters
+  are `set_model` and `set_permission_mode`, and `save_config_content` calls neither. So the disposition
+  reports *every* `engine.json` field as next-session, and carries a separate `live_control` map naming
+  the control that would apply one now (the model panel, the composer's selector). A pointer, not a
+  receipt. `EngineConfig.LIVE_CONTROLS` holds that map beside the field declarations rather than in
+  `settings.py`, so a renamed field cannot leave a stale name two layers up.
+
+  **`commit_model` is the field that tested the rule.** Nothing sets it live, so it is next-session like
+  the rest — but it is also the one `engine.json` value read at *call* time (`commit.py`), which means a
+  restart applies it by replacing `service.engine_config` rather than by rebuilding options. Classifying
+  it correctly needed reading the call site, not the field list.
+
+  **The tab joins "applied", not the save.** For `app.json` the save asks the tab to reload, and a reload
+  can fail — so the summary reports a field as applied only after that call came back true. A failed
+  reload gets its own sentence: changed on disk, not in force, and *not* waiting for a restart either,
+  because a restart is not what applies it. That third case was missed in the first draft, where a failed
+  reload rendered as "nothing changed" — the one wrong answer available.
+
+  **The restart resumes the conversation.** `_resume_request = (session_id, False)` — same session, no
+  fork — so the transcript and the model's context survive; the CLI's cost ledger does not, and the
+  confirmation says both. It also says, unconditionally, that a model or mode set by hand this session
+  goes back to what the file says. Unconditional because the alternative was a preview RPC to detect an
+  override the save did not touch: one honest sentence beats a second round trip that would be wrong
+  whenever a `set_model` happened between the preview and the confirm.
+
+  **The first draft broadcast `sessionChanged` and would have blanked every client's transcript.** Caught
+  by reading the receiver rather than the emitter: `onSessionChanged` replaces `panel.messages` from
+  `data.messages || []`, so an event sent to mean "the engine is new" reads as "the session has no
+  messages". Replaced with conditional `permissionModeChanged` / `modelChanged`, each fired only if the
+  value actually moved, and no session event at all — the session on screen is still this one.
+
+  **Two refusals, one shortcut.** A turn in flight, like `new_session` and `resume_session`. An active
+  review, because review holds `plan` and restores the entering mode when it ends, so a restart would put
+  the file's mode in force under a UI still showing review's posture. And a cold engine adopts the re-read
+  config in place — a shortcut, not an early return, since the config was loaded at startup and a cold
+  session still holds the old one. `EngineSession.adopt_config` refuses to run while connected, which is
+  what makes "the options it reports are the options it built" checkable rather than asserted.
+
+  `test_every_rpc_is_classified` did its job again: it failed on `restart_session` until it was filed, and
+  filing it is where the localhost gate comes from. See
+  [`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option)
+  and [`../5-webapp/settings.md` § Save Behavior](../5-webapp/settings.md).
 
 - **The Settings spec stopped describing other tabs' work** — item (a) of the section above, arbitrated
   2026-08-26. Six features were **deleted outright** from
@@ -557,8 +609,8 @@ rather than already covered by it.
   § The Applies Column Is Load-Bearing depends on for its central claim. Deleting the group as a unit
   would have quietly dropped a (c) item and left an invariant elsewhere depending on a section that no
   longer existed. Same shape in § Invariants, where the non-localhost invariant named restart *and*
-  permission mode together: the first half is vacuous-until-built and stays, the second is not this tab's
-  and went.
+  permission mode together: the first half was vacuous-until-built and stayed — and was built later the
+  same day, which is the argument for keeping it — the second is not this tab's and went.
 
   **The arbitration found one live defect, and it was the one that started the section.** `/permissions`
   routed to a bare `tab:settings` — the tab, not the thing it names. Fixed by naming the field instead of

@@ -123,7 +123,8 @@ notices the file, reports it once in the health banner as ignored, and does not 
 
 - App config loaded once and cached; hot-reload available
 - Downstream consumers read config values through accessor methods, not snapshot dicts, so hot-reloaded values take effect immediately
-- Engine config read on init and on explicit reload
+- Engine config read on init, and re-read by `restart_session()` — there is no engine reload RPC, because
+  a reload that did not replace the subprocess would report applying values the subprocess never saw
 
 ### What a config change can and cannot do live
 
@@ -133,8 +134,8 @@ and the UI must be honest about it:
 | Change | Effect |
 |---|---|
 | Model | Live, via `set_model()` — but not from this file. Editing `engine.json`'s `model` changes what the *next* session requests; the running session's model is the Settings tab's model panel, which calls `set_model()` directly ([`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel)) |
-| Permission mode | Live, via `set_permission_mode()` |
-| Effort, thinking display, budget, CLI path | Requires a new session. The Settings tab says so, and offers the action, rather than appearing to apply and quietly not |
+| Permission mode | Live, via `set_permission_mode()` — and, as with the model, not from this file. The file's value is what the *next* session starts in; the running posture is the selector beside the composer |
+| Effort, thinking display, budget, CLI path, buffer size, commit model | Requires a new session. The Settings tab says so per field after a save, and offers the action — `restart_session()`, which re-reads this file and resumes the conversation ([`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option)) — rather than appearing to apply and quietly not |
 | App config (indexing, doc index, presets, timeouts) | Live on the next use — nothing in it reaches the engine's options |
 
 There is no equivalent of the old `refresh_system_prompt`, and no "prompt composition depends on app
@@ -142,7 +143,9 @@ config" problem, because there is no prompt. A config change never invalidates t
 
 ## Settings Service
 
-- Whitelisted config types can be read, written, and reloaded
+- Whitelisted config types can be read and written; only `app` can be reloaded
+- A save answers with a per-field disposition — what changed, and what that means for the running session
+  — so the UI can qualify its own success message instead of asserting one
 - Arbitrary file paths rejected
 - The whitelist is now two entries — `engine` and `app` — down from eight; the five prompt entries went with the prompt files, and `snippets` with snippets ([CC-22](../plan/decisions.md#cc-22--snippets-are-deleted-the--palette-replaces-them-user))
 - `commit.md` is loaded internally but not exposed via the whitelist, as before

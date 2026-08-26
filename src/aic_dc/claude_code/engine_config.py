@@ -87,6 +87,33 @@ MIN_MAX_BUFFER_SIZE = 1024 * 1024
 ENGINE_CONFIG_FILENAME = "engine.json"
 
 
+# ---------------------------------------------------------------------------
+# Which fields can reach a session that is already running
+# ---------------------------------------------------------------------------
+#
+# ``ClaudeAgentOptions`` is assembled once, when the session connects
+# (:meth:`aic_dc.claude_code.session.EngineSession.connect`), so saving this
+# file changes the *next* session and nothing about the current one. Two
+# fields have live control requests behind them, reachable by hand — and
+# naming where is the difference between "restart to apply this" and
+# "restart, or use that control and keep the session".
+#
+# Not a list of things a save applies. A save calls neither setter; this
+# table exists so a save can tell the user where the shortcut is.
+#
+# Kept beside the field declarations deliberately: a field added above with
+# a live setter behind it is one edit away from being reported here, and a
+# field renamed cannot leave a stale name behind in a table two layers up.
+# ``commit_model`` is absent on purpose — nothing sets it live, though it
+# does come into force on a session restart, because
+# :mod:`aic_dc.claude_code.commit` reads it per call rather than at connect.
+
+LIVE_CONTROLS: dict[str, str] = {
+    "model": "the model panel on the Settings tab",
+    "permission_mode": "the permission-mode selector beside the composer",
+}
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """The contents of ``engine.json``, validated.

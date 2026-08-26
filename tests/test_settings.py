@@ -263,7 +263,9 @@ class TestSaveConfigContent:
     def test_save_overwrites_file(self, settings, isolated_config_dir):
         new_content = json.dumps({"model": "claude-opus-5"}, indent=2)
         result = settings.save_config_content("engine", new_content)
-        assert result == {"status": "ok", "type": "engine"}
+        assert result["status"] == "ok"
+        assert result["type"] == "engine"
+        assert "warning" not in result
         on_disk = (isolated_config_dir / "engine.json").read_text(
             encoding="utf-8"
         )
@@ -296,7 +298,9 @@ class TestSaveConfigContent:
     def test_save_valid_json_no_warning(self, settings, isolated_config_dir):
         content = json.dumps({"model": "claude-sonnet-5", "cli_path": None})
         result = settings.save_config_content("engine", content)
-        assert result == {"status": "ok", "type": "engine"}
+        assert result["status"] == "ok"
+        assert result["type"] == "engine"
+        assert "warning" not in result
 
     def test_save_invalid_json_warns_but_writes(
         self, settings, isolated_config_dir
@@ -355,6 +359,160 @@ class TestSaveConfigContent:
         assert (isolated_config_dir / "engine.json").read_text(
             encoding="utf-8"
         ) == original
+
+
+# ---------------------------------------------------------------------------
+# Per-field save disposition
+# ---------------------------------------------------------------------------
+
+
+def _write_engine(config_dir, mapping: dict[str, Any]) -> None:
+    (config_dir / "engine.json").write_text(
+        json.dumps(mapping, indent=2), encoding="utf-8"
+    )
+
+
+class TestSaveDisposition:
+    """What a save says about where each changed field takes effect.
+
+    The invariant behind these: "a save never shows an unqualified success
+    for a field that did not apply"
+    (``specs5/5-webapp/settings.md`` § Invariants). The tab can only honour
+    it if the save tells it which fields moved.
+    """
+
+    def test_an_engine_field_applies_next_session(
+        self, settings, isolated_config_dir
+    ):
+        _write_engine(isolated_config_dir, {"effort": "low"})
+        result = settings.save_config_content(
+            "engine", json.dumps({"effort": "high"})
+        )
+        assert result["disposition"] == {
+            "compared": True,
+            "changed": ["effort"],
+            "live": [],
+            "next_session": ["effort"],
+            "live_control": {},
+        }
+
+    def test_the_two_live_fields_name_where_to_reach_them(
+        self, settings, isolated_config_dir
+    ):
+        """Still next-session, because the save calls neither setter.
+
+        ``model`` and ``permission_mode`` are the only fields with a live
+        control behind them, and a save is not that control — it writes a
+        file. So they are reported as next-session like everything else,
+        plus a pointer at the control that would apply them now.
+        """
+        _write_engine(isolated_config_dir, {})
+        result = settings.save_config_content(
+            "engine",
+            json.dumps({"model": "claude-opus-5", "permission_mode": "plan"}),
+        )
+        disposition = result["disposition"]
+        assert disposition["next_session"] == ["model", "permission_mode"]
+        assert disposition["live"] == []
+        assert set(disposition["live_control"]) == {"model", "permission_mode"}
+        assert all(where for where in disposition["live_control"].values())
+
+    def test_an_unchanged_save_changes_nothing(
+        self, settings, isolated_config_dir
+    ):
+        """A reformat is not a change, so it offers no restart.
+
+        The user who reindents a file and is told a restart would apply
+        something learns to ignore the message that matters.
+        """
+        _write_engine(isolated_config_dir, {"effort": "high"})
+        result = settings.save_config_content(
+            "engine", json.dumps({"effort": "high"}, indent=8)
+        )
+        assert result["disposition"]["changed"] == []
+        assert result["disposition"]["compared"] is True
+
+    def test_null_and_absent_are_the_same_value(
+        self, settings, isolated_config_dir
+    ):
+        """Both mean "let the CLI decide", so spelling one as the other
+        has changed nothing about what the next session runs."""
+        _write_engine(isolated_config_dir, {"effort": None})
+        result = settings.save_config_content("engine", json.dumps({}))
+        assert result["disposition"]["changed"] == []
+
+    def test_a_removed_field_counts_as_changed(
+        self, settings, isolated_config_dir
+    ):
+        """Dropping a key hands the decision back to the CLI."""
+        _write_engine(isolated_config_dir, {"effort": "high"})
+        result = settings.save_config_content("engine", json.dumps({}))
+        assert result["disposition"]["changed"] == ["effort"]
+        assert result["disposition"]["next_session"] == ["effort"]
+
+    def test_app_fields_apply_on_the_reload_this_save_triggers(
+        self, settings, isolated_config_dir
+    ):
+        (isolated_config_dir / "app.json").write_text("{}", encoding="utf-8")
+        result = settings.save_config_content(
+            "app", json.dumps({"doc_index": {"keywords_enabled": True}})
+        )
+        assert result["disposition"]["live"] == ["doc_index"]
+        assert result["disposition"]["next_session"] == []
+        # Engine field names mean nothing here, so none are consulted.
+        assert result["disposition"]["live_control"] == {}
+
+    def test_an_unreadable_previous_reports_every_field(
+        self, settings, isolated_config_dir
+    ):
+        """``compared`` False, and nothing hidden.
+
+        "Nothing changed" is a claim this call cannot support when it could
+        not read what was there before, and it would be wrong in the
+        direction that drops a waiting field from the summary.
+        """
+        (isolated_config_dir / "engine.json").unlink()
+        result = settings.save_config_content(
+            "engine", json.dumps({"effort": "high", "cli_path": "/usr/bin/claude"})
+        )
+        assert result["disposition"]["compared"] is False
+        assert result["disposition"]["changed"] == ["cli_path", "effort"]
+
+    def test_an_unparseable_previous_reports_every_field(
+        self, settings, isolated_config_dir
+    ):
+        (isolated_config_dir / "engine.json").write_text(
+            "{broken", encoding="utf-8"
+        )
+        result = settings.save_config_content(
+            "engine", json.dumps({"effort": "high"})
+        )
+        assert result["disposition"]["compared"] is False
+        assert result["disposition"]["changed"] == ["effort"]
+
+    def test_unparseable_content_has_no_disposition(
+        self, settings, isolated_config_dir
+    ):
+        """Null, not an empty one.
+
+        There is nothing to diff, and an empty ``changed`` list would read
+        as "you saved the same file" over a save that broke it. The warning
+        is what the tab shows instead.
+        """
+        result = settings.save_config_content("engine", "{broken")
+        assert result["disposition"] is None
+        assert "warning" in result
+
+    def test_a_json_array_is_not_an_object(self, settings, isolated_config_dir):
+        """Parses, has no top-level keys, and is not a config either."""
+        result = settings.save_config_content("engine", "[1, 2]")
+        assert result["disposition"] is None
+
+    def test_a_refused_save_carries_no_disposition(self, settings):
+        """The restricted shape stays exactly the restricted shape."""
+        settings._collab = _StubCollab(is_localhost=False)
+        result = settings.save_config_content("engine", "{}")
+        assert "disposition" not in result
 
 
 # ---------------------------------------------------------------------------

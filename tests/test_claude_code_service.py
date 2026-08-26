@@ -22,6 +22,7 @@ The properties that matter here are the ones a browser depends on:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,10 +70,17 @@ class FakeSession:
     def __init__(self):
         self.health = EngineHealth(cli_version="2.1.229")
         self.ready = False
+        # Whether a CLI subprocess exists, which is not the same question as
+        # `ready` — that one is also past the handshake. A restart asks this
+        # one, because there is nothing to replace without a subprocess.
+        self.connected = False
         self.session_id = None
         self.streaming_active = False
         self.permission_mode = "default"
         self.model = None
+        self.config = EngineConfig()
+        #: Configs handed to :meth:`adopt_config`, in order.
+        self.adopted: list[EngineConfig] = []
         # False the way the real session reports it whenever the transcript
         # is mirrored — which is every run with a repo, this fixture
         # included. Tests about undo turn it on deliberately.
@@ -117,6 +125,7 @@ class FakeSession:
         if self.connect_error is not None:
             raise self.connect_error
         self.ready = True
+        self.connected = True
         self.health.connected = True
         # What the real session does: a plain resume knows its ID up front,
         # a fork's is minted by the CLI and stays unknown until its first
@@ -127,6 +136,22 @@ class FakeSession:
     async def disconnect(self):
         self.disconnect_calls += 1
         self.ready = False
+        self.connected = False
+
+    def adopt_config(self, config):
+        """Mirrors the real method, guard included.
+
+        The guard is the interesting half: a caller that adopted a config
+        without disconnecting first would have the session report options
+        the running CLI was never given, and a fake that allowed it would
+        let that pass.
+        """
+        if self.connected:
+            raise RuntimeError("adopt_config() while connected")
+        self.config = config
+        self.adopted.append(config)
+        self.permission_mode = config.effective_permission_mode
+        self.model = config.model
 
     async def reset(self):
         self.reset_calls += 1
@@ -2064,6 +2089,10 @@ GATED_METHODS: dict[str, tuple] = {
     # discards the context every client is looking at.
     "new_session": (),
     "resume_session": ("sess-1",),
+    # Replaces the host's CLI subprocess and can take the model and
+    # permission mode back to what the file says — an engine mutation twice
+    # over, and one the host is paying for.
+    "restart_session": (),
     # Destroys history every client can see — including the record of a turn
     # a participant might be there to review.
     "history_delete": ("sess-1",),
@@ -3720,6 +3749,228 @@ class TestSessionLifecycle:
         assert [m["content"] for m in changed["messages"] if m["role"] == "user"] == [
             "the older question"
         ]
+
+
+class TestRestartSession:
+    """``restart_session`` — the only thing that applies a saved option.
+
+    Not the *process* restart the class above is about. This one replaces
+    the CLI subprocess inside one run, because ``ClaudeAgentOptions`` is
+    assembled at connect time and nothing else re-reads ``engine.json``
+    (``specs5/5-webapp/settings.md`` § The Applies Column Is Load-Bearing).
+    """
+
+    @pytest.fixture
+    def old(self):
+        return "11111111-1111-4111-8111-111111111111"
+
+    @pytest.fixture
+    def config_dir(self, tmp_path):
+        directory = tmp_path / "config"
+        directory.mkdir()
+        (directory / "engine.json").write_text(
+            json.dumps({"effort": "low"}), encoding="utf-8"
+        )
+        return directory
+
+    @pytest.fixture
+    async def wired(self, tmp_path, events, config_dir, old):
+        """A connected engine on a config dir whose file the test can edit."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo, config_dir=config_dir),
+            event_callback=events,
+            engine_config=EngineConfig(effort="low"),
+        )
+        svc.session = FakeSession()
+        await seed_transcript(svc, old, prompt="the older question")
+        await svc.connect_engine()
+        svc.session.session_id = old
+        events.calls.clear()
+        return svc
+
+    def _rewrite(self, config_dir, mapping):
+        (config_dir / "engine.json").write_text(
+            json.dumps(mapping), encoding="utf-8"
+        )
+
+    # -- What it applies ---------------------------------------------
+
+    async def test_the_file_is_re_read(self, wired, config_dir):
+        self._rewrite(config_dir, {"effort": "max"})
+        answer = await wired.restart_session()
+        assert answer["status"] == "restarted"
+        assert wired.engine_config.effort == "max"
+        assert wired.session.config.effort == "max"
+
+    async def test_the_session_and_the_service_hold_the_same_config(
+        self, wired, config_dir
+    ):
+        """Two references to one file. Letting them diverge would have the
+        commit one-shot reading a model the session never got."""
+        self._rewrite(config_dir, {"model": "claude-opus-5"})
+        await wired.restart_session()
+        assert wired.session.config is wired.engine_config
+
+    async def test_the_config_is_adopted_after_the_disconnect(
+        self, wired, config_dir
+    ):
+        """The fake raises if it is not, which is the real session's rule:
+        options are read at connect time, so a swap under a live client
+        changes what is reported and not what is running."""
+        self._rewrite(config_dir, {"effort": "max"})
+        await wired.restart_session()
+        assert len(wired.session.adopted) == 1
+        assert wired.session.reset_calls == 1
+
+    async def test_the_conversation_comes_with_it(self, wired, old):
+        """A restart resumes the current ID rather than starting blank, so
+        the transcript and the model's own context survive it."""
+        answer = await wired.restart_session()
+        assert wired.session.connect_args[-1] == (old, False)
+        assert answer["session_id"] == old
+
+    async def test_no_session_changed_broadcast(self, wired, events):
+        """That event replaces the message list wholesale in every client,
+        and the session on screen is still this one."""
+        await wired.restart_session()
+        assert [c for c in events.calls if c[0] == "sessionChanged"] == []
+
+    async def test_it_is_recorded_in_the_transcript(self, wired, old):
+        await wired.restart_session()
+        records = await wired.events_log.load(old)
+        events_recorded = [r["event"] for r in records]
+        assert "session_switch" in events_recorded
+        switch = records[events_recorded.index("session_switch")]
+        assert switch["payload"]["action"] == "restarted"
+
+    # -- The file wins over live overrides ---------------------------
+
+    async def test_a_hand_set_mode_goes_back_to_the_file(
+        self, wired, config_dir
+    ):
+        """One rule rather than a per-field carve-out. Keeping the override
+        would make the restart's own confirmation wrong about it."""
+        wired.session.permission_mode = "bypassPermissions"
+        self._rewrite(config_dir, {"permission_mode": "plan"})
+        answer = await wired.restart_session()
+        assert answer["permission_mode"] == "plan"
+        assert wired.session.permission_mode == "plan"
+
+    async def test_a_mode_the_file_does_not_name_returns_to_default(
+        self, wired, config_dir
+    ):
+        wired.session.permission_mode = "acceptEdits"
+        self._rewrite(config_dir, {})
+        assert (await wired.restart_session())["permission_mode"] == "default"
+
+    async def test_a_moved_mode_is_broadcast_and_recorded(
+        self, wired, events, config_dir, old
+    ):
+        """The other windows would otherwise keep offering the posture the
+        session was in before the restart took it away."""
+        wired.session.permission_mode = "acceptEdits"
+        self._rewrite(config_dir, {"permission_mode": "plan"})
+        await wired.restart_session()
+        modes = [c for c in events.calls if c[0] == "permissionModeChanged"]
+        assert modes == [("permissionModeChanged", {"mode": "plan", "by": "restart"})]
+        records = await wired.events_log.load(old)
+        recorded = [r for r in records if r["event"] == "permission_mode"]
+        assert recorded[0]["payload"] == {
+            "from": "acceptEdits",
+            "to": "plan",
+            "source": "restart",
+        }
+
+    async def test_a_mode_that_did_not_move_is_not_announced(
+        self, wired, events, config_dir
+    ):
+        """A restart that changed neither option should not have every
+        window redraw a control that is showing the right thing."""
+        self._rewrite(config_dir, {"effort": "max"})
+        await wired.restart_session()
+        assert [c for c in events.calls if c[0] == "permissionModeChanged"] == []
+        assert [c for c in events.calls if c[0] == "modelChanged"] == []
+
+    async def test_a_moved_model_is_broadcast(self, wired, events, config_dir):
+        wired.session.model = "claude-haiku-4-5"
+        self._rewrite(config_dir, {"model": "claude-opus-5"})
+        await wired.restart_session()
+        assert [c for c in events.calls if c[0] == "modelChanged"] == [
+            ("modelChanged", {"model": "claude-opus-5", "by": "restart"})
+        ]
+
+    # -- Refusals, and the cold shortcut -----------------------------
+
+    async def test_a_turn_in_flight_is_not_interrupted(self, wired):
+        wired.session.streaming_active = True
+        answer = await wired.restart_session()
+        assert answer["reason"] == "turn_in_progress"
+        assert wired.session.reset_calls == 0
+
+    async def test_an_active_review_is_refused(self, wired, monkeypatch):
+        """Review holds the session in ``plan`` and restores the entry mode
+        when it ends. A restart would drop the posture and leave the review
+        on screen without it."""
+        monkeypatch.setattr(
+            type(wired.review), "active", property(lambda self: True)
+        )
+        answer = await wired.restart_session()
+        assert answer["reason"] == "review_active"
+        assert wired.session.reset_calls == 0
+        assert wired.session.adopted == []
+
+    async def test_a_cold_engine_adopts_without_connecting(
+        self, tmp_path, events, config_dir
+    ):
+        """The shortcut, and it is not an early return: ``engine.json`` is
+        read at startup, so a cold session still holds the old config until
+        something replaces it. Adopting reaches the same place as a restart
+        without spending a subprocess."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        svc = ClaudeCodeService(
+            FakeConfig(repo, config_dir=config_dir),
+            event_callback=events,
+            engine_config=EngineConfig(effort="low"),
+        )
+        svc.session = FakeSession()
+        (config_dir / "engine.json").write_text(
+            json.dumps({"effort": "max"}), encoding="utf-8"
+        )
+        answer = await svc.restart_session()
+        assert answer["status"] == "adopted"
+        assert svc.session.connect_calls == []
+        assert svc.engine_config.effort == "max"
+        assert svc.session.config.effort == "max"
+
+    async def test_a_failed_reconnect_is_reported_not_swallowed(
+        self, wired, config_dir
+    ):
+        """And the config it adopted stands: the file is what the next
+        connect will try, so reverting it would leave the user retrying a
+        restart that had already been half-applied."""
+        self._rewrite(config_dir, {"effort": "max"})
+        wired.session.connect_error = EngineStartupError("no CLI")
+        answer = await wired.restart_session()
+        assert answer["reason"] == "startup_failed"
+        assert "no CLI" in answer["error"]
+        assert wired.engine_config.effort == "max"
+
+    async def test_pending_permission_prompts_are_cancelled(
+        self, wired, monkeypatch
+    ):
+        """The subprocess they belong to is about to be replaced, so their
+        ``can_use_tool`` callbacks will never be answered."""
+        calls = []
+        monkeypatch.setattr(
+            wired.permissions,
+            "cancel_all",
+            lambda: calls.append(True) or asyncio.sleep(0),
+        )
+        await wired.restart_session()
+        assert calls == [True]
 
 
 class TestIndexReadiness:

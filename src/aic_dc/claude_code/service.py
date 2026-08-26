@@ -2101,6 +2101,130 @@ class ClaudeCodeService:
             answer["forked_from"] = session_id
         return answer
 
+    async def restart_session(self) -> dict[str, Any]:
+        """Replace the CLI subprocess, on ``engine.json`` as it is on disk.
+        **Localhost only.**
+
+        The only thing that applies a saved ``effort``, ``cli_path``,
+        ``thinking_display``, ``max_budget_usd`` or ``max_buffer_size``:
+        ``ClaudeAgentOptions`` is assembled once per connect, so a save that
+        touched any of them changes the next session and nothing else
+        (``specs5/5-webapp/settings.md`` § The Applies Column Is Load-Bearing).
+        This is that next session, without waiting for a relaunch.
+
+        The conversation comes with it. The current session ID is resumed,
+        not abandoned, so the transcript and the model's own context survive
+        — what does not survive is the CLI's warm state, including the cost
+        totals, which start fresh on a resumed session by the CLI's own
+        rule.
+
+        **The file wins over live overrides**, one rule rather than a
+        per-field carve-out: a model or mode set by hand this session goes
+        back to what ``engine.json`` says. See
+        :meth:`EngineSession.adopt_config` for why keeping them would be
+        worse than reverting them.
+
+        Three refusals, and one shortcut:
+
+        - a turn in flight — the same rule as ``new_session``; pulling the
+          subprocess out from under a live turn loses its tail
+        - an active review — review holds the session in ``plan`` mode and
+          restores the entry mode when it ends, so a restart would drop it
+          into ``engine.json``'s mode while the UI still says review
+        - a cold engine takes the **shortcut**: the config is adopted and
+          nothing is connected. It reaches the same place — the next turn
+          starts on the new file — without spending a subprocess, and
+          without the reload being a no-op, which it would be if this
+          returned early. ``engine.json`` is read at startup, so a cold
+          session still holds the old config until something replaces it.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if self.session.streaming_active:
+            return {
+                "error": "A turn is still running",
+                "reason": "turn_in_progress",
+            }
+        if self.review.active:
+            return {
+                "error": (
+                    "End the review first. A restart would start the session "
+                    "in engine.json's permission mode, leaving review mode "
+                    "on screen without the posture behind it."
+                ),
+                "reason": "review_active",
+            }
+
+        reloaded = EngineConfig.load(getattr(self._config, "config_dir", None))
+        if not self.session.connected:
+            self.engine_config = reloaded
+            self.session.adopt_config(reloaded)
+            return {
+                "status": "adopted",
+                "session_id": await self._visible_session_id(),
+                "permission_mode": self.session.permission_mode,
+                "model": self.session.model,
+            }
+
+        # Read before the reset, which forgets the ID, and before the config
+        # swap, which is allowed to move the other two. The ID is what makes
+        # this restart continue the conversation rather than start a blank one.
+        resume_target = self.session.session_id
+        was_mode = self.session.permission_mode
+        was_model = self.session.model
+        await self.permissions.cancel_all()
+        await self.session.reset()
+        self.engine_config = reloaded
+        self.session.adopt_config(reloaded)
+        if resume_target:
+            self._resume_request = (resume_target, False)
+        outcome = await self.connect_engine()
+        if "error" in outcome:
+            return {"error": outcome["error"], "reason": outcome["reason"]}
+
+        session_id = self.session.session_id
+        if session_id:
+            # Skipped when there is none: a session that connected and never
+            # took a turn has no transcript for the record to appear in.
+            await self._record_event(
+                "session_switch",
+                session_switch_content("restarted", session_id),
+                payload={"action": "restarted", "session_id": session_id},
+                session_id=session_id,
+            )
+        # No ``sessionChanged``: the session on screen is still this one, and
+        # that event replaces the message list wholesale in every client.
+        # What did change are the two options the file is allowed to take
+        # back, and they are announced the way their own setters announce
+        # them — only when they moved, so a restart that changed neither is
+        # silent on both rather than telling every window to redraw.
+        mode = self.session.permission_mode
+        if mode != was_mode:
+            await self._record_event(
+                "permission_mode",
+                permission_mode_content(mode),
+                payload={"from": was_mode, "to": mode, "source": "restart"},
+            )
+            await self._broadcast(
+                Event(
+                    "permissionModeChanged",
+                    {"mode": mode, "by": "restart"},
+                    turn_scoped=False,
+                )
+            )
+        model = self.session.model
+        if model != was_model:
+            await self._broadcast(
+                Event("modelChanged", {"model": model, "by": "restart"}, turn_scoped=False)
+            )
+        return {
+            "status": "restarted",
+            "session_id": session_id,
+            "permission_mode": mode,
+            "model": model,
+        }
+
     # ------------------------------------------------------------------
     # History
     # ------------------------------------------------------------------

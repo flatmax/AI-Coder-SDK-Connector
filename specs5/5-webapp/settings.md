@@ -11,10 +11,11 @@ what remains cannot be applied to a running session, and a Settings tab that pre
 than one that says so.
 
 > **Parts of this file are ahead of the build.** The tab renders a toolbar, a one-row info banner, the
-> model panel, a two-card grid and an inline editor. What remains specified-but-unbuilt is now only work
-> that genuinely belongs *here*: three preference cards (§ Preference Cards), restart-session and
-> session-storage size (§ Session Controls), the § Deleted cards note, and the per-field save disposition
-> in § Save Behavior and § The Applies Column Is Load-Bearing. Each is classified in
+> model panel, a two-card grid, an inline editor, the per-field save disposition (§ Save Behavior) and
+> the restart control that applies what a save could not (§ Session Controls). What remains
+> specified-but-unbuilt is now only work that genuinely belongs *here*: three preference cards
+> (§ Preference Cards), session-storage size (§ Session Controls), and the § Deleted cards note. Each is
+> classified in
 > [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size)
 > under *(c) Neither side exists*.
 >
@@ -90,7 +91,7 @@ the engine's first-turn handshake and nothing pushes it when that arrives.
 
 | Card | Format | Applies |
 |---|---|---|
-| Engine config | JSON | Partially — `model` and `permission_mode` live; everything else on the next session |
+| Engine config | JSON | On the next session — a save reaches the running CLI in no field at all. `model` and `permission_mode` do have live setters, but a save calls neither; it names the control that would (§ Save Behavior), and § Session Controls has the restart that applies the rest |
 | App config | JSON | Yes — consumers read through accessors, so a saved value takes effect on next access |
 
 Card visual style — icon, label, optional subtitle. Clicking a card opens its content in the inline
@@ -128,16 +129,22 @@ There is no "system prompt" for AIC⚡DC to own any more. That is the conversion
 have live setters. Saving an `effort`, `thinking_display`, `max_budget_usd`, `cli_path`, or
 `max_buffer_size` change writes the file correctly and changes nothing about the running session.
 
-So the editor labels each field it cannot apply, and after a save that touched one it offers the only
-thing that would apply it: **restart the session**, with a warning that this ends the current
-conversation (a resume brings the transcript back, but it is a new session either way). Accepting the
-save without restarting is fine and normal — the value applies next time.
+So a save says, per field, where the value it just wrote takes effect, and the tab offers the only thing
+that would apply a next-session one: **restart the session**. Accepting the save without restarting is
+fine and normal — the value applies next time, and the fields still waiting are listed beside the button
+until it is pressed.
 
-**Neither half of that paragraph is built.** No field is labelled, and there is no restart control to
-offer — no RPC and no button. Worth stating plainly rather than leaving as an aspiration, because this
-section exists to prevent a specific failure and currently permits it: a save that touched `effort` shows
-an unqualified success toast over a session that did not change. That is the regression named below,
-reintroduced by the fix for it never landing.
+**The naming happens after the save, not as a label on each line.** The disposition is a diff between
+what was on disk and what was written (§ Save Behavior), so it names only the fields that actually moved
+— which is what the reader wants to know, and is less than a static per-field label would claim. A
+textarea also cannot carry annotations, and the Applies column above already says which fields are
+next-session in general.
+
+The warning that used to stand here said a restart "ends the current conversation". It does not: the
+restart resumes the current session id without forking, so the transcript and the model's context come
+back. What does not come back is the CLI's cost total for the session, and a `set_model` or mode switch
+made by hand — see [`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option).
+Both are in the confirmation.
 
 The failure mode this exists to prevent is a success toast over an unchanged session. It is the specific
 regression named in
@@ -178,7 +185,7 @@ other rule.
 
 ## Session Controls
 
-**Neither of the two below is built, on either side.** They are what is left of this section after the
+**Restart session is built; session storage is not.** They are what is left of this section after the
 things it described that live elsewhere were removed from it: engine health and MCP server status —
 including the reconnect and enable/disable controls — are the Context tab's, beside the connection state
 and token cost that motivate them. See [`viewers-hud.md` § Session Section](viewers-hud.md).
@@ -186,10 +193,16 @@ and token cost that motivate them. See [`viewers-hud.md` § Session Section](vie
 These two are genuinely this tab's, because both are about the session the *config on this tab*
 configures:
 
-- **Restart session** — reconnects the SDK client, applying every pending `engine.json` change.
-  Confirmation first, naming what will apply. § The Applies Column Is Load-Bearing depends on this: it
-  says a save touching a next-session field offers the only thing that would apply it, and until this
-  exists that offer cannot be made
+- **Restart session** — replaces the CLI subprocess on `engine.json` as it is on disk, applying every
+  field a save could not. Confirmation first, and it names the fields waiting rather than asking "restart
+  the session?" over nothing: a restart is not free, and a question with nothing named cannot be weighed.
+  When no save on this tab is waiting the confirmation says it applies the file as it stands, because the
+  edit may have been made in another editor — which is also why the control is always rendered and not
+  only offered after a save. The block below the button lists what is waiting, and clears it when the
+  restart comes back. Refusals (a turn in flight, an open review) are shown in the engine's own words and
+  leave the waiting list alone, because nothing was applied. See
+  [`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option)
+  for the mechanism and the two refusals
 - **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion.
   Deletion happens there, next to what is being deleted, not behind a settings button. Nothing to call
   yet: the backend measures the session directory only as a turn-time warning (`_disk_warning`), not as a
@@ -202,7 +215,7 @@ configures:
 3. Content appears in a monospace textarea within the tab (not a separate editor)
 4. User edits directly
 5. Ctrl+S or Save button writes via the save-content RPC
-6. Save triggers the corresponding reload RPC, and surfaces which of the saved fields could not be applied live
+6. Save triggers the reload RPC where one exists (app config only), and surfaces which of the saved fields could not be applied live
 7. A separate Reload button re-reads from disk (useful if the user edited the file directly)
 8. Close button exits the editor and returns to the card grid
 
@@ -214,8 +227,26 @@ a Reload button, a Save button, and a Close button.
 ## Save Behavior
 
 - Content is written via the save-content RPC
-- On success the reload RPC is invoked automatically, and the response's per-field disposition drives the "applied / applies next session" summary. **Not built** — `save_config_content` returns `{"status": "ok"}` plus an optional JSON-parse warning, carries no per-field disposition, and the tab renders no summary
-- Feedback toasts communicate success or failure
+- On success the reload RPC is invoked automatically for a reloadable type, and the response's per-field
+  disposition drives the "applied / applies next session" summary rendered above the textarea
+- **The disposition is computed from the file, not from the field names.** `save_config_content` reads the
+  previous content before writing and answers `{compared, changed, live, next_session, live_control}`:
+  `changed` is the key-by-key diff, `live` is `changed` for a reloadable type and empty otherwise,
+  `next_session` is the other way round, and `live_control` maps a changed field to the control that
+  *would* apply it now — `model` to the panel on this tab, `permission_mode` to the composer's selector.
+  Two things it deliberately reports rather than hides: `compared: false` when the previous file could not
+  be read or parsed, in which case every key is listed because "nothing changed" would be wrong in the
+  direction that conceals a field; and `null` for content that is not a JSON object, which has no fields
+  to diff and is distinct from an empty `changed`
+- **The tab joins "applied", not the save.** A reloadable type's fields are reported as applied only after
+  the reload the tab then calls came back successful. A reload that fails leaves them stated as changed on
+  disk and not in force — neither applied nor waiting for a restart, because a restart is not what applies
+  them
+- **`live_control` is a pointer, not a receipt.** A save calls no setter. It names the shortcut so a reader
+  who came here to change the model is not sent to a restart for something a select can do
+- Feedback toasts communicate success or failure, and a save with fields waiting is **qualified in the
+  toast** — "Saved. `effort` applies when the session next starts." rather than "Saved". The panel says the
+  same at more length and outlives the toast; the toast is what the reader actually sees
 - Invalid content (malformed JSON) produces an error toast with the parse error message; the file is still saved, so a user can recover by re-editing rather than losing their work to a validator
 
 ## Reload Behavior
@@ -244,8 +275,10 @@ When collaboration mode is active and the client is non-localhost:
 
 - Save and Reload are disabled or hidden
 - Editors may still be shown read-only for viewing
-- Restart session is read-only when it exists. It is an engine mutation, and the collaboration policy
-  puts engine mutations on localhost
+- Restart session is disabled, and the note beside it says only the host can do it. It is an engine
+  mutation twice over — it replaces the host's CLI subprocess and can take the model and permission mode
+  back to what the file says — and the collaboration policy puts engine mutations on localhost. The RPC
+  gates too; the disabled button only narrows what is offered
 - The model select is disabled, and the panel says why. `get_model` is read-only, though, so a
   participant still sees which model is answering: without it they could not tell why a turn came back
   cheaper, faster or worse than the last one
@@ -281,17 +314,20 @@ in a banner that never re-reads would have the tab contradict itself within one 
 
 ## Invariants
 
-Two of these have nothing behind them and are marked. An invariant with no implementation is worse than
-a missing feature — it reads as a guarantee somebody may rely on.
+Every invariant below now has something behind it. The two that did not — the per-field save disposition
+and a restart for a participant to be refused — are the work described in § Save Behavior and § Session
+Controls.
 
 - Only whitelisted config types can be read or written via the settings RPC; the retired keys are rejected
 - Save always writes to the user config directory, never the bundle
-- Every save reports which fields applied live and which need a new session; a save never shows an unqualified success for a field that did not apply. **Not enforced** — there is no per-field disposition and no summary, so a save touching a next-session field does show an unqualified success
+- Every save reports which fields applied live and which need a new session; a save never shows an unqualified success for a field that did not apply — including in the toast, which is the part a reader sees
+- A field is reported as applied only after the call that applied it returned. The save never claims a reload it asked for but has not seen finish
 - No settings path writes an environment variable
 - The tab never edits `CLAUDE.md`, `.claude/settings.json`, or `.claude/settings.local.json`
 - Editor shows current file content on open — no cached stale content
 - Feedback toasts appear for every save and reload
-- Non-localhost participants cannot save, reload, or change the model, and cannot restart the session; those affordances are hidden or disabled. Enforced for save, reload and the model; **vacuous** for restart, which does not exist yet — the permission mode used to be named here and is not this tab's to gate
+- Non-localhost participants cannot save, reload, change the model, or restart the session; those affordances are hidden or disabled. The permission mode used to be named here and is not this tab's to gate
+- A restart never claims more than it did: a refusal keeps the waiting list, and an engine that had not started yet is reported as adopting the file rather than as a session restarted
 - The model panel never shows a resolution it did not read from the engine, and never shows the alias
   `default` in place of "no model pinned"
 - The model select shows what is in force, not what was clicked: it moves on the RPC reply, and a
