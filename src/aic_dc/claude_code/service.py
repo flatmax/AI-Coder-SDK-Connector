@@ -130,10 +130,11 @@ EventCallback = Callable[..., Awaitable[Any]]
 # opens onto whatever that was — usually Usage, which has no MCP status on it
 # at all. The command would then have opened the right tab and still not shown
 # the thing it names. What the section *means* is the surface's business and
-# not this table's: on the Context tab it picks a segment, on the Settings tab
-# it scrolls a panel into view and marks it. Both answer the same question —
-# "which part of this tab did the command mean?" — and the shell forwards the
-# fragment without knowing either answer.
+# not this table's: on the Context tab it picks a segment; on the Settings tab
+# it scrolls a panel into view and marks it, or opens a config card and selects
+# the field the command named. All three answer the same question — "which part
+# of this tab did the command mean?" — and the shell forwards the fragment
+# without knowing any of the answers.
 SLASH_ROUTES: dict[str, dict[str, Any]] = {
     "context": {
         "target": "tab:context#usage",
@@ -189,8 +190,15 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
     # which is deliberately always visible and is not reachable by a route.
     # Said plainly here because the earlier wording promised "the Settings
     # tab's permission-mode control and rules list", and neither is there.
+    #
+    # The anchor is what makes that honest rather than merely accurate. Without
+    # it the command opened the tab and left the reader in front of a card grid,
+    # with the field it named one click and a scroll away inside a JSON file.
+    # `permission-mode` opens the engine.json card and selects the
+    # `permission_mode` line — the same treatment `/model` got, adapted to a
+    # surface whose "control" is a line of text.
     "permissions": {
-        "target": "tab:settings",
+        "target": "tab:settings#permission-mode",
         "surface": (
             "the Settings tab, where engine.json holds the mode the next session "
             "starts in — the live mode is the selector beside the composer"

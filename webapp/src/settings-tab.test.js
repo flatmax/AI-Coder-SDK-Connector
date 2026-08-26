@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import './settings-tab.js';
+import { fieldLineRange } from './settings-tab.js';
 import { SharedRpc } from './rpc.js';
 
 // -----------------------------------------------------------
@@ -182,7 +183,7 @@ describe('aic-settings-tab has no preference switches yet', () => {
 //
 // The grid used to offer eight cards, five of them prompt files
 // the app assembled itself and one of them provider
-// credentials. Three remain. These tests pin the set because a
+// credentials. Two remain. These tests pin the set because a
 // card for a config type the backend no longer whitelists opens
 // an editor that errors on load — and a card for a *retired*
 // prompt would be worse than broken: it would tell the user the
@@ -597,5 +598,181 @@ describe('aic-settings-tab model panel', () => {
     el.onTabVisible();
     await settle(el);
     expect(modelSelect(el).value).toBe('haiku');
+  });
+});
+
+// -----------------------------------------------------------
+// Where /permissions lands
+// -----------------------------------------------------------
+//
+// The route used to be `tab:settings` with no anchor, which
+// opened the tab and left the reader in front of a card grid.
+// The thing the command names — the mode the *next* session
+// starts in — is a line inside engine.json, so the anchor has
+// to open that card and point at that line
+// (specs5/3-engine/session.md § Target grammar,
+// specs5/5-webapp/settings.md § Preference Cards).
+//
+// The running session's mode is the composer's own selector and
+// is deliberately not reachable from here. A test below pins
+// that this tab grows no second control for it: two controls for
+// one posture, one of them applying next launch, is the drift
+// that made the old route dishonest in the first place.
+
+const ENGINE_JSON = [
+  '{',
+  '  "model": "opus",',
+  '  "permission_mode": "acceptEdits",',
+  '  "cli_path": null',
+  '}',
+].join('\n');
+
+function publishEngineRpc(content = ENGINE_JSON, extra = {}) {
+  publishFakeRpc({
+    'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+    'Settings.get_config_content': (key) => ({
+      type: key,
+      content: key === 'engine' ? content : '{}',
+    }),
+    ...extra,
+  });
+}
+
+function editorTextarea(el) {
+  return el.shadowRoot.querySelector('.editor-textarea');
+}
+
+describe('aic-settings-tab permission-mode section', () => {
+  it('opens the engine card and selects the permission_mode line', async () => {
+    publishEngineRpc();
+    const el = mountTab();
+    await settle(el);
+    expect(editorTextarea(el)).toBeNull();
+
+    await el.showSection('permission-mode');
+    await settle(el);
+
+    const ta = editorTextarea(el);
+    expect(ta).toBeTruthy();
+    expect(el._activeKey).toBe('engine');
+    expect(ta.value.slice(ta.selectionStart, ta.selectionEnd))
+      .toBe('"permission_mode": "acceptEdits",');
+  });
+
+  it('marks the editor, so a route that changed nothing else shows', async () => {
+    // The card may already be the open one and already scrolled to,
+    // where opening it again changes nothing on screen and the
+    // command looks like it did nothing. Same lesson as /model's.
+    publishEngineRpc();
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('permission-mode');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.editor-area').classList
+      .contains('flash')).toBe(true);
+  });
+
+  it('lights one mark at a time', async () => {
+    // Two parts of the tab lit at once would claim two commands
+    // arrived when only the second did.
+    publishEngineRpc();
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('permission-mode');
+    await settle(el);
+    await el.showSection('model');
+    await settle(el);
+    expect(modelPanel(el).classList.contains('flash')).toBe(true);
+    expect(el.shadowRoot.querySelector('.editor-area')?.classList
+      .contains('flash')).toBe(false);
+  });
+
+  it('says so when engine.json sets no mode, rather than flashing at nothing', async () => {
+    // An absent key is a real answer — the engine's own default is
+    // in force — and the reader who typed the command is the one
+    // who would set it.
+    const toasts = [];
+    const onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('aic-toast', onToast);
+    publishEngineRpc('{\n  "model": "opus"\n}');
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('permission-mode');
+    await settle(el);
+    window.removeEventListener('aic-toast', onToast);
+    expect(el._activeKey).toBe('engine');
+    expect(toasts.map((t) => t.message).join(' '))
+      .toContain('does not set permission_mode');
+  });
+
+  it('selects the user\'s unsaved line, not the one that was loaded', async () => {
+    // The textarea is where an edit lives until it is saved, so a
+    // reader who adds the key and re-runs the command must land on
+    // the line they just wrote.
+    publishEngineRpc('{\n  "model": "opus"\n}');
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('permission-mode');
+    await settle(el);
+    const ta = editorTextarea(el);
+    ta.value = '{\n  "model": "opus",\n  "permission_mode": "plan"\n}';
+    await el.showSection('permission-mode');
+    await settle(el);
+    expect(ta.value.slice(ta.selectionStart, ta.selectionEnd))
+      .toBe('"permission_mode": "plan"');
+  });
+
+  it('offers no permission-mode control of its own', async () => {
+    // The live posture belongs to the composer's selector. A second
+    // control here — one that applies next launch — is exactly the
+    // drift the anchor was added to end.
+    publishEngineRpc();
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('permission-mode');
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.permission-mode-select')).toBeNull();
+    expect([...el.shadowRoot.querySelectorAll('select')]
+      .filter((s) => s !== modelSelect(el))).toEqual([]);
+  });
+
+  it('ignores an anchor it does not have, and stays reachable', async () => {
+    publishEngineRpc();
+    const el = mountTab();
+    await settle(el);
+    await el.showSection('rules');
+    await settle(el);
+    expect(el._activeKey).toBeNull();
+    expect(modelPanel(el).classList.contains('flash')).toBe(false);
+  });
+});
+
+describe('fieldLineRange', () => {
+  it('spans the key through the end of its line', () => {
+    const r = fieldLineRange(ENGINE_JSON, 'permission_mode');
+    expect(ENGINE_JSON.slice(r.start, r.end))
+      .toBe('"permission_mode": "acceptEdits",');
+  });
+
+  it('reads a key, not a value that contains the name', () => {
+    // Without the colon check this lands the reader on cli_path.
+    const doc = '{\n  "cli_path": "/opt/permission_mode/claude",\n'
+      + '  "permission_mode": "plan"\n}';
+    const r = fieldLineRange(doc, 'permission_mode');
+    expect(doc.slice(r.start, r.end)).toBe('"permission_mode": "plan"');
+  });
+
+  it('finds the line in a document that does not parse', () => {
+    // A field is worth pointing at precisely while the file is being
+    // edited, which is when it is most likely to be malformed.
+    const doc = '{\n  "permission_mode": "plan"\n  "model":\n';
+    const r = fieldLineRange(doc, 'permission_mode');
+    expect(doc.slice(r.start, r.end)).toBe('"permission_mode": "plan"');
+  });
+
+  it('returns null for an absent key and for junk input', () => {
+    expect(fieldLineRange('{}', 'permission_mode')).toBeNull();
+    expect(fieldLineRange(ENGINE_JSON, '')).toBeNull();
+    expect(fieldLineRange(null, 'permission_mode')).toBeNull();
   });
 });

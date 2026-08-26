@@ -319,7 +319,7 @@ the webapp opens the surface named by `target`.
 | `/mcp` | `tab:context#session` | Yes | The Context tab's MCP section: per-server connection state from `get_mcp_status()`, plus each server's tools and their token cost. |
 | `/agents` | `tab:context#session` | Yes | The Context tab's subagent list — the definitions this session can delegate to, with what they have spent. |
 | `/model` | `tab:settings#model` | Yes | The Settings tab's model panel: the alias in force, what the CLI resolves it to, and a switch that calls `set_model` for this session. See [`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel). |
-| `/permissions` | `tab:settings` | Yes | The Settings tab, where `engine.json` holds the mode the *next* session starts in. The running session's mode is the selector beside the composer, which is always visible and deliberately not routable. |
+| `/permissions` | `tab:settings#permission-mode` | Yes | The Settings tab's `engine.json` card, opened with the `permission_mode` line selected — that field is the mode the *next* session starts in. The running session's mode is the selector beside the composer, which is always visible and deliberately not routable. |
 | `/clear` | `new-session` | No | New Session. The CLI's own `/clear` would mint a session the store never saw, leaving every other client rendering the old transcript. |
 | `/resume` | `history` | No | The history browser. Not in the CLI's command list at all. |
 
@@ -328,17 +328,30 @@ the webapp opens the surface named by `target`.
 A target is `surface` or `surface#section`. The webapp opens the surface, then — when a section is
 named — asks it to show that section.
 
-**A surface with a segmented control must be targeted with a section.** The Context tab remembers
-the section its reader last chose, so a bare `tab:context` opens onto whatever that was: `/mcp`
-would land on Usage, which carries no MCP status at all. The command would have opened the right
-tab and still not shown the thing it names. Naming the section is what closes that gap, and it is
-why every Context route above carries one.
+**Every `tab:` target names a section.** A tab is not a destination, and each of the two has its own
+reason. The Context tab remembers the section its reader last chose, so a bare `tab:context` opens
+onto whatever that was: `/mcp` would land on Usage, which carries no MCP status at all. The Settings
+tab has no memory to land wrong in — it opens onto a card grid, with the model panel above it and
+every config field one click inside a file. Either way the command would have opened the right tab
+and still not shown the thing it names.
+
+**What a section means is the surface's business, not the grammar's.** Three answers so far, all to
+the same question: on the Context tab it picks a segment; on Settings, `#model` scrolls a panel into
+view and marks it, while `#permission-mode` opens a config card and selects the line that sets the
+field. The webapp splits the fragment off and forwards it without knowing which of the three it will
+get. That is what lets a surface whose "control" is a line of text still be a routable destination —
+the alternative was building a duplicate control on the tab just so a route would have something to
+point at, which is the drift `/permissions` came from.
 
 Being *shown* a section is not the same as *choosing* it, so an arriving command does not overwrite
 the remembered choice — the reader's own next visit still opens where they left off. An unknown
 section is ignored rather than fatal: the surface still opens, on whatever it would have shown
 anyway. A section is never a substitute for the surface being right, only for where inside it the
 answer lives.
+
+A section that names a field the file does not set is answered rather than mimed: `#permission-mode`
+against an `engine.json` with no such key opens the card and says the key is absent and the engine's
+own default is in force. Marking an empty spot would read as "here it is".
 
 #### Mid-turn availability
 

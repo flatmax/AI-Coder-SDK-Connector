@@ -447,10 +447,11 @@ to-do list: it is the record of a spec section that drifted far enough to make a
 **Three different problems, needing three different fixes.** Lumping them together is what let the
 whole section rot unnoticed.
 
-**(a) Right feature, wrong tab — a spec fix, not a code fix.** These exist and work; the spec files them
-under Settings and they live in the Context tab or the permission dialog. `get_config_info` returns
-`{"config_dir": ...}` and nothing else, so the § Info Banner bullets asking for credential source and
-CLI version describe a banner that could not render them from the RPC it reads.
+**(a) Right feature, wrong tab — a spec fix, not a code fix.** ~~These exist and work; the spec files
+them under Settings and they live in the Context tab or the permission dialog.~~ **Settled 2026-08-26 —
+see § Landed since.** `get_config_info` returns `{"config_dir": ...}` and nothing else, so the § Info
+Banner bullets asking for credential source and CLI version described a banner that could not render them
+from the RPC it reads.
 
 | Specified as | Actually in | Read from |
 |---|---|---|
@@ -459,10 +460,10 @@ CLI version describe a banner that could not render them from the RPC it reads.
 | § Session Controls "MCP servers" status | Context tab § Session — which is where `/mcp` already routes | `get_mcp_status` |
 | § Preference Cards "Permission chime" | The permission dialog | `localStorage` |
 
-The resolution is almost certainly to move these in the spec rather than build second copies: a second
-engine-health panel would be a second thing to keep true, and `/mcp` routing to the Context tab is
-already the better answer. Recorded rather than done because it is nine items of spec arbitration and
-the call on each is the author's, not the implementer's.
+The resolution ~~is almost certainly~~ **was** to move these in the spec rather than build second copies:
+a second engine-health panel would be a second thing to keep true, and `/mcp` routing to the Context tab
+is already the better answer. Recorded rather than done at the time because it was nine items of spec
+arbitration and the call on each was the author's, not the implementer's.
 
 **(b) Backend built, no caller — the shape `set_model` was in.** ~~Two MCP control RPCs exist in
 `service.py`, both localhost-gated, both with **zero callers anywhere in `webapp/src`**.~~ **Built
@@ -498,6 +499,12 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
 - **Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.
 - **Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.
 - **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
+- **The permission chime's mute.** Added to this list by (a)'s arbitration rather than found in it: the
+  dialog *reads* `aic-dc.permission-chime` and nothing writes it, so the mute is reachable only from a
+  devtools console. It was a Settings preference card, which is why the gap read as "specified, not built"
+  on a tab that should never have held it. Now owned by
+  [`../5-webapp/permission-dialog.md` § Attention](../5-webapp/permission-dialog.md), beside the thing
+  that rings.
 - **Session storage size** — nothing to call. The backend measures the session directory only as a
   turn-time warning (`_disk_warning`), not as a readable RPC.
 - **The retired-files note.** § Deleted cards argues for it at some length — a user who customised
@@ -505,12 +512,12 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   rendered. Of everything in this list it is the cheapest to build and the only one whose absence the
   spec has already called out as a mistake.
 
-**Where to start.** ~~(b) is an afternoon and closes a real gap.~~ **(b) is done.** Then (a), because a
+**Where to start.** ~~(b) is an afternoon and closes a real gap.~~ **(b) is done.** ~~Then (a), because a
 spec that names the wrong tab is how `/permissions` came to lie and the same trap is still set for eight
-more items — and note that (b) turned up a ninth of exactly that kind, since this section's own table
-filed the MCP server list under Settings when the right home for it was the Context tab all along. (c)
-last, and within it the restart-session pair first, since two invariants currently have nothing behind
-them.
+more items~~ **— (a) is done too** — and note that (b) turned up a ninth of exactly that kind, since this
+section's own table filed the MCP server list under Settings when the right home for it was the Context
+tab all along. **(c) is what is left**, and within it the restart-session pair first, since two invariants
+currently have nothing behind them.
 
 **How to keep this from recurring.** The drift was invisible because nothing reads a spec section
 against the component that implements it. The two mechanisms that *did* catch things this session were
@@ -526,6 +533,47 @@ image and appears on no list, which is exactly why two of them sat unnoticed. Mo
 rather than already covered by it.
 
 ### Landed since
+
+- **The Settings spec stopped describing other tabs' work** — item (a) of the section above, arbitrated
+  2026-08-26. Six features were **deleted outright** from
+  [`../5-webapp/settings.md`](../5-webapp/settings.md) rather than annotated with where they really live:
+  engine health, credential source, the resolved `claude` path and version, MCP server status with its
+  reconnect/enable controls, the permission chime, and the live permission mode. Annotating was the other
+  option on the table and it was the wrong one — a spec section that describes a surface it does not own is
+  how the drift started, and an annotated bullet is still a bullet somebody will implement.
+
+  **What made the deletions safe to do was checking the receiving spec first, not the code.** Every one of
+  the six is already specified where it is built —
+  [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md),
+  [`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md),
+  [`../5-webapp/chat.md`](../5-webapp/chat.md) — so deleting was moving a description, not losing one. Had
+  any been implemented-but-unspecified, deleting would have made a built feature undescribed anywhere,
+  which is the same drift running the other way.
+
+  **The scope trap this ran into is worth the sentence.** § Session Controls held four bullets and it was
+  tempting to delete the section: two of them (engine health, MCP servers) were (a) items, but **restart
+  session and session-storage size are (c)** — unbuilt, specified only here, and restart-session is what
+  § The Applies Column Is Load-Bearing depends on for its central claim. Deleting the group as a unit
+  would have quietly dropped a (c) item and left an invariant elsewhere depending on a section that no
+  longer existed. Same shape in § Invariants, where the non-localhost invariant named restart *and*
+  permission mode together: the first half is vacuous-until-built and stays, the second is not this tab's
+  and went.
+
+  **The arbitration found one live defect, and it was the one that started the section.** `/permissions`
+  routed to a bare `tab:settings` — the tab, not the thing it names. Fixed by naming the field instead of
+  building a control for the route to point at: the target is now `tab:settings#permission-mode`, and the
+  Settings tab answers that anchor by opening the `engine.json` card and selecting the `permission_mode`
+  line. That is a third meaning for a `#section` — a segment on the Context tab, a panel to scroll and
+  mark for `/model`, a *line in a file* here — and it is the one that makes the grammar carry its weight,
+  because the alternative was a duplicate next-session control on Settings existing solely so a route had
+  a target. `fieldLineRange` reads the textarea rather than the loaded content, so a reader who adds the
+  key after being told it is absent lands on the line they just wrote; and an absent key is answered
+  ("the engine's own default is in force") rather than mimed with a mark over nothing.
+
+  `test_every_context_tab_route_names_a_section` widened to `test_every_tab_route_names_a_section` — a tab
+  is not a destination, and the two tabs reach that conclusion for different reasons (Context remembers
+  the wrong section; Settings opens onto a card grid).
 
 - **The two MCP controls got a caller** — built, as item (b) of the section above. `reconnect_mcp_server`
   and `toggle_mcp_server` are now actions in the Context tab's server-group body, under the connection

@@ -128,20 +128,29 @@ export function permissionModeOptions(current) {
  * `isTrusted` does not separate that from a click — the restored event is the
  * browser's own, so it is trusted too. A real selection always follows a
  * pointer or a key on the control. `autocomplete="off"` asks for the same
- * thing declaratively (the HTML spec exempts such controls from form-state
- * restoration) and costs nothing where it is honoured.
+ * thing declaratively, since the HTML spec exempts such controls from
+ * form-state restoration.
+ *
+ * **The latch is the guard that carries this; the attribute is belt-and-braces.**
+ * Measured, not assumed — `scripts/permission_mode_load_probe.py` parked the
+ * select's DOM value on `bypassPermissions`, reloaded, and saw nothing; then
+ * *removed* `autocomplete="off"` and reloaded again, and still saw nothing. So
+ * Chrome 151 declines to restore this control for its own reasons — most likely
+ * that it is created dynamically inside a shadow root rather than parsed with
+ * the document — and the attribute is not what is holding. Keep it anyway: it
+ * costs nothing and it is the half that is specified rather than observed.
  *
  * Both are guards rather than a fix for a reproduced fault. The symptom they
  * are aimed at — the bypass confirmation appearing on page load, over a
- * selector still reading "Ask" — was reported from a live run but did *not*
- * reproduce on the dev backend on 2026-08-25. Instrumenting this handler to
- * log every `change` it received showed nothing at all on the loads where a
- * dialog appeared, so on that build Chrome was not restoring the select into
- * an event: the reappearing dialog was the CDP harness re-surfacing a native
- * confirm it had already handled. Note that the "selector still reads Ask"
- * half needs no page-load story to explain it — the reset below puts the
- * control back before the confirmation is even drawn, so the mismatch is
- * visible the first time too.
+ * selector still reading "Ask" — was reported from a live run and has never
+ * reproduced: not on the dev backend under Vite on 2026-08-25, and not against
+ * the built bundle under an independent CDP harness on 2026-08-26. Both runs
+ * instrumented this handler and saw no `change` at all on the loads where a
+ * dialog had appeared, so Chrome was not restoring the select into an event;
+ * the reappearing dialog was the CDP harness re-surfacing a native confirm it
+ * had already handled. Note that the "selector still reads Ask" half needs no
+ * page-load story to explain it — the reset below puts the control back before
+ * the confirmation is even drawn, so the mismatch is visible the first time too.
  */
 export function renderPermissionModeSelector(panel) {
   const current = panel._permissionMode || INITIAL_PERMISSION_MODE;

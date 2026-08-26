@@ -809,12 +809,13 @@ describe('ChatPanel tab close — rendering', () => {
 // ---------------------------------------------------------------------------
 //
 // "Mode storage" stood alongside this, asserting that an `agentsSpawned`
-// payload's `mode` field landed in `panel._tabModes`. That broadcast has no
-// consumer since `a0cb83b`, so nothing writes the map any more — it is still
-// read, by the tab chips and the LED tooltip, and so is permanently empty.
-// The tests went rather than being rewritten because there is no longer a
-// path that fills it; see the note in the open-work list about retiring the
-// map itself.
+// payload's `mode` field landed in `panel._tabModes`. That broadcast lost its
+// consumer in `a0cb83b`, so nothing wrote the map any more and it was
+// permanently empty in production — dead code held up by its own test helper.
+// The tests went rather than being rewritten because there was no longer a
+// path that filled it, and the map itself has since been retired along with
+// `seedLabeledTabWithMode` and the `mode` parameter threaded through
+// `renderLedRow` and `formatLedTooltip`. Tombstones mark where it stood.
 
 describe('ChatPanel tab tooltip enrichment', () => {
   it('main tab tooltip is just the label', async () => {

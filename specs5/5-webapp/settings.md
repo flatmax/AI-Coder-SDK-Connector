@@ -4,26 +4,38 @@ The Settings tab provides access to configuration editing and hot-reload. Config
 and reloaded via the settings RPC service with a whitelisted type set. Editing happens inline within the
 tab — no separate window or modal.
 
-The tab shrank with the config surface. Eight cards became three, because five of them edited prompt
-files AIC⚡DC no longer assembles. What it gained is honesty about *when* an edit takes effect: most of
+The tab shrank with the config surface. Eight cards became two, because five of them edited prompt files
+AIC⚡DC no longer assembles and a sixth held provider credentials it no longer has (§ Deleted cards names
+all six). What it gained is honesty about *when* an edit takes effect: most of
 what remains cannot be applied to a running session, and a Settings tab that pretends otherwise is worse
 than one that says so.
 
 > **Parts of this file are ahead of the build.** The tab renders a toolbar, a one-row info banner, the
-> model panel, a two-card grid and an inline editor. § Preference Cards, § Session Controls, the § Deleted
-> cards note, and the per-field save disposition in § Save Behavior and § The Applies Column Is
-> Load-Bearing are **not built** — and some of what they describe exists on a different tab rather than
-> being missing. Each item is classified in
-> [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size).
+> model panel, a two-card grid and an inline editor. What remains specified-but-unbuilt is now only work
+> that genuinely belongs *here*: three preference cards (§ Preference Cards), restart-session and
+> session-storage size (§ Session Controls), the § Deleted cards note, and the per-field save disposition
+> in § Save Behavior and § The Applies Column Is Load-Bearing. Each is classified in
+> [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size)
+> under *(c) Neither side exists*.
+>
+> **What this file no longer describes at all** is the other half of that drift: six features it filed
+> under Settings that were built, and built elsewhere — engine health, credential source, the resolved
+> `claude` path and version, MCP server status and its reconnect/enable controls, the permission chime,
+> and the live permission mode. They are gone from here rather than annotated, because a spec that
+> describes a surface it does not own is how the drift started. Their owners are
+> [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+> [`viewers-hud.md`](viewers-hud.md), [`permission-dialog.md`](permission-dialog.md) and
+> [`chat.md`](chat.md).
 >
 > This banner exists because the drift was not harmless: `/permissions` shipped promising "the Settings
-> tab's permission-mode control plus the rules list", and neither is here. A route can only be as honest
-> as the spec section it points at.
+> tab's permission-mode control plus the rules list", and neither was here. A route can only be as honest
+> as the spec section it points at. That one is now settled the other way round — the route names the
+> `engine.json` field it can actually reach (§ Config Cards) instead of the tab growing a control so the
+> promise could be kept.
 
 ## Layout
 
-- Info banner at top — config directory. *(Specified as also carrying credential source and CLI path;
-  those are on the Context tab, from `get_engine_health` — see the banner above.)*
+- Info banner at top — config directory
 - Model panel — the model in force and a switch for it, between the banner and the grid and
   deliberately **outside** it (see § Model Panel)
 - Card grid — one card per whitelisted config type, plus preference cards
@@ -84,6 +96,13 @@ the engine's first-turn handshake and nothing pushes it when that arrives.
 Card visual style — icon, label, optional subtitle. Clicking a card opens its content in the inline
 editor.
 
+`/permissions` routes here as `tab:settings#permission-mode`. It opens the Engine config card and selects
+the `permission_mode` line, marking the editor so a route that changed nothing else on screen still shows
+that it landed — and when `engine.json` sets no such key it says so, because the engine's own default
+being in force is the answer rather than a gap to mime. The selection is read from the editor, so an
+unsaved line the reader just added is the one they land on. That field is the mode the *next* session
+starts in; the running one is the composer's selector ([`chat.md`](chat.md) § Permission Mode Selector).
+
 ### Deleted cards
 
 `LLM config`, `System prompt`, `System extra`, `Compaction skill`, `Review prompt`, and
@@ -126,20 +145,30 @@ regression named in
 
 ## Preference Cards
 
-**Not built.** No preference card exists; the grid holds the two config cards and nothing else. Of the
-five below, "Permission chime" is live in the permission dialog, and the other four have no
-implementation on either side.
+**Not built.** No preference card exists; the grid holds the two config cards and nothing else. None of
+the three below has an implementation on either side.
 
 Cards that hold a switch rather than an editor, laid out in the same card shape with the control beneath
 the icon and label. Descriptions live in the `title` attribute so the grid stays visually uniform.
 
 | Card | Backed by | Effect |
 |---|---|---|
-| Permission mode | `engine.json` `permission_mode` | The posture a session **starts** in. The *running* session's posture is the chat panel's selector beside the composer, which is always visible and is not reachable by a route — so `/permissions` names this file, not a live control here |
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
-| Permission chime | `localStorage` | Whether a permission request in a background tab plays a sound |
 | Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask` |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
+
+Two rows that stood here have been removed rather than marked, because neither is this tab's to hold. The
+**permission chime** is a `localStorage` preference owned by the surface that rings it — see
+[`permission-dialog.md`](permission-dialog.md). The **permission mode** is two different things and
+neither is a preference card: the running session's posture is the composer's own selector
+([`chat.md`](chat.md) § Permission Mode Selector), and the mode the *next* session starts in is a field
+in `engine.json`, edited as text in that config card like every other field in it. `/permissions` opens
+that card and marks the field.
+
+**Deny-read scope stays**, even though it is also a `localStorage` preference read by another surface. What
+separates it from the chime is what its control *does*: a mute belongs beside the thing making the noise,
+while this one forgets a remembered answer to a prompt that is by definition no longer on screen. There is
+no local place to put it.
 
 The **Agentic coding** toggle is deleted. It gated whether AIC⚡DC would tell the model about its
 `🟧🟧🟧 AGENT` spawn protocol, and there is no protocol left to gate — the agent's `Task` tool is part of
@@ -149,20 +178,22 @@ other rule.
 
 ## Session Controls
 
-**Not built as a group on this tab.** Engine health and MCP server status are live in the Context tab
-(`get_engine_health`, `get_mcp_status`), which is where `/mcp` routes — the open question for those two is
-whether this spec should point there rather than duplicate them. MCP **reconnect** is no longer the gap it
-was: `reconnect_mcp_server(name)` and `toggle_mcp_server(name, enabled)` are now actions on the Context
-tab's own server rows, next to the connection state and token cost that motivate them, rather than a
-second copy of that list here — see [`viewers-hud.md` § Session Section](viewers-hud.md).
-Restart-session and session-storage size still exist on neither side.
+**Neither of the two below is built, on either side.** They are what is left of this section after the
+things it described that live elsewhere were removed from it: engine health and MCP server status —
+including the reconnect and enable/disable controls — are the Context tab's, beside the connection state
+and token cost that motivate them. See [`viewers-hud.md` § Session Section](viewers-hud.md).
 
-A group the old tab had no equivalent for, because the old engine had no session to control:
+These two are genuinely this tab's, because both are about the session the *config on this tab*
+configures:
 
-- **Engine health** — the resolved `claude` binary and version, credential source, and any auth warning. Read-only, and the first place to look when a turn fails for a reason that is not about code
-- **Restart session** — reconnects the SDK client, applying every pending `engine.json` change. Confirmation first, naming what will apply
-- **MCP servers** — status per server from `get_mcp_status()`, with a reconnect action for a failed one. **Built in the Context tab instead**, where the server list already lives; this bullet is kept as the record of where the decision landed and why, not as work outstanding. Note that `aic-dc` *does* appear in that list, with `scope: "dynamic"`, and is the one row that offers neither control — the engine accepts a disable it cannot reverse ([`../plan/sdk-surface.md`](../plan/sdk-surface.md) § Correction, 2026-08-26)
-- **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion. Deletion happens there, next to what is being deleted, not behind a settings button
+- **Restart session** — reconnects the SDK client, applying every pending `engine.json` change.
+  Confirmation first, naming what will apply. § The Applies Column Is Load-Bearing depends on this: it
+  says a save touching a next-session field offers the only thing that would apply it, and until this
+  exists that offer cannot be made
+- **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion.
+  Deletion happens there, next to what is being deleted, not behind a settings button. Nothing to call
+  yet: the backend measures the session directory only as a turn-time warning (`_disk_warning`), not as a
+  readable RPC
 
 ## Editing Flow
 
@@ -213,24 +244,27 @@ When collaboration mode is active and the client is non-localhost:
 
 - Save and Reload are disabled or hidden
 - Editors may still be shown read-only for viewing
-- Session controls — restart, MCP reconnect, permission mode — are read-only. They are engine mutations, and the collaboration policy puts engine mutations on localhost. *(None of the three is on this tab; MCP reconnect and the server toggle are in the Context tab, where they follow this rule — a guest sees the connection facts with no buttons on them, and both RPCs gate on localhost server-side regardless of what the UI offers.)*
+- Restart session is read-only when it exists. It is an engine mutation, and the collaboration policy
+  puts engine mutations on localhost
 - The model select is disabled, and the panel says why. `get_model` is read-only, though, so a
   participant still sees which model is answering: without it they could not tell why a turn came back
   cheaper, faster or worse than the last one
-- Engine health remains visible, because a collaborator who cannot see why a turn failed cannot help
+
+The rule the removed controls followed still holds where they live: a guest sees the Context tab's
+connection facts with no buttons on them, and the MCP RPCs gate on localhost server-side regardless of
+what any UI offers.
 
 ## Info Banner
 
+One row, one fact:
+
 - Config directory path. *(Specified as clickable to open in the system file manager; it renders as plain
   text with no handler.)*
-- Credential source, with the auth warning when the resolved source is surprising. **Not on this tab** —
-  in the Context tab and the chat panel's health banner, from `get_engine_health`
-- Resolved `claude` binary path and version. **Not on this tab** — same place, same RPC
 
-The banner reads `get_config_info`, which returns `{"config_dir": ...}` and nothing else. So the two
-bullets above could not be rendered from the RPC this banner reads even if the markup were there; they
-would need `get_engine_health`, which the Context tab already calls. Whether this tab should duplicate
-that or the spec should point there is the open question — see the banner at the top of this file.
+That is the whole banner, and it matches the RPC: `get_config_info` returns `{"config_dir": ...}` and
+nothing else. The credential source, the auth warning, and the resolved `claude` path and version were
+specified here and are not here — they come from `get_engine_health`, and they are reported where that
+RPC is already called, in the Context tab and the chat panel's health banner.
 
 The old banner showed a "smaller model" line. There is no auxiliary model call left to make, so there is
 no second model to name.
@@ -257,8 +291,7 @@ a missing feature — it reads as a guarantee somebody may rely on.
 - The tab never edits `CLAUDE.md`, `.claude/settings.json`, or `.claude/settings.local.json`
 - Editor shows current file content on open — no cached stale content
 - Feedback toasts appear for every save and reload
-- Non-localhost participants cannot save, reload, restart the session, or change the permission mode or the model; those affordances are hidden or disabled. Enforced for save, reload and the model; **vacuous** for restart and permission mode, which this tab does not offer to anyone
-- Engine health is visible to every participant
+- Non-localhost participants cannot save, reload, or change the model, and cannot restart the session; those affordances are hidden or disabled. Enforced for save, reload and the model; **vacuous** for restart, which does not exist yet — the permission mode used to be named here and is not this tab's to gate
 - The model panel never shows a resolution it did not read from the engine, and never shows the alias
   `default` in place of "no model pinned"
 - The model select shows what is in force, not what was clicked: it moves on the RPC reply, and a

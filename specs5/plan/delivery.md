@@ -1447,8 +1447,9 @@ writes into a `SessionStoreEntry` blob across SDK versions.
   `PRESENCE_POLL_SECONDS = 2.0` in `permissions.py`, phase 2's. `Presets` is deferred by decision
   (CC-12), the other two by omission. The `history` section is the pattern to follow: a callable
   provider so a hot reload takes, and a floor per key.
-- **No Settings engine-health card.** `settings.md:83` specifies one. The banner is the surface health
-  reaches now.
+- **No Settings engine-health card.** ~~`settings.md:83` specifies one.~~ It no longer specifies one:
+  engine health was deleted from `settings.md` on 2026-08-26 as an item filed under the wrong tab
+  (`impl-history/work-log.md` § Landed since). The banner, and the Context tab, are where health lives.
 
 ### For whoever picks up phase 6
 
@@ -3159,3 +3160,85 @@ work — verified by `git stash` — and is left alone.
 - **A second modifier for path insertion.** The shift collision is real and this was the alternative.
   Rejected because the remaining modifiers are the browser's, and a chord nobody can guess is worse than
   an overloaded one that has a menu item beside it.
+
+## Interlude — the dialog nobody raised, and the guard that was not holding (2026-08-26)
+
+Closes the background-subagent fix list. Item 6c was its last open thing: the `Bypass permissions?`
+confirmation appearing on page load, over a selector still reading "Ask". It had been chased once on
+2026-08-25, did not reproduce, and left behind two guards and a note saying it was **worth checking
+against the live session, where it was originally seen**.
+
+It has now been checked, and the answer is that the app does not raise it.
+
+### Why the first investigation could not finish
+
+The 2026-08-25 run instrumented `onPermissionModeSelect` and saw no `change` at all on the loads where a
+dialog appeared, and identified the culprit as the harness: `chrome-devtools-mcp` re-surfacing a native
+`confirm` it had already handled, once per navigation. That is a complete explanation of what was
+observed *through that harness* and no explanation at all of the original sighting, which was not made
+through one. The investigation could not separate "the app raises this" from "the harness invents this"
+because it had only the one harness.
+
+So this run owned the browser outright. Chrome on a scratch profile with its own debugging port, driven
+over plain CDP by `scripts/permission_mode_load_probe.py`, with `window.confirm` replaced by
+`Page.addScriptToEvaluateOnNewDocument` — **before any application script, on every load** — so no native
+dialog is ever created and there is nothing for anything downstream to re-surface. Every call is recorded
+with the stack that made it, which answers "the mechanism is something else" directly instead of by
+elimination. This also sidestepped a contention worth writing down: `chrome-devtools-mcp` holds one Chrome
+profile, and a second session's server cannot launch while another holds it. The Chrome holding it belongs
+to another session and is not ours to kill.
+
+One serving-mode difference had also never been controlled for. The non-reproduction ran under `--dev`
+(Vite); the live sighting was on `--preview` (a built bundle). This run served the same `webapp/dist` the
+live session serves — via a plain launch, which serves that bundle from Python without rebuilding it
+underneath a session already serving it — and the guards were confirmed present in the bundle's own
+minified source before the run, since a check against a stale bundle tests nothing.
+
+### What four scenarios found
+
+| | Scenario | Result |
+|---|---|---|
+| A | Initial load + 3 plain reloads | No confirmation, no `change`. Selector reads `default` every time |
+| B | Park the DOM value on `bypassPermissions`, reload ×2 | No confirmation, no `change`; selector reads `default` again |
+| C | **Positive control** — real gesture, real `change` | Confirmation fires, `change` recorded. Recorder proven live |
+| D | Strip `autocomplete="off"`, re-park, reload ×2 | Still nothing |
+
+**6c is not reproduced**, on two serving modes, under two independent harnesses, with the recorder proven
+live in the same run rather than in a different one.
+
+### Two things the probe found about itself
+
+Both would have shipped as findings, and the second changed a claim in the code.
+
+**The `change` arm was dead.** It wrapped only *function* listeners, and Lit's EventPart registers the
+part **object** — `addEventListener(type, this)`, dispatched through `handleEvent`. So the one listener the
+probe existed to watch was the one it declined to wrap, and it would have reported "no phantom change
+events" for a mechanism it was never watching. The positive control is what exposed it: the confirmation
+fired in scenario C with no `change` logged in front of it. The verdict now fails a run as
+**uninterpretable** unless *both* arms fire under the control, not just the one the headline reads.
+
+**`autocomplete="off"` is not what suppresses restoration.** Scenario B alone cannot tell "the guard
+worked" from "the mechanism never existed", so D removes the guard and re-runs. With the attribute
+stripped, Chrome 151 still restored nothing — the control is created dynamically inside a shadow root
+rather than parsed with the document, which is the likelier reason. So the **gesture latch is the guard
+carrying 6c**, and the attribute is belt-and-braces. It stays, because it costs nothing and it is the half
+that is specified rather than observed, but `permission-mode.js` no longer implies the two are doing equal
+work.
+
+### What moved rather than died
+
+`open-work.md` is deleted, as it asked to be. Its durable half was not in the fix list at all: the
+dedicated-dev-backend recipe, the frontend DOM notes, and the three traps each paid for once existed
+**only** in that file. They are now
+[`0-overview/implementation-guide.md`](../0-overview/implementation-guide.md) § *Verifying UI Work Against
+a Running Engine*, together with the positive-control discipline and the MCP-profile contention. Four
+inbound references to the deleted file were re-pointed, and one of them was stale in its own right:
+`tabs.test.js` still described `panel._tabModes` as "still read, and so permanently empty" and cited an
+open-work note about retiring it — the map has since been retired.
+
+**Still on the watch-list, carried over:** *Option B — session-lifetime pump, or per-translator routing*,
+the alternative to the drain that item 3(a) built on. Left open deliberately; the agreement was to watch
+for A's residual mis-attribution first and take B only if it shows up. Nothing has shown up.
+
+**Not carried over, deliberately:** the fix list's test-baseline totals. A pass count in a rolling
+document is stale by the next commit — run `pytest tests/ -q` and `npx vitest run src/` in `webapp/`.

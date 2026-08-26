@@ -383,7 +383,18 @@ A blocked turn behind a dialog in a background tab is a stall the user cannot se
 hidden on arrival:
 
 - The page title is prefixed with a marker and the pending count.
-- An optional short chime, default on, muted by a Settings toggle. It fires once per queue transition from empty to non-empty, not once per request — a fan-out of nine gated calls must not produce nine chimes.
+- An optional short chime, default on. It fires once per queue transition from empty to non-empty, not once per request — a fan-out of nine gated calls must not produce nine chimes.
+
+**The mute is this surface's preference, not the Settings tab's.** A `localStorage` key —
+`aic-dc.permission-chime`, silent when it reads `off` — and the control belongs beside the thing that
+rings, not a tab away. It was specified as a Settings preference card and deleted from there on
+2026-08-26 as one of the features that spec filed under a surface it does not own
+([`../impl-history/work-log.md` § Landed since](../impl-history/work-log.md)).
+
+**Read, never written.** The dialog honours the key and nothing in the application offers to set it, so
+a user who wants silence has to reach a devtools console. That is a real gap and this is now the section
+that owns it — the round trip through another tab is how it came to be specified somewhere that could not
+implement it.
 
 Nothing about attention changes the decision path, and no notification carries an action. The user comes
 back to the tab and reads the dialog.

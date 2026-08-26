@@ -31,6 +31,13 @@
 // running session. It is also where `/model` lands
 // (specs5/3-engine/session.md § Slash Commands).
 //
+// `/permissions` lands here too, and lands somewhere narrower:
+// the mode the *next* session starts in is a field inside
+// engine.json rather than a control, so the route opens that
+// card and selects the `permission_mode` line. The running
+// session's mode is the composer's own selector and is not this
+// tab's (specs5/5-webapp/settings.md § Preference Cards).
+//
 // Governing spec: specs5/1-foundation/configuration.md
 
 import { LitElement, css, html } from 'lit';
@@ -116,6 +123,37 @@ export function modelEntries(models, current) {
   return entries;
 }
 
+/**
+ * The span of the line that sets `field` in a JSON document, or null.
+ *
+ * Text, not `JSON.parse`: the editor holds whatever the user has typed, which
+ * may not parse at all, and a field is worth pointing at precisely while the
+ * file is being edited. The span runs from the key's opening quote to the end of
+ * its line, so what gets selected reads as the setting — `"permission_mode":
+ * "acceptEdits",` — rather than as an offset.
+ *
+ * A key, not a value that happens to contain the name: the quotes must be
+ * followed by a colon. Without that check, a `"cli_path": "/opt/permission_mode"`
+ * would be the line the reader is sent to.
+ *
+ * @param {string} content
+ * @param {string} field
+ * @returns {{start: number, end: number}|null}
+ */
+export function fieldLineRange(content, field) {
+  if (typeof content !== 'string' || !field) return null;
+  const needle = `"${field}"`;
+  let at = 0;
+  for (const line of content.split('\n')) {
+    const col = line.indexOf(needle);
+    if (col !== -1 && line.slice(col + needle.length).trimStart().startsWith(':')) {
+      return { start: at + col, end: at + line.length };
+    }
+    at += line.length + 1;
+  }
+  return null;
+}
+
 export class SettingsTab extends RpcMixin(LitElement) {
   static properties = {
     /** Info banner data from get_config_info. */
@@ -160,6 +198,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
      * changes nothing on screen and the command looks like it did nothing.
      */
     _modelFlash: { type: Boolean, state: true },
+    /** The same mark, for the editor a field-naming route opened. */
+    _editorFlash: { type: Boolean, state: true },
   };
 
   static styles = css`
@@ -338,6 +378,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
       border: 1px solid rgba(240, 246, 252, 0.1);
       border-radius: 6px;
       overflow: hidden;
+      transition: border-color 240ms ease;
+    }
+    /* Same mark as the model panel's, for the same reason. */
+    .editor-area.flash {
+      border-color: var(--accent-primary, #58a6ff);
     }
     .editor-toolbar {
       display: flex;
@@ -416,6 +461,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._modelPending = false;
     this._canSetModel = true;
     this._modelFlash = false;
+    this._editorFlash = false;
     /** Pending flash-clear timer, so a second route restarts it. */
     this._flashTimer = null;
     // Bound so add/removeEventListener find the same reference.
@@ -436,6 +482,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
       clearTimeout(this._flashTimer);
       this._flashTimer = null;
     }
+    this._modelFlash = false;
+    this._editorFlash = false;
     super.disconnectedCallback();
   }
 
@@ -610,31 +658,105 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * A routed command asked for one part of this tab.
    *
    * Duck-typed hook the shell calls after switching tabs. This tab has no
-   * segmented control, so "show a section" means scroll the panel into view and
-   * mark it — and re-read it, because the command asked about the model and the
-   * menu may have arrived since this tab last looked.
+   * segmented control, so "show a section" means bring the thing the command
+   * named to where the reader is looking and mark it — one panel for `/model`,
+   * one field inside a config file for `/permissions`.
    *
    * An id this tab does not have is ignored, which is what keeps a service that
    * grows a new anchor from making the tab itself unreachable.
    *
+   * Returns a promise for the tests' benefit; the shell ignores it.
+   *
    * @param {string} id
+   * @returns {Promise<void>}
    */
-  showSection(id) {
-    if (id !== 'model') return;
-    this._loadModel();
-    this._modelFlash = true;
+  async showSection(id) {
+    if (id === 'model') {
+      // Re-read: the command asked about the model, and the menu may have
+      // arrived since this tab last looked.
+      this._loadModel();
+      this._flash('model');
+      await this.updateComplete;
+      this._scrollTo('.model-panel', 'start');
+      return;
+    }
+    if (id === 'permission-mode') {
+      await this._showEngineField('permission_mode');
+    }
+  }
+
+  /**
+   * Mark one part of this tab for a moment, so a routed command visibly landed.
+   *
+   * One timer for both marks, and each flash clears the other: two parts of the
+   * tab lit at once would say two commands arrived when only the second did.
+   *
+   * @param {'model'|'editor'} which
+   * @private
+   */
+  _flash(which) {
+    this._modelFlash = which === 'model';
+    this._editorFlash = which === 'editor';
     if (this._flashTimer) clearTimeout(this._flashTimer);
     this._flashTimer = setTimeout(() => {
       this._flashTimer = null;
       this._modelFlash = false;
+      this._editorFlash = false;
     }, _FLASH_MS);
-    this.updateComplete.then(() => {
-      const panel = this.shadowRoot?.querySelector('.model-panel');
-      // jsdom has no scrollIntoView, and neither does an older engine.
-      if (panel && typeof panel.scrollIntoView === 'function') {
-        panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
-      }
-    });
+  }
+
+  /**
+   * Open the engine.json card and select the line that sets `field`.
+   *
+   * What `/permissions` lands on. The mode the *next* session starts in is a
+   * field in a JSON file, not a control, so "show me the permission mode" can
+   * only mean: open the file that holds it and put the reader's cursor on the
+   * line. Opening the tab alone left them in front of a card grid with the field
+   * they asked for one click and a scroll inside a file away.
+   *
+   * The selection is read off the textarea rather than `_editorContent`, because
+   * the textarea is where the user's unsaved edits are — including, plausibly,
+   * the line they just added after this said the field was missing.
+   *
+   * @param {string} field
+   * @private
+   */
+  async _showEngineField(field) {
+    await this._openCard('engine');
+    this._flash('editor');
+    await this.updateComplete;
+    this._scrollTo('.editor-area', 'center');
+    const textarea = this.shadowRoot?.querySelector('.editor-textarea');
+    if (!textarea) return;
+    const range = fieldLineRange(textarea.value, field);
+    if (!range) {
+      // Say so rather than leave a flash over a file with no such line: an
+      // absent key is a real answer — the CLI's own default is in force — and
+      // the reader who typed the command is the one who would set it.
+      this._emitToast(
+        `engine.json does not set ${field} — the engine's own default is in force`,
+        'info',
+      );
+      return;
+    }
+    if (typeof textarea.setSelectionRange === 'function') {
+      textarea.focus();
+      textarea.setSelectionRange(range.start, range.end);
+    }
+  }
+
+  /**
+   * Scroll one of this tab's own elements into view, if the engine can.
+   *
+   * jsdom has no `scrollIntoView`, and neither does an older browser.
+   *
+   * @private
+   */
+  _scrollTo(selector, block) {
+    const el = this.shadowRoot?.querySelector(selector);
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ block, behavior: 'smooth' });
+    }
   }
 
   async _openCard(key) {
@@ -956,7 +1078,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     const card = CONFIG_CARDS.find((c) => c.key === this._activeKey);
     if (!card) return '';
     return html`
-      <div class="editor-area">
+      <div class="editor-area ${this._editorFlash ? 'flash' : ''}">
         <div class="editor-toolbar">
           <span class="toolbar-label">
             ${card.icon} ${card.label}

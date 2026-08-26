@@ -159,3 +159,66 @@ For converting an existing installation rather than building fresh, the phase ta
 - **Contract tests against the SDK** are their own category and the only defence against version skew: the `SessionStore` conformance harness, the message-taxonomy coverage check, and an options-assembly test that fails when a field we set disappears from `ClaudeAgentOptions`. These are cheap, and they fail loudly on an SDK upgrade instead of quietly at runtime.
 
 Anything that requires a real model call belongs behind a marker and out of the default run. The engine is a subprocess with credentials; a test suite that needs it is a test suite nobody runs.
+
+## Verifying UI Work Against a Running Engine
+
+Green suites have met a live CLI and lost four times (phases 3–6). What they cannot reach is a claim
+made in prose, a layout, or anything whose mechanism lives in the browser rather than in our code. This
+section is the standing recipe; it was migrated out of the background-subagent fix list when that list
+closed, and the traps in it were each paid for once.
+
+**Use a dedicated backend, never the live session.** A plain launch serves the same built bundle the
+`--preview` path does, without rebuilding `webapp/dist` underneath a session that is serving it:
+
+```
+.venv/bin/aic-dc --repo-path /tmp/aicdc-uitest --server-port 18190 --webapp-port 19110 \
+    --no-browser --verbose
+```
+
+**Read the real ports off the startup log** rather than trusting the numbers requested. To stop it,
+iterate `pgrep -f aicdc-uitest` and check `/proc/$p/cmdline` — a `pkill -f` whose pattern appears in its
+own command line kills the shell that ran it.
+
+Match the *serving mode* to what is being tested. `--dev` runs Vite, `--preview` rebuilds and runs
+`vite preview`, and a plain launch serves `webapp/dist` from Python. A fault seen on one is not
+reproduced by testing another, and 6c cost a sitting to that distinction.
+
+**Frontend DOM notes for driving it:** `aic-chat-panel` is at shadow-DOM depth 2 (walk the shadow roots
+recursively), `panel._tabs` is a `Map`, and `panel.messages` is the active tab's view. RPC goes through
+`document.querySelector('aic-app-shell').call['ClaudeCodeService.<method>'](...)`.
+
+### Traps
+
+- **Send through the input box, not `chat_streaming` directly.** The panel routes chunks by request id,
+  so a turn it did not start lands in no tab: the transcript stays empty and no subagent row appears.
+  Set `.input-textarea`'s value, fire `input`, then a `keydown` of Enter.
+- **A native `confirm` handled through a CDP harness re-appears on the next navigation.** It looks
+  exactly like a dialog replaying on page load. Stub `window.confirm` **in the page, before any app
+  script** — `Page.addScriptToEvaluateOnNewDocument`, not an `evaluate` after load — so no native dialog
+  is ever created and nothing downstream can re-surface one. Trust in-page instrumentation over what the
+  harness reports.
+- **Editing frontend source while the page is open triggers a Vite reload** under `--dev`, which drops
+  live subagent tabs mid-inspection. Backend edits need a full restart — Python is not hot-reloaded.
+- **`chrome-devtools-mcp` holds one Chrome profile at a time.** A second session's server cannot launch
+  and fails with "the browser is already running". Do not kill the Chrome holding it; it belongs to
+  another session. Launch an independent Chrome on a scratch `--user-data-dir` with its own
+  `--remote-debugging-port` and drive it over plain CDP — `scripts/permission_mode_load_probe.py` is the
+  worked example, and `websockets` plus `requests` in the venv are all it needs.
+
+### A probe that reports an absence needs a positive control
+
+`scripts/permission_mode_load_probe.py` is the pattern to copy. It answers "does the app raise this
+dialog on page load?" and the answer is an absence, so it drives a scenario that *must* produce the
+dialog and fails the run as **uninterpretable** if that scenario is also clean. Two things this caught
+about the probe itself, both of which would have shipped as findings:
+
+- Its `change` recorder wrapped only *function* listeners, and Lit's EventPart registers the part
+  **object** (`handleEvent`). The arm was dead, and a dead arm reports "no phantom change events" for a
+  mechanism it was never watching. The positive control is what exposed it — the confirmation fired with
+  no `change` logged in front of it.
+- Distinguish "the guard worked" from "the mechanism never existed". Park the bait, then **remove the
+  guard and re-run**. For 6c that is what demoted `autocomplete="off"` from load-bearing to belt-and-
+  braces: with the attribute stripped, Chrome 151 still restored nothing.
+
+Anything a probe bounds — a top-N, a sampling, a skipped retry — gets logged as dropped. Silent
+truncation reads as "covered everything".

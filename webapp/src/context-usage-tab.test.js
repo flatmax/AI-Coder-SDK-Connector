@@ -2136,8 +2136,9 @@ describe('ContextUsageTab MCP controls', () => {
   let onToast;
   beforeEach(() => {
     // Stubbed rather than left native: jsdom's `confirm` is unimplemented
-    // and logs, and the live lesson from `open-work.md` § 6c is that a real
-    // confirm handled by a harness re-surfaces on the next navigation.
+    // and logs, and the live lesson is that a real confirm handled by a CDP
+    // harness re-surfaces on the next navigation — see
+    // `specs5/0-overview/implementation-guide.md` § Traps.
     confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     toasts = [];
     onToast = (e) => toasts.push(e.detail);

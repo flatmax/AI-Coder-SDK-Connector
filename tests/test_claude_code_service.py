@@ -719,14 +719,21 @@ class TestSlashCommands:
         }
         assert withheld == {"clear", "resume"}
 
-    def test_every_context_tab_route_names_a_section(self):
-        """The Context tab remembers the section its reader last chose, so a
-        target naming the tab alone opens onto whatever that was. For ``/mcp``
-        that is usually Usage, which carries no MCP status at all — the command
-        would open the right tab and still not show the thing it names.
+    def test_every_tab_route_names_a_section(self):
+        """A tab is not a destination. Each of the two has its own reason.
+
+        The Context tab remembers the section its reader last chose, so a target
+        naming the tab alone opens onto whatever that was. For ``/mcp`` that is
+        usually Usage, which carries no MCP status at all — the command would
+        open the right tab and still not show the thing it names.
+
+        The Settings tab has no memory to land wrong in; it opens onto a card
+        grid, with the model panel above it and every config field one click
+        inside a file. Reachable by scrolling and clicking is not the same as
+        being shown.
         """
         for name, route in SLASH_ROUTES.items():
-            if not route["target"].startswith("tab:context"):
+            if not route["target"].startswith("tab:"):
                 continue
             assert "#" in route["target"], f"/{name} names no section"
 
@@ -766,6 +773,15 @@ class TestSlashCommands:
         surface = SLASH_ROUTES["permissions"]["surface"]
         assert "engine.json" in surface
         assert "composer" in surface
+
+    def test_permissions_lands_on_the_field_rather_than_the_tab(self):
+        """Naming the field is what keeps the honest wording above from being a
+        consolation prize. The anchor is not a panel here — the mode the next
+        session starts in is a line inside ``engine.json`` — so the tab opens
+        that card and selects the line
+        (``webapp/src/settings-tab.js`` ``_showEngineField``).
+        """
+        assert SLASH_ROUTES["permissions"]["target"] == "tab:settings#permission-mode"
 
 
 # ---------------------------------------------------------------------------
