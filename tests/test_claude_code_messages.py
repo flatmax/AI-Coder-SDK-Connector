@@ -1052,6 +1052,66 @@ class TestToolCards:
         assert payload["status"] == "pending"
         assert payload["gated"] is False
 
+    def test_the_card_says_when_the_call_was_made(self):
+        """The one time fact a *pending* card can carry.
+
+        ``duration_ms`` arrives with the result, so until then a call that
+        has hung and a call that answered in 30ms render identically — the
+        gap ``invoked_at`` closes.
+        """
+        translator = TurnTranslator(REQUEST_ID, wall_clock=lambda: 1_772_080_327.5)
+        payload = self._use(translator)[0].payload
+        assert payload["invoked_at"] == "2026-02-26T04:32:07.500000+00:00"
+
+    def test_the_invocation_time_is_utc_with_an_offset(self):
+        """A collaborating browser may not be in this machine's timezone.
+
+        A naive local string would have a participant two zones away reading
+        a stall that had not happened yet.
+        """
+        translator = TurnTranslator(REQUEST_ID, wall_clock=lambda: 0.0)
+        assert self._use(translator)[0].payload["invoked_at"] == (
+            "1970-01-01T00:00:00+00:00"
+        )
+
+    def test_an_unusable_clock_reading_leaves_the_time_out(self):
+        """The card is worth more with no time than with a wrong one.
+
+        The browser already treats an absent ``invoked_at`` as "no time to
+        show", so the degraded card renders without a chip rather than with a
+        nonsense one.
+        """
+        translator = TurnTranslator(REQUEST_ID, wall_clock=lambda: float("nan"))
+        payload = self._use(translator)[0].payload
+        assert payload["invoked_at"] == ""
+        # The rest of the card is unharmed — one bad clock is not a lost call.
+        assert payload["tool_use_id"] == "toolu_1"
+        assert payload["status"] == "pending"
+
+    def test_the_wall_clock_is_not_the_duration_clock(self):
+        """Two clocks, because only one of them may step.
+
+        A duration read off a wall clock can report a result arriving before
+        its own request when NTP corrects mid-call; an ``invoked_at`` read off
+        a monotonic clock is a process-local number no browser can turn into
+        a time of day. Neither is derivable from the other.
+        """
+        translator = TurnTranslator(
+            REQUEST_ID, clock=lambda: 100.0, wall_clock=lambda: 1_772_080_327.0
+        )
+        assert self._use(translator)[0].payload["invoked_at"].startswith("2026-02-26")
+        # A monotonic reading of 100.0 would have been 1970.
+
+    def test_a_reconnecting_client_re_reads_the_time_off_the_block(self, translator):
+        """The chip has to survive a refresh mid-call, which is when it matters.
+
+        A reconnecting client renders from the block list, not from the
+        ``toolUse`` event it was not there for.
+        """
+        self._use(translator)
+        replayed = translator._blocks["toolu_1"].to_dict()
+        assert replayed["tool"]["invoked_at"]
+
     def test_a_prompt_before_the_card_makes_the_card_born_gated(self, translator):
         """The control request can arrive before the assistant message.
 

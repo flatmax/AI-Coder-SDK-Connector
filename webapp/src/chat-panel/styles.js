@@ -2315,9 +2315,13 @@ export const STYLES = css`
   .tool-card[data-tool='Bash'] .tool-header {
     align-items: flex-start;
   }
-  /* The dot and the caret sit on the first line of the
-   * wrapped summary rather than at the top of the block. */
+  /* The dot, the time and the caret sit on the first line
+   * of the wrapped summary rather than at the top of the
+   * block. Bash is the tool most worth timing — it is the
+   * one that hangs — so the chip has to land level with
+   * the row's other chrome on the card that wraps. */
   .tool-card[data-tool='Bash'] .tool-dot,
+  .tool-card[data-tool='Bash'] .tool-time,
   .tool-card[data-tool='Bash'] .tool-caret {
     margin-top: 0.25rem;
   }
@@ -2354,6 +2358,29 @@ export const STYLES = css`
     color: #d29922;
     font-size: 0.65rem;
     font-weight: 600;
+  }
+  /* When the call was made, and while it runs, how long
+   * ago. Rightmost on the row so a column of thirty cards
+   * has its times in a column too — the reason the chip
+   * exists is scanning for the one that has stopped
+   * moving, and that is a comparison down the page rather
+   * than a fact about any single card.
+   *
+   * tabular-nums so a ticking elapsed does not shift the
+   * digits beside it four times a second. Secondary colour
+   * even while running: the pulsing dot already says
+   * "in flight", and most in-flight calls are perfectly
+   * healthy, so accenting every one of them would spend
+   * the reader's attention on the normal case. */
+  .tool-time {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary, #8b949e);
+    white-space: nowrap;
+  }
+  .tool-elapsed {
+    color: var(--text-primary, #c9d1d9);
   }
   .tool-caret {
     flex-shrink: 0;

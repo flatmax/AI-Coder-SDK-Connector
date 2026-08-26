@@ -37,8 +37,10 @@ import {
   diffSegments,
   formatBytes,
   formatDuration,
+  formatInvokedAt,
   formatTokens,
   groupBlocksByScope,
+  invokedAtMs,
   isDiffTool,
   renderBlock,
   renderFileChip,
@@ -338,6 +340,69 @@ describe('formatDuration', () => {
     expect(formatDuration(60_000)).toBe('1m 0s');
     expect(formatDuration(90_000)).toBe('1m 30s');
     expect(formatDuration(3_725_000)).toBe('62m 5s');
+  });
+});
+
+describe('invokedAtMs', () => {
+  it('parses the ISO string the engine sends', () => {
+    expect(invokedAtMs({ invoked_at: '2026-08-27T04:32:07+00:00' }))
+      .toBe(Date.UTC(2026, 7, 27, 4, 32, 7));
+  });
+
+  it('takes a number as already-epoch milliseconds', () => {
+    expect(invokedAtMs({ invoked_at: 1_772_080_327_000 })).toBe(1_772_080_327_000);
+  });
+
+  it('is null for a card with no time, rather than now', () => {
+    // A card replayed from a transcript entry with no `timestamp`, or from a
+    // session recorded before the field existed. Defaulting to now would put
+    // a fresh reading on a call made last Tuesday.
+    for (const card of [null, undefined, {}, { invoked_at: '' }, { invoked_at: null }]) {
+      expect(invokedAtMs(card)).toBeNull();
+    }
+  });
+
+  it('is null for a timestamp it cannot parse', () => {
+    for (const value of ['yesterday', 'NaN', {}, [], NaN, Infinity]) {
+      expect(invokedAtMs({ invoked_at: value })).toBeNull();
+    }
+  });
+});
+
+describe('formatInvokedAt', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is empty for a time there is none of', () => {
+    for (const value of [null, undefined, NaN, Infinity]) {
+      expect(formatInvokedAt(value)).toBe('');
+    }
+  });
+
+  it('gives the time of day alone for a call made today', () => {
+    // The scanning case: read the chip, glance at your own clock, and you
+    // know whether the call has been sitting there for eight minutes.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 27, 16, 0, 0));
+    const invoked = new Date(2026, 7, 27, 14, 32, 7);
+    expect(formatInvokedAt(invoked.getTime())).toBe(invoked.toLocaleTimeString());
+  });
+
+  it('names the date too once the call is not from today', () => {
+    // A bare "14:32:07" on a card replayed from last week's session invites
+    // exactly the arithmetic that would be wrong.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 27, 16, 0, 0));
+    const invoked = new Date(2026, 7, 20, 14, 32, 7);
+    expect(formatInvokedAt(invoked.getTime())).toBe(invoked.toLocaleString());
+  });
+
+  it('counts midnight as another day, not as five hours ago', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 7, 27, 0, 30, 0));
+    const invoked = new Date(2026, 7, 26, 23, 55, 0);
+    expect(formatInvokedAt(invoked.getTime())).toBe(invoked.toLocaleString());
   });
 });
 
@@ -877,6 +942,97 @@ describe('renderToolCard', () => {
     expect(dot.getAttribute('title')).toBe('Waiting for your permission');
     expect(host.querySelector('.tool-card').classList.contains('tool-status-awaiting'))
       .toBe(true);
+  });
+
+  describe('the time chip', () => {
+    // 14:32:07 local on the day the fake clock is set to.
+    const INVOKED = new Date(2026, 7, 27, 14, 32, 7);
+    const clock = () => INVOKED.toLocaleTimeString();
+
+    function timedBlock(over = {}) {
+      const { tool = {}, ...rest } = over;
+      return toolBlock({
+        tool: { invoked_at: INVOKED.toISOString(), ...tool },
+        ...rest,
+      });
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** A panel whose run-timer ticker is running, as it is mid-turn. */
+    const ticking = () => stubPanel({ _streamTimerInterval: 7 });
+
+    it('says when a finished call was invoked', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 40, 0));
+      const host = draw(renderToolCard(stubPanel(), timedBlock({
+        result: { status: 'ok', preview: 'ok', duration_ms: 340 },
+      })));
+      const chip = host.querySelector('.tool-time');
+      expect(text(chip)).toBe(clock());
+      expect(chip.getAttribute('title')).toBe(`Invoked at ${clock()} by the engine's clock`);
+      // The total belongs to the footer; the header answers "when", not
+      // "how long" — a finished call already has its duration below.
+      expect(host.querySelector('.tool-elapsed')).toBeNull();
+      expect(text(host.querySelector('.tool-duration'))).toBe('340ms');
+    });
+
+    it('adds a running elapsed to a pending call — the stall signal', () => {
+      // The reason the chip exists: a hung Bash and a Bash that answered in
+      // 30ms are otherwise identical on screen, because `duration_ms` only
+      // arrives with the result.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 34, 48));
+      const host = draw(renderToolCard(ticking(), timedBlock()));
+      const chip = host.querySelector('.tool-time');
+      expect(text(host.querySelector('.tool-elapsed'))).toBe('2m 41s');
+      expect(text(chip)).toBe(`${clock()} · 2m 41s`);
+      expect(chip.getAttribute('title'))
+        .toBe(`Invoked at ${clock()} by the engine's clock — running for 2m 41s`);
+    });
+
+    it('times a call that is waiting on the user too', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 32, 37));
+      const host = draw(renderToolCard(ticking(), timedBlock({ awaiting: true })));
+      expect(text(host.querySelector('.tool-elapsed'))).toBe('30.0s');
+    });
+
+    it('leaves a denied call untimed — that clock measures the reader', () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 40, 0));
+      const host = draw(renderToolCard(ticking(), timedBlock({
+        denial: { action: 'deny', reason: 'no' },
+      })));
+      expect(text(host.querySelector('.tool-time'))).toBe(clock());
+      expect(host.querySelector('.tool-elapsed')).toBeNull();
+    });
+
+    it('withholds the elapsed when no ticker is running to keep it true', () => {
+      // Nothing is streaming, so nothing re-renders: a number drawn here
+      // would freeze at this value and go on claiming to be live.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 34, 48));
+      const host = draw(renderToolCard(stubPanel(), timedBlock()));
+      expect(text(host.querySelector('.tool-time'))).toBe(clock());
+      expect(host.querySelector('.tool-elapsed')).toBeNull();
+    });
+
+    it('clamps an elapsed the two machines disagree about', () => {
+      // The browser subtracts the engine's clock reading from its own. A skew
+      // between them must not report a call running for minus four seconds.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(2026, 7, 27, 14, 32, 3));
+      const host = draw(renderToolCard(ticking(), timedBlock()));
+      expect(text(host.querySelector('.tool-elapsed'))).toBe('0ms');
+    });
+
+    it('draws no chip at all for a card that carries no time', () => {
+      const host = draw(renderToolCard(ticking(), toolBlock()));
+      expect(host.querySelector('.tool-time')).toBeNull();
+    });
   });
 
   it('opens a failed call and shows what came back', () => {

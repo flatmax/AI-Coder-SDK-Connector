@@ -329,6 +329,56 @@ class TestToolBlocks:
         )
         assert rendered[1]["blocks"][0]["result"]["duration_ms"] == 2500
 
+    def test_a_replayed_card_keeps_the_time_it_was_invoked(self):
+        """The chip has to survive a refresh, not only the turn that made it.
+
+        The live path reads its wall clock; this one reads the timestamp on
+        the entry carrying the call, which is the same fact. Passed through
+        verbatim — re-rendering the CLI's own ISO could only lose precision
+        or invent it.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                at="2026-08-16T12:00:01.000Z",
+            ),
+            tool_reply("u2", "t1", "ok", at="2026-08-16T12:00:03.500Z"),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["invoked_at"] == "2026-08-16T12:00:01.000Z"
+
+    def test_a_replayed_card_still_pending_carries_its_time(self):
+        """The case the chip is for, read off disk.
+
+        A call with no reply is one that hung, was killed, or whose entry was
+        lost. It has no ``duration_ms`` and never will, so the invocation time
+        is the only thing on it that says anything about time at all.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                at="2026-08-16T12:00:01.000Z",
+            ),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["result"] is None
+        assert block["tool"]["invoked_at"] == "2026-08-16T12:00:01.000Z"
+
+    def test_an_entry_with_no_timestamp_leaves_the_time_out(self):
+        """Absent stays absent, the rule the rest of this class follows.
+
+        A card defaulted to the read time would claim a call made last week
+        had just been issued, which is the one wrong answer available.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}, at=None),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["invoked_at"] == ""
+
     def test_a_write_attributes_its_file(self):
         rendered = render(
             human("u1", "write"),

@@ -24,12 +24,41 @@ Never from `can_use_tool`, which only fires on the ask path. See
 One card per call, in transcript order, collapsed by default:
 
 - **Header** — tool name, a one-line summary of the input (the path for file tools, the command for
-  `Bash`, the pattern for search tools), and a state LED: pending, running, succeeded, failed,
-  denied.
+  `Bash`, the pattern for search tools), a state LED (pending, running, succeeded, failed, denied),
+  and the time the call was invoked.
 - **Expanded** — full input, full result, and duration. Long results are truncated with a "show all"
   affordance; the full text is always retrievable, because a truncated `Bash` output that hid the
   actual error is worse than a long card.
 - **Failures are expanded by default.** A failed call is the one the user needs to see.
+
+#### Has it stalled?
+
+The header's time is what answers that, and it is on the header rather than in the expanded body
+because the question is asked of a *column* of cards — which one has stopped moving — not of any
+single one. Rightmost on the row, so thirty calls in a turn put their times in a column too.
+
+A finished call already has its `duration_ms` in the footer, so the header answers **when**, not how
+long. A call that has *not* finished has no duration at all and never will if it hangs, which is the
+gap: without this, a `Bash` that wedged and a `Bash` that answered in 30ms render identically.
+
+So while a call is still running — `pending`, or `awaiting` a permission decision — the header adds a
+live elapsed beside the invocation time. Three constraints on that number, each of which is a way it
+could otherwise lie:
+
+- **It renders only while something is keeping it true.** The panel's run-timer interval is what
+  re-computes it; when that interval is not running, the elapsed is withheld and the invocation time
+  stands alone. A frozen counter still presenting itself as live is worse than no counter, and the
+  reader can always subtract from their own clock. The interval kicks one final render as it stops, so
+  the withdrawal is not deferred to whenever the panel next happens to redraw.
+- **It is clamped at zero.** It subtracts the engine's clock reading from the browser's, so a skew
+  between two machines — or a correction on either — must not report a call running for minus four
+  seconds.
+- **A denied call gets none.** That call never ran; time since it was proposed measures how long the
+  user took to say no, which is a fact about the reader wearing a tool card's clothes.
+
+The invocation time itself shows time-of-day alone for a call made today — the scanning case — and
+gains its date once it is older, because a bare `14:32:07` on a card replayed from last week's session
+invites exactly the arithmetic that would be wrong.
 
 File-touching cards carry a click affordance that opens the touched file in the viewer at the changed
 region — the transcript becomes a navigation surface, not just a log.
@@ -162,4 +191,8 @@ back, so the row explains itself instead
   call.
 - Failed tool cards are expanded by default; successful ones are collapsed.
 - Truncated tool results are always retrievable in full.
+- A card's invocation time is read from a clock, never substituted: a card whose source carries no
+  time renders no time, rather than borrowing the moment it was rendered.
+- An elapsed counter is displayed only while something is re-computing it. No card ever shows a
+  duration-like number that has stopped advancing while the call it describes has not.
 - The undo affordance rewinds files only, and says so.

@@ -40,6 +40,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -221,13 +222,25 @@ class TurnTranslator:
     clock:
         Monotonic clock, injectable so tool-duration assertions in tests
         do not depend on wall time.
+    wall_clock:
+        Wall clock, injectable for the same reason. Separate from ``clock``
+        because the two answer different questions and only one of them may
+        step: a *duration* must be monotonic or an NTP correction mid-call
+        can report a result arriving before its own request, while a card's
+        ``invoked_at`` has to be a time a reader can compare against the
+        clock on their wall. Neither is derivable from the other.
     """
 
     def __init__(
-        self, request_id: str, *, clock: Callable[[], float] = time.monotonic
+        self,
+        request_id: str,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.request_id = request_id
         self._clock = clock
+        self._wall_clock = wall_clock
 
         self.session_id: str | None = None
         self.cancelled = False
@@ -1107,6 +1120,15 @@ class TurnTranslator:
             "input_summary": summarise_tool_input(tool_input),
             "input": tool_input or {},
             "status": "pending",
+            # When the call was made, ISO 8601 UTC. The only fact on a
+            # *pending* card that says anything about time: `duration_ms`
+            # arrives with the result, so until then a call that has hung and
+            # a call that answered in 30ms render identically, which is the
+            # gap this closes. Set here rather than on `_ToolCall` because
+            # the card is what crosses the wire, and read from the wall clock
+            # rather than `started_at` because that one is monotonic — a
+            # process-local number no browser can turn into a time of day.
+            "invoked_at": _iso_utc(self._wall_clock()),
             # True when the permission layer showed a dialog for this call.
             # Usually set by note_permission_prompt after the card exists;
             # true here when the control request beat the message carrying it.
@@ -1234,6 +1256,29 @@ class TurnTranslator:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _iso_utc(epoch_seconds: float) -> str:
+    """Epoch seconds → ISO 8601 UTC, or ``""`` for a clock that answered junk.
+
+    UTC with an explicit offset rather than a naive local string, because the
+    reader may not be on this machine — a collaborating browser two timezones
+    away renders the offset into its own local time, and a naive string would
+    have it reading a stall that had not happened yet.
+
+    ISO rather than epoch milliseconds because it is what the rest of this
+    system puts on the wire for a point in time (the transcript's own
+    ``timestamp``, ``expires_at`` on a permission request), and one convention
+    means one parser on the browser side.
+    """
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        # An injected or broken clock. The card is worth more without a time
+        # than it is with a wrong one, and the browser already treats an
+        # absent `invoked_at` as "no time to show".
+        logger.warning("Unusable wall-clock reading for a tool card: %r", epoch_seconds)
+        return ""
 
 
 def _stream_kind(content_block_type: str) -> str:

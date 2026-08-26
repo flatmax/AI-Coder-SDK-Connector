@@ -5,7 +5,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resumeActiveStreams } from './events.js';
-import { computeTurnOutcome, onStreamRetry } from './streaming.js';
+import {
+  computeTurnOutcome,
+  onStreamRetry,
+  startStreamTimerTick,
+  stopStreamTimerTick,
+} from './streaming.js';
 import {
   mountPanel,
   publishFakeRpc,
@@ -249,6 +254,25 @@ describe('ChatPanel run timer', () => {
     });
     await settle(p);
     expect(p._streamTimerInterval == null).toBe(true);
+  });
+
+  it('renders once more on the way out, so no live number freezes', () => {
+    // Two displays read this interval as their licence to show a number that
+    // advances: the run timer, and a pending tool card's elapsed. Withdrawing
+    // the licence silently leaves whichever was on screen stuck at its last
+    // value while still reading as live — which is the stranded-tool-card
+    // case, the card most likely to be stared at.
+    const panel = { _tabs: new Map(), requestUpdate: vi.fn() };
+    startStreamTimerTick(panel);
+    stopStreamTimerTick(panel);
+    expect(panel._streamTimerInterval).toBeNull();
+    expect(panel.requestUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-render for a ticker that was never running', () => {
+    const panel = { _tabs: new Map(), requestUpdate: vi.fn() };
+    stopStreamTimerTick(panel);
+    expect(panel.requestUpdate).not.toHaveBeenCalled();
   });
 
   it('omits the duration when no start stamp exists', async () => {

@@ -348,9 +348,11 @@ ToolCard:
     tool_use_id: string          // also the block_id
     name: string                 // e.g. "Edit", "Bash", "mcp__aic-dc__symbol_map"
     server: string | null        // MCP server name when the tool is an MCP tool
+    server_tool: bool            // the block was `server_tool_use`, not `tool_use`
     input_summary: string        // ≤ 200 chars, single line
     input: object                // full tool input
     status: "pending"
+    invoked_at: string           // ISO 8601 UTC, or "" when unknown
     gated: bool                  // whether a permission dialog was shown for this call
     agent_id: string | null      // non-null when the call came from a subagent
 
@@ -365,6 +367,15 @@ ToolResultPayload:
 ```
 
 `status: "error"` results are expanded by default in the UI; the flag is what the frontend keys on.
+
+`invoked_at` is the only time on a card until its result arrives with `duration_ms`. Two clocks are
+involved and they are not interchangeable: `duration_ms` is measured on a **monotonic** clock, because
+an NTP correction mid-call would otherwise report a result arriving before its own request, while
+`invoked_at` must be **wall** time, because a monotonic reading is a process-local number no browser
+can render as a time of day. UTC with an explicit offset, since the reader may be a collaborating
+browser in another timezone. `""` rather than a substituted "now" when the source has no time — a
+replayed transcript entry the CLI wrote without a `timestamp`, or a clock that answered junk; the
+frontend renders no chip for it.
 
 #### `SubagentEventPayload`
 

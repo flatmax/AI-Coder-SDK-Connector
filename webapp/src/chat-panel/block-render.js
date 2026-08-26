@@ -204,6 +204,57 @@ export function formatDuration(ms) {
   return `${mins}m ${Math.round(seconds - mins * 60)}s`;
 }
 
+/**
+ * A tool card's `invoked_at` as epoch milliseconds, or `null`.
+ *
+ * `null` for a card that carries no time at all — one replayed from a
+ * transcript entry the CLI wrote without a `timestamp`, or from a session
+ * recorded before the engine started sending the field. Absent stays absent:
+ * the alternative, defaulting to "now", would put a fresh clock reading on a
+ * call made last Tuesday and make an ancient card look like it had just
+ * stalled. Unparseable is treated as absent for the same reason, following
+ * `expiryMs` in ../permission-dialog/queue.js.
+ *
+ * @param {object|null|undefined} card
+ * @returns {number|null}
+ */
+export function invokedAtMs(card) {
+  const raw = card?.invoked_at;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw !== 'string' || !raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * A tool card's invocation time, as a reader would say it.
+ *
+ * Time of day alone for a call made today, because that is the whole point of
+ * the chip — you read "14:32:07", glance at your own clock, and you know
+ * whether the call has been sitting there for eight minutes. Date *and* time
+ * for anything older, because a bare "14:32:07" on a card replayed from last
+ * week's session invites exactly the arithmetic that would be wrong.
+ *
+ * Locale formatting rather than a fixed pattern, matching the rest of the
+ * webapp's timestamps (`toLocaleTimeString` in ../context-usage-tab.js). The
+ * cost is that seconds are locale-dependent; every locale this runs in shows
+ * them, and a chip without seconds would still answer the question.
+ *
+ * @param {number|null} ms
+ * @returns {string}
+ */
+export function formatInvokedAt(ms) {
+  if (!Number.isFinite(ms)) return '';
+  try {
+    const then = new Date(ms);
+    return then.toDateString() === new Date().toDateString()
+      ? then.toLocaleTimeString()
+      : then.toLocaleString();
+  } catch (_) {
+    return '';
+  }
+}
+
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return `${Math.round(bytes)} B`;
@@ -644,6 +695,49 @@ const STATUS_TITLE = {
   denied: 'You denied this call',
 };
 
+/**
+ * The two statuses that mean the call has not finished, and so the two where
+ * "how long has this been going?" is a question worth answering.
+ *
+ * `denied` is not one of them. A denied call never ran, so time since it was
+ * proposed measures how long the user took to say no — a fact about the
+ * reader, rendered as though it were a fact about the tool.
+ */
+const RUNNING_STATUSES = new Set(['pending', 'awaiting']);
+
+/**
+ * The header's time chip: when the call was made, and — while it is still
+ * running — how long ago that was.
+ *
+ * The invocation time is the durable half and always renders when known. The
+ * elapsed half is live, and renders *only while the panel's run-timer ticker
+ * is running*, because that interval is the one thing guaranteeing the number
+ * gets recomputed. Without the ticker a rendered "2m 41s" freezes at whatever
+ * it said on the last re-render and goes on claiming to be live, which is
+ * worse than the clock time alone — the reader can always do the subtraction
+ * themselves, and the wall clock does not stop.
+ *
+ * Elapsed is clamped at zero. It subtracts the *engine's* clock reading from
+ * the *browser's*, so a skew between two machines — or an NTP correction on
+ * either — can otherwise produce a call that has been running for minus four
+ * seconds. Same reasoning as `_elapsed_ms` in the engine's history.py.
+ */
+function renderToolTime(panel, status, card) {
+  const invokedMs = invokedAtMs(card);
+  const clock = formatInvokedAt(invokedMs);
+  if (!clock) return nothing;
+  const ticking = RUNNING_STATUSES.has(status) && panel?._streamTimerInterval != null;
+  const elapsed = ticking ? formatDuration(Math.max(0, Date.now() - invokedMs)) : '';
+  const title = elapsed
+    ? `Invoked at ${clock} by the engine's clock — running for ${elapsed}`
+    : `Invoked at ${clock} by the engine's clock`;
+  return html`
+    <span class="tool-time" title=${title}
+      >${clock}${elapsed ? html` · <span class="tool-elapsed">${elapsed}</span>` : nothing}</span
+    >
+  `;
+}
+
 export function renderToolCard(panel, block) {
   const card = block.tool || {};
   const status = toolStatus(block);
@@ -679,6 +773,7 @@ export function renderToolCard(panel, block) {
               title="This call went through a permission prompt"
             >gated</span>`
           : nothing}
+        ${renderToolTime(panel, status, card)}
         <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
       </button>
       ${expanded ? renderToolBody(block, card, result, segments) : nothing}

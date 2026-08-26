@@ -187,11 +187,23 @@ export function startStreamTimerTick(panel) {
  * Stop the panel-level run-timer ticker. Called when no tab
  * has a live timer left, and on panel teardown from events.js's
  * detach path.
+ *
+ * Kicks one last render on the way out. Two displays read this
+ * interval as their licence to show a live number — the run
+ * timer itself, and a pending tool card's elapsed
+ * (`renderToolTime` in block-render.js) — and withdrawing the
+ * licence silently would leave whichever of them was on screen
+ * frozen at its final value, still reading as though it were
+ * advancing. The stranded-tool-card case is the one that needs
+ * it: a turn that dies holding a pending call keeps that card
+ * on screen afterwards, and it is the card most likely to be
+ * stared at.
  */
 export function stopStreamTimerTick(panel) {
   if (panel._streamTimerInterval != null) {
     clearInterval(panel._streamTimerInterval);
     panel._streamTimerInterval = null;
+    panel.requestUpdate?.();
   }
 }
 

@@ -1073,6 +1073,15 @@ class _Turn:
                 ):
                     existing["superseded"] = True
 
+        # The transcript's own timestamp for the entry carrying the call, which
+        # is the same fact the live path reads off its wall clock — so a card
+        # keeps its invocation time across a refresh instead of having one only
+        # while the turn that made it is still streaming. Passed through
+        # verbatim rather than reformatted: the CLI writes ISO 8601 and
+        # re-rendering it could only lose precision or invent it.
+        timestamp = entry.get("timestamp")
+        invoked_at = timestamp if isinstance(timestamp, str) else ""
+
         card = {
             "tool_use_id": tool_use_id,
             "name": name,
@@ -1080,6 +1089,7 @@ class _Turn:
             "input_summary": summarise_tool_input(tool_input),
             "input": tool_input,
             "status": "pending",
+            "invoked_at": invoked_at,
             # The transcript records denials, never that a dialog was shown
             # and answered, so this is set only where there is evidence.
             "gated": False,
@@ -1101,9 +1111,8 @@ class _Turn:
         }
         self.blocks.append(rendered)
         self._tools[tool_use_id] = rendered
-        timestamp = entry.get("timestamp")
-        if isinstance(timestamp, str):
-            self._started[tool_use_id] = timestamp
+        if invoked_at:
+            self._started[tool_use_id] = invoked_at
 
     def _note_subagent(self, tool_use_id: str, tool_input: dict[str, Any]) -> None:
         """Open a subagent row for one spawn call.

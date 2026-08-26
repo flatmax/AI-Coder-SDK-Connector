@@ -539,6 +539,46 @@ rather than already covered by it.
 
 ### Landed since
 
+- **A tool card says when it was invoked, and counts up while it hasn't answered** — built 2026-08-27
+  from § Known issues: *"a time chip for when the particular mcp task was invoked. This allows me to see
+  if the task has stalled."*
+
+  **The gap was that a pending card carried no time at all.** A finished card has `duration_ms` in its
+  footer; a card still running has nothing and never will if it hangs, so a `Bash` that wedged and a
+  `Bash` that answered in 30ms rendered identically. The header therefore answers **when**, not how long —
+  duplicating the duration on a finished card would have added a number without adding a fact.
+
+  **Two clocks, and neither is derivable from the other.** `TurnTranslator` already took an injectable
+  monotonic `clock` for durations; it now takes a `wall_clock` beside it. A duration must be monotonic or
+  an NTP correction mid-call can report a result arriving before its own request, while `invoked_at` has
+  to be a time a reader can compare against the clock on their wall — and `time.monotonic` is a
+  process-local number no browser can turn into a time of day. So the card gets a *new* field rather than
+  reusing `started_at`, which would have been the same name meaning two things one layer apart.
+
+  **"The ticker is running" is the licence to show a live number.** The elapsed is computed in
+  `renderToolTime` from the panel's existing 250ms run-timer interval — no second interval — and is
+  withheld entirely when `_streamTimerInterval` is null. That makes a frozen counter structurally
+  impossible rather than merely unlikely: the thing that displays the number and the thing that advances
+  it are the same condition. Writing it exposed a one-frame hole in that argument — `stopStreamTimerTick`
+  cleared the interval without re-rendering, so a stranded card's elapsed could outlive its licence until
+  the panel next happened to redraw. It now kicks a final `requestUpdate()` on the way out.
+
+  Two more ways the number could lie, both closed: it is clamped at zero, because engine and browser may
+  be different machines with skewed clocks; and a `denied` card gets none, since time since a call was
+  *proposed* measures how long the user took to say no — a fact about the reader in a tool card's
+  clothes.
+
+  **The disk path had to be the transcript's own timestamp, not a re-render of one.** `history.py`
+  `_open_card` passes `entry["timestamp"]` through verbatim, so a card keeps its invocation time across a
+  refresh; reformatting could only lose precision or invent it. An entry with no timestamp yields `""`
+  and renders no chip — absent stays absent, which is the invariant the browser half enforces too
+  (`invokedAtMs` returns null for anything unparseable rather than falling back to now).
+
+  **Verified in the browser, not only in the suite.** The disk path across 113 restored cards; the live
+  tick on a genuinely stranded pending `Bash`, advancing `2m 46s → 2m 51s` and then withdrawing when the
+  interval was cleared. `specs-reference/3-engine/session.md`'s `ToolCard` schema gained `invoked_at` —
+  and `server_tool`, which was pre-existing drift found while adding it.
+
 - **A save now says what it did not apply, and a restart applies it** — item (c)'s restart-session pair,
   built 2026-08-26. Two invariants that had nothing behind them now do.
 
