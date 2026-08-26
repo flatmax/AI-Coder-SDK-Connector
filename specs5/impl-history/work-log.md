@@ -464,24 +464,25 @@ engine-health panel would be a second thing to keep true, and `/mcp` routing to 
 already the better answer. Recorded rather than done because it is nine items of spec arbitration and
 the call on each is the author's, not the implementer's.
 
-**(b) Backend built, no caller — the shape `set_model` was in.** Two MCP control RPCs exist in
-`service.py`, both localhost-gated, both with **zero callers anywhere in `webapp/src`**:
+**(b) Backend built, no caller — the shape `set_model` was in.** ~~Two MCP control RPCs exist in
+`service.py`, both localhost-gated, both with **zero callers anywhere in `webapp/src`**.~~ **Built
+2026-08-26 — see § Landed since.** Both are now actions on the Context tab's server rows.
 
-| RPC | What it does | Surface it needs |
+| RPC | What it does | Surface it got |
 |---|---|---|
-| `reconnect_mcp_server(name)` | Re-dials one server | An action on a row the Context tab already renders |
-| `toggle_mcp_server(name, enabled)` | Enables or disables one server | The same row |
+| `reconnect_mcp_server(name)` | Re-dials one server | Offered on a `failed` / `needs-auth` row |
+| `toggle_mcp_server(name, enabled)` | Enables or disables one server | The same row, confirmed when enabling |
 
-This is precisely the position `set_model` occupied before this session: working control requests that
-nothing can reach. Unlike `set_model` they do not even need a new surface — the Context tab already
-lists every server with its connection state and token cost, so both are actions on a row that is
-already on screen. Cheapest items in this section, and the ones most likely to be wanted: the state
-`reconnect` repairs is one the tab can already show you and currently cannot do anything about.
+This was precisely the position `set_model` occupied before that session: working control requests that
+nothing could reach. Unlike `set_model` they did not even need a new surface — the Context tab already
+lists every server with its connection state and token cost, so both are actions on a row that was
+already on screen.
 
-`toggle_mcp_server` deserves a moment's thought before it gets a button, though — its docstring makes
-the argument itself: *"Enabling a server hands the agent a new set of tools; the host is the one who
-decides which tools exist."* That is a permissions-shaped decision wearing a toggle, and the localhost
-gate is doing real work rather than being boilerplate.
+`toggle_mcp_server` got the moment's thought its docstring asks for — *"Enabling a server hands the agent
+a new set of tools; the host is the one who decides which tools exist"* — and the answer was to keep the
+toggle but split the two directions, since only one of them grants anything. What that thought actually
+turned on was a fact neither the docstring nor this entry had — and the fact this entry first reached for
+was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the one row that gets no toggle.
 
 **(c) Neither side exists.** Specified, with nothing behind it on either the engine or the browser:
 
@@ -504,8 +505,10 @@ gate is doing real work rather than being boilerplate.
   rendered. Of everything in this list it is the cheapest to build and the only one whose absence the
   spec has already called out as a mistake.
 
-**Where to start.** (b) is an afternoon and closes a real gap. Then (a), because a spec that names the
-wrong tab is how `/permissions` came to lie and the same trap is still set for eight more items. (c)
+**Where to start.** ~~(b) is an afternoon and closes a real gap.~~ **(b) is done.** Then (a), because a
+spec that names the wrong tab is how `/permissions` came to lie and the same trap is still set for eight
+more items — and note that (b) turned up a ninth of exactly that kind, since this section's own table
+filed the MCP server list under Settings when the right home for it was the Context tab all along. (c)
 last, and within it the restart-session pair first, since two invariants currently have nothing behind
 them.
 
@@ -523,6 +526,86 @@ image and appears on no list, which is exactly why two of them sat unnoticed. Mo
 rather than already covered by it.
 
 ### Landed since
+
+- **The two MCP controls got a caller** — built, as item (b) of the section above. `reconnect_mcp_server`
+  and `toggle_mcp_server` are now actions in the Context tab's server-group body, under the connection
+  facts they act on.
+
+  **The fact that decided the design was one nobody in this file had — and the first version of it was
+  wrong.** The question on the table was whether `toggle_mcp_server` should get a button at all, given its
+  docstring's argument that the host decides which tools exist. It looked like a narrower question than it
+  was: [`../plan/sdk-surface.md`](../plan/sdk-surface.md) recorded from a 2026-08-15 live run that
+  `get_mcp_status` lists only *configured stdio/http* servers, so the toggle's only subject on this machine
+  would be the user's own `chrome-devtools`. That is what this entry originally said, and the design was
+  settled on it: keep the toggle, put the friction only on enabling, which is the direction that grants.
+
+  **Then the browser check found `aic-dc` in the list**, `scope: "dynamic"`, six tools, stable across
+  samples — same CLI 2.1.229 the contrary claim was verified against. The absence was an artefact of
+  *when the status was sampled*: `bridge_smoke.py` calls `get_mcp_status()` in the instant after
+  `connect()` returns, and at that instant the list is unpopulated — only stdio servers, `pending`, 0
+  tools. A probe registering a trivial SDK server and polling every 1.5s had it at t=1.5s and stable
+  thereafter. Corrected in `sdk-surface.md`, `delivery.md`, `settings.md`, and in `bridge_smoke.py`'s own
+  comment, which is where the claim entered the specs.
+
+  **The first attempt at that correction blamed the wrong cause** — it said the 2026-08-15 run had built
+  the session without `mcp_servers=`. True of the three throwaway probes written while building this,
+  false of `bridge_smoke.py`, which registers the bridge on line 248 and is the script the verification
+  used. Caught only because a question about tooling prompted actually reading the script instead of
+  assuming what it did. Two wrong claims in one payload, both from reasoning about a harness rather than
+  running it.
+
+  What the correction cost was not cosmetic. Measured on the scratch backend rather than reasoned about:
+  `toggle_mcp_server('aic-dc', false)` replies `{"status": "ok", "enabled": false}` and takes the tool
+  count 6 → 0 while the pill still reads `connected`; then **both** ways back refuse with
+  `SDK servers should be handled in print.ts` — the re-enable and `reconnect_mcp_server` alike. So the
+  shipped design would have put a one-click, unconfirmed, unrecoverable action on the one server whose
+  tools the agent itself runs on, and the enable-only confirmation was no protection because the
+  reversibility it assumed does not exist there.
+
+  **So a `dynamic` row gets neither control**, and says why. This is keyed off the CLI's own `scope`
+  rather than off the name `aic-dc`, so any SDK server we register later is covered. The
+  enable-confirms/disable-does-not split stands for real stdio and http servers, where disabling *is*
+  reversible — the exemption removes the case that broke the premise instead of rewriting the rule.
+
+  Two things worth keeping from how this went. The design rested on a spec claim that was load-bearing
+  and false, and only rendering it in a browser against a live engine found that out — the unit tests
+  were green against fixtures that encoded the same wrong assumption. And the claim was false in the
+  direction that is hardest to catch: **an absence, asserted from a harness that could not have produced
+  the presence.**
+
+  **Reconnect is deliberately narrow** — `failed` and `needs-auth` only, which is the loop the SDK's own
+  docstring example walks. `pending` is mid-dial and re-dialling races the attempt in flight; `disabled`
+  wants Enable. And the toast says `reconnecting`, the reply's own word, rather than claiming a
+  connection: the outcome belongs to the pill on the refresh that follows, and this is the one row that
+  exists because a server was wrong about being fine.
+
+  **What had to be measured rather than reasoned**, on the `set_model` precedent — three probes against a
+  live session, because the first two disagreed with each other. Unlike `set_model`, both controls apply
+  **immediately**: disabling a settled `connected` server returned `disabled` with 0 tools on the next
+  `get_mcp_status` and took `get_context_usage` from 29 tools / 9,071 tokens to `mcpTools=0/0`. So no
+  "applies next turn" sentence is owed, and a control call re-reads the whole breakdown rather than just
+  the status — refreshing the pill and leaving the numbers is how a green pill ends up over a stale total.
+
+  The disagreement between the probes was itself the finding: **a disable issued while the initial dial is
+  still in flight is silently reverted** by the connection completing. The probe that disabled ~1s after
+  connect found the server `connected` with all 29 tools eight seconds later, and the probe that waited
+  for a settled state found `disabled` holding across 11s. Not guarded against — the actions live behind
+  a collapsed group and the tab's first breakdown fetch is slower than the window in which it is possible
+  — but recorded, because "Disable didn't work" is otherwise unfalsifiable. The same 3-14s breakdown cost
+  works in our favour on the way back: the dial takes 1-3s, so the refresh cannot return before the
+  server has finished connecting.
+
+  Two smaller things the work settled. The toggle is session-scoped, not a settings edit —
+  `~/.claude.json`'s `mcpServers` entry was unchanged after both directions with no `disabled` key added.
+  And `test_the_methods_the_frontend_calls_exist` had been listing both RPCs as methods the frontend
+  calls, for a frontend that called neither; that assertion is now true rather than aspirational. See
+  [`../5-webapp/viewers-hud.md` § Session Section](../5-webapp/viewers-hud.md).
+
+  **Not built, and deliberately:** the `test_every_rpc_has_a_caller_or_is_listed_as_dormant` this section
+  argues for. It is the right mechanism and these two were its motivating cases, but writing it means
+  auditing every RPC for callers and arbitrating each caller-less one — the work-log's own claim that it
+  "would have caught these two years earlier" implies there are others. That is its own task, not a
+  rider on this one.
 
 - **A model-selector surface, and `/model` routed to it** — built. `set_model` had been localhost-only
   with no caller and `/model` was passthrough, for a reason this entry stated correctly: there was

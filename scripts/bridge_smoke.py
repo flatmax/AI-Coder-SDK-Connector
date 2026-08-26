@@ -255,13 +255,22 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"\nConnect failed:\n  {exc}", file=sys.stderr)
         return 1
 
-    # Printed for context only. It does *not* tell you whether our server
-    # loaded: `get_mcp_status` lists the configured stdio/http servers, and
-    # an in-process SDK server is not one of those — a live run showed only
-    # `chrome-devtools` from the user's settings while our tools were being
-    # called successfully in the same turn. What proves registration is the
-    # model calling a `mcp__aic-dc__*` tool at all, which is the check at the
-    # bottom of this function.
+    # Printed for context only, and it is sampled too early to mean much:
+    # `get_mcp_status` has not been populated in the instant after `connect()`
+    # returns. Measured 2026-08-26 — at this exact point the list holds only
+    # the user's stdio servers, mid-dial (`pending`, 0 tools); 1.5s later they
+    # are `connected` with their real counts *and* an in-process SDK server is
+    # there too, with `scope: "dynamic"`.
+    #
+    # This comment used to conclude the opposite from that first sample — that
+    # an in-process SDK server never appears here — and that claim reached
+    # `specs5/plan/sdk-surface.md` and shaped a UI decision before a browser
+    # run caught it. It is wrong. Poll until the list settles before drawing
+    # anything from it.
+    #
+    # What proves registration either way is the model calling a
+    # `mcp__aic-dc__*` tool at all, which is the check at the bottom of this
+    # function.
     try:
         status = await session.get_mcp_status()
         print(f"mcp status      {_short(json.dumps(status, default=str))}")

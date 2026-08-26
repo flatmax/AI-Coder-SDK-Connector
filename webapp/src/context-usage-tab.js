@@ -230,6 +230,18 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      */
     _mcpStatus: { type: Object, state: true },
     /**
+     * False once `Collab.get_collab_role` reports this client is not the
+     * host.
+     *
+     * `reconnect_mcp_server` and `toggle_mcp_server` are both
+     * localhost-only, so a guest reads the connection facts without the
+     * actions on them. Same narrowing as the model selector's
+     * `_canSetModel`, and for the same reason: the RPCs run
+     * `_check_localhost_only` themselves, so being wrong here costs a
+     * rejected call rather than an unauthorised one.
+     */
+    _canControlMcp: { type: Boolean, state: true },
+    /**
      * Which kind of failure `_error` was: 'no-engine' when there is no
      * session to ask, 'failed' when a request went out and did not come
      * back with an answer. Empty when nothing has failed.
@@ -526,6 +538,16 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       color: var(--text-secondary, #8b949e);
       font-size: 0.8125rem;
     }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin: 0.1rem 0 0;
+    }
+    .acting {
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.8125rem;
+    }
     .error {
       color: #f85149;
     }
@@ -564,6 +586,14 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._stale = false;
     this._section = _loadSection();
     this._mcpStatus = null;
+    this._canControlMcp = true;
+    /**
+     * Server names with a control request in flight, so one row's buttons
+     * go quiet without disabling every other row's. A plain Set on the
+     * same grounds as `_openGroups` below — mutated in place, which Lit's
+     * identity check never sees, so each mutator asks for the render.
+     */
+    this._mcpBusy = new Set();
     /**
      * Which tool groups are expanded, by group key. A plain Set rather
      * than a reactive property: Lit compares by identity and mutating a
@@ -627,6 +657,11 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   }
 
   async onRpcReady() {
+    // Not awaited alongside the refresh: the probe is a cheap read on
+    // another service, the breakdown is a 3-14s control request, and what
+    // the probe gates sits inside a collapsed group the reader has to open
+    // before it is on screen at all.
+    this._probeMcpAuthority();
     await this._refresh();
   }
 
@@ -817,6 +852,136 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       // Deliberately quiet — see above.
     }
     return null;
+  }
+
+  /**
+   * Find out whether this client may drive the MCP controls.
+   *
+   * Same probe and the same default as the model selector's
+   * `_probeModelAuthority`: no collab service registered means single-user,
+   * which means we are the host.
+   */
+  async _probeMcpAuthority() {
+    try {
+      const role = await this.rpcExtract('Collab.get_collab_role');
+      if (role && typeof role === 'object' && !role.error) {
+        this._canControlMcp = role.is_localhost !== false;
+        return;
+      }
+    } catch {
+      // No collab service — single-user, and we are the host.
+    }
+    this._canControlMcp = true;
+  }
+
+  /**
+   * Ask the engine to dial one server again.
+   *
+   * Offered only for `failed` and `needs-auth`, which is the loop the SDK
+   * documents for this call. A `pending` row is mid-dial and re-dialling
+   * it races the attempt already running; a `disabled` one was switched
+   * off deliberately, and the answer there is Enable.
+   *
+   * The reply says `reconnecting`, not `connected`, and the toast repeats
+   * it in those words. What happens next is the pill's to report — a green
+   * pill written here would be this section claiming an outcome it has not
+   * been told, on the one row that exists because a server was lying about
+   * being fine.
+   */
+  async _reconnectServer(name) {
+    await this._runMcpControl(
+      name,
+      'ClaudeCodeService.reconnect_mcp_server',
+      [name],
+      `Reconnecting ${name}…`,
+    );
+  }
+
+  /**
+   * Switch one server off, or back on.
+   *
+   * Enabling asks first; disabling does not. The RPC's own docstring makes
+   * the argument — "the host is the one who decides which tools exist" —
+   * and the two directions are not symmetric. Disabling only takes tools
+   * away, and the reader reaching for it is usually looking at the token
+   * cost in this very section and wants it gone. Enabling hands the agent
+   * a set of capabilities it did not have a moment ago, so that is where
+   * the friction belongs.
+   *
+   * The confirmation names the tool count when the engine gave one, and
+   * says plainly that it did not when it has not. A disabled server
+   * advertises nothing, so an absent count is the ordinary case here
+   * rather than a fault — and a guessed number is one somebody would weigh
+   * this decision against.
+   */
+  async _toggleServer(name, enabled, toolCount) {
+    if (enabled) {
+      const count = Number.isFinite(toolCount) && toolCount > 0
+        ? `its ${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`
+        : 'every tool it provides (the engine has not said how many — a '
+          + 'server that is switched off advertises nothing)';
+      const ok = window.confirm(
+        `Enable "${name}"?\n\nThis hands the agent ${count}, and their `
+        + 'description tokens join every request for the rest of this '
+        + 'session.',
+      );
+      if (!ok) return;
+    }
+    await this._runMcpControl(
+      name,
+      'ClaudeCodeService.toggle_mcp_server',
+      [name, enabled],
+      `${name} ${enabled ? 'enabled' : 'disabled'}`,
+    );
+  }
+
+  /**
+   * Run one MCP control request and fold the answer back into the tab.
+   *
+   * Shared by both actions because the interesting part is the same three
+   * things: hold the row so a second click cannot race the first, report a
+   * refusal in the words the service used rather than a paraphrase, and
+   * then re-read instead of patching state locally.
+   *
+   * The re-read is the whole breakdown, not just the status. Both calls
+   * move the session's tool set, and that is two separate numbers on this
+   * screen — the server's pill and its token cost — so refreshing one and
+   * leaving the other is how a green pill ends up over a stale total. It
+   * costs the breakdown's 3-14s, which is the price of the numbers being
+   * about the tool set that exists now.
+   */
+  async _runMcpControl(name, method, args, done) {
+    if (!this._canControlMcp || this._mcpBusy.has(name)) return;
+    if (!this.rpcConnected) return;
+    this._mcpBusy.add(name);
+    this.requestUpdate();
+    try {
+      const res = await this.rpcExtract(method, ...args);
+      if (res && typeof res === 'object' && res.error) {
+        this._emitToast(
+          res.error === 'restricted'
+            ? res.reason || 'Only the host can change MCP servers'
+            : res.error,
+          'warning',
+        );
+        return;
+      }
+      this._emitToast(done, 'success');
+    } catch (err) {
+      this._emitToast(`${name}: ${err?.message || err}`, 'error');
+      return;
+    } finally {
+      this._mcpBusy.delete(name);
+      this.requestUpdate();
+    }
+    await this._refresh();
+  }
+
+  /** Same shape as the Settings tab's; the shell listens on `window`. */
+  _emitToast(message, type = 'info') {
+    window.dispatchEvent(
+      new CustomEvent('aic-toast', { detail: { message, type }, bubbles: false }),
+    );
   }
 
   /**
@@ -1795,6 +1960,84 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
         ? html`<p class="note">${bits.join(' · ')}</p>`
         : ''}
       ${h.error ? html`<p class="error">${h.error}</p>` : ''}
+      ${this._renderMcpActions(server, h)}
+    `;
+  }
+
+  /**
+   * The two things a host can do to a server, under the facts about it.
+   *
+   * In the group body rather than on the head, because the head *is* the
+   * disclosure `<button>` and a button cannot contain one. The cost is a
+   * click to reach a reconnect, which `serverGroups` already softens by
+   * sorting an unwell server above a heavier healthy one — the row that
+   * needs acting on is the first one in the list, with its state on the
+   * closed head.
+   *
+   * Nothing renders without health, because `_renderServerDetail` has
+   * returned by then: with no status there is no way to tell which of
+   * these two actions the row wants, and a Disable button on a server that
+   * may already be off is worse than no button. Nothing renders for a
+   * guest either — both RPCs are localhost-only, so an enabled control
+   * would be an offer the engine refuses.
+   *
+   * Nothing renders for an in-process SDK server either — our own `aic-dc`
+   * bridge, which the CLI reports with `scope: "dynamic"`. Measured against
+   * CLI 2.1.229 on 2026-08-26, all three calls behave like this:
+   *
+   *   - `toggle_mcp_server('aic-dc', false)` replies `ok` and takes the
+   *     tool count from 6 to 0, while the pill stays `connected`
+   *   - `toggle_mcp_server('aic-dc', true)` fails: "SDK servers should be
+   *     handled in print.ts"
+   *   - `reconnect_mcp_server('aic-dc')` fails the same way
+   *
+   * So disable is a one-way door on this row: it works, it is the one
+   * server whose tools the *agent* runs on, and neither recovery path can
+   * undo it — only a new session can. A control the engine will not honour
+   * in both directions is not a toggle, so the row states the fact instead
+   * of offering the button. This is the only server-kind exception, and it
+   * keys off the CLI's own word rather than off the name `aic-dc`, so any
+   * other SDK server we register is covered by the same reasoning.
+   */
+  _renderMcpActions(server, h) {
+    if (!this._canControlMcp) return '';
+    if (h.scope === 'dynamic') {
+      return html`<p class="note">
+        Served in-process by this app, so the engine manages it with the
+        session — it cannot be switched off and back on from here.
+      </p>`;
+    }
+    const name = server.name;
+    const busy = this._mcpBusy.has(name);
+    const disabled = busy || !this.rpcConnected;
+    const off = h.status === 'disabled';
+    const broken = h.status === 'failed' || h.status === 'needs-auth';
+    return html`
+      <p class="actions">
+        ${broken
+          ? html`<button
+              class="tool-btn"
+              ?disabled=${disabled}
+              title="Ask the engine to dial ${name} again"
+              @click=${() => this._reconnectServer(name)}
+            >
+              ↻ Reconnect
+            </button>`
+          : ''}
+        <button
+          class="tool-btn"
+          ?disabled=${disabled}
+          title=${off
+            ? `Hand ${name}'s tools back to the agent`
+            : `Drop ${name}'s tools out of this session`}
+          @click=${() => this._toggleServer(name, off, h.toolCount)}
+        >
+          ${off ? '✓ Enable' : '⊘ Disable'}
+        </button>
+        ${busy
+          ? html`<span class="acting" aria-hidden="true">…</span>`
+          : ''}
+      </p>
     `;
   }
 

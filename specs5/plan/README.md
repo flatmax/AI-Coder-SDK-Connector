@@ -163,9 +163,10 @@ the copy told a diagnosing user they had failed**; and two labels were wrong rat
 Tool traffic's `Calls`/`Results` columns render tokens, and the 📊 tooltip still named the panel CC-17
 replaced.
 
-Still deliberately unbuilt, so their absence is not a discovery: `ClaudeCodeService.reconnect_mcp_server`
-exists and no browser surface calls it, and the HUD's Rate limits and Files modified sections and its
-collapse persistence are unwritten — `viewers-hud.md` § *Sections* specifies all three.
+Still deliberately unbuilt, so their absence is not a discovery: ~~`ClaudeCodeService.reconnect_mcp_server`
+exists and no browser surface calls it~~ *(built 2026-08-26, with `toggle_mcp_server`, on the Context tab's
+server rows)*, and the HUD's Rate limits and Files modified sections and its collapse persistence are
+unwritten — `viewers-hud.md` § *Sections* specifies all three.
 
 ### Open items carried forward (as of 2026-08-18)
 

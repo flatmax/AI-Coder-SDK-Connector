@@ -151,15 +151,17 @@ other rule.
 
 **Not built as a group on this tab.** Engine health and MCP server status are live in the Context tab
 (`get_engine_health`, `get_mcp_status`), which is where `/mcp` routes — the open question for those two is
-whether this spec should point there rather than duplicate them. MCP **reconnect** is the interesting
-gap: `reconnect_mcp_server(name)` exists in `service.py` with no caller anywhere in the browser, so a
-failed server is visible and unfixable. Restart-session and session-storage size exist on neither side.
+whether this spec should point there rather than duplicate them. MCP **reconnect** is no longer the gap it
+was: `reconnect_mcp_server(name)` and `toggle_mcp_server(name, enabled)` are now actions on the Context
+tab's own server rows, next to the connection state and token cost that motivate them, rather than a
+second copy of that list here — see [`viewers-hud.md` § Session Section](viewers-hud.md).
+Restart-session and session-storage size still exist on neither side.
 
 A group the old tab had no equivalent for, because the old engine had no session to control:
 
 - **Engine health** — the resolved `claude` binary and version, credential source, and any auth warning. Read-only, and the first place to look when a turn fails for a reason that is not about code
 - **Restart session** — reconnects the SDK client, applying every pending `engine.json` change. Confirmation first, naming what will apply
-- **MCP servers** — status per server from `get_mcp_status()`, with a reconnect action for a failed one. `aic-dc` appears here like any other
+- **MCP servers** — status per server from `get_mcp_status()`, with a reconnect action for a failed one. **Built in the Context tab instead**, where the server list already lives; this bullet is kept as the record of where the decision landed and why, not as work outstanding. Note that `aic-dc` *does* appear in that list, with `scope: "dynamic"`, and is the one row that offers neither control — the engine accepts a disable it cannot reverse ([`../plan/sdk-surface.md`](../plan/sdk-surface.md) § Correction, 2026-08-26)
 - **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion. Deletion happens there, next to what is being deleted, not behind a settings button
 
 ## Editing Flow
@@ -211,7 +213,7 @@ When collaboration mode is active and the client is non-localhost:
 
 - Save and Reload are disabled or hidden
 - Editors may still be shown read-only for viewing
-- Session controls — restart, MCP reconnect, permission mode — are read-only. They are engine mutations, and the collaboration policy puts engine mutations on localhost. *(None of the three is on this tab yet; the rule is the one to apply when they arrive, and `reconnect_mcp_server` already gates on localhost server-side.)*
+- Session controls — restart, MCP reconnect, permission mode — are read-only. They are engine mutations, and the collaboration policy puts engine mutations on localhost. *(None of the three is on this tab; MCP reconnect and the server toggle are in the Context tab, where they follow this rule — a guest sees the connection facts with no buttons on them, and both RPCs gate on localhost server-side regardless of what the UI offers.)*
 - The model select is disabled, and the panel says why. `get_model` is read-only, though, so a
   participant still sees which model is answering: without it they could not tell why a turn came back
   cheaper, faster or worse than the last one

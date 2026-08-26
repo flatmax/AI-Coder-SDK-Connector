@@ -187,7 +187,7 @@ to that question.
 | `set_permission_mode(mode)` | Live switch; no reconnect. |
 | `set_model(model)` | Live switch, and "live" needed measuring. Fired 22.8s into a live 34s turn it answered in **252ms** without interrupting the stream — but the running turn kept billing its original model, including a usage report 124ms after the switch returned; the *next* turn used the new one. So it is accepted mid-turn and applies to the turn after. See [`../3-engine/session.md` § A mid-turn switch lands on the next turn](../3-engine/session.md#a-mid-turn-switch-lands-on-the-next-turn). |
 | `get_context_usage()` | **The `/context` data.** Basis of CC-4. |
-| `get_mcp_status()` / `reconnect_mcp_server(name)` / `toggle_mcp_server(name, enabled)` | MCP server health surface. `get_mcp_status` is wired to the Context tab; the other two are exposed as RPCs with **no browser caller** — see [`../impl-history/work-log.md` § Specified but not yet built](../impl-history/work-log.md#specified-but-not-yet-built). |
+| `get_mcp_status()` / `reconnect_mcp_server(name)` / `toggle_mcp_server(name, enabled)` | MCP server health surface, all three now wired to the Context tab's server rows — the latter two spent a long time as RPCs with no browser caller. Unlike `set_model`, both controls apply **immediately**: a disable returned `disabled` on the next `get_mcp_status` and dropped the server's 29 tools out of `get_context_usage`, measured 2026-08-26. See [`../5-webapp/viewers-hud.md` § Session Section](../5-webapp/viewers-hud.md). |
 | `get_server_info()` | Advertised commands, tools, output styles. |
 | `stop_task(task_id)` | Cancels a single background task / subagent. |
 | `rewind_files(user_message_id)` | File-level undo to a checkpoint. Unreachable while a `session_store` is set — see below. |
@@ -583,9 +583,59 @@ model-authored HTML — not forwarded into the dialog's shadow DOM incidentally)
 
 | Where | Said / assumed | Actually |
 |---|---|---|
-| `get_mcp_status()` (§ Client, above) — "MCP server health surface" | The place to check whether our server registered | **An in-process SDK server does not appear in it.** A live run listed only the user's `chrome-devtools` from settings while all six `mcp__aic-dc__*` tools were being called successfully in the same turn. It reports *configured* stdio/http servers. What proves an SDK server registered is the model calling one of its tools |
+| `get_mcp_status()` (§ Client, above) — "MCP server health surface" | The place to check whether our server registered | **An in-process SDK server does appear in it, with `scope: "dynamic"`** — corrected 2026-08-26, see below. It reports configured stdio/http servers *and* SDK ones. What proves an SDK server registered is still the model calling one of its tools, because the row appearing does not mean the tools are advertised |
 | `specs5/3-engine/permissions.md` § classification table | `aic-dc` tools are ungated because they classify as read-only | Classification only shapes a dialog. The CLI raises a permission request for MCP tools in `acceptEdits` and `default` — not in `plan` — so they must be allowed in `can_use_tool` explicitly. Corrected in that file |
 | `specs5/3-engine/mcp-bridge.md` § Tools | The tool names are what the model sees | It sees them prefixed: `mcp__aic-dc__<tool>`. And when the inventory is deferred it reaches them through `ToolSearch` first — all three live runs showed `ToolSearch{query: "select:mcp__aic-dc__file_symbols"}` before the call. A tool whose *name* is not guessable from the task will not be found that way, which is an argument for plain names over clever ones |
+
+#### Correction, 2026-08-26: an SDK server *does* appear in `get_mcp_status`
+
+The first row above previously said an in-process SDK server does *not* appear, on a 2026-08-15 live run
+that listed only the user's `chrome-devtools`. That is wrong, and the cause was the run, not the CLI —
+the same CLI 2.1.229 and SDK 0.2.137 report our bridge as
+`{"name": "aic-dc", "status": "connected", "scope": "dynamic", "tools": [...6...]}`, stable across
+repeated samples in the running app.
+
+**The cause is sampling time.** `get_mcp_status()` called in the instant after `connect()` returns has
+not been populated yet. Measured 2026-08-26 with a trivial one-tool SDK server registered via
+`mcp_servers=`, polling every 1.5s from the moment connect returned:
+
+```
+t= 0.0s  ["chrome-devtools:pending:user:0"]
+t= 1.5s  ["chrome-devtools:connected:user:29", "probe-srv:connected:dynamic:1"]
+… stable through t=16.5s
+```
+
+`scripts/bridge_smoke.py` calls `get_mcp_status()` immediately after `await session.connect()`, so it
+samples at `t=0` every time — which is why it saw only `chrome-devtools`, and why even *that* row was
+mid-dial (`pending`, 0 tools) rather than the 29 it advertises a second and a half later. The absence
+was the sample's, and got written down as the CLI's. That script's comment asserted the false claim and
+has been corrected at source, since it is where the claim entered the specs.
+
+Two lessons, and the second is the one that cost time here. A claim that something is *absent* is only
+as good as the harness's ability to make it present. And **a single sample of a converging system is not
+a measurement** — this is the same error as the disable-race in
+[`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § MCP server actions, made twice in the same
+payload for the same reason. Poll `get_mcp_status` until it settles before concluding anything from it.
+
+An earlier draft of this correction blamed the wrong thing — it said the 2026-08-15 run had constructed
+the session without `mcp_servers=`. That was true of the three throwaway probes written while building
+the browser controls, but not of `bridge_smoke.py`, which registers the bridge on line 248 and is the
+script the verification actually used. Recorded because the wrong cause was reached the same way as the
+wrong claim: by reasoning about a harness instead of running it.
+
+`scope: "dynamic"` is the CLI's own marker for an in-process server, and `get_mcp_status` is a verbatim
+passthrough (`session.py:1110`), so it is safe to key behaviour off. Two consequences, both measured on
+2026-08-26 against CLI 2.1.229:
+
+- **`toggle_mcp_server(name, false)` works on an SDK server and cannot be undone.** It replies
+  `{"status": "ok", "enabled": false}` and takes the tool count from 6 to 0, while `status` stays
+  `connected` — the pill keeps saying the server is fine. Both recovery calls then refuse with
+  `SDK servers should be handled in print.ts`: `toggle_mcp_server(name, true)` and
+  `reconnect_mcp_server(name)` alike. Only a new session restores the tools.
+- **So neither control is offered on a `dynamic` row.** See
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § MCP server actions. A control the engine
+  will not honour in both directions is not a toggle, and this is the one server whose tools the agent
+  itself runs on.
 
 ### `ToolAnnotations(readOnlyHint=True)` buys nothing at the gate
 

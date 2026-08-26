@@ -1001,9 +1001,16 @@ symbol before trusting this phase.**
 
 Two facts from the live runs worth knowing:
 
-- **`get_mcp_status` does not list an in-process SDK server.** It reported only the user's
-  `chrome-devtools` while our six tools were being called successfully in the same turn. The smoke
-  script's status line is context, not the registration check its comment used to claim; what proves
+- ~~**`get_mcp_status` does not list an in-process SDK server.**~~ **Wrong — corrected 2026-08-26.** It
+  reported only the user's `chrome-devtools` while our six tools were being called successfully in the
+  same turn, and that absence was read as the CLI's behaviour. It was the *sample's*: `bridge_smoke.py`
+  calls `get_mcp_status()` in the instant after `connect()` returns, before the list is populated. Polling
+  from that instant shows only stdio servers, `pending` with 0 tools, and 1.5s later both they and a
+  `scope: "dynamic"` SDK server are there with their real counts. On the same CLI 2.1.229 the real app
+  lists `aic-dc`. See [`sdk-surface.md`](sdk-surface.md) § Correction, 2026-08-26 — which also records
+  that the first attempt at this correction blamed the wrong cause. What still holds is the narrower half:
+  the smoke script's status line is context, not a registration check, and a row appearing does not prove
+  the tools are advertised — a disabled SDK server still reads `connected` with zero tools. What proves
   registration is a `mcp__aic-dc__*` call happening at all.
 - **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.**
   [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session)'s tripwire, working: the
@@ -1944,8 +1951,12 @@ Two smaller things the live run settled about method:
 
 ### Deliberately not built
 
-- **`reconnect_mcp_server` still has no caller.** The RPC exists; no browser surface offers the
-  reconnect. Unchanged from phase 4, and Debug reports the status it would act on.
+- ~~**`reconnect_mcp_server` still has no caller.** The RPC exists; no browser surface offers the
+  reconnect. Unchanged from phase 4, and Debug reports the status it would act on.~~ **Built 2026-08-26**,
+  together with `toggle_mcp_server`, as actions on the Context tab's server rows — see
+  [`../5-webapp/viewers-hud.md` § Session Section](../5-webapp/viewers-hud.md). It had carried forward
+  unchanged across four phases, which is the argument the work-log makes for a
+  `test_every_rpc_has_a_caller_or_is_listed_as_dormant`: nothing here was ever going to notice.
 - **The HUD's Rate limits and Files modified sections, and its collapse persistence.**
   `viewers-hud.md` § *Sections* specifies all three. Unchanged from what the plan recorded going in.
 - **`EngineHealth.mcp` is a field with no writer.** The per-server list the banner leaves out is the same

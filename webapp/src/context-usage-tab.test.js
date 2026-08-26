@@ -19,7 +19,7 @@
 // `offsetParent` as null unconditionally, so the fallback branch cannot be
 // driven by attaching to the document.
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './context-usage-tab.js';
 import { SharedRpc } from './rpc.js';
@@ -2072,6 +2072,332 @@ describe('ContextUsageTab MCP health', () => {
     await settle(el);
     await showSection(el, 'Session');
     expect(pillFor(el, 'aic-dc')).toBe('reticulating');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP controls
+//
+// Both RPCs existed for a long time with no caller at all, which is what
+// `../../specs5/impl-history/work-log.md` § Specified but not yet built
+// filed them under. These are the tests that keep them reachable.
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab MCP controls', () => {
+  const mcpTools = [{ name: 'search', serverName: 'other', tokens: 4000 }];
+
+  /**
+   * Mount with both fetches plus the two controls, and hand back the spies.
+   *
+   * `Collab.get_collab_role` is published deliberately: the authority probe
+   * runs on connect and a test that left it unpublished would be exercising
+   * the no-collab fallback rather than the answer it meant to set.
+   */
+  function publishControls({ servers, usage = usageFixture({ mcpTools }), local = true }) {
+    const reconnect = vi.fn(() => ({ status: 'reconnecting', name: 'other' }));
+    const toggle = vi.fn((name, enabled) => ({ status: 'ok', name, enabled }));
+    const status = vi.fn(() => ({ mcpServers: servers }));
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage,
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_mcp_status': status,
+      'ClaudeCodeService.reconnect_mcp_server': reconnect,
+      'ClaudeCodeService.toggle_mcp_server': toggle,
+      'Collab.get_collab_role': () => ({ is_localhost: local }),
+    });
+    return { reconnect, toggle, status };
+  }
+
+  async function openServer(name, opts) {
+    const spies = publishControls(opts);
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const group = await expandGroup(el, name);
+    return { el, group, ...spies };
+  }
+
+  function buttonLabelled(group, text) {
+    return [...group.querySelectorAll('.actions .tool-btn')].find((b) =>
+      b.textContent.trim().includes(text),
+    );
+  }
+
+  function actionLabels(group) {
+    return [...group.querySelectorAll('.actions .tool-btn')].map((b) =>
+      b.textContent.trim(),
+    );
+  }
+
+  let confirmSpy;
+  let toasts;
+  let onToast;
+  beforeEach(() => {
+    // Stubbed rather than left native: jsdom's `confirm` is unimplemented
+    // and logs, and the live lesson from `open-work.md` § 6c is that a real
+    // confirm handled by a harness re-surfaces on the next navigation.
+    confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    toasts = [];
+    onToast = (e) => toasts.push(e.detail);
+    window.addEventListener('aic-toast', onToast);
+  });
+  afterEach(() => {
+    window.removeEventListener('aic-toast', onToast);
+    confirmSpy.mockRestore();
+  });
+
+  it('offers Reconnect only to a server that is failing', async () => {
+    // The loop the SDK documents for this call. A healthy server gets the
+    // toggle and nothing else.
+    const { group } = await openServer('other', {
+      servers: [{ name: 'other', status: 'failed', error: 'spawn ENOENT' }],
+    });
+    expect(actionLabels(group)).toEqual(['↻ Reconnect', '⊘ Disable']);
+
+    const healthy = await openServer('other', {
+      servers: [{ name: 'other', status: 'connected' }],
+    });
+    expect(actionLabels(healthy.group)).toEqual(['⊘ Disable']);
+  });
+
+  it('offers Reconnect for needs-auth, and not for pending', async () => {
+    // `needs-auth` is reachable and waiting on the user, so a re-dial can
+    // re-raise the prompt. `pending` is mid-dial, and re-dialling races the
+    // attempt already running.
+    const auth = await openServer('other', {
+      servers: [{ name: 'other', status: 'needs-auth' }],
+    });
+    expect(buttonLabelled(auth.group, 'Reconnect')).toBeTruthy();
+
+    const pending = await openServer('other', {
+      servers: [{ name: 'other', status: 'pending' }],
+    });
+    expect(buttonLabelled(pending.group, 'Reconnect')).toBeUndefined();
+  });
+
+  it('reconnects, and reports what the engine actually said', async () => {
+    // "reconnecting", not "connected": the engine accepted the request and
+    // the outcome is the pill's to report on the refresh that follows.
+    const { group, reconnect } = await openServer('other', {
+      servers: [{ name: 'other', status: 'failed' }],
+    });
+    buttonLabelled(group, 'Reconnect').click();
+    await settle(group.getRootNode().host);
+    expect(reconnect).toHaveBeenCalledWith('other');
+    expect(toasts.at(-1)).toEqual({
+      message: 'Reconnecting other…',
+      type: 'success',
+    });
+  });
+
+  it('disables without asking, and enables only after a confirm', async () => {
+    // The asymmetry the RPC's own docstring argues for: disabling only
+    // takes tools away, enabling hands the agent capability it did not
+    // have. So the friction goes on the granting direction alone.
+    const off = await openServer('other', {
+      servers: [{ name: 'other', status: 'connected' }],
+    });
+    buttonLabelled(off.group, 'Disable').click();
+    await settle(off.el);
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(off.toggle).toHaveBeenCalledWith('other', false);
+
+    const on = await openServer('other', {
+      servers: [{ name: 'other', status: 'disabled', tools: [{ name: 'a' }] }],
+    });
+    buttonLabelled(on.group, 'Enable').click();
+    await settle(on.el);
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    expect(on.toggle).toHaveBeenCalledWith('other', true);
+  });
+
+  it('does not enable when the confirm is declined', async () => {
+    confirmSpy.mockReturnValue(false);
+    const { group, el, toggle } = await openServer('other', {
+      servers: [{ name: 'other', status: 'disabled' }],
+    });
+    buttonLabelled(group, 'Enable').click();
+    await settle(el);
+    expect(toggle).not.toHaveBeenCalled();
+  });
+
+  it('names the tool count it would add, when the engine gave one', async () => {
+    const { group, el } = await openServer('other', {
+      servers: [
+        { name: 'other', status: 'disabled', tools: [{ name: 'a' }, { name: 'b' }] },
+      ],
+    });
+    buttonLabelled(group, 'Enable').click();
+    await settle(el);
+    expect(confirmSpy.mock.calls[0][0]).toContain('its 2 tools');
+  });
+
+  it('says the count is unknown rather than inventing one', async () => {
+    // A server that is switched off advertises nothing, so an absent
+    // `tools` list is the ordinary case here — and a guessed number is one
+    // somebody would weigh this decision against.
+    const { group, el } = await openServer('other', {
+      servers: [{ name: 'other', status: 'disabled' }],
+    });
+    buttonLabelled(group, 'Enable').click();
+    await settle(el);
+    const asked = confirmSpy.mock.calls[0][0];
+    expect(asked).toContain('every tool it provides');
+    expect(asked).toContain('has not said how many');
+    expect(asked).not.toMatch(/\b0 tools\b/);
+  });
+
+  it('re-reads the breakdown after a control call, not just the status',
+    async () => {
+      // Both calls move the session's tool set, and that is two numbers on
+      // this screen — the pill and the token cost. Refreshing one and
+      // leaving the other is how a green pill ends up over a stale total.
+      const { group, el, status } = await openServer('other', {
+        servers: [{ name: 'other', status: 'connected' }],
+      });
+      const before = status.mock.calls.length;
+      buttonLabelled(group, 'Disable').click();
+      await settle(el);
+      expect(status.mock.calls.length).toBeGreaterThan(before);
+      expect(el._usage).toBeTruthy();
+    });
+
+  it('reports a refusal in the words the service used', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture({ mcpTools }),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_mcp_status': () => ({
+        mcpServers: [{ name: 'other', status: 'connected' }],
+      }),
+      'ClaudeCodeService.toggle_mcp_server': () => ({
+        error: 'restricted',
+        reason: 'Participants cannot perform this action',
+      }),
+      'Collab.get_collab_role': () => ({ is_localhost: true }),
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const group = await expandGroup(el, 'other');
+    buttonLabelled(group, 'Disable').click();
+    await settle(el);
+    expect(toasts.at(-1)).toEqual({
+      message: 'Participants cannot perform this action',
+      type: 'warning',
+    });
+  });
+
+  it('gives a guest the facts without the actions', async () => {
+    // Both RPCs are localhost-only, so an enabled control here would be an
+    // offer the engine refuses.
+    const { group } = await openServer('other', {
+      servers: [{ name: 'other', status: 'failed', error: 'spawn ENOENT' }],
+      local: false,
+    });
+    expect(group.querySelector('.actions')).toBeNull();
+    expect(group.textContent).toContain('spawn ENOENT');
+  });
+
+  it('offers nothing when the status call did not land', async () => {
+    // With no health there is no way to tell which action the row wants,
+    // and a Disable button on a server that may already be off is worse
+    // than no button.
+    publishUsage(usageFixture({ mcpTools }));
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    const group = await expandGroup(el, 'other');
+    expect(group.querySelector('.actions')).toBeNull();
+  });
+
+  it('holds the row while a call is out so a second click cannot race it',
+    async () => {
+      let release;
+      publishFakeRpc({
+        'ClaudeCodeService.get_context_usage': () => ({
+          usage: usageFixture({ mcpTools }),
+          fetched_at: '2026-08-15T10:30:00Z',
+        }),
+        'ClaudeCodeService.get_mcp_status': () => ({
+          mcpServers: [{ name: 'other', status: 'connected' }],
+        }),
+        'ClaudeCodeService.toggle_mcp_server': vi.fn(
+          () => new Promise((res) => { release = () => res({ status: 'ok' }); }),
+        ),
+        'Collab.get_collab_role': () => ({ is_localhost: true }),
+      });
+      const el = mountTab();
+      await settle(el);
+      await showSection(el, 'Session');
+      let group = await expandGroup(el, 'other');
+      buttonLabelled(group, 'Disable').click();
+      await settle(el);
+      group = groupNamed(el, 'other');
+      expect(buttonLabelled(group, 'Disable').disabled).toBe(true);
+      expect(group.querySelector('.acting')).toBeTruthy();
+      release();
+      await settle(el);
+      group = groupNamed(el, 'other');
+      expect(buttonLabelled(group, 'Disable').disabled).toBe(false);
+    });
+
+  it('offers no toggle for an in-process SDK server', async () => {
+    // Our own `aic-dc` bridge, which the CLI reports with `scope: "dynamic"`.
+    // Measured against CLI 2.1.229: disabling it replies `ok` and zeroes its
+    // tools, then *both* recovery calls fail with "SDK servers should be
+    // handled in print.ts". A one-way door on the one server whose tools the
+    // agent itself runs on, so the row explains instead of offering it.
+    const { group } = await openServer('aic-dc', {
+      servers: [{
+        name: 'aic-dc',
+        status: 'connected',
+        scope: 'dynamic',
+        tools: [{ name: 'symbol_map' }],
+      }],
+      usage: usageFixture({
+        mcpTools: [{ name: 'symbol_map', serverName: 'aic-dc', tokens: 322 }],
+      }),
+    });
+    expect(group.querySelector('.actions')).toBeNull();
+    expect(group.textContent).toContain('Served in-process by this app');
+  });
+
+  it('keys the SDK exemption off scope, not off the name', async () => {
+    // A server *named* aic-dc that the CLI reports as a normal stdio server
+    // is togglable, and a differently-named dynamic one is not. The scope is
+    // the CLI's own word for the thing that makes the calls refuse.
+    const named = await openServer('aic-dc', {
+      servers: [{ name: 'aic-dc', status: 'connected', scope: 'user' }],
+      usage: usageFixture({
+        mcpTools: [{ name: 'symbol_map', serverName: 'aic-dc', tokens: 322 }],
+      }),
+    });
+    expect(actionLabels(named.group)).toEqual(['⊘ Disable']);
+
+    const dynamic = await openServer('other', {
+      servers: [{ name: 'other', status: 'connected', scope: 'dynamic' }],
+    });
+    expect(dynamic.group.querySelector('.actions')).toBeNull();
+  });
+
+  it('withholds Reconnect from a failing SDK server too', async () => {
+    // `reconnect_mcp_server` refuses for a dynamic server with the same CLI
+    // error as the toggle, so a broken one gets no button either — the
+    // status still shows, because that is the part we can honour.
+    const { group } = await openServer('other', {
+      servers: [{
+        name: 'other',
+        status: 'failed',
+        scope: 'dynamic',
+        error: 'spawn ENOENT',
+      }],
+    });
+    expect(group.querySelector('.actions')).toBeNull();
+    expect(group.textContent).toContain('spawn ENOENT');
   });
 });
 

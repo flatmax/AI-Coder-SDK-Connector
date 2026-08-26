@@ -139,7 +139,14 @@ Context tab's tool inventory. Their calls are gated by default (see
 into an external system is never visually indistinguishable from a local file read.
 
 Server health comes from `get_mcp_status()`; `reconnect_mcp_server()` and `toggle_mcp_server()` are
-exposed as per-server controls, localhost-only.
+per-server controls on the Context tab's server rows, localhost-only. Reconnect is offered only to a
+server reporting `failed` or `needs-auth`, and enabling a server asks for confirmation while disabling one
+does not — the asymmetry is the docstring's own: enabling hands the agent tools it did not have.
+
+Neither control is offered on an in-process SDK server — the row the CLI marks `scope: "dynamic"`, which
+on this app means our own `aic-dc` bridge. The CLI accepts a disable there and then refuses both ways
+back, so the row explains itself instead
+([`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § MCP server actions).
 
 ## Invariants
 

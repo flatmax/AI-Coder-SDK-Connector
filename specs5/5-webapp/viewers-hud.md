@@ -134,6 +134,72 @@ Two more shapes the implementation had to answer for:
   leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it is a
   field with no writer. A pill is never carried over from an earlier fetch — "connected" is a claim about
   now, and this is the one figure where being out of date is worse than being absent.
+- **A host can act on a server row: Reconnect and Disable / Enable.** `reconnect_mcp_server(name)` and
+  `toggle_mcp_server(name, enabled)` had existed with no browser caller at all, which is what made this
+  the section that could *show* you a failed server and do nothing about it. Both are localhost-only, so
+  a guest reads the facts with no controls rather than controls the engine would refuse.
+
+  Reconnect is offered only for `failed` and `needs-auth` — the loop the SDK documents for it. A
+  `pending` row is mid-dial and re-dialling races the attempt already running; a `disabled` one was
+  switched off deliberately, and the answer there is Enable. The toast repeats the reply's own word,
+  `reconnecting`, rather than claiming a connection: the outcome is the pill's to report, and this is the
+  one row that exists because a server was wrong about being fine.
+
+  **Enabling asks first; disabling does not.** The two directions are not symmetric — disabling only
+  takes tools away, and the reader reaching for it is usually looking at the token cost in this very
+  section. Enabling hands the agent capability it did not have a moment ago, which is the RPC docstring's
+  own argument ("the host is the one who decides which tools exist"), so the friction goes there alone.
+  The confirmation names the tool count when the engine gave one and says plainly that it did not when it
+  has not — a server that is switched off advertises nothing, so an absent count is ordinary here, and a
+  guessed number is one somebody would weigh the decision against.
+
+  The actions sit in the expanded group body, not on the head, because the head *is* the disclosure
+  `<button>` and a button cannot contain one. The cost is a click to reach a reconnect, which the
+  unwell-first sort already softens: the row that needs acting on is the first in the list, with its
+  state on the closed head.
+
+  **An in-process SDK server gets neither control, and says so.** Our own `aic-dc` bridge appears in this
+  list like any other server — the token-honesty invariant below depends on that — but the CLI reports it
+  with `scope: "dynamic"`, and on such a row both RPCs are broken in a way that matters. Measured
+  2026-08-26 against CLI 2.1.229: `toggle_mcp_server('aic-dc', false)` replies `{"status": "ok",
+  "enabled": false}` and takes the tool count from 6 to 0 **while the pill goes on reading `connected`**,
+  and then both ways back refuse with `SDK servers should be handled in print.ts` — the re-enable and
+  `reconnect_mcp_server` alike. Only a new session restores the tools.
+
+  So the row states the fact in place of the buttons: *"Served in-process by this app, so the engine
+  manages it with the session — it cannot be switched off and back on from here."* A control the engine
+  will not honour in both directions is not a toggle, and this is the one server whose tools the *agent*
+  runs on: `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state`, `ui_state`.
+  Note what this does to the paragraph above — the enable-only confirmation is justified by disabling
+  being cheap and reversible, and on a `dynamic` row it is neither, so the exemption removes the case
+  that broke the premise rather than weakening the rule everywhere else.
+
+  The test is `scope === 'dynamic'`, the CLI's own word, not the name `aic-dc` — any SDK server we
+  register later inherits the same reasoning, and a *configured* server that happened to be called
+  `aic-dc` would still be togglable. `get_mcp_status` is a verbatim passthrough (`session.py:1110`), so
+  the field is the CLI's to define. Background:
+  [`../plan/sdk-surface.md`](../plan/sdk-surface.md) § Correction, 2026-08-26 — which is also where the
+  earlier, false claim that an SDK server does *not* appear in this list is retired.
+
+- **A control call re-reads the whole breakdown, not just the status** — and unlike `set_model`, both
+  take effect *now*. Measured 2026-08-26 against `chrome-devtools`, the one configured stdio server on
+  the dev machine: disabling a settled `connected` server returned `disabled` with 0 tools on the very
+  next `get_mcp_status`, stable across 11s, and `get_context_usage` then reported `mcpTools=0/0 tokens`
+  where it had reported 29 tools / 9,071. Re-enabling restored both within 3s. So no "applies next turn"
+  sentence is owed here, and refreshing the status while leaving the numbers is how a green pill would
+  end up over a stale total.
+
+  Two things that measurement also settled. The dial takes ~1-3s, and the breakdown call costs 3-14s, so
+  the refresh fired after the reply *cannot* return before the server has finished connecting — the slow
+  call covers the latency for free. And **a disable issued while the initial dial is still in flight is
+  silently reverted** by the connection completing: a probe that disabled ~1s after connect found the
+  server `connected` with all 29 tools eight seconds later. Not guarded against, because the actions are
+  behind a collapsed group and the tab's first breakdown fetch takes longer than the window in which it
+  is possible; recorded so that a future report of "Disable didn't work" has somewhere to start.
+
+  The toggle is session-scoped, not a settings edit: `~/.claude.json`'s `mcpServers` entry was unchanged
+  after both directions, with no `disabled` key added, matching the docstring's "temporarily disable …
+  re-enable it later".
 
 ### Debug Section
 
