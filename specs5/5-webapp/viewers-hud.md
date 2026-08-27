@@ -432,6 +432,28 @@ string was split from the payload in the first place.
 The turn's own receipt is unaffected. A turn that failed after spending something still reports what it
 cost; the engine being gone is a reason to stop polling, not a reason to stop reporting.
 
+**What this does not cover, and why it is not fixable from here.** The gate needs health to say the
+engine is gone. One failure mode never says it: the SDK routes control responses on a *detached reader
+task* started once per session, not on the per-turn pump, and when that reader dies — an oversized line
+raising `CLIJSONDecodeError` inside it is the case that has actually happened — it surfaces one error
+into the message stream and exits. From then on every control request waits out its full 60 seconds and
+no answer is ever coming, while `connected` stays true because nothing disconnected.
+
+**The tempting fix is wrong and the spec says so above:** a control-request timeout is *not* evidence of
+a dead engine. This call is measured at 3-14s and goes past 60s often enough to log eight timeouts in one
+healthy half-hour run. Marking the session lost on a timeout would kill working sessions, and a
+consecutive-timeout threshold would be a guess at a number the same paragraph says is routinely exceeded.
+Detecting it properly means reading the SDK's private `_read_task`, which is exactly the kind of internal
+the suite declines to depend on.
+
+So the residue is accepted and stated rather than guessed at, and only its *symptom* is treated: a
+control-request timeout is logged as one sentence instead of a traceback. The stack was pure SDK plumbing
+between the service and an `anyio.fail_after`, and a polled caller repeated it — four tracebacks in one
+log, all of them about a loss the health banner had already reported in better words. The rule lives in
+one helper covering every control request rather than in the polled handler, because the reasoning is
+about control requests and not about this RPC. A failure that is not demonstrably the SDK's deadline
+keeps its stack: being wrong here must cost a noisy log, never a silent one.
+
 ## Terminal HUD
 
 Printed server-side after each turn, in reduced form: model, per-model usage, cost or billing mode,
@@ -457,6 +479,10 @@ tier-distribution HUD.
 - The HUD sends no `get_context_usage` while the engine is known gone, and says so rather than leaving
   the last good breakdown on screen looking current.
 - "Gone" is never concluded from `connected` alone; that field is also false before the first prompt.
+- A control-request timeout is never treated as evidence that the engine is dead. A healthy engine
+  exceeds 60s often enough that it cannot be.
+- A control-request timeout is logged as a sentence, not a traceback, and the rule covers every control
+  request rather than the polled one. Anything not demonstrably the SDK's deadline keeps its stack.
 - The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
 - No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running
   totals and only ever appear labelled as such.

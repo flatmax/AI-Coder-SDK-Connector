@@ -311,6 +311,16 @@ closes the gate on that first one; a reply cannot pre-empt the request it rides 
 overtake the event ahead of it. Both halves are pinned by tests that were checked to fail without them,
 as was the `last_error` discriminator.
 
+**The server-side half followed, and its interest is what it declines to do.** The gate needs health to
+say the engine is gone, and one failure mode never says it: the SDK routes control responses on a
+*detached reader task*, so when that reader dies every control request waits out 60s forever while
+`connected` stays true. Treating a timeout as evidence of death would kill working sessions — the specs
+already measure this call past 60s on healthy engines — and detecting the dead reader honestly means
+reading the SDK's private `_read_task`. **So the residue is stated rather than guessed at** and only the
+symptom is treated: a control-request timeout is logged as a sentence instead of a traceback, keyed on the
+chained `TimeoutError` rather than the SDK's re-wordable message, across all eight control-request
+handlers rather than the polled one.
+
 **Found while writing it, and fixed:** [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Data
 Flow* said the HUD "renders entirely from the `streamComplete` payload", with an invariant that it
 "renders without a follow-up RPC" — describing a design where the percentage rode in on

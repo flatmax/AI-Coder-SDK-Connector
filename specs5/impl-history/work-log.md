@@ -542,6 +542,34 @@ rather than already covered by it.
 
 ### Landed since
 
+- **A control-request timeout stops printing a traceback** — 2026-08-28, the server-side half of § C1.
+
+  The client gate above needs health to say the engine is gone, and there is one failure mode that never
+  says it. **The SDK routes control responses on a detached reader task**, started once per session
+  (`Query.start` → `spawn_detached(self._read_messages())`), not on the per-turn pump — which is why
+  `get_context_usage` works between turns at all. When that reader dies it sends one error into the
+  message stream and exits; after that every control request waits out its full 60 seconds forever, and
+  `connected` stays true because nothing disconnected. The `CLIJSONDecodeError` from an oversized line
+  that closed open item 1 is this path, and it is the one that produced the four tracebacks.
+
+  **The obvious fix is ruled out by a measurement already in the specs.** Treating a timeout as evidence
+  of a dead engine would kill working sessions: the call is measured at 3-14s and exceeds 60s often
+  enough to log eight timeouts in one healthy half-hour run, so a threshold on consecutive timeouts
+  would be a guess at a number the same paragraph says is routinely passed. Detecting the dead reader
+  honestly means reading the SDK's private `_read_task`. So the residue is accepted and *stated* —
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the Engine Is Gone* — in the shape
+  CC-18 established: the absence is written down rather than left silent, and pinned by tests.
+
+  What is treated is the symptom the queue actually complained about. `_log_control_failure` logs a
+  timeout as one sentence and everything else with its stack; the traceback was pure SDK plumbing
+  between the service and an `anyio.fail_after`, and a polled caller repeated it. **Two details decide
+  whether this is worth anything:** it keys on the chained `TimeoutError` rather than on the message,
+  because the SDK raises a *bare* `Exception` with no class of its own and the wording is prose it may
+  reword — a check a reword could silence is worse than none; and it fails towards noise, so anything
+  unclassified keeps its stack. Applied to all eight control-request handlers rather than the polled
+  one, since the reasoning is about control requests. `reconnect_mcp_server` and `toggle_mcp_server`
+  had already logged this shape without a stack, so the rule was there incidentally and is now general.
+
 - **A lost engine stops being polled, and the HUD has somewhere to sit** — 2026-08-28, closing
   [`../next.md`](../next.md) § C1 and [`../plan/README.md`](../plan/README.md) open item 2.
 

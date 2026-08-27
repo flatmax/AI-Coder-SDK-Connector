@@ -47,6 +47,22 @@ REQUEST_ID = "1736956800000-a1b2c3"
 PNG = "data:image/png;base64,aGk="
 
 
+def _control_timeout(subtype: str) -> Exception:
+    """The exception the SDK really raises when a control request times out.
+
+    Built to shape rather than approximated, because the shape is the whole
+    of what the service can key on: ``Query._send_control_request`` raises a
+    *bare* ``Exception`` — the failure has no class of its own — and chains
+    the ``TimeoutError`` from ``anyio.fail_after`` underneath it as
+    ``__cause__``. A test that skipped the cause would be testing a
+    different exception from the one production sees, and would pass against
+    a service that only pattern-matched the message.
+    """
+    exc = Exception(f"Control request timeout: {subtype}")
+    exc.__cause__ = TimeoutError()
+    return exc
+
+
 class FakeConfig:
     def __init__(self, repo_root, config_dir=None, aic_dc_dir=None):
         self.repo_root = repo_root
@@ -1864,6 +1880,65 @@ class TestLiveControls:
         """Only a failure is classified; success has nothing to explain."""
         answer = await service.get_context_usage()
         assert "reason" not in answer
+
+    async def test_a_control_timeout_is_logged_without_a_traceback(self, service, caplog):
+        """One sentence, not a stack of SDK plumbing.
+
+        Every frame between here and the ``anyio.fail_after`` belongs to the
+        SDK, so the traceback tells a reader nothing the message does not —
+        and this is the failure a *polled* caller repeats, which is how four
+        of them ended up in one log describing a loss the health banner had
+        already reported. Pinned on ``exc_info`` rather than on the text,
+        because that is what makes a log entry a traceback.
+        """
+        service.session.control_error = _control_timeout("context_usage")
+        with caplog.at_level(logging.WARNING):
+            answer = await service.get_context_usage()
+        assert answer["reason"] == "failed"
+        assert "Control request timeout" in caplog.text
+        assert [r.exc_info for r in caplog.records] == [None]
+
+    async def test_an_unexpected_control_failure_keeps_its_stack(self, service, caplog):
+        """The other half. Only the known shape loses its traceback.
+
+        Being wrong about which is which must fail towards a noisy log, never
+        a quiet one, so anything that is not demonstrably the SDK's deadline
+        is still worth a stack.
+        """
+        service.session.control_error = RuntimeError("something unforeseen")
+        with caplog.at_level(logging.WARNING):
+            answer = await service.get_context_usage()
+        assert answer["reason"] == "failed"
+        assert [r.exc_info is not None for r in caplog.records] == [True]
+
+    async def test_a_timeout_without_a_cause_still_gets_a_stack(self, service, caplog):
+        """The check reads the chained cause, not the wording.
+
+        The message is prose the SDK is free to reword, and a check a reword
+        could silence would be worse than none. So a bare exception that only
+        *says* timeout is treated as unclassified — which costs a traceback
+        and never a missing one.
+        """
+        service.session.control_error = RuntimeError("Control request timeout: x")
+        with caplog.at_level(logging.WARNING):
+            await service.get_context_usage()
+        assert [r.exc_info is not None for r in caplog.records] == [True]
+
+    async def test_every_control_request_shares_the_timeout_rule(self, service, caplog):
+        """Not just the polled one.
+
+        The reasoning is about control requests, not about this RPC, so a
+        rule that lived in one handler would be incidental. `get_context_usage`
+        is only the caller that repeats it.
+        """
+        service.session.control_error = _control_timeout("mcp_status")
+        with caplog.at_level(logging.WARNING):
+            await service.get_mcp_status()
+        await service.set_model("claude-opus-5")
+        await service.stop_task("task-1")
+        await service.get_server_info()
+        assert len(caplog.records) == 4
+        assert [r.exc_info for r in caplog.records] == [None, None, None, None]
 
     async def test_a_memory_file_inside_the_repo_gets_a_relative_path(self, service):
         """The Context tab can only open what the repo layer will read.

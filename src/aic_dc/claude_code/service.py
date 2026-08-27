@@ -250,6 +250,47 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_control_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` is the SDK's control-request deadline firing.
+
+    The SDK gives this failure no class of its own — ``Query._send_control_request``
+    raises a bare ``Exception(f"Control request timeout: {subtype}")`` — so the
+    durable evidence is the ``TimeoutError`` that ``anyio.fail_after`` chains
+    underneath it. Matched on the cause rather than on the message, because the
+    string is prose the SDK is free to reword and a check that a reword silences
+    is worse than no check.
+
+    Read defensively in the same spirit as :func:`_is_connection_failure`: an SDK
+    that stops chaining degrades to "not a timeout", which logs a full stack. The
+    failure mode of being wrong here is a noisy log, never a quiet one.
+    """
+    return isinstance(exc.__cause__, TimeoutError)
+
+
+def _log_control_failure(exc: Exception, what: str) -> None:
+    """Log a failed control request, with a stack only when it earns one.
+
+    A control-request timeout is an *expected* failure with a known shape and
+    nothing in the traceback a reader can act on: every frame is SDK plumbing
+    between here and an ``anyio.fail_after``. What it means is that the CLI did
+    not answer inside 60s, and the two reasons for that — an engine busy with a
+    turn, or an engine whose reader task has died and will never answer another
+    control request — are indistinguishable from this side. See
+    ``specs5/5-webapp/viewers-hud.md`` § *When the Engine Is Gone*, which states
+    that residue rather than guessing at it.
+
+    So a timeout gets one sentence and everything else keeps its stack. The
+    polled caller is what made this worth separating: four tracebacks in one log,
+    all of them about a loss the health banner had already reported in better
+    words. ``reconnect_mcp_server`` and ``toggle_mcp_server`` already logged this
+    shape without a stack; this makes the rule general instead of incidental.
+    """
+    if _is_control_timeout(exc):
+        logger.warning("%s: %s", what, exc)
+        return
+    logger.exception("%s failed", what)
+
+
 def _review_file_paths(changed_files: Any) -> list[str]:
     """Just the paths out of a review's changed-file dicts.
 
@@ -1425,7 +1466,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("set_permission_mode(%r) failed", mode)
+            _log_control_failure(exc, f"set_permission_mode({mode!r})")
             return {"error": f"Could not change the permission mode: {exc}"}
         await self._record_event(
             "permission_mode",
@@ -1508,7 +1549,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("set_model(%r) failed", model)
+            _log_control_failure(exc, f"set_model({model!r})")
             return {"error": f"Could not change the model: {exc}"}
         await self._broadcast(
             Event("modelChanged", {"model": applied, "by": "user"}, turn_scoped=False)
@@ -1549,7 +1590,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("rewind_files(%r) failed", user_message_id)
+            _log_control_failure(exc, f"rewind_files({user_message_id!r})")
             return {"error": f"Could not rewind: {exc}"}
         return {"restored": [], "user_message_id": user_message_id}
 
@@ -1576,7 +1617,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("stop_task(%r) failed", task_id)
+            _log_control_failure(exc, f"stop_task({task_id!r})")
             return {"error": f"Could not stop the task: {exc}"}
         return {"status": "stopping", "task_id": task_id}
 
@@ -1600,7 +1641,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc), "reason": "no-engine"}
         except Exception as exc:
-            logger.exception("get_context_usage failed")
+            _log_control_failure(exc, "get_context_usage")
             return {
                 "error": f"Could not read context usage: {exc}",
                 "reason": "failed",
@@ -1659,7 +1700,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("get_mcp_status failed")
+            _log_control_failure(exc, "get_mcp_status")
             return {"error": f"Could not read MCP status: {exc}"}
 
     async def reconnect_mcp_server(self, name: str) -> dict[str, Any]:
@@ -1697,7 +1738,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("get_server_info failed")
+            _log_control_failure(exc, "get_server_info")
             return {"error": f"Could not read server info: {exc}"}
         return info or {}
 
@@ -1742,7 +1783,7 @@ class ClaudeCodeService:
         except SessionLostError as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("list_commands failed")
+            _log_control_failure(exc, "list_commands")
             return {"error": f"Could not read the command list: {exc}"}
         commands: list[dict[str, Any]] = []
         for entry in (info or {}).get("commands") or []:
