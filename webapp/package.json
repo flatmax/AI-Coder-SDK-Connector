@@ -1,0 +1,35 @@
+{
+  "name": "aic-dc-webapp",
+  "private": true,
+  "version": "0.0.0-dev",
+  "description": "AIC-DC (AI-Coder-SDK-Connector) browser frontend. Built with Vite + Lit.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "clean": "rm -rf dist node_modules/.vite node_modules/.vite-temp",
+    "prebuild": "npm run clean",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@flatmax/jrpc-oo": "^1.2.2",
+    "diff": "^5.2.0",
+    "highlight.js": "^11.10.0",
+    "katex": "^0.16.11",
+    "lit": "^3.2.0",
+    "marked": "^14.1.0",
+    "monaco-editor": "^0.52.0",
+    "svg-pan-zoom": "^3.6.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0",
+    "jsdom": "^25.0.0",
+    "@vitest/ui": "^2.1.0"
+  }
+}

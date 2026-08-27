@@ -1,0 +1,1631 @@
+// AppShell — root component of the AIC-DC webapp.
+//
+// Owns the single WebSocket connection (inherits from JRPCClient),
+// publishes the RPC proxy to SharedRpc for child components, drives
+// the startup overlay off progress events from the backend, and
+// hosts the dialog + viewer background layers.
+//
+// Governing specs:
+//   - specs4/5-webapp/shell.md
+//   - specs4/1-foundation/rpc-transport.md
+//
+// Phase 1 scope — minimum viable shell:
+//   - Connect to the WebSocket using ?port=N from the URL
+//   - Publish the call proxy to SharedRpc on setupDone
+//   - Render a startup overlay that dismisses on the "ready" stage
+//   - Render a placeholder dialog with three tab buttons
+//   - Show reconnect toast on WebSocket loss and recovery
+//
+// Phase 2 fills in the dialog's tab content. Phase 3 adds the
+// viewer background, file navigation grid, token HUD, and the
+// richer UX concerns.
+
+import { LitElement, html, css } from 'lit';
+import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
+
+import { SharedRpc } from '../rpc.js';
+import '../files-tab/index.js';
+import '../diff-viewer/index.js';
+import '../svg-viewer.js';
+import '../settings-tab.js';
+import '../context-usage-tab.js';
+import '../sdk-surface-tab.js';
+import '../doc-convert-tab.js';
+import '../file-nav.js';
+import '../usage-hud.js';
+import '../doc-index-progress.js';
+import '../compaction-progress.js';
+import '../speech-controls.js';
+// Rendered last in the template and at the top of the z-order: a
+// permission request has stalled a turn, and it must not render
+// somewhere the user is not looking
+// (specs5/5-webapp/permission-dialog.md § Placement).
+import '../permission-dialog/index.js';
+
+import { APP_SHELL_STYLES } from './styles.js';
+import {
+  getWebSocketPort, RECONNECT_DELAYS_MS, TOAST_EVENT,
+  DOC_INDEX_STAGES,
+} from './constants.js';
+import {
+  loadActiveTab, loadMinimized, loadDockedWidth, loadUndockedPos,
+  saveMinimized, saveDockedWidth, saveUndockedPos,
+  saveLastOpenFile, loadLastOpenFile,
+} from './persistence.js';
+import {
+  showToast, onToastEvent, maybeShowEnrichmentUnavailableToast,
+} from './toasts.js';
+import { scheduleReconnect, attemptReconnect } from './reconnect.js';
+import {
+  getDialogRect, onHeaderPointerDown, onHandlePointerDown,
+  onPointerMove, onPointerUp, toggleMinimize,
+  onWindowResize, handleWindowResize, dialogInlineStyle,
+} from './dialog.js';
+import {
+  getFileNav, onGridKeyDown, onGridKeyUp,
+  flushAltArrowPending, onGlobalKeyDown,
+} from './file-nav.js';
+import {
+  onNavigateFile, onLoadDiffPanel, onLoadSvgPanel, onToggleSvgMode,
+  onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
+  syncViewerInset,
+} from './viewers.js';
+import {
+  saveViewportState, saveSvgViewportState, loadViewportState,
+  tryReopenLastFile, doReopenLastFile, doReopenSvg, restoreViewport,
+  onBeforeUnload, onPreviewModeChanged,
+  onSvgViewBoxChanged, onSvgPresentationChanged,
+} from './viewport.js';
+import {
+  fetchCurrentState, fetchContextUsage, onContextUsageRefresh,
+} from './state-fetch.js';
+import { onModeChanged, switchMode } from './mode.js';
+import {
+  onGitAction, onCommitResultHeader, onReviewStateChanged,
+  onStreamChunkHeader, onStreamCompleteHeader,
+  onCopyDiff, onCommit, onResetToHead,
+} from './git-actions.js';
+import { onFileSaved, onFilesReverted } from './file-saved.js';
+import { renderTemplate } from './render.js';
+
+/**
+ * AppShell — root LitElement, inherits from JRPCClient.
+ *
+ * JRPCClient handles the WebSocket + handshake plumbing. We
+ * override `setupDone`, `remoteIsUp`, `remoteDisconnected`, and
+ * `serverChanged` to hook into the lifecycle.
+ */
+export class AppShell extends JRPCClient {
+  static properties = {
+    /** Connection state — drives overlay and reconnect banner. */
+    connectionState: { type: String, state: true },
+    /** Startup progress — populated from AcApp.startupProgress. */
+    startupStage: { type: String, state: true },
+    startupMessage: { type: String, state: true },
+    startupPercent: { type: Number, state: true },
+    /** Whether the startup overlay is visible. */
+    overlayVisible: { type: Boolean, state: true },
+    /** Active dialog tab. */
+    activeTab: { type: String, state: true },
+    /** Active toasts (array of {id, message, type}). */
+    toasts: { type: Array, state: true },
+    /** Number of reconnect attempts (display only). */
+    reconnectAttempt: { type: Number, state: true },
+    _activeViewer: { type: String, state: true },
+    _repoName: { type: String, state: true },
+    _initComplete: { type: Boolean, state: true },
+    /**
+     * Whether the backend reports markitdown is installed.
+     * Hydrated from get_current_state's
+     * `doc_convert_available` field. Gates the Doc Convert
+     * tab button — when false, the tab is hidden entirely
+     * per specs4/4-features/doc-convert.md "Tab Visibility".
+     * Defaults false so first paint doesn't briefly flash
+     * the tab before the state snapshot arrives.
+     */
+    _docConvertAvailable: { type: Boolean, state: true },
+    /** Dialog minimize state — persisted to localStorage. */
+    _minimized: { type: Boolean, state: true },
+    /**
+     * Docked width when in docked mode. Applied as an inline
+     * style override so the CSS `width: 50%` default still
+     * governs the never-resized case.
+     */
+    _dockedWidth: { type: Number, state: true },
+    /**
+     * Undocked rectangle. null means "still docked". Set on
+     * first drag or first bottom/corner resize. Once set, the
+     * dialog renders with explicit pixel positioning.
+     */
+    _undockedPos: { type: Object, state: true },
+    /**
+     * Current primary mode — 'code' or 'doc'. Drives the
+     * segmented toggle in the header. Synced with the
+     * backend via get_current_state and mode-changed
+     * broadcasts. Defaults to 'code' matching the
+     * backend's default.
+     */
+    _mode: { type: String, state: true },
+    /**
+     * Whether the current caller is localhost. Non-localhost
+     * participants cannot initiate mode switches per
+     * specs4/4-features/collaboration.md. Disables the
+     * toggle UI when false. Defaults true so the UI is
+     * live in single-user mode without a collab check.
+     */
+    _isLocalhost: { type: Boolean, state: true },
+    /**
+     * True while a commit_all background task is in
+     * flight. Drives the header commit button's spinner
+     * state and disables both commit and reset until the
+     * completion event fires. Cleared by the
+     * `commit-result` window event handler (see
+     * _onCommitResult). Mirrors the same flag on
+     * ChatPanel — both need it because both need to
+     * reflect in-flight state in their own UI.
+     */
+    _committing: { type: Boolean, state: true },
+    /**
+     * True while review mode is active. Disables the
+     * header commit button — review is read-only per
+     * specs4/4-features/code-review.md. Reset is NOT
+     * disabled in review mode (user may legitimately
+     * want to discard review-mode changes). Synced via
+     * the review-started / review-ended window events.
+     */
+    _reviewActive: { type: Boolean, state: true },
+    /**
+     * True while an LLM stream is in flight. Disables
+     * commit and reset — both mutate the working tree,
+     * and the backend's post-stream edit-application
+     * phase (LLMService._stream_chat → apply_edits) is
+     * not serialized against stage_all or reset_hard.
+     * A commit during that window could stage
+     * partially-written files; a reset could discard
+     * edits mid-apply. The backend's per-path write
+     * locks cover edits vs edits but not edits vs
+     * stage_all / reset_hard. Gating at the UI is the
+     * cheapest fix. Tracked by listening to
+     * stream-chunk (first chunk flips true) and
+     * stream-complete (flips false).
+     */
+    _streaming: { type: Boolean, state: true },
+    /**
+     * Context-window capacity, for the thin bar under the dialog.
+     * Shape is the engine's own `ContextUsageResponse` as passed
+     * through by ClaudeCodeService.get_context_usage:
+     *   { totalTokens, maxTokens, rawMaxTokens, percentage,
+     *     model, isAutoCompactEnabled, categories, ... }
+     * Null before the first fetch. Refreshed on stream-complete,
+     * session-changed, and compaction events.
+     *
+     * A full bar means a compact is imminent — the same warning the
+     * old `_historyStatus` bar gave, from the party that decides it.
+     * The threshold is `autoCompactThreshold`, not `maxTokens`;
+     * context-usage.js derives it.
+     */
+    _contextUsage: { type: Object, state: true },
+  };
+
+  static styles = APP_SHELL_STYLES;
+
+  constructor() {
+    super();
+    // JRPCClient configuration — serverURI set in connectedCallback
+    // so the port is read at the right time.
+    //
+    // 75 rather than 60 because the SDK bounds its own control requests
+    // at exactly 60s, and this clock starts a few milliseconds earlier
+    // than that one — so at 60 the two race and jrpc always wins by the
+    // width of the socket. The reader got "Timed out waiting for
+    // response" from the transport instead of the engine's own "Control
+    // request timeout: get_context_usage", which is the same event
+    // described by the layer that knows nothing about it. Losing that
+    // race also stranded the deliberately-longer 90s deadlines in
+    // context-usage-tab.js and usage-hud.js, which can only fire once
+    // this one is past 60. Waiting 15 extra seconds for a call that is
+    // already lost buys an error that names which call and why.
+    this.remoteTimeout = 75;
+
+    this.connectionState = 'connecting';
+    this.startupStage = '';
+    this.startupMessage = 'Connecting…';
+    this.startupPercent = 0;
+    this.overlayVisible = true;
+    // Hydrate persisted dialog state synchronously in the
+    // constructor. Reading later (e.g. in connectedCallback
+    // or setupDone) causes a visible flash where the dialog
+    // renders at defaults before jumping to the saved
+    // state. specs4/5-webapp/shell.md#state-restoration
+    // calls for "no visible flicker" on reconnect; same
+    // principle applies to first paint.
+    this.activeTab = loadActiveTab(this);
+    this._minimized = loadMinimized(this);
+    this._dockedWidth = loadDockedWidth(this);
+    this._undockedPos = loadUndockedPos(this);
+    // Baseline viewport size at the moment _dockedWidth and
+    // _undockedPos were last committed (pointerup or
+    // resize-driven rescale). Used to rescale proportionally
+    // on window resize — without a remembered baseline, each
+    // resize event would start over from the pixel-literal
+    // saved value and the dialog would stop tracking the
+    // viewport.
+    //
+    // Initialised to the current viewport so the very first
+    // resize after a fresh load scales from "now", not from
+    // whatever viewport was active when the stored geometry
+    // was originally written. The spec (§ Proportional
+    // Rescaling) asks for scaling from the last-known state.
+    this._dockedWidthViewport = window.innerWidth;
+    this._undockedPosViewport = {
+      w: window.innerWidth,
+      h: window.innerHeight,
+    };
+    this.toasts = [];
+    this.reconnectAttempt = 0;
+    // Default to diff viewer — most files route there.
+    // Flipped to 'svg' on navigate-file to an .svg path.
+    this._activeViewer = 'diff';
+    this._repoName = '';
+    // The repo's absolute root, from get_current_state. Held so
+    // navigate-file can relativise the absolute paths the engine
+    // reports for tool calls — see repo-path.js. Empty until the
+    // first snapshot lands, which leaves such a path as it was.
+    this._repoRoot = '';
+    this._initComplete = false;
+    // Doc Convert availability — flipped to true when the
+    // backend's get_current_state reports markitdown is
+    // installed. Stays false in stripped-down releases
+    // where the tab should never appear.
+    this._docConvertAvailable = false;
+    // Mode toggle state. Hydrated from get_current_state
+    // once the backend snapshot arrives, and kept in sync
+    // via mode-changed window events.
+    this._mode = 'code';
+    // Assume localhost until the backend tells us
+    // otherwise. A future collab probe could flip this;
+    // for now single-user mode is always localhost.
+    this._isLocalhost = true;
+    // Header git action state. _committing toggles while
+    // a commit_all background task is running; cleared on
+    // commit-result. _reviewActive mirrors backend review
+    // state so we can disable commit in review mode.
+    // _streaming toggles while an LLM request is active;
+    // gates commit and reset to avoid racing the
+    // post-stream edit-application phase.
+    this._committing = false;
+    this._reviewActive = false;
+    this._streaming = false;
+    // Whether a file reopen is pending (waiting for the
+    // startup overlay to dismiss before issuing the RPC).
+    this._pendingReopen = false;
+
+    // Alt+Arrow debounce state. Rapid arrow sequences
+    // through the file-nav grid would otherwise fire one
+    // viewer.openFile per press — 10 fetches for a 10-key
+    // sequence the user meant as "jump to the end". The
+    // debounce defers the dispatch by ~200ms; a subsequent
+    // arrow resets the timer, Alt release fires immediately.
+    // HUD updates on every keypress regardless — only the
+    // viewer fetch is debounced.
+    this._altArrowTimer = null;
+    this._altArrowPending = null;
+
+    // Whether we've ever connected successfully. Controls
+    // whether disconnects show the startup overlay (first
+    // connect) vs a reconnect banner (subsequent).
+    this._wasConnected = false;
+    // Pending reconnect timeout handle.
+    this._reconnectTimer = null;
+
+    // Drag/resize interaction state. null when idle;
+    // populated during an active drag with the origin
+    // coords and the dialog's rect at drag start. Kept
+    // out of reactive properties so mid-drag updates
+    // don't trigger re-renders — we mutate inline styles
+    // directly for smooth tracking, then commit to
+    // _dockedWidth / _undockedPos on pointerup.
+    this._drag = null;
+    // RAF handle for window resize throttling. One call
+    // per animation frame, cancelled on unmount.
+    this._resizeRAF = null;
+    // Separate RAF handle for viewer relayout during
+    // dialog resize drags. Distinct from _resizeRAF so a
+    // window-resize event in the middle of a drag
+    // doesn't cancel the drag's pending viewer relayout
+    // and vice versa. See specs4/5-webapp/shell.md §
+    // Window Resize Handling.
+    this._viewerRelayoutRAF = null;
+
+    // Global toast event listener binding.
+    this._onToastEvent = this._onToastEvent.bind(this);
+    // file-saved — routes editor saves to Repo.write_file
+    // or Settings.save_config_content.
+    this._onFileSaved = this._onFileSaved.bind(this);
+    // preview-mode-changed — fired by the diff viewer
+    // whenever the user toggles the preview pane. We
+    // save the viewport state immediately so a reload
+    // right after a toggle-then-nothing restores the
+    // correct pane. Per save-triggers table in
+    // specs-reference/5-webapp/shell.md.
+    this._onPreviewModeChanged =
+      this._onPreviewModeChanged.bind(this);
+    // viewbox-changed — fired by the SVG viewer on
+    // every right-editor onViewChange. Debounced save
+    // so wheel-zoom bursts don't produce one write per
+    // frame. See specs-reference/5-webapp/shell.md §
+    // "SVG viewBox debounce window".
+    this._onSvgViewBoxChanged =
+      this._onSvgViewBoxChanged.bind(this);
+    this._svgViewBoxSaveTimer = null;
+    // svg-presentation-changed — same pattern as
+    // preview-mode-changed but for the SVG viewer's
+    // presentation toggle. Saves immediately.
+    this._onSvgPresentationChanged =
+      this._onSvgPresentationChanged.bind(this);
+    // files-reverted — after Discard Changes and
+    // similar working-tree reverts, refresh open
+    // viewers so stale modified buffers get replaced
+    // with the new on-disk content.
+    this._onFilesReverted = this._onFilesReverted.bind(this);
+    // Navigate-file routing. Bound so add/remove match.
+    this._onNavigateFile = this._onNavigateFile.bind(this);
+    this._onActiveFileChanged = this._onActiveFileChanged.bind(this);
+    this._onLoadDiffPanel = this._onLoadDiffPanel.bind(this);
+    this._onLoadSvgPanel = this._onLoadSvgPanel.bind(this);
+    this._onToggleSvgMode = this._onToggleSvgMode.bind(this);
+    this._onGridKeyDown = this._onGridKeyDown.bind(this);
+    this._onGridKeyUp = this._onGridKeyUp.bind(this);
+    this._onBeforeUnload = this._onBeforeUnload.bind(this);
+    this._onModeChanged = this._onModeChanged.bind(this);
+    // Dialog drag/resize handlers. Bound so add/remove
+    // across document scope works on the same instance.
+    this._onHeaderPointerDown =
+      this._onHeaderPointerDown.bind(this);
+    this._onHandlePointerDown =
+      this._onHandlePointerDown.bind(this);
+    this._onPointerMove = this._onPointerMove.bind(this);
+    this._onPointerUp = this._onPointerUp.bind(this);
+    // Window resize — RAF-throttled.
+    this._onWindowResize = this._onWindowResize.bind(this);
+    // Global keyboard shortcuts — Alt+1..4 for tab
+    // switching, Alt+M for minimize toggle. Bound here
+    // so add/remove on document scope match.
+    this._onGlobalKeyDown = this._onGlobalKeyDown.bind(this);
+    // Header git action handlers and commit-result.
+    this._onCommitResultHeader =
+      this._onCommitResultHeader.bind(this);
+    this._onReviewStateChanged =
+      this._onReviewStateChanged.bind(this);
+    // Stream state — header gates commit/reset on these.
+    this._onStreamChunkHeader =
+      this._onStreamChunkHeader.bind(this);
+    this._onStreamCompleteHeader =
+      this._onStreamCompleteHeader.bind(this);
+    // Context-capacity refresh — bound so the three
+    // window event listeners share one callable and
+    // removeEventListener can match. Without the bind,
+    // `this` is undefined inside the handler and the
+    // _fetchContextUsage call throws.
+    this._onContextUsageRefresh =
+      this._onContextUsageRefresh.bind(this);
+    // Git action button dispatch from the file picker
+    // header. The picker doesn't know the RPC call proxy,
+    // so it fires a bubbling `git-action` window event
+    // carrying {action: 'copy-diff'|'commit'|'reset'} and
+    // we route to the existing handlers.
+    this._onGitAction = this._onGitAction.bind(this);
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this.addClass(this, 'AcApp');
+    const port = getWebSocketPort();
+    const host = window.location.hostname || 'localhost';
+    this.serverURI = `ws://${host}:${port}`;
+    window.addEventListener(TOAST_EVENT, this._onToastEvent);
+    // file-saved bubbles from the diff viewer (Ctrl+S in
+    // the editor, clicking the dirty status LED, or
+    // explicit saveAll). The shell routes to Repo.write_file
+    // for normal files, or Settings.save_config_content
+    // when the file is flagged as a config file. Without
+    // this handler, saves silently vanish.
+    window.addEventListener('file-saved', this._onFileSaved);
+    window.addEventListener(
+      'preview-mode-changed', this._onPreviewModeChanged,
+    );
+    window.addEventListener(
+      'viewbox-changed', this._onSvgViewBoxChanged,
+    );
+    window.addEventListener(
+      'svg-presentation-changed',
+      this._onSvgPresentationChanged,
+    );
+    // files-reverted fires from files-tab after a
+    // successful Discard Changes (and in future: stage
+    // rollback, reset-to-HEAD paths). Refresh open
+    // viewers so any editor showing a discarded file
+    // picks up the on-disk content, otherwise the
+    // user's already-discarded edits stay visible and
+    // the next save round-trips them back.
+    window.addEventListener(
+      'files-reverted', this._onFilesReverted,
+    );
+    // navigate-file is dispatched by the files tab (file
+    // picker clicks), the chat panel (file mention clicks),
+    // and the navigateFile server-push callback (when
+    // another collaborator opens a file). Extension-based
+    // routing picks the right viewer.
+    window.addEventListener('navigate-file', this._onNavigateFile);
+    // Alt+Arrow file navigation grid — capture phase so
+    // we intercept before Monaco's word-navigation bindings.
+    document.addEventListener('keydown', this._onGridKeyDown, true);
+    document.addEventListener('keyup', this._onGridKeyUp, true);
+    // Alt+digit / Alt+M shortcuts — bubble phase is fine
+    // because Alt+digit/M aren't intercepted by Monaco or
+    // any child component. Registered separately from the
+    // grid's capture-phase handler so the two concerns
+    // stay independent.
+    document.addEventListener('keydown', this._onGlobalKeyDown);
+    // toggle-svg-mode is dispatched by the SVG viewer's
+    // "</>" button (visual → text diff) and by the diff
+    // viewer's "🎨 Visual" button (text → visual). The
+    // app shell orchestrates the viewer swap.
+    window.addEventListener(
+      'toggle-svg-mode',
+      this._onToggleSvgMode,
+    );
+    // load-diff-panel comes from the history browser's
+    // context menu (Phase 2e.4). The diff viewer's
+    // loadPanel method does the actual ad-hoc
+    // comparison rendering; we route from here so the
+    // history browser doesn't need a direct diff viewer
+    // reference.
+    window.addEventListener(
+      'load-diff-panel',
+      this._onLoadDiffPanel,
+    );
+    // load-svg-panel is the SVG-viewer counterpart,
+    // dispatched by the file picker's "Open in left/right
+    // panel" actions when the file is an SVG. Routes to
+    // the SVG viewer's loadPanel for a rendered visual
+    // comparison instead of the raw XML in the diff
+    // viewer. See files-tab/context-menu.js
+    // dispatchLoadInPanel for the dispatch site.
+    window.addEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
+    );
+    window.addEventListener('beforeunload', this._onBeforeUnload);
+    window.addEventListener('resize', this._onWindowResize);
+    // mode-changed fires when any client (including us)
+    // successfully switches modes. Spec is explicit: all
+    // clients follow the server's authoritative mode via this
+    // broadcast. Dormant since phase 3 — nothing emits it.
+    window.addEventListener('mode-changed', this._onModeChanged);
+    // commit-result broadcasts via the server to all
+    // clients; we use it here to clear the in-flight
+    // flag so the header button returns to idle. The
+    // viewer refresh is handled inside commitResult()
+    // already.
+    window.addEventListener(
+      'commit-result', this._onCommitResultHeader,
+    );
+    // Review state — drives commit button disabling.
+    // Dispatched by chat panel / files tab when review
+    // starts/ends. Fallback: the get_current_state
+    // snapshot hydrates it on connect.
+    window.addEventListener(
+      'review-started', this._onReviewStateChanged,
+    );
+    window.addEventListener(
+      'review-ended', this._onReviewStateChanged,
+    );
+    // Streaming — any chunk arrival means a stream is
+    // active; completion (for any request) clears it.
+    // Simpler than request-ID tracking at this layer,
+    // and the single-stream invariant makes it accurate.
+    window.addEventListener(
+      'stream-chunk', this._onStreamChunkHeader,
+    );
+    window.addEventListener(
+      'stream-complete', this._onStreamCompleteHeader,
+    );
+    // Context-capacity refresh triggers. Three disjoint
+    // events because they arrive on separate channels:
+    // stream-complete after a turn, session-changed after a
+    // restore or history-browser load, and compaction-event
+    // when the engine reports a compact boundary — at which
+    // point the number has just dropped and the bar would
+    // otherwise stay pinned until the next turn. All route
+    // through the single _onContextUsageRefresh handler so the
+    // fetch logic (in-flight guarded) lives in one place.
+    window.addEventListener(
+      'stream-complete', this._onContextUsageRefresh,
+    );
+    window.addEventListener(
+      'session-changed', this._onContextUsageRefresh,
+    );
+    window.addEventListener(
+      'compaction-event', this._onContextUsageRefresh,
+    );
+    window.addEventListener('git-action', this._onGitAction);
+    // request-dialog-tab is fired by tab bodies (Context,
+    // Settings, Convert) when their back-arrow button is
+    // clicked. The shell flips the active dialog tab back
+    // to the chat (`files` key, retained from the legacy
+    // tab naming). Bubbling + composed so the event
+    // crosses the shadow root boundary from each tab
+    // component up to here.
+    this._onRequestDialogTab = this._onRequestDialogTab.bind(this);
+    window.addEventListener(
+      'request-dialog-tab', this._onRequestDialogTab,
+    );
+    this._onRequestDialogMinimize =
+      this._onRequestDialogMinimize.bind(this);
+    window.addEventListener(
+      'request-dialog-minimize', this._onRequestDialogMinimize,
+    );
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener(TOAST_EVENT, this._onToastEvent);
+    window.removeEventListener('file-saved', this._onFileSaved);
+    window.removeEventListener(
+      'preview-mode-changed', this._onPreviewModeChanged,
+    );
+    window.removeEventListener(
+      'viewbox-changed', this._onSvgViewBoxChanged,
+    );
+    window.removeEventListener(
+      'svg-presentation-changed',
+      this._onSvgPresentationChanged,
+    );
+    if (this._svgViewBoxSaveTimer) {
+      clearTimeout(this._svgViewBoxSaveTimer);
+      this._svgViewBoxSaveTimer = null;
+    }
+    window.removeEventListener(
+      'files-reverted', this._onFilesReverted,
+    );
+    window.removeEventListener('resize', this._onWindowResize);
+    // Cancel any pending RAF callback — leaking it would fire
+    // after the element is gone and try to query a detached
+    // shadow root.
+    if (this._resizeRAF) {
+      cancelAnimationFrame(this._resizeRAF);
+      this._resizeRAF = null;
+    }
+    if (this._viewerRelayoutRAF) {
+      cancelAnimationFrame(this._viewerRelayoutRAF);
+      this._viewerRelayoutRAF = null;
+    }
+    // If a drag was in progress at unmount (unusual but
+    // possible during hot reload), remove document-scope
+    // listeners so they don't keep the stale handler alive.
+    document.removeEventListener('pointermove', this._onPointerMove);
+    document.removeEventListener('pointerup', this._onPointerUp);
+    window.removeEventListener(
+      'navigate-file',
+      this._onNavigateFile,
+    );
+    document.removeEventListener('keydown', this._onGridKeyDown, true);
+    document.removeEventListener('keyup', this._onGridKeyUp, true);
+    document.removeEventListener('keydown', this._onGlobalKeyDown);
+    window.removeEventListener(
+      'toggle-svg-mode',
+      this._onToggleSvgMode,
+    );
+    window.removeEventListener(
+      'load-diff-panel',
+      this._onLoadDiffPanel,
+    );
+    window.removeEventListener(
+      'load-svg-panel',
+      this._onLoadSvgPanel,
+    );
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
+    window.removeEventListener('mode-changed', this._onModeChanged);
+    window.removeEventListener(
+      'commit-result', this._onCommitResultHeader,
+    );
+    window.removeEventListener(
+      'review-started', this._onReviewStateChanged,
+    );
+    window.removeEventListener(
+      'review-ended', this._onReviewStateChanged,
+    );
+    window.removeEventListener(
+      'stream-chunk', this._onStreamChunkHeader,
+    );
+    window.removeEventListener(
+      'stream-complete', this._onStreamCompleteHeader,
+    );
+    window.removeEventListener(
+      'stream-complete', this._onContextUsageRefresh,
+    );
+    window.removeEventListener(
+      'session-changed', this._onContextUsageRefresh,
+    );
+    window.removeEventListener(
+      'compaction-event', this._onContextUsageRefresh,
+    );
+    window.removeEventListener('git-action', this._onGitAction);
+    if (this._onRequestDialogTab) {
+      window.removeEventListener(
+        'request-dialog-tab', this._onRequestDialogTab,
+      );
+    }
+    if (this._onRequestDialogMinimize) {
+      window.removeEventListener(
+        'request-dialog-minimize', this._onRequestDialogMinimize,
+      );
+    }
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    super.disconnectedCallback();
+  }
+
+  // ---------------------------------------------------------------
+  // JRPCClient lifecycle hooks
+  // ---------------------------------------------------------------
+
+  setupDone() {
+    super.setupDone();
+    // Publish the call proxy to the shared singleton. Child
+    // components using RpcMixin subscribe to this and wake up.
+    SharedRpc.set(this.call);
+    this.connectionState = 'connected';
+    this.reconnectAttempt = 0;
+
+    if (this._wasConnected) {
+      // This is a reconnect, not the first connect. Skip the
+      // startup overlay and show a success toast instead.
+      this.overlayVisible = false;
+      this._showToast('Reconnected', 'success');
+    }
+    this._wasConnected = true;
+
+    // Fetch the authoritative state snapshot. This gives us
+    // the repo name (for the browser tab title), the message
+    // history (restored from the last session on the server),
+    // selected files, streaming status, and init_complete.
+    this._fetchCurrentState();
+
+    // Initial context-usage fetch so the capacity bar reflects
+    // a resumed session's tokens from the first paint.
+    // Subsequent refreshes come through the event handlers.
+    this._fetchContextUsage();
+  }
+
+  remoteDisconnected() {
+    try {
+      super.remoteDisconnected?.();
+    } catch (err) {
+      // Defensive — jrpc-oo API may not always expose the
+      // parent hook. Swallow and continue.
+    }
+    SharedRpc.set(null);
+    this.connectionState = 'disconnected';
+    if (this._wasConnected) {
+      this._scheduleReconnect();
+    }
+  }
+
+  setupSkip() {
+    // Connection attempt failed entirely — schedule retry.
+    try {
+      super.setupSkip?.();
+    } catch (err) {
+      // same defensive rationale
+    }
+    if (!this._wasConnected) {
+      // First-connect failure — stay on the startup overlay
+      // with an updated message so the user sees progress.
+      this.startupMessage = 'Waiting for server…';
+    }
+    this._scheduleReconnect();
+  }
+
+  // ---------------------------------------------------------------
+  // Server-push callbacks (registered via addClass(this, 'AcApp'))
+  // ---------------------------------------------------------------
+
+  /**
+   * Startup progress event. Drives the overlay's message +
+   * progress bar. When stage === 'ready', the overlay fades out.
+   *
+   * Doc-index stages (listed in DOC_INDEX_STAGES) are
+   * intercepted here and re-dispatched on the
+   * `doc-index-progress` window channel so the doc-index
+   * overlay component handles them instead of the startup
+   * overlay. Without this split, a long enrichment run
+   * arriving after the `ready` stage would re-show the
+   * already-dismissed startup overlay, which would be jarring.
+   *
+   * specs4/5-webapp/shell.md#startup-overlay pins the stage names
+   * and message conventions; the backend's startup sequence fires
+   * these in order during deferred init.
+   */
+  startupProgress(stage, message, percent) {
+    // Doc-index-related stages take a separate path — they
+    // flow to aic-doc-index-progress via the doc-index-progress
+    // window channel, not to the startup overlay.
+    if (stage && DOC_INDEX_STAGES.has(stage)) {
+      window.dispatchEvent(new CustomEvent('doc-index-progress', {
+        detail: { stage, message, percent },
+      }));
+      return true;
+    }
+
+    this.startupStage = stage || '';
+    this.startupMessage = message || '';
+    this.startupPercent = Math.max(0, Math.min(100, percent || 0));
+    if (stage === 'ready') {
+      this._initComplete = true;
+      // Fade out shortly after ready so the user briefly sees
+      // 100%. The CSS transition handles the actual fade.
+      setTimeout(() => {
+        this.overlayVisible = false;
+        // If a file reopen was deferred waiting for the
+        // overlay to dismiss, do it now.
+        if (this._pendingReopen) {
+          const path = this._loadLastOpenFile();
+          if (path) this._doReopenLastFile(path);
+        }
+      }, 400);
+    }
+    return true;
+  }
+
+  // Stubs for Phase 2/3 callbacks. Declared so the addClass
+  // registration exposes them over RPC from day one — the
+  // backend will call them even in Phase 1 and we want "method
+  // not found" errors to surface in logs rather than silently
+  // vanishing.
+
+  /**
+   * A text block's partial content.
+   *
+   * The second argument is a chunk *dict* —
+   * `{block_id, seq, content, done}` — not a bare string. It is named
+   * `chunk` and forwarded under that key to match `thinkingChunk`, which
+   * carries the identical shape: the two differ only in which region of the
+   * turn they belong to, so they should not differ in how they arrive.
+   *
+   * `content` is cumulative within a block and never across a turn, and
+   * `seq` lets the consumer drop a chunk that arrives after a newer one
+   * (see `blocks.js`). Both facts are the block's, not ours — this method
+   * forwards and does not interpret.
+   */
+  streamChunk(requestId, chunk) {
+    window.dispatchEvent(new CustomEvent('stream-chunk', {
+      detail: { requestId, chunk },
+    }));
+    return true;
+  }
+
+  streamComplete(requestId, result) {
+    window.dispatchEvent(new CustomEvent('stream-complete', {
+      detail: { requestId, result },
+    }));
+    // Post-edit viewer refresh. When the LLM's edit
+    // pipeline writes to disk, open viewers are still
+    // showing the pre-edit content cached in their
+    // internal _files array. Without this call, the
+    // diff viewer's same-file suppression means a
+    // click-away-and-back leaves the stale content
+    // visible — and re-sending the same prompt yields
+    // a confusing "already applied" result against
+    // what looks like unchanged content.
+    //
+    // specs4/5-webapp/diff-viewer.md event routing table:
+    //   "Post-edit refresh — Direct call from app shell"
+    //
+    // We refresh whichever viewer is currently active.
+    // The inactive viewer's files are necessarily stale
+    // too, but they'll re-fetch on next activation
+    // because closeFile/openFile fetch fresh content —
+    // actually no, refreshOpenFiles operates on the
+    // internal _files array and is cheap (skips closed
+    // files), so call it on both. Each viewer's
+    // refreshOpenFiles iterates only its own open files
+    // and no-ops when empty.
+    const modified =
+      result && Array.isArray(result.files_modified)
+        ? result.files_modified
+        : [];
+    if (modified.length > 0) {
+      const diffViewer =
+        this.shadowRoot?.querySelector('aic-diff-viewer');
+      const svgViewer =
+        this.shadowRoot?.querySelector('aic-svg-viewer');
+      if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
+        // Fire and forget — viewer handles its own errors.
+        diffViewer.refreshOpenFiles().catch((err) => {
+          console.warn('[app-shell] diff viewer refresh failed', err);
+        });
+      }
+      if (svgViewer && typeof svgViewer.refreshOpenFiles === 'function') {
+        svgViewer.refreshOpenFiles().catch((err) => {
+          console.warn('[app-shell] svg viewer refresh failed', err);
+        });
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Token counters for the turn so far.
+   *
+   * Pushed as each assistant message reports what it used, so the payload
+   * is a *running* per-model total for this turn — `{turn_model_usage}`,
+   * the same shape and the same scope the final `streamComplete` carries,
+   * which is why it reuses the name. Never a session total; see
+   * `webapp/src/turn-cost.js`.
+   *
+   * Forwarded, not interpreted: the chat panel decides where a live
+   * number belongs and how to say it is still moving.
+   */
+  turnUsage(requestId, usage) {
+    window.dispatchEvent(new CustomEvent('turn-usage', {
+      detail: { requestId, usage },
+    }));
+    return true;
+  }
+
+  compactionEvent(requestId, event) {
+    window.dispatchEvent(new CustomEvent('compaction-event', {
+      detail: { requestId, event },
+    }));
+    return true;
+  }
+
+  /**
+   * Server-push callback fired after the service's own post-turn
+   * housekeeping has settled — distinct from ``streamComplete``, which
+   * fires as soon as the result message lands so the chat panel can
+   * settle its blocks without waiting.
+   *
+   * Re-dispatched as a window event so any listener can wait for the
+   * quiet point after a turn without coupling to AppShell. See
+   * specs5/3-engine/session.md § Two completion events survive, with
+   * new meanings.
+   */
+  postResponseComplete(requestId, data = null) {
+    // The Claude Code engine carries a payload here (reindexed files,
+    // refreshed context usage, disk warnings); the native engine sent
+    // the ID alone. Both arities work — `data` is null for the latter.
+    window.dispatchEvent(new CustomEvent('post-response-complete', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  // ``streamRetry`` was received here until conversion phase 3. AIC⚡DC's own
+  // completion wrapper pushed it before each backoff sleep so the chat panel
+  // could draw a countdown and prove the UI hadn't frozen. The CLI retries
+  // inside the subprocess and says nothing about it; the retryable condition
+  // it does report is ``rateLimit`` below, which carries a real reset time.
+
+  // ``filesChanged`` was received here until CC-21. It carried the
+  // authoritative selected-files list after any client changed the picker's
+  // checkboxes, and the files tab applied it to the picker so collaborators
+  // saw one selection. There is no selection to agree about now — a file the
+  // user wants read is named in the prompt — so the service no longer has a
+  // `set_selected_files` to broadcast from. Note that ``filesModified``
+  // below is a different signal that survives: it reports writes to disk,
+  // which the tree still has to reload for.
+
+  filesModified(paths) {
+    // Backend signals disk changes (created, modified, or
+    // deleted files) after edit-pipeline apply, commits,
+    // and resets. The files tab listens for the hyphenated
+    // DOM event and reloads the file tree via RPC, which
+    // picks up new untracked files and refreshed git
+    // status badges.
+    //
+    // Note the event-name difference: the server-push hook
+    // is camelCase (`filesModified`) to match the existing
+    // `commitResult` / `reviewStarted` naming convention;
+    // the DOM event is hyphenated (`files-modified`) to
+    // match what file-picker.md "Files Tab Orchestration"
+    // specifies and what files-tab.js already listens for.
+    window.dispatchEvent(new CustomEvent('files-modified', {
+      detail: { paths: Array.isArray(paths) ? paths : [] },
+    }));
+    return true;
+  }
+
+  // `binaryFilesSkipped` was received here until conversion
+  // phase 3. It was `sync_file_context`'s way of admitting that a
+  // file the user had ticked never made it into the prompt --
+  // either the repo layer could not decode its bytes as text, or
+  // it had been deleted from disk since the tick. Neither
+  // admission has a subject any more: nothing assembles a prompt
+  // from ticked files, so a tick cannot silently fail to be
+  // honoured (see specs5/plan/decisions.md CC-14 -- selection is
+  // a hint). The picker still knows which files are binary; it
+  // learns it from the tree it already loaded
+  // (`files-tab/tree-loader.js` -> `collectBinaryPaths`), not
+  // from a server push. A deleted file now shows up as a deleted
+  // file in the tree.
+
+  userMessage(data) {
+    window.dispatchEvent(new CustomEvent('user-message', { detail: data }));
+    return true;
+  }
+
+  userMessageImages(requestId, data) {
+    // The `image_refs` the `userMessage` above could not carry: a pointer
+    // names the transcript entry the image lives in, and the CLI writes that
+    // entry mid-turn, after the message has already been broadcast. Turn-
+    // scoped, so the request id arrives first and says which message the
+    // pointers belong to.
+    window.dispatchEvent(new CustomEvent('user-message-images', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  commitResult(result) {
+    window.dispatchEvent(new CustomEvent('commit-result', { detail: result }));
+    // Refresh open viewers after a commit. The working
+    // copy is unchanged, but HEAD moved — the diff
+    // viewer's left (original) side is now stale, and
+    // the status LED should flip from "new-file" cyan
+    // to "clean" green for files that just landed in
+    // HEAD. refreshOpenFiles re-fetches both sides so
+    // this falls out naturally.
+    const diffViewer =
+      this.shadowRoot?.querySelector('aic-diff-viewer');
+    const svgViewer =
+      this.shadowRoot?.querySelector('aic-svg-viewer');
+    if (diffViewer && typeof diffViewer.refreshOpenFiles === 'function') {
+      diffViewer.refreshOpenFiles().catch((err) => {
+        console.warn('[app-shell] diff viewer refresh failed', err);
+      });
+    }
+    if (svgViewer && typeof svgViewer.refreshOpenFiles === 'function') {
+      svgViewer.refreshOpenFiles().catch((err) => {
+        console.warn('[app-shell] svg viewer refresh failed', err);
+      });
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------
+  // Dormant receiver — no emitter after conversion phase 3
+  // ---------------------------------------------------------------
+  //
+  // `modeChanged` has no sender: the native engine broadcast it and
+  // nothing in `src/aic_dc/claude_code/` does. It is kept, not
+  // tombstoned, because its consumer is kept for the same reason —
+  // the code/doc mode toggle's replacement is the preset selector
+  // (CC-12), deferred by decision in specs5/plan/delivery.md.
+  // Deleting the receiver while leaving the toggle in place would
+  // move the break rather than fix it.
+  //
+  // Four siblings stood here — `agentModeChanged`, `agentsSpawned`,
+  // `agentsRehydrated` and `agentClosed`, the pushes that drove the
+  // `🟧🟧🟧 AGENT` tab strip. They were held for the same reason
+  // and released on the same terms: CC-8 landed, the subagent
+  // browser is the strip now, and it needs none of them. A subagent
+  // tab is built from block records the parent turn already streams
+  // to this client, so there is no separate spawn broadcast to
+  // receive, no scope to rehydrate after a reconnect, and no
+  // server-side close to mirror.
+
+  modeChanged(data) {
+    window.dispatchEvent(new CustomEvent('mode-changed', { detail: data }));
+    return true;
+  }
+
+  sessionChanged(data) {
+    window.dispatchEvent(new CustomEvent('session-changed', { detail: data }));
+    return true;
+  }
+
+  sessionDeleted(data) {
+    // Fired by `history_delete` once the transcript, its events and
+    // its index rows are gone. Carries `{session_id}`.
+    //
+    // Every client gets it, including the one that asked: a session
+    // list still offering a row whose transcript has been deleted is
+    // a click that can only fail, and the deleting client is not the
+    // only browser that has the list open.
+    window.dispatchEvent(
+      new CustomEvent('session-deleted', { detail: data }),
+    );
+    return true;
+  }
+
+  reviewStarted(data) {
+    // Re-dispatch as a window event so files-tab's
+    // `_onReviewStarted` handler fires. files-tab
+    // stores the review state, pushes it to the
+    // picker (which renders the amber banner), and
+    // triggers a tree reload + auto-select pass so
+    // the staged review files get ticked.
+    window.dispatchEvent(
+      new CustomEvent('review-started', { detail: data }),
+    );
+    return true;
+  }
+
+  reviewEnded(data) {
+    // Symmetric with reviewStarted. The `data`
+    // payload is the empty-state review shape
+    // (active=False); files-tab's handler clears its
+    // local state and reloads the tree to reflect the
+    // restored HEAD.
+    window.dispatchEvent(
+      new CustomEvent('review-ended', { detail: data }),
+    );
+    return true;
+  }
+
+  navigateFile(data) {
+    // The `_remote: true` flag lets the frontend distinguish
+    // broadcast-driven navigation from user-initiated, so
+    // collaborators don't echo-broadcast.
+    window.dispatchEvent(new CustomEvent('navigate-file', {
+      detail: { ...data, _remote: true },
+    }));
+    return true;
+  }
+
+  docConvertProgress(data) {
+    window.dispatchEvent(new CustomEvent('doc-convert-progress', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  // Collab callbacks — Phase 3.
+  admissionRequest(data) {
+    window.dispatchEvent(new CustomEvent('admission-request', { detail: data }));
+    return true;
+  }
+
+  admissionResult(data) {
+    window.dispatchEvent(new CustomEvent('admission-result', { detail: data }));
+    return true;
+  }
+
+  clientJoined(data) {
+    window.dispatchEvent(new CustomEvent('client-joined', { detail: data }));
+    return true;
+  }
+
+  clientLeft(data) {
+    window.dispatchEvent(new CustomEvent('client-left', { detail: data }));
+    return true;
+  }
+
+  roleChanged(data) {
+    window.dispatchEvent(new CustomEvent('role-changed', { detail: data }));
+    return true;
+  }
+
+  // ---------------------------------------------------------------
+  // Claude Code engine callbacks
+  //
+  // Every one of these is a `ClaudeCodeService` server push, re-
+  // dispatched as a window event so the consuming component listens
+  // without coupling to AppShell. Arities come from
+  // specs-reference/3-engine/session.md § Service: AcApp — turn-scoped
+  // events take (request_id, payload); session-wide events take
+  // (payload) alone. Getting that wrong puts a payload where a
+  // consumer expects an ID, which is why the tests assert it.
+  // ---------------------------------------------------------------
+
+  /**
+   * A permission request. Session-wide: every client sees the dialog,
+   * not just the browser that started the turn — the turn is stalled
+   * and whoever is at a keyboard should be able to answer.
+   */
+  permissionRequest(data) {
+    window.dispatchEvent(new CustomEvent('permission-request', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * A pending request's deadline was armed or cancelled.
+   *
+   * Session-wide, and its own event rather than a re-sent
+   * `permissionRequest`: the dialog on screen must not be rebuilt (the
+   * settling interval would restart and a half-typed deny reason would be
+   * lost) when all that changed is whether a clock is running on it.
+   */
+  permissionDeadline(data) {
+    window.dispatchEvent(new CustomEvent('permission-deadline', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * A permission request resolved — by this client, another window, a
+   * stopped turn, the no-host deadline, or shutdown. Closes the dialog
+   * everywhere with attribution.
+   */
+  permissionResolved(data) {
+    window.dispatchEvent(new CustomEvent('permission-resolved', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  permissionModeChanged(data) {
+    window.dispatchEvent(new CustomEvent('permission-mode-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * The model in force changed — in this window or another one.
+   *
+   * Session-wide like `permissionModeChanged`. The window that made the call
+   * already has the answer in its reply; this event is for every other one,
+   * which would otherwise keep naming the model the session started on.
+   */
+  modelChanged(data) {
+    window.dispatchEvent(new CustomEvent('model-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /** A tool card: name, summarised input, pending state. */
+  toolUse(requestId, data) {
+    window.dispatchEvent(new CustomEvent('tool-use', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /** A tool result, attached to its card by `tool_use_id`. */
+  toolResult(requestId, data) {
+    window.dispatchEvent(new CustomEvent('tool-result', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /** A thinking block's partial content. Same chunk shape as streamChunk. */
+  thinkingChunk(requestId, chunk) {
+    window.dispatchEvent(new CustomEvent('thinking-chunk', {
+      detail: { requestId, chunk },
+    }));
+    return true;
+  }
+
+  /** The init banner: model, tool inventory, MCP health, session id. */
+  sessionStarted(requestId, data) {
+    window.dispatchEvent(new CustomEvent('session-started', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  subagentEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('subagent-event', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  hookEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('hook-event', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  rateLimit(requestId, data) {
+    window.dispatchEvent(new CustomEvent('rate-limit', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  /**
+   * Engine lifecycle: startup failures, credential and version warnings,
+   * transcript mirror gaps. Session-wide.
+   */
+  engineHealth(data) {
+    window.dispatchEvent(new CustomEvent('engine-health', { detail: data }));
+    return true;
+  }
+
+  /**
+   * Anything the engine reports that is not a transcript block: a
+   * conversation reset, an unrecognised message type, an assistant-side
+   * error. Surfaced rather than swallowed, because a silently dropped
+   * message type is how a CLI upgrade breaks the UI invisibly.
+   */
+  systemEvent(requestId, data) {
+    window.dispatchEvent(new CustomEvent('system-event', {
+      detail: { requestId, data },
+    }));
+    return true;
+  }
+
+  // ---------------------------------------------------------------
+  // Tabs
+  // ---------------------------------------------------------------
+
+  _switchTab(tab) {
+    this.activeTab = tab;
+    this._notifyTabVisible();
+    try {
+      localStorage.setItem('aic-dc-active-tab', tab);
+    } catch (_) {
+      // localStorage can throw in private-browsing modes or
+      // when quota is exhausted. Persistence is best-effort.
+    }
+  }
+
+  /**
+   * Tell the newly-revealed tab that it is on screen.
+   *
+   * A tab whose data costs a control request to the CLI —
+   * `aic-context-usage-tab` is the one today — refuses to
+   * refetch while hidden and marks itself stale instead. It
+   * cannot see the class change that reveals it, so without
+   * this call the badge stays lit until the user presses
+   * Refresh: `onTabVisible` existed with no caller.
+   *
+   * Deliberately generic. Any tab that grows the hook gets
+   * it; tabs without one are untouched.
+   *
+   * @private
+   */
+  _notifyTabVisible() {
+    // After the render that moves `.active`, so the query
+    // finds the tab that is now visible rather than the one
+    // leaving.
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector('.tab-panel.active');
+      const view = panel?.firstElementChild;
+      if (typeof view?.onTabVisible === 'function') view.onTabVisible();
+    });
+  }
+
+  /**
+   * Ask the newly-revealed tab to show one of its sections.
+   *
+   * Duck-typed and generic in the same way as
+   * `_notifyTabVisible`, and for the same reason: the shell
+   * should not know which tabs have a segmented control, only
+   * that a request naming a section is worth passing on. A tab
+   * without the hook, or with no such section, is untouched.
+   *
+   * Deliberately *not* the same call the segmented control
+   * makes. That one persists the choice as the section its
+   * reader was last on, and a command choosing it is not the
+   * reader choosing it.
+   *
+   * @private
+   */
+  _notifyTabSection(section) {
+    if (!section) return;
+    this.updateComplete.then(() => {
+      const panel = this.shadowRoot?.querySelector('.tab-panel.active');
+      const view = panel?.firstElementChild;
+      if (typeof view?.showSection === 'function') view.showSection(section);
+    });
+  }
+
+  _onRequestDialogTab(event) {
+    const tab = event?.detail?.tab;
+    if (typeof tab !== 'string' || !tab) return;
+    this._switchTab(tab);
+    // After the switch: a section is a destination inside the
+    // tab, so there is no sense asking for one before the tab
+    // that owns it is the active one.
+    this._notifyTabSection(event?.detail?.section);
+  }
+
+  _onRequestDialogMinimize() {
+    this._toggleMinimize();
+  }
+
+  // ---------------------------------------------------------------
+  // Helper-module delegating methods
+  // ---------------------------------------------------------------
+
+  _showToast(message, type = 'info') {
+    return showToast(this, message, type);
+  }
+
+  _onToastEvent(event) {
+    return onToastEvent(this, event);
+  }
+
+  _maybeShowEnrichmentUnavailableToast(status) {
+    return maybeShowEnrichmentUnavailableToast(this, status);
+  }
+
+  _scheduleReconnect() {
+    return scheduleReconnect(this);
+  }
+
+  _attemptReconnect() {
+    return attemptReconnect(this);
+  }
+
+  _getDialogRect() {
+    return getDialogRect(this);
+  }
+
+  _onHeaderPointerDown(event) {
+    return onHeaderPointerDown(this, event);
+  }
+
+  _onHandlePointerDown(event, which) {
+    return onHandlePointerDown(this, event, which);
+  }
+
+  _onPointerMove(event) {
+    return onPointerMove(this, event);
+  }
+
+  _onPointerUp() {
+    return onPointerUp(this);
+  }
+
+  _toggleMinimize() {
+    return toggleMinimize(this);
+  }
+
+  _onWindowResize() {
+    return onWindowResize(this);
+  }
+
+  _handleWindowResize() {
+    return handleWindowResize(this);
+  }
+
+  _dialogInlineStyle() {
+    return dialogInlineStyle(this);
+  }
+
+  _getFileNav() {
+    return getFileNav(this);
+  }
+
+  _onGridKeyDown(event) {
+    return onGridKeyDown(this, event);
+  }
+
+  _onGridKeyUp(event) {
+    return onGridKeyUp(this, event);
+  }
+
+  _flushAltArrowPending() {
+    return flushAltArrowPending(this);
+  }
+
+  _onGlobalKeyDown(event) {
+    return onGlobalKeyDown(this, event);
+  }
+
+  _onNavigateFile(event) {
+    return onNavigateFile(this, event);
+  }
+
+  _onLoadDiffPanel(event) {
+    return onLoadDiffPanel(this, event);
+  }
+
+  _onLoadSvgPanel(event) {
+    return onLoadSvgPanel(this, event);
+  }
+
+  _onToggleSvgMode(event) {
+    return onToggleSvgMode(this, event);
+  }
+
+  _onActiveFileChanged(event) {
+    return onActiveFileChanged(this, event);
+  }
+
+  _scheduleViewerRelayout() {
+    return scheduleViewerRelayout(this);
+  }
+
+  _relayoutViewers() {
+    return relayoutViewers(this);
+  }
+
+  _saveViewportState() {
+    return saveViewportState(this);
+  }
+
+  _saveSvgViewportState() {
+    return saveSvgViewportState(this);
+  }
+
+  _loadViewportState() {
+    return loadViewportState(this);
+  }
+
+  _tryReopenLastFile() {
+    return tryReopenLastFile(this);
+  }
+
+  _doReopenLastFile(path) {
+    return doReopenLastFile(this, path);
+  }
+
+  _doReopenSvg(path, svgState) {
+    return doReopenSvg(this, path, svgState);
+  }
+
+  _restoreViewport(viewer, state, preview) {
+    return restoreViewport(this, viewer, state, preview);
+  }
+
+  _onBeforeUnload() {
+    return onBeforeUnload(this);
+  }
+
+  _onPreviewModeChanged(event) {
+    return onPreviewModeChanged(this, event);
+  }
+
+  _onSvgViewBoxChanged(event) {
+    return onSvgViewBoxChanged(this, event);
+  }
+
+  _onSvgPresentationChanged(event) {
+    return onSvgPresentationChanged(this, event);
+  }
+
+  async _fetchCurrentState() {
+    return fetchCurrentState(this);
+  }
+
+  async _fetchContextUsage() {
+    return fetchContextUsage(this);
+  }
+
+  _onContextUsageRefresh() {
+    return onContextUsageRefresh(this);
+  }
+
+  _onModeChanged(event) {
+    return onModeChanged(this, event);
+  }
+
+  async _switchMode(mode) {
+    return switchMode(this, mode);
+  }
+
+  _onGitAction(event) {
+    return onGitAction(this, event);
+  }
+
+  _onCommitResultHeader(event) {
+    return onCommitResultHeader(this, event);
+  }
+
+  _onReviewStateChanged(event) {
+    return onReviewStateChanged(this, event);
+  }
+
+  _onStreamChunkHeader() {
+    return onStreamChunkHeader(this);
+  }
+
+  _onStreamCompleteHeader() {
+    return onStreamCompleteHeader(this);
+  }
+
+  async _onCopyDiff() {
+    return onCopyDiff(this);
+  }
+
+  async _onCommit() {
+    return onCommit(this);
+  }
+
+  async _onResetToHead() {
+    return onResetToHead(this);
+  }
+
+  async _onFileSaved(event) {
+    return onFileSaved(this, event);
+  }
+
+  _onFilesReverted(event) {
+    return onFilesReverted(this, event);
+  }
+
+  _loadActiveTab() {
+    return loadActiveTab(this);
+  }
+
+  _loadMinimized() {
+    return loadMinimized(this);
+  }
+
+  _loadDockedWidth() {
+    return loadDockedWidth(this);
+  }
+
+  _loadUndockedPos() {
+    return loadUndockedPos(this);
+  }
+
+  _saveMinimized() {
+    return saveMinimized(this);
+  }
+
+  _saveDockedWidth() {
+    return saveDockedWidth(this);
+  }
+
+  _saveUndockedPos() {
+    return saveUndockedPos(this);
+  }
+
+  _saveLastOpenFile(path) {
+    return saveLastOpenFile(this, path);
+  }
+
+  _loadLastOpenFile() {
+    return loadLastOpenFile(this);
+  }
+
+  // ---------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------
+
+  render() {
+    return renderTemplate(this);
+  }
+
+  firstUpdated(changed) {
+    super.firstUpdated?.(changed);
+    // The dialog exists from the first paint, so the viewer
+    // background needs its inset before either viewer opens
+    // a file — including the docked width restored from
+    // localStorage, which is applied by the same render.
+    syncViewerInset(this);
+  }
+
+  updated(changed) {
+    // JRPCClient.updated is what opens the WebSocket — it
+    // watches `serverURI` and calls serverChanged(). Skipping
+    // the super call leaves the app on the startup overlay
+    // forever, connecting to nothing.
+    super.updated(changed);
+    // Dialog geometry drives the background's left inset.
+    // Only re-measure when something that can move the
+    // dialog's right edge changed: the shell re-renders for
+    // plenty of reasons that cannot (toasts, tab switches,
+    // stream flags) and every sync forces a layout read.
+    //
+    // The drag / resize / window-resize paths don't come
+    // through here at all — they mutate the dialog's inline
+    // style directly and go via `_scheduleViewerRelayout`,
+    // which syncs the inset on its own RAF.
+    if (
+      changed.has('_dockedWidth')
+      || changed.has('_undockedPos')
+      || changed.has('_minimized')
+    ) {
+      if (syncViewerInset(this)) this._scheduleViewerRelayout();
+    }
+  }
+}
+
+customElements.define('aic-app-shell', AppShell);

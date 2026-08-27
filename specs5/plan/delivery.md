@@ -1,0 +1,3244 @@
+# Delivery log
+
+One entry per conversion phase from [`README.md`](README.md#phases), written when the phase's exit
+criterion is met. Each entry records what landed, what was deliberately left out, and what the next
+phase has to do first — so a phase can be picked up cold without re-deriving the previous one's
+state.
+
+Corrections to the specs found while implementing belong in the spec, not here. This file points at
+them; it does not restate them.
+
+---
+
+## Phase 1 — Engine spike (2026-08-14)
+
+**Exit criterion:** *"A CLI-side smoke test can send a prompt and print the streamed message
+taxonomy."* Met — see [Live verification](#live-verification).
+
+### What landed
+
+`src/aic_dc/claude_code/`, a self-contained package with no import edge to `aic_dc.llm`:
+
+| Module | Lines | Role |
+|---|---|---|
+| `engine_config.py` | 224 | `EngineConfig` over `engine.json`; every field nullable, null means "let the CLI decide" |
+| `health.py` | 464 | `resolve_cli()` version gate, `EngineHealth`, `EngineStartupError`, failure classification |
+| `options.py` | 194 | The single place `ClaudeAgentOptions` is constructed; `NEVER_SET` prohibitions with reasons |
+| `messages.py` | 960 | `TurnTranslator` — SDK message objects → AIC⚡DC event payloads |
+| `session.py` | 791 | One `ClaudeSDKClient` per process: connect, admission, message pump, interrupt drain, live controls |
+| `service.py` | 566 | The `ClaudeCodeService` RPC facade |
+| `__init__.py` | 86 | Public surface |
+
+Supporting changes:
+
+- `scripts/engine_smoke.py` (255 lines) — the CLI-side smoke test the exit criterion names. Sends
+  one prompt, prints every event payload with its channel, and can drive an interrupt mid-turn.
+- `src/aic_dc/config/engine.json` — the default (all-null) engine config, registered in
+  `config.py`'s `_USER_FILES` so it is user-editable and not overwritten on upgrade.
+- `src/aic_dc/main.py` — registers `ClaudeCodeService` alongside `LLMService`. The chat path is
+  untouched: nothing in the frontend calls the new namespace yet.
+
+**The engine connects lazily**, on the first turn or an explicit `connect_engine()`. Connecting at
+startup would add a second `claude` subprocess (~295 MB resident) to every launch for a service
+nothing is calling. Phase 2 keeps this: the eager connect belongs with the UI that shows the
+connecting state.
+
+### Tests
+
+302 tests across five files, all offline — no CLI is spawned, no credentials are read:
+
+| File | Tests | What it pins |
+|---|---|---|
+| `test_claude_code_engine_config.py` | 22 | Nullable-field semantics, validation, precedence |
+| `test_claude_code_options.py` | 34 | **The SDK-drift tripwire** — every key we emit must exist on the installed `ClaudeAgentOptions` dataclass |
+| `test_claude_code_messages.py` | 74 | Subclass-before-superclass dispatch, cumulative chunks, block identity, nothing dropped, no double render |
+| `test_claude_code_session.py` | 81 | Framing, connect failure modes, pump resilience, interrupt drain, admission |
+| `test_claude_code_service.py` | 91 | The RPC surface, lazy connect, slash equivalents, event arity, cancel |
+
+Two are contract tests against the wheel rather than against our logic, and are the ones that will
+fail first on an SDK upgrade: `test_every_key_exists_on_the_installed_dataclass` (options) and the
+`SystemMessage`-subclass assertions plus the SDK-error-name tripwire (messages, session).
+
+`test_claude_code_service.py` also asserts the phase-2/3 surface is **absent** —
+`resolve_permission`, `get_denied_read_files`, `set_denied_read_files`, `history_list`. Those
+assertions are meant to be deleted by the phase that implements each method; a green run of them is
+a statement about scope, not about correctness.
+
+### Live verification
+
+Two runs against the real CLI (bundled 2.1.229, Bedrock), both with `--permission-mode plan` so no
+write was possible:
+
+- The full message taxonomy printed, including the framing events, cumulative text and thinking
+  deltas, tool-use cards correlated to their results with durations, and the `ResultMessage`
+  footer with a populated `total_cost_usd`.
+- The interrupt path drained to a real `ResultMessage` rather than truncating the stream.
+
+Divergences between the installed wheel and the specs were found and written back into the specs,
+per the plan's rule that the wheel wins: see
+[`sdk-surface.md` § Corrections found while implementing phase 1](sdk-surface.md) and
+`specs-reference/3-engine/session.md`. The substantive ones were the `thinking` option's shape (a
+TypedDict union, not a `ThinkingConfig` constructor), the SDK's real CLI discovery order (bundled
+beats `PATH`), the correct partial-message block key, and `rewind_files`'s `restored` list always
+being empty.
+
+One behaviour is in no spec and should be treated as real: `SystemMessage(subtype="status")` with
+`{"status": "requesting"}`, which arrived four times during a three-tool-call turn. It currently
+falls through to the generic `systemEvent` channel, which is correct but silent — phase 2 may want
+it as a "thinking…" affordance.
+
+### Deliberately not built
+
+Not oversights; each is a later phase's scope:
+
+- **No `can_use_tool` gate.** The session accepts one as a constructor argument and the service
+  passes nothing. There is therefore no path to a browser permission prompt, which is exactly why
+  the live runs used `plan` mode. What `permission_mode: "default"` does with no callback attached
+  was not exercised — **phase 2 must land the gate before any run uses `default` or `acceptEdits`
+  for real work.** This is the plan's *permissions before edits* constraint, and it is the reason
+  phase 1 stopped where it did.
+- **No hooks, no MCP servers, no `SessionStore`.** All three are constructor arguments that are
+  currently `None`. Hooks must stay strictly observational when they arrive: a `PreToolUse` hook
+  that returns a decision shadows `can_use_tool` and would silently bypass the dialog phase 2
+  builds.
+- **No frontend.** No Lit component calls `ClaudeCodeService`.
+- **No `live` pytest marker.** Phase 1 produced no credentialed pytest tests — the credentialed
+  path is `scripts/engine_smoke.py`, a script run by hand — so declaring a marker nothing uses
+  would be speculative. Add it in the phase that first writes a credentialed test.
+
+### For whoever picks up phase 2
+
+- **The RPC namespace is the class name.** `add_service(instance)` derives the namespace from
+  `type(instance).__name__`, so renaming `ClaudeCodeService` breaks every frontend call site at
+  once. `test_claude_code_service.py::TestRpcSurface` pins the name for this reason.
+- **`request_id`, not `session_id`, is the multiplexing primitive.** Turn-scoped events carry
+  `(request_id, payload)`; session-wide events carry `(payload,)`. The event-arity tests encode
+  the split.
+- **Never `break` out of the message iterator.** Cancel means interrupt then drain to
+  `ResultMessage`; breaking early leaves the CLI mid-turn and the next turn inherits the mess.
+
+---
+
+## Phase 2 — Chat on the new engine (2026-08-14)
+
+**Exit criterion:** *"A user can hold a full working conversation, including edits, entirely through
+Claude Code."* Met — see [Live verification](#live-verification-1).
+
+The plan's *permissions before edits* constraint held: no run at any point used
+`permission_mode: "bypassPermissions"`, and the write that satisfies "including edits" went through
+the browser dialog.
+
+### What landed
+
+**Backend.** One new module, plus the gate wired through the session:
+
+| Module | Lines | Role |
+|---|---|---|
+| `claude_code/permissions.py` | 1490 | `can_use_tool` gate: request classification, the pending-request registry, `derive_suggested_rules`, `build_answer_input`, deny/allow/always-allow resolution |
+| `claude_code/service.py` | 881 (+367) | `resolve_permission`, `set_denied_read_files`, permission events, `doc_convert_available` on `EngineState` |
+| `claude_code/session.py` | 824 (+33) | Passes the gate to `build_options`; permission-mode changes without a reconnect |
+| `claude_code/options.py` | 214 (+30) | The `system_prompt` preset fix (below) |
+| `claude_code/messages.py` | 979 (+31) | `compact_boundary`, subagent framing |
+
+`src/aic_dc/collab.py` (+51): the async permission gate runs on the SDK's task, not on an RPC task,
+so the caller-identity `ContextVar` was unset there and every async gate read as "not localhost".
+Fixed by propagating the context. **This retroactively enables every async gate on `LLMService` and
+`Repo`** — they had the same latent hole and were failing open. `test_collab_restrictions.py` grew
+from its previous size to 68 tests to pin it.
+
+`src/aic_dc/main.py` (+116): registers the permission plumbing, and kills the CLI child on shutdown
+(see [The orphan fix](#the-orphan-fix)).
+
+**Frontend.** `webapp/src/permission-dialog/` is new (4970 lines incl. tests):
+
+| Module | Lines | Role |
+|---|---|---|
+| `index.js` | 952 | `<aic-permission-dialog>` |
+| `bodies.js` | 282 | Per-tool request bodies |
+| `queue.js` | 306 | Serialises concurrent requests; one dialog at a time |
+| `styles.js` | 537 | |
+| `decisions.js` | 212 | Decision payload assembly |
+| `diff-editor.js` | 177 | The `Write` preview |
+| `constants.js` | 142 | |
+
+`webapp/src/chat-panel/` gained `blocks.js` (557), `block-render.js` (904) and `permission-mode.js`
+(276), and `streaming.js` was substantially rewritten (1582 lines changed) to consume the Claude
+Code event stream instead of the native one. `styles.js` (+825 net) carries the turn-block UI.
+
+`LLMService` and `src/aic_dc/llm/` are **untouched and still registered** — per the plan's rule that
+phases 1–3 are not interleaved. Nothing in the chat path reaches them.
+
+### Removed from the frontend
+
+Deleted outright, because the native engine's affordances have no Claude Code equivalent yet:
+
+| Deleted | Lines | Returns in |
+|---|---|---|
+| `chat-panel/urls.js` + `urls.test.js` | 283 + 722 | — |
+| `url-chips.js` + `url-chips.test.js` | 552 + 595 | — |
+| The three retry-prompt builders (in `helpers.js`, −88) | — | — |
+
+Also removed from the UI: the mode toggle and the ✨ and 📜 buttons (**phase 6**), the reasoning
+control (**phase 6**), and the URL chips. `<aic-history-browser>` is left mounted but **inert** —
+`history_list` does not exist on `ClaudeCodeService` yet (**phase 5**). `_reasoningEnabled` and
+`_reasoningEffort` are still declared on the chat panel but nothing reads them; the `viewer` framing
+value arrives from the engine and is not wired to anything. The CSS families for all of the above
+were deleted from `styles.js`.
+
+`enrichment_status`, `mode` and `cross_ref_enabled` go silent: they were native-engine state with no
+producer on this path. `doc_convert_available` was added to `EngineState` in their place
+(`service.py:99`, `:267`, `:291`) so the Files tab can still tell whether conversion is possible.
+
+### The `system_prompt` fix
+
+`build_option_kwargs` now sets `system_prompt={"type": "preset", "preset": "claude_code"}`.
+**Omitting it had been sending an empty prompt**, not the CLI's: the SDK emits `--system-prompt ""`
+for `None`, which strips the dynamic sections carrying the working directory, the git status and the
+platform. Observed: an agent asked to edit `greet.py` in a repo at `/tmp/aic-dc-live` reached for
+`/home/flatmax/greet.py`, because nothing had told it where it was. This is the one exception to
+`options.py`'s null-means-omit rule, and the reason is recorded next to it.
+
+### The orphan fix
+
+`main._signal_handler` exits via `os._exit` to avoid hanging on `_heavy_init`'s
+sentence-transformer load. That skips `atexit` — and the Claude Agent SDK's *only* orphan guard is
+an `atexit` hook (`subprocess_cli._kill_active_children`). Measured: **SIGINT during a streaming
+turn left the `claude` process running for a further ~38 seconds**, reparented to init, still
+holding the repo as its working directory.
+
+`main._kill_cli_children()` now signals the SDK's child registry before `os._exit`: SIGTERM, a
+0.25 s grace, then SIGKILL for anything left. SIGTERM alone stopped a mid-stream child in under
+0.3 s, so the escalation is for a wedged child rather than the normal path. Verified live:
+mid-stream SIGINT now takes server *and* child within 0.27 s, with no lingering `_bundled/claude`
+process and no zombie.
+
+Two things a reader will otherwise re-derive: liveness cannot be probed with `os.kill(pid, 0)`,
+because a signalled-but-unreaped child is a zombie that still answers it — hence `_child_exited`
+using `waitpid(WNOHANG)`, without which the grace period was served out in full every time. And the
+registry is private SDK surface, so an SDK that moves it costs us the fix but not the ability to
+exit.
+
+### Tests
+
+533 python tests across seven files, all offline:
+
+| File | Tests | What it pins |
+|---|---|---|
+| `test_claude_code_permissions.py` | 106 | Request classification, the pending registry, suggested-rule derivation, `build_answer_input`, resolution paths |
+| `test_claude_code_service.py` | 153 | The RPC surface incl. the 13 localhost gates, permission events, `doc_convert_available` |
+| `test_claude_code_session.py` | 83 | Gate wiring, permission-mode change without reconnect |
+| `test_claude_code_messages.py` | 77 | `compact_boundary`, subagent framing |
+| `test_collab_restrictions.py` | 68 | **The `ContextVar` fix** — async gates now see the real caller |
+| `test_claude_code_options.py` | 35 | The SDK-drift tripwire, plus the `system_prompt` preset |
+| `test_main_shutdown.py` | 11 | The orphan fix: polite-first, escalation, and the zombie regression |
+
+`test_main_shutdown.py` spawns real child processes rather than mocking `os.kill`, because the thing
+under test *is* signal delivery — a mock would pass whether or not the signal reached anything.
+
+Frontend, 509 tests across the modules this phase touched or created:
+
+| File | Tests |
+|---|---|
+| `chat-panel/block-render.test.js` | 128 |
+| `chat-panel/blocks.test.js` | 82 |
+| `permission-dialog/dialog.test.js` | 88 |
+| `chat-panel/streaming.test.js` | 64 |
+| `permission-dialog/queue.test.js` | 59 |
+| `chat-panel/events.test.js` | 50 |
+| `chat-panel/permission-mode.test.js` | 38 |
+
+Whole-suite state at the close of the phase: python **3897 passed** with nothing failing, webapp
+**89 files, 3215 passed**. The one failure that stood here is fixed — below.
+
+**Phase 1's absence assertions are now partly deleted**, as phase 1's entry said they should be:
+`resolve_permission` and `set_denied_read_files` exist and are tested. `history_list` and
+`get_denied_read_files` are still asserted absent — phase 5 and the file-picker work respectively.
+
+**One pre-existing failure, unrelated to this phase, now fixed** — and the first diagnosis of it
+was wrong, which is the interesting part.
+`test_doc_convert/test_libreoffice_pipeline.py::TestLibreOfficeDispatch::test_odp_routes_to_libreoffice_when_available`
+was recorded here as "needs PyMuPDF, which is not installed", implying an `import fitz` escaping
+somewhere. It was not. The failure was `assert 0 == 1` on the call log: PyMuPDF is an **optional**
+extra (`docs-convert` in `pyproject.toml`), `convert_pptx_via_libreoffice` pre-flight-checks it at
+`pdf_pipeline.py:94`, and without it an `.odp` falls back to markitdown **without ever spawning
+soffice**. That fallback is the documented, intended behaviour; the test was asserting the
+LibreOffice route was taken without declaring that it needs both deps. Its `.pptx` sibling twenty
+lines above guards itself with `_require_pymupdf()`; the `.odp` case had been written without it.
+Adding the same guard turns a false failure into an honest skip, so a base install now runs the
+suite green: `tests/test_doc_convert/` is **113 passed, 75 skipped**, and the whole python suite has
+no failures. No production code was touched — `doc_convert/` is on the inventory's keep-unchanged
+list and stays there.
+
+### Live verification
+
+Against the real CLI (bundled 2.1.229, Bedrock) in a scratch repo, `permission_mode: "default"`
+throughout:
+
+- A full conversation streamed end to end: text, thinking, tool-use cards correlated to their
+  results, and the `ResultMessage` footer with duration, engine-turn count and cost.
+- **The dialog appears before the write.** *Deny* landed — no file was written, and the agent
+  adapted in the same turn. *Allow once* landed — the docstring reached disk (confirmed with
+  `git diff`), the log recorded `resolved as allow by localhost`, and the turn reached a full
+  footer.
+- Ctrl-C mid-stream leaves no orphaned `claude` process (above).
+- An `API Error: Output blocked by content filtering policy` on an unrelated prompt rendered
+  correctly rather than breaking the turn — `api error` badge on the assistant header, the message
+  inline, and the footer still populated.
+
+The compaction divider renders from `compact_boundary`, **client-side only**; it does not survive a
+reload. Persistence is phase 5's, with session history.
+
+Spec divergences found while implementing were written back into the specs per the plan's rule that
+the wheel wins: `specs5/5-webapp/permission-dialog.md`, `specs5/5-webapp/chat.md`,
+`specs5/4-features/collaboration.md`, `specs5/plan/sdk-surface.md`,
+`specs-reference/3-engine/permissions.md` and `specs-reference/3-engine/session.md`.
+
+### Always-allow: six bugs, found by asking the CLI instead of guessing
+
+Phase 2 first shipped with two findings recorded-but-unfixed, on the grounds that changing
+permission semantics on a guess was worse than documenting the doubt. The way out was to stop
+guessing: a throwaway probe connected with a `can_use_tool` that denied everything and logged
+`context.suggestions` verbatim. That is the authoritative source, since the plan makes the installed
+wheel win over any document — and it turned two suspicions into six confirmed defects. The observed
+suggestion shapes are now recorded in
+[`specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md) § What
+the CLI actually suggests.
+
+Fixed:
+
+- **The derived rule named the wrong tool, so it did nothing.** Rules were built from the requesting
+  tool's name, giving `Write(src/aic_dc/**)` for a `Write` call. Claude Code consults path rules for
+  `Edit` and `Read` only; anything else is accepted, never consulted, and warned about at startup
+  (v2.1.210+). Clicking "always allow" wrote a rule to settings that had no effect, and the user was
+  asked again on the next call. `_RULE_TOOL_FOR_PATHS` now maps write tools to `Edit` and read tools
+  to `Read`, and the button's label names the rule that will actually be written. Tools with no
+  consulted path rule — `Grep` among them — derive nothing.
+- **The derived rule over-granted.** `_derived_path_rule` emitted `<dir>/**`, which reads like "this
+  directory" but is a whole-subtree match in gitignore syntax, and collapsed to `**` for a file at
+  the repo root: one click on a dialog naming a single file granted writes to every file in the
+  repository. It now grants **the literal path approved and nothing else**, mirroring the CLI, whose
+  own generated rule "matches only the literal path you approved".
+- **A path outside the repo was anchored wrongly.** The rule was `/home/x/**` where `/path` means
+  "relative to the settings source", so it would have resolved under the project root and never
+  matched. Absolute paths now carry the CLI's `//` anchor. Gitignore metacharacters in the path are
+  escaped too, so a directory like `[2024-06] Reports` produces a rule that matches itself.
+- **The always-allow tooltip asserted something false.** It said "There is no invisible session-only
+  grant behind this button". The CLI suggests `destination: "session"` for reads outside the working
+  directory, and a file-modification approval is session-scoped by design — the published tier table
+  gives its lifetime as "until session end". There are now two tooltips and the one shown agrees
+  with the destination chip beside it.
+- **The derived shell rule over-granted, the same way the path rule did.** `_derived_command_rule`
+  emitted a prefix pattern, so `git push:*` authorised `git push --force origin main` from a click
+  on a dialog that said `git push origin main`. The CLI derives the literal sub-command; the
+  default is now the literal command, with the prefix kept as a second entry in the rule menu the
+  dialog already had. That answers the friction objection without making the broad grant the thing
+  a fast click gets. The command is stripped but not otherwise normalised — collapsing its internal
+  whitespace would produce a rule that never matches, which is the first bug in this list again.
+- **The transcript rendered an approved call as denied.** `applyPermissionOutcome` cleared the
+  denial only for `action === 'allow'`, so a call approved with "always allow" got the amber lock
+  and a denial body — while it ran. No test covered it; the two frontend comparisons are now one
+  imported `ALLOW_ACTIONS`, mirroring the engine's, and a test iterates every allow action.
+
+One correction to the earlier write-up: the `//` in `Read(//home/flatmax/**)` is not a formatting
+quirk of the CLI's. It is the documented anchor for an absolute filesystem path, and our own code
+was the thing getting it wrong.
+
+### The always-allow control a write never gets — now built
+
+For an in-repo file edit the CLI's **only** suggestion is `setMode` → `acceptEdits` with
+`destination: "session"`; it offers no rule whatsoever. `derive_suggested_rules` dropped
+non-`addRules` suggestions, so the CLI's actual offer was never shown.
+
+The drop stands for the rule control — switching to `acceptEdits` stops the dialog appearing for
+*every* later edit, a far larger grant than the one call on screen, so it cannot honestly share a
+button labelled "always allow this call". It now has its own control: `derive_suggested_mode`
+picks the suggestion up, the payload carries `suggested_mode`, and an `allow_mode` decision applies
+it. Four things about it are load-bearing:
+
+- **The mode rides back on the permission result** as a `setMode` `PermissionUpdate`, not as a
+  separate `set_permission_mode` control request. It is atomic with the allow, and — the reason
+  that matters — the CLI is *waiting* on this response, so issuing another control request before
+  answering it is a deadlock waiting for a slow user.
+- **The offered mode comes from the request the engine built, never from the decision.**
+  `resolve_permission` is localhost-only, but a mode is a session-wide grant, and a client able to
+  name its own could name `bypassPermissions`. `_MODE_OFFERS` holds the modes we have copy for;
+  `bypassPermissions` is absent from it and re-checked when the update is built.
+- **The CLI applies the mode without announcing it.** `permissionMode` appears only in the `init`
+  system message, so nothing on the stream would have told the mode selector. The broker gained a
+  `note_mode` callback; the service updates the session's cached mode and broadcasts the
+  `permissionModeChanged` the selector already listens for, attributed to the dialog. Without it
+  the selector would keep claiming `default` while the engine accepted edits silently — the exact
+  class of lie the rest of this section is about.
+- **The copy states what is lost, not just what is granted.** "you will not see a diff for it" is
+  the consequence a user would otherwise discover. The engine owns that copy so the button cannot
+  describe a consequence the engine does not apply.
+
+Still divergent from the CLI, and left alone deliberately: our derived rules default to
+`destination: "projectSettings"` (`.claude/settings.json`, git-tracked) where the CLI persists
+approvals to `localSettings` (`.claude/settings.local.json`, gitignored). The button does name the
+file, so it is not dishonest — but it means an always-allow can land a permission grant in a
+committed file and share it with the whole team. One-word fix; not made here because it changes
+which file gets written and deserves its own decision.
+
+> **Closed at the start of phase 3** by [`decisions.md`](decisions.md) CC-16: `localSettings` is the
+> default, `projectSettings` survives as one `shared`-tagged menu row, and no derived rule may name a
+> path under `.claude/` — the second defect the first one was hiding.
+
+### Deliberately not built
+
+- **No `Edit`/`MultiEdit` input editing in the dialog.** `Write` gets a diff preview the user can
+  edit; `Edit` and `MultiEdit` are shown read-only. Editing an `old_string`/`new_string` pair in a
+  textarea invites a no-longer-matching edit that fails after approval, which is a worse experience
+  than approving as-proposed and asking for a change.
+- **The `Write` preview is against the proposed content, not disk.** For a new file that is the same
+  thing; for an overwrite the dialog does not show what is being lost. Wants a real diff against the
+  file on disk.
+- **No rewind UI.** `rewind_files()` is on the service and nothing calls it.
+- **Subagent attribution is by id, not by name.** Nested tool calls carry the subagent's id; the UI
+  shows the id. Mapping it to the agent's name needs the definition lookup.
+- **Three `interact` affordances are unbuilt.** `build_answer_input` and multi-question rendering
+  landed; free-text-with-suggestions, question grouping, and the "ask again" path did not.
+- **The file tree does not refresh mid-turn after a write.** A written file shows `Modified +1` only
+  after a reload. Post-write re-indexing is phase 4 (hooks).
+- **No health-banner link target.** The banner renders and its link goes nowhere.
+- **Deferred by decision, not by omission:** the preset selector (CC-12), the subagent browser, the
+  Context tab and HUD (**phase 6**), the history browser and session management (**phase 5**), and
+  relabelling the file picker's "deny agent read" (CC-14).
+
+> **Two of those came forward into phase 3**, and its entry says why. The Context tab and HUD were
+> replaced rather than vacated (CC-17), because a three-phase gap in "how full is the context" is not
+> a neutral wait. CC-14 landed as wiring *and* labels together, because a read-denial behind a label
+> saying "exclude from index" is a dishonest control — worse than either half of the job alone.
+
+### For whoever picks up phase 3
+
+- **Phase 3 is the deletion.** `LLMService` and `src/aic_dc/llm/` are intact and registered; the
+  chat path does not reach them. The exit criterion for phase 2 is met, so the deletion is now
+  unblocked — do it in one commit, per the plan.
+- **`collab.py`'s `ContextVar` fix is load-bearing beyond this phase.** Every async gate on
+  `LLMService` and `Repo` depends on it now. Deleting `LLMService` must not take the fix with it.
+- **The permission gate runs on the SDK's task.** Anything it needs from request context has to be
+  propagated explicitly; nothing about the RPC call is ambient there.
+- **13 `ClaudeCodeService` methods are localhost-gated**: `connect_engine`, `shutdown`,
+  `set_selected_files`, `chat_streaming`, `cancel_streaming`, `resolve_permission`,
+  `set_denied_read_files`, `set_permission_mode`, `set_model`, `rewind_files`, `stop_task`,
+  `reconnect_mcp_server`, `toggle_mcp_server`. A new method that mutates engine state or spends
+  money belongs on that list, and `test_claude_code_service.py` should pin it.
+
+> **17 as of phase 3**, and the four new ones do not look gated from `service.py`: `commit_all`,
+> `reset_to_head`, `start_review` and `end_review` delegate, so their `_check_localhost_only()` sits
+> in `claude_code/commit.py` and `claude_code/review.py`.
+
+---
+
+## Phase 3 — The rip-out (2026-08-15)
+
+**Exit criterion:** *"`grep -r litellm src/` is empty; test suite green."* Met on both counts:
+`grep -rn -i litellm src/` and the same over `webapp/src/` return nothing, and both suites pass —
+python **2550 passed, 75 skipped**; webapp **88 files, 3163 passed**.
+
+One commit, per the plan's no-interleaving rule: 189 files, **+6228 / −69527**.
+
+**The suite is green and smaller.** Python went 3897 → 2550 tests, because 52 test files and 33,350
+lines of them tested code that no longer exists. That is a shrinking denominator, not improving
+coverage, and it is the honest reading of the number.
+
+### What went
+
+37 Python modules, 25,371 lines:
+
+| Deleted | Lines | What it was |
+|---|---|---|
+| `llm_service.py` | 2043 | The RPC face of the native engine |
+| `llm/` (20 modules) | 13,704 | Streaming, prompt assembly, breakdown, agents, the RPC mixins |
+| `stability_tracker.py` + `cache_membrane.py` | 1977 | Four-tier cache assignment and its flux controller |
+| `context_manager.py` | 1393 | The central session state holder |
+| `edit_protocol.py` + `edit_pipeline.py` | 1640 | The emoji edit protocol and its applier |
+| `url_service/` (7 modules) | 2840 | URL detection, fetching, extraction, summarising, cache |
+| `history_compactor.py` | 658 | LLM-driven compaction |
+| `token_counter.py` | 578 | The `tiktoken` wrapper |
+| `file_context.py` | 279 | Per-file context assembly |
+| `agent_factory.py` | 259 | The `🟧🟧🟧 AGENT` spawn protocol |
+
+Seven config files, 569 lines: `system.md`, `system_doc.md`, `system_agentic_appendix.md`,
+`system_reminder.md`, `compaction.md`, `review.md` and `llm.json`. Five were prompts this app composed
+and sent; there is no longer a prompt to compose. **`review.md` has no successor at all** (CC-13) —
+the review no longer describes itself to a model. A review is an *arrangement of the repository* (disk at
+the branch tip, HEAD at the merge-base, everything staged), and the agent reaches the pre-change state
+the way a human reviewer does, with `git show` / `git diff` / `git log`. `commit.md` is the one prompt
+file that stayed (+12/−10): it is a message *format*, handed to the agent per commit rather than
+installed as a system prompt, and `config.py` keeps it out of the editable-file whitelist for that
+reason.
+
+`config.py` lost 896 lines and gained 55: the provider table, the model catalogue, the tier budgets
+and the prompt-file loaders all described the deleted engine. **Nothing in the
+config layer writes `os.environ`.** The `claude` CLI resolves its own credentials, and injecting a
+key or a region silently changes which account a turn bills to — that is left as a deliberate
+absence, not an oversight.
+
+Five dependencies left `pyproject.toml` with it: `litellm`, `tiktoken`, `boto3`, `tenacity` and
+`trafilatura`. The reason each one was there is recorded in the comment that replaced them.
+
+`src/aic_dc/__init__.py` now re-exports nothing but `__version__`. It used to hoist the four engine
+types that were constructed everywhere; all four are gone, and the surviving subsystems are reached
+by module path, which keeps `import aic_dc` free of transitive cost.
+
+### What survived by moving
+
+Four pieces of `llm/` were not engine machinery — they were features that happened to live inside the
+engine, and each is re-pointed at the CLI:
+
+| New home | Lines | Was |
+|---|---|---|
+| `claude_code/commit.py` | 321 | `llm/_commit.py` — generate a commit message, stage, commit, reset |
+| `claude_code/review.py` | 410 | `llm/_review.py` — branch review: checkout, diff, posture, teardown |
+| `doc_index/background.py` | 464 | `llm/_doc_index_background.py` — the post-write doc-index builder |
+| `claude_code/service.py` (+294) | — | The LSP RPC surface, `get_snippets`, `navigate_file`, and the git/review RPCs from `llm_service.py` and `llm/_rpc_lifecycle.py` |
+
+Two things about the review move are load-bearing. Review entry switches the engine's permission
+posture to `plan`, which is a control request — so `start_review` is now async where its predecessor
+was not. And a review can be entered on a **cold** engine, before the CLI process exists, where
+there is no client to send a control request to. `EngineSession.prefer_permission_mode` handles that
+case: it sets the posture a *future* `connect` starts in, and `build_option_kwargs` grew a
+`permission_mode` parameter so the session passes its **current** mode rather than `engine.json`'s.
+Without it, connecting would have silently reverted a posture the user had already asked for.
+
+`get_snippets` returns two sets now, `review` and `code`. The `doc` set went with the modes: there is
+no longer a state in which documents are the only thing the agent can see, so a document-specific
+snippet list has nothing to key off.
+
+### The panels were replaced, not vacated
+
+[`decisions.md#cc-17`](decisions.md), rebuilding what CC-4 specified — the HUD and the Context tab
+were the two surfaces most completely made of deleted numbers, and the plan's phase table originally
+left them for phase 6. `inventory.md:155-156` had already named both replacement files.
+Deleting them and shipping a gap for three phases would have removed the app's only answer to *how
+full is the context* at exactly the moment the CLI started making that decision on the user's behalf.
+
+| Deleted | Lines | Replacement | Lines |
+|---|---|---|---|
+| `context-tab.js` | 2360 | `context-usage-tab.js` | 629 |
+| `token-hud.js` | 1245 | `usage-hud.js` | 586 |
+
+Both read `ClaudeCodeService.get_context_usage`, which is a pass-through of the breakdown the CLI's
+own `/context` prints — so the tab and that command cannot disagree. The category colours come from
+the engine, so a user running both does not have to learn two colour languages; `categories[].color`
+carries the CLI's *theme token names* (`claude`, `promptBorder`, `inactive`, `warning`) rather than
+CSS, and `context-usage.js` maps them.
+
+`maxTokens` is the model's raw window — it equals `rawMaxTokens`, and the autocompact buffer is
+*not* subtracted from it. The compaction point is `autoCompactThreshold`, a separate field (167,000
+against a 200,000 window on Sonnet). The bar therefore fills toward the threshold, not `maxTokens`,
+so 100% is the real trigger point; `compactionLimit()` and `warningPercent()` own that arithmetic
+for all three views that render this payload. The payload was written against the opposite belief,
+and the live run corrected it: the ratios are provable from three identities the engine maintains —
+the content categories sum to `totalTokens`, `Free space` is `autoCompactThreshold − totalTokens`,
+and `Autocompact buffer` is `maxTokens − autoCompactThreshold`. The structural rows are room left
+rather than content, so the bar excludes them and checks the sum before segmenting.
+
+Two absences in them are deliberate. There is **no refresh loop** — the breakdown only moves when a
+turn runs or a session loads, so it refreshes on those events plus a button; polling would spend
+control requests watching a number that cannot change on its own. And there is **no "rebuild cache"
+button**, because the cache is the CLI's and there is no request to rebuild it; a button that quietly
+did nothing would be worse than no button.
+
+**Cost renders as "included", never as `$0.00`.** `total_cost_usd` is null under subscription
+billing. A turn on a Max plan did not cost nothing — it cost nothing *extra*, and the two are not the
+same claim. The model is read from the turn rather than from a config default, because `set_model`
+can change it mid-session and a subagent may have used a different one.
+
+The dialog's capacity bar was re-based from `get_history_status` (gone) onto `get_context_usage` for
+the same reason.
+
+### The file picker's third state now means something (CC-14)
+
+The three-state checkbox's third position used to mean *keep this file out of the structural index*.
+There is no index in the prompt to keep it out of, so per [`decisions.md`](decisions.md) § CC-14 it
+now writes a real `Read` deny rule to `.claude/settings.local.json` via
+`ClaudeCodeService.set_denied_read_files`.
+
+**This was listed under phase 2's "Deliberately not built" as deferred by decision**, framed as
+labelling work. It is done here instead, and the reading is worth stating because a later reader will
+find the two in conflict: wiring a read-denial *behind a label that says "exclude from index"* is a
+dishonest control — worse than either half of the job alone. `inventory.md:144` puts CC-14 in the
+phase-3 ADAPT table and `specs5/5-webapp/file-picker.md:5` states the end state outright, so the
+deferral is read as a record of what phase 2 didn't do rather than a prohibition on phase 3. Wiring
+and labels landed together.
+
+- **The picker's user-facing words are "deny agent read"**; the internal vocabulary stays `excluded` /
+  `_excludedFiles` / `exclusion-changed`. That is the name of a *tree state* — the third position of
+  a checkbox — shared with the picker, its event contract and a dozen tests. What changed is what the
+  state means to the backend, and that lives in one function.
+- **One repo-wide RPC, no per-tab dispatch.** The agent-tab branch (`set_agent_excluded_index_files`)
+  was dropped rather than re-pointed: a deny rule lands in settings sources that every SDK subagent
+  inherits, so a per-agent variant would be a promise the permission layer cannot keep.
+- **The list is authoritative, not additive**, which is what makes un-denying work without a second
+  method.
+- **The L0-invalidation dialog is gone** — with its three-way localStorage preference, its CSS and
+  its 20 tests. Excluding a file used to rewrite a ~100K-token cache prefix, so a dialog asking the
+  user whether to pay for that now was honest work. Both halves of the trade are gone: this app
+  builds no aggregate map, and the CLI's prompt cache is the CLI's. Its one surviving job — telling
+  the user the change is not instant — is now a `takes_effect` toast shown **once per session**, plus
+  the checkbox tooltip. The RPC returns that string; the frontend does not assume it.
+- **A remote collaborator's tick is refused and says so.** `set_denied_read_files` is localhost-only
+  (CC-15) and the `error: 'restricted'` path surfaces a toast, because otherwise the checkbox lies.
+
+### Frontend surfaces deleted
+
+Beyond the two replaced panels:
+
+| Deleted | Lines | Why |
+|---|---|---|
+| `compaction-progress.js` + test | 758 | The CLI compacts itself and reports one `compact_boundary`. A progress bar over someone else's compaction would be an animation, not a measurement — the transcript divider is the replacement *(reversed later: the file is back, inline in the dialog and indeterminate. The argument against a **measurement** stood; what it missed is that the pause still needs to be visible while it lasts, and the 3-second `pre_compact` toast that was left holding that job expired while the stall continued. See [shell.md § Layout](../5-webapp/shell.md#layout))* |
+| `cache-warmup-progress.js` | 322 | There is no cache to warm, and the four `cacheWarmup*` receivers went with it |
+
+Also removed: the **retry banner** (the successor is the `rateLimit` push, which reports the CLI's own
+limit rather than our retry loop); the **reasoning toggle and effort selector** — the `minimal` level
+the selector offered is not in the SDK's `EffortLevel` vocabulary, so it was offering a value that
+could not be sent; five native `compactionEvent` stages (`url_fetch`, `url_ready`, `compacting`,
+`compacted`, `compaction_error`), whose handler now hardens its `default` because *acting* on a stale
+`compacted` would replace the transcript the user is reading with a summary from an engine that is
+gone; the whole `binaryFilesSkipped` receiver, since nothing assembles a prompt from ticked files any
+more so a tick cannot silently fail; and `settings-tab.js`'s config-card grid, cut from eight
+cards to three (`engine`, `app`, `snippets`) with the model rows removed from its banner.
+
+`engine.json` is **editable but not reloadable**, and the card says so: session options are read when
+the CLI subprocess starts, so a reload would report success while the running engine kept its
+original model and posture. `app.json` does reload, because that one takes.
+
+The banner names no model even if a stale backend volunteers one. `engine.json`'s value is a
+*request*; the engine can answer on a different model (a rate-limit fallback, a mid-session
+`set_model`), and the model actually used is reported per turn by the HUD.
+
+The model in force *is* now named on that tab — in its own panel below the banner, reading a live
+`get_model()` rather than the banner's launch-time `get_config_info`, and carrying the switch that
+makes `set_model` a call somebody can actually make. It is the one control on the Settings tab that
+applies to the running session, which is why it is not in the card grid. See
+[`../5-webapp/settings.md` § Model Panel](../5-webapp/settings.md#model-panel).
+
+### Dormant, annotated, not deleted
+
+Five push receivers have no emitter after this phase — `modeChanged`, `agentModeChanged`,
+`agentsSpawned`, `agentsRehydrated`, `agentClosed` — and so do the surfaces that consume them: the
+code/doc mode toggle and the agent tab strip. They are **kept and commented, not tombstoned**,
+because their replacements are deferred *by decision*: the preset selector is CC-12 and the subagent
+browser is CC-8. Deleting a receiver while leaving its tab strip mounted moves the break rather than
+fixing it.
+
+The consequence is worth knowing when reading that code: an agent tab can only be created by an
+`agentsSpawned` push, nothing emits one, so `parseAgentTabId` cannot return a tag outside the tests
+and every `LLMService` call inside the strip is unreachable rather than broken. `app-shell/mode.js`'s
+`switchMode` guards on the method being absent and returns.
+
+`selection.js` carried a phase-3 promise that could not be kept — "phase 3 removes both the call and
+its caller". The call site stays with the dormant strip it belongs to, and the comment now says why
+instead of predicting a deletion that didn't happen. The sibling promise in `events.js` — "they stay
+until phase 3 deletes `LLMService`" — was honoured.
+
+`LLMService` call sites in still-live code were left in place with the phase that owns each: phase 4
+(`set_cross_reference`, `set_agent_cross_reference`), phase 5 (`history_list_sessions`,
+`history_get_session`, `history_search`, `get_turn_archive`, `load_session_into_context`,
+`new_session`), CC-8 (`close_agent_context`, `set_agent_selected_files`, `list_live_agents`,
+`get_agent_history`, `switch_agent_mode`) and CC-12 (`switch_mode`).
+
+### Tests
+
+Three new backend files, 104 tests, covering the three re-homed modules:
+
+| File | Tests |
+|---|---|
+| `test_doc_index_background.py` | 43 |
+| `test_claude_code_review.py` | 33 |
+| `test_claude_code_commit.py` | 28 |
+
+`test_claude_code_service.py` grew to 175 (+59/−17) for the absorbed RPC surface.
+`test_config.py` (−478 net) and `test_settings.py` (−103 net) shed the provider, model-catalogue and
+prompt-file cases.
+
+**`test_collab_restrictions.py` went 68 → 34 tests, and the fix it exists to protect survived.**
+Half its cases pinned `LLMService`'s gates. What matters is that `TestGateUnderRealDispatch` — the
+five tests pinning phase 2's `ContextVar` fix, including "the caller survives an `await` inside the
+method" — is independent of `LLMService` and is intact. Phase 2's note that the fix is load-bearing
+beyond that phase was the reason to check.
+
+Frontend: `exclusion.test.js` 18 (the 20 L0-dialog tests replaced by 11 read-denial ones),
+`events.test.js` 39, `per-tab.test.js` 25, `settings-tab.test.js` 18.
+
+**Neither new panel has a unit test.** `context-tab.js` and `token-hud.js` had none either, so this
+is an inherited gap rather than a new one, but it is a gap: the two files are 1215 lines with only
+the service-level tests for `get_context_usage` behind them.
+
+### Live verification — not done for this phase
+
+This was a deletion, verified by two suites and a grep. **The replacement panels have not been
+exercised against a running CLI**, so their rendering of a real `ContextUsageResponse` — the category
+list, the colours, the "included" cost path under subscription billing — is unproven outside the
+service-level pass-through tests. Phase 6's exit criterion ("the Context tab shows the same numbers
+as `/context` in the CLI, live") is the check that closes this, and it is worth doing sooner than
+that.
+
+Two empty package directories were removed by hand (`src/aic_dc/llm/`, `src/aic_dc/url_service/`);
+both held nothing but stale `__pycache__` after their contents were deleted.
+
+### Deviations from `inventory.md`
+
+- **The review orchestration landed at `claude_code/review.py`, not `repo/review.py`.**
+  `repo/review.py` already existed as the git-mechanics mixin, and the orchestration needs the
+  engine — permission posture, prompt streaming, index rebuild. Splitting them keeps the mixin
+  free of the engine; `repo/review.py`'s docstring now points at the orchestrator.
+- **The specs' "recorded in the transcript as a system event" is not implemented, for any of the
+  three things that claim it** — review entry and exit (`4-features/code-review.md:273`), a mode
+  change during review (`:295`), and a permission-mode change (`4-features/collaboration.md:247`).
+  All three broadcast live (`reviewStarted` / `reviewEnded`, `permissionModeChanged`) and vanish
+  on reload, exactly as phase 2's compaction divider does. There is no transcript to write to until
+  phase 5, so the deviation is one of ordering rather than of design; it is listed here so phase 5
+  finds the three claims rather than one of them.
+- **The two TeX RPCs were deleted, not re-homed**, against `inventory.md:76` ("navigate, TeX,
+  snippets survive"). `LLMService.is_tex_preview_available` / `compile_tex_preview` were thin
+  duplicates of `repo/tex_preview.py`, and the frontend already called `Repo.*` — so re-homing them
+  onto `ClaudeCodeService` would have created a second name for a working RPC. `navigate_file` and
+  `get_snippets` did survive onto the service, because they have no `Repo` equivalent.
+- **`context_usage.py` was not created**, against `inventory.md:103`, which lists it as a new backend
+  module doing "fetch, shaping, and caching for the Context tab". `ClaudeCodeService.get_context_usage`
+  has existed since phase 1 and is already a pass-through; shaping happens in the two components, and
+  caching would put a stale number in front of the user for no gain, since the call is one control
+  request against a value that only moves when a turn runs.
+- **`Repo.get_files_by_directory` and `get_directory_mtime` were deleted**, not kept: their only
+  caller was the engine's per-directory prompt assembly.
+- **The empty-path post-write signal is a no-op until phase 4.** `Repo`'s post-write callback is now
+  `DocIndexBuilder.note_file_written`, which covers *one* of the two write paths it used to. The
+  user's edits go through `Repo.write_file`; the agent's do not — the CLI's `Write` and `Edit` write
+  to disk directly, and re-indexing after those is the post-tool-call hook that lands with the MCP
+  bridge in phase 4. This is stated in `main.py` at the wiring site so it isn't rediscovered as a
+  bug.
+- **`edit-blocks.js`, `edit-block-render.js`, `agent-block-render.js` and the prose render path were
+  kept**, against the inventory's DELETE. They are the decoders for archived transcripts: a session
+  saved before the conversion contains emoji edit blocks and `🟧🟧🟧 AGENT` framing, and deleting the
+  renderers turns old history into garbage on screen. They are archive decoders now, not a live path,
+  and they revisit with phase 5.
+- **Retired config files are ignored, not deleted** — a deliberate choice the inventory did not
+  specify. The upgrade iterator walks the *union* of the managed and user file sets, so a user
+  upgrading in place keeps their `system.md` and `llm.json` on disk. That text may be customised
+  prompt work; deleting it would be irreversible and pointless, since nothing reads the file either
+  way. The cost is a few kilobytes. What was **not** built is the notice: nothing tells such a user
+  the files are now inert.
+- **The permission-rule destination default flipped to `localSettings` before this phase, not in
+  it** — CC-16 landed as its own commit, as the note under phase 2 records.
+- **`prefer_permission_mode` and `build_option_kwargs(permission_mode=…)` are new seams** the
+  inventory did not anticipate; the cold-engine review-entry case above is why.
+- **`engine` is a new config type** in the settings whitelist, replacing `llm`.
+- **Doc-index enrichment for CLI-tool writes is deferred to phase 4** (same cause as the no-op
+  signal above).
+
+### Deliberately not built
+
+- **No live verification of the new panels** — see above. This is the one that should be closed first.
+  *Closed 2026-08-16; it found five wrong numbers. See the [interlude](#interlude--the-context-panels-meet-a-live-cli-2026-08-16).*
+- **No unit tests for `usage-hud.js` / `context-usage-tab.js`.** *Closed 2026-08-16, same entry.*
+- **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8.
+  *The tab strip half closed 2026-08-17: subagents now open their own live tabs. See the
+  [interlude](#interlude--the-tab-a-subagent-never-got-2026-08-17). CC-12 is unchanged.*
+- **No upgrade notice for a stale `llm.json` or `system.md`.** They are left on disk and ignored.
+- **The doc index still misses the agent's writes.** Phase 4.
+- **`<aic-history-browser>` is still mounted and inert.** Phase 5, unchanged from phase 2.
+
+### For whoever picks up phase 4
+
+- **Phase 4 is the MCP bridge, and it inherits one clear consumer.** The plan's ordering constraint
+  ("indexes after the rip-out, not before") is now satisfied: prompt assembly is gone, so the symbol
+  and doc indexes have exactly one consumer — the browser — and the bridge is written against that
+  instead of two competing ones.
+- **Two things are waiting on the post-tool-call hook**, and they are the same thing: the file tree
+  does not refresh after the agent writes, and the doc index does not learn about it. Both are the
+  callback in `main.py` covering only `Repo.write_file`. Wire the hook once and both close.
+- **17 RPCs are localhost-gated now, not 13, and four of them do not look it.** `commit_all`,
+  `reset_to_head`, `start_review` and `end_review` delegate, so the `_check_localhost_only()` call is
+  in `claude_code/commit.py` and `claude_code/review.py` rather than in `service.py`. A grep of
+  `service.py` alone will read them as ungated. They are pinned by
+  `test_claude_code_commit.py` and `test_claude_code_review.py`.
+- **`collab.py`'s `ContextVar` fix survived the deletion**, as phase 2's note required. Its five
+  tests are `TestGateUnderRealDispatch` in `test_collab_restrictions.py`; that file lost half its
+  cases with `LLMService` and those five are the ones that must not go.
+- **Nothing in the config layer may write `os.environ`.** The CLI resolves its own credentials, and
+  an injected key or region silently changes which account a turn bills to.
+- **Phase 1's absence assertions are now phase 5's alone.** `get_denied_read_files` and
+  `set_denied_read_files` both exist and are tested; `history_list`, `history_load` and
+  `history_delete` are still asserted absent by `test_phase_five_methods_are_absent`, on phase 1's
+  reasoning that a stub reporting success would be worse than a missing method. Delete that test as
+  you build them, not before.
+
+---
+
+## Interlude — the two dialogs the terminal has and the browser did not (2026-08-15)
+
+Not a phase. Two gaps found while answering "can this repo build itself yet?", both in the permission
+dialog, both cheap enough to close before phase 4 rather than after. The question mattered because
+self-hosting makes the permission dialog the only way to work: a gap the terminal covers is a gap that
+stops the session.
+
+### `ExitPlanMode` is now a class of its own
+
+`classify_tool` had no entry for it, so it took the unknown-name fallthrough to `exec`. The consequence
+was not a missing dialog but a wrong one: the plan arrived through `CommandPayload`, summarised, capped
+at 4 000 characters, under the heading "command", with focus moved to Deny whenever the prose happened
+to contain the word "delete". A dialog asking for approval of something it is not showing.
+
+- `plan` is a `tool_class`, gated by default; `PlanPayload` carries `plan`, `headline` and `file_path`.
+- The plan renders as markdown, whole, scrolled rather than truncated. `plan` is optional in the CLI's schema — injected from disk — so the no-plan case has its own body, and `planFilePath` is shown when present.
+- The primary button says "Approve plan"; the header shows the plan's first line rather than `ExitPlanMode`'s title, which is identical for every such call; deny prefills "Keep planning".
+- No suggested rule is derived. A standing grant here approves every future plan unread.
+
+### `AskUserQuestion` gained the reply the terminal always offers
+
+The tool's schema tells the model *not* to write an "Other" option, on the grounds that the front end
+provides one. Ours did not, so a user whose answer was none of the offered options had to deny the call
+and start again in prose. Each question now has a text field: typing clears a single-select selection and
+is sent instead of it, a multi-select sends it alongside what is ticked, and a typed reply counts as that
+question's answer for the "Answer" button.
+
+`PermissionDecision.answers` is now `[{options, text}]` per question. Bare index lists are still read, so
+a browser mid-upgrade does not lose its selections.
+
+### One spec correction, made in code first
+
+`specs5/5-webapp/permission-dialog.md` said the freeform reply travels as `input.response`. Implementing
+that literally would have silently discarded every option the user picked: the CLI's result mapping tests
+`response` *before* it reads the answers map, and returns "The user responded: …" instead of it. The
+reply goes through `answers[<question text>]` like any other answer. Both specs now record the verified
+semantics; `test_no_response_key_is_ever_written` pins the behaviour.
+
+### Tests
+
+- `tests/test_claude_code_permissions.py` — `TestPlanPayload` (8), `TestFreeformAnswers` (7), plus the classification and summary cases. 134 in the file, all passing; 2 568 in the suite.
+- `webapp/src/permission-dialog/dialog.test.js` — `describe('a plan')` (8) and `describe('a question the options do not answer')` (7). `queue.test.js` gained 6. 3 184 in the webapp suite, all passing.
+
+### Deliberately not built
+
+- **The permission mode goes stale after an approved plan.** The CLI sets its own mode to `prePlanMode ?? "default"` and announces nothing, so the mode selector goes on saying `plan`. Same class of lie `note_mode` fixed for `setMode` suggestions, but the target mode is whatever preceded plan mode and the SDK does not expose it — the engine would be guessing. Recorded in `specs-reference/3-engine/permissions.md` § `ExitPlanMode`.
+- **The transcript tool card for `ExitPlanMode` is still generic.** The dialog was the blocking gap; the card is a read of history.
+- **No "chat about this" on the dialog.** Denying with a reason is the available path, and it works — the agent reads the reason — but it costs a turn where the terminal would let the user just talk.
+- **`preview` and `annotations` on `AskUserQuestion` remain unbuilt.** Phase 6, unchanged.
+
+---
+
+## Phase 4 — The indexes as MCP tools (2026-08-15)
+
+**Exit criterion:** *"Claude Code can call `symbol_map` / `doc_outline`; hover and go-to-definition
+still work in Monaco."* Met for the tools — see [Live verification](#live-verification-2). **The Monaco
+half is proven by tests only**, for the reason below.
+
+This is CC-6 built: the symbol and document indexes reach the agent as tools it decides to call, not as
+text prepended to a prompt. The difference is not packaging. Prompt injection paid for the index on
+every turn whether or not the turn was about code; a tool is paid for when asked, and the agent's choice
+to call it is visible in the transcript as a tool card.
+
+### What landed
+
+Two new modules, both in `src/aic_dc/claude_code/`:
+
+| File | Lines | What it is |
+|---|---|---|
+| `mcp_server.py` | 734 | `McpBridge` — the six tools, their schemas, and their rendering |
+| `hooks.py` | 383 | `Reindexer` and `build_hook_matchers` — the `PostToolUse` re-index |
+
+**`McpBridge` takes callables, not indexes.** Every provider is a zero-argument callable
+(`symbol_index`, `symbol_index_ready`, `doc_index`, `doc_index_ready`, `review_state`, `ui_state`,
+`flush`) resolved at call time. The indexes it reads are built minutes after the session connects and
+are replaced wholesale on a rebuild, so a bridge holding references would answer from the object that
+existed at wiring time. It also means the tools and the browser read *the same* index objects — an SDK
+in-process server, not a subprocess with a second copy.
+
+The six tools, all annotated `readOnlyHint=True`:
+
+| Tool | Answers |
+|---|---|
+| `symbol_map` | The compressed repo map, optionally under a `path_prefix` |
+| `file_symbols` | Symbols for named paths, with line numbers |
+| `find_references` | Definition and referrers for a name |
+| `doc_outline` | Headings, keywords, line counts and link targets for documents |
+| `review_state` | Whether a review is in progress, and over what |
+| `ui_state` | Selected files, the open viewer, permission mode |
+
+The last two are why the bridge exists as more than an index shim: the agent can now ask what the human
+is looking at. `ui_state` returns a copy, not the service's own dicts —
+`test_the_snapshot_does_not_alias_the_service_state` pins that, because a tool handing out a live
+reference lets a schema change in the browser mutate service state.
+
+**Chunking is by path, not offset.** A map of this repo does not fit in one tool result, so both map
+tools return a chunk plus a continuation cursor, and the cursor is a *path*. An offset would be
+invalidated by the re-index that the next call may trigger; a path still names a file. `exclude_files`
+for the next call is computed against the whole index rather than the chunk — the bug that version one
+had, and the one the live run surfaced honestly: the agent reported "the map came back chunked,
+`session.py` is in a chunk I have not seen" instead of concluding the file did not exist.
+
+**Freshness is a flush, not a hope.** `Reindexer` debounces the `PostToolUse` writes it sees, and every
+index-reading tool calls `flush()` *before* it answers. So the agent that writes a file and immediately
+asks for its symbols gets the file it just wrote. `MAX_FLUSH_ROUNDS = 2` bounds a write storm; an
+`asyncio.Lock` serialises drains and is the thing `flush()` joins on.
+
+**Three-state readiness, plus a failure flag.** `absent` / `building` / `built` on the service
+(`_mark_symbol_index_ready`, `_mark_symbol_index_failed`, called from `main.py`'s heavy init), and
+`DocIndexBuilder.failed` for the doc half. A partially built index answers Monaco's hovers and is
+withheld from the map tools, which report it unavailable and point at `Grep`. A hover that resolves for
+half the repo is useful; a map that covers half the repo is a lie with no marker on it. The `failed`
+flag exists because "wait and retry" and "this will never work" are indistinguishable through `ready`
+alone, and an agent that retries a permanent failure spends turns on it.
+
+**The agent's writes now reach the doc index.** `DocIndexBuilder.note_file_written` gained a `bool`
+return and a second caller. Phase 3 left it wired to `Repo.write_file` only — the user's edits — with a
+comment saying the agent's writes were phase 4's job. They are now the `PostToolUse` path, calling the
+same method, so the decision about which extensions matter stays in one place. The return value is what
+lets the re-index report *which* writes refreshed an index without the caller having to know that.
+
+**`SymbolIndex.resolve_indexed_path` learned to take the paths an agent types.** The CLI reports writes
+as absolute paths; the index is keyed relative. It now accepts absolute paths under the repo root,
+`./`-prefixed and `..`-containing relative paths, and refuses anything that escapes the root —
+`/etc/passwd` and `../outside/a.py` return `None`, while `.github/workflows/x.py` resolves, because a
+leading dot is a real directory and only `..` leaves.
+
+### The gate had to learn about our own tools
+
+`specs5/3-engine/permissions.md` puts the `aic-dc` index tools in the read-only row: *displayed, not
+gated*. That was implemented as `classify_tool` returning `"read"` for them — which shapes a dialog's
+wording and does not skip one. `Read`, `Glob` and `Grep` are ungated because the **CLI** never asks
+about them. Our MCP tools it does ask about, in `acceptEdits` and `default` though not in `plan`.
+
+So `can_use_tool` now early-returns `PermissionResultAllow()` for `mcp__aic-dc__*`, with no dialog, no
+broadcast, and no prompt recorded on the turn — a prompt nobody saw must not inflate the turn footer's
+tally. Without it the agent stalls on a dialog for every `symbol_map` call, and answering those is
+click-through training, which is R-12 in `risks.md` becoming true through a mechanism the risk register
+did not anticipate: not fatigue from real prompts, but noise from prompts that should not exist.
+
+`allowed_tools` was **not** used for this, which would have been the obvious fix. Setting it in options
+is forbidden — it replaces the CLI's own resolution of the user's settings — so the allow lives in our
+gate, where the reason for it is readable.
+
+### Retired: the cross-reference toggle
+
+The only frontend control deleted rather than left dormant. It chose which index fed the native
+engine's prompt; both indexes are now permanently available as tools, so there is nothing left to
+switch. `toggleCrossRef`, `_crossRefEnabled`, `_toggleMainCrossRef`, `_toggleAgentCrossRef`, the
+`+xref` mode-string composition, and the `cross_ref_enabled` snapshot hydration are all gone, each site
+carrying a one-line tombstone naming the phase.
+
+**The mode axis stayed.** `_mode`, `_tabModes`, `onModeChanged` and `onAgentModeChanged` are still
+mounted and still inert, waiting for CC-12's preset selector and CC-8's `Task` tab strip. The rule that
+decided each case: remove a receiver only when its consumer is going too, because removing a receiver
+while leaving the consumer mounted moves the break instead of fixing it. The cross-reference toggle had
+no consumer left; the mode axis has one arriving.
+
+Two tests pin the retirement as a *behaviour* rather than an absence: `toasts-and-events.test.js`
+asserts the shell ignores a `cross_ref_enabled` field it is sent, and `tabs.test.js` asserts an
+archived `+xref` mode string still renders verbatim, since old transcripts contain them.
+
+### Tests
+
+| File | Tests | Note |
+|---|---|---|
+| `test_claude_code_mcp_server.py` | 42 | new — schemas, rendering, chunking, readiness, flush ordering |
+| `test_claude_code_hooks.py` | 28 | new — debounce, drain, hook shape, degradation |
+| `test_claude_code_service.py` | 202 | +`TestBridgeWiring`, `TestIndexReadiness`, `TestUiStateSnapshot`, `TestReindexReporting` |
+| `test_symbol_index_orchestrator.py` | 53 | +`TestReindexFiles`, `TestResolveIndexedPath`, `TestNameQueries` |
+| `test_claude_code_permissions.py` | 139 | +`TestOurOwnToolsAreUngated` (6) |
+
+**2 687 passing, 75 skipped** in the backend suite; **3 185 passing** across 88 files in the webapp.
+
+Two of those tests exist because a red test turned out to be a real defect rather than a bad assertion:
+
+- **`test_a_flush_does_not_abandon_the_batch_a_drain_is_holding`.** `flush()` cancelled the debounce
+  timer, and the drain was awaited *inside* that timer's task — so cancelling it aborted a rebuild that
+  had already taken its batch off the queue. `flush()` then returned believing the index was fresh,
+  over an index missing those files, with `_pending` already cleared. Silent, and exactly the failure
+  the flush exists to prevent. Fixed by spawning the drain as a task of its own (`_spawn_drain`), so
+  the timer only ever sleeps.
+- **`test_the_debounced_path_survives_a_broken_drain`.** Nobody awaits a debounced drain, so nobody
+  would see it raise. `_drain_quietly` logs and keeps the reindexer usable.
+
+**The bridge's fake index records what it was asked for, not just what it returned.**
+`FakeSymbolIndex._render` appends every `exclude_files` set it receives, and
+`test_it_excludes_against_the_whole_index_not_the_scope` asserts on that list
+(`symbols.exclusions[-1] == {"src/b.py", "webapp/c.js"}`). That is what caught the scoping bug: the
+rendered output of a scoped map looks correct whether the exclusion set was computed against the whole
+index or against the chunk, and only the *argument* distinguishes them. Asserting on the return value
+alone would have passed. The real-index coverage lives next door in `test_symbol_index_orchestrator.py`,
+where `TestReindexFiles` builds a tree under `tmp_path` and re-indexes it.
+
+### Live verification
+
+`scripts/bridge_smoke.py` — new, alongside `engine_smoke.py`, in `scripts/` for the same reasons: it
+costs tokens and needs a login. It builds the symbol index the way `main.py` does (resolver seeded
+before per-file indexing, then call-site resolution, then the reference graph — get that order wrong
+and every import resolves to `None`), wires the real `PermissionBroker`, the real hook matchers, and
+the bridge, then runs one turn.
+
+Four runs against CLI 2.1.229. Three pass; the fourth is the one that found the gate bug, and it ran
+first as a failure:
+
+- **`--no-docs`** (352 files indexed of 447): the model called `mcp__aic-dc__symbol_map` with
+  `{'path_prefix': 'src/aic_dc/claude_code'}` and named `permissions.py` as the module holding the
+  permission gate, from the map alone. It also reported the chunk boundary rather than treating an
+  unseen file as absent.
+- **`--tool doc_outline`**: summarised all seven documents in `specs5/plan/` — their headings,
+  keywords, line counts and outbound links — without opening a file. It read the phase table well
+  enough to state that three phases were logged complete and phase 4 handed off.
+- **`--write`, first attempt — failed.** The hook half worked: `files_reindexed` came back
+  `['scratch_bridge_smoke.py']`. But the tool call itself was refused — *"Claude requested permissions
+  to use mcp__aic-dc__file_symbols, but you haven't granted it yet"* — and the agent said so plainly
+  instead of guessing, which is the only reason it was legible. Two bugs behind one symptom: the gate
+  did not ungate our tools, and the script passed no `can_use_tool` at all, so the *CLI* was answering
+  and the script would have logged a real denial as a model choice. Both fixed; the script now wires
+  the real `PermissionBroker` and fails loudly if one of our tools opens a dialog.
+- **`--write`, after the fix**: `Write` → `PostToolUse` → debounced re-index → `flush()` →
+  `file_symbols` reporting `f smoke_marker:1()` for a file that did not exist when the index was built.
+  `files_reindexed` came back as `['scratch_bridge_smoke.py']`, resolved from the absolute path the CLI
+  reported. The whole freshness chain, end to end, in one turn — and no dialog.
+
+**The Monaco half of the exit criterion is not live-verified.** `lsp_get_hover`, `lsp_get_definition`
+and `lsp_get_references` needed no re-pointing — phase 3 re-homed them onto `ClaudeCodeService` reading
+`self.symbol_index` directly, and they deliberately bypass the readiness gate the map tools respect, so
+a partial index still answers hovers. That is tested but not clicked. **Open the app and hover a
+symbol before trusting this phase.**
+
+Two facts from the live runs worth knowing:
+
+- ~~**`get_mcp_status` does not list an in-process SDK server.**~~ **Wrong — corrected 2026-08-26.** It
+  reported only the user's `chrome-devtools` while our six tools were being called successfully in the
+  same turn, and that absence was read as the CLI's behaviour. It was the *sample's*: `bridge_smoke.py`
+  calls `get_mcp_status()` in the instant after `connect()` returns, before the list is populated. Polling
+  from that instant shows only stdio servers, `pending` with 0 tools, and 1.5s later both they and a
+  `scope: "dynamic"` SDK server are there with their real counts. On the same CLI 2.1.229 the real app
+  lists `aic-dc`. See [`sdk-surface.md`](sdk-surface.md) § Correction, 2026-08-26 — which also records
+  that the first attempt at this correction blamed the wrong cause. What still holds is the narrower half:
+  the smoke script's status line is context, not a registration check, and a row appearing does not prove
+  the tools are advertised — a disabled SDK server still reads `connected` with zero tools. What proves
+  registration is a `mcp__aic-dc__*` call happening at all.
+- **The `$CLAUDE_CODE_USE_BEDROCK` warning fires on a machine with a subscription login.**
+  [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session)'s tripwire, working: the
+  environment redirects the CLI to a gateway while `~/.claude/.credentials.json` exists. Worth knowing
+  before reading a cost number from any run here. (This entry originally cited R-10, which is subagent
+  transcript volume; corrected when phase 5's live verification found the environment unchanged.)
+
+### Deviations from `inventory.md`
+
+- **`hooks.py` subscribes to one event of the seven the inventory lists.** `inventory.md:100` names
+  `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PreCompact`, `Stop`, `SubagentStart` and
+  `SubagentStop` as "handlers that drive UI broadcasts and re-indexing". Only `PostToolUse` shipped,
+  because it is the only one this phase needs and every extra subscription is a place a hook can shadow
+  `can_use_tool` or slow a tool call down. `PreToolUse` is *deliberately* unsubscribed —
+  `test_pretooluse_is_not_subscribed_at_all` pins that, since a `PreToolUse` handler is the one that can
+  return a `permissionDecision` and silently replace the gate. The other five are UI broadcasts the
+  message pump already covers or phase-5/6 work.
+- **Bash-driven writes are not re-indexed.** The hook watches `Write`, `Edit`, `MultiEdit` and
+  `NotebookEdit`. A `sed -i` or a `git checkout` through `Bash` changes files the index will not hear
+  about until the next full build. Hooking `Bash` would mean re-indexing after every `ls`, and the tool
+  input is not reliably parseable into "which files did this touch" — the alternatives are a filesystem
+  watcher or nothing, and nothing is what shipped. **This is the phase's largest known hole.**
+- **The frontend cross-reference toggle has no inventory row of its own.** `inventory.md:142` says only
+  "`app-shell/mode.js` — mode toggle becomes a preset selector (CC-12)", and cross-reference appears
+  only in the two backend DELETE rows (`llm/_rpc_state.py:41`, `llm/_stability.py:42`) that went in
+  phase 3. So the frontend half was left implicit, and reading the inventory alone would have you
+  adapt it alongside the mode toggle. It was deleted instead — see above.
+- **`messages.py`'s per-card `files_modified` inference is unchanged.** The re-index reports
+  `files_reindexed` on the turn footer as a separate fact. Two sources for "what changed" sounds like
+  one too many, but they answer different questions — the card attributes a write to a tool call, the
+  footer says which of those writes refreshed an index — and collapsing them would lose the
+  attribution.
+
+### Deliberately not built
+
+- **No `Bash` write detection.** Above.
+- **No banner when the bridge fails to start.** `mcp-bridge.md` § Availability says the session
+  continues without it "and a banner reports the loss — otherwise the agent simply appears inexplicably
+  worse at repo-wide questions", which is exactly right and is exactly what is missing. What shipped is
+  degradation without announcement: if `build_server()` raises, the session connects with
+  `mcp_servers=None`, the hooks stay wired, and a log line says the agent will fall back to
+  Glob/Grep/Read. Nothing reaches the browser. Two service tests pin the degradation itself
+  (`McpBridge.build_server` raising leaves hooks intact; `build_hook_matchers` raising leaves servers
+  intact), so the failure is survivable and silent rather than fatal and silent — but a user watching
+  the agent grep its way around a repo will not know why. **Closed in phase 6**: each loss is recorded
+  as a sentence on `EngineHealth.degradations` where it happens, and the health banner renders it beside
+  the version and credential warnings. The same two tests now assert the sentence, not just the log.
+- **No token-cost display for the tool inventory.** `mcp-bridge.md` also wants server health and the
+  `aic-dc` tool inventory with its token cost in the Context tab. The tools are registered and callable;
+  the panel does not mention them. Phase 6 territory. The banner above is the same missing surface seen
+  from the other side. It also inherited phase 3's gap that neither context panel has a unit test —
+  that half has since been pulled forward to sit ahead of phase 5, because phase 5 adds *session load*
+  as a second refresh trigger into panels nobody has watched work.
+- **No `symbol_map` in the Context tab's cost breakdown.** Same reason.
+- **The mode toggle and agent tab strip are still mounted and inert.** CC-12 and CC-8, unchanged from
+  phase 3. *The tab strip half closed 2026-08-17, same entry as under phase 3.*
+- **`<aic-history-browser>` is still mounted and inert.** Phase 5, unchanged since phase 2.
+
+### For whoever picks up phase 5
+
+- **Phase 5 is history, and `test_phase_five_methods_are_absent` is still there.** `history_list`,
+  `history_load` and `history_delete` are asserted absent on phase 1's reasoning that a stub reporting
+  success is worse than a missing method. Delete that test as you build them, not before.
+- **The transcript is where three phase-3 deviations converge.** Review entry and exit, a mode change
+  during review, and a permission-mode change all claim to be "recorded in the transcript as a system
+  event" in the specs, and all three only broadcast live. Phase 3 listed them together so you would
+  find all three rather than one.
+- **`Reindexer` is the only thing that knows what the agent wrote.** If the transcript wants a
+  "files changed this turn" record that survives a reload, `take_reindexed()` is the honest source for
+  the index half and `result['files_modified']` for the CLI's half. They disagree by design: the first
+  is repo-relative and filtered to files an index cares about, the second is absolute and everything.
+- **Neither of those two is "files changed", and the persisted field must not say it is** —
+  [`decisions.md#cc-18`](decisions.md). Where they disagree is documented above; where they *agree* is
+  the trap: both miss `Bash`. `take_reindexed()` misses it because the hook never fires for `Bash`, and
+  `result['files_modified']` misses it because `messages.py:62` gates `_files_modified` on the same
+  four-tool `_FILE_WRITING_TOOLS` map — whose docstring already calls input-attribution "a stopgap".
+  Name the field for what it holds (`files_written_by_file_tools` or equivalent). A wrong live
+  broadcast dies at reload; a wrong field in `.aic-dc/` is what the history browser and full-text
+  search show until someone migrates every transcript users have accumulated. Phase 8 may later make
+  the narrow name obsolete — that is a cheap problem, and the reverse is not.
+- **Before you start, the two context panels need tests and one live run.** They refresh on *a turn
+  runs* and *a session loads*, and you are building session loading. See the README's status section;
+  this is deliberately not phase-5 scope, it is phase 3 work that phase 5 would otherwise inherit the
+  blame for. **Done — 2026-08-16, in the interlude below.** Two of its findings bind phase 5: session-load
+  fetches must opt into `withRpcTimeout`, and the tab-visibility contract is `onTabVisible`, not a
+  guess.
+- **Nothing in the config layer may write `os.environ`**, and **hooks must never return a
+  `permissionDecision`.** The second is new with this phase and is the sharper of the two: a
+  `PostToolUse` hook returning one shadows `can_use_tool` entirely, ungating every gated tool with no
+  error anywhere. `build_hook_matchers` returns observation only, and
+  `test_claude_code_hooks.py` pins that the returned dict never carries a decision.
+- **`can_use_tool` now has an early return before any dialog is built.** Anything you add to the front
+  of that method runs after it for `mcp__aic-dc__*` calls and before it for everything else. If a future
+  server is added to the bridge, it is ungated by the same line — which is correct only as long as
+  every tool on it is genuinely read-only and in-process.
+- **`collab.py`'s `ContextVar` fix and its five `TestGateUnderRealDispatch` tests survive**, unchanged
+  and still load-bearing.
+
+---
+
+## Interlude — the context panels meet a live CLI (2026-08-16)
+
+Not a phase. The README sequenced this ahead of phase 5 for one reason: `context-usage-tab.js` and
+`usage-hud.js` refresh on *a turn runs* and *a session loads*, phase 5 builds session loading, and
+neither panel had a test or a live run. The bet was that phase 5 would otherwise inherit the blame for
+whatever was already wrong. Five things were.
+
+### Five wrong numbers, and why 3 371 green tests said nothing
+
+Phase 3 shipped the two panels and the shell's capacity bar against a *guessed* model of
+`ContextUsageResponse`. Each of the three views derived the arithmetic independently, so each was wrong
+on its own terms — and the fixtures were written from the same guess, so the suite agreed with it. This
+is the failure mode a fixture cannot catch by construction: the test asserts the guess.
+
+What the engine actually reports, provable from three identities it maintains:
+
+- the content categories sum to `totalTokens`
+- `Free space` is `autoCompactThreshold - totalTokens`
+- `Autocompact buffer` is `maxTokens - autoCompactThreshold`
+
+So the non-deferred categories tile the whole window, `maxTokens` equals `rawMaxTokens` (200 000), and
+the compaction point is a separate field (167 000). Five consequences, every one of them visible on
+screen:
+
+1. **`categories[].color` carries the CLI's theme token names** — `claude`, `promptBorder`,
+   `inactive`, `warning` — not CSS. Every bar segment and legend swatch in both panels rendered
+   transparent.
+2. **Shares divided by `totalTokens`**, which gave `Free space — 692.0%`. The denominator is
+   `maxTokens`; the column is now headed `Share of window` and the shares sum to 100 %.
+3. **The bar segmented by every non-deferred category**, so it sat permanently 100 % full with 73 % of
+   it labelled "Free space" — a capacity bar that cannot show capacity. Structural rows are room left,
+   not content, and are excluded.
+4. **`maxTokens` was believed to arrive pre-reduced by the autocompact buffer.** It does not, at seven
+   sites. That made the `rawMaxTokens > maxTokens` tooltip branches dead in both panels — the one thing
+   they existed to explain was the one thing they never said — and put the >90 % red band out of reach
+   in all three views: at the moment of compaction the bar read **84 %, in green**, the single reading
+   it exists to rule out.
+5. **`MCP tools — 0 loaded` above a table of 35 tools.** All 35 are deferred, so "0 loaded" was true
+   and unreadable; it now names the count, the loaded tokens and the deferred tokens.
+
+Also cosmetic and also live-only: the engine names some rows `System tools (deferred)` *and* flags them,
+which rendered as `System tools (deferred) (deferred)`.
+
+### The arithmetic moved to one place
+
+`context-usage.js` (242 lines) now holds the derivation the three views each got wrong.
+`partitionCategories` checks the sum identity rather than trusting its own name matching, and an
+unverified payload degrades to an unsegmented bar instead of a confident wrong one. `warningPercent`
+puts the warning colour on the figure that predicts the pause *and* on the number being looked at — the
+HUD had been printing one basis and colouring by another.
+
+The three views' fixtures are rebased onto a verbatim live capture, with a `usageAt(totalTokens)`
+helper that rebuilds the structural rows so the identities keep holding as a test moves the number.
+Confirmed live afterwards: `memoryFiles` is `{path, type, tokens}` and `mcpTools` is
+`{name, serverName, tokens, isLoaded}`. **`agents` came back empty, so its element shape is still
+unverified** — the one shape in the payload still resting on a guess.
+
+### A dropped reply wedges every guarded fetch
+
+Found in the same run, and the wider bug of the two. A jrpc-oo call issued while the socket is being
+replaced — a reload mid-reconnect is the reliable way to see it — is dropped without a reply, and its
+promise then neither resolves nor rejects. Survivable alone. What is not is the `if (inFlight) return;`
+guard nearly every fetch in the webapp uses: the flag clears in a `finally`, the `finally` never runs,
+and the component stops fetching for the rest of the session. The HUD's context section went
+permanently blank, and the Context tab's Refresh button — the one affordance that would retry — is
+disabled in exactly that state, because `_loading` both blocks the fetch and greys the button.
+
+`withRpcTimeout` (`rpc.js`) rejects at a deadline so the `finally` runs. **Opt-in, not folded into
+`rpcCall`:** some calls legitimately run for minutes — a document conversion, an index rebuild — and a
+blanket deadline would break them. Nothing cancels the underlying call, since jrpc-oo cannot, so a late
+reply is ignored.
+
+Pick the deadline *above* whatever deadline the backend method already has. Every `ClaudeCodeService`
+method converts its own failures into an `{error}` return, so the backend always replies; a shorter
+deadline here abandons a reply that is still coming and stacks a retry onto whatever was too slow the
+first time. The remaining case — no reply at all — is the only one this helper is for. All three
+`get_context_usage` callers use 90 s, and that number is not arbitrary: the call measured **3–5 s warm,
+14 s on the first fetch after an idle session, and past the SDK's own 60 s control-request deadline
+eight times in one half-hour run.** A control request to the CLI subprocess is not a local computation.
+
+### A revealed tab is told it is on screen
+
+`ContextUsageTab.onTabVisible` had no caller. Its docstring said "called by the dialog when this tab
+becomes visible"; `_switchTab` set `activeTab` and told nobody. The tab refuses to refetch while hidden
+— a breakdown costs a control request — and marks itself stale instead, but it cannot see the class
+change that reveals it, so the badge stayed lit until someone pressed Refresh. The one affordance that
+clears it was unreachable by the gesture it was written for.
+
+`_switchTab` now notifies the newly-active tab on a microtask after the render that moves `.active`, so
+the query finds the tab arriving rather than the one leaving. Deliberately generic: any tab that grows
+the hook gets it, tabs without one are untouched.
+
+### A failed turn is not an included turn
+
+The HUD guarded on `result.error` to skip a turn with no numbers. A `streamComplete` result has no
+`error` key — the engine flags failure as `is_error`, in `messages.py` `_on_result` and in the synthetic
+result `service.py` emits when a turn dies outside the pump, which is what the chat panel reads. **The
+guard had never fired.** So a failed turn popped a HUD reading `included · 0.0s`, where "included" is a
+claim about subscription billing — the turn cost nothing *extra* — standing in for a cost the engine
+never priced. Wrong in the one direction a cost display must not be wrong.
+
+### Tests
+
+No backend change: python stays **2 687 passed, 75 skipped**. Webapp **91 files / 3 380 passed**,
++195 over the phase-4 figure, in four files:
+
+- `context-usage.test.js` — **41**, new. The shared derivation, including the identity check and the
+  degrade-to-unsegmented path.
+- `context-usage-tab.test.js` — **74**, new. The panel phase 3 shipped untested.
+- `usage-hud.test.js` — **68**, new. The auto-hide timers (the HUD is gone by the time anyone looks),
+  hover pause and fade-undo, cost formatting at each magnitude including the null case, the model label
+  when a subagent used a second model, the bar's exclusion of deferred and empty categories, the
+  headroom tooltip, and the `session-changed` path — which refreshes the numbers *without* showing the
+  HUD, because popping up on a session load would report a turn that never happened.
+- `rpc.test.js` — **+8** for `withRpcTimeout`: rejecting at the deadline, releasing the guard so a
+  later fetch succeeds where it used to be locked out, and ignoring a late reply.
+- `app-shell/toasts-and-events.test.js` — **+4**: the revealed tab is told, the tab being *hidden* is
+  not, a tab with no hook is a no-op, and the stale badge clears on the way in.
+
+The lock file was also re-solved (`chore: re-lock`): phase 3 dropped `boto3`, `litellm`, `tenacity`,
+`tiktoken` and `trafilatura` from `pyproject.toml`, and `uv.lock` had pinned all five plus their
+transitive closure ever since — 1 165 lines of resolution for packages nothing imports. No dependency
+changed.
+
+### Deliberately not built
+
+- **A "cost unknown" rendering.** Hiding a failed turn's cost hides the real usage that a late failure
+  carries — `error_max_turns` in particular. Reporting it honestly needs a state distinct from
+  "included", which is phase 6's visualisation work and not a guard's job. Noted in the code where the
+  guard sits.
+- **The rest of the webapp's guarded fetches are still unbounded.** Only the three `get_context_usage`
+  callers opt in. The wedge is generic to the `if (inFlight) return;` idiom; the fix is per-call by
+  design, because the right deadline is per-call.
+- **`agents[]`'s element shape.** Live capture returned it empty. Unverified, and the only part of the
+  payload still guessed.
+- **No visualisation upgrade.** This entry is correctness. Phase 6 is still phase 6.
+
+### What binds phase 5
+
+- **Session-load fetches must opt into `withRpcTimeout`**, with the deadline above the backend
+  method's, never under it. Phase 5 adds the second path into these panels, and it is the path most
+  likely to run during a reconnect — which is exactly when a reply gets dropped.
+- **The staleness contract is `onTabVisible`.** A session load makes the breakdown stale; the panels
+  already know how to say so and already know not to refetch while hidden. Reuse it rather than
+  inventing a second mechanism.
+- **The HUD must not pop on a session load.** `session-changed` refreshes the numbers and shows
+  nothing, because a HUD that appears on resume reports a turn nobody took. If phase 5 introduces
+  another way to load a session, it joins that path and not the turn-complete one.
+
+---
+
+## Phase 5 — History and sessions (2026-08-16)
+
+The exit criterion, met: **restarting the server resumes the previous conversation with context
+intact, and `session_store_conformance` passes** —
+`run_session_store_conformance(make_store, skip_optional=frozenset())`, nothing waived.
+
+Two things had to be true at once for that sentence to mean anything. The transcript on disk has to be
+a *record* the browser can read, and the context the model gets has to come from the engine's own
+rebuild of it. Phase 5 keeps those separate on purpose: what we render is a record of the session, and
+what the model gets is the session. Neither is derived from the other, so they cannot drift — which is
+exactly how the previous architecture produced conversations that looked right on screen while the
+model's view had diverged.
+
+### One store, and the one it replaced
+
+`session_store.py` (753 lines) implements the SDK's `SessionStore` protocol as `RepoSessionStore`:
+`.aic-dc/sessions/<project>/<session>.jsonl` with a sibling `<session>.summary.json`, folded and
+written atomically. Per-key `asyncio.Lock`s, so two appends to one session cannot interleave; every
+key component goes through `_safe_component` / `_safe_subpath` and raises `SessionStoreKeyError`,
+because the session ID reaching the path builder is minted by the CLI and not by us.
+
+`history_store.py` is **retired, not adopted** (CC-19): 1 148 lines of store and 2 079 lines of its
+tests deleted. The reason it could not be a head start is in the plan — `SessionStoreEntry` is a
+pass-through blob, so a store cannot impose a record shape, and half its field names described
+protocols phase 3 deleted. The file handling was worth reading; the schema was not worth inheriting.
+
+**Images are in the transcript entries that carried them.** No `images/` directory, no content-hash
+indirection. A base64 screenshot is bigger on disk than a hash would be, and that cost buys the
+property that matters: a transcript is one file, and a session survives being copied out of the repo.
+The size consequence is the disk warning, below.
+
+### Reopening is a rebuild, and the append observers say when it was not
+
+`history.py` (1 127 lines) folds raw store entries into turn-shaped messages. `_Turn` reassembles a
+turn from its scattered parts — user text, tool calls and their replies interleaved by
+`_interleave`, todos, the result — and `render_messages` returns the same block objects a live turn
+produces, so the browser consumes a browsed turn through `restoreMessage`: one renderer, not a second
+one that agrees with the first until it doesn't. Compaction dividers, elapsed times and event cards
+(`_event_message`) are folded in on the same sort key.
+
+`resume_session(session_id, fork=False)` renders the transcript for the browser and hands the *same
+session ID* to `connect`, and the SDK's `resume` / `fork_session` parameters do the rest. Which
+session a connect attaches to is decided **inside** the connect lock, read from a held
+`_resume_request` rather than passed as an argument: a click on "resume" and a first turn arriving
+together would otherwise race, and the turn would win with the auto-resume default — the user asks for
+an old session and gets the newest one.
+
+Auto-resume needs no pointer file. The store sorts by `last_modified`, so the newest session *is* the
+one we were in, and a pointer would be one more thing that can disagree with the transcripts it names.
+`new_session` is the only thing that turns auto-resume off, and it turns back on after the next
+connect, so a session lost mid-conversation reattaches to itself instead of quietly continuing as a
+blank one. The startup spec's step for pre-loading history before the WebSocket server starts is
+**gone**: `get_current_state` reads the transcript on demand, which gives the same guarantee without a
+startup ordering constraint to get wrong.
+
+A mirror gap — an append the store could not write — is `add_append_observer`'s job, and it is said at
+two scales. The affected turn carries a footer marker; the session carries a running count in engine
+health. Both were specified in phase 1 and neither had a reader until this phase.
+
+### The events log had one writer and six events
+
+`events_log.py` (347 lines), append-only at `.aic-dc/events.jsonl`, with `EVENT_TYPES` a **closed**
+seven-member set: a typo'd discriminator writes a record the browser has no renderer for, which reads
+as "the event never happened" rather than as a bug. `id` and `timestamp` come from one clock call so
+they cannot disagree.
+
+This closes the three phase-3 deviations that converged here — review entry and exit, a mode change
+during review, and a permission-mode change, all specified as "recorded in the transcript as a system
+event" and all three only broadcast live. They are records now, and they render as system-event cards
+in a browsed session.
+
+`files_written_by_file_tools` keeps CC-18's narrow name. A wrong live broadcast dies at reload; a
+wrong field name in `.aic-dc/` is what the browser shows until somebody migrates every transcript
+users have accumulated.
+
+### The browser was a reader for an engine that no longer existed
+
+`history-browser.js` went 1 356 → 2 233 lines. Every button in the modal called `LLMService.history_*`
+— a name with nothing behind it since phase 3 — and its record-shape assumptions were the deleted
+engine's. Seven RPCs now stand behind it: `history_list`, `history_load`, `history_search`,
+`history_delete`, `history_image`, `get_subagent_transcript`, `resume_session`.
+
+The pieces that took more than re-pointing:
+
+- **Search that a cold index cannot answer differently.** `history_index.py` (563 lines) is CC-19's
+  derived index: token postings under `.aic-dc/`, `INDEX_VERSION`-stamped, deletable and rebuildable
+  from the transcripts. It **narrows which sessions to read and never decides a hit** — every match is
+  confirmed against the transcript text — so a warm index and a cold one return the same rows, and the
+  index can go stale without being able to disagree. `role` narrows to user, assistant or *tool*, the
+  new third value: the searches this serves best are for a path or a command the agent used. Tool
+  *results* are not searched at all; that is what `Grep` is for.
+- **Delete, and the one session it refuses** — the live one. Deleting the conversation you are in
+  leaves an engine attached to a transcript that is not there.
+- **Screenshots in a browsed prompt.** `history_image` and `image-refs.js` (117 lines, new): the
+  transcript holds the image, and a listing that dropped it showed a prompt that reads as though the
+  user described a screenshot rather than pasted one.
+- **Subagents from a browsed session.** `list_subagents` / `load_subagent`, opened into read-only
+  tabs keyed `historical:<agent_id>` with a 📜 label marker and no input surface.
+- **Resume is not load.** The confirmation arms on `liveUnread` — a resume that swaps the conversation
+  out while an unread live reply is on screen is the one destructive thing in the modal, so the button
+  asks a second time in amber and only then.
+
+### The two warnings that were delivered to nobody
+
+Both were specified, both had their plumbing built in phase 1, and neither reached a human.
+
+**The disk warning.** The 1 GiB session-directory threshold had nobody watching it; it is now a
+transcript system-event card, read from both carriers so it survives a reload.
+
+**The health banner.** Four specs routed to it — `engineHealth`'s row in chat.md said "the health
+banner owns this", and the turn footer's mirror-gap marker "links to the health banner" — and it did
+not exist. `panel._engineHealth` was being stashed for a reader that was never written. Worse,
+`onEngineHealth` expected a `{requestId, data}` envelope that session-wide events do not carry, so the
+live event had never landed at all; only the state snapshot ever set the field, and nothing tested it.
+The banner sits beside the disconnected note (both are standing conditions about the channel, not
+events in the conversation), is amber while the conversation still works, and its dismissal is keyed to
+*which* problems are showing so a read warning stays quiet and a new one speaks. `connected: false` is
+not a fault: it is the normal state of a freshly loaded page.
+
+> **Correction to the phase-2 entry.** "No health-banner link target. The banner renders and its link
+> goes nowhere" was wrong in a way worth naming: nothing rendered. The link had no target because the
+> banner did not exist. Closed now, and the marker *forces* the banner open rather than un-dismissing
+> it, so the click always lands somewhere — including on "the engine reports nothing wrong", which is
+> the honest answer after a restart.
+
+### The two thresholds the mirror is judged by
+
+`app.json` gains the `history` section configuration.md always specified: the session-directory warning
+threshold and how many mirror-append failures are tolerated before the banner escalates. Both were
+hardcoded; the gap count in particular was compared against nothing, so three failed appends and
+thirty read as the same amber sentence.
+
+The comparison lives on `EngineHealth` — one owner for the rule, the same placement as the disk
+warning's one-shot — and reaches the browser as `mirror_gaps_escalated`, a verdict rather than a
+threshold to re-compare. The tolerance arrives as a `Callable[[], int]` because `reload_app_config()`
+hot-reloads the file and never notifies the service, so a value read at construction would be pinned
+to whatever was on disk at startup. Floors differ per key on purpose: bytes at least 1, because zero is
+a silenced warning; tolerance at least 0, because zero tolerated failures is a legitimate answer.
+
+### Tests
+
+Python **2 906 passed, 75 skipped** (+219 over phase 4, net of the 2 079 lines that went with
+`history_store.py`). Webapp **92 files / 3 526 passed** (+146 over the interlude).
+
+- `test_claude_code_session_store.py` — **new**. Conformance first, with `skip_optional` empty, then
+  the concurrency, key-safety and atomic-write behaviour the protocol does not cover.
+- `test_claude_code_history.py` — **new**, 979 lines. Turn folding, interleaving, compaction dividers,
+  event cards, image refs, subagent listing and loading, and delete.
+- `test_claude_code_events_log.py` — **new**. The closed discriminator, malformed-line tolerance,
+  per-session delete and rewrite.
+- `test_claude_code_service.py` — **350** total, of which **39** cover search and the derived index
+  (including the cold-versus-warm equivalence). Also the seven history RPCs, `resume_session`'s lock
+  ordering and its refusals, auto-resume and what `new_session` turns off, and the disk warning.
+  `history_index.py` has **no test file of its own** — it is exercised through the RPC that uses it,
+  which is thinner coverage than the store or the log got.
+- `history-browser.test.js` — **139**. `chat-panel/input.test.js` — **163**.
+  `chat-panel/events.test.js` — **76**. `view-subagents.test.js` — **12** and
+  `view-subagents-load.test.js` — **26**, replacing the two `view-agents*` files phase 3's naming left
+  behind. `health-banner.test.js` — **28**, new.
+
+### Live verification — not done for this phase
+
+No live CLI run. The exit criterion was verified against the conformance suite and the unit tests, not
+against a restarted server with a real conversation behind it. Given what the interlude found the last
+time a phase's numbers met a live engine, treat this as the open risk of the phase and not as a
+formality — the shapes most worth doubting are the ones the store never chose: what the CLI actually
+writes into a `SessionStoreEntry` blob across SDK versions.
+
+### Deliberately not built
+
+- **No rewind UI.** `rewind_files()` is still on the service and still has no caller. Unchanged from
+  phase 2, and still not this phase's job.
+- **Subagent attribution is still by id, not by name.** A `historical:<agent_id>` tab is labelled with
+  the id. Mapping it to the agent's definition name is unchanged from phase 3.
+- **No per-turn subagent affordance in a browsed session.** A browsed turn's `subagents` is empty, so
+  the way into a subagent transcript is the session-level listing. The per-turn chip stays a
+  live-run-only affordance.
+- **Search is substring, not semantic.** It answers from the transcripts, which is what makes it
+  answer the same cold as warm.
+- **Three App Config sections configuration.md specifies and nothing implements.** `Indexing` — the
+  re-index debounce and the pending-flush ceiling are `hooks.py`'s `DEBOUNCE_SECONDS = 0.6` and
+  `MAX_FLUSH_ROUNDS = 2`, phase 4's to have wired. `Permissions` — `NO_LOCALHOST_TIMEOUT = 30.0` and
+  `PRESENCE_POLL_SECONDS = 2.0` in `permissions.py`, phase 2's. `Presets` is deferred by decision
+  (CC-12), the other two by omission. The `history` section is the pattern to follow: a callable
+  provider so a hot reload takes, and a floor per key.
+- **No Settings engine-health card.** ~~`settings.md:83` specifies one.~~ It no longer specifies one:
+  engine health was deleted from `settings.md` on 2026-08-26 as an item filed under the wrong tab
+  (`impl-history/work-log.md` § Landed since). The banner, and the Context tab, are where health lives.
+
+### For whoever picks up phase 6
+
+- **The health payload's MCP server list is unrendered, on purpose.** The banner leaves it out because
+  a per-server status wants the Context tab's room. The bridge-failure banner is phase 6's, and the
+  data is already in the payload.
+- **A browsed session goes through `restoreMessage`.** Anything phase 6 adds to a live turn's
+  rendering has to survive arriving from `render_messages` too, or a resumed conversation loses the
+  visualisation the phase exists to add.
+- **`session-changed` is now a real, frequent event.** Auto-resume fires it on every server start.
+  The interlude's rule holds: refresh the numbers, show no HUD.
+- **Escalation is a verdict, not a threshold.** If phase 6 grows a second view of mirror health, read
+  `mirror_gaps_escalated`; do not re-derive it from a count and a config value.
+
+---
+
+## Interlude — the store that stopped the engine (2026-08-16)
+
+Phase 5 closed with **live verification not done**, named as the open risk of the phase. The risk paid
+out on the first attempt to start the app: no session at all.
+
+```
+Could not start a Claude Code session: session_store cannot be combined with
+enable_file_checkpointing (checkpoints are local-disk only and would diverge
+from the mirrored transcript)
+```
+
+### 2 906 green tests and an engine that could not connect
+
+The SDK validates that pair in `ClaudeSDKClient.connect()` and again in `query()`. AIC⚡DC had set
+`enable_file_checkpointing=True` unconditionally since phase 1 and it was harmless for four phases,
+because **nothing constructed a store** — `build_option_kwargs` only adds `session_store` when it is
+given one, and until phase 5 nobody was. The moment `_build_session_store()` started returning a
+`RepoSessionStore`, every connect in every repo raised.
+
+Why the suite said nothing is the part worth keeping. `test_claude_code_options.py` is the SDK-drift
+tripwire and it asserted the right things about the wrong subject: that every key we set exists on the
+installed dataclass, and that checkpointing ships with its `--replay-user-messages` partner. Both were
+true. Neither is *validity* — the SDK's own opinion about combinations lives in
+`_internal/session_store_validation.py`, which the tripwire never called. A contract test against a
+dataclass's field names cannot see a rule about two of its fields together.
+
+Two tests replace that gap, and they point in opposite directions on purpose:
+
+- `test_a_mirrored_session_passes_the_sdks_own_validation` runs the SDK's validator over the options we
+  actually build, with a store. This is the connect the user could not get.
+- `test_the_sdk_still_refuses_the_pair` asserts the constraint *exists*. When the SDK learns to
+  checkpoint alongside a store, that test fails — which is the notification that undo can come back.
+
+Both `importorskip` the private module rather than pretending it is public API. Nine tests in total —
+the two above, the options assembly's three, three on the session's `file_checkpointing`, and one on the
+RPC refusal — take Python to **2 915 passed, 75 skipped**.
+
+### Which one loses, and the answer was not close
+
+[CC-20](decisions.md#cc-20--the-mirror-wins-over-file-checkpointing-undo-is-gits-job) records it. The
+store is `.aic-dc/` history, resume-after-restart, the session browser and the derived index —
+everything phase 5 shipped, and its absence reads as data loss days later when the CLI's own retention
+window expires. Checkpointing was one control that has never had a caller, over changes git already
+tracks. `options.py` now sets checkpointing and the replay flag only when there is no store, which
+means only a repoless run: undo is not a reason to refuse anybody a session.
+
+The loss is not silent. Connecting with a mirror logs what went with it, `rewind_files()` is refused at
+the RPC with a message that names git instead of letting the SDK raise about local disks, and `/rewind`
+no longer claims an affordance that was never built.
+
+### Live verification — done this time
+
+`EngineSession` with a real `RepoSessionStore`, connect and disconnect against the bundled CLI 2.1.229:
+session ready, `file_checkpointing` False, clean disconnect. Phase 5's own exit criterion — a restarted
+server resuming the previous conversation — still has not been run live, and this is the second entry in
+this log to say that a phase's green tests met a live CLI and lost.
+
+---
+
+## Interlude — the exit criterion, and the preview every session shared (2026-08-16)
+
+Phase 5's exit criterion was finally run against a live CLI, and it passes. Six checks: the CLI child
+carries `--resume=1d53df67-39aa-4d04-894a-14a53f7f6d2a`; a question about the *earlier* conversation is
+answered with no tool calls at all, so the answer came from the model's rebuilt context and not from
+anything we replayed; the resumed turns land in the same `.jsonl` with no fork; the HUD stays closed on
+`session-changed`; and SIGINT leaves no `_bundled/claude` survivors and no zombies.
+
+The restart had to be driven from **outside** the app, by a terminal `claude` CLI agent with
+chrome-devtools MCP. The reason is structural and worth writing down: the process under test is the one
+hosting the engine that would be doing the testing. There is no way to verify "the server restarts and
+resumes" from inside the server — killing it kills the turn making the observation. Any future check of
+a shutdown path needs a second agent, not a cleverer test.
+
+### Every session row said the same thing, and 2 915 green tests agreed
+
+The bug the live run exposed was on screen the whole time. The session list showed, for **every** row,
+the same 100 characters of AIC⚡DC's own `<aic-dc-ui-context>` prose — and `session-preview` is the only
+field that distinguishes one row from another. A history browser where every entry is identical.
+
+Three things had to line up, and they did:
+
+- The CLI truncates the sidecar's `first_prompt` to **exactly 200 characters**, with an ellipsis. Our
+  framing block is longer than that, so the truncation lands *inside* it and `</aic-dc-ui-context>` never
+  appears in the field.
+- `strip_framing` needs that closing tag. Without it, it takes its "opened and never closed" branch and
+  returns the text unchanged — correct behaviour, on input it was never given a way to fix.
+- `summarise_session` did `info.first_prompt or info.summary` and never called `strip_framing` at all.
+
+The last one is the actual defect, and the live sidecar shows how avoidable it was:
+`info.first_prompt` was 200 characters of framing, while `info.summary` — sitting right there as the
+second operand — was `'Determine next phase after phase 5'`. The CLI had already written a good
+one-line title from its `ai_title` field. We preferred the truncated boilerplate over it. And
+`first_prompt_locked` is `true` in the sidecar, so the field never improves on its own.
+
+The preview now reads the *parsed messages* first, through the same parser the rest of the module reads
+through, where the whole prompt is present and the framing can be stripped; then the CLI's title; then
+the truncated field last rather than never, because something session-specific beats `(empty)`.
+
+Why the suite said nothing is the same shape as the last two interludes: **every fixture's framed prompt
+was short enough for the closing tag to survive the truncation**. The tests exercised
+`strip_framing`'s happy branch exclusively, so they agreed with the bug. The seven new tests in
+`TestThePreviewIsWhatTheUserTyped` are built on the real 200-character truncation, copied verbatim off
+the live sidecar, and one of them asserts the CLI's title wins when the transcript will not parse.
+
+`INDEX_VERSION` goes 1 → 2 with it. The derived index caches the *finished row*, `preview` included, so
+without a bump the old boilerplate would have outlived the fix on every machine that already had a
+cache.
+
+### 73 raw entries, 51 parser messages, 4 rendered turns
+
+Read against a real CLI-written blob rather than a fixture, the fold holds. Fifteen tool calls
+correlated to their results, `num_turns: 12`, per-model usage with cache-read and cache-creation tokens,
+`duration_ms: 231250` — footers reconstructed because the CLI writes one entry per content block and no
+result entry exists to copy. `terminalReason` and cost come back **absent rather than guessed**, which
+is the behaviour `formatCost` exists to protect.
+
+Four entry types the SDK's parser drops account for the 73 → 51: `ai-title`, `attachment`,
+`queue-operation`, `last-prompt`. All four are correctly dropped — the `attachment` here was a
+`deferred_tools_delta`, not user content, so nothing the human wrote or saw is lost in the gap.
+
+### Resuming redirects the CLI's own store, and that has a consequence
+
+This looked like a defect and is not. `subprocess_cli.py` appends `--session-mirror` whenever a store is
+set, and `materialize_resume_session` copies the store's session into a temp `CLAUDE_CONFIG_DIR` laid
+out like `~/.claude/` and points the subprocess there. Confirmed live: both `_bundled/claude` pids carry
+`CLAUDE_CONFIG_DIR=/tmp/claude-resume-<suffix>`.
+
+The consequence belongs in the spec, not just here. **Once AIC⚡DC resumes a session,
+`~/.claude/projects/…/<id>.jsonl` is frozen at the moment of resume** — permanently, and a terminal
+`claude --resume` on that id sees a stale conversation ending mid-restart. This sharpens the mirror-gap
+warning from a nicety into the thing it is: before a resume, a gap in our mirror was survivable because
+the CLI kept its own copy. After one, our mirror is the *only* record of every turn that follows, and a
+gap marker is a report of data that exists nowhere.
+
+### The temp directory the signal handler never removes
+
+Chasing the above surfaced a real leak, and it is one neither phase owns alone. The SDK's contract is
+that `MaterializedResume.cleanup()` removes the temp config dir, reached from
+`ClaudeSDKClient.disconnect()`. Our graceful path honours it — `EngineSession.disconnect()` →
+`_quiet_disconnect(client)`. But phase 2's `_signal_handler` exits via `os._exit`, documented right
+there in `_kill_cli_children` as the reason the SDK's `atexit` child guard never fires for us. It skips
+this cleanup for exactly the same reason.
+
+Phase 2's `os._exit` and phase 5's auto-resume compose into it: auto-resume makes **every** start after
+the first a resume, so every launch materialises a directory and every Ctrl-C abandons one. Measured
+after two restarts: `/tmp/claude-resume-fatfygyc`, 900 K, orphaned by the verification's own SIGINT,
+alongside the live one at 1.1 M.
+
+Each holds a full transcript copy and a `.credentials.json`. Calibrating that honestly, because the SDK
+did its part: `refreshToken` is **deliberately redacted** by `_write_redacted_credentials` (a
+single-use token spent under a redirected config dir would revoke the parent's own credentials), and
+the directory is `0700` with the file `0600`, so this is not exposure to anyone else on the machine.
+What remains is a live `accessToken`, valid until its `expiresAt` — 6.7 hours out on the orphan found
+here — accumulating one copy per launch cycle and surviving until the next reboot. Hygiene, not a
+breach, and ours to fix.
+
+`resume_cleanup.py` is the fix. `remember(client)` records the path after a successful connect and
+`purge()` removes it from the signal handler, after `_kill_cli_children` and never before — the
+directory is the live `CLAUDE_CONFIG_DIR` of the children being killed, and pulling it out from under a
+CLI still flushing its transcript would trade a disk leak for a write error on the way out.
+
+Two choices in it are worth the ink. It is **registered, not discovered**: sweeping the temp dir for
+the `claude-resume-` prefix would also match the live directory of another AIC⚡DC or a plain `claude`
+running alongside, and deleting that is a worse bug than the leak. And the registry is **not pruned on
+a graceful disconnect** — `purge()` removes with `ignore_errors`, so an already-cleaned path costs one
+failed `rmtree`, which is cheaper than keeping two sources of truth about which directories still
+exist.
+
+### The other thing `os._exit` was skipping: Vite
+
+Chasing the temp dirs turned up two orphan Vite servers on the same machine — 22h40m on port 19001 and
+50m on 19000, both reparented to systemd, both still bound. The comment in the signal handler said
+"vite shuts itself down once the parent dies". It does not, and this is the fourth observation of that:
+sending SIGTERM to a running server orphaned a third one on demand, in front of us.
+
+The cause is one level of indirection. We launch `npx vite`, and `npx` is a chain —
+`npm exec vite` → `sh -c "vite"` → `node …/vite`. `Popen` holds the pid of the *wrapper*, so
+`terminate()` signalled the top of the chain and the `node` process holding the port survived. Ctrl-C
+at a terminal usually hid it, because the shell signals the whole foreground process group and reaches
+`node` that way — so the leak only appeared when the server ended by any other route, which is exactly
+what a supervisor, an IDE stop button or a `kill` does.
+
+`start_new_session=True` at launch puts the chain in its own process group and `_kill_vite` signals the
+group. That also takes Vite out of the terminal's foreground group, which means this kill is now the
+only thing that stops it — hence the documented fallback to signalling the wrapper when there is no
+group to address.
+
+The regression test spawns a real wrapper that ignores SIGTERM and holds a grandchild, so a fix that
+only reaches the wrapper cannot pass. Two things about it cost real time and are recorded so the next
+person does not re-derive them: **`SIG_IGN` is inherited across `exec`**, unlike a handler, which
+resets to the default — ignoring SIGTERM before spawning the grandchild gives it the same immunity and
+the test then fails for the wrong reason. And **a zombie answers `kill(pid, 0)`**, which the phase-2
+tests already knew for their own children; a *grandchild* leaves nothing we are allowed to reap, so
+liveness has to be read from `/proc` instead.
+
+Fourteen tests across the two fixes take Python to **2 940 passed, 75 skipped**.
+
+### Still open after this verification
+
+- **Whether the HUD appears on turn-complete is unverified.** The live check ran past `_AUTO_HIDE_MS`
+  plus the fade, so the observation window was gone before anybody looked — reported as inconclusive
+  rather than as a pass, which is the right call, and phase 6 will see it incidentally.
+- **`$CLAUDE_CODE_USE_BEDROCK` still redirects this machine to a gateway** while a subscription login
+  sits in `~/.claude/.credentials.json`. Phase 4 recorded the warning firing and called it the tripwire
+  working; two phases later the environment is unchanged, so it is now also a standing caveat on every
+  cost number read here, and phase 6 is the phase that renders cost. It is
+  [R-9](risks.md#r-9--authentication-conflict-silently-redirects-the-session), not R-10 — the phase-4
+  entry cited the wrong number and it is corrected there.
+- ~~**The mirror read-path verifier is still a throwaway in `/tmp`.**~~ Promoted to
+  `scripts/history_smoke.py`, alongside `engine_smoke.py` and `bridge_smoke.py` and on the same
+  argument those two were promoted on. Five checks, `argparse`, a `Report` that runs every check
+  before exiting non-zero, and no credentials — it reads the mirror off disk, so it costs nothing to
+  run and can gate a phase's sign-off instead of being read by eye. It stays in `scripts/` rather
+  than the suite because it needs a real conversation to have happened in the repo, which no fixture
+  supplies and no CI job will have.
+
+### The bug the promotion found on its first real run
+
+Moving the verifier was meant to be filing. Its own output disagreed:
+
+```
+4. The session-list preview is what the user typed
+        1d53df67  'This session is being continued from a previous conversation that ran '
+  ok    no framing boilerplate in the preview
+```
+
+That check passed. It was still wrong, and wrong in exactly the way it was written to catch — the same
+sentence in every row, from a second source. **The SDK's parser starts a compacted session's message
+list at the compact boundary**, so the first user message of every compacted session is the CLI's
+compaction summary, and that summary opens with a fixed sentence. `_first_prompt` read the messages
+faithfully and returned it. The parser's first three user messages, live:
+
+```
+parser messages: 329
+  user msg #0 (idx   0): 'This session is being continued from a previous conversation that ran out of context. The '
+  user msg #1 (idx 102): '<aic-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+  user msg #2 (idx 265): '<aic-dc-ui-context>\nFiles the user has selected in the file picker (a hint about what they '
+```
+
+Three things are worth keeping about this.
+
+**Reading the messages was not the fix; reading the *human's* messages was.** The earlier interlude's
+conclusion — prefer the parsed transcript over the sidecar's truncated field — was right and did not
+go far enough. A transcript contains machine-written user entries too: tool results, which
+`_first_prompt` already skipped, and this one, which it did not.
+
+**The entry says so, and the parser does not carry it.** The raw entry is
+`{"type": "user", "isCompactSummary": true, ...}`, but a `SessionMessage` exposes only `type`, `uuid`,
+`session_id`, `message` and `parent_tool_use_id`, so the flag is gone by the time the fold sees it.
+Re-reading the raw entries to recover it would add a third store read per row to a listing whose whole
+design is two — so `_COMPACT_PREAMBLE` prefix-matches the CLI's wording instead. That is coupling to a
+string the CLI owns, and the honest note is that it can change under us. When it does the row degrades
+to `info.summary`, not to a crash: **a session long enough to have compacted has an `ai_title`**, which
+is why the fallback is reliable here specifically.
+
+**The fallbacks had the same hole.** Writing the invariant down as a test — *no preview ever opens with
+boilerplate* — immediately failed on the case where the sidecar's `first_prompt` is the boilerplate,
+because only the first candidate was filtered. Both sidecar fields now go through `_readable`, so the
+invariant is true of the preference order rather than of its first branch. `INDEX_VERSION` → 3 for the
+same reason it went to 2: the cache holds finished rows, and a stale row is the one thing a user would
+still see.
+
+Live after the fix, on the session this file is being written in — which has since compacted again, and
+so is the "nothing typed since the boundary" case the tests cover:
+
+```
+4. The session-list preview is what the user typed
+        1d53df67  'Determine next phase after phase 5'
+  ok    no framing boilerplate in the preview
+  ok    no compaction preamble in the preview
+```
+
+The second `ok` is new. Check 4 printed the bad preview and passed; a human caught it by reading the
+output. That is a check doing half its job, so the preamble is asserted now — 2 945 tests, five new
+ones built on the real compaction prompt rather than a shortened stand-in, and `history_smoke.py`
+exiting 0.
+
+---
+
+## Phase 6 — Context and cost visualisation (2026-08-17)
+
+The exit criterion: **the Context tab shows the designed visualisation over those numbers, names the
+`aic-dc` tools it is paying for, and distinguishes a turn that cost nothing extra from one whose cost is
+unknown.** All three clauses are met in code and in tests. The first two were read off a live CLI on
+2026-08-17; the third was closed live later the same day for the case that actually occurs — a priced
+turn, verified as a *difference* rather than a running total — while its two remaining renderings
+("nothing extra" and "cost unknown") are still unobserved on screen because no ordinary turn produces
+them. The detail and the reason are under *Live verification*, not buried as a caveat.
+
+The phase divides on which half of it owed a correctness pass. The **context** numbers had already had
+theirs, in the interlude: three readers of one RPC, each deriving the arithmetic independently and each
+wrong on its own terms, collapsed into `context-usage.js`. The **cost** numbers turned out to owe one
+nobody had budgeted for. `total_cost_usd` and `modelUsage` are *session running totals* in a
+streaming-input session, which is the only kind AIC⚡DC runs, and both readers printed them as one turn's
+— so every turn was mispriced upward, monotonically, and the HUD's "This turn · $1.87" was the whole
+session's bill. The difference is taken in the engine now (`cost.py`, 207 lines), and the wire carries
+`turn_cost_usd`, `turn_cost_basis` and `turn_model_usage`.
+
+### `turn_cost_basis` exists because a missing figure has three different meanings
+
+A null cost is not one state. The specs said it meant a subscription, which was wrong, and `fd3963a`
+corrected them. What it actually means is one of:
+
+| Basis | Figure | What the reader is told |
+|---|---|---|
+| `measured`, difference > 0 | the difference | a price |
+| `measured`, difference == 0 | zero | **nothing extra** |
+| `reset` | none | **cost unknown** — the session's total went *down*, so this turn's share cannot be separated out |
+| `unpriced` | none | **cost unknown** — the engine never priced the turn |
+| unrecognised | none | no chip at all |
+
+That last row is the one worth defending. An unknown basis renders *nothing* rather than "unknown",
+because a future CLI adding a fifth basis would otherwise make every turn report a problem it does not
+have. `turn-cost.js` (254 lines) is the single owner of that table, and `usage-hud.js` and
+`block-render.js` both read it rather than each deciding what a null means — the same mistake in the
+same shape as the three context readers, caught before it was made twice.
+
+A browsed turn shows **no cost chip at all**. Cost is not in the CLI's transcript, so a replayed footer
+has nothing to report, and "unknown" on every one of them would be noise about a thing that was never
+recorded. This is a deliberate asymmetry between a live footer and a browsed one, and it is the one
+place phase 5's "anything phase 6 adds has to survive `restoreMessage`" is answered with "it doesn't,
+on purpose".
+
+### The three review findings, closed
+
+All three were named in the plan as non-blocking and cheap. They were.
+
+**A fetched health record could overwrite a fresher pushed one.** `_ensureDebug`'s rule is that a push
+wins over a fetch, because `mirror_gaps` moves during a turn and the fetch is seconds wide; the guard
+only covered a fetch that answered *nothing*. A `_healthSeq` counter, captured before the `await` and
+compared after, closes the case where a push lands mid-flight and the older server snapshot lands on top
+of it. The test gates the fetch on a promise it releases only after pushing a fresher record, so it
+fails against the old code rather than passing by timing.
+
+**The initialize reply now has its own heading.** It rendered inside Engine, under one `<h3>`, and the
+whole point of the distinction is provenance: the binary resolution is a fact *we* resolved, the reply is
+what the engine says about itself. Two tables under one heading lose exactly the distinction a diagnosis
+needs. Debug is five sections now, not four.
+
+**The autocompact mark is no longer clipped.** `.mark` sets `top: -1px; bottom: -1px` and a `box-shadow`
+ring; `.bar` sets `overflow: hidden`. The overhang the tick is drawn for was being cut off in both
+files. A `.bar-wrap` with `position: relative` holds the mark as a sibling of the bar rather than a
+child, in `usage-hud.js` and `context-usage-tab.js` together — the bug was pre-existing in the tab and
+had been copied faithfully into the HUD, so fixing one would have left the other looking correct by
+accident.
+
+### What the live run found
+
+Four things, none of which any test could have caught, because all four are about what a reader is
+*told*.
+
+**The credential source predicted a future it cannot see.** The no-credentials branch of
+`detect_credentials()` said "the CLI will prompt for login". It said that against a fully authenticated
+session that was never going to prompt for anything. Two facts make the prediction unsupportable: the
+CLI resolves its own credentials, and a *resumed* session's CLI child runs under a materialised
+`CLAUDE_CONFIG_DIR` that is not the one this process reads. So the branch now reports what was looked
+for and where it looked — `unknown — no key, gateway or login file in <dir>` — and predicts nothing.
+`_credential_base()` was split out to say, in one place, that the directory is the limit of what the
+field can know.
+
+`detect_credentials()` had **zero tests** — the only billing-mode signal the browser gets, and the
+function R-9 lives in. It has 41 now, in a new `test_claude_code_health.py`: every source branch, the
+precedence order, `CLAUDE_CODE_USE_BEDROCK=0` not counting as a gateway, both conflict warnings, the
+endpoint overrides, `~` expansion in `CLAUDE_CONFIG_DIR`, and two that pin the contract the config layer
+is built on — that detection leaves `os.environ` byte-identical, and that probing for a login file does
+not *create* the directory it looked in.
+
+**The hook log promised traffic the CLI never sends.** The empty state read "the PostToolUse re-index
+fires on every file the agent writes, so a turn with an edit in it fills this". It never fills. Proven
+both directions, live, with the panel mounted throughout: a `window` probe on `hook-event` recorded
+**zero** events across two agent writes, while `file_symbols` on a file created seconds earlier came back
+fully indexed and the turn footer listed it under "3 files modified". So the hook ran, the re-index ran,
+and the *announcement* is what does not exist — AIC⚡DC registers its `PostToolUse` hook as an SDK
+callback, which the CLI answers over the control channel and does not put in the message stream, and
+`HookEventMessage` is the only thing feeding this table. The copy now says an empty table is the normal
+state and is not evidence the re-index did not run.
+
+This is the phase's sharpest instance of a general problem: **a reader that cannot fill looks identical
+to a reader that is broken.** The old copy pointed a diagnosing user at a working mechanism and told them
+it had failed.
+
+**Two labels were wrong rather than unclear.** The Tool traffic columns read `Calls` and `Results` while
+rendering tokens, so "Calls: 4.2K" against a tool called four times is a wrong number — they name the
+unit now. And the per-tab 📊 tooltip still said "View this conversation's context (Budget + Cache)",
+naming the two sections of the panel CC-17 replaced.
+
+### Tests
+
+Python **3 033 passed, 75 skipped** (3 108 collected). Webapp **93 files / 3 724 passed**.
+
+**This line originally read "3 108 passed, 0 skipped", and it was wrong** — corrected on 2026-08-17 by
+re-measuring `4efc0f9` in a throwaway worktree, which collects 3 108. The figure quoted as *passed* was
+the **collected total**, and the skip count was not read off the summary at all. Phase 5's baseline
+(**2 992 passed, 75 skipped**, 3 067 collected) is right, because it quotes both halves of the line;
+3 067 + this phase's 41 = 3 108 collected, and 2 992 + 41 = 3 033 passed. Nothing was deleted and
+nothing was waived — but nothing got 75 tests wider either.
+
+**The 75 skips are not the tree-sitter extractor tests, and they have not moved.** They are optional
+document-conversion dependencies that are absent from the venv: PyMuPDF (29), python-pptx (25),
+openpyxl (21). The grammars *are* installed and every extractor test does run — the retracted note
+explained a change in the skip count that never happened, since the count was 75 before this phase and
+75 after. The trap worth naming: **75 is a standing constant of this venv**, so it turns up on both
+sides of any comparison and reads like an accounted-for difference.
+
+The reason a wrong number survived review is that it was flattering and self-consistent. "0 skipped" is
+a stronger claim than the suite has ever supported, and the arithmetic offered to explain it was built
+backwards from the total rather than read off the summary. **Quote both halves of the pytest line, always
+— a total is not a pass count**, and the only way to get a historical count right is to re-run that
+commit.
+
+- `test_claude_code_health.py` — **new**, 41. Credential resolution, above.
+- `test_claude_code_cost.py` — 26. The four bases, and the three cases where a turn's share cannot be
+  recovered from a session total.
+- `test_claude_code_mcp_server.py` — 42.
+- `context-usage-tab.test.js` — **168**. `context-usage.test.js` — **93**. `usage-hud.test.js` — **84**.
+  `turn-cost.test.js` — **34**.
+
+### Live verification — the context half done, the cost half closed on 2026-08-17
+
+Run against a live CLI, and an unusually direct one: **the running app was hosting the very session doing
+the verifying**, so the numbers on screen described the conversation that was reading them. No second app
+instance, no synthetic turn.
+
+Verified by reading it: the segmented context bar and its arithmetic; all five Debug sections; the
+`aic-dc` tool inventory with a token cost per tool, which is the criterion's "names the `aic-dc` tools it
+is paying for"; `get_mcp_status()` answering `connected`; Debug's `Grid rows` cross-checking the Usage
+section it is derived independently of; and both of the fixes above that have a visible consequence.
+
+**The cost chip and the HUD's appearance were not verifiable from inside the turn.** A turn's cost
+arrives only in the `result` push (`get_current_state` has no cost key), the HUD is visible for
+`_AUTO_HIDE_MS` = 8 s plus an 800 ms fade, and **a turn cannot observe its own completion**. This is
+phase 5's lesson in a smaller shape: there, a process could not verify its own shutdown and needed a
+second agent; here, the observation window opens exactly when the observer stops running. The method is
+to leave a recorder behind — a `stream-complete` listener plus a `MutationObserver` on the HUD's
+`visible` attribute — which turn N+1 reads to describe turn N. It was installed once and lost to a Vite
+HMR full page reload caused by a later edit in this same phase. **The ordering constraint that makes it
+work: install the recorder after the final webapp write of the sitting, or HMR takes it.**
+
+**Closed on 2026-08-17.** The recorder was reinstalled during a turn that wrote nothing under `webapp/`
+— which is what let it survive — and read on the two following turns. What it recorded:
+
+| | turn 1 | turn 2 |
+|---|---|---|
+| `turn_cost_usd` | 1.51561 | 1.210191 |
+| `total_cost_usd` | 1.51561 | 2.725801 |
+| `turn_cost_basis` | `measured` | `measured` |
+| chip on screen | `This turn $1.52 · 37 tool calls · 385.5s` | `This turn $1.21 · 20 tool calls · 247.5s` |
+| HUD `visible` window | 8.796 s | 8.800 s |
+
+**Turn 2 is the whole verification, and turn 1 could not have been.** `1.51561 + 1.210191 = 2.725801`
+exactly, so the wire arithmetic is confirmed cumulative, and the chip rendered **$1.21 rather than
+$2.73** — the pre-fix code would have printed the running total under "This turn". On turn 1 the two
+fields were *equal*, because a session's first turn's difference is its total, so **the bug this phase
+exists to fix is invisible on turn 1**. A single-turn observation would have looked like a pass and
+proved nothing. The HUD's `visible` window measured 8.796 s and 8.800 s against the specified
+8 s + 800 ms, which also closes the interlude's "whether the HUD appears on turn-complete is
+unverified", open across two phases for the same structural reason both times.
+
+The cost span carried `class=""` rather than `muted` and the tooltip "What this turn added to the
+session's cost, now $1.52 in total. An estimate the engine computes, not a billing statement." — the
+`known` branch of `turn-cost.js`, on screen.
+
+**What is still unobserved is the criterion's actual pair.** Both turns were `measured` with a difference
+above zero, so the *priced* rendering is verified and the two that the criterion's third clause names —
+"nothing extra" (`measured`, difference exactly 0) and "cost unknown" (`reset`, `unpriced`) — have never
+been on screen. They hold in 60 tests. Reaching them live needs a turn that spends nothing or one the
+engine never priced, which no ordinary turn produces; an immediate Stop is the cheapest candidate. **The
+clause is met for the case that occurs and unmet for the two that are hard to cause**, which is a more
+useful way to leave it than "verified".
+
+A method note worth keeping, because it cost a re-read: the probe that classified the second chip
+computed `known` by testing the row's HTML for `class="muted"`, and the *bits* span ("· 20 tool calls")
+legitimately carries that class. The regex matched the wrong span and reported `known: false` against a
+chip that was rendering the known branch. **A probe over rendered HTML has to name the element it means**
+— the first read only escaped this because it captured the raw HTML and was read by eye.
+
+Two smaller things the live run settled about method:
+
+- **Diagnose the Python side first.** A webapp edit HMR-reloads the page, which remounts
+  `aic-context-usage-tab` and clears the hook log the diagnosis is reading. The hook finding above was
+  only reachable because the `health.py` edits came before the `context-usage-tab.js` ones.
+- **`(Budget + Cache)` survived four phases** of the panel it named being replaced. Stale copy is not
+  found by grepping for what changed; it is found by reading the screen.
+
+### Deliberately not built
+
+- ~~**`reconnect_mcp_server` still has no caller.** The RPC exists; no browser surface offers the
+  reconnect. Unchanged from phase 4, and Debug reports the status it would act on.~~ **Built 2026-08-26**,
+  together with `toggle_mcp_server`, as actions on the Context tab's server rows — see
+  [`../5-webapp/viewers-hud.md` § Session Section](../5-webapp/viewers-hud.md). It had carried forward
+  unchanged across four phases, which is the argument the work-log makes for a
+  `test_every_rpc_has_a_caller_or_is_listed_as_dormant`: nothing here was ever going to notice.
+- **The HUD's Rate limits and Files modified sections, and its collapse persistence.**
+  `viewers-hud.md` § *Sections* specifies all three. Unchanged from what the plan recorded going in.
+- **`EngineHealth.mcp` is a field with no writer.** The per-server list the banner leaves out is the same
+  data Debug's MCP status fetches live, and one of the two should own it.
+- **No `auth_warning` for the new "unknown" source.** `hasHealthProblem` in `health-banner.js` escalates
+  on `auth_warning`, and an unknown *source* is a limit on what this process can see, not a
+  misconfiguration — banner-escalating it would fire on every resumed session.
+
+### For whoever picks up phase 7
+
+- ~~**Read the recorder.**~~ Done on 2026-08-17; see *Live verification*. The HUD's appearance and the
+  priced chip are verified live, and the turn-versus-session differencing is confirmed by arithmetic on
+  two consecutive turns. **If you need the other two chip renderings**, the recorder pattern still
+  applies — reinstall `window.__phase6` after the last webapp write of the sitting and cause a turn that
+  spends nothing. **Two turns minimum, always**: on a session's first turn `turn_cost_usd` and
+  `total_cost_usd` are equal, so it cannot distinguish the fix from the bug.
+- **Cost is cumulative. Every time.** `total_cost_usd` and `modelUsage` are session totals, and the only
+  correct per-turn figures on the wire are `turn_cost_usd` / `turn_model_usage`. A new reader that reaches
+  for the obvious field name will be wrong upward and monotonically, which is the shape of wrong that
+  looks plausible for a long time.
+- **A reader that cannot fill and a reader that is broken look the same.** The hook log's empty state is
+  one instance; anything phase 7 adds that depends on an event the CLI may not emit needs its empty state
+  to say which of the two it is.
+- **`R-9` is still live on this machine.** `$CLAUDE_CODE_USE_BEDROCK` redirects to a gateway with a
+  subscription login present, so every cost figure read here carries that caveat. Three phases have now
+  recorded it; the tripwire works and the environment has not changed.
+
+---
+
+## Interlude — the timer that answered for the user (2026-08-17)
+
+Not a phase. It started with a screenshot: an `evaluate_script` permission request the dialog had closed
+itself, denied, because 300 seconds passed while nobody was at the machine. The question that followed was
+the right one — *why does it time out at all?* — and the honest answer turned out to be "because of a bug
+somewhere else".
+
+### Gating consumes nothing, and that is checkable
+
+The reason a wall-clock limit felt necessary was an assumption that something is being held open while a
+request waits — an API call, a warm cache, a socket. It is not. `can_use_tool` is dispatched by
+`Query._read_messages` through `_spawn_control_request_handler` as its own detached task, so the read loop
+is not held either. What is outstanding is one blocked SDK **control request**, and that is the whole cost:
+the CLI is holding a complete assistant message and cannot issue its next API call until a tool result
+exists. Nothing accrues while the user is away.
+
+So the timer was not protecting a resource. It was answering on the user's behalf, which is the one thing
+a permission dialog must not do.
+
+### But the timer was load-bearing, for a reason nothing said out loud
+
+Removing it needed one check first: what clears `_pending` when a user hits Stop? Nothing did.
+`cancel_all`'s only callers were shutdown, new-session and resume, so `interrupt()` left the request
+suspended and **the 300 s expiry was the only thing that ever released it.** Three throwaway probes against
+a real `EngineSession` and a real `PermissionBroker` with only the SDK client faked — the shape the session
+tests already use — split the outcome in two: a CLI that honours the interrupt anyway leaves a stale dialog
+on screen (Case A); a CLI that cannot finish the turn without a tool result loses the session to
+`_watch_drain` expiring (Case B). Both are the deadline covering for a missing call.
+
+### What landed
+
+1. **Stop denies before it interrupts.** `cancel_streaming` calls `cancel_for_turn(request_id)` *first* —
+   releasing what the CLI is blocked on is what makes the interrupt actionable — and `_run_turn`'s `finally`
+   sweeps anything still open, which covers a lost session, an engine crash, a drain that timed out. `Stop`
+   is now the escape hatch from a dialog nobody wants to answer, which is what lets the request itself wait
+   indefinitely.
+2. **The deadline is presence-driven, not wall-clock.** `DECISION_TIMEOUT` and its deny reason are deleted;
+   `expires_at` is nullable and `None` is the normal case. `NO_LOCALHOST_TIMEOUT = 30 s` survives as the only
+   expiry, and it is armed when the *last* localhost client leaves and cancelled when one returns —
+   re-sampled every `PRESENCE_POLL_SECONDS = 2 s` for the life of the request rather than once at the start.
+   The poll uses `asyncio.wait({fut}, timeout=…)`, never `wait_for`, which would cancel the future it is
+   waiting on. Each arm and disarm broadcasts `permissionDeadline`.
+3. **The dialog updates in place.** `permissionDeadline` is session-wide, not turn-scoped — a request
+   outlives the moment it was raised — and it mutates the queue entry rather than re-enqueuing it: a
+   half-typed deny reason survives and the settling interval is not restarted by a clock the user did not
+   touch. No countdown renders when there is nothing counting down, and a request with no deadline sorts
+   last in the queue.
+
+### One thing the change broke, found by writing the spec rather than by a test
+
+The coarse screen-reader milestones are `[300, 60, 10]` and the loop announced the first threshold the
+remaining time fell under. Correct for a 300 s window; over the 30 s one that is now the only window, it
+told a screen-reader user they had **five minutes** to answer something expiring in thirty seconds. Fixed by
+retiring thresholds above the time the request actually has, and by announcing the arm itself with the real
+remaining — the first milestone inside a 30 s window is the 10 s one, far too late to be the only notice.
+Announcements say "30 seconds left", not the chip's `0:30`, which reads as "zero colon thirty".
+
+Also fixed while checking the new `cancelled` action end to end: the transcript rendered machine denials as
+"cancelled by cancelled" and "shutdown by shutdown". `resolved_by` repeats the cause for those, and an
+attribution phrase is for a person who decided.
+
+### Tests
+
+- `tests/test_claude_code_permissions.py` — 148 in the file. `TestCancelForTurn` (7) is new; the old expiry
+  tests became four presence tests in `TestCanUseTool`, including a client who leaves and one who comes back
+  and stops the clock, and `test_pending_is_ordered_by_expiry` is now a presence flip rather than two
+  synthetic deadlines. Every `decision_timeout=` kwarg is gone — 12 call sites, plus one in
+  `scripts/bridge_smoke.py` that no test covers and that would have crashed the script.
+- `tests/test_claude_code_service.py` — 3 new: Stop denies the dialog the turn was waiting on, the deny
+  reaches the CLI *before* the interrupt, and a turn that ends any other way sweeps what is left.
+- `tests/test_claude_code_stop_with_permission.py` — **11 new, and the probes' real home.** The service
+  tests above run against a `FakeSession`, so the component that made this a bug — `_watch_drain` — never
+  executes there. This file is a real service, the real `EngineSession` it builds, the real broker wired in
+  as `can_use_tool`, and a fake CLI that asks permission by calling the callback off the `options` it was
+  handed, so a service that forgot to pass `can_use_tool` fails here rather than passing. The fake is
+  parametrised over both probe outcomes — a CLI blocked until answered, and one that abandons the tool and
+  emits a result anyway — against the *same* assertions, which is the substance of the fix: the outcome no
+  longer depends on which shape the CLI has. Checked by neutering `cancel_for_turn` and re-running: **7 of
+  the 11 fail on the pre-fix code**, including the session-lost case. The four that pass are the abandoning
+  CLI's, which is Case A being survivable all along.
+- `webapp/src/permission-dialog/dialog.test.js` — `describe('a deadline that arms mid-request')` (7),
+  covering arm, cancel-and-does-not-fire, the surviving deny reason, promotion, the announcements, and an
+  unknown `permission_id`. `queue.test.js` gained `spokenSeconds`.
+- Both suites green: python **3 056 passed, 75 skipped** (3 131 collected); webapp **93 files / 3 740
+  passed**. This line first read "3131 passed", which was the collected total — the same misreading the
+  phase-6 *Tests* section now retracts, and the 75 skips are the same standing doc-convert ones.
+
+### Deliberately not built
+
+- **Case A versus Case B is still unverified against a real CLI.** The fix makes the distinction moot — the
+  request is released either way, and `test_claude_code_stop_with_permission.py` asserts that over both
+  shapes — so nothing depends on knowing which one the CLI is. Nothing establishes it either.
+- **The `permissions` App Config section is still unwired.** `configuration.md` specifies
+  `no_client_timeout_s` and `presence_poll_s` against `permissions.py`'s two constants, and there is still
+  no provider reading them.
+
+  **This bullet claimed that spec edit as done when it had not been made** — corrected 2026-08-17.
+  `configuration.md` still described "the decision timeout and the shorter no-localhost-client timeout",
+  and `6-deployment/packaging.md`'s default-sections list still named a `decision timeout` among the
+  `app.json` keys, so **two specs documented a constant `5fc6fa4` had deleted** while the delivery record
+  asserted they matched the code. Both are reconciled now, and both say the absence of a decision timeout
+  is load-bearing rather than incidental — the failure mode is a later reader restoring a "missing"
+  default. Worth naming as a pattern: a *Deliberately not built* entry that describes work in the perfect
+  tense is indistinguishable from one that describes an intention, and only one of those is checkable by
+  `grep`. It was caught by grepping the specs for `decision_timeout`, which is what should have closed the
+  interlude in the first place.
+
+## Interlude — the examples the question was asking about (2026-08-17)
+
+Not a phase. It started as a one-line observation from the user: the terminal shows an example beside each
+option of an `AskUserQuestion`, and our dialog showed none. It ended up correcting a claim this record and
+three specs had already made in the perfect tense — which is the same failure the interlude above names,
+found again one commit later and from the inside.
+
+### The dialog was dropping the thing being compared
+
+`AskUserQuestion`'s options carry a third field, `preview`: an ASCII mockup, a candidate implementation, a
+config example. The whole point of a question with previews is comparison, and comparison needs both halves
+on screen — so the question switches layout when any option has one. Options in a column, the focused
+option's example beside them, the pane following focus *and* hover with a fallback to the chosen option and
+then the first that has an example. Following focus matters more than it sounds: in a radio group a click is
+an answer, so a pane that needed a click to change would charge the user an answer per comparison.
+
+Two smaller calls in the same shape. The pane names the option it is showing *and* that option is marked in
+the list, because four options beside one pane otherwise ask the reader to work out which row they are
+looking at. And a multi-select renders each example under its own option instead of using the pane — several
+options can be ticked and "which example" has no answer, which is why the tool tells the model previews are
+single-select only. A model that sends one anyway has still authored something the user is deciding about.
+
+### The claim that had to be retracted
+
+The engine sets `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT=markdown`, and `options.py`,
+`specs-reference/3-engine/permissions.md`, `specs5/3-engine/session.md` and a test docstring all said, in
+one form or another, that **previews only exist because we ask for them**. That is false, and it took two
+void experiments to find out:
+
+1. The first control asked the model to "give each option a preview" — a prompt that names the field tells
+   the model the field exists, which is the entire variable.
+2. The second and third removed the variable from `options.env` and got previews anyway, which looked like
+   a result. It was not. The SDK spawns the CLI with `{**os.environ, **options.env}`, and the session
+   running the experiment was hosted by an engine that had already exported the variable — so the CLI saw
+   `markdown` on every "without" run. Emptying `options.env` removes nothing that was inherited.
+
+With `os.environ.pop` added, previews still arrived. The binary says why: the `preview` field is in the
+tool's input schema **unconditionally**, and the env var gates only the *"Preview feature" block in the
+tool's prompt* — what previews are for, which format to author, that the UI turns side-by-side, that they
+are single-select only. Unset, the CLI adds that block for a terminal session and omits it for every SDK
+entrypoint; ours is `sdk-py`.
+
+So the value is real but narrower than claimed: the schema's own description defers the format to a tool
+description that then says nothing, and markdown-versus-HTML becomes the model's guess. **Unset, the format
+is nobody's decision.** All five places now say that instead.
+
+The lesson generalises past this field. A control that produces the expected result is not evidence until
+the *absence* of the control has been established, and for anything reaching a subprocess "absence" means
+the environment it inherits, not the dict we passed.
+
+### A note is an answer's footnote
+
+The second half is `input.annotations` — a sibling of `answers` in the same input, keyed the same way,
+carrying `{notes, preview}` per question, and present in the tool's *output* schema too, which is how the
+model reads it back. It is the one place a user can qualify a choice without abandoning it. Picking an
+option votes for a label the model wrote; what a user often means is that label with a condition attached,
+and without a note that condition has to go in the freeform field, where for a single-select it *replaces*
+the choice rather than qualifying it.
+
+Three decisions worth their own lines, all of them about a note not being an answer:
+
+1. **The field appears only once the question is answered.** Two empty text boxes under one unanswered
+   question is a real ambiguity — the first is the answer, and a second beside it invites the answer to be
+   typed into the wrong one.
+2. **A note cannot enable the Answer button.** `_answerSelections()` tests options and typed text only. A
+   dialog holding nothing but notes has not been answered.
+3. **A key is written only for a question that answered.** Both maps key by question text, so an annotation
+   on an unanswered question would arrive attached to nothing — the CLI builds its result from `answers`,
+   so the note would be unreachable while looking delivered. `annotations` is omitted entirely when nothing
+   filled it: an empty map is a claim, and it makes every allow look user-modified in the transcript.
+
+`annotations[…].preview` is filled only when exactly one option was chosen and it had an example, because
+the CLI's own description is "the preview content of *the* selected option", singular. Echoing every ticked
+option's mockup into a field typed as one would be inventing a shape.
+
+### `scripts/question_preview_smoke.py`, and what it proved
+
+The CLI's acceptance of `annotations` is not something a unit test can establish — a `FakeSession` accepts
+any shape we invent — so this is a smoke script, alongside the others: a real CLI, real credentials, real
+tokens. It asks a question, answers option 0 with a note, and reports what the model sent, what survives
+`build_question_payload`, what went back, and what the model said afterwards.
+
+It works. The model quoted the note back verbatim and then **revised its own proposal to match it** — the
+note said "keep the gutter at exactly 47px" against a 240px mockup, and the reply came back "rendered as
+the narrow icon rail (47px, not the ~240px labelled rail I drew)". Nothing is silently dropped: the preview
+counts before and after normalisation match, and the script says so when they do not.
+
+Two things the script's own first run taught, both about how a probe fails:
+
+- **It degraded into a deny.** A `range(list)` typo raised inside the callback, the SDK turned that into a refusal, and the report blamed the CLI for our bug. The callback now catches, prints the traceback, and says the deny was ours.
+- **"No previews" is inconclusive, not failing.** Asked only to *show* the layouts, the model can satisfy that by writing mockups into its reply and leaving the field empty — which is exactly what the first run did. So the script has two prompts: the default names the field, which makes the transport check repeatable, and `--neutral` does not, which is what the `--without` A/B needs. Naming the field there would settle the question in the prompt.
+
+### Tests
+
+Deltas, not totals — this record's per-commit figures are dated, and the rolling status in
+[`README.md`](README.md) deliberately quotes neither:
+
+- `tests/test_claude_code_permissions.py` — **+9**, as `TestAnswerAnnotations`: the note travels keyed like
+  its answer, one chosen option carries its example back and two ticks carry none, a typed reply keeps its
+  note but has no example, a note on an unanswered question is dropped, a note alone is not an answer, a
+  non-text `notes` is dropped (parametrised over five values), the key is absent when nothing annotated
+  anything, and the legacy index-only `Answer` shape annotates nothing and still answers.
+- `webapp/src/permission-dialog/dialog.test.js` — **+7**, as `describe('a note on an answer')`: not offered
+  until answered, offered for a typed reply, travels beside its answer, cannot answer on its own, survives
+  switching options, labelled by its question, forgotten on the next request. Eleven existing assertions
+  gained `notes: ''`, keeping the uniform shape `text: ''` already established.
+- The preview half landed in `aee7b2b` with its own tests in the same two files plus `queue.test.js`.
+
+One failure worth recording because it looked nothing like its cause: the *whole* vitest run stopped
+loading with `ReferenceError: answer is not defined` from `styles.js`. A comment inside the `css` tagged
+template had put a CSS class name in backticks, which terminates the template literal. **No backticks in a
+`css` or `html` template's comments** — the error surfaces as a missing identifier in an unrelated file.
+
+### Deliberately not built
+
+- **The `--without` A/B is not automated.** The script supports it and the specs record its result; nothing
+  re-runs it on a CLI upgrade, and the thing it measures — whether the tool's prompt documents the field —
+  is exactly the kind of detail a version bump moves. Running `--neutral --without` after an upgrade is a
+  judgement call, not a check.
+- **`annotations` on a question answered with prose alone carries the note and no preview.** Correct by the
+  rule above, but it means a user who typed an answer *and* attached a note sends two free-text strings the
+  model must tell apart by key. Nothing tests how well it does.
+- **The pane is navigable, not announced** (§ Accessibility, unchanged): labelled and reachable, but
+  arrow-keying a radio group must not read a whole mockup aloud per keystroke. No screen-reader run was
+  done against a question with previews.
+
+## Interlude — the editor that could not see its own stylesheet (2026-08-17)
+
+Not a phase. Three defects the user reported in one message, each with a screenshot: the dialog's edit
+window "looks terrible", edit cards should open by default, and `Bash` summaries should wrap so you can see
+what a command is about to do. Two are preferences. The first was a bug that had been shipping since the
+dialog got a diff, and the specs had been describing the fixed behaviour all along.
+
+### The dialog was showing Monaco with the wrong font
+
+The screenshot was unmistakable once read properly: line numbers stacked into a single row (`506561`),
+every line soft-wrapped, no change highlighting, and acres of empty space. That is not a misconfigured
+editor — it is an editor that measured its layout with Monaco's font metrics and then painted in the host
+page's font, because Monaco writes those rules into `document.head` and a shadow root cannot see them.
+
+The diff viewer had solved this a long time ago; a comment in `monaco-setup.js` naming `_syncAllStyles` was
+what pointed at it. The dialog had simply never been given the same treatment. So the viewer's cloning logic
+moved out into `webapp/src/shadow-style-sync.js` — `syncHeadStyles`, `applyHeadMutations`,
+`observeHeadStyles`, parameterised by the dataset marker each host uses — and both hosts now call it.
+`diff-viewer/shadow-styles.js` keeps its own KaTeX injection and observer lifecycle and lost 50-odd lines of
+duplicate; its behaviour is unchanged, deliberately, because a shared module is only worth having if
+adopting it is not also a rewrite.
+
+The dialog syncs **twice**: once before `createDiffEditor` and once immediately after. Not belt-and-braces —
+the rules that set the font metrics are added synchronously *inside* the constructor, so an observer
+registered before it has not fired yet and one registered after it has already missed them. The observer
+covers everything later (a theme change, a lazily-imported stylesheet). Disposal disconnects it, and does so
+*before* the early return that fires when there is no editor to dispose — put it after, and a dialog whose
+editor was already gone would leak a watcher on `document.head` for the life of the page.
+
+### Cards that open themselves, and only when the body says something new
+
+`blockExpanded` was "collapsed unless clicked, or unless it failed". It is now collapsed unless clicked, or
+unless the body has something the header does not: an error or a denial, or a diff. A `Read` card stays shut
+because its expanded body only restates its own header; an `Edit` opens because the diff *is* the card. An
+`Edit` whose input carries no usable diff stays shut for the same reason `Read` does.
+
+The one case that reads like an exception and is not: a call **awaiting permission** stays collapsed even
+when it is an edit, because the permission dialog is on screen showing that exact diff. Opening the card
+would put the same content twice on one screen and pull the chat log out from under the dialog. An explicit
+click always wins over all of it — the map is keyed per block and remembered for the session, so a user who
+closes a card keeps it closed.
+
+### `Bash` summaries wrap; nothing else does
+
+The engine already caps summaries at 200 characters. The card then elided that to one line, so
+`git diff --stat -- webapp/src/… && npx vitest run …` became a promise that something was happening. The
+fix is scoped to `.tool-card[data-tool='Bash']`: a three-row `-webkit-line-clamp` with `pre-wrap` and
+`overflow-wrap: anywhere`, and the dot and caret nudged to the first line's baseline so a wrapped header
+does not centre them against three rows of text. Three rows and not unbounded, because the value of a
+scannable log is that rows are the same height; three is enough for a long path plus flags.
+
+Every other tool keeps its single elided line. A `Read` is a path, a `Grep` is a pattern — one line is the
+whole summary, and wrapping them would cost the uniform row for nothing.
+
+### What the tests could not tell us
+
+The clone tests prove style text reaches the shadow root and stops arriving once the editor is disposed.
+They cannot prove the editor *looks* right: jsdom does no layout, and the failure being fixed here is
+entirely a layout failure. So the fix was confirmed against the running app — a second tab, a synthetic
+`permission-request` dispatched client-side so the user's live session was never touched, and a DOM probe:
+97 cloned styles, 27 laid-out view lines, 9 change decorations. That is the assertion the suite cannot make.
+
+The wrapping has no test at all, for the same reason and with less excuse: `-webkit-line-clamp` is a
+rendering rule, and asserting the rule exists in `styles.js` would test that the file contains the string we
+just typed into it.
+
+### Tests
+
+Deltas, not totals:
+
+- `webapp/src/chat-panel/block-render.test.js` — **+3** (four new cases, one old name retired). The
+  `blockExpanded` group now says what stays shut and why: a body that only echoes its header (`Bash`,
+  `Read`), an edit-shaped call opening itself (parametrised over `Edit`, `MultiEdit`, `Write`,
+  `NotebookEdit`), an edit with no diff in its input, and an edit awaiting permission. Plus a render test
+  that an edit card arrives with `aria-expanded="true"` and its diff in the DOM, and closes on one click —
+  the default and the override in one assertion.
+- `webapp/src/permission-dialog/dialog.test.js` — **+3**, on the head-style contract: the editor gets the
+  Monaco styles that live outside its shadow root, a stylesheet added *after* construction is picked up, and
+  the head is no longer watched once the editor is disposed.
+
+The third of those failed first, and instructively: written with `deny`, it found the observer still
+connected and was right to. Deny opens a reason flow and leaves the dialog — and its editor — alive. The
+test now uses `allow` and asserts `_disposed` before checking that a later head style is not cloned, so its
+precondition is visible instead of assumed.
+
+### Deliberately not built
+
+- **The `max_buffer_size` default is untouched.** A screenshot returned inline during this work exceeded the
+  SDK's 1 MB stdout line limit (`_DEFAULT_MAX_BUFFER_SIZE`, `subprocess_cli.py`), which raises in the reader
+  and permanently kills the message pump — the session does not recover, and the `get_context_usage`
+  timeouts that follow are the usage HUD polling a corpse. `ClaudeAgentOptions.max_buffer_size` is settable
+  and `src/aic_dc/claude_code/options.py` never sets it. Raising it is a decision about memory, not a
+  cleanup, so it is left open rather than quietly changed.
+- **`Failed: Absolute paths not accepted:` is not chased.** It appeared repeatedly in the same log, comes
+  from `src/aic_dc/repo/paths.py`, and is a separate pre-existing bug — most likely a webapp caller handing
+  the engine's absolute `file_path` to a repo API that takes repo-relative paths. Folding it into a UI
+  polish commit would bury it.
+- **The dialog re-clones the whole head per editor creation.** Same cost the viewer has always paid, same
+  reason (the constructor's own rules), and the dialog builds at most one editor per request. Incremental
+  cloning would be an optimisation to the shared module, measured against nothing.
+- **Three rows is not configurable.** No setting, no per-card override, no "show full command" affordance
+  beyond expanding the card — which already shows the command verbatim.
+
+## Interlude — the chip that asked for a path the repo API refuses (2026-08-17)
+
+Not a phase. A bare `Failed: Absolute paths not accepted:` line, repeated in a terminal log the user
+pasted, pointing at a test file nobody had asked to open. Recorded as deliberately-not-built in the
+interlude above and chased on the next turn, because the thing it broke is a click that looks like it
+should work.
+
+### Two contracts that had nowhere to meet
+
+Claude Code's file tools take absolute paths, so every path a tool card attributes to a call is absolute:
+`files_written_by` reports what the tool was given, and `result['files_modified']` is absolute by
+documented contract. Every `Repo` method takes a path relative to the repo root and rejects an absolute
+one *outright* — it deliberately does not resolve it, because resolving would be a route around the
+containment check.
+
+The browser had no way to convert between them, because it was never told the repo root. So a click on a
+tool card's file chip asked `Repo.get_file_content` for `/home/you/repo/tests/thing.py`, the backend
+raised, jrpc-oo printed the exception text as a bare `Failed:` line on the server's stderr, and the
+viewer sat empty. Nothing on screen said why — which is why a bug on the app's most-used affordance was
+reported as a log curiosity rather than as "the chips don't work".
+
+The same held for the turn footer's "files modified" list and the context tab, which carry the same
+paths from the same source.
+
+### The root, once, and one place that uses it
+
+`get_current_state` now carries `repo_root`. It is the only absolute path the browser is given, and it is
+given it so it can stop sending them back — cheaper than relativising every path in every payload that
+carries one, and no more of a disclosure than the repo name already in the window title or the working
+directory in every exec dialog.
+
+`webapp/src/repo-path.js` holds the conversion, and `onNavigateFile` is the only caller: one choke point
+every dispatcher already goes through, rather than a `startsWith` per chip. Normalising there also fixes
+the two side effects that made a bad click outlive the click — the absolute path used to be what got
+persisted as the last-open file and registered with the navigation grid, so it came back on reload.
+
+Three things it refuses to guess. A path outside the root passes through unchanged, because it has no
+repo-relative name and the backend refusing it is the right answer — a `../..` walk would ask for a
+different file. A sibling directory sharing the root's name as a string prefix (`my-repo-backup`) is not
+inside it; the match is on the separator. And with no root yet known, an absolute path is left exactly as
+it was, which is the old behaviour rather than a path measured against an empty string.
+
+### Tests
+
+- `webapp/src/repo-path.test.js` — **new, 9 tests**: relativises inside the root, leaves relative paths
+  alone, tolerates a trailing slash, leaves an outside path absolute, does not mistake a shared-prefix
+  sibling for a child, leaves the root itself alone, passes through with no root, passes non-string input
+  to the caller's own guard, and treats a Windows drive-letter root the same way the backend does.
+- `webapp/src/app-shell/viewers.test.js` — **+5**: an absolute path opens as a repo path, the relative
+  path is what gets persisted and registered, an outside path is left as found, the root arrives from the
+  state snapshot, and an absolute path before the first snapshot is untouched.
+- `tests/test_claude_code_service.py` — **+2**, plus `repo_root` in the snapshot's key-set assertion: the
+  root is absolute and matches the configured repo, and it falls back to the cwd alongside the name.
+
+Verified against the running backend, which is the only place the two contracts actually meet. The
+browser tab was running the pre-fix bundle, which forwards whatever it is given, so the same file was
+opened both ways in one probe: absolute → 0 characters loaded and an empty viewer, repo-relative →
+40 937 characters. That is exactly the conversion the fix performs, measured on the real RPC rather than
+on a mock that would have accepted either.
+
+### Deliberately not built
+
+- **Chips still *display* the absolute path.** Only the navigation is converted. Shortening the label is a
+  display change with its own question — basename, or root-relative, or middle-elided — and it would hide
+  which repo a path belongs to in the one place a multi-root future would need it.
+- **`Repo` still refuses absolute paths.** The alternative fix was to resolve-then-contain inside
+  `_validate_rel_path`, which turns a flat rule into a conditional one at the security boundary for the
+  convenience of one caller. The specs say absolute paths are rejected; they still are.
+- **The bare `Failed:` stderr line is unchanged.** jrpc-oo prints raw exception text with no request
+  context, which is why this took a pasted log to notice. Giving RPC errors a context line is a
+  transport-wide change, not this fix.
+- **`max_buffer_size` is still the SDK's 1 MB default** — the other item from the same log, still open on
+  the same grounds: it is a decision about memory, not a cleanup.
+
+## Interlude — the tab a subagent never got (2026-08-17)
+
+Not a phase. One sentence from the user: "agents were meant to show their feeds in separate tabs. I saw
+before that they shared the same main tab. can you confirm that and fix it?" Confirmed, and it was not an
+accident — the tab strip was the surface this record kept listing as *mounted and inert by decision*, CC-8.
+The half that was actually missing turned out to be small, and one thing underneath it was broken.
+
+### The row was the whole surface
+
+`onSubagentEvent` folded each `Task` into `turnBlocks.subagents` and the blocks it produced nested under
+the `Task` card that spawned them. That is a real surface and it stays: an indented row inside Main is the
+evidence the delegation happened, and a user watching Main sees the fan-out without switching anywhere. But
+it was the *only* surface. A subagent working for minutes was a second feed competing for one message list,
+and the only tab a subagent ever got was `historical:<agent_id>` — a transcript read off disk, after the
+fact, because the user asked for it.
+
+So the strip was inert for want of a producer, not for want of a strip.
+`webapp/src/chat-panel/subagent-tabs.js` is that producer, and every other change in this interlude is a
+consequence of it.
+
+### One id joins everything, and text had none of it
+
+A block produced inside a subagent carries `agent_id = the parent Task call's tool_use_id`, and a
+`subagentEvent` carries that same id as `tool_use_id`. That single identity is what lets a tab find its own
+blocks with no correlation table — the same identity `groupBlocksByScope` already relied on.
+
+It held for tool cards and for nothing else. `_Block` in `messages.py` had no scope field at all: the
+translator knew which scope was speaking (it passes `scope` around to route chunks) and threw it away on
+the way out, `_chunk_event` emitted no `agent_id`, and `applyReplayBlocks` hardcoded `agent_id: null`. Live,
+this went unnoticed because a subagent's *text* nested nowhere and read as the main conversation's. The
+reconnect test is what failed — a rebuilt tab found none of its own feed — and it was right to.
+
+Fixed end to end rather than at the seam that showed it: `_Block.agent_id`, emitted by `to_dict` and by
+every `streamChunk` / `thinkingChunk`, set from `_open_block(kind, scope)`; `normalizeAgentId(raw.agent_id)`
+on replay. A subagent narrates as well as calling tools, and its narration belongs where its tools are.
+
+The reconnect path needed a second thing the snapshot did not carry: the rows themselves. `_record_subagent`
+accumulates one row per task across the four `Task*` messages — patching only truthy fields, so a progress
+message that omits the description does not blank it, and latching `terminal` once set — and
+`ActiveTurn.to_dict` reports them as `subagents`. A browser that refreshed mid-fan-out rebuilds the strip
+from that list; the blocks it needs are already in the snapshot it replays, so no transcript is read until
+the user opens a tab.
+
+### Mirrored, not copied
+
+A subagent tab's block list holds *the same record objects* Main's does. `blocks.js` mutates records in
+place, so a tool result landing on a card updates both placements at once: one card object, two positions,
+no reconciliation — which is exactly what the spec's "renders in both from one card object" asks for, and
+the cheapest way to get it. `mirrorSubagentBlocks` runs on every fold, every drained chunk frame, and once
+more at `streamComplete` before `resetTurnBlocks` empties the array it reads from.
+
+Two things fall out of it. The mirrored tab's own `subagents` map is left empty on purpose, so
+`groupBlocksByScope` renders the feed flat — no row header wrapping a tab that is entirely about that one
+subagent. And a subagent tab never sets `currentRequestId`: `findTabForRequest` scans that field, so a second
+tab answering to the parent's request would take Main's chunks. The parent id lives in
+`tab.subagent.requestId`, read for settling and nothing else.
+
+### What settles a tab, and what colour it settles on
+
+Tabs are created on first sight of a task, not on `started` — a missed `started` would otherwise mean a
+subagent that runs to completion with no tab at all, and a first event that is already terminal creates and
+settles in the same call. Settling keeps the tab in the strip for the rest of the turn and shares the live
+blocks array with its message rather than freezing it: Main freezes so a late event cannot rewrite history
+the user has read, and a subagent tab has no next turn to protect against, while a tool result landing after
+the terminal status is content the user still wants.
+
+Amber is the state the LED row did not have. `subagentLedState` reads the row, not `lastEditOutcome`
+(nothing on that tab completes *its* turn), and green is reserved for `status === 'completed'`: `stopped`
+and `killed` are neither a success nor a fault, an unrecognised terminal status is a vocabulary the CLI will
+keep growing, and a subagent still live when the turn ends has an outcome nobody reported. Red is only the
+case where the parent turn itself errored while the subagent was live. The tooltip says which — `stopped`,
+or `status unknown at turn end`, rather than a colour with no sentence.
+
+The tabs leave when the turn does, and `clearSubagentTabs` runs *first* in `onSessionChanged`, before
+anything else in it writes: every assignment there goes through the active-tab accessors, so with a
+subagent's feed active the loaded session's messages would land in a tab about to be deleted.
+
+### The chip that was always blank
+
+The subagent row wanted to show tokens and never did. `TaskUsage` is `{total_tokens, tool_uses,
+duration_ms}`, already summed by the CLI, and it shares no field name with the per-model counters
+`turnTokens` sums — so every subagent scored zero and the chip rendered `nothing`, silently and correctly,
+for a subagent that had demonstrably spent tokens. `taskUsage()` in `turn-cost.js` reads the right shape,
+falls back to `turnTokens` for a payload carrying the other one, and treats zero as "not reported" so a
+caller drops the figure instead of printing a claim. It now feeds the row's two chips and the green LED's
+tooltip.
+
+### Tests
+
+- `webapp/src/chat-panel/subagent-tabs.test.js` — **new, 33 tests**: a live subagent gets a read-only tab
+  keyed on its agent id with no `currentRequestId`, labelled `Explore: audit the parser`, seeded with what it
+  was asked to do, idempotent across repeat events and relabelled when a later one supplies a description;
+  the feed holds the *same objects* as Main and does not claim Main's own blocks; it renders flat, with the
+  read-only note and no textarea; a finished subagent keeps its tab and goes green; one still live at turn
+  end goes amber with the status-unknown tooltip, red only if the turn errored; ⏹ Stop replaces 📊, confirms
+  before calling `_stopSubagent`, and is gone once settled; the tabs leave on the next send and on a session
+  change, from the active tab included; and a refresh mid-fan-out rebuilds the strip and mirrors the scoped
+  block.
+- `webapp/src/chat-panel/blocks.test.js` — **+1**: replay keeps the scope that produced each block, text
+  included. This is the assertion whose absence hid the missing field.
+- `tests/test_claude_code_messages.py` — **+6**, plus two assertions on the existing two-scopes-at-once
+  streaming test: a subagent's thinking carries its scope, replayed blocks say which scope produced them,
+  rows accumulate across the four `Task*` messages without a later event blanking an earlier one, a finished
+  subagent stays finished, each task gets its own row, and the snapshot is a copy.
+- `tests/test_claude_code_session.py` — **+1**: a subagent live when the pump is paused is in
+  `active_streams()`, with its `tool_use_id` — the field a rebuilt tab needs to claim its feed.
+
+Both suites green: **3819 webapp tests across 95 files**, **3088 pytest passed / 75 skipped**.
+
+### The live run, and the sixteen tabs nobody asked for
+
+Done the same day, on the user's prompt — "I just restarted python and the webapp. can you test the agent
+mode tabs?" — by driving a real fan-out from the browser and reading the DOM back through
+`evaluate_script`. It closed the item the section below had named as the first to close, and it found the
+thing 33 green tests could not.
+
+**The CLI reports a slow `Bash` command as a task.** `task_type="local_bash"`, its own `b*` task id, one
+per command past the backgrounding threshold (~5 s), announced through the same four `Task*` messages a
+subagent uses — `started` carrying the command as its description, then `notification` with
+`task_type=None`. A turn that delegated four subagents opened **twenty tabs, sixteen of them empty**.
+Reproduced deliberately with `sleep 9; echo slow-probe-done`: two events, one empty tab. The separation is
+exact, and was probed again on the turn that wrote this fix — of 21 subagent tabs in the strip,
+`local_agent/has-blocks: 4, local_bash/empty: 17`, with no tab on either diagonal. A tab whose feed can
+never hold a block is the shape of the bug, and `task_type` is what predicts it.
+
+The rows had been there all along. `_record_subagent` folded *every* task into the turn's subagent
+inventory, so Main's row list had carried sixteen junk entries under a scroll for as long as the rows have
+existed — invisible enough that nobody looked. Giving each row a tab in the strip is what made a
+pre-existing bug impossible to miss, which is the argument for the strip stated backwards.
+
+Filtered in `messages.py` rather than in the browser, because one rule there serves the indented row, the
+tab, its status LED, the reconnect snapshot and the Context tab's subagent inventory at once, and five
+places agreeing by accident is how the next surface disagrees. Two details the shape of the messages
+forces: the check **latches the task id** (`_non_subagent_tasks`), since `TaskProgressMessage` has no
+`task_type` field at all and the trailing `notification` reports `None` — only the first message of a bash
+task says what it is; and the set is an **observation, not a contract** — the SDK types the field
+`str | None` and documents no vocabulary, so an absent or unrecognised type falls through to a visible row
+rather than being dropped silently.
+
+What the run confirmed, none of it previously observed:
+
+- **`agent_id` was null on every single event.** Tabs keyed on `task_id` throughout. The field the spec
+  treats as the identity and `task_id` as a last resort is, live, the one that never arrives — which is
+  why `subagentTabId` records a later `agent_id` on the tab instead of rekeying the Map.
+- **The event order**: `started` → 8 × `progress` → `updated(completed, terminal)` →
+  `notification(completed, terminal)`, with `last_tool_name` present only on `progress`. That is the
+  vocabulary the truthy-only patching in `_record_subagent` and `applySubagentEvent` was written for, and
+  it holds.
+- **The tab contract**: `readOnly: true`, no textarea, the read-only note, `currentRequestId: null`, the
+  `🤖 …` seed line, the LED strip present, the feed flat (`subagentRowsInFeed: 0`), ⏹ Stop only while live
+  and 📊 absent, and the settled feed message sharing the live blocks array.
+- **The counters are real**: `completed (8 tools, 8,991 tokens)` on the green LED and `8 tools` / `9.0k
+  tok` on Main's row — the same chip that rendered blank before `taskUsage()`, now reading a live
+  `TaskUsage`.
+- **Reconnect, live**: a hard reload mid-fan-out rebuilt all three tabs from the snapshot — two green
+  settled, one live and cyan with its ⏹ — off 76 blocks in Main of which 23 carried a subagent scope, and
+  the three feeds refilled by mirroring. This is the path the missing `_Block.agent_id` had broken, now
+  watched rather than asserted.
+
+**Re-verified after the fix**, engine restarted on the same session, in two halves. The negative half:
+three long commands in the main scope — `sleep 9`, a 12-second `pytest`, a 19-second `vitest`, the last two
+being the exact pair that had opened tabs `bua39rv8j` and `bk0br7yxp` before — produced **no tab and no
+row**, the strip staying `["main"]` throughout. The positive half: two delegated subagents, each running a
+`sleep` of its own past the threshold, produced **exactly two tabs**, both `local_agent`, live and
+read-only with ⏹ in the strip and blocks arriving, then settling `completed` with
+`(2 tools, 7,403 tokens)` and `(2 tools, 7,377 tokens)` on green LEDs — and Main's inventory held exactly
+those two rows. A bash task fired *inside* a subagent is where most of the sixteen came from, so the
+subagents were given sleeps precisely to fire them.
+
+Three things the run leaves open, all carried in the README's item 9; the two below it are closed in
+*The strip that could not be read*, and the first is not. **⏹ Stop and the amber path are
+still unverified**, because `stop_task` interrupts the host turn and the host turn was the one doing the
+verifying — it needs its own sitting, deliberately rather than by omission. (That reason turned out to be
+wrong; see below.) **The labels read as noise**:
+`task_type` is `local_agent` for every subagent, eating 13 of 40 characters to say nothing, and
+`description` is the SDK's *live* activity string — so a tab is labelled with whatever the subagent
+happened to be doing when its last event arrived, and one settled here as
+`local_agent: Reading ~/…/delivery.md`, which is not what it was asked to do and not what it did. The
+parent `Task` card already holds the `input.description` and `input.subagent_type` the user actually typed.
+And **one focus anomaly did not reproduce**: after a mid-fan-out reload the active tab was once a live
+subagent feed rather than Main; instrumenting the `_activeTabId` accessor, including before page load,
+recorded nothing.
+
+The run also cost the session. A screenshot returned inline put one JSON line over the CLI's 1 MB stdout
+limit, and the pump for that session ended permanently — open item 1, exercised by accident, its failure
+path working exactly as designed and the conversation over anyway. Everything after it was verified by DOM
+probe, which returns a few hundred bytes.
+
+- `tests/test_claude_code_messages.py` — **+6 more** (`TestNonSubagentTasks`): a backgrounded `Bash`
+  command is neither event nor row, the latch drops its untyped `progress` and `notification`, a
+  `local_agent` subagent and one with no `task_type` at all still get their row, a bash task interleaved
+  with a live subagent disturbs neither its `last_tool_name` nor its terminal flag, and two bash tasks
+  cannot merge. **3094 pytest passed / 75 skipped**; the webapp suite is unchanged at 3819, the fix being
+  entirely engine-side.
+
+### The strip that could not be read
+
+Four tabs into the same fan-out, the strip was a row of near-identical sentences with the ends cut off. The
+label had been `task_type: description` truncated to 40 characters, which for real CLI events means 13
+characters of `local_agent` — identical on every tab — followed by whatever the subagent was doing when its
+last event landed. Two tabs could carry the same words and neither of them what the user asked for.
+
+The label is now an **ordinal plus one keyword**, `1 headings`, `2 test-files`, and the sentence moves to
+the tooltip and to the feed's opening line, which are the two places with room for it. Three decisions are
+worth recording:
+
+- **The ordinal is assigned once, at creation**, and stored on the tab (`sub.ordinal`). Numbering by
+  position in the strip would renumber the tabs under the user's cursor every time an earlier one closed,
+  and a tab that changes its name while being clicked is worse than a long one.
+- **The text comes from the parent `Task` card, not from the event.** `taskCardLabel` reads
+  `ownerTab.turnBlocks.index.get(row.tool_use_id)?.tool?.input` for `description` and `type` — the words
+  the user's own delegation typed. The event's `description` is the SDK's *live activity* string and is
+  only the fallback. The upgrade latches (`labelFromTask`), so a later activity string cannot overwrite the
+  real description once it has been found.
+- **`subagentKeyword` is a heuristic and is commented as one.** English task descriptions put their object
+  last, so the keyword is the last word — reaching back to the nearest word that is not a stopword when the
+  last one identifies nothing (`Count webapp test files` → `test-files`, `check the tests` → `check-tests`
+  rather than `the-tests`), paths collapsed to their basename because the fallback string is full of
+  absolute ones, lowercased because these read as tags, and truncated at 14 characters because the point of
+  the change was the *other* tabs' visibility.
+
+The unreproduced focus anomaly is now **guarded rather than explained**. `rehydrateSubagentTabs` remembers
+the active tab id, and if the rebuild ended with focus on a tab it just created, it puts focus back (or on
+Main if the remembered tab is gone). A rebuilt tab is one nobody chose. The cause is still unknown — this
+does not close that question, it makes the symptom unreachable from this path.
+
+And the reason ⏹ Stop stayed unverified was wrong. `stop_task` is its **own** control subtype, not
+`interrupt`: the SDK sends `{"subtype": "stop_task", "task_id": …}` (`query.py:848`,
+`SDKControlStopTaskRequest` sitting beside `SDKControlInterruptRequest` in `types.py:2352`) and
+`client.py:454` documents the answer arriving **in the message stream** — "a `task_notification` system
+message with status `'stopped'` will be emitted by the CLI". Nothing supports `service.py`'s claim that it
+interrupts the host's turn, so that docstring now says what the SDK says and explains why the RPC returns
+`"stopping"`: the terminal word is an event, not a return value.
+
+### The stop that told nobody
+
+The cheap way to reach amber without pressing the webapp's ⏹ — an agent stopping one of its own background
+subagents with the CLI's `TaskStop` tool — was tried live on 2026-08-17 against a subagent sleeping for 240
+seconds. It killed the subagent and **reported nothing to the message stream**.
+
+Before: `status: running`, cyan LED, tooltip `… running — Bash`, ⏹ offered. After the kill, and six seconds
+later again, the browser read `terminal: false` with no `status` field at all, the LED still cyan, the ⏹
+still offered for a task that no longer existed. `get_current_state` was asked directly, so this is not a
+browser-side miss: the **engine's** own record of the task was `{status: null, terminal: false}`, holding
+only a `usage` patch (`6,963 tokens, 1 tool use, 3,378 ms`) that had arrived while the task was alive. The
+harness that owns the background agent reported `killed`; the CLI's task machinery said nothing.
+
+Three things follow. The two stop paths are **not interchangeable** — the CLI's own `TaskStop` tool and the
+SDK's `stop_task` control request reach the same task by different routes, and only the latter is documented
+to answer with a `stopped` notification, so only the webapp's ⏹ can verify the webapp's ⏹. A task can
+therefore **die without a terminal status**, which is exactly the case the turn-end sweep exists for: a
+subagent still live when its parent turn ends is shown status-unknown and amber, and that sweep is now the
+only thing standing between a quietly-killed subagent and a cyan LED that lies. And the ⏹ affordance is
+offered on the strength of non-terminal status alone, so it will happily send a `stop_task` for a task the
+CLI has already forgotten.
+
+- `webapp/src/chat-panel/subagent-tabs.test.js` — **+13** (46 total in the file): the ordinal sticks
+  across a sibling's completion, the strip button and its tooltip carry what they should, `subagentKeyword`
+  over six shapes including stopwords and paths, the `Task`-card label beats the activity string and
+  latches, and a rebuilt tab leaves Main active. **3832 webapp passed / 95 files**, **3094 pytest passed /
+  75 skipped**.
+
+### Deliberately not built
+
+- ~~**No live verification against a real fan-out.**~~ Done the same day — see *The live run* above. It
+  found the `local_bash` tasks, confirmed the event vocabulary and the reconnect rebuild, and left ⏹ Stop,
+  the amber path and the label source open.
+- **`duration_ms` is parsed and unused.** `taskUsage` returns it; nothing renders it. A subagent tab has a
+  run timer of its own that starts when we first hear of the task, and two elapsed figures disagreeing on
+  screen is worse than one.
+- **A live feed and an archived transcript are still two code paths.** `historical:<agent_id>` tabs read
+  from disk and keep their own prefix; a live tab is keyed on the bare id. They are kept from colliding
+  (`onViewSubagentsRequested` skips a subagent that already has a live tab, by row key or task id) rather
+  than unified.
+- **⏹ Stop needs a `task_id`.** `stop_task` takes nothing else, so a live subagent whose events have not yet
+  carried one renders no Stop affordance rather than a button with nothing to send.
+- **Deep linking (`?turn=<request_id>`) is still absent**, as is the strip's per-description menu for a
+  turn that fanned out past the viewport — the generic overflow menu carries the tabs, labelled.
+
+## Interlude — asking the SDK what we have not built (2026-08-18)
+
+Not a phase. It started as a feasibility question from the user: *is there a way to get the py and webapp
+to probe the claude SDK to look for new features or unimplemented features, which we should program in to
+keep up with SDK changes?* The answer is yes, and the interesting part is that the first two ways of doing
+it both produced confident wrong numbers.
+
+The result is `src/aic_dc/claude_code/sdk_surface.py`, the gate in
+`tests/test_claude_code_sdk_surface.py`, `ClaudeCodeService.get_sdk_surface`, and an Alt+5 tab linked
+from the Context tab's Debug section. The design reasoning lives in
+[`sdk-surface.md` § The probe](sdk-surface.md#the-probe); this entry records what it cost and what it
+found.
+
+### Two probes that lied, and why the third reads syntax trees
+
+The obvious probe compares `dataclasses.fields(ClaudeAgentOptions)` against the keys
+`build_option_kwargs()` actually returns. Built, run, **36 false gaps** — because `model`, `hooks`,
+`resume` and `thinking` are set conditionally, so one call's output is one branch's output and the
+prober calls every other branch missing.
+
+The second obvious probe greps `options.py` for each field name. Built, run, and it reported **`skills` as
+handled**: the word occurs in a comment about `.claude/skills/`. That failure is the dangerous direction —
+it marks unbuilt surface as done, so nobody ever looks again.
+
+So coverage is derived from the package's **own AST**: `ast.Subscript` targets, `ast.Assign` /
+`ast.AnnAssign`, `ast.Return` dict literals, `ast.Call` attribute names, all `lru_cache`d and all cleared
+by an autouse fixture so a test that patches the source is not answered from the cache. Both failures are
+now pinned as tests, because the next person to think "a grep would do" deserves to find out in two
+seconds rather than in an afternoon.
+
+The payoff is the maintenance property the user's question was really about: **adding an option to
+`options.py` requires no edit to the probe.** It moves from `pending` to `handled` on its own, and the
+declared `PENDING_OPTIONS` entry that described it becomes `stale` and is reported as stale. The tables
+grow only when the SDK itself grows.
+
+### The gate fails on untriaged, never on unimplemented
+
+24 options are pending and the suite is green, which is the whole design. A name in *none* of `handled` /
+`declined` / `pending` is the only failure, because that is the only state meaning the wheel moved and
+nobody looked; closing it costs one table entry with a sentence in it. The alternative — fail on anything
+unbuilt — fails on 24 things the day it lands, earns an ignore-list inside a week, and the ignore-list is
+the file nobody reads.
+
+Two smaller judgements in the same spirit. `KNOWN_BETAS` exists because the one beta we have declined
+(`context-1m-2025-08-07`) otherwise failed the gate as untriaged, and a test that goes red for a decided
+thing is a test that gets deleted. And `get_sdk_surface` **never returns `{"error": …}`** — a dead engine
+costs it the live `get_server_info()` diff and nothing else, so the static half renders when the reader
+most wants it, which is when something is broken.
+
+### What it found
+
+Nothing untriaged, and a picture that would have been guessed wrong: **the message taxonomy and the client
+surface are fully consumed** — every one of the 7 `Message` union members is rendered, and 14 of the 15
+public client methods are called, the exception being `receive_messages` (declined; `receive_response`
+bounds itself on `ResultMessage`). An earlier grep of mine said 5 of 14, having matched only the literal
+`client.` prefix; the real call sites reach those methods through several receivers.
+
+Of the 24 pending options, **`max_buffer_size` is this record's own [open item 1](README.md#open-items-carried-forward-as-of-2026-08-18)** —
+found independently by a tool that had never read the README, which is the best evidence available that it
+is reading something real. `stderr` and `resume_session_at` / `resume_drops_turn` are the other two worth
+doing. `PreCompact` is the one pending hook: nothing else announces a compaction before it happens.
+
+### The tab was a dead end, and the spec already said so
+
+Reported by the user within the hour of it landing: *there is no back arrow from the sdk coverage view. I
+had to press alt-1 to get back here.* The panel had put its `Refresh` button in a `<header>` that only the
+loaded branch rendered — so the error state, the state most likely to make someone want out, had no
+toolbar at all.
+
+`shell.md` had specified the arrow all along ("each overlay tab's body carries a back-arrow (`← Chat`) at
+top-left"), which makes this a case of a spec being right and unread rather than of a decision being
+wrong. The toolbar is now `← Chat` / `↻ Refresh` / `▾`, copied from `context-usage-tab.js` so the control
+is where a reader arriving from that tab already expects it, and rendered **outside** all three state
+branches. The spec now says why that placement is load-bearing, in the words the bug supplies: a new
+overlay tab is not finished when its content renders, it is finished when it can be left.
+
+### Tests
+
+- `tests/test_claude_code_sdk_surface.py` — **new, 38**. `TestNothingUntriaged` is parametrized over the
+  five sections and is the gate; it also refuses a stale entry and refuses a table that claims a hook is
+  handled when nothing registers it. `TestCoverageIsDerivedNotGuessed` pins the two naive probes' failures.
+  The rest are per-section — a pending option must carry an argument, a declined one a reason, and the two
+  sets must not overlap — plus `diff_server_info` over junk shapes, a report that is still *shaped* with the
+  SDK absent or the source unreadable (no false coverage from a failed read), and one asserting the whole
+  report is JSON-serialisable, since it crosses an RPC.
+- `tests/test_claude_code_service.py` — **+3**: the report carries both halves, and a dead engine or an
+  unexpected exception costs the live half rather than the call. Plus `get_sdk_surface` in
+  `READ_ONLY_METHODS` — the repo's own `test_every_rpc_is_classified` caught its absence, which is that
+  contract test working exactly as intended, and the entry then extended
+  `TestCollabRestrictions::test_a_participant_may_watch` with a case for free.
+- `webapp/src/sdk-surface-tab.test.js` — **new, 27**: pending is the default filter, untriaged names get a
+  banner naming the test that fails and what closing it looks like, the static half renders with no engine,
+  a stale entry is reported, the filter survives a remount, and — the back-arrow fix — `← Chat` is present
+  and dispatches in the error branch and the pre-report branch, not just the loaded one.
+- `webapp/src/context-usage-tab.test.js` — **+4**: the Debug link dispatches `sdk-surface`, escapes the
+  shadow root, names Alt+5, and is a real `<button>`.
+- `webapp/src/app-shell/window-and-keyboard.test.js` — Alt+5 now switches and Alt+6 is still ignored,
+  replacing the test that asserted Alt+5 was unmapped.
+
+Both suites green: **3864 webapp tests across 96 files**, **3211 pytest passed**.
+
+The gate was also verified by breaking it deliberately — a fake option, hook event and beta value injected
+into the reflected surface each made the shipped test fail with the injected name in the assertion message.
+A drift detector that has never been observed detecting drift is a decoration.
+
+### Deliberately not built
+
+- **No semantic checking, and this is a hard limit rather than a deferral.** Reflection reads shape. Every
+  row in `sdk-surface.md`'s correction tables is a case where the types were satisfied and the behaviour was
+  not — the `StreamEvent` partial-block key, `rewind_files` returning `None`, `get_mcp_status` omitting an
+  in-process server. A green gate means nobody is unaware of a name; it does not mean the name is used
+  correctly, and a reader who takes it for the latter is worse off than with no probe at all.
+- **The 24 pending options stay pending.** The point of this pass was to make the list exist and be
+  maintained, not to spend it. Three of them are named above as worth doing; `sandbox` is named as a trap.
+- **Nothing runs the probe in CI on a schedule.** It runs when the suite runs, which means it fires on the
+  next commit after a wheel bump rather than on the bump itself. A `pip install --upgrade` followed by no
+  commits is a window where the report is stale and says nothing about being stale.
+- **The tab does not link to source.** A pending option's row names the field and the argument for it; it
+  cannot open `options.py` at the line that would set it. That is the obvious next affordance and it needs a
+  line number the probe does not currently record.
+
+---
+
+## Interlude — the ceiling that ended conversations, and the diagnostics nobody could read (2026-08-18)
+
+Asked of the probe built an hour earlier: *looking at the SDK surface coverage. do you think that there
+are items which should be implemented?* The answer had to come from the wheel rather than from the notes
+next to it, because the notes are the thing being asked about. Three items survived that reading, all
+three now built: `max_buffer_size`, `stderr`, and the `PreCompact` hook. What makes them one entry rather
+than three is what they have in common — each is a case where **the failure is already implemented and
+only the report is missing**.
+
+### One line of stdout, and the conversation is over
+
+[Open item 1](README.md#open-items-carried-forward-as-of-2026-08-18) had been sitting on a number since
+2026-08-17, when a returned inline screenshot exceeded the SDK's own 1 MiB per-line ceiling and
+`CLIJSONDecodeError` was raised inside the transport's reader. Everything downstream of that worked
+exactly as designed and none of it helped: `_is_connection_failure` matched, the turn failed, the session
+was marked lost, `engineHealth` went out. The conversation was still over.
+
+The number fell out of the asymmetry rather than out of a benchmark. The ceiling exists to bound memory;
+the overflow ends a conversation. One session's pending buffer at 16 MiB is nothing on a single-user
+localhost host, and covers a ~12 MB raw image. So `DEFAULT_MAX_BUFFER_SIZE = 16 * 1024 * 1024`, and
+`engine.json` can raise it further for a payload nobody has met yet — a pathological case should cost a
+config edit, not a release.
+
+Two decisions inside that are worth the words:
+
+- **It is set unconditionally, against `options.py`'s own null-means-omit rule.** That rule exists so we
+  never pin today's CLI default into our code, and it is right for `model` and `effort`. It is wrong here
+  for one reason: the dependency's default is the *known-fatal* value, so deferring to it is not humility,
+  it is choosing the broken option. `system_prompt` was the first exception (omitting it deletes the CLI's
+  own prompt); this is the second, and the docstring now says two rather than one.
+- **A configured value below the SDK's default is dropped with a warning.** The field's whole purpose is
+  to *raise* the ceiling. Below 1 MiB it could only make the session-ending overflow arrive sooner, which
+  is a misconfiguration and not a preference. `MIN_MAX_BUFFER_SIZE` reads
+  `subprocess_cli._DEFAULT_MAX_BUFFER_SIZE` from the installed wheel rather than hardcoding 1 MiB, so an
+  SDK that raises its own default leaves the floor merely low rather than wrong. A *float* is rejected
+  outright rather than truncated: a byte count written `1.5` is a units mistake, and reading it as one and
+  a half bytes would be the worst available reading of it.
+
+### Registering a stderr callback is what pipes stderr
+
+`ClaudeAgentOptions.stderr` looked like the smallest of the three and carried the one trap. The SDK pipes
+the CLI's stderr **only when a callback is registered**; unset, the subprocess inherits the server's and
+its diagnostics reach the terminal. So a callback that merely stored lines for the browser would have
+*taken away* what the server log has today. `EngineSession._note_cli_stderr` therefore logs the line at INFO
+with a `claude CLI stderr:` prefix — the CLI's words, attributable to the subprocess that wrote them —
+and *then* records it. It catches everything: this is a diagnostic path, and a diagnostic that can end a
+turn is worse than none.
+
+The browser end is a 20-line tail on `EngineHealth`, each line capped at 500 characters, trimmed from the
+front so a chatty session keeps its most recent output. Unlike `note_degradation` it does **not**
+deduplicate: a warning repeating forty times is the fact worth seeing, and collapsing it would hide a
+loop.
+
+The display decision is the load-bearing one. `cli_stderr` is deliberately absent from both
+`hasHealthProblem` and `healthKey` in `health-banner.js`, which means the tail **can neither open the
+banner nor undo a dismissal**. The CLI writes routine chatter to stderr; a session that says "Fetching
+latest version" must not wear a warning banner for it, and a user who dismissed a version-skew warning
+must not have it return because the subprocess printed another line. It renders underneath whatever *did*
+open the banner — including a banner forced open from the turn footer on a perfectly healthy engine,
+which still says the engine reports nothing wrong and then shows what the CLI has been saying. The case
+it was added for is the one where this matters most: a connect that fails, where the CLI's own words are
+the only diagnosis available and the banner is open already. `service.py` broadcasts `engineHealth` after
+a failed connect, so that path reaches the browser.
+
+### A compaction pause announced before the pause
+
+`PreCompact` was the single pending hook, and the client had been ready for it for some time:
+`onSystemEvent` already had a `pre_compact` branch and nothing registered the matcher, so the branch was
+unreachable. Registering it makes the toast arrive *before* the pause. The stream's own `compact_boundary`
+→ `compactionEvent` arrives when compaction has **finished**, which means it can only explain a stall the
+user has already read as a hang — that asymmetry is the entire reason this is a hook and not a translated
+message.
+
+The matcher carries no matcher string, because that field filters on a tool name and this event has none.
+The hook stays inside the repo's standing rule that **hooks are observational**: it returns `{}` always,
+never a `decision` or `continue: False`, and never raises.
+
+Removing a latent double-toast came with it. `streaming.js`'s `onHookEvent` had its own
+`hook_event_name === 'PreCompact'` branch, and `HookEventMessage` arrives **twice** per hook run
+(`hook_started`, then `hook_response`) — so with a hook actually registered, that branch would have
+toasted twice for one compaction. It is gone, with a docstring saying where the toast comes from now and
+why a branch here would double up.
+
+### The bucket `stale` structurally cannot fill
+
+Implementing two pending options exposed a hole in the day-old probe. `sdk_surface.py` claimed that
+closing a pending option would make its `PENDING_OPTIONS` note "become `stale` and be reported as such",
+and it cannot: `stale` is `(declined | pending) − fields`, so it fires only for names the *SDK* removed,
+and a note about an option we just implemented names a field that still exists. The note would have sat
+there indefinitely, and a leftover pending note is worse than no note — it is an argument for *not doing*
+the thing that has been done, which reads to the next person as a reason to undo it.
+
+Hence a fourth bucket, `resolved` = `(declined | pending) ∩ assigned`, rendered beside `stale` in the tab
+with the same *Delete the entries* instruction and asserted empty by
+`test_nothing_we_set_is_still_argued_against` — with a companion test that monkeypatches a note over
+`cwd` to prove the check can fail, because a check that cannot fail is decoration.
+
+> **Correction to the entry above.** "The declared `PENDING_OPTIONS` entry that described it becomes
+> `stale` and is reported as stale" was wrong, in the direction that matters: it describes a
+> self-maintaining table that was not self-maintaining. The maintenance property it was claiming is real,
+> but it needed the bucket this entry adds. `sdk-surface.md` § *Coverage is read out of the AST* now says
+> which bucket catches which direction and why both are needed.
+>
+> And its "**the 24 pending options stay pending**" held for about an hour. Not a wrong decision at the
+> time — the point of that pass really was to make the list exist rather than to spend it — but the count
+> is 22 now, and the reason is the one the entry hoped for: someone read the arguments it had written down
+> and acted on two of them.
+
+### What the probe now says
+
+`Options 23 / 2 / 22`, `Hooks 2 / 8 / 0` (handled / declined / pending). The hook column is empty for the
+first time. The one remaining item of the original three is `resume_session_at` / `resume_drops_turn`,
+left open on purpose: unlike the other two it is a feature with a UI, not a constructor argument, and it
+is the SDK-side half of the undo story [CC-20](decisions.md) already decided against.
+
+### Tests
+
+- `tests/test_claude_code_engine_config.py` — **+6** (28). The cleaner's own shape: a size is read, a
+  float or a string is not, `true` is not a size, a value below the floor drops *with a warning*, exactly
+  the floor is accepted, and the floor is asserted equal to the SDK's private constant rather than to
+  1 MiB — so a wheel that raises its own default fails here and says so.
+- `tests/test_claude_code_options.py` — **+5** (48). The ceiling is set even under a null config, it
+  exceeds what the SDK would have used (read from the wheel), it covers an 8 MB screenshot's base64
+  expansion, a configured value wins, and — the one that documents the trap —
+  `test_stderr_is_omitted_when_nobody_will_read_it`, because absence has to mean *inherit*.
+- `tests/test_claude_code_session.py` — **+11** (122). `TestCliStderr`: the callback the session hands the
+  SDK **is** `_note_cli_stderr` (`options.stderr` compared by identity), a line reaches the health record
+  *and* is logged as the CLI's own, a quiet CLI reports nothing, only the last 20 are kept, a repeated line
+  is not collapsed, an enormous line is cut, blanks are dropped, `to_dict` hands over a copy, and our own
+  failure inside the recording path is logged rather than swallowed.
+- `tests/test_claude_code_hooks.py` — **+9** (37). `TestPreCompact`: the announcement's shape, its
+  `turn_scoped` flag (it must stay true or the shell's `systemEvent(requestId, data)` arity breaks under
+  `_broadcast`'s `request_id=None`), a manual trigger saying so, custom instructions carried, an
+  unexpected payload shape still announcing the pause, `{}` with no decision key of any kind, a broadcast
+  that raises not reaching the caller, and no broadcast at all not being a failure — plus the matcher
+  mapping now subscribing to two events, with no tool matcher on this one.
+- `tests/test_claude_code_sdk_surface.py` — **+4** (42). `PreCompact` handled and the table agreeing,
+  nothing registered without a note recorded, `resolved` empty, and `resolved` able to report.
+- `tests/test_claude_code_service.py` — unchanged count (366), two assertions rewritten: the observational
+  hook subscription is now two events, not one.
+- `webapp/src/chat-panel/health-banner.test.js` — **+9** (44). Output alone cannot open the banner and
+  cannot undo a dismissal; it renders under whatever did open it; a forced banner on a healthy engine says
+  so *and* shows the output; a tail that is a string is read as no tail rather than one letter per line.
+- `webapp/src/chat-panel/streaming.test.js` — **+3** (61). The toast fires on the engine's own
+  announcement, does **not** fire again when the hook reports itself twice, and an unrelated blocking hook
+  still toasts.
+- `webapp/src/sdk-surface-tab.test.js` — **+2** (29). The `resolved` note renders, and neither note
+  appears in a healthy report.
+
+Both suites green: **3887 webapp tests across 96 files**, **3246 pytest passed**. The webapp baseline for
+this entry is 3873, not the 3864 the entry above records — two commits landed between them.
+
+### Deliberately not built
+
+- **`resume_session_at` / `resume_drops_turn`** — named above; a feature, not a flag.
+- **`betas` / the 1M context window** — still declined for the reason `KNOWN_BETAS` records: it changes
+  the cost profile of every turn and the Context tab reads compaction thresholds from the live window, so
+  it is a config decision with a UI consequence rather than a flag flip.
+- **`fallback_model`** — a second model silently answering a turn the user asked the first one for is a
+  disclosure problem before it is a resilience feature. The HUD names the model per turn; a fallback needs
+  that to keep being true.
+- **A byte-count *budget* rather than a ceiling.** 16 MiB is a per-line limit, not an allowance: nothing
+  tracks cumulative buffer use across a session, because the failure mode this closes is one line, once.
+- **`cli_stderr` in the health *problem* set.** The whole design above depends on it staying out. If a
+  particular stderr line ever needs to raise the banner, the thing to add is a recogniser for *that line*,
+  not a rule that any output is a fault.
+
+## Interlude — the empty repo that wasn't, and an app served from last week (2026-08-18)
+
+Reported as *I tried to start on an empty repo and it doesn't work*, with a console to match: every RPC
+the webapp made failed, `LLMService.get_history_status is not a function` and
+`rpcCall('LLMService.set_selected_files') failed: method not found on proxy`. `LLMService` was deleted in
+phase 3. The obvious reading is that something in the webapp still calls it — and something does, which is
+the open item this entry leaves behind — but that was not this. **The backend was current and the tab was
+not.**
+
+### The bundle that existed nowhere
+
+The console named `index-B68mnaSQ.js`. `webapp/dist/index.html` named `index-CcF1pKq8.js`, and
+`B68mnaSQ` was not on disk at all: not in `dist/assets`, not anywhere. A file the browser had loaded and
+the filesystem had never heard of is only one thing. The entry document had come from the browser's own
+HTTP cache, and had brought the bundle it used to name with it.
+
+`_start_static_server` served `SimpleHTTPRequestHandler` unmodified, which sends `Last-Modified` and no
+`Cache-Control`. That leaves the freshness lifetime to the browser's heuristic, and for a URL as stable as
+`/index.html` the heuristic is free to reuse its copy without ever asking. So a rebuilt webapp could stay
+invisible for as long as the browser felt like it — and what came up instead was an app from before phase
+3, calling a service phase 3 deleted.
+
+Two rules, in `end_headers`. `/assets/**` is `immutable` for a year: Vite puts a content hash in every
+asset name, so a changed file is a changed URL and there is nothing to go stale. Everything else —
+above all the entry document that *names* those hashes — is `no-store, must-revalidate`. The split matters
+in both directions: `no-store` on the assets too would re-fetch ~5 MB of Monaco and KaTeX on every reload,
+and `immutable` on `index.html` would be the bug with a header on it.
+
+### The same drift, on disk
+
+Correct headers deliver whatever is in `dist` faithfully, and `dist` has its own way of being wrong.
+`--preview` rebuilds before serving and the comment on that branch in `main.py` already says
+why — a stale bundle means old code, and if the RPC contract moved since the build, the app calls methods
+the backend no longer has. That is the paragraph that describes this bug, written before it happened,
+guarding the one path it could not happen on. Plain `aic-dc` serves whatever `npm run build` last left
+behind, however long ago that was.
+
+`_warn_if_dist_is_stale` compares `dist/index.html`'s mtime against the newest file under `webapp/src` and
+says so. It deliberately does **not** rebuild: that would put Node on the critical path of every launch,
+including the ones where the user only wanted to read a diff. It is silent for an installed package, where
+`webapp_dist` ships with no sources beside it — nothing to compare with is not evidence of staleness, and a
+warning every installed user can do nothing about is noise.
+
+### What the empty repo actually did
+
+Nothing wrong, which is worth recording because the report named it. A launch in a fresh `git init` with
+one untracked file rendered the tree, and a sent message connected the engine — bundled CLI 2.1.229,
+`session connected (cwd=…)`, turn streaming. No commits is not a state anything on the startup path minds.
+
+### Tests
+
+- `tests/test_main_static_cache.py` — **new, 7 cases.** Four drive a real socket against a real server
+  rather than calling `end_headers` on a constructed handler, because the thing under test is what arrives
+  at a client: `index.html`, the SPA fallback (a separate branch — it rewrites `self.path`, which is what
+  the rule reads), the `?port=` URL the browser is actually handed, and a hashed asset. Three cover the
+  staleness warning on explicitly aged mtimes, including the installed-package silence.
+
+The four `ruff` findings in `main.py` (`shutil` and `node_modules` unused in the dev branch, import order,
+missing final newline) pre-date this entry and are left alone.
+
+### Deliberately not built
+
+- **Rebuilding on the bundled path.** Named above: a warning costs nothing and a build costs Node on every
+  launch. The user who wants the rebuild has `--preview`, which is exactly what it is for.
+- **A build-id handshake between webapp and backend.** The honest fix for "the app in the tab is not the
+  app on disk" in general, and far more than this needs: the cache header closes the path that produced it,
+  and the mtime check covers the disk half. Worth revisiting only if a third variant of this appears.
+- **A favicon.** `/favicon.ico` 404s on every load. It is one line of noise in the network panel and
+  nothing reads it.
+
+---
+
+## Interlude — two ways to point at a file, one of which did nothing (2026-08-20)
+
+Opened as a question, not a bug report: *the claude cli has the "@" char which is used to demarcate files
+or paths of interest. Is the check box the same feature?* It is not, and the difference is the whole
+entry. `@path` in the prompt is expanded by the CLI, which reads the file. The checkbox put a paragraph
+in the turn's framing saying "here is a hint about what the user is pointing at, read them yourself if
+you need them" and then relied on the model to act on it. Same gesture in the user's head, two mechanisms,
+and only one of them did anything.
+
+The follow-up decided it: *do you think the checkbox is useful or should it be dropped?* → **dropped**,
+recorded as [CC-21](decisions.md#cc-21). The reasoning that made it easy is in the decision; what made it
+*safe* is that the third checkbox state had already stopped being a hint. [CC-14](decisions.md#cc-14)
+repurposed it into a real `Read(path)` deny rule the CLI enforces, so the control being deleted was two
+unlike things wearing one widget: a permission, and a suggestion.
+
+### What came out
+
+The hint had a channel of its own from the browser to the framing block, and every segment of it went:
+
+| Layer | Removed |
+|---|---|
+| `service.py` | `_selected_files`, `get_selected_files`, `set_selected_files`, `_clear_selection`, `chat_streaming`'s `files` parameter, `selected_files` from `get_current_state()` and `get_ui_state()`, `files` from the `userMessage` broadcast |
+| `session.py` | `Turn.files`, and the branch of `build_framing()` that listed it |
+| `mcp_server.py` | the selected-files paragraph `ui_state` rendered — including its `"No files are ticked in the file picker."` else-branch |
+| `review.py` | the `on_selection_cleared` hook, and entry's call to it |
+| `AcApp` | the `filesChanged` broadcast and its receiver |
+| `files-tab/` | `selection.js` entire (176 lines), `_selectedFiles`, `_selectedFilesByTab` |
+| `file-picker/` | the checkbox column, the `selectedFiles` prop, three-state rendering |
+| `chat-panel/` | `selectedFiles`, the `files` send argument, the chips' ✓/+ marks, "+ Add All (N)", and input accumulation on add |
+
+50 files, +1713 / −2942. Two test files were renamed to say what they now cover rather than what they
+were written for: `file-picker/selection.test.js` → `deny-read.test.js`, `files-tab/selection-sync.test.js`
+→ `auto-expand.test.js`.
+
+This also closes one of the dead `LLMService` callers the [2026-08-18 interlude](#interlude--the-empty-repo-that-wasnt-and-an-app-served-from-last-week-2026-08-18)
+left open — `set_agent_selected_files`, the agent-tab branch at `files-tab/selection.js:102`, listed in
+[`README.md`](README.md) § CC-8 among the dead calls a user could still reach. The file is gone, so the
+call is. (The console string in that entry, `LLMService.set_selected_files`, was the *cached* bundle's;
+no code at HEAD called it.) The other callers named there — `switch_mode`, `switch_agent_mode`,
+`list_live_agents`, `get_agent_history`, `close_agent_context` — are untouched and still open.
+
+### What stayed, and the test framing now has to pass
+
+Deleting the hint sharpened the rule for what framing is allowed to carry: **could the user reasonably
+have typed it?** The viewer's path and cursor could not — it changes without them acting, every turn.
+A list of paths from a tree they are looking at could, and now does, in the prompt. So `build_framing()`
+keeps the viewer block and the review facts and has nothing else.
+
+Deny-read stayed, and moved. With no checkbox to carry it, it lives on the row: **shift+click** toggles
+the rule for a file, or for every descendant file of a directory or the root. All-or-nothing per subtree —
+if everything under it is already denied, it allows them all, else it denies them all.
+
+Path insertion stayed and was promoted, because middle-click became the only picker→prompt route. Asked
+which form to insert, the answer was **both, on different gestures**: middle-click writes the bare path,
+shift+middle-click writes `@path`. The bare form names a file without forcing a read; the `@` form makes
+the CLI read it. Both, plus both deny verbs, are also context-menu items — asked how a user would ever
+find a middle-click, the answer was a **context-menu item**, so "Insert path in prompt" and "Insert @path
+— agent reads it" lead every file and directory menu.
+
+The cost is stated rather than solved: **`shift` now means two things on one row**, split by mouse button.
+The mitigation is that no gesture is the only route to anything. The alternative was a second modifier,
+and `ctrl`/`cmd`+click belongs to the browser.
+
+*Amended 2026-08-21:* the mention modifier is `ctrl`+middle-click. The browser's claim on `ctrl` is on the
+primary button only, so the collision above was avoidable — see [decisions § CC-21](decisions.md#cc-21).
+
+### Three drifts the sweep turned up
+
+None caused by this work; all three were spec claiming something the code never did.
+
+- **Denied rows do render a badge.** `specs5/5-webapp/file-picker.md` said "No badge"; the code renders
+  `✕`. Confirmed against `git show HEAD` before correcting the spec, since the checkbox removal touched
+  the same render path.
+- **The Denial Scope Prompt was never built.** A modal asking whether a rule should be session-scoped or
+  written to `.claude/settings.local.json`, specified in full, with an `aic-dc-deny-read-scope` localStorage
+  key no code reads or writes. Every denial goes to `settings.local.json` unconditionally. Marked **Not
+  built** rather than deleted: `specs-reference/3-engine/permissions.md` § There is no runtime rule API
+  already explains what a `session` option would have to mean, and that is worth keeping.
+- **The reference doc's context-menu action IDs were invented.** It listed `deny-read`, `allow-read`,
+  `deny-read-all`, `allow-read-all` and `doc-convert`; the code dispatches `exclude`, `include`,
+  `exclude-all`, `include-all` and has no `doc-convert` row action at all. The IDs kept the old
+  index-exclusion vocabulary and are left alone — renaming them touches a dozen files to say the same
+  thing, and only the labels face the user. Also corrected: a directory deny writes one `Read(<path>)`
+  per descendant file, never a `Read(<dir>/**)` glob, so a file created in a denied directory afterwards
+  is not denied.
+
+And one error of my own, from the phase that removed the checkbox: the binary-row tooltip I wrote said to
+"convert it from the context menu", naming a `Convert with Doc Convert` item that exists nowhere. The
+affordance is the picker toolbar's 📄 button. Fixed in the tooltip and in the spec bullet that matched it.
+
+### Tests
+
+Nothing new was written for a removal, but a lot had to stop asserting the old shape. Notable:
+
+- **`tabs.test.js`** — three send-path tests. One now asserts `chat_streaming` takes **four** arguments
+  (`request_id, message, images, viewer`); one that read the selection off the active tab is deleted with
+  a tombstone naming CC-21; one was repurposed to prove per-tab message routing, which is what it was
+  really guarding.
+- **`files-tab-file-search.test.js`** — "restores selection state on exit" became "restores per-path state
+  on exit", over deny-read. Same hazard, and it is a real one: search swaps the tree out from under the
+  rows, and a rebuild that forgot to re-push the list leaves every strikethrough behind. It has to use the
+  production direct-update pattern (`picker.excludedFiles = …` + `requestUpdate()`) because the tab's
+  setter is deliberately non-reactive — a plain assignment to `t._excludedFiles` never reaches the picker,
+  which is exactly the trap the pattern exists to document.
+- **Three stale RPC stubs** for `ClaudeCodeService.set_selected_files` in `init.test.js` and
+  `status.test.js`, missed by the earlier grep sweeps because they were stubbing a method rather than
+  naming a behaviour.
+
+99 files / 3927 tests green in the webapp, 3268 green in Python, `npm run build` clean.
+
+The pre-existing `ruff` import-order finding in `service.py` (the `resume_cleanup` import) predates this
+work — verified by `git stash` — and is left alone.
+
+### Deliberately not built
+
+- **A "files the agent read this turn" panel.** The obvious thing to offer in place of the checkbox, and
+  it cannot be honest: the `@` expansion is the CLI's, so we learn about the read the same way we learn
+  about any other, as a `Read` tool call in the transcript. The turn footer already lists those.
+- **Renaming `exclude` / `include` to `deny-read` / `allow-read`.** Named above.
+- **A second modifier for path insertion.** The shift collision is real and this was the alternative.
+  Rejected because the remaining modifiers are the browser's, and a chord nobody can guess is worse than
+  an overloaded one that has a menu item beside it.
+
+## Interlude — the dialog nobody raised, and the guard that was not holding (2026-08-26)
+
+Closes the background-subagent fix list. Item 6c was its last open thing: the `Bypass permissions?`
+confirmation appearing on page load, over a selector still reading "Ask". It had been chased once on
+2026-08-25, did not reproduce, and left behind two guards and a note saying it was **worth checking
+against the live session, where it was originally seen**.
+
+It has now been checked, and the answer is that the app does not raise it.
+
+### Why the first investigation could not finish
+
+The 2026-08-25 run instrumented `onPermissionModeSelect` and saw no `change` at all on the loads where a
+dialog appeared, and identified the culprit as the harness: `chrome-devtools-mcp` re-surfacing a native
+`confirm` it had already handled, once per navigation. That is a complete explanation of what was
+observed *through that harness* and no explanation at all of the original sighting, which was not made
+through one. The investigation could not separate "the app raises this" from "the harness invents this"
+because it had only the one harness.
+
+So this run owned the browser outright. Chrome on a scratch profile with its own debugging port, driven
+over plain CDP by `scripts/permission_mode_load_probe.py`, with `window.confirm` replaced by
+`Page.addScriptToEvaluateOnNewDocument` — **before any application script, on every load** — so no native
+dialog is ever created and there is nothing for anything downstream to re-surface. Every call is recorded
+with the stack that made it, which answers "the mechanism is something else" directly instead of by
+elimination. This also sidestepped a contention worth writing down: `chrome-devtools-mcp` holds one Chrome
+profile, and a second session's server cannot launch while another holds it. The Chrome holding it belongs
+to another session and is not ours to kill.
+
+One serving-mode difference had also never been controlled for. The non-reproduction ran under `--dev`
+(Vite); the live sighting was on `--preview` (a built bundle). This run served the same `webapp/dist` the
+live session serves — via a plain launch, which serves that bundle from Python without rebuilding it
+underneath a session already serving it — and the guards were confirmed present in the bundle's own
+minified source before the run, since a check against a stale bundle tests nothing.
+
+### What four scenarios found
+
+| | Scenario | Result |
+|---|---|---|
+| A | Initial load + 3 plain reloads | No confirmation, no `change`. Selector reads `default` every time |
+| B | Park the DOM value on `bypassPermissions`, reload ×2 | No confirmation, no `change`; selector reads `default` again |
+| C | **Positive control** — real gesture, real `change` | Confirmation fires, `change` recorded. Recorder proven live |
+| D | Strip `autocomplete="off"`, re-park, reload ×2 | Still nothing |
+
+**6c is not reproduced**, on two serving modes, under two independent harnesses, with the recorder proven
+live in the same run rather than in a different one.
+
+### Two things the probe found about itself
+
+Both would have shipped as findings, and the second changed a claim in the code.
+
+**The `change` arm was dead.** It wrapped only *function* listeners, and Lit's EventPart registers the
+part **object** — `addEventListener(type, this)`, dispatched through `handleEvent`. So the one listener the
+probe existed to watch was the one it declined to wrap, and it would have reported "no phantom change
+events" for a mechanism it was never watching. The positive control is what exposed it: the confirmation
+fired in scenario C with no `change` logged in front of it. The verdict now fails a run as
+**uninterpretable** unless *both* arms fire under the control, not just the one the headline reads.
+
+**`autocomplete="off"` is not what suppresses restoration.** Scenario B alone cannot tell "the guard
+worked" from "the mechanism never existed", so D removes the guard and re-runs. With the attribute
+stripped, Chrome 151 still restored nothing — the control is created dynamically inside a shadow root
+rather than parsed with the document, which is the likelier reason. So the **gesture latch is the guard
+carrying 6c**, and the attribute is belt-and-braces. It stays, because it costs nothing and it is the half
+that is specified rather than observed, but `permission-mode.js` no longer implies the two are doing equal
+work.
+
+### What moved rather than died
+
+`open-work.md` is deleted, as it asked to be. Its durable half was not in the fix list at all: the
+dedicated-dev-backend recipe, the frontend DOM notes, and the three traps each paid for once existed
+**only** in that file. They are now
+[`0-overview/implementation-guide.md`](../0-overview/implementation-guide.md) § *Verifying UI Work Against
+a Running Engine*, together with the positive-control discipline and the MCP-profile contention. Four
+inbound references to the deleted file were re-pointed, and one of them was stale in its own right:
+`tabs.test.js` still described `panel._tabModes` as "still read, and so permanently empty" and cited an
+open-work note about retiring it — the map has since been retired.
+
+**Still on the watch-list, carried over:** *Option B — session-lifetime pump, or per-translator routing*,
+the alternative to the drain that item 3(a) built on. Left open deliberately; the agreement was to watch
+for A's residual mis-attribution first and take B only if it shows up. Nothing has shown up.
+
+**Not carried over, deliberately:** the fix list's test-baseline totals. A pass count in a rolling
+document is stale by the next commit — run `pytest tests/ -q` and `npx vitest run src/` in `webapp/`.

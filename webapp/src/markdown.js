@@ -1,0 +1,346 @@
+// Markdown rendering for chat messages.
+//
+// Thin wrapper around the `marked` library with chat-specific
+// configuration. Lives in its own module so:
+//
+//   1. The chat panel doesn't need to know about marked's API
+//      directly.
+//   2. Syntax highlighting, math rendering, and code-block
+//      chrome (copy button, language label) live here once,
+//      not scattered through every call site.
+//   3. Tests can exercise the renderer in isolation.
+//
+// Scope:
+//   - Fenced code blocks with syntax highlighting via
+//     highlight.js (js/ts/python/json/bash/css/html/yaml/c/cpp/
+//     diff/md), plus highlightAuto for unspecified language
+//   - Code blocks render as `<pre class="code-block">` with a
+//     language label and a copy button (the chat panel owns
+//     the delegated click handler)
+//   - Inline code (`x`)
+//   - Paragraphs, headings, bold, italic, GFM tables/task lists
+//   - Line breaks within paragraphs (breaks: true)
+//   - KaTeX math — `$$...$$` display, `$...$` inline
+//   - Raw HTML rendered as the literal text it was written as,
+//     never as markup (see `_makeChatMarked`)
+//
+// Not here:
+//   - Source-line attributes for preview scroll sync (lives in
+//     markdown-preview.js — only used by the diff viewer's
+//     Markdown preview pane, needs a different Marked instance)
+//   - Custom renderer for edit blocks (the chat panel runs the
+//     segmenter before marked sees the content)
+
+import hljs from 'highlight.js/lib/core';
+import bash from 'highlight.js/lib/languages/bash';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
+import css from 'highlight.js/lib/languages/css';
+import diff from 'highlight.js/lib/languages/diff';
+import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import markdown from 'highlight.js/lib/languages/markdown';
+import python from 'highlight.js/lib/languages/python';
+import typescript from 'highlight.js/lib/languages/typescript';
+import xml from 'highlight.js/lib/languages/xml';
+import yaml from 'highlight.js/lib/languages/yaml';
+import katex from 'katex';
+import { Marked } from 'marked';
+
+// Register the language set specs call out. hljs.registerLanguage
+// overwrites on repeat calls so hot-module reload during
+// development is safe. Aliases (sh/shell, js, ts, py, md, yml,
+// html) share an implementation with their canonical name.
+hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('sh', bash);
+hljs.registerLanguage('shell', bash);
+hljs.registerLanguage('c', c);
+hljs.registerLanguage('cpp', cpp);
+hljs.registerLanguage('css', css);
+hljs.registerLanguage('diff', diff);
+hljs.registerLanguage('javascript', javascript);
+hljs.registerLanguage('js', javascript);
+hljs.registerLanguage('json', json);
+hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('md', markdown);
+hljs.registerLanguage('python', python);
+hljs.registerLanguage('py', python);
+hljs.registerLanguage('typescript', typescript);
+hljs.registerLanguage('ts', typescript);
+hljs.registerLanguage('html', xml);
+hljs.registerLanguage('xml', xml);
+hljs.registerLanguage('yaml', yaml);
+hljs.registerLanguage('yml', yaml);
+
+/**
+ * Render a single `$...$` or `$$...$$` math expression to
+ * HTML via KaTeX. Parse failures fall back to escaped plain
+ * text so a bad formula doesn't crash the whole message —
+ * the user sees the raw source with a visual cue that
+ * rendering failed.
+ */
+function _renderMath(src, display) {
+  try {
+    return katex.renderToString(src, {
+      displayMode: display,
+      throwOnError: false,
+      output: 'htmlAndMathml',
+    });
+  } catch (err) {
+    console.warn('[markdown] katex render failed', err);
+    const tag = display ? 'div' : 'code';
+    return (
+      `<${tag} class="math-error">` +
+      escapeHtml(display ? `$$${src}$$` : `$${src}$`) +
+      `</${tag}>`
+    );
+  }
+}
+
+// Marked extension implementing `$$...$$` (display) and
+// `$...$` (inline). Block-level display math renders at
+// paragraph granularity rather than getting wrapped in a <p>.
+// Inline math stays on one line with non-whitespace neighbors
+// (the usual "dollar as delimiter, not dollar as currency"
+// rule).
+const _mathExtension = {
+  extensions: [
+    {
+      name: 'displayMath',
+      level: 'block',
+      start(src) {
+        const idx = src.indexOf('$$');
+        return idx < 0 ? undefined : idx;
+      },
+      tokenizer(src) {
+        const match = /^\$\$([\s\S]+?)\$\$/.exec(src);
+        if (!match) return undefined;
+        return {
+          type: 'displayMath',
+          raw: match[0],
+          text: match[1].trim(),
+        };
+      },
+      renderer(token) {
+        return _renderMath(token.text, true);
+      },
+    },
+    {
+      name: 'inlineMath',
+      level: 'inline',
+      start(src) {
+        const idx = src.indexOf('$');
+        return idx < 0 ? undefined : idx;
+      },
+      tokenizer(src) {
+        // Inline math: single-line, no whitespace right
+        // after opening `$` or right before closing `$`.
+        // Prevents "costs $5 and $10 more" from turning
+        // into a math span.
+        const match = /^\$([^\s$][^$\n]*?[^\s$]|[^\s$])\$(?!\d)/.exec(src);
+        if (!match) return undefined;
+        return {
+          type: 'inlineMath',
+          raw: match[0],
+          text: match[1],
+        };
+      },
+      renderer(token) {
+        return _renderMath(token.text, false);
+      },
+    },
+  ],
+};
+
+/**
+ * Build the chat Marked instance with highlighting, math,
+ * and the code-block renderer override wired in. Called
+ * once at module load; the result is reused for every
+ * `renderMarkdown()` call.
+ *
+ * The `code()` override emits the spec-documented
+ * `<pre class="code-block">` shape with a language label
+ * and a copy button. The chat panel owns the delegated
+ * click handler, so no per-element listeners attach here.
+ *
+ * The `html()` override escapes raw HTML instead of passing
+ * it through. `marked` does not sanitize — that option was
+ * removed in v5 — so anything that looks like a tag reached
+ * the DOM as one. A prompt asking about `<your topic>`
+ * rendered as a paragraph with an unknown element in it,
+ * which the browser draws as nothing: the user's own words
+ * silently disappeared from their own message. Angle
+ * brackets in prose are far more often literal than
+ * markup — placeholders, generics, comparisons, XML the
+ * conversation is *about* — and nothing in this codebase
+ * writes HTML into message content, so there is no
+ * rendering to lose by escaping. Escaping also closes the
+ * gap the alternative left open: message content is not all
+ * ours, and a file the agent reads can ask it to echo
+ * `<img onerror=…>`, which would run with the app's own
+ * RPC access.
+ */
+function _makeChatMarked() {
+  const instance = new Marked({
+    breaks: true,
+    gfm: true,
+    // Silently degrade on malformed input rather than
+    // throwing. A streaming response mid-construction can
+    // easily be invalid markdown; render what we can and
+    // move on.
+    silent: true,
+  });
+  instance.use(_mathExtension);
+  instance.use({
+    renderer: {
+      html(token) {
+        // Both the block and inline HTML tokenizers land here, so
+        // one override covers `<div>` on its own line and `<x>`
+        // mid-sentence. Fenced and inline code are separate token
+        // types and keep their own escaping; autolinks
+        // (`<https://…>`) are `link` tokens and still work.
+        const raw =
+          token && typeof token === 'object' && 'text' in token
+            ? token.text
+            : token;
+        return escapeHtml(raw);
+      },
+      code(code, infostring) {
+        // Marked 14+ can pass either a token object
+        // (`{text, lang}`) or positional args depending on
+        // how the renderer is invoked. Normalize.
+        let text;
+        let lang;
+        if (code && typeof code === 'object' && 'text' in code) {
+          text = code.text;
+          lang = code.lang;
+        } else {
+          text = code;
+          lang = infostring;
+        }
+        const langName =
+          typeof lang === 'string' ? lang.trim().split(/\s+/)[0] : '';
+        // Highlighting strategy:
+        //   1. Named language registered with hljs →
+        //      highlight directly, preserving the requested
+        //      class name.
+        //   2. Anything else (including empty) →
+        //      highlightAuto. The auto-detect uses the
+        //      detected language (if any) as the display
+        //      label so users see what hljs picked.
+        let highlighted;
+        let displayLang = langName;
+        try {
+          if (langName && hljs.getLanguage(langName)) {
+            highlighted = hljs.highlight(text, {
+              language: langName,
+              ignoreIllegals: true,
+            }).value;
+          } else {
+            const auto = hljs.highlightAuto(text);
+            highlighted = auto.value;
+            if (!displayLang) displayLang = auto.language || '';
+          }
+        } catch (err) {
+          // Pathological input can trip hljs in rare cases.
+          // Fall back to escaped plain text so the user still
+          // sees their code, just without coloring.
+          console.warn('[markdown] hljs failed', err);
+          highlighted = escapeHtml(text);
+        }
+        const label = displayLang
+          ? `<span class="code-lang">${escapeHtml(displayLang)}</span>`
+          : '';
+        // Floating copy button — positioned absolute at the
+        // top-right via CSS in chat-panel.js. Hidden by
+        // default, fades in on `.code-block:hover`. The SVG
+        // icon is inlined so it adopts currentColor and
+        // renders crisply at any zoom. The chat panel's
+        // delegated click handler (`_onMessagesClick`) picks
+        // up `.code-copy-btn` clicks and copies the
+        // contained `<code>` element's text to the
+        // clipboard. A ✓ swap flashes for 1.5s on success.
+        const copyIcon =
+          '<svg class="code-copy-icon" viewBox="0 0 16 16" ' +
+          'width="14" height="14" fill="currentColor" ' +
+          'aria-hidden="true">' +
+          '<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 ' +
+          '0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 ' +
+          '0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 ' +
+          '1.75 0 0 1 0 14.25Z"/>' +
+          '<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 ' +
+          '1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 ' +
+          '0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 ' +
+          '0-.25-.25Z"/>' +
+          '</svg>';
+        const copyBtn =
+          '<button type="button" class="code-copy-btn" ' +
+          'aria-label="Copy code" title="Copy code">' +
+          copyIcon +
+          '</button>';
+        const codeClass = displayLang
+          ? `hljs language-${escapeHtml(displayLang)}`
+          : 'hljs';
+        return (
+          '<pre class="code-block">' +
+          label +
+          copyBtn +
+          `<code class="${codeClass}">${highlighted}</code>` +
+          '</pre>'
+        );
+      },
+    },
+  });
+  return instance;
+}
+
+const marked = _makeChatMarked();
+
+/**
+ * Render a markdown string to an HTML string.
+ *
+ * Returns an HTML string, not a DOM node. Callers that need to
+ * insert it into a Lit template should use `unsafeHTML` from
+ * `lit/directives/unsafe-html.js`. The only markup in the
+ * result is this module's own: `marked` does not sanitize, so
+ * every path that could carry a tag from the content — raw
+ * HTML, code fences, math fallbacks, language labels — escapes
+ * it, and the instance is not given a source it trusts more
+ * than another. Who wrote the string therefore does not change
+ * how it renders, which is what makes the same function safe
+ * for a prompt, a reply and a replayed transcript alike.
+ *
+ * Empty or null input returns the empty string — callers don't
+ * need to guard against these cases.
+ */
+export function renderMarkdown(text) {
+  if (!text) return '';
+  try {
+    return marked.parse(text);
+  } catch (err) {
+    // `marked` with `silent: true` shouldn't throw, but if it
+    // does (malformed input, internal bug) we fall back to an
+    // escaped plain-text rendering rather than showing a raw
+    // Error object or crashing the chat.
+    console.warn('[markdown] parse failed, falling back to plain', err);
+    return escapeHtml(text);
+  }
+}
+
+/**
+ * Escape HTML special characters in a string.
+ *
+ * Used for the fallback path when markdown rendering fails, for
+ * the raw-HTML and code-fence renderers above, and exported for
+ * the renderers that build markup by hand (edit blocks, tool
+ * cards) and must not let a path or a label out of its slot.
+ */
+export function escapeHtml(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}

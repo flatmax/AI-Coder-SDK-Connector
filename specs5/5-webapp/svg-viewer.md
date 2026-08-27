@@ -1,0 +1,422 @@
+# SVG Viewer
+
+Side-by-side SVG diff viewer for SVG files. Replaces the Monaco diff editor when an SVG file is opened. Both panels host instances of the same visual editor component — the left pane in read-only mode (pan, zoom, fit, wheel zoom, middle-click pan), the right pane fully editable. Each editor owns its own viewBox and fires an on-view-change callback on every write; the viewer mirrors writes to the sibling editor under a mutex so pan/zoom stays synchronized without feedback loops. Right panel supports visual editing (move, resize, vertex edit, inline text edit, multi-selection).
+## Routing
+The app shell inspects the file extension on every navigate-file event:
+| Extension | Viewer |
+|---|---|
+| SVG | SVG viewer |
+| All others | Diff viewer (Monaco) |
+Both viewers live in the same background layer as absolutely positioned siblings. CSS classes toggle opacity and pointer events with a short transition. When either viewer dispatches active-file-changed, the app shell activates the correct layer based on the active file's extension.
+
+## Panel Loading (Ad-Hoc Visual Comparison)
+The file picker's "Open in left panel" / "Open in right panel" context-menu actions and the history browser's equivalent menu items both dispatch a panel-load event carrying the file's textual content, the target panel, a label, and (when the source is a real on-disk file) a repo-relative source path.
+| File extension | Event name | Receiver | Result |
+|---|---|---|---|
+| `.svg` | `load-svg-panel` | SVG viewer | Visual rendered comparison — content loaded into the viewer's left or right pane and rendered as an image |
+| All others | `load-diff-panel` | Diff viewer (Monaco) | Text comparison — content loaded into the corresponding Monaco diff side |
+The dispatcher inspects the file extension and chooses the event name; the app shell routes each event to the matching viewer and flips active-viewer visibility so the result is immediately visible.
+The source path is optional — file picker actions always include it (real on-disk files); history-browser actions omit it (content comes from session archives). When present and the right pane carries one, edits to the right pane save back to disk via the standard file-saved event flow. When absent, the snapshot-and-event flow described under "Virtual-Mode Save" applies.
+### Virtual-Comparison Slot
+When `loadPanel(content, panel, label, sourcePath)` is called, the SVG viewer populates an internal virtual-comparison slot rather than appending to its multi-file model. Two successive calls (one per panel) accumulate — the second call preserves whatever was loaded into the other side. The slot holds:
+- Left content + left label + left source path (when known)
+- Right content + right label + right source path (when known)
+- Right saved-content snapshot (created lazily on first edit)
+The right pane's source path is the save target for Ctrl+S and the dirty-LED click in virtual mode. The left pane's source path is recorded for symmetry — image-href resolution falls back to it when the right pane has none — but it is never written to (the left pane is read-only by spec contract).
+The virtual-comparison slot and the multi-file model are mutually exclusive. Opening any real file via `openFile` clears the virtual slot; populating the virtual slot suspends the active multi-file entry (its dirty state and content are preserved, but it is not displayed). Closing in virtual mode (Ctrl+W) clears the slot entirely and returns the viewer to its empty state.
+The pane labels render as the existing static "Original" / "Modified" captions even when virtual content is loaded — the label parameter is preserved on the slot for future per-pane caption use but is not currently surfaced in the rendered template.
+### Active-File Path Dispatch
+The viewer's `active-file-changed` event still fires when virtual content is loaded so the app shell foregrounds the SVG viewer correctly. The reported path is synthesised as `virtual://svg-compare/{label}` (where `{label}` is the right pane's label, falling back to the left pane's, falling back to the literal `panel`). Consumers that need to disambiguate real files from virtual comparisons can check the `virtual://` prefix.
+### Image Href Resolution in Virtual Mode
+Relative `<image>` href resolution uses the right pane's label as the base path when the virtual slot is active (falling back to the left pane's label). Labels are typically basenames, which resolves hrefs against the repo root — sufficient for the common case where the two compared SVGs reference siblings of the original file. Mismatched directory contexts on the two sides may produce broken hrefs on whichever side disagrees with the chosen label; this is acceptable given that ad-hoc visual comparison is the intended use case.
+## Layout
+
+Both layouts below fill the viewer background layer, which is inset from the left by the strip the docked
+dialog occupies — see [shell.md § Reserved Strip](shell.md#reserved-strip). The 50/50 split is taken
+across that uncovered region, not across the viewport; a split of the full viewport would put the original
+panel entirely underneath the dialog.
+
+### Normal Layout (Select / Pan Mode)
+- Two side-by-side SVG panels with a resizable splitter
+- Left — original SVG (HEAD version), always read-only, pan/zoom navigation
+- Right — modified SVG (working copy), editable in select mode, read-only navigation in pan mode
+- Floating overlay buttons in corners — status LED, presentation mode toggle, fit button, text-diff toggle
+### Presentation Layout
+- Left panel and splitter hidden; right panel expands to full width
+- Editor remains active — all editing operations continue to work
+- Left panel hidden via `visibility: hidden` and zero-width flex, **not** `display: none`. Both panes inject the same SVG content, so both carry duplicate `<defs>` with identical IDs (gradients, patterns, filters, markers). Right-pane content uses `url(#…)` references which the browser resolves to the first matching ID in document order — the left pane's. Removing the left pane from the render tree (via `display: none`) would break those references; collapsing it via `visibility: hidden` keeps the referenced defs addressable
+- Defs subtrees in the hidden left pane are explicitly forced back to `visibility: visible`. Required because `<marker>` rendering inherits visibility from the marker element's tree — without the override, `marker-end="url(#arrowhead)"` on a right-pane path resolves to the left-pane marker, which is hidden, and the arrowhead silently disappears. Gradients/patterns/filters don't have this problem (a hidden ancestor doesn't suppress fill painting) but the override is applied uniformly across all defs children for consistency
+- Toggled via button or keyboard shortcut
+### Empty State
+- Same watermark as diff viewer when no SVG files open
+## File Tabs
+Internal multi-file tracking without a visible tab bar, same pattern as diff viewer. Status LED communicates file state.
+### Status Detection
+| LED State | Condition |
+|---|---|
+| Dirty (orange pulsing) | Modified content differs from last saved content |
+| New file (cyan) | File does not exist in HEAD |
+| Clean (green) | No unsaved changes |
+## Interaction Modes
+Two modes switchable programmatically:
+| Mode | Left panel | Right panel | Purpose |
+|---|---|---|---|
+| Select (default) | Read-only editor (navigation only) | Editable editor | Edit SVG elements by dragging, resizing, typing |
+| Present | Hidden | Editable editor, full width | Full-width editor with left panel hidden |
+- Both panels are instances of the same visual editor class — the left is constructed with a read-only flag that disables selection, handles, marquee, keyboard shortcuts, and double-click-to-edit. Only pan and zoom remain active on the left pane
+- Mode switch captures current editor content, disposes active handlers, reinitializes for new mode. The viewer starts in select mode and stays there in practice
+## Synchronized Pan/Zoom
+Both panels maintain synchronized viewports.
+| Input | Behavior |
+|---|---|
+| Mouse wheel | Zoom in/out centered on cursor |
+| Middle-click drag | Pan (both panels) |
+| Plain drag on empty space, left pane | Pan (read-only pane has no other use for plain drag) |
+| Plain drag on empty space, right pane | Start marquee selection (editable pane) |
+| Shift+drag over any element, right pane | Start marquee selection (preserves selection under the pointer) |
+| Double-click on a text element, right pane | Enter inline text edit |
+| Pinch gesture | Zoom (touch devices) |
+| Min/max zoom | Constrained to sensible bounds |
+### Synchronization
+- Both panels are editor instances that manipulate their own viewBox
+- Each editor fires an on-view-change callback after any viewBox write (from wheel zoom, pan, fit-content, or external set-view-box)
+- The viewer wires each editor's on-view-change to call the other editor's set-view-box
+- Mirror writes go through a silent variant of set-view-box that skips firing on-view-change on the sibling — the two editors' callbacks never cross
+- A shared mutex flag is held during the mirrored write as defense-in-depth; if a future code path ever emits on-view-change independently of set-view-box (e.g., a programmatic viewBox attribute write that bypasses the editor's API), the mutex still breaks the feedback loop
+- Initial fit-content during setup runs under the mutex too so the two panes' initial fits don't cascade through each other
+- The fit button runs the same pattern: both editors fit-content under the mutex, then a final explicit sync pushes the right editor's post-fit viewBox to the left so they're byte-exact afterwards (the two fits can differ by a fraction of a pixel against their separate container rects)
+### Shadow DOM Compatibility
+- The editor operates on SVG elements obtained via shadow-root queries
+- All coordinate math uses native browser APIs (get-screen-CTM, create-SVG-point, matrix transforms) which work uniformly inside shadow DOM
+- No third-party pan/zoom library is involved, eliminating a class of shadow-DOM isolation failures that previous designs had to guard against
+## SVG Editing (Select Mode)
+Right panel uses the visual editor; left panel remains read-only for reference.
+### Element Selection
+- Click an SVG element to select; bounding box with handles appears around it
+- Click empty space or press Escape to deselect
+- Clicking a tspan resolves to its parent text element — tspan never selected independently
+### Multi-Selection
+Hold Shift and click or drag to multi-select. Shift overrides element hit-testing so the gesture works anywhere, including over already-selected or unselected elements — without Shift, a click on an element is always interpreted as element select/move:
+| Interaction | Behavior |
+|---|---|
+| Shift+click on selected element | Immediately remove from multi-selection |
+| Shift+click on unselected element | Immediately add to multi-selection |
+| Shift+click on empty space | Begin marquee selection (threshold-gated) |
+| Shift+drag from anywhere (empty space or over elements) | Begin marquee selection immediately |
+| Forward drag (top-left to bottom-right) | Containment mode — solid border, selects only elements fully inside |
+| Any other drag direction | Crossing mode — dashed border, selects any elements that touch or intersect |
+- Marquee hit testing checks direct children of the root SVG and one level of children inside groups; deeper nesting not scanned
+- Shift+click toggles elements immediately without waiting for pointer-up
+- Multi-selected elements can be dragged as a group
+### Supported Operations
+| Operation | Interaction | Supported elements |
+|---|---|---|
+| Move | Drag selected element | All visible elements |
+| Resize | Drag corner/edge handles | Rectangles, circles, ellipses |
+| Vertex edit | Drag individual vertex handles | Polylines, polygons, paths |
+| Line endpoint edit | Drag endpoint handles | Lines |
+| Inline text edit | Double-click a text element | Text elements |
+| Copy | Ctrl+C | Any selected element |
+| Paste | Ctrl+V | Pastes with slight offset |
+| Duplicate | Ctrl+D | Selected element in place |
+| Delete | Delete or Backspace | Any selected element |
+| Zoom | Mouse wheel | Manipulates SVG viewBox directly |
+| Pan | Drag on empty space | Translates SVG viewBox |
+### Inline Text Editing
+- Double-clicking a text element opens a foreign-object textarea overlay positioned at the text's bounding box
+- Textarea matches the text's font size and color
+- Enter confirms the edit (updating the text element's content), Escape cancels
+- Only one text edit active at a time — starting a new edit commits the previous one
+- While the textarea is active, pointer and mouse events inside it do not propagate to the editor's SVG-level handlers — clicks position the caret natively, double-clicks select words, drag-selects text. The editor's selection / pan / marquee gestures are suppressed inside the textarea's bounds. Clicks outside the textarea blur it and trigger the cancel path
+### Handles
+Selection handles rendered as a dedicated SVG group overlaid on the selected element:
+- Bounding box (dashed rectangle)
+- Corner handles (resize for shape elements)
+- Vertex handles (point editing for polylines, polygons)
+- Path handles (circles at each command endpoint, dotted lines to control points for curves)
+- Handle radius scales inversely with zoom level to maintain consistent screen size
+- Handle positions account for ancestor group transforms so overlays align with visually-rendered element position regardless of nesting
+### Coordinate Math
+SVG editing requires translating between three coordinate systems:
+1. Screen coordinates — raw pointer event coordinates
+2. SVG root coordinates — the viewBox coordinate space of the root SVG
+3. Element-local coordinates — the coordinate space inside an element's parent group transforms
+- Screen-to-SVG — invert the composed screen CTM to convert pointer events into viewBox units
+- Element-local-to-SVG-root — compose inverse of root CTM with element's CTM, so handles for elements inside transformed groups align with visual position
+- Handle size constancy — handles should appear at a constant screen size regardless of zoom; handle radius in SVG units is computed inversely to the current zoom
+### Hit-Test Exclusion
+Handle elements and the marquee rectangle must be ignored when finding the SVG element under the pointer:
+- All handle overlays marked with a class; handle group has a known id
+- Hit test uses elements-from-point and skips handle-classed elements, the handle group, and the root SVG itself
+- Tags that never participate in editing also filtered (defs, style, metadata, filter, gradients, clipPath, mask, marker, pattern, symbol)
+Without this filtering, clicking a handle would re-hit-test to the underlying element and start a drag on that element instead.
+### Interaction Model by Element
+| Element | Drag behavior | Handle behavior |
+|---|---|---|
+| Rectangle | Translate position | Resize width/height |
+| Circle | Translate center | Resize radius |
+| Ellipse | Translate center | Resize radii |
+| Line | Translate both endpoints | Move individual endpoints |
+| Polyline, polygon | Translate all points | Move individual vertices |
+| Path | Translate via transform | Move individual path points |
+| Text | Translate via transform or position attribute (auto-detected) | Double-click to edit |
+| Group | Translate via transform | — |
+### Path Command Parsing
+- Path editing parses the path data attribute into editable command objects
+- Handles all path commands in absolute and relative forms
+- Control point extraction tracks pen position, extracting draggable points per command type
+- When a handle is dragged, the delta is applied to the original relative arg values so overall path shape is preserved
+- Serialization rounds to reasonable precision and joins commands with spaces
+### Preserve Aspect Ratio Override
+- Both panels get an explicit "preserve aspect ratio: none" attribute on the root SVG after injection
+- Without this override, the browser applies default fitting (letterboxing or pillarboxing) to make the viewBox fit the container while preserving aspect ratio — which means a screen pixel inside the SVG element's client rect does not map 1:1 to a viewBox unit along one axis
+- The editor's cursor-to-viewBox conversion uses the SVG's screen CTM, which correctly accounts for that browser-applied fitting; so strict correctness doesn't require this override
+- But disabling browser-side fitting makes the SVG viewBox the single source of truth for what's visible. The fit-content method is then responsible for ensuring the viewBox aspect ratio matches the container — by expanding the shorter axis — so content isn't stretched
+- Applying the override uniformly to both panels keeps coordinate math and fit logic symmetric across left and right
+### Marquee Visual Feedback
+Marquee rectangle's appearance changes based on drag direction to signal the selection mode:
+| Direction | Fill | Stroke | Dash | Meaning |
+|---|---|---|---|---|
+| Forward (left → right, top → bottom) | Light tint | Solid border | None | Containment — must be fully inside |
+| Reverse (any other direction) | Light tint, different hue | Dashed border | Yes | Crossing — any intersection counts |
+Stroke width and dash lengths scale inversely with zoom to maintain consistent screen-pixel appearance.
+### Dirty Tracking and Undo
+- Each edit marks the file as dirty (orange pulsing status LED)
+- An undo stack captures SVG snapshots after each edit operation, up to a limit
+- Ctrl+Z pops the stack and restores the previous state by re-injecting the SVG content and reinitializing the editor
+### Save
+- Ctrl+S or clicking the dirty status LED saves the modified SVG content to disk via the write-file RPC
+- Editor's get-content method commits any active text edit, removes selection handles, serializes the SVG, then re-renders handles — ensuring saved content is clean
+- A file-saved event is dispatched on success
+
+### Editing in Virtual-Comparison Mode
+The right pane remains fully editable when the viewer is showing virtual-comparison content, with the same select / drag / resize / vertex-edit / text-edit / multi-select / marquee / clipboard surface as in normal file mode. Edit serialisation routes to the virtual slot's right-content field instead of a `_files[]` entry.
+- The first edit lazily initialises a right-saved snapshot from the right-content's pre-edit value, so the dirty comparison has a baseline
+- Subsequent edits flip the dirty LED whenever right-content diverges from right-saved
+- The status LED renders cyan (new-file) when clean and orange-pulsing when dirty — the green "clean against HEAD" state never applies because the virtual slot has no on-disk counterpart
+- The LED tooltip reads `{label} — visual comparison (no save target)` when clean and `{label} — unsaved (click to snapshot)` when dirty, where `{label}` is the right pane's label, falling back to the left pane's
+### Virtual-Mode "Save"
+Clicking a dirty LED in virtual mode (or pressing Ctrl+S) routes to one of two paths depending on whether the right pane carries a known source path:
+**With a source path** (file picker's "Open in panel" actions):
+- Right-content is snapshotted into right-saved, clearing the dirty state and returning the LED to cyan
+- A `file-saved` event is dispatched carrying `{path, content}` — the same shape as a normal save. The app shell's existing handler routes the write through `Repo.write_file`, which performs the on-disk save, fires post-write callbacks, and triggers any open-viewer refresh
+- The LED clears optimistically (fire-and-forget); a server-side write failure surfaces through the shell's standard error-toast path, and the dirty state reappears on the next edit
+**Without a source path** (history-browser comparisons or programmatic loads):
+- Right-content is snapshotted into right-saved, clearing the dirty state and returning the LED to cyan
+- A `virtual-svg-save` event is dispatched carrying `{content, label}` for any consumer that wants to capture the edited content (e.g., a future "Save as…" flow or a paste-into-chat affordance)
+- An info toast confirms the snapshot ("Visual edits snapshotted (no file target)") so the user knows their changes were captured even though no file was written
+Closing the viewer or opening a real file discards the virtual buffer along with any unsnapshotted edits — there is no rescue path. The virtual-svg-save event gives source-path-less consumers an opportunity to persist content if they need to.
+## Controls
+No persistent toolbar. The viewer uses floating overlay buttons and keyboard shortcuts for all actions.
+### Floating Action Buttons
+Bottom-right corner holds a vertical stack of small floating buttons:
+| Button | Action |
+|---|---|
+| Presentation toggle | Toggle presentation mode (full-width editor). Highlighted when active |
+| Fit | Fit content to view |
+### Fit Button
+- Fits both panels so SVG content is fully visible within available space
+- Calls each editor's fit-content method; under the mutex so neither editor's on-view-change callback echoes into the other
+- Fitting respects the SVG's authored viewBox when one exists — many SVGs (especially those with font glyphs or clip paths in defs) produce misleading bounding-box results that don't reflect the intended visible area; the authored viewBox is the correct viewport
+- When no authored viewBox is present, falls back to computed bounding box with a small margin
+- ViewBox expanded on the shorter axis to match the container's aspect ratio so content isn't stretched horizontally or vertically even when the container's aspect ratio differs from the content's
+- Sanity check — if computed bounding-box area vastly exceeds the authored viewBox area (e.g., off-screen text from font glyph definitions), the authored viewBox is trusted instead
+### Status LED
+Small circular indicator in the top-right, same behavior as diff viewer.
+### Zoom
+- Mouse-wheel only; no toolbar buttons
+- Smooth zoom centered on cursor position
+- Zoom level tracked internally but not displayed
+## SVG Content Injection
+SVG content cannot be rendered via framework templates — framework doesn't natively handle raw SVG string injection. Instead:
+1. Render creates empty container divs for left and right panels
+2. Inject method sets inner HTML on each container with the SVG string
+3. After injection, SVG elements are normalized:
+   - Width/height attributes removed (so SVG fills container)
+   - Width/height styles set to fill container
+   - ViewBox attribute added if missing (computed from original width/height before they are removed)
+   - Both panels get "preserve aspect ratio: none" so cursor-to-viewBox math is symmetric and the editor's fit-content output fully controls what's visible
+4. A new editor instance is constructed and attached on each panel — left pane in read-only mode, right pane editable. Editors initialize their viewBox via fit-content
+### Injection Deduplication
+- A generation counter guards against duplicate injection
+- Both lifecycle update and openFile can trigger injection for the same file
+- Counter ensures only the latest invocation proceeds — earlier invocations still in-flight (waiting on animation frame) bail out when they see the counter has advanced
+### Retry on Next Frame
+- If container divs are not yet in the shadow DOM when injection runs (due to framework render timing), it schedules a retry via animation frame
+- Ensures injection succeeds even when called during the framework update lifecycle before the DOM reflects the latest template
+### Authored ViewBox Preservation
+- Both panels prefer the authored viewBox attribute over a computed one
+- Computed bounding-box results are polluted by glyphs, clip paths, and symbol definitions in defs that have very small or off-screen coordinate systems
+- Authored viewBox trusted as correct viewport
+- Computed bounding box only used as fallback when no viewBox attribute exists — a small margin added around the computed bounds
+## Relative Image Resolution
+SVG files produced by doc-convert reference sibling image files with relative paths. When injected into the webapp DOM, the browser resolves those paths against the webapp's origin URL — which does not serve repository files. Images silently fail to load.
+After injection sets inner HTML on both panels, a resolve-image-hrefs method runs:
+1. Finds all image elements in the injected SVG
+2. Skips elements whose href is already a data URI or absolute URL
+3. Resolves each relative path against the SVG file's directory
+4. Fetches binary content via the base64 RPC, returning a data URI with correct MIME type
+5. Rewrites the href (and xlink href) attribute in-place so the browser renders the image
+Image resolution runs in parallel for all images in both panels. Non-blocking — SVG panels initialize and become interactive immediately; images appear as base64 fetches complete. Failed fetches log a warning but do not prevent the SVG from displaying.
+## File Content Fetching
+Content fetched via the same RPC methods as the diff viewer:
+| Version | RPC call | Fallback |
+|---|---|---|
+| HEAD (original) | Content at HEAD | Empty string (file is new) |
+| Working copy (modified) | Content at working copy | Empty string (file deleted) |
+| Embedded images | Base64 content | Warning logged, image not shown |
+Each call wrapped in its own error handler — a failure in one (e.g., file doesn't exist in HEAD) doesn't prevent the other from loading.
+## Public API
+Mirrors the diff viewer's interface so the app shell can treat both uniformly:
+- Open file — open or switch to an SVG file; fetches content if not provided
+- Refresh open files — re-fetch content for all open files (post-edit refresh)
+- Close file — close a tab, dispose pan/zoom, update active index
+- Get dirty files — returns list for save-all coordination
+## Keyboard Shortcuts
+All toolbar-level actions are accessible only via keyboard. Element-level shortcuts are handled by the visual editor internally and only fire when focus is outside input/textarea/contenteditable elements — so the chat textarea, file picker filter, settings editor, etc. receive their own keystrokes without interference. Escape is the one exception: it clears SVG selection regardless of focus location.
+| Shortcut | Scope | Action |
+|---|---|---|
+| Ctrl+PageDown / PageUp | Viewer | Next / previous tab |
+| Ctrl+W | Viewer | Close active tab |
+| Ctrl+S | Viewer | Save modified SVG |
+| Ctrl+Z | Viewer (select mode) | Undo last edit |
+| Ctrl+Shift+C | Viewer | Copy SVG as PNG image to clipboard |
+| F11 | Viewer | Toggle presentation mode |
+| Escape | Viewer (present mode) | Exit presentation mode |
+| Ctrl+C | Editor | Copy selected element(s) |
+| Ctrl+V | Editor | Paste copied element(s) with offset |
+| Ctrl+D | Editor | Duplicate selected element(s) in place |
+| Delete / Backspace | Editor | Delete selected element(s) |
+| Escape | Editor | Deselect / cancel text edit / cancel marquee |
+## Resize Handling
+- Resize observer on the diff container notifies both editors when container dimensions change (dialog resize, browser window resize)
+- Each editor re-runs fit-content so the viewBox aspect ratio re-matches the new container aspect ratio; otherwise content would be stretched until the next explicit fit
+## Integration with Existing Systems
+### App Shell
+- Both viewers are children of the background layer
+- On navigate-file — check extension, toggle visibility classes
+- On active-file-changed — activate the correct viewer layer
+- On stream-complete with modified files — call refresh on both viewers
+- On files-modified (commit, reset) — call refresh on both viewers if they have open files
+### File Picker
+- No changes needed — dispatches navigate-file events for all file types; app shell handles routing
+### Search Tab
+- Search results for SVG files route through the same navigate-file → app shell → SVG viewer path
+### Agent Edits
+- The agent edits SVG files through its own `Edit` / `Write` tools, as text — the viewer takes no part in applying them
+- The `PostToolUse` hook's files-modified broadcast triggers refresh, which updates the SVG viewer's content if the file is open
+- A user's unsaved handle-drag edits are lost by that refresh, the same as in the diff viewer's no-cache policy — the file on disk is authoritative
+## Context Menu
+Right-clicking on the right (editable) panel opens a context menu. Some actions are always visible; alignment and snap-to-axis are gated on the current selection so the menu shows only what's actionable.
+| Action | Visibility | Description |
+|---|---|---|
+| Copy as PNG | Always | Renders the current modified SVG to a canvas and copies as PNG to clipboard |
+| Copy as SVG | Always | Copies the current modified SVG source to the clipboard as text — same serialized form a save would produce (handle overlay stripped, pan-zoom wrapper unwrapped, externalized image hrefs intact) |
+| Make horizontal / Make vertical | Exactly one selection of a snappable shape | Snap a line, two-point polyline, or single-segment straight path to be horizontal or vertical |
+| Align horizontal (left / center / right) | Two or more selected elements | Translate every selected element so its left edge / horizontal center / right edge aligns with the union bbox's |
+| Align vertical (top / middle / bottom) | Two or more selected elements | Translate every selected element so its top edge / vertical middle / bottom edge aligns with the union bbox's |
+- Context menu positioned at click point relative to diff container
+- Dismisses on clicking outside or on a subsequent right-click
+- Dismiss listener uses click (not pointerdown) so menu buttons fire handlers before dismiss logic runs
+- Alignment and snap-to-axis go through the same undo/onChange path as drag-to-move — single undo entry per operation, single dirty-state flip
+### Snap to Axis
+- Operates on a single selected `<line>`, two-point `<polyline>`, or `<path>` whose `d` is a single straight segment (M followed by L, optionally followed by Z)
+- The second endpoint anchors (for line: x2/y2; for polyline: second point; for path: the L command's endpoint) — the first endpoint moves to make the line orthogonal
+- "Make horizontal" sets the first endpoint's y to match the second's, leaving x alone; "Make vertical" sets the first endpoint's x to match the second's, leaving y alone
+- Anchor choice preserves direction of travel for plain lines and keeps the arrow head in place for arrows whose head is on the second endpoint (the common authoring convention for Inkscape, draw.io, PowerPoint)
+- No-op when the line is already on the requested axis (sub-pixel tolerance)
+- Multi-selection or non-snappable shapes hide the entries entirely rather than disabling them
+### Alignment
+- Operates on two or more selected elements
+- Reference is the union bbox of the selection in SVG root coordinates — element bboxes are computed via native `getBBox()` then transformed through the parent CTM so alignment is correct across siblings whose ancestor transforms differ (groups with translate/scale/rotate)
+- Each element gets a per-element `(dx, dy)` and is translated using the same per-element dispatch as drag-to-move (rect/image/use → x/y; circle/ellipse → cx/cy; line → both endpoints; polyline/polygon → all points; path/g/transformed text → prepend translate to transform attribute)
+- Sub-pixel-threshold moves are skipped — alignment is idempotent on already-aligned elements and doesn't dirty the file unnecessarily
+- Single-selection alignment is a no-op (no group reference) — the menu hides the entries rather than aligning to the canvas
+## Copy as PNG
+Copy as PNG renders the current SVG to a high-quality PNG image:
+1. Parse dimensions — reads viewBox or width/height attributes to determine intrinsic size; defaults when unparseable
+2. Scale for quality — scales up with an upper bound on longest side for crisp output; small SVGs use higher scale, larger SVGs use modest scale
+3. Render to canvas — creates an offscreen canvas, draws white background (SVGs often have transparent backgrounds), renders the SVG via an image element loaded from a blob URL
+4. Clipboard write — passes a promise-of-blob (not a resolved blob) to the clipboard item to preserve the user-gesture context across async operations
+5. Download fallback — if clipboard write is unavailable or fails, downloads the PNG file via a synthesized download link; filename strips SVG extension and appends PNG
+### User Feedback
+Success and failure communicated via a toast event dispatched from the viewer. App shell catches and renders in the global toast system.
+| Outcome | Message |
+|---|---|
+| Clipboard succeeded | Image copied to clipboard |
+| Clipboard failed, download succeeded | Image downloaded as PNG |
+| Both failed | Failure message |
+Available via two paths:
+- Context menu
+- Keyboard shortcut
+## SVG ↔ Text Diff Mode Toggle
+
+SVG files can be viewed in either the visual SVG editor or the Monaco text diff editor. Two buttons enable bidirectional switching:
+
+| Button | Location | Direction |
+|---|---|---|
+| Code toggle | SVG viewer floating actions | Visual → Text diff |
+| Visual toggle | Diff viewer overlay buttons | Text diff → Visual |
+
+### Toggle Mechanism
+
+Both directions dispatch a toggle-svg-mode window event carrying:
+
+- Path
+- Target viewer (diff or visual)
+- Latest content from the source viewer (optional)
+- On-disk saved content for dirty tracking (optional)
+
+### App Shell Handler
+
+Orchestrates the switch:
+
+**Visual → Text:**
+
+1. Capture latest SVG content from the SVG editor
+2. Read the file object from the SVG viewer's internal files list
+3. Flip viewer visibility (show diff, hide SVG)
+4. Close any existing diff tab for the path, then open fresh with the captured content
+5. Set saved-content to the on-disk original so visual edits appear as dirty in the diff editor
+6. Layout Monaco after the DOM settles
+
+**Text → Visual:**
+
+1. Read the file object from the SVG viewer's files list (before closing)
+2. Flip viewer visibility (show SVG, hide diff)
+3. Close and reopen the SVG viewer with the latest text content from the diff editor
+4. Carry saved-content through so dirty state is preserved
+5. Close the diff viewer's tab for the path
+
+### Race Prevention
+
+- An override flag is set on the app shell during the toggle to prevent the active-file-changed handler from interfering
+- Flag is cleared in an animation-frame callback after the toggle completes
+- Without this guard, the active-file-changed event from opening the new tab would trigger viewer visibility logic that conflicts with the toggle in progress
+
+### Content Preservation
+
+- Saved-content (the last on-disk content) is carried across mode toggles so:
+  - Edits made in the SVG editor appear as dirty when switching to text mode
+  - Edits made in the text editor appear as dirty when switching back to visual mode
+  - Saving in either mode updates saved-content for both
+
+## Invariants
+
+- Only one viewer is visible at a time — the app shell enforces this via CSS class toggling
+- Panel-load events are routed by file extension at dispatch time: `.svg` → `load-svg-panel` → SVG viewer; everything else → `load-diff-panel` → Monaco diff viewer. The app shell routes each event to the matching viewer and flips active-viewer visibility
+- The virtual-comparison slot and the `_files[]` multi-file model are mutually exclusive — at any moment exactly one is non-null, or both are null (empty state). Opening a real file clears the virtual slot; populating the virtual slot suspends the active multi-file entry without dropping it
+- Virtual-mode "save" routes by right-pane source path: with a known path, dispatches `file-saved` for a real on-disk write through `Repo.write_file`; without one, snapshots right-content into right-saved and dispatches `virtual-svg-save` for in-memory capture only. The LED clears optimistically in both cases. Closing the viewer or opening a real file discards the virtual buffer
+- Both panels are instances of the same editor class; the left pane is always constructed with the read-only flag set, and the read-only flag is the sole source of truth for which pane-level mutations are allowed
+- In presentation mode, the hidden left pane's defs subtree must remain `visibility: visible` so that `<marker>`, `<linearGradient>`, `<pattern>`, `<filter>`, and any other ID-referenced defs continue to paint when referenced from the visible right pane via `url(#…)`. Hiding the left pane via `display: none` is forbidden — it would prune the first-in-document-order ID matches and break right-pane references
+- The read-only editor never mutates any SVG element — only its own viewBox attribute for pan/zoom/fit, and never the handle overlay
+- Each editor is the sole authority for its own viewBox — no external code path writes the viewBox attribute directly
+- Handle elements are always excluded from hit-testing so clicking a handle never starts a drag on the underlying element
+- Both panels have their browser-side aspect-ratio preservation disabled so the editor's viewBox is the single source of truth for what's visible
+- Injection deduplication guarantees that rapid openFile calls for the same file never attach editors to stale content
+- View sync never produces infinite feedback loops — the silent-write flag on set-view-box prevents the callback from firing on the sibling, and the shared mutex provides defense-in-depth
+- The on-view-change callback receives the freshly-written viewBox, not a read-back from the attribute — callers can trust the value is authoritative at the moment of the write
+- Save commits any active text edit and removes handles before serializing — saved content is always clean
+- Mode-toggle race guard prevents active-file-changed events from disrupting an in-flight visual ↔ text switch
+- Copy-as-PNG clipboard write uses a promise-of-blob, not a resolved blob, to preserve user-gesture context across async scaling
+- Document-level keyboard shortcuts (Ctrl+C/V/D/Z, Delete, Backspace) defer to the focused editable field when any input, textarea, select, or contenteditable element is the event target — only Escape is exempt

@@ -1,0 +1,1519 @@
+"""Tests for reading a mirrored transcript back as renderable messages.
+
+The transcript is the CLI's format, not ours, so the fixtures here are
+built to match what real ``sdk-py``-written transcripts on disk actually
+contain — in particular: one entry per content block with ``usage``
+repeated across the split, tool results arriving as ``user`` entries, and
+**no result entry anywhere**. A test that fed this module a tidier shape
+than the CLI produces would pass while the browser showed nothing.
+
+What these assert, in order of what breaks the UI worst:
+
+- the message taxonomy — which entries start a turn and which attach to one
+- the footer, rebuilt from usage rather than from a result entry that does
+  not exist
+- the fields the panel reads by exact name, snake_case and camelCase alike
+- what is deliberately absent: no cost, no terminal reason, no invented
+  defaults
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from aic_dc.claude_code import history
+from aic_dc.claude_code.history import render_messages, strip_framing, summarise_session
+
+SESSION = "sess-1"
+
+
+# ---------------------------------------------------------------------------
+# Fixture building
+# ---------------------------------------------------------------------------
+
+
+class FakeSessionMessage:
+    """What the SDK's parser hands back: a type, a uuid and a message body.
+
+    Deliberately not the real ``SessionMessage``: it carries no timestamp
+    (which is exactly why this module also reads the raw entries), and
+    constructing the real one would tie these tests to an SDK dataclass
+    signature that has nothing to do with what is being tested.
+    """
+
+    def __init__(self, type: str, uuid: str, message: dict[str, Any]) -> None:
+        self.type = type
+        self.uuid = uuid
+        self.message = message
+        self.session_id = SESSION
+        self.parent_tool_use_id = None
+
+
+def human(uuid: str, text: str, *, at: str = "2026-08-16T12:00:00.000Z") -> tuple:
+    """A prompt somebody typed, as a (message, entry) pair."""
+    message = FakeSessionMessage("user", uuid, {"role": "user", "content": text})
+    entry = {"uuid": uuid, "type": "user", "timestamp": at, "parentUuid": None}
+    return message, entry
+
+
+def assistant(
+    uuid: str,
+    block: dict[str, Any],
+    *,
+    message_id: str = "msg_1",
+    model: str = "claude-opus-5",
+    usage: dict[str, Any] | None = None,
+    at: str = "2026-08-16T12:00:01.000Z",
+) -> tuple:
+    """One assistant entry: exactly one content block, as the CLI writes it."""
+    body = {
+        "id": message_id,
+        "role": "assistant",
+        "model": model,
+        "content": [block],
+        "usage": usage
+        if usage is not None
+        else {"input_tokens": 10, "output_tokens": 5},
+    }
+    message = FakeSessionMessage("assistant", uuid, body)
+    entry = {"uuid": uuid, "type": "assistant", "timestamp": at, "message": body}
+    return message, entry
+
+
+def tool_reply(
+    uuid: str,
+    tool_use_id: str,
+    content: Any,
+    *,
+    is_error: bool = False,
+    at: str = "2026-08-16T12:00:02.000Z",
+    **extra: Any,
+) -> tuple:
+    """A tool reporting back — a ``user`` entry, not an assistant one."""
+    body = {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            }
+        ],
+    }
+    message = FakeSessionMessage("user", uuid, body)
+    entry = {"uuid": uuid, "type": "user", "timestamp": at, **extra}
+    return message, entry
+
+
+def render(*pairs, events=None) -> list[dict[str, Any]]:
+    messages = [pair[0] for pair in pairs]
+    entries = [pair[1] for pair in pairs]
+    return render_messages(messages, entries, events or [], session_id=SESSION)
+
+
+# ---------------------------------------------------------------------------
+# The taxonomy
+# ---------------------------------------------------------------------------
+
+
+class TestWhatBecomesAMessage:
+    """Which entries start a turn, and which fold into the one in progress."""
+
+    def test_a_prompt_and_a_reply_are_two_messages(self):
+        rendered = render(
+            human("u1", "hello"),
+            assistant("a1", {"type": "text", "text": "hi"}),
+        )
+        assert [m["role"] for m in rendered] == ["user", "assistant"]
+        assert rendered[0]["content"] == "hello"
+        assert rendered[1]["content"] == "hi"
+
+    def test_consecutive_assistant_entries_are_one_turn(self):
+        """The panel draws one card per turn carrying ordered blocks, not one
+        card per API message; splitting them would multiply the footer."""
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "thinking", "thinking": "hmm"}),
+            assistant("a2", {"type": "text", "text": "done"}),
+        )
+        assert [m["role"] for m in rendered] == ["user", "assistant"]
+        assert [b["kind"] for b in rendered[1]["blocks"]] == ["thinking", "text"]
+
+    def test_a_tool_reply_does_not_start_a_new_message(self):
+        """It is a `user` entry, but a human did not write it, and rendering
+        it as a prompt would put words in the user's mouth mid-turn."""
+        rendered = render(
+            human("u1", "read it"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "file body"),
+            assistant("a2", {"type": "text", "text": "there"}, message_id="msg_2"),
+        )
+        assert [m["role"] for m in rendered] == ["user", "assistant"]
+
+    def test_a_second_prompt_closes_the_first_turn(self):
+        rendered = render(
+            human("u1", "one"),
+            assistant("a1", {"type": "text", "text": "first"}),
+            human("u2", "two", at="2026-08-16T12:05:00.000Z"),
+            assistant("a2", {"type": "text", "text": "second"}, message_id="msg_2"),
+        )
+        assert [m["role"] for m in rendered] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert rendered[1]["content"] == "first"
+        assert rendered[3]["content"] == "second"
+
+    def test_a_prompt_carrying_text_and_an_image_is_still_a_prompt(self):
+        """A list content block is not by itself a tool reply."""
+        message = FakeSessionMessage(
+            "user",
+            "u1",
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this"},
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/png", "data": "AAA"},
+                    },
+                ],
+            },
+        )
+        entry = {"uuid": "u1", "type": "user", "timestamp": "2026-08-16T12:00:00.000Z"}
+        rendered = render_messages([message], [entry], [], session_id=SESSION)
+        assert rendered[0]["role"] == "user"
+        assert rendered[0]["content"] == "what is this"
+
+    def test_an_empty_conversation_renders_nothing(self):
+        assert render_messages([], [], [], session_id=SESSION) == []
+
+    def test_a_turn_with_no_prompt_before_it_still_renders(self):
+        """A transcript truncated at the front, or a resumed session whose
+        first visible entry is a reply. Showing the reply beats showing
+        nothing."""
+        rendered = render(assistant("a1", {"type": "text", "text": "orphan"}))
+        assert [m["role"] for m in rendered] == ["assistant"]
+
+
+# ---------------------------------------------------------------------------
+# Images
+# ---------------------------------------------------------------------------
+
+
+class TestImagesArePointedAtNotInlined:
+    def test_an_image_becomes_a_reference(self):
+        """Base64 in a history load would send every screenshot in the
+        session to every client on every open."""
+        message = FakeSessionMessage(
+            "user",
+            "u1",
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "see"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "A" * 10_000,
+                        },
+                    },
+                ],
+            },
+        )
+        rendered = render_messages(
+            [message], [{"uuid": "u1", "type": "user"}], [], session_id=SESSION
+        )
+        assert rendered[0]["image_refs"] == [
+            {
+                "session_id": SESSION,
+                "entry_uuid": "u1",
+                "block": 1,
+                "media_type": "image/png",
+            }
+        ]
+        assert "A" * 100 not in repr(rendered)
+
+    def test_a_prompt_with_no_images_has_no_image_key(self):
+        rendered = render(human("u1", "plain"))
+        assert "image_refs" not in rendered[0]
+
+
+# ---------------------------------------------------------------------------
+# Tool blocks
+# ---------------------------------------------------------------------------
+
+
+class TestToolBlocks:
+    def test_a_call_and_its_result_are_one_block(self):
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Read",
+                    "input": {"file_path": "/a.py"},
+                },
+            ),
+            tool_reply("u2", "t1", "contents"),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["block_id"] == "t1"
+        assert block["kind"] == "tool"
+        assert block["done"] is True
+        assert block["tool"]["name"] == "Read"
+        assert block["tool"]["status"] == "ok"
+        assert block["result"]["preview"] == "contents"
+
+    def test_a_call_with_no_result_stays_pending(self):
+        """A turn the server was killed in the middle of. The card must show
+        as unfinished rather than as having quietly succeeded."""
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["done"] is False
+        assert block["result"] is None
+        assert block["tool"]["status"] == "pending"
+
+    def test_an_error_result_is_marked_error(self):
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "ENOENT", is_error=True),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["result"]["status"] == "error"
+        assert block["tool"]["status"] == "error"
+
+    def test_a_long_result_is_truncated_with_its_true_size(self):
+        """Truncation is a read-time decision; the stored entry keeps the
+        whole thing so "show all" has something to show."""
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "x" * 9000),
+        )
+        result = rendered[1]["blocks"][0]["result"]
+        assert result["truncated"] is True
+        assert len(result["preview"]) == 4000
+        assert result["full_bytes"] == 9000
+
+    def test_a_structured_result_is_flattened_for_preview(self):
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", [{"type": "text", "text": "one"}, {"type": "text", "text": "two"}]),
+        )
+        assert rendered[1]["blocks"][0]["result"]["preview"] == "one\ntwo"
+
+    def test_a_call_duration_is_the_real_gap_between_call_and_result(self):
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                at="2026-08-16T12:00:01.000Z",
+            ),
+            tool_reply("u2", "t1", "ok", at="2026-08-16T12:00:03.500Z"),
+        )
+        assert rendered[1]["blocks"][0]["result"]["duration_ms"] == 2500
+
+    def test_a_replayed_card_keeps_the_time_it_was_invoked(self):
+        """The chip has to survive a refresh, not only the turn that made it.
+
+        The live path reads its wall clock; this one reads the timestamp on
+        the entry carrying the call, which is the same fact. Passed through
+        verbatim — re-rendering the CLI's own ISO could only lose precision
+        or invent it.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                at="2026-08-16T12:00:01.000Z",
+            ),
+            tool_reply("u2", "t1", "ok", at="2026-08-16T12:00:03.500Z"),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["invoked_at"] == "2026-08-16T12:00:01.000Z"
+
+    def test_a_replayed_card_still_pending_carries_its_time(self):
+        """The case the chip is for, read off disk.
+
+        A call with no reply is one that hung, was killed, or whose entry was
+        lost. It has no ``duration_ms`` and never will, so the invocation time
+        is the only thing on it that says anything about time at all.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                at="2026-08-16T12:00:01.000Z",
+            ),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["result"] is None
+        assert block["tool"]["invoked_at"] == "2026-08-16T12:00:01.000Z"
+
+    def test_an_entry_with_no_timestamp_leaves_the_time_out(self):
+        """Absent stays absent, the rule the rest of this class follows.
+
+        A card defaulted to the read time would claim a call made last week
+        had just been issued, which is the one wrong answer available.
+        """
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}, at=None),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["invoked_at"] == ""
+
+    def test_a_write_attributes_its_file(self):
+        rendered = render(
+            human("u1", "write"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Write",
+                    "input": {"file_path": "/x.py", "content": "hi"},
+                },
+            ),
+            tool_reply("u2", "t1", "written"),
+        )
+        assert rendered[1]["blocks"][0]["result"]["files_modified"] == ["/x.py"]
+        assert rendered[1]["files"] == ["/x.py"]
+        assert rendered[1]["turn"]["files_modified"] == ["/x.py"]
+
+    def test_a_failed_write_attributes_nothing(self):
+        rendered = render(
+            human("u1", "write"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "t1",
+                    "name": "Write",
+                    "input": {"file_path": "/x.py"},
+                },
+            ),
+            tool_reply("u2", "t1", "permission denied", is_error=True),
+        )
+        assert rendered[1]["files"] == []
+
+    def test_a_file_written_twice_is_listed_once(self):
+        rendered = render(
+            human("u1", "write"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "/x.py"}},
+            ),
+            tool_reply("u2", "t1", "ok"),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file_path": "/x.py"}},
+                message_id="msg_2",
+            ),
+            tool_reply("u3", "t2", "ok"),
+        )
+        assert rendered[1]["files"] == ["/x.py"]
+
+    def test_an_mcp_tool_carries_its_server(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "mcp__aic-dc__ui_state", "input": {}},
+            ),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["server"] == "aic-dc"
+
+    def test_a_server_tool_is_flagged_as_one(self):
+        rendered = render(
+            human("u1", "search"),
+            assistant(
+                "a1",
+                {"type": "server_tool_use", "id": "t1", "name": "web_search", "input": {"q": "x"}},
+            ),
+        )
+        assert rendered[1]["blocks"][0]["tool"]["server_tool"] is True
+
+    def test_a_result_for_an_unknown_call_is_dropped(self):
+        """A card with no header reads as a rendering bug, not as history."""
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "text", "text": "hi"}),
+            tool_reply("u2", "nope", "orphan result"),
+        )
+        assert rendered[1]["blocks"] == [
+            {
+                "block_id": "a1:0",
+                "kind": "text",
+                "seq": 0,
+                "content": "hi",
+                "done": True,
+                "agent_id": None,
+            }
+        ]
+
+    def test_a_tool_use_with_no_id_is_skipped(self):
+        """Nothing can ever resolve it, and a block keyed on "" would collide
+        with the next one like it."""
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "tool_use", "name": "Read", "input": {}}),
+        )
+        assert rendered[1]["blocks"] == []
+
+    def test_repeated_todo_writes_supersede_the_earlier_cards(self):
+        """One live plan per turn. The superseded cards stay in the list so
+        block order does not renumber; the renderer skips them."""
+        rendered = render(
+            human("u1", "plan"),
+            assistant(
+                "a1",
+                {"type": "tool_use", "id": "t1", "name": "TodoWrite", "input": {"todos": []}},
+            ),
+            tool_reply("u2", "t1", "ok"),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t2", "name": "TodoWrite", "input": {"todos": []}},
+                message_id="msg_2",
+            ),
+            tool_reply("u3", "t2", "ok"),
+        )
+        assert [b["superseded"] for b in rendered[1]["blocks"]] == [True, False]
+
+    def test_other_repeated_tools_do_not_supersede(self):
+        rendered = render(
+            human("u1", "read"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t2", "name": "Read", "input": {}},
+                message_id="msg_2",
+            ),
+        )
+        assert [b["superseded"] for b in rendered[1]["blocks"]] == [False, False]
+
+
+# ---------------------------------------------------------------------------
+# Denials
+# ---------------------------------------------------------------------------
+
+
+class TestDenials:
+    def test_a_denied_call_is_gated_not_merely_errored(self):
+        """"Error" would hide that a person, or a rule they wrote, stopped
+        this — which is the only part of it they can act on."""
+        rendered = render(
+            human("u1", "rm it"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}),
+            tool_reply(
+                "u2",
+                "t1",
+                "The user doesn't want to proceed",
+                is_error=True,
+                toolDenialKind="permission-rule",
+            ),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["gated"] is True
+        assert block["tool"]["gated"] is True
+        assert block["denial"]["action"] == "deny"
+        assert block["denial"]["reason"] == "The user doesn't want to proceed"
+
+    def test_who_resolved_it_is_left_empty_rather_than_guessed(self):
+        """Live, this names the client that answered the dialog. The
+        transcript records the kind of rule instead — a different fact."""
+        rendered = render(
+            human("u1", "rm it"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}),
+            tool_reply("u2", "t1", "no", is_error=True, toolDenialKind="permission-rule"),
+        )
+        assert rendered[1]["blocks"][0]["denial"]["resolvedBy"] == ""
+
+    def test_an_ordinary_error_is_not_a_denial(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}),
+            tool_reply("u2", "t1", "exit 1", is_error=True),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["gated"] is False
+        assert block["denial"] is None
+
+
+# ---------------------------------------------------------------------------
+# The footer, rebuilt
+# ---------------------------------------------------------------------------
+
+
+class TestTheFooterWithoutAResultEntry:
+    """The CLI transcript has no result entry — verified against real ones.
+
+    Everything the footer shows is therefore reconstructed from per-message
+    ``usage`` and timestamps, or omitted. These tests pin which is which.
+    """
+
+    def test_usage_is_summed_by_model_in_the_keys_the_panel_reads(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant(
+                "a1",
+                {"type": "text", "text": "a"},
+                message_id="msg_1",
+                usage={
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 7,
+                },
+            ),
+            assistant(
+                "a2",
+                {"type": "text", "text": "b"},
+                message_id="msg_2",
+                usage={"input_tokens": 5, "output_tokens": 3},
+            ),
+        )
+        assert rendered[1]["turn"]["turn_model_usage"] == {
+            "claude-opus-5": {
+                "input_tokens": 105,
+                "output_tokens": 23,
+                "cache_read_input_tokens": 7,
+            }
+        }
+
+    def test_one_message_split_across_entries_is_counted_once(self):
+        """The CLI writes one entry per content block and repeats `usage` on
+        every one of them, so summing entries would multiply a turn's
+        tokens by its block count."""
+        usage = {"input_tokens": 100, "output_tokens": 20}
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "thinking", "thinking": "hmm"}, usage=usage),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                usage=usage,
+            ),
+        )
+        assert rendered[1]["turn"]["turn_model_usage"]["claude-opus-5"] == {
+            "input_tokens": 100,
+            "output_tokens": 20,
+        }
+        assert rendered[1]["turn"]["num_turns"] == 1
+
+    def test_two_models_in_one_turn_are_kept_apart(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "text", "text": "a"}, model="claude-opus-5"),
+            assistant(
+                "a2",
+                {"type": "text", "text": "b"},
+                message_id="msg_2",
+                model="claude-haiku-4-5-20251001",
+            ),
+        )
+        assert set(rendered[1]["turn"]["turn_model_usage"]) == {
+            "claude-opus-5",
+            "claude-haiku-4-5-20251001",
+        }
+
+    def test_tool_calls_are_counted(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "ok"),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t2", "name": "Grep", "input": {}},
+                message_id="msg_2",
+            ),
+            tool_reply("u3", "t2", "ok"),
+        )
+        assert rendered[1]["turn"]["tool_calls"] == 2
+
+    def test_the_duration_is_measured_from_the_prompt(self):
+        """What the user waited for, which is what the live footer's
+        `duration_ms` reports — not the gap between the first and last
+        assistant entry, which would read as instant for a one-block reply."""
+        rendered = render(
+            human("u1", "go", at="2026-08-16T12:00:00.000Z"),
+            assistant("a1", {"type": "text", "text": "a"}, at="2026-08-16T12:00:01.000Z"),
+            assistant(
+                "a2",
+                {"type": "text", "text": "b"},
+                message_id="msg_2",
+                at="2026-08-16T12:00:09.250Z",
+            ),
+        )
+        assert rendered[1]["turn"]["duration_ms"] == 9250
+
+    def test_a_turn_with_no_prompt_measures_its_own_span(self):
+        """A transcript truncated at the front still has two entries to
+        measure between."""
+        rendered = render(
+            assistant("a1", {"type": "text", "text": "a"}, at="2026-08-16T12:00:01.000Z"),
+            assistant(
+                "a2",
+                {"type": "text", "text": "b"},
+                message_id="msg_2",
+                at="2026-08-16T12:00:04.000Z",
+            ),
+        )
+        assert rendered[0]["turn"]["duration_ms"] == 3000
+
+    def test_cost_is_absent_rather_than_zero(self):
+        """It is not in the transcript, the CLI derives it from a pricing
+        table we do not have, and under subscription billing it is null
+        anyway. `$0.00` would be a claim; nothing is the truth."""
+        rendered = render(human("u1", "go"), assistant("a1", {"type": "text", "text": "a"}))
+        assert "total_cost_usd" not in rendered[1]["turn"]
+
+    def test_the_terminal_reason_is_null_so_no_badge_is_drawn(self):
+        """The transcript never records why a turn ended. A badge claiming a
+        clean finish would be worse than no badge."""
+        rendered = render(human("u1", "go"), assistant("a1", {"type": "text", "text": "a"}))
+        assert rendered[1]["terminalReason"] is None
+
+    def test_a_turn_with_no_timestamps_omits_its_duration(self):
+        """Rather than reporting 0 ms, which reads as instantaneous."""
+        message = FakeSessionMessage(
+            "assistant",
+            "a1",
+            {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "x"}]},
+        )
+        rendered = render_messages([message], [{"uuid": "a1"}], [], session_id=SESSION)
+        assert "duration_ms" not in rendered[0]["turn"]
+
+
+# ---------------------------------------------------------------------------
+# Compaction
+# ---------------------------------------------------------------------------
+
+
+class TestCompaction:
+    """The boundary is a `system` entry, so the SDK's parser drops it.
+
+    It is still in the chain as the parent of the compact-summary user
+    entry, which is how the divider gets placed without a chain walk here.
+    """
+
+    @staticmethod
+    def _boundary(uuid: str = "b1") -> dict[str, Any]:
+        return {
+            "uuid": uuid,
+            "type": "system",
+            "subtype": "compact_boundary",
+            "parentUuid": None,
+            "logicalParentUuid": "a1",
+            "content": "Conversation compacted",
+            "isMeta": False,
+            "timestamp": "2026-08-16T12:10:00.000Z",
+            "compactMetadata": {
+                "trigger": "auto",
+                "preTokens": 150_000,
+                "postTokens": 20_000,
+                "durationMs": 4200,
+            },
+        }
+
+    def _rendered(self):
+        summary = FakeSessionMessage(
+            "user",
+            "u2",
+            {"role": "user", "content": "Here is a summary of the conversation so far."},
+        )
+        summary_entry = {
+            "uuid": "u2",
+            "type": "user",
+            "parentUuid": "b1",
+            "isCompactSummary": True,
+            "isVisibleInTranscriptOnly": True,
+            "timestamp": "2026-08-16T12:10:01.000Z",
+        }
+        first = human("u1", "start")
+        reply = assistant("a1", {"type": "text", "text": "ok"})
+        return render_messages(
+            [first[0], reply[0], summary],
+            [first[1], reply[1], self._boundary(), summary_entry],
+            [],
+            session_id=SESSION,
+        )
+
+    def test_a_divider_lands_before_the_summary(self):
+        rendered = self._rendered()
+        assert [m.get("system_event", False) for m in rendered] == [
+            False,
+            False,
+            True,
+            False,
+        ]
+        assert rendered[2]["content"] == "Conversation compacted"
+
+    def test_the_metadata_is_translated_to_the_keys_the_panel_reads(self):
+        """`compactMetadata`/`preTokens` on disk; the renderer takes
+        snake_case, so a pass-through would print blanks."""
+        assert self._rendered()[2]["compaction"] == {
+            "pre_tokens": 150_000,
+            "post_tokens": 20_000,
+            "trigger": "auto",
+        }
+
+    def test_the_summary_is_marked_as_not_something_the_user_typed(self):
+        rendered = self._rendered()
+        assert rendered[3]["compact_summary"] is True
+        assert rendered[3]["role"] == "user"
+
+    def test_an_ordinary_prompt_gets_no_divider(self):
+        rendered = render(
+            human("u1", "one"),
+            assistant("a1", {"type": "text", "text": "ok"}),
+            human("u2", "two"),
+        )
+        assert not any(m.get("system_event") for m in rendered)
+        assert not any("compact_summary" in m for m in rendered)
+
+    def test_a_parent_that_is_not_a_boundary_gets_no_divider(self):
+        message, entry = human("u2", "two")
+        entry["parentUuid"] = "a1"
+        first = human("u1", "one")
+        reply = assistant("a1", {"type": "text", "text": "ok"})
+        rendered = render_messages(
+            [first[0], reply[0], message],
+            [first[1], reply[1], entry],
+            [],
+            session_id=SESSION,
+        )
+        assert not any(m.get("system_event") for m in rendered)
+
+
+_UNSET = object()
+"""Distinguishes "not passed" from "passed ``None``" in a test helper."""
+
+
+class TestABackgroundAgentsWakeUp:
+    """The CLI wakes the main agent by sending it a user message.
+
+    So a turn that delegated to a background subagent has a `user` entry in
+    the middle of it that nobody typed, holding a payload written for the
+    model. Rendered as a prompt it was the worst row in the transcript.
+    """
+
+    NOTIFICATION = (
+        "<task-notification>\n"
+        "<task-id>a24b07aead0d86603</task-id>\n"
+        "<tool-use-id>toolu_bdrk_01Hj4EpVcJupjrpSV3q3UN4i</tool-use-id>\n"
+        "<output-file>/tmp/claude-1000/-tmp-x/sess/tasks/a24b0.output</output-file>\n"
+        "<status>completed</status>\n"
+        '<summary>Agent "Describe calc.py" finished</summary>\n'
+        "<note>A task-notification fires each time this agent stops with no "
+        "live background children of its own. The user can send it another "
+        "message and resume it.</note>\n"
+        "<result>`calc.py` defines two one-line arithmetic helpers.</result>\n"
+        "<usage><subagent_tokens>8868</subagent_tokens><tool_uses>1</tool_uses>"
+        "<duration_ms>4858</duration_ms></usage>\n"
+        "</task-notification>"
+    )
+
+    @staticmethod
+    def notification(
+        uuid: str = "n1",
+        content: str | None = None,
+        *,
+        at: str = "2026-08-16T12:05:00.000Z",
+        origin: Any = _UNSET,
+    ) -> tuple:
+        """One wake-up entry. ``origin`` defaults to the CLI's own marker;
+        pass anything else — including ``None`` — to test an entry without it.
+        """
+        body = {
+            "role": "user",
+            "content": (
+                TestABackgroundAgentsWakeUp.NOTIFICATION if content is None else content
+            ),
+        }
+        message = FakeSessionMessage("user", uuid, body)
+        entry = {
+            "uuid": uuid,
+            "type": "user",
+            "timestamp": at,
+            "origin": {"kind": "task-notification"} if origin is _UNSET else origin,
+            "message": body,
+        }
+        return message, entry
+
+    def _rendered(self, **kwargs):
+        return render(
+            human("u1", "delegate this"),
+            assistant("a1", {"type": "text", "text": "SPAWNED"}),
+            self.notification(**kwargs),
+            assistant(
+                "a2", {"type": "text", "text": "The agent finished. Its report: …"}
+            ),
+        )
+
+    def test_it_is_not_attributed_to_the_user(self):
+        """A "YOU" label on this row says the user typed a task id and an
+        internal explainer, which is the whole complaint."""
+        rendered = self._rendered()
+        assert [m.get("system_event", False) for m in rendered] == [
+            False,
+            False,
+            True,
+            False,
+        ]
+
+    def test_it_says_which_agent_finished_and_what_it_spent(self):
+        assert self._rendered()[2]["content"] == (
+            '🤖 Agent "Describe calc.py" finished (8,868 tokens, 1 tool call, 4.9s)'
+        )
+
+    def test_the_metrics_are_labelled_rather_than_run_together(self):
+        """Passed through verbatim, the three counters concatenated into one
+        meaningless number — `886814858` here, and the reason this row was
+        reported as unreadable."""
+        content = self._rendered()[2]["content"]
+        assert "886814858" not in content
+        assert "8,868 tokens" in content
+        assert "4.9s" in content
+
+    def test_the_plumbing_and_the_model_facing_note_are_left_out(self):
+        content = self._rendered()[2]["content"]
+        assert "toolu_bdrk" not in content
+        assert "/tmp/claude-1000" not in content
+        assert "task-notification fires" not in content
+        assert "a24b07aead0d86603" not in content
+
+    def test_the_subagents_answer_is_left_to_the_turn_that_restates_it(self):
+        """The assistant's next turn reports it, and the subagent's own
+        transcript holds it in full. Two copies in the feed is one too many."""
+        assert "arithmetic helpers" not in self._rendered()[2]["content"]
+
+    def test_a_status_that_is_not_success_is_the_point_of_the_row(self):
+        rendered = self._rendered(
+            content=(
+                "<task-notification><task-id>t7</task-id><status>killed</status>"
+                "<summary>Agent \"Sweep\" stopped</summary></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == '🤖 Agent "Sweep" stopped — **killed**'
+
+    def test_an_agent_with_no_summary_is_named_by_its_task_id(self):
+        """Better than an unattributed row: the id is at least a handle for
+        finding the subagent's transcript."""
+        rendered = self._rendered(
+            content="<task-notification><task-id>t7</task-id></task-notification>"
+        )
+        assert rendered[2]["content"] == "🤖 Background agent `t7` finished"
+
+    def test_a_payload_with_no_usage_block_reports_no_figures(self):
+        """Rather than three zeroes, which would read as an agent that ran
+        and did nothing."""
+        rendered = self._rendered(
+            content=(
+                "<task-notification><summary>Agent finished</summary>"
+                "</task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished"
+
+    def test_a_non_numeric_counter_is_dropped_not_printed(self):
+        rendered = self._rendered(
+            content=(
+                "<task-notification><summary>Agent finished</summary><usage>"
+                "<subagent_tokens>lots</subagent_tokens><tool_uses>2</tool_uses>"
+                "</usage></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished (2 tool calls)"
+
+    def test_a_result_containing_markup_does_not_break_the_parse(self):
+        """`<result>` is the subagent's prose, so it holds whatever the
+        subagent wrote — including unbalanced tags. An XML parse would raise
+        on it; this one keeps reading the fields it came for."""
+        rendered = self._rendered(
+            content=(
+                "<task-notification><result>Use <Foo> and </Bar unclosed</result>"
+                "<summary>Agent finished</summary>"
+                "<usage><tool_uses>1</tool_uses></usage></task-notification>"
+            )
+        )
+        assert rendered[2]["content"] == "🤖 Agent finished (1 tool call)"
+
+    def test_it_keeps_the_time_it_happened(self):
+        """The row is interleaved with `events.jsonl` records by timestamp, so
+        one without a stamp sorts to the end of the conversation."""
+        assert self._rendered()[2]["timestamp"] == "2026-08-16T12:05:00.000Z"
+
+    def test_it_still_ends_the_turn_above_it_and_opens_the_one_below(self):
+        """Where the turn breaks is the transcript's decision, not ours. Live
+        the two halves are one settled message, because the browser revises it
+        when the continuation arrives; on disk they are two turns and the row
+        is the seam between them."""
+        rendered = self._rendered()
+        assert [m["role"] for m in rendered] == [
+            "user",
+            "assistant",
+            "user",
+            "assistant",
+        ]
+        assert rendered[1]["blocks"][0]["content"] == "SPAWNED"
+        assert "Its report" in rendered[3]["blocks"][0]["content"]
+
+    def test_a_prompt_that_merely_looks_like_one_is_still_a_prompt(self):
+        """`origin.kind` is the CLI's own discriminator, so nothing sniffs the
+        content — a user quoting a notification back is not a notification."""
+        rendered = self._rendered(origin={"kind": "user"})
+        assert rendered[2].get("system_event") is None
+        assert "toolu_bdrk" in rendered[2]["content"]
+
+    def test_an_entry_with_no_origin_at_all_is_a_prompt(self):
+        rendered = self._rendered(origin=None)
+        assert rendered[2].get("system_event") is None
+
+
+# ---------------------------------------------------------------------------
+# Framing
+# ---------------------------------------------------------------------------
+
+
+class TestFramingIsStripped:
+    def test_the_ui_context_block_goes(self):
+        """AIC-DC wrote it, not the user; leaving it in would bury every
+        historical prompt under a context blob."""
+        framed = "<aic-dc-ui-context>\nSelected: a.py\n</aic-dc-ui-context>\n\nfix the bug"
+        assert strip_framing(framed) == "fix the bug"
+
+    def test_an_unframed_prompt_is_untouched(self):
+        assert strip_framing("just a prompt") == "just a prompt"
+
+    def test_a_prompt_that_merely_mentions_the_tag_is_untouched(self):
+        text = "why does <aic-dc-ui-context> appear in my prompt?"
+        assert strip_framing(text) == text
+
+    def test_unclosed_framing_is_left_alone(self):
+        """Truncating at a guess could cut into the user's own words."""
+        text = "<aic-dc-ui-context>\nSelected: a.py\nfix it"
+        assert strip_framing(text) == text
+
+    def test_stripping_happens_on_the_rendered_prompt(self):
+        rendered = render(
+            human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nreal question")
+        )
+        assert rendered[0]["content"] == "real question"
+
+
+# ---------------------------------------------------------------------------
+# Unknown blocks
+# ---------------------------------------------------------------------------
+
+
+class TestAnUnknownBlockIsVisible:
+    def test_it_renders_as_json_rather_than_vanishing(self):
+        """A CLI that grows a block kind this build has never seen must
+        degrade to something the user can see and report, not to a hole in
+        the middle of an answer."""
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "hologram", "payload": {"depth": 3}}),
+        )
+        (block,) = rendered[1]["blocks"]
+        assert block["kind"] == "text"
+        assert "hologram" in block["content"]
+        assert "unrecognised" in block["content"]
+
+    def test_it_is_logged(self, caplog):
+        with caplog.at_level("WARNING"):
+            render(human("u1", "go"), assistant("a1", {"type": "hologram"}))
+        assert "hologram" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Subagent rows
+# ---------------------------------------------------------------------------
+
+
+# What a real backgrounded spawn answers with, abridged. The id is prose
+# inside a warning not to repeat it, which is why it is parsed rather than
+# read off a field.
+_SPAWNED = (
+    "Async agent launched successfully. (This tool result is internal metadata"
+    " — never quote or paste any part of it, including the agentId below, into"
+    " a user-facing reply.)\nagentId: a9f5687c0b6a0904f (internal ID - do not"
+    " mention to user.)\nThe agent is working in the background."
+)
+
+
+class TestATurnRemembersWhatItDelegated:
+    """A turn read back off disk keeps the subagents it spawned.
+
+    It used to report none, so a refresh emptied the row, its summary and —
+    because "View subagents" counts this list — every way into the
+    transcripts, from a turn that had shown all three a moment earlier.
+    """
+
+    @staticmethod
+    def _spawn(name="Agent", **input_over):
+        return {
+            "type": "tool_use",
+            "id": "toolu_task",
+            "name": name,
+            "input": {
+                "description": "Read README magic word",
+                "subagent_type": "Explore",
+                "prompt": "Read README.md and report the magic word.",
+                **input_over,
+            },
+        }
+
+    def _rendered(self, *, name="Agent", result=_SPAWNED):
+        return render(
+            human("u1", "delegate it"),
+            assistant("a1", self._spawn(name)),
+            tool_reply("u2", "toolu_task", result),
+            assistant("a2", {"type": "text", "text": "Spawned."}, message_id="msg_2"),
+        )
+
+    def test_the_spawn_call_becomes_a_row(self):
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["tool_use_id"] == "toolu_task"
+        assert row["description"] == "Read README magic word"
+        assert row["subagent_type"] == "Explore"
+
+    def test_the_agent_id_is_read_out_of_the_result(self):
+        """The only place the turn's own transcript names the subagent, and
+        what the button into its transcript is addressed with."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["agent_id"] == "a9f5687c0b6a0904f"
+
+    def test_the_older_tool_name_is_still_recognised(self):
+        """Transcripts written before the CLI renamed `Task` to `Agent` are
+        on disk in sessions users still resume."""
+        (row,) = self._rendered(name="Task")[1]["subagents"]
+        assert row["agent_id"] == "a9f5687c0b6a0904f"
+
+    def test_a_synchronous_spawn_keeps_its_row_without_an_id(self):
+        """It answers with the subagent's output and names no id. The row is
+        still the evidence the turn delegated; the renderer drops the button
+        rather than offering a transcript we cannot address."""
+        (row,) = self._rendered(result="The magic word is ORCHID.")[1]["subagents"]
+        assert row["agent_id"] is None
+        assert row["description"] == "Read README magic word"
+
+    def test_a_restored_row_never_spins(self):
+        """`terminal` is a statement about the turn, not the subagent: this
+        turn ended, so nothing restored from it is still running."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert row["terminal"] is True
+
+    def test_the_live_only_fields_are_absent_rather_than_invented(self):
+        """Status, usage and the closing summary arrive as `Task*` events,
+        which nothing on disk holds. A row claiming `completed` on no
+        evidence would wear it over a subagent that was killed."""
+        (row,) = self._rendered()[1]["subagents"]
+        assert "status" not in row
+        assert "usage" not in row
+        assert "summary" not in row
+
+    def test_a_turn_that_delegated_nothing_reports_nothing(self):
+        rendered = render(
+            human("u1", "go"),
+            assistant("a1", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}),
+            tool_reply("u2", "t1", "file body"),
+        )
+        assert rendered[1]["subagents"] == []
+
+    def test_two_spawns_are_two_rows_in_call_order(self):
+        rendered = render(
+            human("u1", "delegate twice"),
+            assistant(
+                "a1",
+                {
+                    "type": "tool_use",
+                    "id": "toolu_a",
+                    "name": "Agent",
+                    "input": {"description": "first", "subagent_type": "Explore"},
+                },
+            ),
+            assistant(
+                "a2",
+                {
+                    "type": "tool_use",
+                    "id": "toolu_b",
+                    "name": "Agent",
+                    "input": {"description": "second", "subagent_type": "Plan"},
+                },
+                message_id="msg_2",
+            ),
+        )
+        rows = rendered[1]["subagents"]
+        assert [r["description"] for r in rows] == ["first", "second"]
+        assert [r["subagent_type"] for r in rows] == ["Explore", "Plan"]
+
+
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
+
+
+class TestEventsAreInterleaved:
+    @staticmethod
+    def _event(at: str, content: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "id": f"1-{content}",
+            "session_id": SESSION,
+            "timestamp": at,
+            "event": "commit",
+            "content": content,
+            **extra,
+        }
+
+    def test_an_event_lands_in_timestamp_order(self):
+        rendered = render(
+            human("u1", "one", at="2026-08-16T12:00:00+00:00"),
+            assistant("a1", {"type": "text", "text": "ok"}, at="2026-08-16T12:00:01+00:00"),
+            human("u2", "two", at="2026-08-16T12:00:30+00:00"),
+            events=[self._event("2026-08-16T12:00:10+00:00", "committed")],
+        )
+        assert [m["content"] for m in rendered] == ["one", "ok", "committed", "two"]
+
+    def test_an_event_card_is_a_system_event(self):
+        rendered = render(
+            human("u1", "one"),
+            events=[self._event("2026-08-16T12:00:10+00:00", "committed")],
+        )
+        card = rendered[-1]
+        assert card["system_event"] is True
+        assert card["event"] == "commit"
+        assert card["role"] == "user"
+
+    def test_a_request_id_is_carried_through(self):
+        """Correlation is by session plus request; the browser groups an
+        event with the turn it belongs to."""
+        rendered = render(
+            human("u1", "one"),
+            events=[self._event("2026-08-16T12:00:10+00:00", "c", request_id="req-9")],
+        )
+        assert rendered[-1]["request_id"] == "req-9"
+
+    def test_the_transcript_wins_a_tie(self):
+        """A commit recorded in the same millisecond as the message that
+        triggered it belongs after it."""
+        rendered = render(
+            human("u1", "one", at="2026-08-16T12:00:00+00:00"),
+            events=[self._event("2026-08-16T12:00:00+00:00", "committed")],
+        )
+        assert [m["content"] for m in rendered] == ["one", "committed"]
+
+    def test_an_undated_event_goes_last_not_first(self):
+        """A malformed record must not claim to predate the conversation."""
+        rendered = render(
+            human("u1", "one", at="2026-08-16T12:00:00+00:00"),
+            events=[{"session_id": SESSION, "event": "reset", "content": "no clock"}],
+        )
+        assert [m["content"] for m in rendered] == ["one", "no clock"]
+
+    def test_a_record_with_no_content_is_dropped(self):
+        rendered = render(human("u1", "one"), events=[{"event": "reset"}])
+        assert len(rendered) == 1
+
+    def test_no_events_leaves_the_transcript_untouched(self):
+        pairs = [human("u1", "one"), assistant("a1", {"type": "text", "text": "ok"})]
+        assert render(*pairs) == render(*pairs, events=[])
+
+    def test_events_are_ordered_among_themselves(self):
+        rendered = render(
+            human("u1", "one", at="2026-08-16T12:00:00+00:00"),
+            events=[
+                self._event("2026-08-16T12:00:20+00:00", "second"),
+                self._event("2026-08-16T12:00:10+00:00", "first"),
+            ],
+        )
+        assert [m["content"] for m in rendered] == ["one", "first", "second"]
+
+    def test_a_z_suffixed_and_an_offset_timestamp_sort_together(self):
+        """The CLI writes `...Z`; our events log writes `+00:00`. Comparing
+        them as strings would put every event after every message."""
+        rendered = render(
+            human("u1", "one", at="2026-08-16T12:00:00.000Z"),
+            human("u2", "two", at="2026-08-16T12:00:20.000Z"),
+            events=[self._event("2026-08-16T12:00:10+00:00", "between")],
+        )
+        assert [m["content"] for m in rendered] == ["one", "between", "two"]
+
+
+# ---------------------------------------------------------------------------
+# The session list
+# ---------------------------------------------------------------------------
+
+
+class FakeInfo:
+    """The fields of ``SDKSessionInfo`` that a summary reads."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.session_id = kwargs.get("session_id", SESSION)
+        self.summary = kwargs.get("summary")
+        self.first_prompt = kwargs.get("first_prompt")
+        self.created_at = kwargs.get("created_at", 1_786_881_600_123)
+
+
+class TestTheSessionSummary:
+    def test_it_has_exactly_the_seven_documented_fields(self):
+        summary = summarise_session(FakeInfo(first_prompt="hi"), [object()])
+        assert set(summary) == {
+            "session_id",
+            "timestamp",
+            "message_count",
+            "preview",
+            "first_role",
+            "resumable",
+            "total_cost_usd",
+        }
+
+    def test_the_message_count_is_exact_not_estimated(self):
+        summary = summarise_session(FakeInfo(), [object(), object(), object()])
+        assert summary["message_count"] == 3
+
+    def test_the_preview_is_capped(self):
+        summary = summarise_session(FakeInfo(first_prompt="x" * 500), [object()])
+        assert len(summary["preview"]) == history.PREVIEW_CHARS
+
+    def test_the_title_stands_in_for_a_missing_first_prompt(self):
+        summary = summarise_session(FakeInfo(summary="Fix the parser"), [object()])
+        assert summary["preview"] == "Fix the parser"
+
+    def test_the_timestamp_is_iso_not_epoch_millis(self):
+        summary = summarise_session(FakeInfo(), [object()])
+        assert summary["timestamp"].startswith("2026-08-16T12:00:00.123")
+
+    def test_a_session_with_no_creation_time_gets_an_empty_timestamp(self):
+        summary = summarise_session(FakeInfo(created_at=0), [object()])
+        assert summary["timestamp"] == ""
+
+    def test_cost_is_null_rather_than_zero(self):
+        assert summarise_session(FakeInfo(), [object()])["total_cost_usd"] is None
+
+    def test_an_unparseable_session_is_listed_as_not_resumable(self):
+        """Better a row the user can see and delete than a listing that
+        fails because one transcript is broken."""
+        summary = summarise_session(FakeInfo(), [])
+        assert summary["resumable"] is False
+        assert summary["message_count"] == 0
+
+
+# The framing as the CLI's sidecar actually holds it: `first_prompt` is
+# truncated to 200 characters, and AIC-DC's context block is longer than
+# that, so the closing tag is not in the field. Taken from a real
+# transcript rather than shortened for the test — the shortening is the
+# reason the original tests passed while every row on screen was wrong.
+_TRUNCATED_FRAMING = (
+    "<aic-dc-ui-context> Files the user has selected in the file picker (a "
+    "hint about what they are pointing at, not their contents — read them "
+    "yourself if you need them): - specs5/0-overview/glossary.md -…"
+)
+
+
+class TestThePreviewIsWhatTheUserTyped:
+    """The session list's only distinguishing field.
+
+    Found by rendering a real CLI-written transcript: every row read as the
+    same 100 characters of AIC-DC's own framing, because the sidecar's
+    ``first_prompt`` is truncated before the closing tag that
+    ``strip_framing`` needs.
+    """
+
+    def test_the_truncated_framing_does_not_become_the_preview(self):
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="Some title"),
+            [human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nwhat is next ?")[0]],
+        )
+        assert summary["preview"] == "what is next ?"
+
+    def test_no_preview_ever_opens_with_the_framing_tag(self):
+        """The invariant behind the fix, stated where a future change to the
+        preference order would trip over it."""
+        for info in (
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="A title"),
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING),
+        ):
+            summary = summarise_session(
+                info, [human("u1", _TRUNCATED_FRAMING + "\n</aic-dc-ui-context>\n\nask")[0]]
+            )
+            assert not summary["preview"].startswith("<aic-dc-ui-context>")
+
+    def test_the_prompt_is_preferred_over_the_generated_title(self):
+        """Both are available and specific; the user's own words win."""
+        summary = summarise_session(
+            FakeInfo(first_prompt="ignored", summary="A generated title"),
+            [human("u1", "the actual question")[0]],
+        )
+        assert summary["preview"] == "the actual question"
+
+    def test_a_tool_reply_is_not_mistaken_for_the_first_prompt(self):
+        """A transcript's ``user`` entries include tools reporting back."""
+        summary = summarise_session(
+            FakeInfo(),
+            [
+                tool_reply("t1", "tu1", "some tool output")[0],
+                human("u1", "the real prompt")[0],
+            ],
+        )
+        assert summary["preview"] == "the real prompt"
+
+    def test_the_title_is_the_fallback_when_no_prompt_can_be_read(self):
+        """A transcript that will not parse has no words to quote."""
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="Fix the parser"), []
+        )
+        assert summary["preview"] == "Fix the parser"
+
+    def test_the_truncated_field_is_last_rather_than_never(self):
+        """Something specific to the session beats ``(empty)`` on screen."""
+        summary = summarise_session(FakeInfo(first_prompt="a short prompt"), [])
+        assert summary["preview"] == "a short prompt"
+
+    def test_a_framing_only_prompt_does_not_render_as_the_boilerplate(self):
+        """Nothing but framing: the title is better than our own prose."""
+        summary = summarise_session(
+            FakeInfo(first_prompt=_TRUNCATED_FRAMING, summary="A title"),
+            [human("u1", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n")[0]],
+        )
+        assert summary["preview"] == "A title"
+
+
+# The CLI's compaction prompt as it is actually written, opening sentence
+# and all. Taken from a real compacted transcript for the same reason
+# `_TRUNCATED_FRAMING` is: the bug below survived a suite whose fixtures
+# were all short enough to be wrong about.
+_COMPACT_SUMMARY = (
+    "This session is being continued from a previous conversation that ran "
+    "out of context. The summary below covers the earlier portion of the "
+    "conversation.\n\nSummary:\n1. **Primary Request and Intent:**\n"
+    '   - **Initial:** "now that phase 5 is done. what is next ?"'
+)
+
+
+class TestACompactedSessionPreviewsTheHumansWords:
+    """The second source of the identical-row bug.
+
+    The SDK's parser starts a compacted session's message list at the
+    compact boundary, so the first user message is the CLI's summary — which
+    opens with the same sentence in every session that has ever compacted.
+    Found by running ``scripts/history_smoke.py`` over a real transcript
+    *after* the framing fix had already shipped and its checks passed.
+    """
+
+    def test_the_compaction_summary_does_not_become_the_preview(self):
+        summary = summarise_session(
+            FakeInfo(summary="Determine next phase after phase 5"),
+            [
+                human("u1", _COMPACT_SUMMARY)[0],
+                human("u2", "<aic-dc-ui-context>\nctx\n</aic-dc-ui-context>\n\nyes cleanup")[0],
+            ],
+        )
+        assert summary["preview"] == "yes cleanup"
+
+    def test_the_summary_is_skipped_when_it_arrives_as_a_content_block(self):
+        """The CLI writes it as a plain string; the parser's own shape for a
+        user message is a list of blocks, and both reach here."""
+        message = FakeSessionMessage(
+            "user",
+            "u1",
+            {"role": "user", "content": [{"type": "text", "text": _COMPACT_SUMMARY}]},
+        )
+        summary = summarise_session(
+            FakeInfo(summary="A title"), [message, human("u2", "the real question")[0]]
+        )
+        assert summary["preview"] == "the real question"
+
+    def test_the_title_stands_in_when_the_summary_is_all_there_is(self):
+        """Compacted and resumed, nothing typed since. The CLI's own title is
+        the only thing specific to the session, and a session long enough to
+        compact has one."""
+        summary = summarise_session(
+            FakeInfo(summary="Determine next phase after phase 5"),
+            [human("u1", _COMPACT_SUMMARY)[0]],
+        )
+        assert summary["preview"] == "Determine next phase after phase 5"
+
+    def test_two_compacted_sessions_do_not_preview_identically(self):
+        """The invariant, in the form the browser actually needs it: a row is
+        told apart from another row by ``preview`` and nothing else."""
+        previews = {
+            summarise_session(
+                FakeInfo(session_id=sid, summary=f"title {sid}"),
+                [human("u1", _COMPACT_SUMMARY)[0], human("u2", asked)[0]],
+            )["preview"]
+            for sid, asked in (("s1", "fix the parser"), ("s2", "write the HUD"))
+        }
+        assert previews == {"fix the parser", "write the HUD"}
+
+    def test_a_task_notification_does_not_become_the_preview(self):
+        """The third guise. A wake-up cannot ordinarily be the first user
+        message — the prompt that spawned the agent precedes it — but a
+        compacted session whose subagent notified after the boundary has one
+        as the first the parser hands over, and a row previewing a task id
+        names nothing the user would recognise their conversation by."""
+        summary = summarise_session(
+            FakeInfo(summary="A title"),
+            [
+                human("u1", _COMPACT_SUMMARY)[0],
+                TestABackgroundAgentsWakeUp.notification("n1")[0],
+                human("u2", "so what did it find?")[0],
+            ],
+        )
+        assert summary["preview"] == "so what did it find?"
+
+    def test_a_notification_alone_falls_back_to_the_title(self):
+        summary = summarise_session(
+            FakeInfo(summary="Audit the parser"),
+            [TestABackgroundAgentsWakeUp.notification("n1")[0]],
+        )
+        assert summary["preview"] == "Audit the parser"
+
+    def test_no_preview_ever_opens_with_the_compaction_preamble(self):
+        for info in (
+            FakeInfo(summary="A title", first_prompt="a prompt"),
+            FakeInfo(first_prompt=_COMPACT_SUMMARY),
+            FakeInfo(),
+        ):
+            summary = summarise_session(info, [human("u1", _COMPACT_SUMMARY)[0]])
+            assert not summary["preview"].startswith(
+                "This session is being continued"
+            ), f"preview was {summary['preview']!r}"
+
+
+# ---------------------------------------------------------------------------
+# Time
+# ---------------------------------------------------------------------------
+
+
+class TestTimeParsing:
+    @pytest.mark.parametrize(
+        "value",
+        ["", None, "not a date", 12345, "2026-13-45T99:99:99Z"],
+    )
+    def test_an_unusable_timestamp_yields_no_duration(self, value):
+        assert history._elapsed_ms(value, "2026-08-16T12:00:01Z") == 0
+
+    def test_a_clock_step_backwards_does_not_make_a_negative_duration(self):
+        """Entries are written in order, but a duration reading as though
+        the result preceded the call is a rendering bug either way."""
+        assert history._elapsed_ms("2026-08-16T12:00:05Z", "2026-08-16T12:00:01Z") == 0
+
+    def test_a_naive_timestamp_is_read_as_utc(self):
+        assert history._elapsed_ms("2026-08-16T12:00:00", "2026-08-16T12:00:02") == 2000
