@@ -329,10 +329,13 @@ others. Deliberately not built as a rider on that work, because writing it means
 for callers and arbitrating each callerless one. **That audit is the task, and the test is its
 by-product.**
 
-**C6 — [`known-issues.md`](known-issues.md).** One open entry: a "compacting conversation" toast does
-not survive a browser refresh. Same class as the compaction divider that phase 2 shipped client-side
-only, and cheap; the inbox is where new defects land, so read it before planning a sitting rather than
-only when it is cited.
+**C6 — [`known-issues.md`](known-issues.md).** ✅ *Its one entry fixed 2026-08-28; the inbox is now
+empty.* A "compacting conversation" indicator did not survive a browser refresh — same class as the
+compaction divider phase 2 shipped client-side only, and the same fix: a broadcast is not a record.
+`get_current_state` now carries a `compaction` key and `state-loaded` restores the indicator, with the
+elapsed seconds computed server-side so no two clocks have to agree. Details in
+[`5-webapp/shell.md`](5-webapp/shell.md) § *Layout*. The inbox is still where new defects land, so read
+it before planning a sitting rather than only when it is cited.
 
 ---
 

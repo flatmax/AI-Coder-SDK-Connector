@@ -905,6 +905,12 @@ class ClaudeCodeService:
             "engine_ready": self.session.ready,
             "streaming_active": self.session.streaming_active,
             "active_streams": self.session.active_streams(),
+            # None unless the engine is compacting right now. A browser
+            # refreshed during the pause used to reconnect into a session that
+            # looked idle while the engine was still summarising — tens of
+            # seconds of apparently hung UI, which is the failure the
+            # indicator exists to prevent.
+            "compaction": self.session.compaction_state,
             "permission_mode": self.session.permission_mode,
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),

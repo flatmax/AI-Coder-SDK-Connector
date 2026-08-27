@@ -196,6 +196,28 @@ and the only thing announcing it was a 3-second toast, which expires long before
 describes — so the honest half of a progress bar came back, and the toast went (see
 [chat.md § Engine Event Routing](chat.md#engine-event-routing)).
 
+**It survives a page reload, because a broadcast is not a record.** Every signal driving the indicator
+is live — it says what the engine is doing *now*, to whoever happens to be connected — so a refresh
+during the pause used to reconnect into a session that looked idle while the engine was still
+summarising. Tens of seconds of apparently hung UI: the exact failure the indicator exists to prevent,
+reintroduced by the one action a user watching a silent screen is most likely to take. Same class as the
+compaction divider phase 2 shipped client-side only, and the same fix. `get_current_state` now carries a
+`compaction` key — `null`, or `{elapsed_seconds}` — and `state-loaded` restores the indicator from it.
+
+Three things about that key are decisions rather than details:
+
+- **The server computes the elapsed seconds; it does not send a start timestamp.** A timestamp would
+  make the browser difference two clocks, and a collaborating client can be on another machine.
+- **It is set from the engine's status frame, never from the `PreCompact` hook**, so a restored
+  indicator can never be a speculative background precompute — which is why it restores as *confirmed*
+  and gets the long ceiling rather than the short unconfirmed one.
+- **The ceiling budgets the whole compaction, not this component's view of it.** A restore arriving 170
+  seconds in gets the remaining 10, not a fresh 180; otherwise a compaction that died before the refresh
+  would sit there for three more minutes claiming to work.
+
+The trigger is deliberately absent from the restored state: it belongs to the hook, not the frame. A
+restored indicator says how long, not why.
+
 A boundary with no start ahead of it is **ignored**, not flashed: microcompaction can report one without
 the hook ever firing, and by the time it lands there is no pause left to explain — the divider records it.
 The reverse case is bounded rather than trusted: a spinner is a claim only `compact_boundary` can retract,

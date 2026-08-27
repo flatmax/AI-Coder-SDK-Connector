@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -383,6 +384,10 @@ class EngineSession:
         self._last_session_id: str | None = None
         self._permission_mode = self.config.effective_permission_mode
         self._model = self.config.model
+        # When the engine last said it was compacting, or None. Monotonic,
+        # because this is only ever read as a duration and a wall clock that
+        # steps backwards would produce a negative one.
+        self._compacting_since: float | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -407,6 +412,36 @@ class EngineSession:
     @property
     def streaming_active(self) -> bool:
         return self._active_turn is not None
+
+    @property
+    def compaction_state(self) -> dict[str, Any] | None:
+        """The compaction in progress, or ``None`` — for a client's first paint.
+
+        Compaction was live-only: the engine's status frames were translated
+        into ``compactionEvent`` broadcasts and nothing kept the fact, so a
+        browser refreshed during the pause reconnected into a session that
+        looked idle while the engine was still summarising. On a long session
+        that is tens of seconds of a UI that appears hung — which is precisely
+        the failure the indicator exists to prevent, reintroduced by the one
+        action a confused user is most likely to take.
+
+        Same class as the compaction divider phase 2 shipped client-side only,
+        and the same fix: a broadcast is not a record.
+
+        **Elapsed is computed here, not sent as a start timestamp.** The
+        browser would have to compare a server clock against its own to make
+        that into a duration, and a collaborating client can be on another
+        machine entirely. A number of seconds needs no shared clock.
+
+        The trigger — automatic or manual — is deliberately absent. It is the
+        ``PreCompact`` hook's, not the status frame's, and this state is set
+        from the frame because the frame is the half that only fires for a real
+        compaction. A restored indicator says how long, not why.
+        """
+        if self._compacting_since is None:
+            return None
+        elapsed = time.monotonic() - self._compacting_since
+        return {"elapsed_seconds": max(0.0, elapsed)}
 
     @property
     def permission_mode(self) -> str:
@@ -638,6 +673,10 @@ class EngineSession:
         async with self._lifecycle_lock:
             client, self._client = self._client, None
             self.health.connected = False
+            # Nothing is compacting once there is no engine, and a stale flag
+            # here would outlive the process that set it: the browser survives
+            # a server restart and would ask for state before the first turn.
+            self._compacting_since = None
             if client is not None:
                 await _quiet_disconnect(client)
                 logger.info("Claude Code session disconnected")
@@ -776,7 +815,25 @@ class EngineSession:
             self.health.note_mirror_gap()
             self.health.last_error = event.payload.get("error") or None
             return Event("engineHealth", self.health.to_dict(), turn_scoped=False)
+        if event.name == "compactionEvent":
+            # Held, not just forwarded, so a browser that reloads during the
+            # pause can be told about it — see `compaction_state`. Only the
+            # two status-frame stages move it: `compact_boundary` is the
+            # transcript's record and can arrive for a microcompaction that
+            # never paused anything, so ending on it would clear a state it
+            # never set.
+            stage = event.payload.get("stage")
+            if stage == "compaction_started":
+                self._compacting_since = time.monotonic()
+            elif stage == "compaction_ended":
+                self._compacting_since = None
+            return event
         if event.name == "streamComplete":
+            # A compaction never outlives the turn it happened in. Without
+            # this a turn that died mid-compaction would leave the flag set,
+            # and every browser connecting afterwards would be handed a
+            # spinner for a pause that ended when the engine went away.
+            self._compacting_since = None
             # What a turn *cost* is only visible against the session's running
             # total. Every result is priced, and a turn that ends more than
             # once is priced against its own start rather than against its

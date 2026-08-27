@@ -1941,3 +1941,114 @@ class TestBackgroundDrain:
         from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 
         assert session_module.DEFERRING_TASK_TYPES == DEFERRING_TASK_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Compaction survives a reload
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionState:
+    """A broadcast is not a record.
+
+    The compaction indicator was driven entirely by live `compactionEvent`
+    broadcasts, so a browser refreshed *during* the pause reconnected into a
+    session that looked idle while the engine was still summarising. On a long
+    session that is tens of seconds of apparently hung UI — the exact failure
+    the indicator exists to prevent, reintroduced by the one action a user
+    watching a silent UI is most likely to take.
+
+    Same class as the compaction divider phase 2 shipped client-side only.
+    """
+
+    def fold(self, engine, stage, **payload):
+        """Push one translated event through the session's folding step."""
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        return engine._fold_session_state(
+            active, Event("compactionEvent", {"stage": stage, **payload})
+        )
+
+    async def test_an_idle_session_is_not_compacting(self, engine):
+        assert engine.compaction_state is None
+
+    async def test_a_start_frame_is_remembered(self, engine):
+        self.fold(engine, "compaction_started")
+        state = engine.compaction_state
+        assert state is not None
+        assert state["elapsed_seconds"] >= 0
+
+    async def test_the_end_frame_clears_it(self, engine):
+        self.fold(engine, "compaction_started")
+        self.fold(engine, "compaction_ended", result="success")
+        assert engine.compaction_state is None
+
+    async def test_a_failed_compaction_also_clears_it(self, engine):
+        """The only report a failure produces. Holding the flag past it
+        would leave every later browser a spinner for a pause that ended."""
+        self.fold(engine, "compaction_started")
+        self.fold(engine, "compaction_ended", result="failed")
+        assert engine.compaction_state is None
+
+    async def test_a_boundary_alone_does_not_start_one(self, engine):
+        """Microcompaction reports a boundary with no pause behind it.
+
+        Starting on it would hand a reloading browser an indicator for a
+        compaction that never made anyone wait — and, worse, one with no
+        end frame coming to clear it.
+        """
+        self.fold(engine, "compact_boundary", pre_tokens=100)
+        assert engine.compaction_state is None
+
+    async def test_the_event_is_still_forwarded_unchanged(self, engine):
+        """Folding records; it must not swallow. The live indicator is
+        still driven by the broadcast — this only adds the snapshot."""
+        out = self.fold(engine, "compaction_started")
+        assert out.name == "compactionEvent"
+        assert out.payload["stage"] == "compaction_started"
+
+    async def test_elapsed_grows(self, engine, monkeypatch):
+        """A settable clock rather than a list of ticks: this patches the
+        real `time.monotonic`, so anything else that reads it during the
+        test must keep getting an answer."""
+        now = [100.0]
+        monkeypatch.setattr(session_module.time, "monotonic", lambda: now[0])
+        self.fold(engine, "compaction_started")
+        assert engine.compaction_state["elapsed_seconds"] == pytest.approx(0.0)
+        now[0] = 142.5
+        assert engine.compaction_state["elapsed_seconds"] == pytest.approx(42.5)
+
+    async def test_a_turn_ending_clears_a_stuck_compaction(self, engine):
+        """A compaction never outlives its turn.
+
+        Without this, a turn that died mid-compaction leaves the flag set and
+        every browser connecting afterwards is handed a spinner for something
+        that stopped when the engine went away.
+        """
+        self.fold(engine, "compaction_started")
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        engine._fold_session_state(active, Event("streamComplete", {}))
+        assert engine.compaction_state is None
+
+    async def test_disconnect_clears_it(self, tmp_path):
+        """Nothing is compacting once there is no engine, and the browser
+        outlives the process — it will ask for state before the first turn."""
+        session = EngineSession(
+            tmp_path, EngineConfig(), clock=lambda: "2026-08-14T00:00:00Z"
+        )
+        await session.connect()
+        self.fold(session, "compaction_started")
+        assert session.compaction_state is not None
+        await session.disconnect()
+        assert session.compaction_state is None

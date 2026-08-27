@@ -76,6 +76,9 @@ class FakeSession:
         self.connected = False
         self.session_id = None
         self.streaming_active = False
+        # `None` the way the real property reports "not compacting", which is
+        # every state a test sets up unless it says otherwise.
+        self.compaction_state = None
         self.permission_mode = "default"
         self.model = None
         self.config = EngineConfig()
@@ -1632,6 +1635,7 @@ class TestState:
             "engine_ready",
             "streaming_active",
             "active_streams",
+            "compaction",
             "permission_mode",
             "model",
             "pending_permissions",

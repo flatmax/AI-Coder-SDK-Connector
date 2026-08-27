@@ -3,4 +3,5 @@
 The raw inbox — defects as they are noticed, unsorted. Triaged entries are carried into
 [`next.md`](next.md) § C and leave here when they are fixed.
 
-on browser refresh, if a "compacting conversation" toast is open, browser refresh doesn't show it any more. this doesn't break the system, just a defect.
+*(Empty. The one open entry — a "compacting conversation" indicator not surviving a browser refresh —
+was fixed 2026-08-28; see [`next.md`](next.md) § C6 and the work-log's § Landed since.)*

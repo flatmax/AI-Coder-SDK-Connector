@@ -283,17 +283,20 @@ export class CompactionProgress extends LitElement {
     this._fadeTimer = null;
     this._onSystemEvent = this._onSystemEvent.bind(this);
     this._onCompactionEvent = this._onCompactionEvent.bind(this);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
   }
 
   connectedCallback() {
     super.connectedCallback();
     window.addEventListener('system-event', this._onSystemEvent);
     window.addEventListener('compaction-event', this._onCompactionEvent);
+    window.addEventListener('state-loaded', this._onStateLoaded);
   }
 
   disconnectedCallback() {
     window.removeEventListener('system-event', this._onSystemEvent);
     window.removeEventListener('compaction-event', this._onCompactionEvent);
+    window.removeEventListener('state-loaded', this._onStateLoaded);
     this._clearTimers();
     super.disconnectedCallback();
   }
@@ -358,6 +361,40 @@ export class CompactionProgress extends LitElement {
    *
    * Doc-enrichment stages share this channel and fall through untouched.
    */
+  /**
+   * A compaction that started before this browser was listening.
+   *
+   * The four signals above are all *live* — they say what the engine is
+   * doing now, to whoever happens to be connected. Refresh the page during
+   * the pause and every one of them has already been and gone, so the
+   * indicator that existed to explain a long silence was itself erased by
+   * the one action a user watching a silent UI is most likely to take.
+   *
+   * `get_current_state` now carries the pause as state rather than only as
+   * a broadcast, so the shell's `state-loaded` restores it. Treated as
+   * confirmed, because the server only sets it from the engine's own status
+   * frame — never from the ambiguous `PreCompact` hook — so this can never
+   * be a speculative background precompute.
+   *
+   * The elapsed seconds come from the server already computed. Sending a
+   * start timestamp would have made the browser difference two clocks, and
+   * a collaborating client can be on another machine.
+   *
+   * Ignored while something is already on screen: a live signal is at least
+   * as fresh as a snapshot, and re-entering would re-phase the counter.
+   */
+  _onStateLoaded(event) {
+    if (this._state !== 'hidden' || this._pendingTimer != null) return;
+    const compaction = event.detail?.compaction;
+    if (!compaction || typeof compaction !== 'object') return;
+    const elapsed = Number(compaction.elapsed_seconds);
+    if (!Number.isFinite(elapsed) || elapsed < 0) return;
+    // No trigger: the server sets this from the status frame, which does not
+    // carry one. The caption says how long, not why.
+    this._enterActive(null, { elapsed: Math.round(elapsed) });
+    this._confirm();
+  }
+
   _onCompactionEvent(event) {
     const payload = event.detail?.event;
     if (!payload || typeof payload !== 'object') return;
@@ -435,10 +472,13 @@ export class CompactionProgress extends LitElement {
    * is left running rather than restarted, because restarting it re-phases the
    * ticks and silently drops the fraction of a second already counted.
    */
-  _enterActive(trigger, { keepClock = false } = {}) {
+  _enterActive(trigger, { keepClock = false, elapsed = 0 } = {}) {
     this._clearTimers({ keepClock });
     this._state = 'active';
-    if (!keepClock) this._elapsed = 0;
+    // `elapsed` seeds a wait that began before this component was watching —
+    // a page refreshed mid-compaction. Zero for every live path, which is
+    // every path that saw the start itself.
+    if (!keepClock) this._elapsed = elapsed;
     this._trigger = trigger || null;
     this._caption = '';
     this._fading = false;
@@ -464,8 +504,19 @@ export class CompactionProgress extends LitElement {
     this._armCeiling();
   }
 
+  /**
+   * The ceiling is a budget for the *whole* compaction, not for this
+   * component's view of it. A restored indicator arrives with seconds
+   * already on the clock, and granting it a fresh 180 would let a
+   * compaction that died before the refresh sit there for three more
+   * minutes claiming to be working. A floor of one second keeps a restore
+   * that arrives past the budget from firing synchronously inside the
+   * handler that set the state.
+   */
   _armCeiling() {
     const confirmed = this._confirmed;
+    const budget = confirmed ? _MAX_ACTIVE_MS : _UNCONFIRMED_MAX_MS;
+    const remaining = Math.max(1000, budget - this._elapsed * 1000);
     this._ceilingTimer = setTimeout(() => {
       this._ceilingTimer = null;
       if (confirmed) {
@@ -476,7 +527,7 @@ export class CompactionProgress extends LitElement {
       } else {
         this._hide();
       }
-    }, confirmed ? _MAX_ACTIVE_MS : _UNCONFIRMED_MAX_MS);
+    }, remaining);
   }
 
   /** First visible value is 1s, a second in — how a stopwatch reads. */

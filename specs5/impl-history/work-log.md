@@ -542,6 +542,45 @@ rather than already covered by it.
 
 ### Landed since
 
+- **The compaction indicator survives a reload: a broadcast is not a record** — 2026-08-28, closing
+  [`../next.md`](../next.md) § C6 and emptying [`../known-issues.md`](../known-issues.md).
+
+  **The defect was small and the shape of it was not.** Every signal driving the indicator is live: it
+  says what the engine is doing *now*, to whoever happens to be connected. Refresh during the pause and
+  all of them have already been and gone, so the component that existed to explain a long silence was
+  erased by the one action a user watching a silent screen is most likely to take — and what they got
+  back was a session that looked idle while the engine was still summarising. This is the same class as
+  the compaction divider phase 2 shipped client-side only, which suggests the lesson is worth naming: a
+  UI state driven only by a push is a UI state that does not survive a reload, and reload is not an
+  exotic case.
+
+  The fix is that `EngineSession` now *holds* the fact rather than only forwarding it.
+  `_fold_session_state` — already the place where translated events complete against session state —
+  sets a monotonic start on `compaction_started` and clears it on `compaction_ended`, and
+  `get_current_state` carries `compaction`. The event is still forwarded unchanged, so the live path is
+  untouched; this only adds the snapshot.
+
+  Four decisions inside it, each of which the obvious version gets wrong:
+
+  - **The server computes elapsed seconds; it does not send a start timestamp.** A timestamp makes the
+    browser difference two clocks, and a collaborating client can be on another machine.
+  - **Only the status frames move it.** `compact_boundary` is the transcript's record and can arrive for
+    a microcompaction that never paused anything, so ending on it would clear a state it never set —
+    and starting on it would hand a reloading browser an indicator with no end frame coming.
+  - **A turn ending clears it, and so does disconnect.** A compaction never outlives its turn; without
+    that, a turn dying mid-compaction leaves every later browser a spinner for a pause that ended when
+    the engine went away.
+  - **The client's ceiling budgets the whole compaction**, not its own view of it. A restore 170 seconds
+    in gets the remaining 10, not a fresh 180.
+
+  The restore is treated as *confirmed*, because the server only ever sets it from the engine's own
+  status frame and never from the ambiguous `PreCompact` hook — so it cannot be a speculative background
+  precompute and must not vanish at the short unconfirmed ceiling. The trigger is deliberately absent: it
+  belongs to the hook, not the frame, so a restored indicator says how long and not why.
+
+  `test_current_state_has_every_key_the_frontend_reads` asserts an exact key set and caught the addition,
+  which is the test doing its job rather than an obstacle.
+
 - **`EngineHealth.mcp` deleted: a field that always answered `[]` was answering the wrong question** —
   2026-08-28, closing [`../next.md`](../next.md) § B5. Declared, serialised by `to_dict()`, assigned by
   nothing in `src/` for three phases.
