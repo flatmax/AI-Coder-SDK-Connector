@@ -1288,3 +1288,227 @@ describe('UsageHud session changes', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// A lost engine — the poll gate and the state to sit in
+// ---------------------------------------------------------------------------
+//
+// `get_context_usage` is a control request to the CLI subprocess. Once the
+// engine is gone every call is a round trip that cannot succeed, and the
+// expensive failure is not the tidy one: a pump that dies without the
+// session being marked lost leaves a client that still looks usable and a
+// subprocess whose reply nobody reads, so the call hangs to the SDK's own
+// 60-second control deadline and is logged server-side with a traceback.
+// Four of those in one log is the bug these tests pin.
+//
+// Two halves, and each covers a case the other cannot. The health push
+// stops the polling — but it lands *after* the `streamComplete` of the turn
+// that died, so it cannot stop that turn's own fetch. The reply's
+// `reason: 'no-engine'` catches that one. Neither alone is the fix.
+
+describe('UsageHud engine gone', () => {
+  /** A health payload for a live engine, past the handshake. */
+  function healthy(extra = {}) {
+    return {
+      connected: true,
+      cli_version: '2.1.229',
+      credential_source: 'subscription',
+      last_error: null,
+      mirror_gaps: 0,
+      degradations: [],
+      ...extra,
+    };
+  }
+
+  /** A health payload for a session that lost its engine. */
+  function lost(extra = {}) {
+    return healthy({
+      connected: false,
+      last_error: 'The engine closed the stream before the turn finished.',
+      ...extra,
+    });
+  }
+
+  function pushHealth(health) {
+    window.dispatchEvent(
+      new CustomEvent('engine-health', { detail: health }),
+    );
+  }
+
+  function pushSessionChanged() {
+    window.dispatchEvent(
+      new CustomEvent('session-changed', { detail: { messages: [] } }),
+    );
+  }
+
+  function goneNote(el) {
+    return el.shadowRoot.querySelector('.gone');
+  }
+
+  it('sends no control request once the engine is reported gone', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('says so rather than leaving the last good numbers looking current', async () => {
+    // The whole point of the state: a breakdown from before the loss
+    // describes a window no engine holds any more.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el)).toBeTruthy();
+
+    pushHealth(lost());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el)).toBeUndefined();
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+  });
+
+  it('leaves the reason to the health banner', async () => {
+    // One owner of the words. The HUD says there is nothing to read and
+    // points at the surface that says why.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost({ last_error: 'CLIJSONDecodeError: line too long' }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(goneNote(el).textContent).not.toContain('CLIJSONDecodeError');
+    expect(goneNote(el).textContent).toContain('health banner');
+  });
+
+  it('still reports what the dying turn cost', async () => {
+    // A turn that failed after spending something keeps its receipt —
+    // the engine being gone is a reason to stop polling, not to stop
+    // reporting. This is the crash footer AIC⚡DC writes itself, which is
+    // the one a lost engine actually produces.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    pushComplete(crashFixture({ tool_calls: 4, response: 'partial answer' }));
+    await settle(el);
+    expect(hud(el)).toBeTruthy();
+    expect(turnText(el)).toContain('cost unknown');
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+  });
+
+  it('does not read a disconnected-but-never-started engine as gone', async () => {
+    // `connected` is false before the first prompt too, which is the
+    // ordinary state of a freshly loaded page. Gating on it alone would
+    // stop the HUD ever fetching. `last_error` is the discriminator, and
+    // it is the same one the health banner uses.
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(healthy({ connected: false, last_error: null }));
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el)).toBeNull();
+  });
+
+  it('closes the gate from the reply when the push has not arrived yet', async () => {
+    // The racing case, and the reason the reply is read as well as the
+    // push: the engine emits `streamComplete` before the `engineHealth`
+    // that follows a loss, so this fetch is already out.
+    const handler = vi.fn(() => ({
+      error: 'The Claude Code session was lost.',
+      reason: 'no-engine',
+    }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+
+    // And the next turn does not ask again.
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('still shows a live engine its error text', async () => {
+    // The other half of `reason`: a request that failed against an engine
+    // that is there is a mishap worth retrying, not a state to sit in, and
+    // it must not be dressed as a loss.
+    const handler = vi.fn(() => ({
+      error: 'Could not read context usage: boom',
+      reason: 'failed',
+    }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(goneNote(el)).toBeNull();
+    expect(el.shadowRoot.querySelector('.error').textContent).toContain('boom');
+    // Still polling, because there is something to poll.
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('reopens the gate when the engine comes back', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).not.toHaveBeenCalled();
+
+    pushHealth(healthy());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el)).toBeNull();
+  });
+
+  it('gives a new session one chance, whatever the last one did', async () => {
+    // Starting or resuming is exactly what the note tells the user to do,
+    // so a flag surviving them doing it would report a dead engine at a
+    // live one until a health push happened to arrive.
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    await settle(el);
+    pushSessionChanged();
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a malformed health payload rather than guessing', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(null);
+    pushHealth('gone');
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops listening for health once removed', async () => {
+    const el = mountHud();
+    await settle(el);
+    el.remove();
+    pushHealth(lost());
+    await Promise.resolve();
+    expect(el._engineGone).toBe(false);
+  });
+});

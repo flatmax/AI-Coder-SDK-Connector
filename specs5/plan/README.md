@@ -191,12 +191,18 @@ interlude that found it; this list exists so that none of them has to be redisco
    [`../1-foundation/configuration.md`](../1-foundation/configuration.md). **The SDK probe reported this
    one independently** (item 10), having found it from the wheel rather than from this list, which is
    also how the other two items closed that day.
-2. **A lost session keeps being polled.** After that pump died, the usage HUD went on calling
-   `get_context_usage` — each attempt a control request that ends in a 60-second
-   `Control request timeout` traceback, four of them in one log. `get_context_usage` catches
-   `EngineNotReadyError` and `SessionLostError`, but nothing gates the *poll* on engine health, and the
-   HUD has no "the engine is gone" state to sit in. The tracebacks are noise about a thing already
-   reported by the banner.
+2. ~~**A lost session keeps being polled.**~~ — **fixed on 2026-08-28.** After that pump died, the usage
+   HUD went on calling `get_context_usage` — each attempt a control request that ends in a 60-second
+   `Control request timeout` traceback, four of them in one log. `get_context_usage` caught
+   `EngineNotReadyError` and `SessionLostError`, but nothing gated the *poll* on engine health, and the
+   HUD had no "the engine is gone" state to sit in. The tracebacks were noise about a thing already
+   reported by the banner. **The gate is now on the pushed `engineHealth` record, and the interesting
+   part was deciding what it reads:** `connected: false` is also true of a freshly loaded page, so the
+   discriminator is a non-empty `last_error` — the same rule the health banner uses, kept single-owner
+   deliberately. A second signal was needed for the turn that *causes* the loss, whose fetch is already
+   out before the health push lands: the reply's `reason: 'no-engine'`. Writing the spec section also
+   caught § *Data Flow* claiming the HUD makes no follow-up RPC, which has been false since phase 3.
+   [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the Engine Is Gone*.
 3. **Two mechanisms now answer "absolute engine path → repo path".** `_mark_openable_memory_files` adds
    a `relPath` field server-side so the Context tab knows which memory files are openable; `toRepoPath`
    (`218f89d`) converts client-side at the shell's `navigate-file` choke point. Both are correct and

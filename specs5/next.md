@@ -1,6 +1,6 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `7608a8f`.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `52ef273`.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -85,7 +85,11 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase, and § B2 remains the cheapest item on the page.
+smaller than either phase. B2, B5, C1 and C6 have since closed, so the cheapest remaining items are
+**C4** (tool-card chips still show the absolute path — the display decision is the only open question,
+the conversion already exists) and the **first two rows of B3**, which build discoverability for values
+that are already configurable. **C5 is the one to read before picking anything**: it is an audit of every
+RPC for callers, and the test is its by-product rather than the job.
 
 ---
 
@@ -294,13 +298,25 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 
 ## C. Found while working — correctness and honesty
 
-**C1 — A lost session keeps being polled.** After a message pump dies, the usage HUD goes on calling
-`get_context_usage`, each attempt a control request that ends in a 60-second `Control request timeout`
-traceback — four in one log. `get_context_usage` catches `EngineNotReadyError` and `SessionLostError`,
-but **nothing gates the poll on engine health, and the HUD has no "the engine is gone" state to sit
-in** (verified 2026-08-27: `usage-hud.js:_fetchContext` gates on `_fetchInFlight` and `rpcConnected`
-only). The tracebacks are noise about a thing the health banner has already reported.
-[`plan/README.md`](plan/README.md) open item 2.
+**C1 — A lost session keeps being polled.** ✅ *Fixed 2026-08-28 — leaves this queue.* `usage-hud.js`
+now listens for `engineHealth`, skips the fetch while the engine is gone, and renders a state instead of
+the last good breakdown. **The definition of "gone" was the whole of the work:** `connected: false` is
+also the state of a freshly loaded page, so gating on it alone would have stopped the HUD ever fetching
+— the discriminator is a non-empty `last_error`, which is the rule `health-banner.js` already uses, so
+there is one definition and two readers rather than two that can drift.
+
+**Two signals, because neither covers the other's case.** The pushed health record stops every later
+turn but arrives *after* the `streamComplete` of the turn that died, so the reply's `reason: 'no-engine'`
+closes the gate on that first one; a reply cannot pre-empt the request it rides on, and a push cannot
+overtake the event ahead of it. Both halves are pinned by tests that were checked to fail without them,
+as was the `last_error` discriminator.
+
+**Found while writing it, and fixed:** [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Data
+Flow* said the HUD "renders entirely from the `streamComplete` payload", with an invariant that it
+"renders without a follow-up RPC" — describing a design where the percentage rode in on
+`postResponseComplete`. It never did; the RPC has been there since phase 3. The section documenting the
+gate could not sit next to one denying the call exists, so both are corrected. Reasoning lives in that
+file § *When the Engine Is Gone*; [`plan/README.md`](plan/README.md) open item 2 is struck.
 
 **C2 — An RPC that fails behind a viewer open shows the user nothing.** Two independent halves, and
 **fixing either one alone would have made the bug that found this reportable**: jrpc-oo prints raw

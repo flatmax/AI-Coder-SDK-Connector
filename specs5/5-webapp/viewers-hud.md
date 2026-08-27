@@ -279,15 +279,22 @@ Floating overlay on the viewer background, appearing after each turn.
 
 ### Data Flow
 
-One step, not two. The HUD renders entirely from the `streamComplete` payload: the per-turn
-`turn_cost_usd` / `turn_cost_basis` / `turn_model_usage` (never the cumulative `model_usage` or
-`total_cost_usd` beside them — see § Cost Is Cumulative below), `duration_ms`, `num_turns`,
-`terminal_reason`, `permission_prompts`. Context
-percentage comes from the `context_usage` carried on `postResponseComplete`, which arrives moments
-later and updates that one line in place.
+**Two sources, and the split is along which numbers the payload actually carries.** Everything about the
+turn comes from the `streamComplete` payload and needs no round trip: the per-turn `turn_cost_usd` /
+`turn_cost_basis` / `turn_model_usage` (never the cumulative `model_usage` or `total_cost_usd` beside
+them — see § Cost Is Cumulative below), `duration_ms`, `num_turns`, `terminal_reason`,
+`permission_prompts`.
 
-The old two-phase flow — immediate partial display, then a breakdown RPC to fill in the rest — is gone.
-There is nothing left that needs a second round trip.
+**The context breakdown is a second round trip**, `ClaudeCodeService.get_context_usage`, fetched on
+`stream-complete` and on `session-changed`. This section and the invariant beside it used to say the
+opposite — "one step, not two", "the HUD renders without a follow-up RPC" — describing a design where
+the percentage rode in on `postResponseComplete`. It does not: the payload carries no `context_usage`
+key, `usage-hud.js` has called the RPC since phase 3, and the corrected sentence is the one the tree
+can support. What *is* still true is the part that mattered: the HUD shows the turn immediately and
+never waits on the fetch to render.
+
+That second call is a control request to the CLI subprocess, which is what makes § When The Engine Is
+Gone below a requirement rather than a nicety.
 
 ### Sections
 
@@ -388,6 +395,43 @@ figure beside four the engine measured. The counters are there for a reader who 
   nothing: there is no number, and the chat panel and a toast already carry the error.
 - A turn that ended with a mirror gap shows a marker linking to the health banner, because a HUD reporting a clean turn over a failed transcript append would be misleading
 
+### When the Engine Is Gone
+
+**The poll is gated on engine health, and the HUD has a state to sit in.** Without the gate a lost
+session went on being polled once per turn, and the expensive failure is not the tidy one: a message
+pump that dies *without* the session being marked lost leaves a client that still looks usable and a
+subprocess whose reply nobody is reading, so each call hangs to the SDK's own 60-second control
+deadline and is logged server-side with a traceback. Four of those appeared in one log. They were noise
+about a thing the health banner had already reported.
+
+**"Gone" is `connected: false` **and** a non-empty `last_error`** — not `connected` alone. That field is
+false before the first prompt as well, which is the ordinary state of a freshly loaded page, so gating
+on it by itself would stop the HUD ever fetching. `last_error` is the discriminator because a session
+that loses its engine sets it on the way out. This is deliberately the same rule
+[chat.md](chat.md)'s health banner uses to decide it has something to say: one definition of gone, two
+readers, because a second one could only come to disagree with the surface the HUD defers to.
+
+**Both directions are needed, and each covers a case the other cannot.**
+
+| Signal | Covers | Why the other cannot |
+|---|---|---|
+| The pushed `engineHealth` record | Every turn after the loss | It arrives *after* the `streamComplete` of the turn that died, so it cannot stop that turn's own fetch |
+| `reason: 'no-engine'` on the reply | The fetch from the dying turn | It is a reply, so it can only arrive by sending the request the gate exists to prevent |
+
+The state clears as readily as it sets — a `connected: true` push, a breakdown that arrives anyway, or a
+`session-changed` — because starting or resuming a session is exactly what the note tells the user to
+do, and a flag that survived them doing it would report a dead engine at a live one.
+
+**What the note says is that there is nothing to read, and not why.** The health banner owns the reason
+and states it in the engine's own words; a HUD that reproduced them would be a second owner of the
+wording. It is amber rather than the error red, because this is a condition to sit in rather than a
+request that failed. It also replaces the last good breakdown rather than sitting beside it — numbers
+from before the loss describe a window no engine holds any more, which is the same reason the error
+string was split from the payload in the first place.
+
+The turn's own receipt is unaffected. A turn that failed after spending something still reports what it
+cost; the engine being gone is a reason to stop polling, not a reason to stop reporting.
+
 ## Terminal HUD
 
 Printed server-side after each turn, in reduced form: model, per-model usage, cost or billing mode,
@@ -408,7 +452,11 @@ tier-distribution HUD.
 - `gridRows` is rendered only in the Debug section and never used for layout.
 - The Debug section is off by default and never required to understand normal usage.
 - Memory files, system prompt sections, and every MCP server including `aic-dc` appear in the Session section with their token cost.
-- The HUD renders without a follow-up RPC.
+- The HUD renders the turn without waiting on an RPC. The context breakdown is a follow-up control
+  request and fills in when it lands.
+- The HUD sends no `get_context_usage` while the engine is known gone, and says so rather than leaving
+  the last good breakdown on screen looking current.
+- "Gone" is never concluded from `connected` alone; that field is also false before the first prompt.
 - The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
 - No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running
   totals and only ever appear labelled as such.

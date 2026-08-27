@@ -542,6 +542,46 @@ rather than already covered by it.
 
 ### Landed since
 
+- **A lost engine stops being polled, and the HUD has somewhere to sit** — 2026-08-28, closing
+  [`../next.md`](../next.md) § C1 and [`../plan/README.md`](../plan/README.md) open item 2.
+
+  The usage HUD called `get_context_usage` once per turn with no reference to whether there was an engine
+  to call. Against a lost session that is a wasted round trip; against the worse case — a message pump
+  that died *without* the session being marked lost, which leaves a client that still looks usable and a
+  subprocess whose reply nobody is reading — it is a 60-second control-request timeout logged with a
+  traceback, four of them in one log. None of it told anyone anything: the health banner had already
+  reported the loss, in the engine's own words.
+
+  **The fix is four lines of behaviour and one definition, and the definition was the work.** The HUD now
+  listens for the pushed `engineHealth` record and treats the engine as gone when `connected` is false
+  *and* `last_error` is non-empty. Gating on `connected` alone is the obvious version and it is wrong in
+  a way that would have looked like a different bug: the field is false before the first prompt too, so
+  the HUD would have stopped fetching on a freshly loaded page and never started. `last_error` is what
+  separates "died" from "not yet", and it is reused rather than invented — `health-banner.js` already
+  draws the line there, for the surface this note points the user at. One definition, two readers.
+
+  **Two signals, and neither is redundant.** The push covers every turn after the loss but arrives after
+  the `streamComplete` of the turn that *caused* it, so it cannot stop that turn's own fetch; the reply's
+  `reason: 'no-engine'` closes the gate on that one. A reply cannot pre-empt the request it rides on, and
+  a push cannot overtake the event ahead of it — so the two cases are disjoint and each needs its own
+  signal. The `reason` field already existed for the Context tab's error note and needed nothing new.
+
+  The state clears on a `connected: true` push, on a breakdown that arrives anyway, and on
+  `session-changed` — that last one because starting or resuming is precisely what the note tells the
+  user to do, and a flag surviving it would report a dead engine at a live one until a push happened
+  along. The note is amber rather than error red (a condition, not a failed request), replaces the last
+  good breakdown rather than sitting beside it (numbers from before the loss describe a window no engine
+  holds), and says only that there is nothing to read — the banner owns the why. The turn's own receipt
+  is untouched: a turn that failed after spending something still reports what it cost.
+
+  **A spec claim fell out of writing it.** [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)
+  § *Data Flow* said the HUD "renders entirely from the `streamComplete` payload", with a matching
+  invariant that it "renders without a follow-up RPC", describing a design where the context percentage
+  arrived on `postResponseComplete`. That payload has no such key and `usage-hud.js` has made the call
+  since phase 3, so the claim was false for three phases and nothing caught it — the section documenting
+  the gate could not be written next to one denying the call exists. Both are corrected. Eleven tests,
+  each checked to fail without the code it pins, including the discriminator.
+
 - **The compaction indicator survives a reload: a broadcast is not a record** — 2026-08-28, closing
   [`../next.md`](../next.md) § C6 and emptying [`../known-issues.md`](../known-issues.md).
 

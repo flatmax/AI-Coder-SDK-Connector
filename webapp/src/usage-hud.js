@@ -73,6 +73,24 @@ function _fmtTokens(n) {
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
+/**
+ * Whether an `engineHealth` payload says the engine is *gone*, as
+ * opposed to not started yet.
+ *
+ * `connected` alone cannot tell those apart: it is false before the
+ * first prompt as well, which is the ordinary state of a freshly loaded
+ * page and not something to report. The discriminator is `last_error` —
+ * a session that loses its engine sets it on the way out — and it is the
+ * same one `health-banner.js` uses to decide it has something to say.
+ * One rule, two readers; a second definition of "gone" could only come
+ * to disagree with the banner the HUD defers to for the reason.
+ */
+function _engineIsGone(health) {
+  if (!health || typeof health !== 'object') return false;
+  if (health.connected !== false) return false;
+  return typeof health.last_error === 'string' && health.last_error !== '';
+}
+
 export class UsageHud extends RpcMixin(LitElement) {
   static properties = {
     /** Whether the HUD is visible. */
@@ -93,6 +111,16 @@ export class UsageHud extends RpcMixin(LitElement) {
      * looking current.
      */
     _contextError: { type: String, state: true },
+    /**
+     * Whether the engine is gone, in which case there is nothing to
+     * poll and a state to sit in instead.
+     *
+     * Its own flag rather than a third reading of `_contextError`,
+     * because it gates the fetch as well as the render: this is the
+     * one context failure that is a standing condition rather than a
+     * request that went wrong, so the answer is to stop asking.
+     */
+    _engineGone: { type: Boolean, state: true },
     /**
      * The turn that just finished: `{ cost, usage, models, durationMs,
      * toolCalls, cancelled }`. Derived from the `streamComplete`
@@ -271,6 +299,14 @@ export class UsageHud extends RpcMixin(LitElement) {
       color: #f85149;
       font-size: 0.6875rem;
     }
+    /* Amber, not the error red: the engine being gone is a condition to
+     * sit in rather than a request that failed, and it is already being
+     * alarmed about by the health banner — which owns the reason, so
+     * this says only that there is nothing to read. */
+    .gone {
+      color: #d29922;
+      font-size: 0.6875rem;
+    }
   `;
 
   constructor() {
@@ -279,6 +315,7 @@ export class UsageHud extends RpcMixin(LitElement) {
     this._fading = false;
     this._context = null;
     this._contextError = '';
+    this._engineGone = false;
     this._turn = null;
 
     this._autoHideTimer = null;
@@ -287,6 +324,7 @@ export class UsageHud extends RpcMixin(LitElement) {
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
+    this._onEngineHealth = this._onEngineHealth.bind(this);
     this._onPointerEnter = this._onPointerEnter.bind(this);
     this._onPointerLeave = this._onPointerLeave.bind(this);
   }
@@ -298,6 +336,12 @@ export class UsageHud extends RpcMixin(LitElement) {
     // the HUD. The HUD is per-turn feedback; popping it up because a
     // session loaded would be reporting on a turn that didn't happen.
     window.addEventListener('session-changed', this._onSessionChanged);
+    // Pushed on connect and again whenever it changes, which includes the
+    // way out: a lost session broadcasts one. This is the only signal that
+    // can stop a poll *before* it is sent — the other one the HUD reads is
+    // the reply to a poll, which by then has already gone out. See
+    // `_fetchContext` for why both are needed.
+    window.addEventListener('engine-health', this._onEngineHealth);
     this.addEventListener('pointerenter', this._onPointerEnter);
     this.addEventListener('pointerleave', this._onPointerLeave);
   }
@@ -305,6 +349,7 @@ export class UsageHud extends RpcMixin(LitElement) {
   disconnectedCallback() {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('session-changed', this._onSessionChanged);
+    window.removeEventListener('engine-health', this._onEngineHealth);
     this.removeEventListener('pointerenter', this._onPointerEnter);
     this.removeEventListener('pointerleave', this._onPointerLeave);
     this._clearTimers();
@@ -378,7 +423,25 @@ export class UsageHud extends RpcMixin(LitElement) {
 
   _onSessionChanged() {
     this._turn = null;
+    // A session change is new information, so the gate is dropped and
+    // this engine gets asked once. Starting or resuming a session is
+    // exactly what the gone state tells the user to do, and a flag that
+    // survived them doing it would leave the HUD reporting a dead engine
+    // at a live one until the next health push happened to arrive.
+    this._engineGone = false;
     this._fetchContext();
+  }
+
+  /**
+   * Track whether there is an engine worth polling.
+   *
+   * Clears as readily as it sets: a reconnect broadcasts `connected`
+   * true, and this is a claim about now.
+   */
+  _onEngineHealth(event) {
+    const health = event?.detail;
+    if (!health || typeof health !== 'object') return;
+    this._engineGone = _engineIsGone(health);
   }
 
   _onPointerEnter() {
@@ -403,10 +466,21 @@ export class UsageHud extends RpcMixin(LitElement) {
    * Guarded against overlap: a fast succession of turns would
    * otherwise queue several control requests to the CLI for the same
    * answer, and the later reply could land before the earlier one.
+   *
+   * And guarded against there being no engine to ask. `get_context_usage`
+   * is a control request to the CLI subprocess, so once the engine is gone
+   * every call is a round trip whose best outcome is an error the health
+   * banner has already given in better words — and whose worst is a
+   * 60-second `Control request timeout`, logged server-side with a
+   * traceback, because a pump that died without the session being marked
+   * lost leaves a client that still looks usable and a subprocess whose
+   * reply nobody is reading. Four of those in one log is what put the
+   * gate here; the tracebacks were noise about a thing already reported.
    */
   async _fetchContext() {
     if (this._fetchInFlight) return;
     if (!this.rpcConnected) return;
+    if (this._engineGone) return;
     this._fetchInFlight = true;
     try {
       // Bounded: a reply dropped by a reconnecting socket would
@@ -418,6 +492,18 @@ export class UsageHud extends RpcMixin(LitElement) {
         'get_context_usage',
       );
       if (res && res.error) {
+        // `reason` tells the two failures apart — there being no engine
+        // versus a request to a live one that failed — and this is the
+        // half that is a state rather than a mishap. Reading it here is
+        // what closes the gate on the turn that *causes* it: the engine
+        // emits `streamComplete` before the `engineHealth` that follows
+        // it, so the HUD is called from the dying turn a moment before
+        // the push arrives, and without this the first fetch after every
+        // loss would go out anyway. The push covers every later one.
+        if (res.reason === 'no-engine') {
+          this._engineGone = true;
+          return;
+        }
         this._contextError = String(res.error);
         return;
       }
@@ -428,6 +514,9 @@ export class UsageHud extends RpcMixin(LitElement) {
       }
       this._context = usage;
       this._contextError = '';
+      // An engine that answered with a breakdown is an engine that is
+      // there, whatever a health push said earlier.
+      this._engineGone = false;
     } catch (err) {
       this._contextError = err?.message || 'Context usage unavailable.';
     } finally {
@@ -520,6 +609,18 @@ export class UsageHud extends RpcMixin(LitElement) {
   }
 
   _renderContext() {
+    // Ahead of both the error and the numbers, because it outranks them.
+    // The last good breakdown would otherwise sit here looking current
+    // while describing a window no engine holds any more — the same
+    // reason `_contextError` was split from `_context` in the first
+    // place — and a stale error string from the fetch that discovered
+    // the loss says less than naming the loss does.
+    if (this._engineGone) {
+      return html`<div class="gone">
+        The engine is gone — no context to read until a session is
+        started or resumed. The health banner has the reason.
+      </div>`;
+    }
     if (this._contextError && !this._context) {
       return html`<div class="error">${this._contextError}</div>`;
     }
