@@ -9,6 +9,11 @@ history and moves under `specs5/impl-history/`.
 
 ## Where we are (2026-08-18)
 
+> **The queue is [`../next.md`](../next.md), not this section.** What follows is the record of how the
+> conversion got here — dated, and deliberately left as written. The open items below are the reasoning
+> behind their entries in `next.md`; that file carries the sequence, the state of each item at HEAD, and
+> the ones that have closed since this section was written.
+
 **Phases 0 through 6 are done, and phase 6's last clause closed on 2026-08-17.** The Context tab had its
 live run: the visualisation and the `aic-dc` tool inventory were read off a live CLI — the app was
 hosting the session doing the verifying — and the run found four things no test could have, all of them

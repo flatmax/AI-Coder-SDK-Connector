@@ -11,6 +11,13 @@ authorises a specific tool call — including arbitrary `Bash` — so a particip
 would turn collaboration mode into a remote-code-execution grant. See
 [decisions § CC-15](../plan/decisions.md#cc-15--permission-prompts-are-localhost-only) and
 [`../3-engine/permissions.md` § Collaboration and Authority](../3-engine/permissions.md#collaboration-and-authority).
+
+> **Admission is not built on the browser side, and is on pause by decision (2026-08-27).** Everything
+> below is specified and the backend implements it; the browser receives the admission pushes and
+> re-dispatches them as window events that nothing listens to, so no toast is ever shown and every
+> connection after the first is auto-denied by the 120-second pending timeout. The pause and what
+> reopening it requires are in [`../next.md`](../next.md) § E.
+
 ## Activation
 - Disabled by default for security
 - Enabled via a CLI flag

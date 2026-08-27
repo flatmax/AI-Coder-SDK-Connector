@@ -8,6 +8,26 @@ SDK and renders it. The conversion itself — what is kept, deleted, and added, 
 [`plan/`](plan/README.md). The specs assume every decision in
 [`plan/decisions.md`](plan/decisions.md).
 
+## What Is Next To Implement
+
+**[`next.md`](next.md) is the queue** — the one place that says what this suite specifies and the tree
+does not yet do. Conversion phases 0–6 are shipped; two remain, and the smaller items in §§ B–D of that
+file are each cheaper than either phase.
+
+**Now: phase 7 — packaging, to make a release possible** (chosen 2026-08-27). `.github/workflows/release.yml`
+predated the conversion: it gated the build on a `dev4-*` head branch, named packages deleted in phase 3
+while omitting the whole `claude_code` engine, and never collected the SDK's 296.76 MiB `claude` binary
+although [`6-deployment/build.md`](6-deployment/build.md#the-engine-is-not-bundleable) requires it. None of
+that failed a build — PyInstaller only warns — so it was quietly shipping. The workflow is now rewritten and
+[`plan/risks.md`](plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels) § R-7 is decided.
+`master` needed no generating; the branch exists and merges clean. What remains is a build that has run, the
+merge, and the fresh-machine install test — `next.md` § A2.
+
+**Then phase 8 — index freshness after `Bash`.** A `sed -i` or a `git checkout` changes files no index
+hears about until the next full build, so the four index-backed MCP tools answer from a stale picture
+with no marker on it. [`plan/decisions.md#cc-18`](plan/decisions.md) leaves the mechanism open and
+"nothing, documented" is a legitimate exit.
+
 ## Companion Tree: `specs-reference/`
 
 A companion directory at the repo top level holds implementation detail that specs5 deliberately
@@ -57,12 +77,13 @@ Specs are numbered in dependency order — bottom-up. Each layer depends only on
 | **6 Deployment** | Build, startup, packaging |
 | **7 Future** | Speculative designs and the record of what the platform implemented for us — **not for implementation** |
 
-Two directories sit outside the layer numbering:
+Three entries sit outside the layer numbering:
 
-| Directory | Contents |
+| Entry | Contents |
 |---|---|
+| [`next.md`](next.md) | **What is next to implement** — the ordered queue over everything this suite specifies and nothing implements yet, plus verification debt and the items parked by decision. Start here if you are picking the work up. |
 | [`plan/`](plan/README.md) | The conversion plan of record: decisions, keep/delete/add inventory, verified SDK surface, risk register, origin brief. Becomes history when the conversion lands. |
-| [`impl-history/`](impl-history/README.md) | Delivery record of the pre-conversion system. Historical; references retired specs and older suites intentionally. |
+| [`impl-history/`](impl-history/README.md) | Delivery record of the pre-conversion system, and § *Landed since* for work after phase 6. |
 
 ## Conventions
 
