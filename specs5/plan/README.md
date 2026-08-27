@@ -434,9 +434,12 @@ in the tree:
 - **A session load must not pop the HUD.** `session-changed` refreshes the numbers and shows nothing,
   because a HUD that appears on resume reports a turn nobody took. Auto-resume means this fires on
   every server start now, not just on a click.
-- **`EngineHealth.mcp` is a field with no writer.** This bullet used to say the health payload already
-  carried what a per-server status view needs. It does not: `mcp` is declared on `EngineHealth`,
-  serialised by `to_dict()`, and assigned by nothing in `src/`, so every consumer reads `[]`. The
+- **`EngineHealth.mcp` was a field with no writer. Deleted 2026-08-28.** This bullet used to say the
+  health payload already carried what a per-server status view needs. It did not: `mcp` was declared on
+  `EngineHealth`, serialised by `to_dict()`, and assigned by nothing in `src/`, so every consumer read
+  `[]`. **The choice was write it or delete it, and deleting won** — the question it looked like it
+  answered already had a better answer, and an empty list does not say "no servers", it says "no
+  answer". Nothing broke when it went, which is the clearest evidence available that it was dead. The
   Context tab's Session section therefore calls `ClaudeCodeService.get_mcp_status()` alongside the
   breakdown and tolerates it failing — health is a decoration on the numbers, so its error must not
   replace them. Anything else wanting per-server status has the same two options, and the empty list is

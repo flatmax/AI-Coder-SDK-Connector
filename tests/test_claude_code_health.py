@@ -306,3 +306,56 @@ class TestReadOnlyContract:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(missing))
         detect_credentials()
         assert not missing.exists()
+
+
+class TestNoDeclaredAndEmptyFields:
+    """A serialised field that nothing writes is worse than no field.
+
+    ``EngineHealth`` carried an ``mcp`` list for three phases: declared,
+    serialised by ``to_dict()``, and assigned by nothing in ``src/``. Every
+    consumer therefore read ``[]`` — and an empty list does not say "no
+    servers", it says "no answer", which is the shape that made the Context
+    tab's own MCP claim wrong for a week before anyone checked.
+
+    Deleted rather than filled in, because the question it looked like it
+    answered has a better answer already: ``get_mcp_status()`` asks the CLI
+    and is allowed to fail visibly, so a status pill can be absent instead
+    of confidently blank. ``degradations`` answers the different question of
+    what the session started *without*, and it has a writer.
+
+    Pinned here so the field cannot come back by looking useful.
+    """
+
+    def test_the_payload_has_no_mcp_key(self):
+        from aic_dc.claude_code.health import EngineHealth
+
+        assert "mcp" not in EngineHealth().to_dict()
+
+    def test_the_dataclass_has_no_mcp_field(self):
+        import dataclasses
+
+        from aic_dc.claude_code.health import EngineHealth
+
+        names = {f.name for f in dataclasses.fields(EngineHealth)}
+        assert "mcp" not in names
+
+    def test_every_serialised_key_has_a_writer_or_a_default_that_means_it(
+        self,
+    ):
+        """The general form of the rule, as far as a test can state it.
+
+        Not "every key is non-empty" — plenty are legitimately empty on a
+        fresh session. What this asserts is narrower and is the thing that
+        actually went wrong: every key in the payload corresponds to a
+        dataclass field or a computed property, so a key cannot be
+        serialised out of nothing at all.
+        """
+        import dataclasses
+
+        from aic_dc.claude_code.health import EngineHealth
+
+        health = EngineHealth()
+        payload = health.to_dict()
+        declared = {f.name for f in dataclasses.fields(EngineHealth)}
+        computed = {"mirror_gaps_escalated"}
+        assert set(payload) <= declared | computed

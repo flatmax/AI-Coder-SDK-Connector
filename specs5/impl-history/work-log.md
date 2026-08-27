@@ -542,6 +542,27 @@ rather than already covered by it.
 
 ### Landed since
 
+- **`EngineHealth.mcp` deleted: a field that always answered `[]` was answering the wrong question** —
+  2026-08-28, closing [`../next.md`](../next.md) § B5. Declared, serialised by `to_dict()`, assigned by
+  nothing in `src/` for three phases.
+
+  **The size was two lines; the choice was the work.** Write it or delete it, and deleting won because
+  the question it looked like it answered already had a better answer. `get_mcp_status()` asks the CLI
+  and is *allowed to fail visibly*, which is exactly what a status pill needs — it can be absent. A
+  field that always answers `[]` cannot fail, and an empty list does not say "no servers", it says "no
+  answer". That conflation is what made the Context tab's own MCP claim wrong for a week before anyone
+  checked.
+
+  **The whole suite passed unchanged when the field went**, which is the clearest evidence available
+  that nothing had been reading it — and is itself the argument against declared-and-empty fields: for
+  three phases the codebase could not tell the difference between this field working and this field not
+  existing.
+
+  Three tests pin the absence, and the third is the general form: every key in the health payload must
+  map to a dataclass field or a named computed property, so a key cannot again be serialised out of
+  nothing at all. `degradations` is untouched and is *not* a second attempt at the same thing — it
+  records what the session started **without**, one sentence per loss, and it has a writer.
+
 - **The retired-files note: the leaving-alone was right, the silence was the mistake** — built
   2026-08-28, closing [`../next.md`](../next.md) § B2 and the last entry of *(c)* below that belongs
   to this tab's own surface. Phase 3 retired eight config files, left them on disk deliberately —

@@ -281,13 +281,14 @@ because [`specs-reference/3-engine/permissions.md`](../specs-reference/3-engine/
 that constraint is the reason this is a design decision and not a form. Every denial currently goes to
 `settings.local.json` unconditionally.
 
-**B5 — `EngineHealth.mcp` is a field with no writer.** Declared (`health.py:496`), serialised by
-`to_dict()` (`:605`), assigned by nothing in `src/`, so every consumer reads `[]` (verified
-2026-08-27). The Context tab works around it by calling `get_mcp_status()` alongside the breakdown, and
-that is the better answer — see [`plan/README.md`](plan/README.md) § *What phase 6 will find already
-there*, which corrects an earlier belief that this field carried what a per-server view needs. So the
-work is one of two lines, and the choice matters more than the size: **write it, or delete it.** A
-declared-and-empty field is the shape that made the Context tab's own MCP claim wrong for a week.
+**B5 — `EngineHealth.mcp` is a field with no writer.** ✅ *Deleted 2026-08-28 — leaves this queue.*
+The choice was write it or delete it, and deleting won: the Context tab already called
+`get_mcp_status()` alongside the breakdown and that is the better answer, because a status call can
+*fail visibly* and a field that always answers `[]` cannot. An empty list does not say "no servers", it
+says "no answer" — the shape that made the Context tab's own MCP claim wrong for a week. The full test
+suite passed unchanged when the field went, which is the clearest evidence available that nothing had
+been reading it. Three tests now pin the absence, including one asserting that every serialised key
+maps to a real field, so a key cannot again be serialised out of nothing.
 
 ---
 

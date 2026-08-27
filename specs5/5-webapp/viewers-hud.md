@@ -131,8 +131,10 @@ Two more shapes the implementation had to answer for:
   the union of `mcpTools` and `get_mcp_status()`, and an unwell server sorts above a heavier healthy one.
 - **Health comes from `get_mcp_status()`, fetched beside the breakdown and allowed to fail.** The
   breakdown is the point of the tab and health is a decoration on it, so a status call that times out
-  leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it is a
-  field with no writer. A pill is never carried over from an earlier fetch — "connected" is a claim about
+  leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it was a
+  field with no writer, and it was deleted in 2026-08-28 rather than filled in, because a status call
+  that can fail is what a pill needs and a field that always answers `[]` cannot fail. A pill is never
+  carried over from an earlier fetch — "connected" is a claim about
   now, and this is the one figure where being out of date is worse than being absent.
 - **A host can act on a server row: Reconnect and Disable / Enable.** `reconnect_mcp_server(name)` and
   `toggle_mcp_server(name, enabled)` had existed with no browser caller at all, which is what made this

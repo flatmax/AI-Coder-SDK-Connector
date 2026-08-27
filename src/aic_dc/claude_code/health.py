@@ -493,7 +493,16 @@ class EngineHealth:
     version_warning: str | None = None
     credential_source: str = "unknown"
     auth_warning: str | None = None
-    mcp: list[dict[str, Any]] = field(default_factory=list)
+    #
+    # There is deliberately no ``mcp`` field here. One was declared and
+    # serialised for three phases with nothing ever assigning it, so every
+    # consumer read ``[]`` — and an empty list is not "no servers", it is
+    # "no answer", which is the shape that made the Context tab's own MCP
+    # claim wrong for a week. Per-server status comes from
+    # ``ClaudeCodeService.get_mcp_status()``, which asks the CLI and can
+    # fail visibly; ``degradations`` below answers the *different*
+    # question of what the session started without. See
+    # ``specs5/plan/README.md`` § Open items carried forward.
     mirror_gaps: int = 0
     last_error: str | None = None
     #: Capabilities the session started *without*, one sentence each.
@@ -602,7 +611,6 @@ class EngineHealth:
             "version_warning": self.version_warning,
             "credential_source": self.credential_source,
             "auth_warning": self.auth_warning,
-            "mcp": list(self.mcp),
             "mirror_gaps": self.mirror_gaps,
             "mirror_gaps_escalated": self._escalated(),
             "last_error": self.last_error,
