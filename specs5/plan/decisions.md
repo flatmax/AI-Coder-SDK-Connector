@@ -364,7 +364,7 @@ starting from a working panel and a gate that can already be checked against `/c
 
 ---
 
-## CC-18 — Index freshness after `Bash` is an open choice, and the record must not pre-empt it
+## CC-18 — Index freshness after `Bash` **(decided 2026-08-28: sweep mtimes at flush)**
 
 Phase 4's `PostToolUse` re-index watches `Write`, `Edit`, `MultiEdit` and `NotebookEdit`. A `sed -i`,
 a `git checkout`, a formatter or an `npm install` run through `Bash` changes files no index hears
@@ -381,6 +381,34 @@ phase 4's largest known hole). **How that is closed is not decided.** The candid
 "Nothing, documented" is a legitimate outcome, which is precisely why it must be chosen rather than
 inherited. The implementation is its own phase (phase 8) and is sequenced *after* phase 5: it does not
 block history, and phase 5 is what reveals whether the durable record wants a watcher at all.
+
+**Decided 2026-08-28 — a fifth option, which the table above did not contain: sweep mtimes at flush.**
+None of the four was taken, because the choice as framed had a false premise. It assumed freshness
+needed a *new* source of truth — a watcher subscribing to the kernel, or an attribution parsed out of
+the command line. The index already had one. `BaseCache.get(path, mtime)` returns `None` when a file's
+mtime no longer matches what was recorded at extraction, so per-file staleness has been computable
+since Layer 2.7; nothing had ever asked it as a question in its own right, only as a side effect of
+re-indexing a file someone already knew had changed.
+
+So the `Bash` hook sets a boolean and does no work, and `Reindexer.flush()` — which every index-reading
+MCP tool already awaits — stats the known files and queues what disagrees. That defuses two of the
+four costs rather than paying them: **an `ls` re-indexes nothing** because no sweep runs until an index
+is *read*, and an unchanged repo never reaches `reindex_files`, so the two whole-index passes are not
+paid for a sweep that found nothing. No watcher, no debounce tuning, no gitignore logic, no
+cross-platform behaviour — the three things that made option 1 a subsystem.
+
+**What was accepted, not solved:** a file the shell command *creates* holds no cached mtime to
+disagree with, so the sweep is blind to it and it stays out of the map until the next full build.
+Catching it means re-walking the repo per sweep, which is the cost being avoided. Modification and
+deletion are covered. The residue is documented in
+[`../2-indexing/symbol-index.md` § Freshness After a Shell Command](../2-indexing/symbol-index.md#freshness-after-a-shell-command)
+and pinned by a test, which is CC-18's own exit criterion — the absence is stated rather than silent.
+
+**The naming constraint below still binds and is unchanged by this.** The sweep tells us which files
+*differ from the index*, which is not the same claim as "the turn changed these": a file the user
+edited in their editor is equally stale, and a re-index that predates the turn is equally reported. So
+`files_written_by_file_tools` remains the honest name for the persisted field, and nothing here earns
+the name `files_changed`.
 
 **What is binding now is the naming.** Both candidate sources for a "what changed this turn" record
 share the `Bash` blind spot — `take_reindexed()` because the hook never fires, and

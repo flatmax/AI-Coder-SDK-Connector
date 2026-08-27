@@ -61,31 +61,39 @@ This is not a reversal of **"packaging last but not never"**
 satisfied — the conversion phases are shipped — and its stated reason was that packaging is "the one
 most likely to block a release". It is, and the block is now the thing in the way.
 
-**Then phase 8 — index freshness after `Bash`.** It is the last phase-shaped *correctness* item, and
-the one whose absence the agent itself trips over: a `sed -i`, a `git checkout` or a `mv` through
-`Bash` changes files that no index hears about until the next full build, so `symbol_map`,
-`file_symbols`, `find_references` and `doc_outline` answer confidently from a stale picture with no
-marker on it. The `PostToolUse` hook covers `Write`, `Edit`, `MultiEdit` and `NotebookEdit` only —
-hooking `Bash` would mean re-indexing after every `ls`, and the tool input is not reliably parseable
-into "which files did this touch". **There is no filesystem watcher in the tree** (verified
-2026-08-27: no `watchdog`, no `inotify` use in `src/`).
+**Phase 8 — index freshness after `Bash` — is built (2026-08-28).** It was the last phase-shaped
+*correctness* item, and the one whose absence the agent itself tripped over: a `sed -i`, a `git
+checkout` or a `mv` through `Bash` changed files that no index heard about until the next full build,
+so `symbol_map`, `file_symbols`, `find_references` and `doc_outline` answered confidently from a stale
+picture with no marker on it.
 
-[`plan/decisions.md#cc-18`](plan/decisions.md) leaves the choice open and **"nothing, documented" is a
-legitimate exit** — the exit criterion is that a `Bash`-driven change is either reflected in the
-indexes, or its absence is stated in [`2-indexing/`](2-indexing/) *and surfaced to the user* rather
-than silent. Phase 4's own entry calls this its largest known hole
-([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
+**None of CC-18's four options was taken.** The choice as framed assumed freshness needed a new source
+of truth — a watcher, or paths parsed out of a command line. The index already had one:
+`BaseCache.get(path, mtime)` has always returned `None` on a stale entry, and nothing had ever asked it
+as a question of its own. So the `Bash` hook sets a boolean and does no work, and `Reindexer.flush()` —
+which every index-reading MCP tool already awaits — stats the known files and re-indexes what
+disagrees. An `ls` costs nothing, because no sweep runs until an index is *read*; an unchanged repo
+never reaches `reindex_files`, so its two whole-index passes are not paid for a sweep that found
+nothing. There is still **no filesystem watcher in the tree**, and now there is no reason to want one.
 
-**The phase numbers record naming, not order.** Packaging is numbered 7 and index-freshness 8, but the
-constraint above was written in phase 0 and phase 8 did not exist until CC-18 was decided during phase
-5. Read either way round, the two are independent; nothing in phase 7 touches an index and nothing in
-phase 8 touches a build. Everything in §§ B–D below is smaller than either phase and can precede both.
+**What was accepted rather than solved:** a file a shell command *creates* holds no cached mtime to
+disagree with, so the sweep is blind to it until the next full build. Catching it means re-walking the
+repo per sweep — the cost the approach exists to avoid. Modification and deletion are covered. That
+residue is stated in [`2-indexing/symbol-index.md`](2-indexing/symbol-index.md) § *Freshness After a
+Shell Command* and pinned by a test, which is CC-18's own exit criterion: the absence is stated rather
+than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 4's entry had called
+this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
+
+**Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
+smaller than either phase, and § B2 remains the cheapest item on the page.
 
 ---
 
 ## A. The two phases the plan has not shipped
 
-**A1 — Phase 8, index freshness after `Bash`.** Above.
+**A1 — Phase 8, index freshness after `Bash`.** ✅ *Built 2026-08-28 — leaves this queue.* Above for
+what shipped and what was accepted; [`plan/decisions.md#cc-18`](plan/decisions.md) holds the reasoning
+and the fifth option that closed it. The work-log's § *Landed since* carries the record.
 
 **A2 — Phase 7, packaging and the release path.** *(a)–(d) all landed 2026-08-27, and (a)–(c) are now
 confirmed on a runner: a green three-platform build and a published release, read from the Actions tab

@@ -541,6 +541,42 @@ rather than already covered by it.
 
 ### Landed since
 
+- **Phase 8: index freshness after `Bash`, by asking the disk instead of the command line** — built
+  2026-08-28, closing [`../next.md`](../next.md) § A1 and deciding
+  [`../plan/decisions.md#cc-18`](../plan/decisions.md). Phase 4's largest known hole, and the last
+  phase-shaped correctness item in the suite.
+
+  **None of CC-18's four options was taken, because the question had a false premise.** The table
+  offered a filesystem watcher, parsing paths out of the command line, re-indexing after every `Bash`,
+  or documenting the gap — and all four assume freshness needs a *new* source of truth. It did not.
+  `BaseCache.get(path, mtime)` has returned `None` on a stale entry since Layer 2.7, so per-file
+  staleness was always computable; it had simply never been asked as a question in its own right, only
+  as a side effect of re-indexing a file someone already knew had changed. `SymbolIndex.find_stale_files`
+  is that question, and it is forty lines of `stat` and dict lookup.
+
+  **Two costs defused rather than paid.** The `Bash` hook sets a boolean and does nothing else, so an
+  `ls` re-indexes nothing — the sweep only runs when something *reads* an index, which is
+  `Reindexer.flush()`, which every index-reading MCP tool already awaited. And `reindex_files` is called
+  only when the sweep returns a non-empty set, so its two whole-index passes (call-site re-resolution,
+  reference-graph rebuild) are never paid for a sweep that found nothing. No watcher, no debounce
+  tuning, no gitignore logic, no cross-platform behaviour.
+
+  **The gap is a decision, and it is pinned.** A file a shell command *creates* holds no cached mtime to
+  disagree with, so the sweep cannot see it; catching it means re-walking the repo per sweep, which is
+  the cost being avoided. Modification and deletion — `sed -i`, formatters, `git checkout` over a tracked
+  file, `mv` away — are covered. `test_a_file_the_index_never_knew_is_not_reported` asserts the
+  limitation so it stays a decision rather than becoming a surprise, and
+  [`../2-indexing/symbol-index.md`](../2-indexing/symbol-index.md) § *Freshness After a Shell Command*
+  states it, along with a narrower one: a backgrounded `Bash` is hooked when it launches, so its later
+  writes belong to whichever shell command comes next.
+
+  **Tested against tree-sitter, not against a mock.** The unit tests run on a `FakeIndex`, which proves
+  the wiring and not the effect — the failure mode this project has hit twice. So there is also an
+  end-to-end pair on a real `SymbolIndex`: a `sed -i` behind the index's back, then the hook, then the
+  flush, asserting `after` is in the symbol map and `before` is gone — **plus the counter-test that runs
+  the identical edit with no `Bash` hook and asserts the map is still wrong**, so the positive test
+  cannot pass for free.
+
 - **Phase 7 (d): the release path is verified by running it, not by reading it** — built 2026-08-27,
   closing [`../next.md`](../next.md) § A2 (d). Three things landed; the interesting part is what the
   third one found.

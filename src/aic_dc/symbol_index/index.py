@@ -521,6 +521,56 @@ class SymbolIndex:
         had_cache = self._cache.invalidate(rel)
         return had_memory or had_cache
 
+    def find_stale_files(self) -> list[str]:
+        """Indexed paths whose file on disk no longer matches.
+
+        The read half of the mtime cache, which until now
+        only ever answered as a side effect of re-indexing
+        a file someone already knew had changed. Here it is
+        the question itself: *what* changed, when nothing
+        told us.
+
+        This exists for changes that arrive through
+        ``Bash`` — a ``sed -i``, a ``git checkout``, a
+        formatter, an ``mv`` away. ``PostToolUse`` names the
+        files for ``Write`` and its neighbours; for a shell
+        command it hands over the command line, which is not
+        reliably parseable into paths (decisions.md § CC-18).
+        Comparing mtimes needs no such attribution: the disk
+        is the record.
+
+        Scope, deliberately: paths **already known** to the
+        index — the union of the symbol map and the cache,
+        matching :meth:`_prune_stale`, so a file that parsed
+        to no symbols is still watched. A file a shell
+        command *created* is in neither set and is not
+        returned; catching those means re-walking the repo,
+        which is the cost this approach exists to avoid. That
+        residue is recorded in
+        ``specs5/2-indexing/symbol-index.md``.
+
+        A file that has vanished or turned unreadable is
+        reported stale rather than dropped here: this is a
+        query and the caller may not be about to re-index.
+        :meth:`reindex_files` is what removes it, and it
+        already omits vanished paths from its return value.
+
+        Sorted, and cheap: one ``stat`` per known file and a
+        dict lookup, no parsing. Nothing is mutated.
+        """
+        known = set(self._all_symbols.keys()) | self._cache.cached_paths
+        stale: list[str] = []
+        for rel in known:
+            try:
+                mtime = self._absolute_path(rel).stat().st_mtime
+            except OSError:
+                # Deleted, renamed away, or no longer readable.
+                stale.append(rel)
+                continue
+            if self._cache.get(rel, mtime) is None:
+                stale.append(rel)
+        return sorted(stale)
+
     # ------------------------------------------------------------------
     # Read queries — snapshot discipline applies
     # ------------------------------------------------------------------

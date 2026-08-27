@@ -18,6 +18,14 @@ one fact about a session that the message stream cannot carry in time — see
    no index: it describes code that no longer exists, confidently.
 3. **Nothing else.**
 
+``Bash`` is registered too, on a second matcher, and it is the odd one
+out: it does no work at all. A shell command's ``tool_input`` is a
+command line, not a file list, so the hook records only that one ran and
+:meth:`Reindexer._sweep_after_shell` later asks the *disk* which known
+files moved. That is CC-18's answer — the mtime the cache already keeps
+per file turns out to be the attribution the tool input could not
+give.
+
 That third point is the invariant. **These hooks are observational.** They
 never return a ``permissionDecision``, ``decision``, ``continue: False``,
 or any other control field — an empty dict, always. The reason is
@@ -56,13 +64,15 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# The tools that put bytes on disk at a path we can name. Bash is
-# deliberately absent: `PostToolUse` hands us the command, not the files it
-# touched, and guessing paths out of a shell line would be wrong more often
-# than right. A `sed -i` therefore leaves the index stale until the next
-# full build — recorded as a known gap rather than papered over with a
-# heuristic.
+# The tools that put bytes on disk at a path we can name.
 WRITE_TOOL_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"
+
+# The tool that puts bytes on disk at a path we cannot name. `PostToolUse`
+# hands us the command line, not the files it touched, and guessing paths
+# out of a shell line would be wrong more often than right — so this hook
+# does not try. It sets a flag, and the *disk* is asked later. See
+# `Reindexer.note_shell_ran` and CC-18.
+SHELL_TOOL_MATCHER = "Bash"
 
 # Where each of those tools keeps the path. NotebookEdit is the odd one out,
 # which is the whole reason this is a table and not a constant.
@@ -133,6 +143,10 @@ class Reindexer:
         # which is the frontend's only evidence that the agent's edits
         # reached the indexes.
         self._reindexed: set[str] = set()
+        # Set by the `Bash` hook, cleared by the sweep in `flush`. A bool
+        # rather than a queue because there is nothing to queue: the point
+        # of the shell path is that we do not know what it touched.
+        self._shell_ran = False
         self._timer: asyncio.Task[None] | None = None
         self._drain_task: asyncio.Task[None] | None = None
         # Serialises drains against each other. Without it a flush racing
@@ -158,6 +172,23 @@ class Reindexer:
         self._pending.update(accepted)
         self._arm()
         return accepted
+
+    def note_shell_ran(self) -> None:
+        """Record that a shell command ran, without saying what it did.
+
+        Deliberately not a re-index and deliberately not armed on the
+        debounce timer. The objection to hooking ``Bash`` was that it
+        would re-index after every ``ls`` — so an ``ls`` sets a bool and
+        nothing else happens. The cost is only paid if something then
+        *reads* an index, and even then only for files that really
+        changed: :meth:`flush` sweeps, and the sweep asks the disk.
+
+        Fires when a command *starts* if it was backgrounded, not when
+        it finishes, so a background build's later writes belong to
+        whichever shell command comes next. Recorded in
+        ``specs5/2-indexing/symbol-index.md``.
+        """
+        self._shell_ran = True
 
     def _relative(self, path: str) -> str | None:
         """Repo-relative form of ``path``, or None if it is outside."""
@@ -237,6 +268,10 @@ class Reindexer:
             # already started is a task of its own, and the lock below is
             # what waits for that.
             self._timer.cancel()
+        # Before the queue is examined, not after: the sweep's whole job
+        # is to *add* to that queue, and a flush that drained first would
+        # answer from the index it was about to discover was stale.
+        await self._sweep_after_shell()
         for _ in range(MAX_FLUSH_ROUNDS):
             if not self._pending:
                 # An in-flight drain still has to finish — it holds the
@@ -253,6 +288,59 @@ class Reindexer:
                 len(self._pending),
                 MAX_FLUSH_ROUNDS,
             )
+
+    async def _sweep_after_shell(self) -> None:
+        """Ask the disk what a shell command changed, and queue it.
+
+        The other half of :meth:`note_shell_ran`, and the whole of
+        CC-18's answer. ``SymbolIndex.find_stale_files`` compares each
+        known file's mtime against the one the cache recorded, so no
+        attribution from the command line is needed — a ``sed -i``, a
+        ``git checkout``, a formatter and an ``mv`` away all look the
+        same to it, which is the point.
+
+        What it cannot see is a file the command *created*: it is in
+        neither the symbol map nor the cache, so nothing holds an mtime
+        to disagree with. Catching those needs a repo re-walk per sweep,
+        which is the cost this approach was chosen to avoid; the gap is
+        recorded in ``specs5/2-indexing/symbol-index.md``.
+
+        Runs under the drain lock and in the executor: it is a ``stat``
+        per known file, which is blocking I/O, and it reads the two
+        structures ``reindex_files`` mutates.
+        """
+        if not self._shell_ran:
+            return
+        index = self._symbol_index()
+        if index is None:
+            # The index is still being built, and that build reads the
+            # disk as it is now. Keep the flag: the first flush after it
+            # exists is the one that should sweep.
+            return
+        # Cleared before the scan, not after. A command landing mid-scan
+        # re-arms the flag and earns one redundant sweep later; clearing
+        # afterwards would swallow it, and a missed change outlives the
+        # session.
+        self._shell_ran = False
+        try:
+            async with self._lock:
+                loop = asyncio.get_running_loop()
+                stale = await loop.run_in_executor(
+                    self._executor, index.find_stale_files
+                )
+        except Exception as exc:
+            # Same bargain as the drain: a failed sweep costs freshness,
+            # and raising here would surface inside a tool call that has
+            # nothing to do with indexing.
+            logger.warning("Post-shell staleness sweep failed: %s", exc)
+            return
+        if stale:
+            logger.debug(
+                "Shell command changed %d indexed file(s): %s",
+                len(stale),
+                stale,
+            )
+            self._pending.update(stale)
 
     async def _drain(self) -> None:
         """Re-index everything queued, then hand the docs to the builder."""
@@ -365,6 +453,41 @@ def build_post_tool_use_hook(
     return post_tool_use
 
 
+def build_post_shell_hook(
+    reindexer: Reindexer,
+) -> Callable[[Any, str | None, Any], Awaitable[dict[str, Any]]]:
+    """The ``PostToolUse`` callback for ``Bash``: set a flag, do no work.
+
+    It reads nothing out of ``tool_input`` on purpose. The command line
+    is right there and parsing it is the option CC-18 rejected — every
+    heuristic that recovers paths from a shell string is wrong for
+    pipelines, redirects, ``xargs``, subshells and anything behind a
+    script. So this hook records only *that* a command ran, and
+    :meth:`Reindexer._sweep_after_shell` asks the filesystem what that
+    meant.
+
+    Takes no ``broadcast``, unlike its write-tool neighbour: it has no
+    file list to push, so there is nothing the browser could be told
+    beyond "something may have happened", which is not worth a reload of
+    the tree. A shell command that changes the tree therefore still
+    leaves the file panel stale until something else refreshes it — a
+    narrower gap than the index one, and untouched here.
+    """
+
+    async def post_shell(
+        input_data: Any,
+        tool_use_id: str | None,
+        context: Any,
+    ) -> dict[str, Any]:
+        try:
+            reindexer.note_shell_ran()
+        except Exception as exc:
+            logger.warning("PostToolUse shell hook failed: %s", exc)
+        return {}
+
+    return post_shell
+
+
 def build_pre_compact_hook(
     broadcast: Callable[[Event], Awaitable[None]] | None = None,
 ) -> Callable[[Any, str | None, Any], Awaitable[dict[str, Any]]]:
@@ -447,7 +570,14 @@ def build_hook_matchers(
             HookMatcher(
                 matcher=WRITE_TOOL_MATCHER,
                 hooks=[build_post_tool_use_hook(reindexer, broadcast)],
-            )
+            ),
+            # Two matchers rather than one alternation, because the two
+            # do different things: one knows the paths, the other only
+            # knows that it does not.
+            HookMatcher(
+                matcher=SHELL_TOOL_MATCHER,
+                hooks=[build_post_shell_hook(reindexer)],
+            ),
         ],
         "PreCompact": [HookMatcher(hooks=[build_pre_compact_hook(broadcast)])],
     }
