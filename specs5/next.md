@@ -1,6 +1,6 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-27**, HEAD `8f167e9`.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `1986d45`.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -37,12 +37,24 @@ wheel that carries the webapp. Verified locally against a real 237 MiB artefact,
 with no `claude`, `node`, `npm` or `python3` — see [`6-deployment/build.md`](6-deployment/build.md) and
 work-log § *Landed since*.
 
-**Two claims here are not verified against GitHub itself**, and this file's own rule says to say so: the
-green run was reported rather than read (no credentials to read the Actions tab from this machine), and
-the three verification steps added on 2026-08-27 have run locally but not yet on a runner. The first
-dispatch after this lands is what closes that, and the Windows and macOS legs remain unexercised
-end-to-end. **Nothing in this file is finished by a green matrix** — but a green matrix that includes a
-container test is now a materially stronger statement than one that did not.
+**Read from the Actions tab 2026-08-28**, closing the two claims the paragraph above could only report:
+`gh` is authenticated on this machine after all, so the run was read rather than relayed. Pull request #1
+merged into `master` (`a8be5fb`), the gate fired, **all three legs went green and a release was
+published** — `2026.08.27-04.22-a8be5fb2`, marked latest, carrying `aic-dc-linux` (247.8 MB),
+`aic-dc-macos` (223.3 MB) and `aic-dc-windows.exe` (236.5 MB). Those sizes are the load-bearing part:
+each is engine-scale, so `--collect-all=claude_agent_sdk` resolved a platform-tagged wheel on every
+runner and **R-7's option 2 is proven on the matrix, not just inherited from `uv.lock`**.
+
+**What that run does not cover is the commit that verifies it.** It built `0e46991` at 04:21 UTC;
+`1986d45` — `--check-engine`, the `ubuntu:24.04` clean-container step, the wheel-carries-webapp assertion
+— landed at 06:40 UTC and is the one commit `master` does not have. So the published binary was built
+*before* the tripwire existed, and phase 7's stated exit criterion has still never run on a runner.
+**Nothing in this file is finished by a green matrix**, and this matrix was green without the check that
+would make it mean what § A2 (d) wants it to mean.
+
+That gap closes on the next real pull request into `master` and by no other route: **manual runs are
+declined by decision** (2026-08-28), and `workflow_dispatch` has been removed from the workflow so the
+policy is structural rather than remembered. See § E.
 
 This is not a reversal of **"packaging last but not never"**
 ([`plan/README.md`](plan/README.md) § *Ordering constraints that are not obvious*). That constraint is
@@ -75,8 +87,10 @@ phase 8 touches a build. Everything in §§ B–D below is smaller than either p
 
 **A1 — Phase 8, index freshness after `Bash`.** Above.
 
-**A2 — Phase 7, packaging and the release path.** *Active. (a)–(c) landed 2026-08-27; what remains is a
-build that has actually run, the merge, and the fresh-machine test.*
+**A2 — Phase 7, packaging and the release path.** *(a)–(d) all landed 2026-08-27, and (a)–(c) are now
+confirmed on a runner: a green three-platform build and a published release, read from the Actions tab
+2026-08-28. What remains is (d) alone — the verification steps postdate the run that would have exercised
+them, and only the next PR into `master` can close that.*
 
 **(a) The build command described a deleted engine.** ✅ *Fixed.* `.github/workflows/release.yml` predated
 the conversion, and its PyInstaller step named, as things to bundle, packages phase 3 removed from
@@ -106,8 +120,9 @@ CArchive — so R-7's cost is smaller on the wire than the raw figure suggests a
 This is the Linux third of a matrix build; Windows and macOS remain unproven, and a local build cannot
 exercise `actions/setup-uv`, `npm ci`, or the release job at all.
 
-**(b) The trigger, and `master`.** ✅ *Gate fixed; `master` merged. A run on GitHub is outstanding — see the
-note at the end of this item, because the way the merge happened means nothing fired.* The workflow
+**(b) The trigger, and `master`.** ✅ *Done — gate fixed, `master` merged, and the workflow has now run
+green and published. The narrative below is kept because its middle section was wrong for a day and the
+way it was wrong is the useful part; the closing note carries what actually happened.* The workflow
 fires on a pull request **closed into `master`**, and gated the build job on the head branch starting with
 `dev4-`. That gate is gone: the condition is now simply that the PR merged, because the merge target is the
 release decision and a branch-name pattern is a naming convention that outlives its generation by exactly
@@ -119,13 +134,16 @@ one. The branch situation is better than it looks — verified 2026-08-27:
   is empty** — master's tree is already an ancestor of the dev line, and its ten extra commits are merges
   carrying no content dev5 lacks. **A pull request from `dev5-claude-code` into `master` merges clean and
   loses nothing.** No history reconciliation is owed and no force-push is involved.
-- **`workflow_dispatch` is how the build gets proven before anything touches `master`.** It needed one
-  change first: the release job published unconditionally with `make_latest: true`, so a manual test run
-  would have put a public release from an unmerged branch in front of users. Dispatch now takes a
-  `publish_release` input defaulting to false — build and verify, publish only when asked.
-- **The default branch is `dev4-membrane`, not `master`.** That is why dispatch works at all
-  (`workflow_dispatch` requires the workflow on the default branch, and the `Release` workflow is there),
-  and it is a loose end of its own: the repository's idea of "main" and this suite's are different branches.
+- ~~**`workflow_dispatch` is how the build gets proven before anything touches `master`.**~~ **Withdrawn
+  2026-08-28.** It was the plan for a day, and the `publish_release` input existed to make it safe (the
+  release job had published unconditionally with `make_latest: true`, so a manual run from an unmerged
+  branch would have gone in front of users). Both are now gone: manual runs are declined, the trigger is
+  removed, and the release job needs no publish gate because the only thing that reaches it is a merge.
+  § E holds the decision.
+- ~~**The default branch is `dev4-membrane`, not `master`.**~~ **Closed 2026-08-28** — the repository's
+  default branch *is* `master` (`gh repo view`). The suite's idea of "main" and the repository's now agree,
+  and with dispatch gone the reason this mattered — which definition supplies the inputs for a non-default
+  ref — has no way to arise.
 - `origin/master` also carries an **older, unrelated** `release.yml` — a push-triggered "Build and Release"
   from the dev3 era. The merge replaces it, which is correct, but expect it in the diff.
 
@@ -137,17 +155,16 @@ not a closed pull request**, and this workflow deliberately ignores direct pushe
 release exists. That is the gate working as specified, not a fault; it is worth recording because the
 symptom — a merged `master` with an empty Actions tab — looks like a broken workflow and is not one.
 
-Two loose ends follow from it, and the second is the reason to fix the first:
+Two loose ends followed from it, and **both closed on their own before anything was done about them**
+(read from GitHub 2026-08-28). A pull request — #1 — was opened from `dev5-claude-code` into `master` after
+all and merged as `a8be5fb`, which is the trigger the workflow wants; the run built all three platforms and
+published `2026.08.27-04.22-a8be5fb2`. And `master` is now the default branch. So the "first release needs a
+manual dispatch" problem never had to be solved, and the default-branch question dissolved with it.
 
-- **The first release now needs a manual dispatch**, because `master` and `dev5-claude-code` are identical
-  and there is no longer a pull request to open. A dispatch with no inputs builds and verifies without
-  publishing (`publish_release` defaults to false); publishing is the same dispatch with it set true.
-- **`master` should probably become the default branch.** `workflow_dispatch` requires the workflow on the
-  default branch, which is still `dev4-membrane` — and the copy there is the *pre-conversion* one, whose
-  `workflow_dispatch:` takes no inputs at all. So the dispatch button exists, but which definition supplies
-  `publish_release` when a non-default ref is selected is a GitHub implementation detail this project should
-  not be relying on. Making the release branch the default branch removes the question. It is a repository
-  setting, not a change to any file here.
+**The lesson is the one this file keeps relearning, and it cost a paragraph of planning:** the item above
+reasoned from a dated local observation (`git log`, a direct push, an empty Actions tab inferred rather
+than seen) to a confident claim about a remote that had moved. `gh` was authenticated on this machine the
+whole time. **Check the remote before writing a plan that turns on its state.**
 
 **(c) R-7's distribution question.** ✅ *Decided: collect the bundle* — recorded in
 [`plan/risks.md`](plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels) § R-7 with the reasoning,
@@ -198,8 +215,12 @@ the wheel now carries `webapp/dist` at `aic_dc/webapp_dist` — the third entry 
 priority list, which until now had no producer. The include is conditional, because the declarative form
 fails a dev checkout that has not run Vite; CI asserts on the built wheel instead of trusting step order.
 
-**What is still owed here** is a run on a runner, and the two platforms a Linux container cannot speak
-for: Windows and macOS get the resolve-and-run check but no clean-environment guarantee.
+**What is still owed here** is a run on a runner — and as of 2026-08-28 that is the *only* thing owed in
+phase 7, because (a)–(c) have one. The three verification steps were committed after the green run, so
+they have executed locally and nowhere else. They will run on the next pull request merged into `master`
+and, by decision, on no earlier occasion; a manual dispatch is not available and is not wanted (§ E).
+Two platforms stay weaker even then: Windows and macOS get the resolve-and-run check but no
+clean-environment guarantee, because a Linux container cannot speak for them.
 
 Spec homes: [`6-deployment/packaging.md`](6-deployment/packaging.md),
 [`6-deployment/build.md`](6-deployment/build.md).
@@ -346,6 +367,15 @@ minimum when checking anything per-turn**, since a session's first turn has `tur
 Listed so their absence is not rediscovered as a bug. Do not implement these without reopening the
 decision that parked them.
 
+- **Manual release runs — declined, and the trigger removed (2026-08-28).** `workflow_dispatch` and its
+  `publish_release` input are gone from `.github/workflows/release.yml`; a pull request merged into
+  `master` is the only thing that builds. The reason is that a manual run spends three runners on three
+  ~230 MiB artefacts to answer a question the next merge answers anyway, and the release decision is the
+  merge rather than a button. It was removed rather than left unpressed because a policy that depends on
+  nobody pressing a button is not enforced by anything. **The accepted cost is stated in § A2 (d):** a new
+  build or verification step stays unproven on a runner until a real PR carries it. When packaging work
+  lands, run the build command locally with CI's exact flags, run the verification block by hand, and
+  record the runner half as outstanding — that is the sanctioned substitute, not a dispatch.
 - **The collaboration admission UI — on pause (2026-08-27).** The backend is complete:
   [`4-features/collaboration.md`](4-features/collaboration.md) §§ *Pending State*, *Admission Toast*,
   *Connected Users Indicator*, *Collab Popover* specify the surface, `collab.py` holds the pending queue,

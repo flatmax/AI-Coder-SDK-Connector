@@ -8,10 +8,14 @@
 # naming convention; `master` is the release decision, so the
 # merge target is the only gate. Never triggers on direct pushes.
 #
-# `workflow_dispatch` builds without publishing by default —
-# set `publish_release: true` to also cut a GitHub Release. A
-# manual run is the way to prove the build command works without
-# putting an artefact in front of users.
+# A merged pull request is the *only* trigger. There is deliberately
+# no `workflow_dispatch`: a manual run builds three ~230 MiB
+# artefacts on three runners to answer a question the merge will
+# answer anyway, and an unpressed button is still a button. The cost
+# is that a new build or verification step stays unproven on a runner
+# until a real PR carries it — verify locally against these exact
+# flags and say the runner half is outstanding, rather than firing a
+# run to close it.
 #
 # Builds per-platform single-file binaries in parallel, then
 # attaches all artefacts to a GitHub Release. The release tag on
@@ -57,12 +61,6 @@ on:
   pull_request:
     types: [closed]
     branches: [master]
-  workflow_dispatch:
-    inputs:
-      publish_release:
-        description: "Publish a GitHub Release from this manual run"
-        type: boolean
-        default: false
 
 permissions:
   contents: write  # needed to create releases and attach artefacts
@@ -72,10 +70,8 @@ jobs:
     name: Build ${{ matrix.label }}
     # Gate: PR closed events only build when the PR was actually
     # merged, not merely closed. No head-branch pattern — see the
-    # header comment. workflow_dispatch always builds.
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.merged == true
+    # header comment.
+    if: github.event.pull_request.merged == true
     strategy:
       fail-fast: false
       matrix:
@@ -313,12 +309,9 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    # A merge into master publishes. A manual run only publishes
-    # when asked, so the build can be exercised without putting an
-    # artefact in front of users.
-    if: |
-      github.event_name != 'workflow_dispatch' ||
-      github.event.inputs.publish_release == 'true'
+    # No condition. Anything reaching here came from a merged PR into
+    # master — `needs: build` and the build job's own gate are the
+    # whole answer, and a merge into master publishes by definition.
     runs-on: ubuntu-latest
     steps:
       - name: Download all artefacts
