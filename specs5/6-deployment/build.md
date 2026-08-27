@@ -14,7 +14,13 @@ thing we could, and diagnose its absence either way" (see
 
 - Vite-based build producing a static bundle
 - Base path configured to relative (`./`) so the built webapp can be served from any origin without path rewriting
-- Output directory bundled into the Python package under a known subdirectory
+- Output directory bundled into the Python package under a known subdirectory — `aic_dc/webapp_dist`,
+  which is the name § Webapp Location Priority's third entry looks for. **The include is conditional
+  on the Vite build having run**, because a declarative `force-include` fails the build when
+  `webapp/dist` is absent and it is absent in every dev checkout until someone builds a frontend they
+  may not be working on. `hatch_build.py` asks instead. The failure that leaves is a release built
+  without the npm step, which ships a wheel that silently serves nothing — so CI asserts on the built
+  wheel rather than trusting the order of its own steps
 - Build emits hashed asset filenames for long-term caching
 - `index.html` is the entry point with all asset references relative
 
@@ -123,6 +129,38 @@ from a bundle, producing a runtime error on a user's machine that no build-time 
 collection flags cannot police themselves** — a `--collect-all` for a package that is not installed only
 warns, so the assertion has to look at what the build emitted rather than at what it was asked to emit.
 
+**Build-time verification cannot answer the question the user has, and the runtime half landed
+2026-08-27.** Everything above inspects what the build *emitted*. None of it runs the thing that was
+emitted, and the two failures are genuinely different: `--collect-all` files are data, data files carry
+no permission bits, so "in the archive" and "spawnable after extraction" are separate claims. The
+runtime check is `aic-dc --check-engine` — it resolves the binary the SDK would spawn, reports it, and
+exits **1** when nothing resolves and **2** when something resolved and would not run. It needs no
+credentials and asserts nothing about them, because a build runner has no login and a check that
+required one could not run there.
+
+Three properties make it the right shape for this, and the third is the one that pays:
+
+- **It is the same resolution the app uses**, not a re-implementation. It calls `resolve_cli` with
+  `engine.json`'s `cli_path`, so a green check and a working launch cannot disagree.
+- **It reports the counter-intuitive case out loud.** When a `claude` on `PATH` exists and is *not* what
+  resolved, it says so with both paths. Silence there reads as "PATH won", which is the belief this file
+  had backwards twice.
+- **It exits non-zero, which the release binary previously could not.** `src/aic_dc/__main__.py` — the
+  script PyInstaller builds from — called `main()` and discarded its return value, so every exit code
+  the CLI computed was invisible to a shell. Harmless while every path returned 0; fatal for a CI step
+  whose only output is an exit status, which would have passed whether or not the artefact had an
+  engine. Found by running the check against a real 237 MiB artefact rather than reasoning about it.
+
+**The exit criterion is a container, not a runner.** Phase 7's wording is "a fresh machine can install
+and run without a manual `npm i -g @anthropic-ai/claude-code`", and a build runner is not a fresh
+machine: it has Node, Python, a uv environment and the repository. The Linux leg therefore runs the
+artefact in `ubuntu:24.04` with `claude`, `node`, `npm` and `python3` asserted absent first — a check
+that could pass by finding a system engine proves nothing. Measured 2026-08-27 against the local
+build: the container populated the user config directory on first run, resolved
+`_MEI*/claude_agent_sdk/_bundled/claude`, and got `2.1.229` out of it. The base image deliberately
+matches the runner image, because a PyInstaller binary needs a glibc at least as new as the one it was
+built against and an older base would fail for a reason that is not the one under test.
+
 Two consequences worth stating rather than discovering:
 
 - **Version skew is a supported state, not an error.** A user's `PATH` CLI can be newer or older than the SDK's `__cli_version__` pin. Startup records both and warns on mismatch; it does not refuse to run. Refusing would make our release cadence a gate on theirs
@@ -166,7 +204,7 @@ Adding the SDK added nine packages and changed the version of none — `doc_conv
 |---|---|
 | PyInstaller binary | Bundled inside binary |
 | Development (`pip install -e .` + `npm run build`) | Source tree's dist directory |
-| pip install from PyPI | Installed package data (if included) or GitHub Pages fallback |
+| pip install from PyPI | Installed package data at `aic_dc/webapp_dist`, else the GitHub Pages fallback |
 | Dev mode (`--dev`) | Vite dev server as child process |
 | Preview mode (`--preview`) | Vite preview server as child process |
 
@@ -187,6 +225,14 @@ For dev and preview modes only (webapp development, not normal usage):
 - PyInstaller binary contains every **Python-side** requirement — config defaults, webapp bundle, version file, all Python dependencies, and the SDK's bundled CLI as package data
 - The binary never builds or substitutes for an engine of its own. Whether or not the SDK's bundled copy is collected, a missing engine degrades to a working editor with a health banner, never a failed launch ([startup.md](startup.md#engine-health-in-the-overlay))
 - CI asserts the SDK's bundled CLI path is present in the built binary before the release is published
+- CI also *runs* the built binary's engine resolution, and does it once in a container with no `claude`,
+  `node`, `npm` or `python3` — presence in the archive and spawnability after extraction are separate
+  claims, and a check that could pass by finding a system engine is not a check
+- The release binary's exit status is always the CLI's own return value. A diagnostic whose output is an
+  exit code is only as good as the entry point's willingness to pass it on
+- A wheel built after the Vite step always carries `aic_dc/webapp_dist`; a wheel built without it never
+  claims to. CI asserts the former, and the build hook stays silent for the latter rather than failing a
+  dev checkout
 - Module collection covers every submodule of our own package without naming any of them — no "module not found" at runtime, and no list to keep in step with the tree
 - SPA fallback ensures client-side routing works when users bookmark deep links
 - Webapp location priority always tried in order; first hit wins

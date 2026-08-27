@@ -30,12 +30,19 @@ this branch, the build command it would run describes an engine deleted three ph
 mentions the CLI the SDK ships even though its own spec requires collecting it. § A2 is the checklist, in
 the order the steps unblock each other.
 
-**Where it stands after 2026-08-27:** the workflow is rewritten, R-7 is decided (collect the bundle —
-§ A2 (c)), the command has been proven locally on Linux, and **`master` never needed generating** — the
-branch already existed and has since been merged, so its tree is now identical to `dev5-claude-code`. What
-remains is a build that has run **on GitHub** — which the merge did not cause, because it arrived as a direct
-push rather than a pull request (§ A2 (b)) — and the fresh-machine test that is the real exit criterion
-(§ A2 (d)). Nothing in this file is finished by a green matrix.
+**Where it stands after 2026-08-27 (late):** phase 7 is built. The workflow is rewritten, R-7 is decided
+(collect the bundle — § A2 (c)), `master` is merged, **deployment on GitHub is reported working**, and
+§ A2 (d)'s runtime half landed: `aic-dc --check-engine`, a fresh-container step in the Linux leg, and a
+wheel that carries the webapp. Verified locally against a real 237 MiB artefact, including in a container
+with no `claude`, `node`, `npm` or `python3` — see [`6-deployment/build.md`](6-deployment/build.md) and
+work-log § *Landed since*.
+
+**Two claims here are not verified against GitHub itself**, and this file's own rule says to say so: the
+green run was reported rather than read (no credentials to read the Actions tab from this machine), and
+the three verification steps added on 2026-08-27 have run locally but not yet on a runner. The first
+dispatch after this lands is what closes that, and the Windows and macOS legs remain unexercised
+end-to-end. **Nothing in this file is finished by a green matrix** — but a green matrix that includes a
+container test is now a materially stronger statement than one that did not.
 
 This is not a reversal of **"packaging last but not never"**
 ([`plan/README.md`](plan/README.md) § *Ordering constraints that are not obvious*). That constraint is
@@ -171,16 +178,28 @@ comment were all corrected:
 Users who want their own CLI keep `engine.json`'s `cli_path`, which bypasses discovery entirely
 (`claude_code/health.py:259`).
 
-**(d) The exit criterion is a fresh machine, not a green build.** ⬜ *Outstanding — the remaining phase-7
-work.* Phase 7's own wording: "a fresh machine can install and run without a manual
-`npm i -g @anthropic-ai/claude-code`". Only the build-time half of R-7's tripwire landed — the archive
-assertion and `--version`. The runtime half is still owed: **a fresh-container install test that fails
-loudly with an actionable message when no CLI is resolvable**, rather than at the first prompt. A green
-matrix says the flags parsed and the binary starts; it says nothing about whether the thing it produced can
-hold a conversation.
+**(d) The exit criterion is a fresh machine, not a green build.** ✅ *Built 2026-08-27; verified locally,
+not yet on a runner.* Phase 7's own wording: "a fresh machine can install and run without a manual
+`npm i -g @anthropic-ai/claude-code`". The build-time half was the archive assertion and `--version`; the
+runtime half is now `aic-dc --check-engine`, which resolves the binary the SDK would spawn, runs it, and
+exits 1 when nothing resolves or 2 when something resolved and would not run. The Linux leg runs it inside
+`ubuntu:24.04` with `claude`, `node`, `npm` and `python3` asserted absent first, because a check that could
+pass by finding a system engine is not a check.
 
-Also outstanding, and cheap: `pyproject.toml`'s note that the wheel ships webapp/dist only after Layer 6
-"wires this up properly". A pip-installed release still cannot serve the webapp.
+**Writing it found the thing that would have made it useless.** `src/aic_dc/__main__.py` — the script
+PyInstaller builds the release binary from — called `main()` and threw away its return value, so the
+process exited 0 no matter what the CLI computed. A CI step whose only output is an exit status would have
+passed unconditionally. That is the second time in this phase a check has turned out to be quietly
+inert (§ A2 (a) was the first), and both were found by running the artefact rather than reading the
+build. Reasoning is what missed them.
+
+Also landed: `pyproject.toml`'s note predicting that Layer 6 would "wire this up properly" is gone, and
+the wheel now carries `webapp/dist` at `aic_dc/webapp_dist` — the third entry in `_find_webapp_dist`'s
+priority list, which until now had no producer. The include is conditional, because the declarative form
+fails a dev checkout that has not run Vite; CI asserts on the built wheel instead of trusting step order.
+
+**What is still owed here** is a run on a runner, and the two platforms a Linux container cannot speak
+for: Windows and macOS get the resolve-and-run check but no clean-environment guarantee.
 
 Spec homes: [`6-deployment/packaging.md`](6-deployment/packaging.md),
 [`6-deployment/build.md`](6-deployment/build.md).

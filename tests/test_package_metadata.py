@@ -156,6 +156,43 @@ def test_the_commit_prompt_is_non_empty() -> None:
     assert content.strip(), "commit.md is empty or whitespace-only"
 
 
+def test_wheel_destination_matches_the_runtime_lookup() -> None:
+    """``hatch_build.py`` puts the webapp where ``_find_webapp_dist`` looks.
+
+    Two files have to agree on one directory name: the build hook that
+    force-includes ``webapp/dist`` into the wheel, and the runtime lookup
+    whose third priority is installed package data. They cannot import each
+    other — the hook needs hatchling, which is a build-time dependency and
+    is not installed in the test environment — so the coupling is checked by
+    reading it.
+
+    The failure this prevents is quiet in the worst way: a renamed
+    destination still builds a valid wheel, still installs, and only shows
+    up as a pip-installed release that falls through to the GitHub Pages
+    fallback for no visible reason.
+    """
+    project_root = Path(aic_dc.__file__).resolve().parent.parent.parent
+    hook = project_root / "hatch_build.py"
+    if not hook.is_file():
+        # An installed-package test run has no repo around it. Skipping is
+        # right: there is no hook to disagree with.
+        return
+
+    hook_dest = re.search(
+        r'^WHEEL_DEST\s*=\s*"([^"]+)"', hook.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert hook_dest, "hatch_build.py no longer declares WHEEL_DEST"
+    # The hook writes a package-qualified path; the lookup joins the leaf
+    # onto the package directory. Compare the leaf.
+    assert hook_dest.group(1).split("/")[-1] == "webapp_dist"
+
+    main_src = (Path(aic_dc.__file__).parent / "main.py").read_text(encoding="utf-8")
+    assert 'pkg_dir / "webapp_dist"' in main_src, (
+        "_find_webapp_dist no longer looks for webapp_dist beside the package; "
+        "update hatch_build.py's WHEEL_DEST to match"
+    )
+
+
 def test_no_shipped_file_describes_an_edit_protocol() -> None:
     """No bundled file teaches an edit-block format any more.
 

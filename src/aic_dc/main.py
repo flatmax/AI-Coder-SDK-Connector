@@ -386,6 +386,12 @@ def _find_webapp_dist() -> Path | None:
     1. PyInstaller bundle (sys._MEIPASS)
     2. Source tree (project_root/webapp/dist)
     3. Installed package data (package_dir/webapp_dist)
+
+    Entry 3's producer is ``hatch_build.py``, whose ``WHEEL_DEST`` has to
+    name the same ``webapp_dist`` directory this looks for. Changing one
+    without the other yields an install that serves nothing;
+    ``test_wheel_destination_matches_the_runtime_lookup`` holds them
+    together.
     """
     # PyInstaller bundle
     meipass = getattr(sys, "_MEIPASS", None)

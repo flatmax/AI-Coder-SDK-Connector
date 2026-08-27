@@ -541,6 +541,49 @@ rather than already covered by it.
 
 ### Landed since
 
+- **Phase 7 (d): the release path is verified by running it, not by reading it** — built 2026-08-27,
+  closing [`../next.md`](../next.md) § A2 (d). Three things landed; the interesting part is what the
+  third one found.
+
+  **`aic-dc --check-engine`.** The build already asserted the bundled `claude` was *in* the onefile
+  archive. That cannot answer whether the extracted copy runs, and the two are separate claims for a
+  concrete reason: `--collect-all` files are data, and data files carry no permission bits. The new flag
+  resolves the binary the SDK would actually spawn — via the same `resolve_cli` the app calls, so a green
+  check and a working launch cannot disagree — prints it, and exits **1** when nothing resolves, **2**
+  when something resolved and would not run. It needs no credentials and asserts nothing about them,
+  because a runner has no login and a check that demanded one could not run there. Exiting non-zero does
+  not contradict [`../6-deployment/startup.md`](../6-deployment/startup.md) § *Engine Health in the
+  Overlay*, which governs the *launch* path; a diagnostic that cannot fail reports nothing.
+
+  **A container, because a runner is not a fresh machine.** Phase 7's criterion is "a fresh machine can
+  install and run without a manual `npm i -g @anthropic-ai/claude-code`", and the runner has Node,
+  Python, a uv environment and the repo. The Linux leg now runs the artefact in `ubuntu:24.04` with
+  `claude`, `node`, `npm` and `python3` asserted absent *first* — a check that could pass by finding a
+  system engine is not a check. Verified locally against a real 237 MiB build: the container populated
+  the user config directory on first run, resolved `_MEI*/claude_agent_sdk/_bundled/claude`, and got
+  `2.1.229` out of it. Bonus coverage nobody planned — that first-run config population is a packaging
+  invariant that had never been watched happening on a machine that had never run the app.
+
+  **The find: the release binary could not fail.** `src/aic_dc/__main__.py` is the script PyInstaller
+  builds from, and it called `main()` and discarded the return value. Every exit code the CLI computed
+  was therefore invisible to a shell, so the CI step whose entire output is an exit status would have
+  passed whether or not the artefact had a working engine. Confirmed both ways on the rebuilt artefact:
+  a bad `cli_path` in a container returned 0 before the one-line fix and 1 after it. **This is the second
+  inert check in one phase** — § A2 (a)'s `--collect-all` for uninstalled packages was the first — and
+  both were found by running the thing, not by reading it. The pattern is worth naming: a verification
+  step is code, and untested code does not work.
+
+  **The wheel carries the webapp.** `_find_webapp_dist`'s third priority is installed package data at
+  `aic_dc/webapp_dist`, and nothing had ever put anything there, so pip installs fell through to the
+  GitHub Pages fallback for no visible reason. The include is conditional via `hatch_build.py` rather
+  than a declarative `force-include`, which fails the build when `webapp/dist` is missing — and it is
+  missing in every dev checkout until someone builds a frontend they may not be working on. That would
+  have turned `uv sync`, the first command in the contributing path, into an error. The residual risk is
+  a release built without the Vite step shipping a silently webapp-less wheel, so CI asserts on the
+  built wheel instead of trusting the ordering of its own steps. Both branches tested: wheel with the
+  webapp (13 entries), wheel without (builds clean, backend only), and an editable install with the
+  webapp present.
+
 - **A tool card says when it was invoked, and counts up while it hasn't answered** — built 2026-08-27
   from § Known issues: *"a time chip for when the particular mcp task was invoked. This allows me to see
   if the task has stalled."*
