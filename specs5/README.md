@@ -18,10 +18,11 @@ file are each cheaper than either phase.
 predated the conversion: it gated the build on a `dev4-*` head branch, named packages deleted in phase 3
 while omitting the whole `claude_code` engine, and never collected the SDK's 296.76 MiB `claude` binary
 although [`6-deployment/build.md`](6-deployment/build.md#the-engine-is-not-bundleable) requires it. None of
-that failed a build — PyInstaller only warns — so it was quietly shipping. The workflow is now rewritten and
-[`plan/risks.md`](plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels) § R-7 is decided.
-`master` needed no generating; the branch exists and merges clean. What remains is a build that has run, the
-merge, and the fresh-machine install test — `next.md` § A2.
+that failed a build — PyInstaller only warns — so it was quietly shipping. The workflow is now rewritten,
+proven locally on Linux, and [`plan/risks.md`](plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels)
+§ R-7 is decided. `master` needed no generating and has since been merged, but as a direct push rather than a
+pull request — which this workflow ignores by design, so no build has run on GitHub yet. What remains is that
+run, and the fresh-machine install test — `next.md` § A2.
 
 **Then phase 8 — index freshness after `Bash`.** A `sed -i` or a `git checkout` changes files no index
 hears about until the next full build, so the four index-backed MCP tools answer from a stale picture

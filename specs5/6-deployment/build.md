@@ -108,7 +108,10 @@ follow, and they pull in opposite directions:
   installs its own platform's engine without the build having to arrange it. Confirm `uv.lock` resolves
   wheels for every matrix platform before relying on this — `--frozen` will not fetch one that was never
   locked.
-- **Collecting it adds ~297 MiB to every artefact.** That is the cost side of
+- **Collecting it adds ~297 MiB to every artefact — but not to every download.** A Linux `--onefile` build
+  with the engine collected measures **237 MiB** (measured 2026-08-27), because PyInstaller compresses the
+  archive; the ~297 MiB reappears in the extraction directory at first run. Budget both numbers: the smaller
+  one is what users fetch, the larger one is what their disk holds. That is the cost side of
   [`../plan/risks.md` § R-7](../plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels), and the
   reason the choice stays a choice rather than a default: a self-sufficient binary at ~300 MiB+, or a small
   one that requires a `claude` on `PATH` and says so loudly when there is none.

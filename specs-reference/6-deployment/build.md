@@ -83,7 +83,8 @@ hidden imports. The model registry and the BPE encoding tables were collected so
 provider and count tokens, and it does neither now — the engine resolves the model and reports its own token
 accounting; the content extractor went with URL fetching. Note that a `--collect-all` naming a package that
 is no longer installed **only warns** (`collect_data_files - skipping data collection for module 'x' as it
-is not a package`) and returns empty lists — verified 2026-08-27 against PyInstaller 6.22.2. Stale entries
+is not a package`) and returns empty lists — verified 2026-08-27 against PyInstaller 6.22.2, an ephemeral
+probe environment rather than the 6.21.0 that `uv.lock` pins. Stale entries
 therefore cost nothing and announce nothing, which is why they survived three phases in the workflow YAML.
 
 `claude_agent_sdk`'s collection has a sharper failure mode than the others, and it is worth spelling out
@@ -277,6 +278,12 @@ executable, x86-64, dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2,
 311,175,440 bytes (296.76 MiB). No Node runtime is involved, and collecting it *does* make the binary
 self-sufficient on the platform it was built for.
 
+**The download is smaller than the engine.** A full Linux `--onefile` build with CI's exact flags produced a
+237 MiB `dist/aic-dc-linux` (measured 2026-08-27, PyInstaller 6.21.0, Python 3.14.2) — the CArchive is
+zlib-compressed, so a 296.76 MiB engine plus the entire Python dependency set lands under 240 MiB on the
+wire. The uncompressed footprint reappears in the extraction directory at every launch, which is the number
+that matters for disk and for first-run latency, not for release-asset size.
+
 The wheel is platform-tagged accordingly — `Tag: py3-none-manylinux_2_17_x86_64`, with
 `Root-Is-Purelib: true` — so a per-platform build matrix inherits per-platform engines from whichever
 wheel each runner resolves. Two things follow for the build:
@@ -293,6 +300,13 @@ the SDK spawns it. Measured 2026-08-27 with PyInstaller 6.22.2 (`os.access(path,
 `stat.S_IMODE` → `0o700`, from inside a onefile build carrying an executable data file). No runtime `chmod`
 is needed. Re-check if a PyInstaller major version changes extraction; the failure mode would be an engine
 that exists and cannot be spawned.
+
+**One gap in that measurement, stated rather than glossed:** it was taken in an ephemeral environment running
+PyInstaller **6.22.2**, while `uv.lock` pins **6.21.0** — which is what CI and the local release build
+actually use. The release build confirms the engine reaches the archive under 6.21.0; it does not re-confirm
+the extraction mode, because `aic-dc --version` prints the app's version without spawning an engine. The
+remaining proof is the same one R-7's runtime tripwire needs: launch a collected binary on a machine with no
+`claude` on `PATH` and watch it resolve the bundled copy.
 
 The packaging contract stays deliberately partial regardless of the choice: bundle what we can, resolve at
 startup, and diagnose precisely when resolution fails. `EngineHealth` distinguishes "no `claude` found and
