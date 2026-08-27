@@ -30,11 +30,12 @@ this branch, the build command it would run describes an engine deleted three ph
 mentions the CLI the SDK ships even though its own spec requires collecting it. § A2 is the checklist, in
 the order the steps unblock each other.
 
-**Where it stands after 2026-08-27:** the workflow is rewritten and R-7 is decided (collect the bundle —
-§ A2 (c)), **`master` never needed generating** — the branch exists on `origin`, four months stale, and a PR
-from `dev5-claude-code` merges into it clean with nothing to reconcile. What remains is a build that has
-actually run, the merge, and the fresh-machine test that is the real exit criterion (§ A2 (d)). Nothing in
-this file is finished by a green matrix.
+**Where it stands after 2026-08-27:** the workflow is rewritten, R-7 is decided (collect the bundle —
+§ A2 (c)), the command has been proven locally on Linux, and **`master` never needed generating** — the
+branch already existed and has since been merged, so its tree is now identical to `dev5-claude-code`. What
+remains is a build that has run **on GitHub** — which the merge did not cause, because it arrived as a direct
+push rather than a pull request (§ A2 (b)) — and the fresh-machine test that is the real exit criterion
+(§ A2 (d)). Nothing in this file is finished by a green matrix.
 
 This is not a reversal of **"packaging last but not never"**
 ([`plan/README.md`](plan/README.md) § *Ordering constraints that are not obvious*). That constraint is
@@ -89,7 +90,17 @@ list that must be edited in lockstep with the tree is a list that will not be. T
 comment was stale in the same way — it justified uv over pip by citing litellm's `Requires-Python` cap —
 and now gives the reason that survives, lockfile reproducibility.
 
-**(b) The trigger, and `master`.** ✅ *Gate fixed; the run and the merge are outstanding.* The workflow
+**The rewritten command was then run locally with CI's exact flags** (2026-08-27, PyInstaller 6.21.0 as
+`uv.lock` pins it, Python 3.14.2, an isolated `UV_PROJECT_ENVIRONMENT` so the repo's `.venv` was untouched),
+followed by the workflow's verification block verbatim. It passed: `claude_agent_sdk/_bundled/claude` present
+in the archive, no missing-module warnings for `aic_dc` or `jrpc_oo`, and `./dist/aic-dc-linux --version`
+answering. **The artefact is 237 MiB, not the ~297 the engine occupies on disk** — PyInstaller compresses the
+CArchive — so R-7's cost is smaller on the wire than the raw figure suggests and larger after extraction.
+This is the Linux third of a matrix build; Windows and macOS remain unproven, and a local build cannot
+exercise `actions/setup-uv`, `npm ci`, or the release job at all.
+
+**(b) The trigger, and `master`.** ✅ *Gate fixed; `master` merged. A run on GitHub is outstanding — see the
+note at the end of this item, because the way the merge happened means nothing fired.* The workflow
 fires on a pull request **closed into `master`**, and gated the build job on the head branch starting with
 `dev4-`. That gate is gone: the condition is now simply that the PR merged, because the merge target is the
 release decision and a branch-name pattern is a naming convention that outlives its generation by exactly
@@ -110,6 +121,26 @@ one. The branch situation is better than it looks — verified 2026-08-27:
   and it is a loose end of its own: the repository's idea of "main" and this suite's are different branches.
 - `origin/master` also carries an **older, unrelated** `release.yml` — a push-triggered "Build and Release"
   from the dev3 era. The merge replaces it, which is correct, but expect it in the diff.
+
+**What then happened (2026-08-27, later the same day): `master` was merged by direct push, and so nothing
+ran.** `origin/master` is now `bd4f62d` ("Merge branch 'dev5-claude-code'"), and
+`git diff --stat dev5-claude-code origin/master` is empty — the trees are identical, so the merge took this
+branch's `release.yml` whole and there is nothing left to compare. **But a local merge pushed to `master` is
+not a closed pull request**, and this workflow deliberately ignores direct pushes, so no build ran and no
+release exists. That is the gate working as specified, not a fault; it is worth recording because the
+symptom — a merged `master` with an empty Actions tab — looks like a broken workflow and is not one.
+
+Two loose ends follow from it, and the second is the reason to fix the first:
+
+- **The first release now needs a manual dispatch**, because `master` and `dev5-claude-code` are identical
+  and there is no longer a pull request to open. A dispatch with no inputs builds and verifies without
+  publishing (`publish_release` defaults to false); publishing is the same dispatch with it set true.
+- **`master` should probably become the default branch.** `workflow_dispatch` requires the workflow on the
+  default branch, which is still `dev4-membrane` — and the copy there is the *pre-conversion* one, whose
+  `workflow_dispatch:` takes no inputs at all. So the dispatch button exists, but which definition supplies
+  `publish_release` when a non-default ref is selected is a GitHub implementation detail this project should
+  not be relying on. Making the release branch the default branch removes the question. It is a repository
+  setting, not a change to any file here.
 
 **(c) R-7's distribution question.** ✅ *Decided: collect the bundle* — recorded in
 [`plan/risks.md`](plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels) § R-7 with the reasoning,
