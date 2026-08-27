@@ -2,11 +2,12 @@
 
 How the webapp and backend are packaged for distribution. The webapp is a Vite-built SPA served by a built-in HTTP static file server; the backend is a Python package optionally packaged as a PyInstaller single-file binary. Source installs can use a fallback served from GitHub Pages.
 
-**The single-file binary is no longer self-sufficient**, and that is the headline of this file after the
-conversion. AIC⚡DC used to contain its own inference client: bundle `litellm`, ship the binary, and a user
-with an API key had a working application. Now the engine is a separate Node process the user must have —
-the `claude` CLI. No amount of PyInstaller flags changes that, so the packaging story becomes "bundle
-everything we can and diagnose the one thing we cannot" (see
+**The single-file binary's self-sufficiency now has a price tag**, and that is the headline of this file
+after the conversion. AIC⚡DC used to contain its own inference client: bundle `litellm`, ship the binary,
+and a user with an API key had a working application. Now the engine is a separate process this project
+does not build — the `claude` CLI — and the only copy we can ship is the one the SDK wheel carries, which
+is 296.76 MiB. So the packaging story is "bundle everything we can, decide deliberately about the large
+thing we could, and diagnose its absence either way" (see
 [§ The Engine Is Not Bundleable](#the-engine-is-not-bundleable)).
 
 ## Webapp Bundling
@@ -64,9 +65,8 @@ Per-platform single-file binaries built in CI:
 
 ### Dependency Collection
 
-- `--collect-all` for packages with data files — the agent SDK, tree-sitter core and per-language grammars, content extraction library
-- `--hidden-import` for every aic_dc submodule and extractor (static analysis misses dynamically imported modules and modules only referenced via class registration)
-- `--hidden-import` for the RPC library
+- `--collect-all` for packages with data files — the agent SDK, tree-sitter core and per-language grammars, the document-conversion extra
+- **Whole-package collection, not an enumerated module list**, for our own package and the RPC library. Static analysis misses modules registered by class name or imported by string, and a hand-listed set drifts silently against the tree — a hidden import naming a deleted module only warns. Walk the package instead
 - Runtime behavior verified in CI on each platform
 
 Removed from collection: the LLM provider library and its provider SDKs, and the tokenizer with its
@@ -80,22 +80,45 @@ matters: a bundled `claude` CLI under `claude_agent_sdk/_bundled/`. See below.
 
 ### The Engine Is Not Bundleable
 
-The `claude` CLI is a Node application. PyInstaller bundles Python; it cannot make a Node runtime appear,
-and shipping one would mean carrying a second language runtime plus a CLI whose release cadence is not
-ours. So the binary ships without an engine and resolves one at startup, in the SDK transport's order:
+PyInstaller bundles Python; it cannot build the `claude` CLI, whose release cadence is not ours. So the
+binary carries no engine of its own and resolves one at startup, in the SDK transport's order:
 
 1. An explicitly configured `cli_path` from `engine.json`
-2. `claude` on `PATH`
-3. The SDK's own bundled copy under `claude_agent_sdk/_bundled/claude`
+2. The SDK's own bundled copy under `claude_agent_sdk/_bundled/claude`
+3. `claude` on `PATH`
 
-Option 3 is the reason for `--collect-all` on the SDK: the bundled copy is package data that a plain
-import collection would drop, and dropping it removes the fallback that makes a fresh install work at all.
-It still needs a Node runtime present, so it is a fallback rather than a solution.
+**The order of 2 and 3 is not the intuitive one, and an earlier version of this list had it backwards.**
+`SubprocessCLITransport._find_cli` checks the bundled copy *first* and only falls back to `shutil.which`
+(verified 2026-08-27 against `claude-agent-sdk` 0.2.137). A machine with a newer system CLI still runs the
+wheel's copy unless `engine.json`'s `cli_path` says otherwise — which is why `cli_path` exists and why
+startup reports which binary it resolved rather than assuming. `EngineHealth` carries the answer;
+`claude_code/health.py` § `_sdk_find_cli` carries the same warning next to the code.
 
-**Build-time verification is required.** A CI smoke test must assert that the bundled CLI path exists
-inside the built binary and that `--version` runs. Both are cheap, and both fail in the specific way this
-project has been bitten by before: a data file silently absent from a bundle, producing a runtime error on
-a user's machine that no build-time test caught.
+Option 2 is the reason for `--collect-all` on the SDK: the bundled copy is package data that a plain import
+collection would drop, and dropping it turns the default resolution into a `PATH` search.
+
+**What that copy actually is, verified against the installed wheel** (`claude-agent-sdk` 0.2.137, CLI pin
+2.1.229, checked 2026-08-27): a **single native executable, not a Node script** — on Linux an ELF x86-64
+binary dynamically linked against glibc, 296.76 MiB. It needs no Node runtime, which an earlier version of
+this section said it did; on its own platform it is a complete engine, not a half-measure. Two consequences
+follow, and they pull in opposite directions:
+
+- **Per-platform-ness is inherited, not invented.** The wheel is platform-tagged
+  (`py3-none-manylinux_2_17_x86_64` for the Linux build), so each runner in a per-platform build matrix
+  installs its own platform's engine without the build having to arrange it. Confirm `uv.lock` resolves
+  wheels for every matrix platform before relying on this — `--frozen` will not fetch one that was never
+  locked.
+- **Collecting it adds ~297 MiB to every artefact.** That is the cost side of
+  [`../plan/risks.md` § R-7](../plan/risks.md#r-7--bundled-cli-size-and-platform-specific-wheels), and the
+  reason the choice stays a choice rather than a default: a self-sufficient binary at ~300 MiB+, or a small
+  one that requires a `claude` on `PATH` and says so loudly when there is none.
+
+**Build-time verification is required, and it landed with phase 7 (2026-08-27).** A CI smoke test asserts
+that the bundled CLI is in the archive the build produced and that the binary answers `--version`. Both are
+cheap, and both fail in the specific way this project has been bitten by before: a data file silently absent
+from a bundle, producing a runtime error on a user's machine that no build-time test caught. **The
+collection flags cannot police themselves** — a `--collect-all` for a package that is not installed only
+warns, so the assertion has to look at what the build emitted rather than at what it was asked to emit.
 
 Two consequences worth stating rather than discovering:
 
@@ -159,9 +182,9 @@ For dev and preview modes only (webapp development, not normal usage):
 - Webapp bundle is always self-contained — no absolute paths, no external CDN dependencies for core features
 - Base path is always relative so the bundle can serve from any origin
 - PyInstaller binary contains every **Python-side** requirement — config defaults, webapp bundle, version file, all Python dependencies, and the SDK's bundled CLI as package data
-- The binary does **not** contain a Node runtime and does not pretend to. A missing engine degrades to a working editor with a health banner, never a failed launch ([startup.md](startup.md#engine-health-in-the-overlay))
+- The binary never builds or substitutes for an engine of its own. Whether or not the SDK's bundled copy is collected, a missing engine degrades to a working editor with a health banner, never a failed launch ([startup.md](startup.md#engine-health-in-the-overlay))
 - CI asserts the SDK's bundled CLI path is present in the built binary before the release is published
-- Hidden imports cover every module — no "module not found" at runtime
+- Module collection covers every submodule of our own package without naming any of them — no "module not found" at runtime, and no list to keep in step with the tree
 - SPA fallback ensures client-side routing works when users bookmark deep links
 - Webapp location priority always tried in order; first hit wins
 - Broken-pipe errors during client disconnect never surface as tracebacks

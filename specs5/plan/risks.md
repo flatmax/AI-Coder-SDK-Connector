@@ -161,7 +161,7 @@ shows a real figure or shows "subscription" with the usage figures.
 **Severity: high for release, zero for development. Likelihood: certain.**
 
 The `claude-agent-sdk` wheel bundles a ~295 MB platform-specific `claude` binary, making it
-`manylinux_2_17_x86_64` rather than pure Python.
+`manylinux_2_17_x86_64` rather than pure Python. (Measured at 296.76 MiB — see § *Status* below.)
 
 **Why it bites:** AIC⚡DC currently ships a modest pure-Python package and a PyInstaller bundle.
 Both assumptions break. Discovered at release time, this blocks a release.
@@ -179,15 +179,52 @@ Startup logs which CLI was selected and its version, so support questions are an
 **Tripwire:** a fresh-container install test that fails loudly with an actionable message when no
 CLI is resolvable, rather than failing at the first prompt.
 
+**Status (2026-08-27), with phase 7 now active — this risk landed as predicted, at release time.**
+Measured against the installed wheel (`claude-agent-sdk` 0.2.137, CLI pin 2.1.229): `_bundled/claude` is
+**296.76 MiB** (311,175,440 bytes), and it is a **native ELF x86-64 executable**, not the Node application
+the deployment specs described until today. Three consequences for the options above:
+
+- **Option 2 is mostly inherited, not built.** The wheel is tagged `py3-none-manylinux_2_17_x86_64`, so
+  each runner in the existing per-platform PyInstaller matrix resolves its own platform's engine. The work
+  it reduces to is confirming `uv.lock` covers every matrix target, since `--frozen` installs no wheel that
+  was never locked.
+- **Option 3 works standalone.** No Node runtime is needed, so embedding produces a genuinely
+  self-sufficient artefact — which makes this a straight size trade against option 1 rather than the
+  half-measure it looked like.
+**Decision (2026-08-27): option 3 — collect the bundle.** Taken during phase 7 and implemented in
+`.github/workflows/release.yml`, which now passes `--collect-all=claude_agent_sdk` and fails the build if
+`_bundled` is absent from the onefile archive. Three reasons it beat option 1 on the facts above rather than
+on preference:
+
+- **It is what the SDK already does.** Resolution prefers the bundled copy over `PATH` (see R-8's
+  correction), so option 1 would mean shipping a binary whose first-choice engine had been deliberately
+  removed — a smaller artefact whose failure mode is a `PATH` search the user did not ask for.
+- **It costs a download, not a decision tree.** ~95 MB compressed per platform in the wheel; a
+  self-sufficient artefact needs no prerequisite documented, no install instruction to get wrong, and no
+  support question about which `claude` was picked.
+- **Option 2 came free.** `uv.lock` already pins all five SDK wheels — macOS arm64 and x86_64, Linux x86_64
+  and aarch64, Windows amd64 — so each matrix runner installs its own platform's engine under `--frozen`
+  (verified 2026-08-27).
+
+Users who want their own CLI keep it via `engine.json`'s `cli_path`, which bypasses discovery entirely.
+**Still outstanding: the tripwire's runtime half** — the build-time assertion landed, the fresh-container
+install test has not ([`../next.md`](../next.md) § A2).
+
 ---
 
 ## R-8 — Version skew between the SDK and the system CLI
 
 **Severity: medium. Likelihood: high over time.**
 
-The wheel pins `__cli_version__ = "2.1.229"` and enforces a floor of `2.0.0`, but `_find_cli`
-prefers a CLI on `PATH`. The local machine has 2.1.227. Skew is the normal state, not the
-exception.
+The wheel pins `__cli_version__ = "2.1.229"` and enforces a floor of `2.0.0`, while the resolved CLI
+can be any version. The local machine has 2.1.227. Skew is the normal state, not the exception.
+
+**Correction (2026-08-27):** this paragraph said `_find_cli` prefers a CLI on `PATH`. It does not — it
+returns the SDK's bundled copy first and only falls back to `shutil.which("claude")`
+([`../6-deployment/build.md` § The Engine Is Not Bundleable](../6-deployment/build.md#the-engine-is-not-bundleable)).
+Skew is still the normal state, but it points the other way: a build that collects the bundle pins users to
+the wheel's engine regardless of what they installed themselves, and `engine.json`'s `cli_path` is the only
+way to prefer their copy.
 
 **Mitigation:** startup checks the resolved CLI version, logs it alongside the SDK's pin, and warns
 (not fails) on mismatch. Where a feature we rely on has a known minimum — file checkpointing,

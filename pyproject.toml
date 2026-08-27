@@ -37,8 +37,10 @@ dependencies = [
     # compaction, and session persistence — see specs5/3-engine/. Pulls
     # `mcp` (>=1.29) for the in-process MCP server that exposes AIC-DC's
     # symbol and document indexes to the agent (specs5/plan/decisions.md CC-6).
-    # The `claude` CLI itself is a Node app and is NOT installed by this
-    # dependency; it is resolved at startup (specs5/6-deployment/build.md).
+    # This wheel is platform-tagged and ships a native `claude` binary as
+    # package data (~297 MiB), which the SDK resolves in preference to a
+    # `claude` on PATH; engine.json's cli_path overrides both
+    # (specs5/6-deployment/build.md § The Engine Is Not Bundleable).
     "claude-agent-sdk>=0.2.136",
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",

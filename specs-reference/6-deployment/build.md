@@ -31,7 +31,7 @@ Written to `src/aic_dc/VERSION` at build time. Read by `src/aic_dc/__init__.py` 
 Full command as run in CI per platform:
 
 ```bash
-pyinstaller --onefile --name aic-dc-{platform} \
+uv run --no-sync pyinstaller --onefile --name aic-dc-{platform} \
     --add-data "src/aic_dc/VERSION{sep}aic_dc" \
     --add-data "src/aic_dc/config{sep}aic_dc/config" \
     --add-data "webapp/dist{sep}aic_dc/webapp_dist" \
@@ -42,14 +42,19 @@ pyinstaller --onefile --name aic-dc-{platform} \
     --collect-all=tree_sitter_typescript \
     --collect-all=tree_sitter_c \
     --collect-all=tree_sitter_cpp \
-    --collect-all=trafilatura \
-    --hidden-import=aic_dc \
-    --hidden-import=aic_dc.collab \
-    --hidden-import=aic_dc.doc_convert \
-    --hidden-import=aic_dc.base_cache \
-    --hidden-import=jrpc_oo \
+    --collect-all=markitdown \
+    --collect-all=fitz \
+    --collect-all=pptx \
+    --collect-all=openpyxl \
+    --collect-submodules=aic_dc \
+    --collect-submodules=jrpc_oo \
     src/aic_dc/__main__.py
 ```
+
+`--no-sync` keeps the environment the preceding `uv sync --no-dev --extra build --extra docs-convert
+--frozen` produced; without it `uv run` re-syncs to the default groups, re-adding dev and dropping the
+extras. The four `markitdown`/`fitz`/`pptx`/`openpyxl` entries are the `docs-convert` extra; `docs-enrich`
+is deliberately absent (see `specs5/6-deployment/packaging.md`).
 
 Where:
 
@@ -69,34 +74,43 @@ Packages that ship data files PyInstaller's static analysis can't discover autom
 | `tree_sitter_typescript` | Compiled grammar (exposes both `language_typescript` and `language_tsx`) |
 | `tree_sitter_c` | Compiled grammar |
 | `tree_sitter_cpp` | Compiled grammar |
-| `trafilatura` | Content extraction data files (stopwords, language detection models) |
+| `markitdown`, `fitz`, `pptx`, `openpyxl` | `docs-convert` extra — format converters with their own data files |
 
 Missing any of these produces a runtime `ModuleNotFoundError` (for the package itself) or a silent data-file-not-found failure (grammars that fail to load silently leave the language unavailable).
 
-`litellm`, `tiktoken`, and `tiktoken_ext` are removed. The model registry and the BPE encoding tables were
-collected so this process could pick a provider and count tokens, and it does neither now — the engine
-resolves the model and reports its own token accounting.
+`litellm`, `tiktoken`, `tiktoken_ext` and `trafilatura` are removed, along with the `boto3`/`botocore`
+hidden imports. The model registry and the BPE encoding tables were collected so this process could pick a
+provider and count tokens, and it does neither now — the engine resolves the model and reports its own token
+accounting; the content extractor went with URL fetching. Note that a `--collect-all` naming a package that
+is no longer installed **only warns** (`collect_data_files - skipping data collection for module 'x' as it
+is not a package`) and returns empty lists — verified 2026-08-27 against PyInstaller 6.22.2. Stale entries
+therefore cost nothing and announce nothing, which is why they survived three phases in the workflow YAML.
 
 `claude_agent_sdk`'s collection has a sharper failure mode than the others, and it is worth spelling out
 because it is the one a build-time test must cover. A dropped tree-sitter grammar silently removes a
-language from the symbol index: bad, but the app still runs. A dropped `_bundled/claude` removes the third
-and last entry in the CLI resolution chain, so a user whose `PATH` has no `claude` gets an application that
-starts, renders, indexes — and cannot hold a conversation. CI asserts the path exists inside the built
-binary and that the file is executable.
+language from the symbol index: bad, but the app still runs. A dropped `_bundled/claude` removes the
+**preferred** entry in the CLI resolution chain — the SDK checks it before `PATH` — so every user silently
+falls back to a `PATH` search, and one without `claude` installed gets an application that starts, renders,
+indexes and cannot hold a conversation. CI asserts `_bundled` appears in the onefile PKG table of contents
+(`build/*/PKG-*.toc`) and that the built binary answers `--version`.
 
-### `--hidden-import` module list
+### `--collect-submodules` instead of a hidden-import list
 
-Modules PyInstaller's static analyzer misses because they're imported dynamically or only referenced by string name:
+Modules PyInstaller's static analyzer misses because they're registered dynamically via `add_class()` or
+referenced only by string name — `aic_dc.collab`, `aic_dc.doc_convert`, the whole
+`aic_dc.claude_code` package the RPC layer registers by class name, `aic_dc.base_cache` behind its
+subclasses, and jrpc-oo's string-imported submodules.
 
-| Module | Why missed |
-|---|---|
-| `aic_dc` | Package root — static analyzer sees only the entry point's direct imports |
-| `aic_dc.collab` | Registered via `add_class()` dynamically; not imported directly by `main.py` |
-| `aic_dc.doc_convert` | Same — registered via `add_class()` |
-| `aic_dc.base_cache` | Abstract base; concrete subclasses import it, but analyzer may miss the chain |
-| `jrpc_oo` | Some submodules imported by string in the jrpc-oo library itself |
+**These are covered by walking the packages, not by listing them.** `--collect-submodules=aic_dc` resolved
+82 modules and `--collect-submodules=jrpc_oo` 8, verified 2026-08-27 against the tree at HEAD.
 
-The full workflow YAML (`.github/workflows/release.yml`) has additional hidden imports for every `aic_dc.*` submodule — the list in this twin is the minimal set observed to work; the full list is belt-and-braces. Adding new submodules during development typically requires adding a corresponding `--hidden-import` entry before the next release build.
+The workflow used to enumerate every `aic_dc` submodule by hand, and the list drifted badly: by 2026-08-27
+it named fifteen modules deleted in conversion phase 3 (`context_manager`, `edit_pipeline`,
+`edit_protocol`, `file_context`, `history_compactor`, `history_store`, `llm_service`, `stability_tracker`,
+`token_counter`, six `url_service` submodules) and omitted all nineteen `aic_dc.claude_code.*` modules plus
+the `repo` and `doc_convert` packages' submodules. **A `--hidden-import` naming a module that does not exist
+is a warning in `build/*/warn-*.txt`, not an error**, so nothing failed and nothing said so. Prefer the
+walk; a list that must be edited in lockstep with the tree is a list that will not be.
 
 ### Vite optimizeDeps exclude
 
@@ -254,18 +268,36 @@ export default defineConfig({
 
 The `tree_sitter_typescript` pip package exposes `language_typescript()` (for `.ts`) and `language_tsx()` (for `.tsx`) but **not** `language()`. PyInstaller's `--collect-all=tree_sitter_typescript` picks up both grammars as data files, but the loader code must probe for the function names individually. See `specs-reference/2-indexing/symbol-index.md` § dependency quirks for the loader pattern.
 
-### The bundled CLI still needs a Node runtime
+### The bundled CLI is a native, platform-specific executable
 
-`claude_agent_sdk/_bundled/claude` is a Node application, so collecting it does not make the binary
-self-sufficient — it makes the binary carry an engine that runs *if* Node is installed. PyInstaller cannot
-bundle a Node runtime, and doing so by hand would mean shipping a second language runtime and tracking a
-release cadence that is not ours.
+Corrected 2026-08-27 against the installed wheel; this section previously said it was a Node application
+that needed a Node runtime. `claude-agent-sdk` 0.2.137 (CLI pin 2.1.229) ships
+`claude_agent_sdk/_bundled/claude` as a **single native executable** — on Linux, `ELF 64-bit LSB
+executable, x86-64, dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2, for GNU/Linux 3.2.0`,
+311,175,440 bytes (296.76 MiB). No Node runtime is involved, and collecting it *does* make the binary
+self-sufficient on the platform it was built for.
 
-So the packaging contract is deliberately partial: bundle what we can, resolve at startup, and diagnose
-precisely when resolution fails. `EngineHealth` distinguishes "no `claude` found on `PATH` and no runtime
-for the bundled copy" from "found but unauthenticated" from "found but version-skewed", because the user
-action differs for each and a single "engine unavailable" message would send them looking in the wrong
-place.
+The wheel is platform-tagged accordingly — `Tag: py3-none-manylinux_2_17_x86_64`, with
+`Root-Is-Purelib: true` — so a per-platform build matrix inherits per-platform engines from whichever
+wheel each runner resolves. Two things follow for the build:
+
+- `uv sync --frozen` will only install a wheel that `uv.lock` already resolved for that platform. Verify
+  the lock covers every matrix target before treating option 3 as available off-Linux.
+- The `manylinux_2_17` floor and the dynamic link mean the host glibc matters. A binary built on an older
+  runner keeps working on newer distros; the reverse is not guaranteed.
+
+**The executable bit survives onefile extraction.** `--collect-all` classifies `_bundled/claude` as a data
+file, and data files do not carry permissions through a bundle — but PyInstaller's onefile bootloader
+extracts *everything* to its temp directory with mode `0o700`, so the collected engine is executable when
+the SDK spawns it. Measured 2026-08-27 with PyInstaller 6.22.2 (`os.access(path, os.X_OK)` → `True`,
+`stat.S_IMODE` → `0o700`, from inside a onefile build carrying an executable data file). No runtime `chmod`
+is needed. Re-check if a PyInstaller major version changes extraction; the failure mode would be an engine
+that exists and cannot be spawned.
+
+The packaging contract stays deliberately partial regardless of the choice: bundle what we can, resolve at
+startup, and diagnose precisely when resolution fails. `EngineHealth` distinguishes "no `claude` found and
+no bundled copy" from "found but unauthenticated" from "found but version-skewed", because the user action
+differs for each and a single "engine unavailable" message would send them looking in the wrong place.
 
 ### What adding the SDK actually pulls in
 

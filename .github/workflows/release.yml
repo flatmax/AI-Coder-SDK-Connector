@@ -1,10 +1,17 @@
-# Release — PyInstaller binaries on merge from a dev4-* branch → master.
+# Release — PyInstaller binaries on any merge into master.
 #
-# Triggered automatically when a pull request from a `dev4-*`
-# development branch (e.g. dev4-agent, dev4-membrane) is merged
-# into `master`. Also exposes `workflow_dispatch` for manual
-# reruns. Never triggers on direct pushes to master or merges
-# from other (non-dev4-) branches.
+# Triggered automatically when a pull request is merged into
+# `master`, whatever the source branch is called. The previous
+# version of this gate matched head branches starting with
+# `dev4-`, which silently disabled releases the moment the active
+# development line became `dev5-claude-code`. Branch names are a
+# naming convention; `master` is the release decision, so the
+# merge target is the only gate. Never triggers on direct pushes.
+#
+# `workflow_dispatch` builds without publishing by default —
+# set `publish_release: true` to also cut a GitHub Release. A
+# manual run is the way to prove the build command works without
+# putting an artefact in front of users.
 #
 # Builds per-platform single-file binaries in parallel, then
 # attaches all artefacts to a GitHub Release. The release tag on
@@ -17,6 +24,16 @@
 # Written to src/aic_dc/VERSION before PyInstaller runs so the
 # baked binary self-identifies. Dev checkouts leave VERSION as
 # the literal "dev".
+#
+# The engine: `claude_agent_sdk` ships a native `claude` binary as
+# package data (296.76 MiB at 0.2.137), and the wheel is
+# platform-tagged, so each runner collects its own platform's
+# engine. The SDK resolves that copy *before* a `claude` on PATH
+# — see specs5/6-deployment/build.md § The Engine Is Not
+# Bundleable — so a build that drops it silently demotes every
+# user to a PATH search, and a machine without `claude` gets a
+# binary that starts, renders and indexes but cannot hold a
+# conversation. Hence the verification step below.
 #
 # Docs extras split into two groups in pyproject.toml:
 #   [docs-convert] — markitdown, pymupdf, python-pptx, openpyxl
@@ -34,6 +51,11 @@ on:
     types: [closed]
     branches: [master]
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish a GitHub Release from this manual run"
+        type: boolean
+        default: false
 
 permissions:
   contents: write  # needed to create releases and attach artefacts
@@ -41,16 +63,12 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.label }}
-    # Gate: PR closed events only trigger the build when the PR
-    # was actually merged (not just closed) AND came from a dev4-*
-    # development branch (dev4-agent, dev4-membrane, ...). The
-    # startsWith match means renaming the active dev branch no
-    # longer silently disables releases.
-    # workflow_dispatch bypasses the guard (manual trigger).
+    # Gate: PR closed events only build when the PR was actually
+    # merged, not merely closed. No head-branch pattern — see the
+    # header comment. workflow_dispatch always builds.
     if: |
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       startsWith(github.event.pull_request.head.ref, 'dev4-'))
+      github.event.pull_request.merged == true
     strategy:
       fail-fast: false
       matrix:
@@ -77,12 +95,13 @@ jobs:
           # commit's full SHA, not a shallow stub.
           fetch-depth: 0
 
-      # uv (not pip): pip strictly enforces litellm's declared
-      # `Requires-Python <3.14` and refuses to install 1.88 on
-      # Python 3.14, whereas uv treats that upper cap as advisory.
-      # uv also installs from uv.lock with `--frozen`, so release
-      # builds are reproducible. Pinned to the uv version that
-      # produced the lock.
+      # uv (not pip): uv installs from uv.lock with `--frozen`, so
+      # release builds are reproducible and every platform's binary
+      # is built from the same resolved versions. Pinned to the uv
+      # version that produced the lock. (The original reason for
+      # choosing uv here — litellm's `Requires-Python <3.14` cap,
+      # which pip enforced and uv treated as advisory — left with
+      # litellm in conversion phase 3.)
       - uses: astral-sh/setup-uv@v5
         with:
           version: "0.11.16"
@@ -124,10 +143,20 @@ jobs:
       - name: Install project with build + docs-convert extras
         run: uv sync --no-dev --extra build --extra docs-convert --frozen
 
-      # PyInstaller command. Hidden-imports list enumerates every
-      # aic_dc submodule; PyInstaller's static analysis misses
-      # modules registered dynamically via add_class() or imported
-      # by string. Belt-and-braces — extra entries cost nothing.
+      # PyInstaller command.
+      #
+      # --collect-submodules=aic_dc replaces what used to be a
+      # hand-maintained list of every aic_dc submodule. That list
+      # drifted: by 2026-08-27 it named fifteen modules deleted in
+      # conversion phase 3 and none of the nineteen in
+      # aic_dc.claude_code — the engine itself. A missing
+      # --hidden-import only warns, so the drift was invisible.
+      # Walking the package is the same belt-and-braces intent
+      # without a list to forget.
+      #
+      # --collect-all=claude_agent_sdk is not optional: the SDK's
+      # `claude` binary lives at claude_agent_sdk/_bundled/ as
+      # package data, which a plain import collection drops.
       - name: Build PyInstaller binary
         shell: bash
         run: |
@@ -140,79 +169,53 @@ jobs:
             --add-data "src/aic_dc/VERSION${SEP}aic_dc" \
             --add-data "src/aic_dc/config${SEP}aic_dc/config" \
             --add-data "webapp/dist${SEP}aic_dc/webapp_dist" \
-            --collect-all=litellm \
-            --collect-all=tiktoken \
-            --collect-all=tiktoken_ext \
+            --collect-all=claude_agent_sdk \
             --collect-all=tree_sitter \
             --collect-all=tree_sitter_python \
             --collect-all=tree_sitter_javascript \
             --collect-all=tree_sitter_typescript \
             --collect-all=tree_sitter_c \
             --collect-all=tree_sitter_cpp \
-            --collect-all=trafilatura \
             --collect-all=markitdown \
             --collect-all=fitz \
             --collect-all=pptx \
             --collect-all=openpyxl \
-            --hidden-import=boto3 \
-            --hidden-import=botocore \
-            --hidden-import=jrpc_oo \
-            --hidden-import=aic_dc \
-            --hidden-import=aic_dc.base_cache \
-            --hidden-import=aic_dc.base_formatter \
-            --hidden-import=aic_dc.cli \
-            --hidden-import=aic_dc.collab \
-            --hidden-import=aic_dc.config \
-            --hidden-import=aic_dc.context_manager \
-            --hidden-import=aic_dc.doc_convert \
-            --hidden-import=aic_dc.edit_pipeline \
-            --hidden-import=aic_dc.edit_protocol \
-            --hidden-import=aic_dc.file_context \
-            --hidden-import=aic_dc.history_compactor \
-            --hidden-import=aic_dc.history_store \
-            --hidden-import=aic_dc.llm_service \
-            --hidden-import=aic_dc.logging_setup \
-            --hidden-import=aic_dc.main \
-            --hidden-import=aic_dc.repo \
-            --hidden-import=aic_dc.rpc \
-            --hidden-import=aic_dc.settings \
-            --hidden-import=aic_dc.stability_tracker \
-            --hidden-import=aic_dc.token_counter \
-            --hidden-import=aic_dc.doc_index \
-            --hidden-import=aic_dc.doc_index.cache \
-            --hidden-import=aic_dc.doc_index.formatter \
-            --hidden-import=aic_dc.doc_index.index \
-            --hidden-import=aic_dc.doc_index.keyword_enricher \
-            --hidden-import=aic_dc.doc_index.models \
-            --hidden-import=aic_dc.doc_index.reference_index \
-            --hidden-import=aic_dc.doc_index.extractors \
-            --hidden-import=aic_dc.doc_index.extractors.base \
-            --hidden-import=aic_dc.doc_index.extractors.markdown \
-            --hidden-import=aic_dc.doc_index.extractors.svg \
-            --hidden-import=aic_dc.doc_index.extractors.svg_geometry \
-            --hidden-import=aic_dc.symbol_index \
-            --hidden-import=aic_dc.symbol_index.cache \
-            --hidden-import=aic_dc.symbol_index.compact_format \
-            --hidden-import=aic_dc.symbol_index.import_resolver \
-            --hidden-import=aic_dc.symbol_index.index \
-            --hidden-import=aic_dc.symbol_index.models \
-            --hidden-import=aic_dc.symbol_index.parser \
-            --hidden-import=aic_dc.symbol_index.reference_index \
-            --hidden-import=aic_dc.symbol_index.extractors \
-            --hidden-import=aic_dc.symbol_index.extractors.base \
-            --hidden-import=aic_dc.symbol_index.extractors.c \
-            --hidden-import=aic_dc.symbol_index.extractors.cpp \
-            --hidden-import=aic_dc.symbol_index.extractors.javascript \
-            --hidden-import=aic_dc.symbol_index.extractors.python \
-            --hidden-import=aic_dc.symbol_index.extractors.typescript \
-            --hidden-import=aic_dc.url_service \
-            --hidden-import=aic_dc.url_service.cache \
-            --hidden-import=aic_dc.url_service.detection \
-            --hidden-import=aic_dc.url_service.fetchers \
-            --hidden-import=aic_dc.url_service.models \
-            --hidden-import=aic_dc.url_service.service \
-            --hidden-import=aic_dc.url_service.summarizer \
+            --collect-submodules=aic_dc \
+            --collect-submodules=jrpc_oo \
             src/aic_dc/__main__.py
+
+      # The build-time half of R-7's tripwire
+      # (specs5/plan/risks.md § R-7). Two assertions, both cheap,
+      # both covering failures that otherwise surface on a user's
+      # machine: that the engine went into the archive, and that
+      # the binary runs at all.
+      - name: Verify the bundled engine and the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          TOC="$(ls build/*/PKG-*.toc 2>/dev/null | head -1 || true)"
+          if [ -z "$TOC" ]; then
+            echo "::error::No PyInstaller PKG TOC under build/ — layout changed, this check needs updating."
+            ls -R build | head -50
+            exit 1
+          fi
+          if ! grep -q "_bundled" "$TOC"; then
+            echo "::error::claude_agent_sdk/_bundled/claude is absent from the onefile archive."
+            echo "It is resolution fallback 3 (specs5/6-deployment/build.md); without it a user"
+            echo "with no 'claude' on PATH gets an app that starts, renders, indexes and cannot"
+            echo "hold a conversation. Check --collect-all=claude_agent_sdk and the warn file:"
+            grep -n "claude_agent_sdk" build/*/warn-*.txt || echo "(no claude_agent_sdk lines in warn file)"
+            exit 1
+          fi
+          echo "Engine present in archive:"
+          grep -o "[^'\"]*_bundled[^'\"]*" "$TOC" | sort -u | head -5
+          echo "Hidden-import and collection warnings (informational):"
+          grep -E "missing module named aic_dc|missing module named jrpc_oo" build/*/warn-*.txt | head -20 \
+            || echo "(none for aic_dc / jrpc_oo)"
+          echo "Artefact:"
+          ls -lh "dist/${{ matrix.binary-name }}"
+          echo "Running --version:"
+          "./dist/${{ matrix.binary-name }}" --version
 
       - name: Upload artefact
         uses: actions/upload-artifact@v4
@@ -225,6 +228,12 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
+    # A merge into master publishes. A manual run only publishes
+    # when asked, so the build can be exercised without putting an
+    # artefact in front of users.
+    if: |
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.publish_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download all artefacts
@@ -261,6 +270,10 @@ jobs:
           ### Requirements
 
           - Run from within a git repository directory.
+          - Anthropic credentials for Claude Code. The binary bundles the
+            \`claude\` engine, so no separate install is needed. The bundled
+            copy is used even when you have your own \`claude\` on \`PATH\`;
+            set \`cli_path\` in \`engine.json\` to prefer yours.
 
           ### Optional: keyword-enriched document mode
 
