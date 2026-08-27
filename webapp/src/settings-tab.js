@@ -83,6 +83,34 @@ export const DEFAULT_MODEL_ALIAS = 'default';
 const _FLASH_MS = 2200;
 
 /**
+ * Where the retired-files note remembers it was dismissed.
+ *
+ * Persisted rather than per-load: the note answers a question that is
+ * asked once — "where did my System extra card go?" — and a note that
+ * came back on every visit after being read would be nagging about a
+ * set of files that is never going to change again.
+ *
+ * Keyed on the file list, not a bare boolean. If a later upgrade
+ * retires something else, the new name has never been explained to this
+ * user and the note is owed again; a boolean would swallow it.
+ */
+const RETIRED_NOTE_DISMISSED_KEY = 'aic-dc-retired-note-dismissed';
+
+/**
+ * What a dismissal is recorded *as* — the list the user actually read.
+ *
+ * Sorted so the key does not depend on the backend's ordering, joined
+ * on a character that cannot occur in a filename we ship.
+ */
+export function retiredNoteSignature(files) {
+  return (Array.isArray(files) ? files : [])
+    .filter((f) => typeof f === 'string' && f)
+    .slice()
+    .sort()
+    .join('|');
+}
+
+/**
  * The engine's `models` list, normalised, and guaranteed to contain `current`.
  *
  * Same lesson as the chat panel's `permissionModeOptions`: a `<select>` whose
@@ -237,6 +265,12 @@ export class SettingsTab extends RpcMixin(LitElement) {
     /** True while `restart_session` is in flight. */
     _restarting: { type: Boolean, state: true },
     /**
+     * True once the retired-files note has been dismissed for this exact
+     * file list. Read from localStorage on load, so a dismissal survives
+     * a refresh — see `RETIRED_NOTE_DISMISSED_KEY`.
+     */
+    _retiredDismissed: { type: Boolean, state: true },
+    /**
      * True for a moment after `/model` routed here, so the panel the command
      * meant is visibly the one it landed on. A route can arrive with this tab
      * already open and already scrolled to the panel, where scrolling alone
@@ -306,6 +340,68 @@ export class SettingsTab extends RpcMixin(LitElement) {
     .info-label {
       opacity: 0.7;
       min-width: 5rem;
+    }
+
+    /*
+      The retired-files note. Same chrome as the info banner because it
+      is the same kind of thing — a fact about the config directory, not
+      a control — but muted further and set apart by the left rule: it
+      is history, and it is the one block here a reader is meant to
+      finish with rather than return to.
+    */
+    .retired-note {
+      background: rgba(22, 27, 34, 0.4);
+      border: 1px solid rgba(240, 246, 252, 0.08);
+      border-left: 3px solid rgba(187, 128, 9, 0.5);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      font-size: 0.8125rem;
+      color: var(--text-secondary, #8b949e);
+      line-height: 1.5;
+    }
+    .retired-note-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .retired-note-title {
+      color: var(--text-primary, #c9d1d9);
+      font-weight: 600;
+    }
+    .retired-note ul {
+      margin: 0.5rem 0;
+      padding-left: 1.25rem;
+    }
+    .retired-note li {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      font-size: 0.75rem;
+    }
+    .retired-note p {
+      margin: 0.5rem 0 0;
+    }
+    .retired-note code {
+      font-family: var(--font-mono, ui-monospace, monospace);
+      color: var(--text-primary, #c9d1d9);
+    }
+    /*
+      A text button, not the icon-only ✕ this would usually be: the
+      note is dismissed for good, and a bare glyph does not say that.
+    */
+    .retired-dismiss {
+      flex: none;
+      background: none;
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      border-radius: 4px;
+      color: var(--text-secondary, #8b949e);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 0.15rem 0.5rem;
+    }
+    .retired-dismiss:hover {
+      color: var(--text-primary, #c9d1d9);
+      border-color: rgba(240, 246, 252, 0.3);
     }
 
     /*
@@ -567,6 +663,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._summary = null;
     this._pendingFields = new Set();
     this._restarting = false;
+    this._retiredDismissed = false;
     this._modelFlash = false;
     this._editorFlash = false;
     /** Pending flash-clear timer, so a second route restarts it. */
@@ -616,8 +713,48 @@ export class SettingsTab extends RpcMixin(LitElement) {
     try {
       const result = await this.rpcExtract('Settings.get_config_info');
       this._info = result && typeof result === 'object' ? result : null;
+      this._retiredDismissed = this._readRetiredDismissal();
     } catch (err) {
       console.warn('[settings] get_config_info failed', err);
+    }
+  }
+
+  /** The retired files this install has, or `[]` — never null. */
+  get _retiredFiles() {
+    const files = this._info?.retired_files;
+    return Array.isArray(files)
+      ? files.filter((f) => typeof f === 'string' && f)
+      : [];
+  }
+
+  /**
+   * Whether this exact list has already been dismissed.
+   *
+   * Storage access is wrapped because it throws outright in a browser
+   * with site data blocked, and a Settings tab that failed to render
+   * over a dismissal preference would be a bad trade. Unreadable
+   * storage means "not dismissed": showing the note twice is a smaller
+   * fault than never showing it.
+   */
+  _readRetiredDismissal() {
+    const signature = retiredNoteSignature(this._retiredFiles);
+    if (!signature) return false;
+    try {
+      return localStorage.getItem(RETIRED_NOTE_DISMISSED_KEY) === signature;
+    } catch {
+      return false;
+    }
+  }
+
+  _dismissRetiredNote() {
+    this._retiredDismissed = true;
+    try {
+      localStorage.setItem(
+        RETIRED_NOTE_DISMISSED_KEY,
+        retiredNoteSignature(this._retiredFiles),
+      );
+    } catch {
+      // Dismissed for this load either way; it will return next visit.
     }
   }
 
@@ -1140,6 +1277,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
           `
         : ''}
 
+      ${this._renderRetiredNote()}
+
       ${this._renderModelPanel()}
 
       <div class="card-grid">
@@ -1159,6 +1298,63 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
       ${this._activeKey ? this._renderEditor() : ''}
       ${this._renderSessionControls()}
+    `;
+  }
+
+  /**
+   * Why six cards are gone, for the installs that can tell they went.
+   *
+   * `specs5/5-webapp/settings.md` § Deleted cards argues this at length:
+   * a user who customised `system_extra.md` over months and finds the
+   * card gone deserves to know why. Phase 3 left the files on disk and
+   * inert precisely so nothing irreversible happened to them, and then
+   * never said so — the leaving-alone was right and the silence was the
+   * mistake.
+   *
+   * Rendered only when this install actually has such a file. A fresh
+   * install never had the cards, so the note would be explaining the
+   * disappearance of something the reader has never seen; the backend
+   * answers with names on disk rather than the constant list for
+   * exactly this reason.
+   *
+   * Above the model panel, because it is about what is *not* here and
+   * the reader is looking for a card they cannot find. Below the
+   * banner, because the directory it names is the one the note is
+   * about.
+   */
+  _renderRetiredNote() {
+    const files = this._retiredFiles;
+    if (!files.length || this._retiredDismissed) return '';
+    return html`
+      <div class="retired-note" role="note">
+        <div class="retired-note-head">
+          <span class="retired-note-title">
+            Some config cards are gone, and their files are not
+          </span>
+          <button
+            class="retired-dismiss"
+            title="Dismiss — this will not come back"
+            @click=${() => this._dismissRetiredNote()}
+          >Dismiss</button>
+        </div>
+        <p>
+          These are still in your config directory. Nothing reads them
+          any more, nothing migrated them, and nothing will delete
+          them:
+        </p>
+        <ul>
+          ${files.map((name) => html`<li>${name}</li>`)}
+        </ul>
+        <p>
+          They held the system prompt AIC⚡DC used to assemble and the
+          provider settings it used to need. There is no system prompt
+          to own now — the agent's instructions come from
+          <code>CLAUDE.md</code> and <code>.claude/</code>, which you
+          edit in the viewer like any other file in the repository,
+          with the agent's help, and which the Context tab prices in
+          tokens.
+        </p>
+      </div>
     `;
   }
 

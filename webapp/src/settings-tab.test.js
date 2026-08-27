@@ -1331,3 +1331,153 @@ describe('fieldLineRange', () => {
     expect(fieldLineRange(null, 'permission_mode')).toBeNull();
   });
 });
+// -----------------------------------------------------------
+// The retired-files note
+// -----------------------------------------------------------
+//
+// `specs5/5-webapp/settings.md` § Deleted cards argues for this
+// and then nothing rendered it — for three phases. The cards
+// that edited these files are gone; the files are still on
+// disk, deliberately, because `system_extra.md` may hold real
+// user work. Leaving them was right. Not saying so was not.
+//
+// The load-bearing property is relevance: the note is shown
+// only to installs that actually have such a file, because a
+// user who never had the cards would be reading an explanation
+// of a disappearance they did not witness.
+
+describe('aic-settings-tab retired-files note', () => {
+  const withRetired = (retired) => {
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({
+        config_dir: '/tmp/config',
+        retired_files: retired,
+      }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+    });
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  const note = (el) => el.shadowRoot.querySelector('.retired-note');
+
+  it('names the retired files this install still has', async () => {
+    withRetired(['llm.json', 'system_extra.md']);
+    const el = mountTab();
+    await settle(el);
+
+    const rendered = note(el);
+    expect(rendered).not.toBeNull();
+    const items = [...rendered.querySelectorAll('li')].map((li) => li.textContent);
+    expect(items).toEqual(['llm.json', 'system_extra.md']);
+  });
+
+  it('says where the instructions come from now', async () => {
+    // The point of the note is not the list — it is that there is
+    // no system prompt to own any more, and where the user should
+    // look instead.
+    withRetired(['system_extra.md']);
+    const el = mountTab();
+    await settle(el);
+
+    const text = note(el).textContent;
+    expect(text).toContain('CLAUDE.md');
+    expect(text).toContain('.claude/');
+  });
+
+  it('promises the files are not deleted', async () => {
+    // The reassurance is the reason the leave-alone rule exists;
+    // a note that only said "these are obsolete" would read as a
+    // warning that they are about to be cleaned up.
+    withRetired(['system_extra.md']);
+    const el = mountTab();
+    await settle(el);
+    expect(note(el).textContent).toContain('delete');
+  });
+
+  it('says nothing to a fresh install', async () => {
+    withRetired([]);
+    const el = mountTab();
+    await settle(el);
+    expect(note(el)).toBeNull();
+  });
+
+  it('says nothing when the backend omits the field', async () => {
+    // An older engine, or a failed call that left `_info` partial.
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({ config_dir: '/tmp/config' }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(note(el)).toBeNull();
+  });
+
+  it('dismisses, and stays dismissed across a remount', async () => {
+    withRetired(['system_extra.md']);
+    const first = mountTab();
+    await settle(first);
+    note(first).querySelector('.retired-dismiss').click();
+    await first.updateComplete;
+    expect(note(first)).toBeNull();
+
+    const second = mountTab();
+    await settle(second);
+    expect(note(second)).toBeNull();
+  });
+
+  it('returns when a later upgrade retires something new', async () => {
+    // The dismissal is keyed on the list, not on a boolean: a name
+    // the user has never had explained to them is owed the note
+    // again, and a flag would swallow it.
+    withRetired(['system_extra.md']);
+    const first = mountTab();
+    await settle(first);
+    note(first).querySelector('.retired-dismiss').click();
+    await first.updateComplete;
+
+    withRetired(['system_extra.md', 'review.md']);
+    const second = mountTab();
+    await settle(second);
+    expect(note(second)).not.toBeNull();
+  });
+
+  it('renders when localStorage throws', async () => {
+    // Site data blocked. Failing to render the tab over a
+    // dismissal preference would be a bad trade; showing the note
+    // twice is the smaller fault.
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+      .mockImplementation(() => { throw new Error('blocked'); });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => { throw new Error('blocked'); });
+    try {
+      withRetired(['system_extra.md']);
+      const el = mountTab();
+      await settle(el);
+      expect(note(el)).not.toBeNull();
+      // And dismissing still works for this load.
+      note(el).querySelector('.retired-dismiss').click();
+      await el.updateComplete;
+      expect(note(el)).toBeNull();
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
+  });
+
+  it('sits above the card grid, where the missing card would be', async () => {
+    withRetired(['system_extra.md']);
+    const el = mountTab();
+    await settle(el);
+    const root = el.shadowRoot;
+    const position = root.querySelector('.retired-note')
+      .compareDocumentPosition(root.querySelector('.card-grid'));
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});

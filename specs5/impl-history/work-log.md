@@ -512,10 +512,11 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   that rings.
 - **Session storage size** — nothing to call. The backend measures the session directory only as a
   turn-time warning (`_disk_warning`), not as a readable RPC.
-- **The retired-files note.** § Deleted cards argues for it at some length — a user who customised
+- ~~**The retired-files note.** § Deleted cards argues for it at some length — a user who customised
   `system_extra.md` over months and finds the card gone "deserves to know why" — and then no note is
-  rendered. Of everything in this list it is the cheapest to build and the only one whose absence the
-  spec has already called out as a mistake.
+  rendered.~~ **Built 2026-08-28 — see § Landed since.** It was the cheapest item in this list and the
+  only one whose absence the spec had already called a mistake, which is a combination that should have
+  got it built two phases earlier than it was.
 
 **Where to start.** ~~(b) is an afternoon and closes a real gap.~~ **(b) is done.** ~~Then (a), because a
 spec that names the wrong tab is how `/permissions` came to lie and the same trap is still set for eight
@@ -540,6 +541,37 @@ image and appears on no list, which is exactly why two of them sat unnoticed. Mo
 rather than already covered by it.
 
 ### Landed since
+
+- **The retired-files note: the leaving-alone was right, the silence was the mistake** — built
+  2026-08-28, closing [`../next.md`](../next.md) § B2 and the last entry of *(c)* below that belongs
+  to this tab's own surface. Phase 3 retired eight config files, left them on disk deliberately —
+  `system_extra.md` can hold months of a user's own prompt work, and deleting it would be irreversible
+  and pointless since nothing reads it either way — and then never told anyone. Six cards vanished from
+  the Settings tab with no explanation for three phases.
+
+  **The design decision was relevance, and it is what made this more than a paragraph of static text.**
+  A note is only owed to an install that *has* one of these files; a fresh install never had the cards,
+  so explaining their disappearance would be explaining something the reader never witnessed. So
+  `ConfigManager.retired_files_present()` stats the eight names and `get_config_info` carries the
+  result — a new key on the banner's existing RPC rather than an RPC of its own, because it is one more
+  fact about the same directory and a list that is usually empty does not deserve a round trip. It also
+  keeps the RPC inventory unchanged, which is the classification burden § C5 is about.
+
+  **The dismissal is keyed on the file list, not a boolean.** If a later upgrade retires something new,
+  that name has never been explained to this user and the note is owed again — a flag would swallow it,
+  and the bug would be invisible because the failure mode is silence, which is the exact failure this
+  item exists to fix.
+
+  Two smaller things worth keeping: the note **says the files will not be deleted**, because that is the
+  reassurance the leave-alone rule exists to provide and a note that only said "obsolete" would read as
+  a deletion warning; and `retired_files_present` uses `is_file`, so a directory that happens to be
+  called `review.md` is not offered as a prompt somebody wrote. The upgrade-preserves-them rule is now
+  pinned by a test *next to* the reporting, because if an upgrade ever started cleaning these up the
+  note would quietly stop having anything to say.
+
+  Found while there and fixed: `specs-reference/1-foundation/rpc-inventory.md` still described
+  `get_config_info` as returning `{model, config_dir, cli_path}`, two of which had been gone since the
+  conversion.
 
 - **Phase 8: index freshness after `Bash`, by asking the disk instead of the command line** — built
   2026-08-28, closing [`../next.md`](../next.md) § A1 and deciding
@@ -567,15 +599,14 @@ rather than already covered by it.
   file, `mv` away — are covered. `test_a_file_the_index_never_knew_is_not_reported` asserts the
   limitation so it stays a decision rather than becoming a surprise, and
   [`../2-indexing/symbol-index.md`](../2-indexing/symbol-index.md) § *Freshness After a Shell Command*
-  states it, along with a narrower one: a backgrounded `Bash` is hooked when it launches, so its later
-  writes belong to whichever shell command comes next.
+  states it.
 
   **Tested against tree-sitter, not against a mock.** The unit tests run on a `FakeIndex`, which proves
   the wiring and not the effect — the failure mode this project has hit twice. So there is also an
   end-to-end pair on a real `SymbolIndex`: a `sed -i` behind the index's back, then the hook, then the
   flush, asserting `after` is in the symbol map and `before` is gone — **plus the counter-test that runs
   the identical edit with no `Bash` hook and asserts the map is still wrong**, so the positive test
-  cannot pass for free.
+  cannot pass for free. 3460 tests green.
 
 - **Phase 7 (d): the release path is verified by running it, not by reading it** — built 2026-08-27,
   closing [`../next.md`](../next.md) § A2 (d). Three things landed; the interesting part is what the

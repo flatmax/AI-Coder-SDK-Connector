@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 from aic_dc.config import (
     CONFIG_TYPES,
+    RETIRED_FILES,
     ConfigManager,
     _bundled_config_dir,
     _bundled_version,
@@ -559,3 +560,67 @@ def test_bundled_config_dir_falls_back_when_meipass_missing_config(
     assert resolved.is_dir()
     # Logged the fallback so operators can see why.
     assert any("MEIPASS" in r.message for r in caplog.records)
+
+# ---------------------------------------------------------------------------
+# Retired files — left alone, and now reported
+# ---------------------------------------------------------------------------
+
+
+def test_a_fresh_install_has_no_retired_files(isolated_config_dir):
+    """Nothing bundled is retired, so a first install starts clean.
+
+    This is what lets the Settings tab stay silent for a new user: the
+    note explains cards that disappeared, and for this install they
+    never existed.
+    """
+    manager = ConfigManager()
+    assert manager.retired_files_present() == []
+
+
+def test_retired_files_on_disk_are_reported(isolated_config_dir):
+    manager = ConfigManager()
+    (isolated_config_dir / "system_extra.md").write_text("mine\n")
+    (isolated_config_dir / "llm.json").write_text("{}\n")
+
+    # RETIRED_FILES order, not alphabetical and not disk order — the
+    # note reads llm.json first because startup already mentions it.
+    assert manager.retired_files_present() == ["llm.json", "system_extra.md"]
+
+
+def test_live_config_files_are_not_reported_as_retired(isolated_config_dir):
+    """The two sets must not overlap, or the note would tell a user
+    their working config had been abandoned."""
+    manager = ConfigManager()
+    assert not set(CONFIG_TYPES.values()) & set(RETIRED_FILES)
+    assert manager.retired_files_present() == []
+
+
+def test_a_directory_of_the_right_name_is_not_a_retired_file(
+    isolated_config_dir,
+):
+    """`is_file`, not `exists`. A directory called `review.md` is not a
+    prompt anybody wrote, and offering to explain it would be wrong."""
+    manager = ConfigManager()
+    (isolated_config_dir / "review.md").mkdir()
+    assert manager.retired_files_present() == []
+
+
+def test_an_upgrade_leaves_retired_files_alone(isolated_config_dir):
+    """The rule the report depends on, pinned.
+
+    Retired files are never migrated and never deleted, because
+    `system_extra.md` may hold real user work and removing it would be
+    irreversible and pointless. If an upgrade ever started cleaning them
+    up, the note would quietly stop having anything to say — so the
+    preservation and the reporting are tested together.
+    """
+    ConfigManager()
+    kept = isolated_config_dir / "system_extra.md"
+    kept.write_text("months of work\n")
+
+    with patch("aic_dc.config._bundled_version", return_value="9.9.9"):
+        manager = ConfigManager()
+
+    assert kept.is_file()
+    assert kept.read_text() == "months of work\n"
+    assert manager.retired_files_present() == ["system_extra.md"]

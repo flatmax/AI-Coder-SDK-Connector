@@ -305,7 +305,7 @@ shape or the same idea — it reports the engine's own categories, not our tiers
 | `Settings.save_config_content` | `type: str, content: str` | `{status: str}` |
 | `Settings.reload_engine_config` | — | `{status: str}` |
 | `Settings.reload_app_config` | — | `{status: str}` |
-| `Settings.get_config_info` | — | `{model: str \| null, config_dir: str, cli_path: str}` — `model: null` means the CLI's default |
+| `Settings.get_config_info` | — | `{config_dir: str, retired_files: list[str]}` — `retired_files` is the retired config files *this install still has on disk*, in `RETIRED_FILES` order and usually empty; it feeds the Settings tab's § Deleted cards note. The `model` and `cli_path` this once carried are gone: the model in force belongs to the engine and changes mid-session, and the resolved CLI path comes from `get_engine_health` |
 | `Settings.get_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` |
 | `Settings.get_review_snippets` | — | `list[{icon: str, tooltip: str, message: str}]` |
 

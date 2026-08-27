@@ -12,9 +12,10 @@ than one that says so.
 
 > **Parts of this file are ahead of the build.** The tab renders a toolbar, a one-row info banner, the
 > model panel, a two-card grid, an inline editor, the per-field save disposition (§ Save Behavior) and
-> the restart control that applies what a save could not (§ Session Controls). What remains
+> the restart control that applies what a save could not (§ Session Controls), and the retired-files
+> note (§ Deleted cards, built 2026-08-28). What remains
 > specified-but-unbuilt is now only work that genuinely belongs *here*: three preference cards
-> (§ Preference Cards), session-storage size (§ Session Controls), and the § Deleted cards note. Each is
+> (§ Preference Cards) and session-storage size (§ Session Controls). Each is
 > classified in
 > [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size)
 > under *(c) Neither side exists*.
@@ -111,15 +112,27 @@ starts in; the running one is the composer's selector ([`chat.md`](chat.md) § P
 read, never migrated (see
 [`../../specs-reference/1-foundation/configuration.md § Retired files`](../../specs-reference/1-foundation/configuration.md)).
 
-**The note below is not built** — no retired-file note is rendered. It is the cheapest item in this
-file's backlog and the only one whose absence the spec already argues is a mistake, in the next
-paragraph.
-
 Their absence needs a sentence in the UI, not silence. A user who customised `system_extra.md` over
 months and finds the card gone deserves to know why, so the grid carries a dismissible note: retired
 files are listed by name, with the explanation that the agent's instructions now come from `CLAUDE.md`
 and `.claude/` — which the user edits in the viewer like any other repository file, with the agent's help,
-and which the Context tab prices in tokens.
+and which the Context tab prices in tokens. **Built 2026-08-28.** Three properties are load-bearing,
+and each of them is a way the obvious implementation would have been worse:
+
+- **It is shown only to installs that have such a file.** The note explains a disappearance, so a
+  reader who never had the cards would be reading about something they did not witness. That is why
+  `get_config_info` answers with the names *on this disk* rather than the constant list — the
+  relevance is computed on the server, where the directory is.
+- **The dismissal is keyed on the file list, not a boolean.** If a later upgrade retires something
+  else, that name has never been explained to this user and the note is owed again. A flag would
+  swallow it.
+- **It says the files are not deleted.** That is the reassurance the leave-alone rule exists to
+  provide; a note that only said "these are obsolete" would read as a warning that they are about to
+  be cleaned up.
+
+The rule the note depends on — that an upgrade never migrates or removes these files — is pinned by a
+test alongside the reporting, because if an upgrade ever started cleaning them up the note would
+quietly stop having anything to say.
 
 There is no "system prompt" for AIC⚡DC to own any more. That is the conversion in one card.
 
@@ -294,8 +307,11 @@ One row, one fact:
 - Config directory path. *(Specified as clickable to open in the system file manager; it renders as plain
   text with no handler.)*
 
-That is the whole banner, and it matches the RPC: `get_config_info` returns `{"config_dir": ...}` and
-nothing else. The credential source, the auth warning, and the resolved `claude` path and version were
+That is the whole banner. `get_config_info` returns one more key than the banner renders —
+`retired_files`, the retired config files this install still has on disk — and that is deliberate: it
+is a second fact about the same directory, it feeds § Deleted cards rather than the banner, and a
+list that is usually empty does not deserve a round trip of its own. The credential source, the auth
+warning, and the resolved `claude` path and version were
 specified here and are not here — they come from `get_engine_health`, and they are reported where that
 RPC is already called, in the Context tab and the chat panel's health banner.
 

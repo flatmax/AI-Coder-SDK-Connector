@@ -1,6 +1,6 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `1986d45`.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `7608a8f`.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -250,12 +250,13 @@ persistence). Rate limits is the one with weight behind it —
 `RateLimitEvent` the subscription-mode equivalent of a cost signal, and under subscription billing it is
 the only figure a user can act on.
 
-**B2 — The retired-files note.** [`5-webapp/settings.md`](5-webapp/settings.md) § *Deleted cards*
-argues for it at length — a user who customised `system_extra.md` over months and finds the card gone
-"deserves to know why" — and then no note is rendered (verified 2026-08-27: nothing in
-`settings-tab.js`). Phase 3 left the retired config files on disk and inert precisely so nothing
-irreversible happened to them, and never told the user. **The cheapest item on this page, and the only
-one whose absence its own spec already calls a mistake.**
+**B2 — The retired-files note.** ✅ *Built 2026-08-28 — leaves this queue.*
+[`5-webapp/settings.md`](5-webapp/settings.md) § *Deleted cards* had argued for it at length and
+nothing rendered it for three phases. The note now lists the retired files **this install actually
+has**, says they will not be deleted, and points at `CLAUDE.md` and `.claude/`; `get_config_info`
+grew a `retired_files` key rather than the work growing an RPC. Dismissal is keyed on the file list
+rather than a boolean, so a later upgrade that retires something new is owed the note again. Details
+in that section and in the work-log's § *Landed since*.
 
 **B3 — Three preference cards and the session-storage figure.** The remainder of
 [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built* item (c), after
