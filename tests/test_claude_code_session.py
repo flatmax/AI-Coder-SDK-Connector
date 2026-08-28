@@ -1944,6 +1944,113 @@ class TestBackgroundDrain:
 
 
 # ---------------------------------------------------------------------------
+# The rate-limit record survives a reload
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitState:
+    """The same lesson as `TestCompactionState`, over a much longer gap.
+
+    A compaction lasts tens of seconds, so the window in which a reload loses
+    the fact is small. The CLI emits a rate limit only when the status
+    *changes* — the SDK's own docstring says so — so a browser that reloads
+    between transitions has nothing to show for as long as the status holds:
+    hours, on a seven-day window, and possibly right up to the rejection the
+    figure exists to give warning of.
+
+    The HUD's Rate limits section is the subscription-mode replacement for a
+    cost figure (`specs5/plan/risks.md` § R-6), so "nothing to show" is not a
+    cosmetic outcome there.
+    """
+
+    def fold(self, engine, event):
+        """Push one translated event through the session's folding step."""
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        return engine._fold_session_state(active, event)
+
+    def record(self, **overrides):
+        payload = {
+            "status": "allowed_warning",
+            "rate_limit_type": "five_hour",
+            "resets_at": 1_800_000_000,
+            "utilization": 0.82,
+            "overage_status": None,
+            "overage_resets_at": None,
+            "overage_disabled_reason": None,
+            "raw": {},
+        }
+        payload.update(overrides)
+        return Event("rateLimit", payload)
+
+    async def test_an_untouched_session_has_no_record(self, engine):
+        assert engine.rate_limit is None
+
+    async def test_a_pushed_record_is_remembered(self, engine):
+        self.fold(engine, self.record())
+        assert engine.rate_limit["utilization"] == 0.82
+        assert engine.rate_limit["rate_limit_type"] == "five_hour"
+
+    async def test_the_event_is_still_forwarded_unchanged(self, engine):
+        """Folding records; it must not swallow. The chat panel's toast is
+        still driven by the broadcast — this only adds the snapshot."""
+        out = self.fold(engine, self.record())
+        assert out.name == "rateLimit"
+        assert out.payload["status"] == "allowed_warning"
+
+    async def test_a_later_record_replaces_the_earlier_one(self, engine):
+        self.fold(engine, self.record(utilization=0.42))
+        self.fold(engine, self.record(utilization=0.99, status="rejected"))
+        assert engine.rate_limit["utilization"] == 0.99
+        assert engine.rate_limit["status"] == "rejected"
+
+    async def test_the_record_is_copied_out(self, engine):
+        """A caller that mutates what it was handed must not edit the
+        session's own copy — this is served to every client that connects."""
+        self.fold(engine, self.record())
+        handed = engine.rate_limit
+        handed["utilization"] = 0.0
+        assert engine.rate_limit["utilization"] == 0.82
+
+    async def test_a_turn_ending_does_not_clear_it(self, engine):
+        """Unlike a compaction, which never outlives its turn. A five-hour
+        window is not a property of the turn that happened to observe it."""
+        self.fold(engine, self.record())
+        self.fold(engine, Event("streamComplete", {}))
+        assert engine.rate_limit is not None
+
+    async def test_disconnect_does_not_clear_it(self, tmp_path):
+        """The engine going away does not give the tokens back.
+
+        `compaction_state` clears here because it is a claim about what the
+        engine is *doing*; this is a claim about the account, and it stays
+        true across the restart the browser outlives.
+        """
+        session = EngineSession(
+            tmp_path, EngineConfig(), clock=lambda: "2026-08-14T00:00:00Z"
+        )
+        await session.connect()
+        self.fold(session, self.record())
+        await session.disconnect()
+        assert session.rate_limit is not None
+
+    async def test_expiry_is_not_decided_here(self, engine):
+        """`resets_at` in the past is served as-is.
+
+        Whether the window has closed is the browser's question: a pushed
+        record has to be aged client-side regardless, so a second test here
+        could only come to disagree with it (`specs5/next.md` § C3).
+        """
+        self.fold(engine, self.record(resets_at=1))
+        assert engine.rate_limit["resets_at"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Compaction survives a reload
 # ---------------------------------------------------------------------------
 

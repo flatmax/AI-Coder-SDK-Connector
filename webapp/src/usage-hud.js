@@ -34,7 +34,25 @@
 //      default. Also not `model_usage`, for the same reason: cumulative,
 //      so it named every model the session had ever used.
 //
-// Interaction is deliberately unchanged from the old HUD, because users
+// Two more the spec always asked for and nothing rendered until now:
+//
+//   4. Rate limits — how much of the window is spent, which window, and
+//      when it resets. This is the *cost* row for a reader whose billing
+//      makes the dollar figures meaningless: R-6 names `RateLimitEvent`
+//      as the subscription-mode equivalent of a cost signal, so it shows
+//      at any status rather than only when something is wrong. The
+//      arithmetic and the wording are in rate-limit.js, shared with the
+//      chat panel's toast — which is the alarm this deliberately is not.
+//   5. Files modified — what the turn did to the repo, one click from
+//      the diff. The chips follow the house rule every file on screen
+//      follows: repo-relative label, engine's absolute path on the
+//      tooltip, and the unconverted path in the navigation event.
+//
+// Sections with a body under them collapse, and the set of collapsed ones
+// is remembered across sessions. The head keeps the section's headline
+// figure, so closing one costs no height and hides no answer.
+//
+// Interaction is otherwise unchanged from the old HUD, because users
 // have the muscle memory: appears on stream-complete, auto-hides after
 // 8s, hover pauses the timer, the × dismisses immediately.
 
@@ -52,6 +70,13 @@ import {
   windowPercent,
 } from './context-usage.js';
 import { costLabel, modelUsageLines, reportsUsage } from './turn-cost.js';
+import {
+  formatResetTime,
+  hasSomethingToSay,
+  limitTypeLabel,
+  utilizationPercent,
+} from './rate-limit.js';
+import { toRepoPath } from './repo-path.js';
 
 /** Auto-hide delay (ms). Matches the old HUD. */
 const _AUTO_HIDE_MS = 8000;
@@ -65,6 +90,45 @@ const _FADE_MS = 800;
  * why the guard needed a release path at all.
  */
 const _FETCH_TIMEOUT_MS = 90000;
+
+/**
+ * Where the collapse set is kept.
+ *
+ * A serialised array of section *names*, not a per-section boolean, so a
+ * section this build has never heard of round-trips instead of being reset —
+ * two browsers on one profile, or a downgrade, would otherwise each clear the
+ * other's preferences for the sections it does not render.
+ */
+const _COLLAPSE_KEY = 'aic-dc-hud-collapsed';
+
+/**
+ * The collapse set, or an empty one.
+ *
+ * Every failure mode lands on "nothing collapsed", which is the pre-existing
+ * behaviour: a Safari private window that throws on `localStorage`, a value
+ * some other tool wrote, a half-written string. A HUD that fails to open is a
+ * worse outcome than a HUD that forgets, and this is a preference rather than
+ * a record.
+ */
+function _loadCollapsed() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(_COLLAPSE_KEY) || '[]');
+    if (!Array.isArray(raw)) return new Set();
+    return new Set(raw.filter((name) => typeof name === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function _saveCollapsed(names) {
+  try {
+    window.localStorage.setItem(_COLLAPSE_KEY, JSON.stringify([...names]));
+  } catch {
+    // Storage full or unavailable. The session keeps the preference in
+    // memory; only its persistence is lost, and there is nothing to tell
+    // the user that they could act on.
+  }
+}
 
 function _fmtTokens(n) {
   if (typeof n !== 'number' || !Number.isFinite(n)) return '0';
@@ -133,6 +197,21 @@ export class UsageHud extends RpcMixin(LitElement) {
      * no tokens.
      */
     _turn: { type: Object, state: true },
+    /**
+     * The last `rateLimit` record, or null before one arrives.
+     *
+     * Not per-turn, unlike `_turn`: the CLI emits this when the status
+     * *transitions*, so one record stands until the next transition or the
+     * window's reset — which is why the engine holds it too, and why the
+     * shell's first-paint snapshot carries it (`rate_limit`).
+     */
+    _rateLimit: { type: Object, state: true },
+    /**
+     * Which sections the user has collapsed, by name. A `Set`, replaced
+     * rather than mutated on every toggle — Lit compares by identity and a
+     * `Set` that grows in place is the same object it was.
+     */
+    _collapsed: { type: Object, state: true },
   };
 
   static styles = css`
@@ -140,7 +219,19 @@ export class UsageHud extends RpcMixin(LitElement) {
       position: fixed;
       top: 16px;
       right: 16px;
-      z-index: 10000;
+      /* 500, the rung specs-reference/5-webapp/shell.md § Viewport-scoped
+       * overlay z-index ladder assigns: above the dialog panel, below the
+       * toast layer, and far below the permission dialog's 9000.
+       *
+       * It was 10000, which is above everything including the one surface in
+       * the app that blocks a turn. § Placement has said "below the
+       * permission dialog, which is modal over everything" since phase 3 and
+       * the number never matched it — a request arriving within the HUD's
+       * eight seconds had this overlay floating over its top-right corner,
+       * with pointer-events auto taking the clicks there too. Found while
+       * building the sections below, by reading the ladder for where a fifth
+       * section could go. */
+      z-index: 500;
       display: none;
       pointer-events: none;
     }
@@ -150,6 +241,15 @@ export class UsageHud extends RpcMixin(LitElement) {
     }
     .hud {
       width: 300px;
+      /* Specified since phase 3 (§ Behaviour, "fixed width, max height with
+       * internal scroll") and never written, which cost nothing while the
+       * HUD was four short rows. The Files modified section is what makes it
+       * matter: a turn that touches forty files is an ordinary refactor, and
+       * without a ceiling the overlay runs off the bottom of the screen —
+       * taking the dismiss button, which is at the top, out of reach of the
+       * part that is off-screen. */
+      max-height: 80vh;
+      overflow-y: auto;
       background: rgba(22, 27, 34, 0.96);
       border: 1px solid rgba(240, 246, 252, 0.15);
       border-radius: 8px;
@@ -231,6 +331,51 @@ export class UsageHud extends RpcMixin(LitElement) {
       color: var(--text-secondary, #8b949e);
     }
 
+    /* A collapsible section. The head is the row that would have been there
+     * anyway — a label on the left and the section's headline figure on the
+     * right — with a caret in front of it, so collapsing costs no height and
+     * a collapsed section still reports its number. Only sections with a
+     * body under them get one; see the _section helper below. */
+    .sec-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      padding: 0;
+      background: none;
+      border: none;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+    .sec-head:hover .sec-name {
+      color: var(--text-primary, #c9d1d9);
+    }
+    .sec-label {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      min-width: 0;
+    }
+    .sec-caret {
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.625rem;
+      flex: 0 0 auto;
+    }
+    .sec-name {
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.75rem;
+      white-space: nowrap;
+    }
+    .sec-body {
+      margin-top: 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
     .bar {
       position: relative;
       height: 6px;
@@ -307,6 +452,45 @@ export class UsageHud extends RpcMixin(LitElement) {
       color: #d29922;
       font-size: 0.6875rem;
     }
+
+    /* Rate limits. The reset line is the half that makes the figure
+     * actionable — "72% used" is a fact, "72% used, resets at 14:30" is a
+     * decision — so it is body text rather than a tooltip. */
+    .rl-note {
+      font-size: 0.6875rem;
+      color: var(--text-secondary, #8b949e);
+    }
+    .rl-rejected {
+      color: #f85149;
+    }
+
+    /* File chips. The same shape as the chat panel's tool-card footer chip,
+     * in this shadow root's own stylesheet because a shadow root does not
+     * inherit one — the *rule* the two share is toRepoPath, which is the
+     * part that could drift, and it does not live here either. */
+    .files {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .file-chip {
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      padding: 1px 6px;
+      border-radius: 10px;
+      background: rgba(240, 246, 252, 0.08);
+      color: var(--text-secondary, #8b949e);
+      font-size: 0.6875rem;
+      font-family: var(--font-mono, ui-monospace, monospace);
+      cursor: pointer;
+    }
+    .file-chip:hover {
+      background: rgba(240, 246, 252, 0.16);
+      color: var(--text-primary, #c9d1d9);
+    }
   `;
 
   constructor() {
@@ -317,6 +501,8 @@ export class UsageHud extends RpcMixin(LitElement) {
     this._contextError = '';
     this._engineGone = false;
     this._turn = null;
+    this._rateLimit = null;
+    this._collapsed = _loadCollapsed();
 
     this._autoHideTimer = null;
     this._fadeTimer = null;
@@ -325,6 +511,8 @@ export class UsageHud extends RpcMixin(LitElement) {
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onEngineHealth = this._onEngineHealth.bind(this);
+    this._onRateLimit = this._onRateLimit.bind(this);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
     this._onPointerEnter = this._onPointerEnter.bind(this);
     this._onPointerLeave = this._onPointerLeave.bind(this);
   }
@@ -342,6 +530,12 @@ export class UsageHud extends RpcMixin(LitElement) {
     // the reply to a poll, which by then has already gone out. See
     // `_fetchContext` for why both are needed.
     window.addEventListener('engine-health', this._onEngineHealth);
+    // Two arrivals for one figure, because a status change and a page load
+    // are different moments and neither covers the other. The push is the
+    // only thing that reports a *transition*; the snapshot is the only thing
+    // a browser that reloaded between transitions will ever get.
+    window.addEventListener('rate-limit', this._onRateLimit);
+    window.addEventListener('state-loaded', this._onStateLoaded);
     this.addEventListener('pointerenter', this._onPointerEnter);
     this.addEventListener('pointerleave', this._onPointerLeave);
   }
@@ -350,6 +544,8 @@ export class UsageHud extends RpcMixin(LitElement) {
     window.removeEventListener('stream-complete', this._onStreamComplete);
     window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener('engine-health', this._onEngineHealth);
+    window.removeEventListener('rate-limit', this._onRateLimit);
+    window.removeEventListener('state-loaded', this._onStateLoaded);
     this.removeEventListener('pointerenter', this._onPointerEnter);
     this.removeEventListener('pointerleave', this._onPointerLeave);
     this._clearTimers();
@@ -412,6 +608,14 @@ export class UsageHud extends RpcMixin(LitElement) {
         : null,
       cancelled: !!result.cancelled,
       failed,
+      // What the turn did to the repo. The single most useful thing to know
+      // in the moment after an agentic turn lands, and the one thing here
+      // that is not a number — see `_renderFiles`. Absolute, as every path
+      // the engine reports is; the chip converts for display and leaves the
+      // navigation contract alone.
+      filesModified: Array.isArray(result.files_modified)
+        ? result.files_modified.filter((path) => typeof path === 'string' && path)
+        : [],
     };
 
     this._visible = true;
@@ -442,6 +646,59 @@ export class UsageHud extends RpcMixin(LitElement) {
     const health = event?.detail;
     if (!health || typeof health !== 'object') return;
     this._engineGone = _engineIsGone(health);
+  }
+
+  /**
+   * A pushed rate-limit record.
+   *
+   * Kept whatever the status, including the `allowed` the chat panel's toast
+   * deliberately says nothing about. The toast reports a transition and this
+   * reports a standing figure: under subscription billing it is the only
+   * number on the HUD that maps to anything the user can act on
+   * (`specs5/plan/risks.md` § R-6), so it is not gated on being alarming.
+   *
+   * A record never *replaces* a good one with nothing — the CLI only sends
+   * this when it has something to say, so there is no empty push to guard
+   * against, and the window's own reset is what ends a record's life.
+   */
+  _onRateLimit(event) {
+    const data = event?.detail?.data;
+    if (!data || typeof data !== 'object') return;
+    this._rateLimit = data;
+  }
+
+  /**
+   * The shell's first-paint snapshot.
+   *
+   * Read for `rate_limit` alone. Everything else the HUD shows is per-turn
+   * and there is no turn to report at first paint — the HUD does not even
+   * appear until one lands, which is exactly why adopting the record here
+   * costs nothing: it is waiting by the time there is a HUD to put it in.
+   *
+   * A snapshot that carries no record leaves the current one alone rather
+   * than clearing it. A reconnect re-delivers the snapshot mid-session, and
+   * a backend older than the field sends nothing at all; neither is evidence
+   * that a limit the browser has been told about has gone away.
+   */
+  _onStateLoaded(event) {
+    const record = event?.detail?.rate_limit;
+    if (!record || typeof record !== 'object') return;
+    this._rateLimit = record;
+  }
+
+  /**
+   * Collapse or expand a section, and remember it.
+   *
+   * A new `Set` each time: Lit's default `hasChanged` is an identity
+   * comparison, so a `Set` mutated in place is the same object it was and
+   * nothing would re-render.
+   */
+  _toggleSection(name) {
+    const next = new Set(this._collapsed);
+    if (next.has(name)) next.delete(name);
+    else next.add(name);
+    this._collapsed = next;
+    _saveCollapsed(next);
   }
 
   _onPointerEnter() {
@@ -581,6 +838,9 @@ export class UsageHud extends RpcMixin(LitElement) {
         <div class="body">
           ${this._renderContext()}
           ${this._renderTurn()}
+          ${this._renderTokens()}
+          ${this._renderRateLimit()}
+          ${this._renderFiles()}
         </div>
       </div>
     `;
@@ -606,6 +866,53 @@ export class UsageHud extends RpcMixin(LitElement) {
     const models = this._turn?.models || [];
     if (models.length > 1) return `Models used this turn: ${models.join(', ')}`;
     return this._modelLabel();
+  }
+
+  /**
+   * One collapsible section: a head that is always drawn, and a body that is
+   * drawn when the section is open.
+   *
+   * **Only sections with a body take one.** The spec's § Sections calls the
+   * HUD's sections collapsible without qualification, and for four of them
+   * that is what this implements. "This turn" is the exception and stays a
+   * plain row: its entire content *is* its headline, so a disclosure control
+   * there would hide the figure the HUD exists to show and cost a caret to
+   * do it. A collapsed section that says nothing is not a smaller section,
+   * it is an absent one.
+   *
+   * `body` is a thunk so a collapsed section costs no render work — the
+   * categories legend and the file chips are the two biggest things here and
+   * both are behind one.
+   *
+   * The head is a real `<button>`, so it is reachable by keyboard and
+   * announces its state; `aria-expanded` is on the control rather than the
+   * region because the control is what the reader lands on.
+   *
+   * `key` is stored, `name` is displayed, and they are two arguments because
+   * one section's name moves: "5-hour limit" becomes "7-day limit" when the
+   * window the account is against changes. Keying the preference on the label
+   * would silently re-open a section the user closed, on the day the label
+   * changed — which is the day they least want to look at it.
+   */
+  _section(key, name, headline, body) {
+    const collapsed = this._collapsed.has(key);
+    return html`
+      <div class="sec">
+        <button
+          class="sec-head"
+          aria-expanded=${collapsed ? 'false' : 'true'}
+          title=${collapsed ? `Show ${name}` : `Hide ${name}`}
+          @click=${() => this._toggleSection(key)}
+        >
+          <span class="sec-label">
+            <span class="sec-caret">${collapsed ? '▸' : '▾'}</span>
+            <span class="sec-name">${name}</span>
+          </span>
+          ${headline ?? nothing}
+        </button>
+        ${collapsed ? nothing : html`<div class="sec-body">${body()}</div>`}
+      </div>
+    `;
   }
 
   _renderContext() {
@@ -655,14 +962,15 @@ export class UsageHud extends RpcMixin(LitElement) {
         }))
       : [];
 
-    return html`
-      <div>
-        <div class="row">
-          <span class="label">Context</span>
-          <span class="value" style="color: ${_contextColor(warnPct)}">
-            ${clamped.toFixed(0)}% · ${_fmtTokens(total)}/${_fmtTokens(max)}
-          </span>
-        </div>
+    // The headline stays on the head when the section is closed, which is
+    // what makes closing it cheap: the percentage and the totals are the
+    // answer, and the bar and the legend are the working.
+    const headline = html`
+      <span class="value" style="color: ${_contextColor(warnPct)}">
+        ${clamped.toFixed(0)}% · ${_fmtTokens(total)}/${_fmtTokens(max)}
+      </span>
+    `;
+    return this._section('Context', 'Context', headline, () => html`
         <div class="bar-wrap">
           <div
             class="bar"
@@ -711,8 +1019,7 @@ export class UsageHud extends RpcMixin(LitElement) {
             `)}
           </div>
         ` : ''}
-      </div>
-    `;
+    `);
   }
 
   /**
@@ -777,7 +1084,6 @@ export class UsageHud extends RpcMixin(LitElement) {
             : ''}
         </span>
       </div>
-      ${this._renderTokens()}
     `;
   }
 
@@ -794,16 +1100,158 @@ export class UsageHud extends RpcMixin(LitElement) {
    * model name, and the sum is the honest one to show. The tooltip
    * carries the breakdown, and the chat panel's turn footer shows the
    * cache column in full.
+   *
+   * **The headline is a count, never a total.** Summing the rows is the one
+   * thing this section may not do — "the expensive model did a little and
+   * the cheap model did a lot" is the shape of a well-delegated turn, and a
+   * single number erases it (§ Per-Model Rows Are Not Summed). A count says
+   * how many rows are hidden without claiming anything about them, and a
+   * one-model turn gets no headline at all because "1 model" is the model
+   * name already on the HUD's own header.
    */
   _renderTokens() {
     const lines = this._turn?.usage;
     if (!Array.isArray(lines) || lines.length === 0) return '';
-    return lines.map((line) => html`
+    const headline = lines.length > 1
+      ? html`<span class="label">${lines.length} models</span>`
+      : null;
+    return this._section('Per-model usage', 'Per-model usage', headline, () => lines.map((line) => html`
       <div class="row">
         <span class="label token-model" title=${line.model}>${line.model}</span>
         <span class="value token-value" title=${this._tokenTitle(line)}>
           ↑ ${_fmtTokens(line.prompt)} · ↓ ${_fmtTokens(line.output)}
         </span>
+      </div>
+    `));
+  }
+
+  /**
+   * Rate limits — the subscription-mode cost signal.
+   *
+   * Rendered from the standing record whatever its status, which is the
+   * decision `rate-limit.js` argues: under a subscription the dollar figures
+   * above stop meaning anything and this is what replaces them, so gating it
+   * on `allowed_warning` would leave the HUD with nothing to say in exactly
+   * the billing mode R-6 is about. The chat panel's toast is the alarm; this
+   * is the gauge.
+   *
+   * Absent rather than empty when there is nothing true to show — before the
+   * CLI has ever sent a record, and after the window it describes has reset.
+   * A stale utilisation is worse than no utilisation, because nothing else on
+   * screen contradicts it.
+   */
+  _renderRateLimit() {
+    const rl = this._rateLimit;
+    if (!hasSomethingToSay(rl)) return '';
+    const pct = utilizationPercent(rl);
+    const type = limitTypeLabel(rl.rate_limit_type);
+    const rejected = rl.status === 'rejected';
+    // `rejected` is red whatever the figure says. A limit can be refused at a
+    // utilisation the bands would call healthy — an overage cut-off is the
+    // case — and the colour reports the outcome, not the arithmetic.
+    const color = rejected ? '#f85149' : _contextColor(pct ?? 0);
+    const resets = formatResetTime(rl.resets_at);
+    const headline = html`
+      <span class="value" style="color: ${color}">
+        ${pct != null ? `${pct.toFixed(0)}%` : (rejected ? 'reached' : '—')}
+      </span>
+    `;
+    const name = type ? `${type} limit` : 'Rate limit';
+    return this._section('Rate limits', name, headline, () => html`
+      ${pct != null ? html`
+        <div class="bar-wrap">
+          <div
+            class="bar"
+            role="img"
+            aria-label="${name} ${pct.toFixed(0)} percent used"
+          >
+            <div class="bar-seg" style="width: ${pct}%; background: ${color};"></div>
+          </div>
+        </div>
+      ` : nothing}
+      ${rejected ? html`
+        <div class="rl-note rl-rejected">
+          Limit reached${resets ? ` — resets ${resets}` : ''}.
+        </div>
+      ` : resets ? html`
+        <div class="rl-note">Resets ${resets}</div>
+      ` : nothing}
+      ${this._renderOverage(rl)}
+    `);
+  }
+
+  /**
+   * Pay-as-you-go, when the record says anything about it.
+   *
+   * One line, not a second gauge. Overage is a fallback rather than a budget
+   * — what the reader needs is whether it is there to fall back on — and the
+   * CLI reports it as a status and a reason rather than a figure.
+   *
+   * `overage_disabled_reason` is printed in the CLI's own words. It is the
+   * answer to the only question this line raises, and paraphrasing a reason
+   * we have never enumerated would be inventing one.
+   */
+  _renderOverage(rl) {
+    const status = rl.overage_status;
+    if (typeof status !== 'string' || !status) return nothing;
+    const resets = formatResetTime(rl.overage_resets_at);
+    if (status === 'rejected') {
+      const why = typeof rl.overage_disabled_reason === 'string'
+        && rl.overage_disabled_reason
+        ? ` — ${rl.overage_disabled_reason}`
+        : '';
+      return html`<div class="rl-note rl-rejected">Overage unavailable${why}</div>`;
+    }
+    const warning = status === 'allowed_warning' ? ' (near its own limit)' : '';
+    return html`
+      <div class="rl-note">
+        Overage available${warning}${resets ? `, resets ${resets}` : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * What the turn changed, one click from the diff.
+   *
+   * The most useful thing to know in the moment after an agentic turn lands
+   * is which files moved, and the answer is only useful if it is one click
+   * from the diff — so these are the same chips the tool-card footer draws,
+   * following the same house rule: repo-relative label, engine's absolute
+   * path on the tooltip, and `detail.path` left exactly as the engine sent
+   * it. `onNavigateFile` normalises, and it is the one place that should; a
+   * second conversion here would make a display concern into the navigation
+   * contract (specs5/next.md § C4).
+   *
+   * Deduplicated, because a turn that edits one file three times reports it
+   * three times, and on the raw path rather than the label — two spellings
+   * of one file would otherwise survive as two chips right up until they
+   * rendered identically.
+   *
+   * The HUD is not dismissed by a click. Unlike the Context tab's memory
+   * rows, which minimise the dialog because it is opaque over the viewer,
+   * this is a small corner overlay: hovering it has already stopped the
+   * auto-hide, so a reader opening three files in turn keeps the list, and
+   * it fades on its own once they move away.
+   */
+  _renderFiles() {
+    const files = this._turn?.filesModified;
+    if (!Array.isArray(files) || files.length === 0) return '';
+    const unique = [...new Set(files)];
+    const headline = html`<span class="label">${unique.length}</span>`;
+    return this._section('Files modified', 'Files modified', headline, () => html`
+      <div class="files">
+        ${unique.map((path) => html`
+          <span
+            class="file-chip"
+            title="Open ${path}"
+            @click=${() => {
+              window.dispatchEvent(new CustomEvent('navigate-file', {
+                detail: { path },
+                bubbles: false,
+              }));
+            }}
+          >${toRepoPath(path)}</span>
+        `)}
       </div>
     `);
   }

@@ -388,6 +388,13 @@ class EngineSession:
         # because this is only ever read as a duration and a wall clock that
         # steps backwards would produce a negative one.
         self._compacting_since: float | None = None
+        # The last rate-limit record the CLI sent, or None. Held rather than
+        # only forwarded, for the reason the SDK's own docstring gives: the
+        # event fires when the status *transitions*, not per turn, so a
+        # browser that reloads an hour into a five-hour window would have
+        # nothing to show until the next transition — which may be the
+        # rejection this figure exists to give warning of.
+        self._rate_limit: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -442,6 +449,33 @@ class EngineSession:
             return None
         elapsed = time.monotonic() - self._compacting_since
         return {"elapsed_seconds": max(0.0, elapsed)}
+
+    @property
+    def rate_limit(self) -> dict[str, Any] | None:
+        """The last rate-limit record, or ``None`` — for a client's first paint.
+
+        Same shape as the ``rateLimit`` broadcast, and the same reasoning as
+        :attr:`compaction_state`: a broadcast is not a record. The difference
+        is how long the gap is. A compaction lasts tens of seconds, so the
+        window in which a reload loses the fact is small; the CLI emits a rate
+        limit only when the status *changes*, so a reload loses it for as long
+        as the status holds — hours, on a seven-day window.
+
+        **Not cleared by a new session, unlike compaction.** A five-hour window
+        belongs to the account, not to the conversation, so ``/clear`` and a
+        resume leave it exactly as true as it was. Nor by ``disconnect``: the
+        engine going away does not give the tokens back.
+
+        **Whether the window has since reset is the browser's question, not
+        this one.** The record is served raw. A pushed record has to be aged by
+        the client anyway — the HUD can hold one for hours without another
+        arriving — so expiring it here as well would be a second definition of
+        "still open" that could only come to disagree with the first
+        (``specs5/next.md`` § C3). ``resets_at`` is a wall-clock instant that
+        the browser already renders against its own clock, and minutes of skew
+        do not matter to a five-hour window.
+        """
+        return dict(self._rate_limit) if self._rate_limit is not None else None
 
     @property
     def permission_mode(self) -> str:
@@ -816,6 +850,15 @@ class EngineSession:
             self.health.note_mirror_gap()
             self.health.last_error = event.payload.get("error") or None
             return Event("engineHealth", self.health.to_dict(), turn_scoped=False)
+        if event.name == "rateLimit":
+            # Held as well as forwarded — see `rate_limit`. The payload is
+            # kept whole rather than reduced to the fields the HUD renders
+            # today, because it is the CLI's own record and the translator
+            # already chose which of its fields to name.
+            payload = event.payload
+            if isinstance(payload, dict):
+                self._rate_limit = dict(payload)
+            return event
         if event.name == "compactionEvent":
             # Held, not just forwarded, so a browser that reloads during the
             # pause can be told about it — see `compaction_state`. Only the

@@ -274,7 +274,14 @@ Floating overlay on the viewer background, appearing after each turn.
 ### Placement
 
 - Top-level element in the app-shell shadow DOM, sibling of the dialog and viewer containers
-- Fixed position near a top corner, high z-index — but **below the permission dialog**, which is modal over everything (see [permission-dialog.md](permission-dialog.md))
+- Fixed position near a top corner, high z-index — but **below the permission dialog**, which is modal
+  over everything (see [permission-dialog.md](permission-dialog.md)). *This line was true and the code
+  was not*: the HUD shipped at `z-index: 10000` against the dialog's 9000 from phase 3 until
+  2026-08-28, so a permission request arriving inside the HUD's eight seconds had a transient overlay
+  floating over its top-right corner, taking the clicks there as well. Corrected to the 500 the
+  [reference ladder](../../specs-reference/5-webapp/shell.md) always assigned it, and pinned by a test
+  that reads the dialog's own stylesheet rather than copying its number — a copied constant goes stale
+  exactly when the dialog moves, which is the one change that could reintroduce this.
 - Triggered by the stream-complete window event, filtered to exclude errored and empty turns
 
 ### Data Flow
@@ -296,9 +303,34 @@ never waits on the fetch to render.
 That second call is a control request to the CLI subprocess, which is what makes § When The Engine Is
 Gone below a requirement rather than a nicety.
 
+**A third source arrived with the Rate limits section, and it is neither per-turn nor fetched.** The
+`rateLimit` push carries a record that is not about the turn at all, and the shell's first-paint
+`state-loaded` snapshot carries the last one the engine held. Both write the same field, because the
+CLI sends this on a status *change* rather than per turn: the push is the only thing that reports a
+transition, and the snapshot is the only thing a browser that reloaded between transitions will ever
+get. Neither costs a round trip the HUD makes.
+
 ### Sections
 
-All collapsible; collapse state persisted to `localStorage` as a serialised set of section names.
+Collapsible where there is a body to collapse; the set of collapsed section names is persisted to
+`localStorage` (`aic-dc-hud-collapsed`).
+
+**A section's head keeps its headline figure**, so closing one costs no height and hides no answer —
+Context collapsed still reads `23% · 45.2K/200K`, and what goes away is the bar and the category
+legend. That is what makes the control worth having in an overlay this small: the numbers are the
+answer and the bars are the working.
+
+**"This turn" is the exception and stays a plain row.** This section previously said *all* sections
+collapse. Its entire content is its headline, so a disclosure control there would hide the one figure
+the HUD exists to show and spend a caret doing it — a collapsed section that says nothing is not a
+smaller section, it is an absent one. The four that do collapse are Context, Per-model usage, Rate
+limits and Files modified.
+
+**The stored name is not always the displayed one.** Rate limits is keyed on `Rate limits` while its
+head reads "5-hour limit" or "7-day Opus limit", because the window an account is bound by changes and
+keying the preference on the label would silently re-open a section the user closed, on the day the
+label changed. A stored name this build does not render is kept rather than dropped, so two browsers
+on one profile — or a downgrade — do not each clear the other's preferences.
 
 | Section | Content |
 |---|---|
@@ -306,11 +338,86 @@ All collapsible; collapse state persisted to `localStorage` as a serialised set 
 | This turn | This turn's cost or why there is none, duration, engine-internal turn count, terminal reason, permission-prompt count |
 | Per-model usage | One row per entry in `turn_model_usage`: the model, then `↑ prompt · ↓ output`. `↑` is the **whole** prompt — the uncached part and the cached part added together — because three input-side counters do not fit in 300px beside a model name, and their sum is the one figure that is not misleading on its own (see [chat.md § The Token Split](chat.md#the-token-split)). The tooltip carries all four counters unrounded. Per-row cost and context window belong to the Context tab; this row exists to answer whether a turn's tokens were prompt or completion, which the cost line alone cannot |
 | Context | `totalTokens` / `maxTokens` with the auto-compact mark |
-| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play |
+| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play. Overage on its own line when the record mentions it |
 | Files modified | The turn's `files_modified`, each clickable to the diff viewer |
 
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
 immediately after an agentic turn is which files changed.
+
+### Rate Limits Is A Gauge, Not A Second Alarm
+
+**It renders at any status, including `allowed`.** The chat panel's toast is the alarm and stays silent
+below `allowed_warning` ([chat.md § Engine Event Routing](chat.md#engine-event-routing)); this section
+is the standing figure. Gating it on the same threshold would have left the HUD with nothing to say in
+exactly the billing mode [§ R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap) is
+about, where the dollar rows above stop mapping to money and this is the only number a user can act on.
+R-6 asks for "first-class display", and a control that appears only when something is wrong is not a
+display of anything.
+
+**"In play" is a window that has not reset yet, not an event that just fired.** The SDK is explicit
+that the CLI emits `RateLimitEvent` when the status *transitions*, not per turn, and two consequences
+follow that a live-only reading would get wrong in opposite directions:
+
+- **A record must survive a reload.** Between transitions there is nothing to receive, and on a
+  seven-day window that gap is measured in days — possibly right up to the rejection the figure exists
+  to give warning of. So `EngineSession` holds the last record and `get_current_state` carries it as
+  `rate_limit`, and the HUD adopts it on `state-loaded`. Same lesson as the compaction indicator and a
+  much longer gap: **a broadcast is not a record.** A snapshot carrying no record leaves a pushed one
+  alone — a reconnect re-delivers the snapshot mid-session, and a backend older than the field sends
+  nothing, and neither is evidence that a limit has gone away.
+- **A record must expire.** One stands for hours and outlives its own window: past `resets_at` the
+  counter is back at zero and "82% of your 5-hour limit" is a claim about a window that no longer
+  exists, with nothing else on screen to contradict it. So the section disappears at the reset rather
+  than going stale.
+
+**Expiry is the browser's question, and only the browser's.** A pushed record has to be aged
+client-side regardless — the HUD can hold one for hours without another arriving — so testing it
+server-side as well would be a second definition of "still open" that could only come to disagree with
+the first ([next.md § C3](../next.md)). The server serves the record raw. `resets_at` is a wall-clock
+instant the HUD already renders against the browser's own clock, and minutes of skew do not matter to a
+five-hour window.
+
+**The record is not cleared by a session change or by a disconnect**, unlike the compaction state
+beside it. A five-hour window belongs to the account rather than to the conversation: `/clear` does not
+give the tokens back, and neither does the engine going away.
+
+**A rejection is red whatever the utilisation says.** An overage cut-off can refuse a turn at a figure
+the colour bands would call healthy, and the colour reports the outcome rather than the arithmetic.
+Overage itself gets one line and no second gauge — it is a fallback rather than a budget, the CLI
+reports it as a status and a reason rather than a figure, and `overage_disabled_reason` is printed in
+the CLI's own words because paraphrasing a reason this repo has never enumerated would be inventing
+one.
+
+`utilization` is a **fraction, 0.0–1.0** (`RateLimitInfo`), and `resets_at` is **Unix seconds** — not
+milliseconds and not ISO. Both are pinned by tests, because each has exactly one plausible wrong
+reading and neither fails visibly: a fraction read as a percentage renders every real figure as under
+one percent, and seconds read as milliseconds put the reset in 1970.
+
+**`max_budget_usd`'s spend-against-budget bar is still not built.** § *Cost Is Cumulative* says one
+appears in this section's place when a budget is configured; nothing renders it, and it is not what
+this section is. Recorded here rather than left to be noticed, and queued in
+[`next.md`](../next.md) § B.
+
+### Files Modified Reuses The Rule, Not The Chip
+
+The chips are the tool-card footer's chips in every way that could drift and none of the ways that
+could not. The **rule** is shared — `toRepoPath` names the file, the tooltip keeps the engine's
+absolute path, and `detail.path` on the `navigate-file` event stays exactly what the engine sent, so
+the label remains a display concern and never becomes the navigation contract
+([shell.md § The Same Rule Names Files On Screen](shell.md#the-same-rule-names-files-on-screen),
+[next.md § C4](../next.md)). The **markup and the stylesheet** are this component's own, because a
+shadow root does not inherit another's rules and there is nothing there that two copies can disagree
+about.
+
+The list is deduplicated **on the raw path, not on the label**. A turn that edits one file three times
+reports it three times, and deduplicating after conversion would additionally collapse two genuinely
+different files that happen to render the same — the bug the "Files Referenced" list had, in the
+opposite direction.
+
+**A click does not dismiss the HUD**, unlike a click on the Context tab's memory-file rows. Those
+minimise the dialog because it is opaque over the viewer they just opened a file in; this is a small
+corner overlay, and hovering it has already stopped the auto-hide, so a reader opening three files in
+turn keeps the list and it fades on its own once they move away.
 
 ### Cost Is Cumulative, and the HUD Reports One Turn
 
@@ -366,7 +473,12 @@ here reads like the one the terminal shows. Two decimals throughout would render
 `$0.00`.
 
 The rate-limit section remains the analogue of a cost signal for a user who does not care about dollar
-estimates, and when `max_budget_usd` is configured a spend-against-budget bar appears in its place.
+estimates — see § *Rate Limits Is A Gauge, Not A Second Alarm*, which is what that sentence turned into
+when it was built. When `max_budget_usd` is configured a spend-against-budget bar appears in its place;
+**that half is specified and not built**, and it is a different reading of the same payload rather than
+a variant of the section beside it — the budget is a session total against a configured ceiling, so it
+is `total_cost_usd` read deliberately as the cumulative figure it is, which is the one place in this
+app where that is the right field.
 
 ### Per-Model Rows Are Not Summed
 
@@ -489,6 +601,17 @@ tier-distribution HUD.
 - A turn whose cost cannot be established is never rendered as `$0.00`, and never as a claim about the
   billing plan; the reason is named instead.
 - A turn that genuinely cost nothing extra renders differently from one whose cost is unknown.
-- Per-model usage rows are never summed into one line.
-- HUD section collapse state persists across sessions via `localStorage`.
+- Per-model usage rows are never summed into one line — including by the section head, whose headline
+  is a count of rows and never a total of them.
+- HUD section collapse state persists across sessions via `localStorage`, keyed on a section name that
+  does not move when the section's label does. A stored name this build does not render is preserved.
+- A collapsed section still shows its headline figure. Collapsing hides working, never answers.
+- The HUD's rate-limit section renders at any status, not only when a limit is being approached: it is
+  the subscription-mode cost signal, not a second alarm.
+- A rate-limit record is never rendered past the `resets_at` it names, and expiry is decided in exactly
+  one place — the browser.
+- A rate-limit record survives a reload, a session change and a disconnect. The window belongs to the
+  account, and the CLI only re-sends on a status change.
+- Every file named on the HUD follows the same rule as every file named anywhere else: repo-relative
+  label, engine's path on the tooltip, unconverted path in the navigation event.
 - The terminal HUD prints after every completed turn, cancelled or not.

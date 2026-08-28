@@ -965,6 +965,11 @@ class ClaudeCodeService:
             # seconds of apparently hung UI, which is the failure the
             # indicator exists to prevent.
             "compaction": self.session.compaction_state,
+            # The last rate-limit record, for the HUD's Rate limits section.
+            # None until the CLI sends one, which it does on a status change
+            # rather than per turn — so unlike `compaction` above, this is
+            # usually the *only* way a browser learns the figure at all.
+            "rate_limit": self.session.rate_limit,
             "permission_mode": self.session.permission_mode,
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),

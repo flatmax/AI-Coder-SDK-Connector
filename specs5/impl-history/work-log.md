@@ -557,6 +557,73 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The usage HUD's last three sections** — 2026-08-28, closing `next.md` § B1. Rate limits, Files modified
+  and collapse persistence had been specified for three phases with nothing rendering any of them. The
+  reasoning is in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) §§ *Rate Limits Is A Gauge, Not
+  A Second Alarm* and *Files Modified Reuses The Rule, Not The Chip*; the field shapes and the collapse keys
+  are in its [reference twin](../../specs-reference/5-webapp/viewers-hud.md).
+
+  **The item was scoped as three frontend sections and one of them had a backend half.** The SDK's own
+  docstring is what found it: the CLI emits `RateLimitEvent` when the status *transitions*, not per turn. So
+  a HUD reading only the live push would show nothing to any browser that reloaded between transitions —
+  days, on a seven-day window, and possibly right up to the rejection the figure exists to warn about. The
+  session now holds the record and `get_current_state` carries it, which is § C6's compaction fix a day
+  earlier applied to a gap two orders of magnitude longer. **A broadcast is not a record**, and the interval
+  between broadcasts is how much that costs.
+
+  **Where the spec's wording had to be read rather than followed.** "When a rate-limit event is in play"
+  reads as *an event just fired*; taken that way the section would have been a second copy of the toast that
+  already fires on the same transition. It has to mean *the window has not reset yet* — which is also what
+  makes expiry a requirement rather than a nicety, because a record stands for hours and outlives its own
+  window, and "82% of your 5-hour limit" an hour after the reset has nothing on screen to contradict it.
+
+  **Expiry has an obvious wrong home.** Testing `resets_at` server-side at snapshot time looks like the
+  tidy place for it and is not: a pushed record has to be aged client-side regardless, so the server test
+  would have been a second definition of "still open" that could only come to disagree with the first — the
+  shape `next.md` § C3 keeps finding. The server serves the record raw and says so in the property's
+  docstring, and a test pins that it does.
+
+  **Two units, each with exactly one plausible wrong reading and neither failing visibly.** `utilization` is
+  a fraction 0.0–1.0, so read as a percentage every real figure renders as under one percent; `resets_at` is
+  Unix seconds, so read as milliseconds the reset lands in 1970. Both are pinned, in `rate-limit.test.js`,
+  against the SDK's `RateLimitInfo` docstring rather than against a guess.
+
+  **One spec sentence was corrected instead of implemented.** § *Sections* said *all* sections collapse.
+  "This turn" is its own headline, so a disclosure control there hides the one figure the HUD exists to show
+  and spends a caret doing it — a collapsed section that says nothing is not a smaller section, it is an
+  absent one. Four collapse; each head keeps its headline, so closing one costs no height and hides no
+  answer.
+
+  **The collapse key is deliberately not the label.** The rate-limit section's head reads "5-hour limit" or
+  "7-day Opus limit" depending on which window the account is bound by, and that moves. Keying the stored
+  preference on it would silently re-open a section the user closed, on the day the label changed — which is
+  the day they are least likely to want to look at it. Pinned by a test that sets the preference under one
+  window and asserts it under another.
+
+  **Two reuses, and the line between them is the point.** `formatResetTime` moved out of
+  `chat-panel/streaming.js` into a shared `rate-limit.js`, so the toast and the section name one limit the
+  same way — the toast's wording changed as a result, from the raw `five_hour` to "5-hour". But the file
+  chips are *not* the tool card's chips: the rule they share is `toRepoPath` and the unconverted
+  `detail.path`, which is the part that could drift, while the markup and the stylesheet are the HUD's own
+  because a shadow root does not inherit another's and there is nothing there for two copies to disagree
+  about.
+
+  **Two things the work found that were not the work.** The HUD had **no `max-height`** — specified
+  since phase 3 as "fixed width, max height with internal scroll", harmless while it was four short
+  rows, and a real problem the moment Files modified made a section that grows with the turn: forty
+  files is an ordinary refactor. And it sat at **`z-index: 10000`, above the permission dialog's
+  9000**, for three phases while its own § Placement said "below the permission dialog, which is modal
+  over everything". A request arriving inside the HUD's eight seconds had this overlay across its
+  top-right corner and taking the clicks there. Both were found by reading the reference twin's ladder
+  for where a fifth section could go — which is an argument for reading the twin, since neither is
+  visible from the behavioural spec and neither fails a test that existed.
+
+  **Checked by mutation, not by passing.** Six behaviours — the window's expiry, the raw-path dedup, the
+  stable collapse key, rendering at `allowed`, the repo-relative label, and adopting the snapshot record —
+  were each reverted in turn and the suite confirmed to fail. Five of them cost one test each; gating the
+  section on `allowed_warning` cost ten, which is the difference between a detail and the decision the
+  section is built on.
+
 - **A tool card's header is two columns, and nothing is pinned right** — 2026-08-28, asked for in the same
   conversation as the entry below and superseding its `.tool-header-end` group. The user's question was
   whether the time chip could move under the tool name, "so that we have only two columns, left (tool tag,

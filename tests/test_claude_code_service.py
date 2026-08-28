@@ -95,6 +95,9 @@ class FakeSession:
         # `None` the way the real property reports "not compacting", which is
         # every state a test sets up unless it says otherwise.
         self.compaction_state = None
+        # `None` the way the real property reports "the CLI has never sent a
+        # rate limit", which is every session that has not been near one.
+        self.rate_limit = None
         self.permission_mode = "default"
         self.model = None
         self.config = EngineConfig()
@@ -1652,6 +1655,7 @@ class TestState:
             "streaming_active",
             "active_streams",
             "compaction",
+            "rate_limit",
             "permission_mode",
             "model",
             "pending_permissions",
@@ -1664,6 +1668,18 @@ class TestState:
             "doc_convert_available",
             "disk_warning",
         }
+
+    async def test_the_snapshot_carries_the_rate_limit_record(self, service):
+        """The HUD's Rate limits section has no other way to learn the figure.
+
+        The CLI emits a rate limit on a status *change*, so a browser that
+        reloads between transitions never sees the push — this snapshot is the
+        only thing that tells it, and it may be hours before another arrives.
+        """
+        assert (await service.get_current_state())["rate_limit"] is None
+        service.session.rate_limit = {"status": "allowed_warning", "utilization": 0.9}
+        state = await service.get_current_state()
+        assert state["rate_limit"]["utilization"] == 0.9
 
     async def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
         state = await service.get_current_state()

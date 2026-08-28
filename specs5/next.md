@@ -1,6 +1,6 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `eff378a`.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `dfda621` — B1 landed on top of it and is not yet committed.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -85,9 +85,9 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B2, B5, C1, C4, C5, C6, C7 and C8 have since closed, so the cheapest remaining
-item is the **first two rows of B3**, which build discoverability for values that are already
-configurable.
+smaller than either phase. B1, B2, B5, C1, C4, C5, C6, C7 and C8 have since closed, so the cheapest
+remaining item is the **first two rows of B3**, which build discoverability for values that are already
+configurable. § B is down to B3 and B4, and B4 is a design decision rather than a build.
 
 **§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
 display decision with three plausible options; the house rule for naming a file on screen was already in
@@ -254,15 +254,37 @@ Spec homes: [`6-deployment/packaging.md`](6-deployment/packaging.md),
 Each of these is a spec section with no implementation behind it. They are not oversights in the
 specs; they are the specs waiting.
 
-**B1 — The HUD's last three sections.** [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md)
-§ *Sections* specifies **Rate limits** (limit type, utilisation, reset time when a rate-limit event is
-in play) and **Files modified** (the turn's list, each clickable to the diff viewer), and its
-§ *Invariants* requires **collapse state persisted to `localStorage`**. None of the three exists
-(verified 2026-08-27: `usage-hud.js` contains no `rateLimit`, no `filesModified`, no collapse
-persistence). Rate limits is the one with weight behind it —
-[`plan/risks.md`](plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap) § R-6 makes
-`RateLimitEvent` the subscription-mode equivalent of a cost signal, and under subscription billing it is
-the only figure a user can act on.
+**B1 — The HUD's last three sections.** ✅ *Built 2026-08-28 — leaves this queue.* Rate limits, Files
+modified and collapse persistence all render;
+[`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) holds the reasoning in three new sections and the
+concrete shapes are in its [reference twin](../specs-reference/5-webapp/viewers-hud.md).
+
+**The section with weight behind it turned out to have a backend half.** § R-6 makes `RateLimitEvent`
+the subscription-mode equivalent of a cost signal, and the SDK's own docstring says the CLI emits one
+when the status *transitions* — not per turn. So a live-only reading would have shown nothing to any
+browser that reloaded between transitions, which on a seven-day window is days, and possibly right up
+to the rejection the figure exists to warn about. `EngineSession` holds the record and
+`get_current_state` carries it, exactly as § C6 did for compaction a day earlier: **a broadcast is not
+a record**, and this is the same lesson over a much longer gap.
+
+**Two things the framing had backwards.** "When a rate-limit event is in play" reads as *an event just
+fired*; it has to mean *the window has not reset yet*, or the section would be a second copy of the
+toast. And expiry had a natural-looking home on the server that would have been the wrong one — a
+pushed record must be aged client-side regardless, so a server-side test could only have become a
+second definition of "still open" (§ C3). The server serves the record raw.
+
+**One spec sentence was corrected rather than implemented.** § *Sections* said *all* sections collapse;
+"This turn" is its own headline, so a disclosure control there hides the figure the HUD exists to show
+and spends a caret doing it. Four sections collapse, the head keeps the headline, and the stored key is
+deliberately not the displayed label — the rate-limit section's name moves from "5-hour limit" to
+"7-day limit" with the account's binding window, and keying on it would re-open a section the user
+closed on the day the label changed.
+
+**What this did not build, and it is not residue but scope:** § *Cost Is Cumulative* also specifies a
+spend-against-budget bar when `max_budget_usd` is configured. It is a different reading of a different
+field — `total_cost_usd` deliberately as the cumulative figure, which is the one place in the app where
+that is correct — and it is stated in both spec files rather than left to be noticed. Not queued;
+nobody has asked for a budget.
 
 **B2 — The retired-files note.** ✅ *Built 2026-08-28 — leaves this queue.*
 [`5-webapp/settings.md`](5-webapp/settings.md) § *Deleted cards* had argued for it at length and
@@ -501,6 +523,11 @@ background subagent killed it with the CLI emitting no terminal task message at 
 and browser both reading `status: null, terminal: false` and the LED cyan. So the two paths are not
 interchangeable and **the webapp's own ⏹ is the only thing that can verify itself.**
 [`plan/README.md`](plan/README.md) open item 9, last clause.
+
+**B1's own residue is D2's, not this section's.** The HUD's collapse behaviour is asserted from the
+DOM — a collapsed section's body is absent and its headline is not — which jsdom answers honestly
+because it is presence, not layout. What jsdom cannot answer is whether five sections and their heads
+fit 300px on a real screen, which is the same distance from a pixel that § D2 already records.
 
 **D2 — Two rendering behaviours cannot be tested from jsdom.** ~~The `Bash` summary's three-row clamp is
 layout,~~ and the permission dialog's Monaco style-clone tests assert that the rules *arrive*, not that

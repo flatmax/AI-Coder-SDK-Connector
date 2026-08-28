@@ -32,12 +32,20 @@ per-variant column.
 |---|---|
 | Position | `position: fixed; top: 16px; right: 16px` |
 | Z-index | 500 — **below** the permission dialog's 2000 (see `specs-reference/5-webapp/shell.md` § Viewport-scoped overlay z-index ladder) |
-| Width | 340 px fixed |
-| Max height | 80 vh with overflow scroll |
+| Width | 300 px fixed |
+| Max height | 80 vh with `overflow-y: auto` |
 
-The z-index dropped from 10000. A HUD floating over a modal permission request would obscure the one
-surface in the app that blocks a turn, and the HUD is transient information about a turn that is already
-over.
+The z-index dropped from 10000 **on 2026-08-28, not when this table was written**. For three phases the
+table said 500 and the stylesheet said 10000, so a HUD did float over a modal permission request —
+obscuring the one surface in the app that blocks a turn, and taking the clicks in its corner, with the
+HUD carrying transient information about a turn that was already over. It is now pinned by a test in
+`usage-hud.test.js` that reads the dialog's z-index out of `permission-dialog/styles.js` rather than
+copying it.
+
+The width figure was 340 here and 300 in the stylesheet over the same period; 300 is what shipped and
+what the component's own comments size their columns against, so this table now says 300. The max
+height was likewise unwritten until the Files modified section made it load-bearing — a section whose
+height grows with the turn is the first thing here that could run off the screen.
 
 ### Context gauge colour thresholds
 
@@ -119,6 +127,51 @@ prevent.
 The native engine's `priced_request_count` / `unpriced_request_count` split is gone. It existed because
 litellm's pricing table could lack an entry for a configured model; the CLI reports cost or reports
 nothing, with no third "we could not price this" state.
+
+### Rate-limit record
+
+Field shapes are the SDK's `RateLimitInfo`, passed through unchanged by
+`aic_dc/claude_code/messages.py::_rate_limit` and held on the session as `rate_limit`.
+
+| Field | Type | Note |
+|---|---|---|
+| `status` | `allowed` \| `allowed_warning` \| `rejected` | The HUD renders at all three; the chat panel's toast fires on the last two only |
+| `rate_limit_type` | `five_hour` \| `seven_day` \| `seven_day_opus` \| `seven_day_sonnet` \| `overage` | Unknown values render with underscores opened out rather than dropped — the enum is the CLI's to extend |
+| `utilization` | float **0.0–1.0** | A *fraction*. Read as a percentage it renders every real figure as under 1% |
+| `resets_at` | int, **Unix seconds** | Not milliseconds, not ISO. `× 1000` before `new Date` |
+| `overage_status` | same three words, or null | One line, no second gauge |
+| `overage_resets_at` | int, Unix seconds | |
+| `overage_disabled_reason` | string or null | Printed in the CLI's own words |
+
+Both unit facts are pinned by tests, because each has exactly one plausible wrong reading and neither
+fails visibly.
+
+| Rule | Value |
+|---|---|
+| Utilisation colour | The context gauge's bands above, applied to the percentage — **except** `status: "rejected"`, which is `#f85149` at any figure |
+| Section absent when | `windowIsOpen` is false (`resets_at × 1000 ≤ Date.now()`), or the record carries no figure, no type and no rejection |
+| Expiry decided in | The browser only. The server serves the record raw |
+| Cleared by | Nothing short of a newer record — not a session change, not a disconnect |
+
+Labels: `five_hour` → "5-hour", `seven_day` → "7-day", `seven_day_opus` → "7-day Opus",
+`seven_day_sonnet` → "7-day Sonnet", `overage` → "Overage". The section's *head* reads
+`{label} limit`; its *stored collapse key* is the constant `Rate limits`.
+
+The derivations live in `webapp/src/rate-limit.js`, shared with `chat-panel/streaming.js` —
+`formatResetTime` moved there from the latter when the HUD needed the same sentence.
+
+### HUD section collapse
+
+| Section | Collapse key | Head's headline |
+|---|---|---|
+| Context | `Context` | `{pct}% · {total}/{max}`, in the gauge colour |
+| Per-model usage | `Per-model usage` | `{n} models` when n > 1, otherwise nothing — **never a token total** |
+| Rate limits | `Rate limits` | `{pct}%`, or `reached`, or `—` |
+| Files modified | `Files modified` | The de-duplicated file count |
+| This turn | *(not collapsible)* | — |
+
+Stored as a JSON array under `aic-dc-hud-collapsed`. Unparseable values, non-arrays and non-string
+members all degrade to "nothing collapsed". Names the build does not render round-trip untouched.
 
 ### Thinking token rendering
 
