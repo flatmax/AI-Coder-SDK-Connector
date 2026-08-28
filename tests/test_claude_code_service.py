@@ -2536,6 +2536,46 @@ class TestSessionStoreWiring:
         )
 
 
+class TestKeywordEnrichmentPreference:
+    """``doc_index.keywords_enabled`` reaches the builder, and stays live.
+
+    Before this wiring the key was parsed by ``ConfigManager`` and read by
+    nobody: ``app.json`` documented a switch, the Settings tab now offers
+    one, and enrichment ran regardless of both.
+    """
+
+    def test_the_builder_gets_a_callable_not_a_boolean(self, tmp_path, events):
+        """A boolean captured here would pin the value the app started with.
+
+        The builder is constructed once per process and ``app.json`` is
+        reloadable, so the preference has to be a question the builder can
+        ask again — otherwise the Settings switch needs a relaunch, and
+        that tab has no way to say so.
+        """
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        assert callable(svc.doc_builder._enrichment_enabled)
+        assert svc.doc_builder._enrichment_enabled == svc._keyword_enrichment_enabled
+
+    def test_it_reads_the_config_each_time_it_is_asked(self, tmp_path, events):
+        config = FakeConfig(tmp_path)
+        config.doc_index_config = {"keywords_enabled": True}
+        svc = ClaudeCodeService(
+            config, event_callback=events, engine_config=EngineConfig()
+        )
+        assert svc._keyword_enrichment_enabled() is True
+        config.doc_index_config = {"keywords_enabled": False}
+        assert svc._keyword_enrichment_enabled() is False
+
+    def test_a_config_without_the_key_leaves_enrichment_on(self, tmp_path, events):
+        """Absent means on, the same way ``ConfigManager`` reads it."""
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        assert svc._keyword_enrichment_enabled() is True
+
+
 class TestTheDiskWarning:
     """One sentence, once, about the one thing under `.aic-dc/` that does
     not rebuild.

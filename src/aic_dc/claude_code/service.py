@@ -657,9 +657,29 @@ class ClaudeCodeService:
         return DocIndexBuilder(
             doc_index=doc_index,
             enricher=enricher,
+            enrichment_enabled=self._keyword_enrichment_enabled,
             repo=self._repo,
             progress=self._send_startup_progress,
         )
+
+    def _keyword_enrichment_enabled(self) -> bool:
+        """``app.json``'s ``doc_index.keywords_enabled``, read fresh.
+
+        Handed to :class:`DocIndexBuilder` as a callable, so a reload of
+        ``app.json`` — which the Settings tab performs after a save —
+        reaches the next enrichment pass without a relaunch. Reading it
+        once here and passing the boolean would make the preference an
+        app-restart field, and there is no third disposition on that tab
+        between "now" and "next session".
+
+        The key was parsed by ``ConfigManager.doc_index_config`` from the
+        day the section existed and read by nothing until this method: it
+        was a documented switch with no wire behind it, so enrichment ran
+        whatever the file said. See ``specs5/2-indexing/keyword-enrichment.md``
+        § Switching Enrichment Off.
+        """
+        doc_config = getattr(self._config, "doc_index_config", None) or {}
+        return bool(doc_config.get("keywords_enabled", True))
 
     def _build_bridge_wiring(self) -> tuple[Any, Any]:
         """The ``hooks`` and ``mcp_servers`` the session is built with.

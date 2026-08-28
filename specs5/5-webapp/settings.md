@@ -165,17 +165,58 @@ regression named in
 
 ## Preference Cards
 
-**Not built.** No preference card exists; the grid holds the two config cards and nothing else. None of
-the three below has an implementation on either side.
+**Two of the three are built.** Thinking display and Doc enrichment render above the config grid; Deny-read
+scope waits on the prompt it would reset (§ B4 of [`../next.md`](../next.md)), because a control that
+forgets a remembered answer to a question nobody is asked yet is a control over nothing.
 
 Cards that hold a switch rather than an editor, laid out in the same card shape with the control beneath
-the icon and label. Descriptions live in the `title` attribute so the grid stays visually uniform.
+the icon and label, in a grid of their own — a `<select>` with "Engine default" in it does not fit the
+110px track the icon cards use. Long descriptions live in the `title` attribute so the grid stays visually
+uniform.
 
 | Card | Backed by | Effect |
 |---|---|---|
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
-| Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask` |
+| Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask`. **Not built** |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
+
+**The note under each control is the card.** Both fields were already editable in the textarea below —
+`engine.json` and `app.json` are the two config cards — so a switch adds no capability whatsoever. What it
+adds is discoverability plus the one thing a textarea cannot say: when the value it just wrote starts being
+true. The two cards deliberately answer that differently, and **neither answers "now"**:
+
+- **Thinking display** is next-session, like every other field in `engine.json` bar the model. The field
+  joins the waiting list, which is what makes the restart confirmation name it — so the card hands the
+  reader to the control that finishes the job rather than reporting a success it did not achieve
+- **Doc enrichment** is next-*pass*. `app.json` is reloadable and the card calls the reload, but the
+  consumer is a background build, not a value read per use. Switching enrichment off stops the next pass;
+  it does not remove keywords already computed, and switching it back on does not start one. Reporting it
+  as applied would be wrong in both directions
+
+**Thinking display is a three-state select, not a switch.** `null` means "let the CLI decide", which is a
+different claim from either `summarized` or `omitted` — the null rule in
+[`../1-foundation/configuration.md`](../1-foundation/configuration.md) is load-bearing here, and a checkbox
+could not have expressed it.
+
+**A switch writes text, not a re-serialised file.** `webapp/src/settings-preferences.js` replaces the value
+on its own line and leaves every other byte alone, falling back to parse-and-stringify only for a key the
+file does not have yet. Round-tripping this app's own `app.json` through `JSON.stringify` explodes
+`extensions` and `keywords_ngram_range` from one line each to twelve: not data loss, but an unrequested
+rewrite of the user's file performed by a control that promised to move one boolean. When the file will not
+parse at all the switch is disabled and says so, and the reader is sent to the textarea — the surface that
+can actually fix it.
+
+**A switch writes through the open textarea when there is one.** If the card's file is open for editing,
+the base for the write is the textarea's current content and the result goes back into it. Basing the write
+on a stale read is the one failure this control could cause that the textarea alone never could: it would
+silently discard whatever the user had typed above it.
+
+**`doc_index.keywords_enabled` had no consumer until this card was built** (found 2026-08-28). It was
+parsed by `ConfigManager.doc_index_config` from the day the section existed and read by nothing —
+`EnrichmentConfig` never carried an `enabled` field — so enrichment ran whatever the file said. The gate
+now lives in `DocIndexBuilder.run_enrichment`, as a callable rather than a captured boolean so an
+`app.json` reload reaches a builder constructed at startup. See
+[`../2-indexing/keyword-enrichment.md`](../2-indexing/keyword-enrichment.md) § Switching Enrichment Off.
 
 Two rows that stood here have been removed rather than marked, because neither is this tab's to hold. The
 **permission chime** is a `localStorage` preference owned by the surface that rings it — see

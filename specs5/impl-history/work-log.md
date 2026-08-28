@@ -501,8 +501,12 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   session" summary.~~ **Built 2026-08-26 — see § Landed since.** The invariant that depended on it —
   *"a save never shows an unqualified success for a field that did not apply"* — is now enforced at the
   toast, not only in the panel.
-- **Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.
-- **Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.
+- ~~**Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.~~ **Built
+  2026-08-28 — see § Landed since.**
+- ~~**Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.~~ **Built
+  2026-08-28 — see § Landed since**, and it needed a backend half nobody had looked for: the key had no
+  reference anywhere in `src/aic_dc` either, beyond the line that parses it. This bullet had measured
+  the browser side of a field that was dead on both.
 - **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
 - **The permission chime's mute.** Added to this list by (a)'s arbitration rather than found in it: the
   dialog *reads* `aic-dc.permission-chime` and nothing writes it, so the mute is reachable only from a
@@ -523,9 +527,12 @@ spec that names the wrong tab is how `/permissions` came to lie and the same tra
 more items~~ **— (a) is done too** — and note that (b) turned up a ninth of exactly that kind, since this
 section's own table filed the MCP server list under Settings when the right home for it was the Context
 tab all along. ~~**(c) is what is left**, and within it the restart-session pair first, since two
-invariants currently have nothing behind them.~~ **That pair is built.** What is left of (c) is the three
+invariants currently have nothing behind them.~~ **That pair is built.** ~~What is left of (c) is the three
 preference-card items (thinking display, doc enrichment, deny-read scope), session-storage size — which
-still has no RPC to call — and the retired-files note, which remains the cheapest thing on this list.
+still has no RPC to call — and the retired-files note, which remains the cheapest thing on this list.~~
+**What is left of (c) is two items**: the deny-read scope reset, which is blocked on the prompt it would
+reset (next.md § B4), and session-storage size, which still has no RPC to call. The retired-files note and
+the first two preference cards all landed 2026-08-28.
 
 **How to keep this from recurring.** The drift was invisible because nothing reads a spec section
 against the component that implements it. The two mechanisms that *did* catch things this session were
@@ -556,6 +563,58 @@ not obstruct a caller that does not exist. Both are careful prose by someone loo
 The classification tests work because they refuse to be read past, and that is the difference.
 
 ### Landed since
+
+- **The first two preference cards** — 2026-08-28, closing the first two rows of `next.md` § B3 and most of
+  item (c) above. Thinking display and Doc enrichment now render above the config grid; the third row, the
+  deny-read scope reset, stays blocked on § B4. Reasoning in
+  [`../5-webapp/settings.md`](../5-webapp/settings.md) § *Preference Cards*.
+
+  **The queue entry's premise was half wrong, and the wrong half was the entire job.** It read: "the value
+  is already configurable, so what is being built is discoverability, not capability". True of
+  `thinking_display`, which `options.py` genuinely passes to the SDK. False of `app.json`'s
+  `keywords_enabled`, which `ConfigManager.doc_index_config` **parses** — the entry had recorded that as
+  *honoured* — and which nothing then read. `EnrichmentConfig` never carried an `enabled` field and no other
+  caller looked, so keyword enrichment ran whatever the file said and a card over it would have been a
+  switch wired to nothing.
+
+  This is the third field-with-a-missing-end in a week — § B5's `EngineHealth.mcp` had no writer, § C7's
+  `Turn.viewer` had no writer, this one had no reader — and the check that would have caught all three is
+  the same one: **grep for the consumer, not for the name.** A key appears in a config reader whether or
+  not anything downstream ever asks for it, so "the value exists and is read by `config.py`" is a sentence
+  that can be true of a dead key.
+
+  **Written rather than deleted**, unlike § B5, and for two reasons that did not apply there: the spec
+  names the effect ("Whether keyword enrichment runs"), and the thing being switched off is roughly a
+  gigabyte of resident sentence-transformer plus the pass that loads it — a user on a small machine has a
+  real reason to want the switch that the field promised them. The gate is the first check in
+  `DocIndexBuilder.run_enrichment`, and it is a **callable rather than a captured boolean**: the builder is
+  constructed once per process and `app.json` is reloadable, so reading the value at construction would have
+  made the switch an app-restart field, and the Settings tab has no disposition between "now" and "next
+  session" to describe one with. It also gets its own status word — `disabled`, not `unavailable` — because
+  `unavailable` drives a one-shot "install `aic-dc[docs]`" toast, and telling somebody how to install what
+  they just turned off is the one certainly wrong answer. Details in
+  [`../2-indexing/keyword-enrichment.md`](../2-indexing/keyword-enrichment.md) § *Switching Enrichment Off*.
+
+  **What the cards are made of is the note under the control.** Both fields remain editable as text in the
+  two config cards below, so the switch adds no capability at all — it adds discoverability plus the one
+  thing a textarea cannot say, which is when the value it just wrote starts being true. The pair was worth
+  building together precisely because their answers differ and **neither is "now"**: `thinking_display`
+  joins `_pendingFields` so the restart confirmation names it, and `keywords_enabled` is next-*pass* —
+  the reload is called and is real, but the consumer is a background build, so switching off does not
+  un-enrich what is cached and switching on does not start a pass.
+
+  **Two things the work found in the writing.** A switch that re-serialised its file would reformat it:
+  `JSON.stringify(_, null, 2)` over this app's own `app.json` explodes `extensions` and
+  `keywords_ngram_range` from one line each into twenty-four, which is an unrequested rewrite of a user's
+  config performed by a control that promised to move one boolean — so `settings-preferences.js` replaces
+  the value on its own line and only falls back to reserialising for a key the file does not have yet. And
+  a switch that based its write on a cached read would **silently discard the user's unsaved textarea
+  edits** when that file happened to be open: the base is the textarea when there is one, and the result
+  goes back into it, so the two surfaces cannot end up describing different files. That is the only fault
+  this control could cause that the config card alone never could.
+
+  `_reload` had to stop keying on `_activeKey`, since a preference writes a file that may not be open at
+  all — reloadability is a fact about the file, never about which panel asked.
 
 - **The usage HUD's last three sections** — 2026-08-28, closing `next.md` § B1. Rate limits, Files modified
   and collapse persistence had been specified for three phases with nothing rendering any of them. The

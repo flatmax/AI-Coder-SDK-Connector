@@ -133,47 +133,292 @@ afterEach(() => {
 // The switch, its config key and the `--experimental` flag
 // that unlocked it are all gone.
 //
-// This test replaces them. The removal has to be provable from
-// the tab's own rendering, not from the absence of a card
+// The suite below replaces them. The removal has to be provable
+// from the tab's own rendering, not from the absence of a card
 // definition — a re-added CONFIG_CARDS entry with a stale
 // `renderer: 'toggle'` would render a card with no switch
 // machinery behind it and fail silently.
 
-describe('aic-settings-tab has no preference switches yet', () => {
-  beforeEach(() => {
-    publishFakeRpc({
-      'Settings.get_config_info': () => ({ config_dir: '/tmp/config' }),
-      'Settings.get_config_content': (key) => ({
-        type: key,
-        content: '{}',
-      }),
-    });
-  });
+// -----------------------------------------------------------
+// Preference cards
+// -----------------------------------------------------------
+//
+// `specs5/5-webapp/settings.md` § Preference Cards. Two switches
+// over fields that were already editable in the textarea below
+// them, which is what makes the *notes* the thing under test:
+// the card adds discoverability, and the only thing it can get
+// wrong that the textarea could not is claiming a value is in
+// force when it is not.
+//
+// The two dispositions are deliberately different and neither is
+// "now": engine.json is read when the CLI starts, and app.json's
+// enrichment flag is read by the next background pass.
 
-  it('renders no toggle card, switch or agentic label', async () => {
+const ENGINE_CONTENT = `{
+  "model": null,
+  "permission_mode": null,
+  "thinking_display": null,
+  "max_buffer_size": null
+}
+`;
+
+const APP_CONTENT = `{
+  "doc_index": {
+    "keyword_model": "BAAI/bge-small-en-v1.5",
+    "keywords_enabled": true,
+    "keywords_ngram_range": [1, 2]
+  }
+}
+`;
+
+function prefCards(el) {
+  return [...el.shadowRoot.querySelectorAll('.pref-card')];
+}
+
+function thinkingSelect(el) {
+  return el.shadowRoot.querySelector('.pref-select');
+}
+
+function enrichmentCheckbox(el) {
+  return el.shadowRoot.querySelector('.pref-card input[type="checkbox"]');
+}
+
+/** A fake backend that holds both config files and records saves. */
+function publishConfigFiles(overrides = {}) {
+  const files = {
+    engine: ENGINE_CONTENT,
+    app: APP_CONTENT,
+    ...(overrides.files || {}),
+  };
+  const saves = [];
+  const reloads = [];
+  publishFakeRpc({
+    'Settings.get_config_info': () => ({ config_dir: '/tmp/config' }),
+    'Settings.get_config_content': (key) => ({ type: key, content: files[key] ?? '' }),
+    'Settings.save_config_content': (key, content) => {
+      saves.push({ key, content });
+      files[key] = content;
+      return {
+        status: 'ok',
+        type: key,
+        disposition: overrides.disposition || {
+          compared: true,
+          changed: [key === 'engine' ? 'thinking_display' : 'doc_index'],
+          live: key === 'app' ? ['doc_index'] : [],
+          next_session: key === 'engine' ? ['thinking_display'] : [],
+          live_control: {},
+        },
+      };
+    },
+    'Settings.reload_app_config': () => {
+      reloads.push(true);
+      return overrides.reloadFails ? { error: 'boom' } : { status: 'ok' };
+    },
+    ...(overrides.methods || {}),
+  });
+  return { files, saves, reloads };
+}
+
+function toastSpy() {
+  const seen = [];
+  const handler = (e) => seen.push(e.detail);
+  window.addEventListener('aic-toast', handler);
+  _toastCleanups.push(() => window.removeEventListener('aic-toast', handler));
+  return seen;
+}
+
+const _toastCleanups = [];
+afterEach(() => {
+  while (_toastCleanups.length) _toastCleanups.pop()();
+});
+
+describe('aic-settings-tab preference cards', () => {
+  it('renders one card per preference, and none of the deleted toggle', async () => {
+    publishConfigFiles();
     const el = mountTab();
     await settle(el);
+    expect(prefCards(el)).toHaveLength(2);
+    expect(el.shadowRoot.textContent).toContain('Thinking display');
+    expect(el.shadowRoot.textContent).toContain('Doc enrichment');
+    // The Agentic-coding switch and its machinery are gone for good.
     expect(el.shadowRoot.querySelector('.card.toggle-card')).toBeNull();
     expect(el.shadowRoot.querySelector('.toggle-switch')).toBeNull();
-    expect(el.shadowRoot.querySelector('[role="switch"]')).toBeNull();
     expect(el.shadowRoot.textContent).not.toContain('Agentic');
   });
 
-  it('never reads app.json to hydrate a switch', async () => {
-    // `_loadToggles` fetched every toggle card's backing file on
-    // `onRpcReady`. Nothing should read a config file until the
-    // user opens a card.
-    const reads = [];
-    publishFakeRpc({
-      'Settings.get_config_info': () => ({}),
-      'Settings.get_config_content': (key) => {
-        reads.push(key);
-        return { type: key, content: '{}' };
+  it('hydrates each control from its own config file', async () => {
+    publishConfigFiles({
+      files: {
+        engine: ENGINE_CONTENT.replace('"thinking_display": null', '"thinking_display": "omitted"'),
+        app: APP_CONTENT.replace('"keywords_enabled": true', '"keywords_enabled": false'),
       },
     });
     const el = mountTab();
     await settle(el);
-    expect(reads).toEqual([]);
+    expect(thinkingSelect(el).value).toBe('omitted');
+    expect(enrichmentCheckbox(el).checked).toBe(false);
+  });
+
+  it('offers "Engine default" as a third state, not as a synonym for one of the two', async () => {
+    // `thinking_display: null` means "let the CLI decide", which is
+    // not the same claim as either "summarized" or "omitted". A
+    // checkbox could not have said it.
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const values = [...thinkingSelect(el).options].map((o) => o.value);
+    expect(values).toEqual(['', 'summarized', 'omitted']);
+    expect(thinkingSelect(el).value).toBe('');
+  });
+
+  it('writes the engine field and leaves the rest of the file alone', async () => {
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = thinkingSelect(el);
+    select.value = 'omitted';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves).toHaveLength(1);
+    expect(backend.saves[0].key).toBe('engine');
+    expect(backend.saves[0].content).toContain('"thinking_display": "omitted"');
+    expect(backend.saves[0].content).toContain('"max_buffer_size": null');
+  });
+
+  it('sends the engine field to the restart list rather than claiming it applied', async () => {
+    // The whole reason the card exists: engine.json is read when the
+    // CLI starts, so the honest report is a restart, and the restart
+    // confirmation has to be able to name the field.
+    const backend = publishConfigFiles();
+    const toasts = toastSpy();
+    const el = mountTab();
+    await settle(el);
+    const select = thinkingSelect(el);
+    select.value = 'summarized';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.reloads).toEqual([]);
+    expect(toasts.at(-1).message).toContain('when the session next starts');
+    expect(el.restartConfirmText()).toContain('thinking_display');
+    expect(el.shadowRoot.textContent).toContain('Waiting to apply');
+  });
+
+  it('reloads app.json for the enrichment flag, and says what that does not do', async () => {
+    const backend = publishConfigFiles();
+    const toasts = toastSpy();
+    const el = mountTab();
+    await settle(el);
+    const box = enrichmentCheckbox(el);
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves[0].key).toBe('app');
+    expect(JSON.parse(backend.saves[0].content).doc_index.keywords_enabled).toBe(false);
+    expect(backend.reloads).toEqual([true]);
+    // Not "applied now": switching enrichment off does not remove
+    // keywords already computed, and switching it on does not start a
+    // pass.
+    expect(toasts.at(-1).message).toContain('next enrichment pass');
+    expect(el.restartConfirmText()).not.toContain('doc_index');
+  });
+
+  it('does not claim the enrichment flag is in force when the reload failed', async () => {
+    const backend = publishConfigFiles({ reloadFails: true });
+    const toasts = toastSpy();
+    const el = mountTab();
+    await settle(el);
+    const box = enrichmentCheckbox(el);
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves).toHaveLength(1);
+    const messages = toasts.map((t) => t.message).join(' | ');
+    expect(messages).toContain('still on the old value');
+  });
+
+  it('says nothing is waiting when the value written is the one already there', async () => {
+    // A save that moved nothing must not offer a restart. The
+    // disposition is what knows this — the card cannot.
+    publishConfigFiles({
+      disposition: {
+        compared: true, changed: [], live: [], next_session: [], live_control: {},
+      },
+    });
+    const toasts = toastSpy();
+    const el = mountTab();
+    await settle(el);
+    const select = thinkingSelect(el);
+    select.value = 'omitted';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(toasts.at(-1).message).toContain('Already what the file said');
+    expect(el.restartConfirmText()).not.toContain('thinking_display');
+  });
+
+  it('disables both controls and refuses to write when the file will not parse', async () => {
+    const backend = publishConfigFiles({ files: { engine: '{ "model":' } });
+    const el = mountTab();
+    await settle(el);
+    expect(thinkingSelect(el).disabled).toBe(true);
+    expect(thinkingSelect(el).closest('.pref-card').title).toContain('not a JSON object');
+    // The other card is unaffected: they read different files.
+    expect(enrichmentCheckbox(el).disabled).toBe(false);
+    expect(backend.saves).toEqual([]);
+  });
+
+  it('disables both controls for a participant', async () => {
+    publishConfigFiles({
+      methods: { 'Collab.get_collab_role': () => ({ is_localhost: false }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(thinkingSelect(el).disabled).toBe(true);
+    expect(enrichmentCheckbox(el).disabled).toBe(true);
+    expect(thinkingSelect(el).closest('.pref-card').title)
+      .toContain('Only the host');
+  });
+
+  it('puts the control back when the save is refused', async () => {
+    // A native select flips itself on the gesture and Lit will not put
+    // it back — the bound value never changed. Left alone, a refused
+    // write leaves the control claiming a setting the file does not
+    // have, which is the unqualified-success failure one screen up.
+    publishConfigFiles({
+      methods: {
+        'Settings.save_config_content': () => ({ error: 'restricted' }),
+      },
+    });
+    const toasts = toastSpy();
+    const el = mountTab();
+    await settle(el);
+    const select = thinkingSelect(el);
+    select.value = 'omitted';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(toasts.at(-1).message).toBe('restricted');
+    expect(thinkingSelect(el).value).toBe('');
+  });
+
+  it('writes through the open textarea rather than over it', async () => {
+    // The one failure this control could cause that the textarea alone
+    // never could: a switch basing its write on a stale read would
+    // silently discard whatever the user had typed above it.
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    await el._openCard('engine');
+    await settle(el);
+    const textarea = el.shadowRoot.querySelector('.editor-textarea');
+    textarea.value = ENGINE_CONTENT.replace('"model": null', '"model": "opus"');
+    const select = thinkingSelect(el);
+    select.value = 'omitted';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves[0].content).toContain('"model": "opus"');
+    expect(backend.saves[0].content).toContain('"thinking_display": "omitted"');
+    // And the editor now shows what was actually written.
+    expect(el.shadowRoot.querySelector('.editor-textarea').value)
+      .toBe(backend.saves[0].content);
   });
 });
 
@@ -205,8 +450,12 @@ describe('aic-settings-tab config cards', () => {
     });
   });
 
+  // Scoped to the config grid. The preference cards above it wear the
+  // same `.card` chrome on purpose, so an unscoped label sweep would
+  // count them as config types and this suite would be asserting
+  // something it does not mean.
   function cardLabels(el) {
-    return [...el.shadowRoot.querySelectorAll('.card-label')]
+    return [...el.shadowRoot.querySelectorAll('.card-grid .card-label')]
       .map((n) => n.textContent.trim());
   }
 
@@ -732,8 +981,11 @@ describe('aic-settings-tab permission-mode section', () => {
     await el.showSection('permission-mode');
     await settle(el);
     expect(el.shadowRoot.querySelector('.permission-mode-select')).toBeNull();
+    // Every select on this tab is accounted for: the model panel's, and
+    // the preference cards'. A fourth would be the drift.
     expect([...el.shadowRoot.querySelectorAll('select')]
-      .filter((s) => s !== modelSelect(el))).toEqual([]);
+      .filter((s) => s !== modelSelect(el) && !s.classList.contains('pref-select')))
+      .toEqual([]);
   });
 
   it('ignores an anchor it does not have, and stays reachable', async () => {
@@ -1268,7 +1520,8 @@ describe('aic-settings-tab session controls', () => {
     expect(el.shadowRoot.querySelector('.card-grid .session-controls'))
       .toBeNull();
     expect([...el.shadowRoot.querySelectorAll('select')]
-      .filter((s) => s !== modelSelect(el))).toEqual([]);
+      .filter((s) => s !== modelSelect(el) && !s.classList.contains('pref-select')))
+      .toEqual([]);
   });
 });
 

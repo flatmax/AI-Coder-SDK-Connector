@@ -86,9 +86,15 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B1, B2, B5, C1, C4, C5, C6, C7 and C8 have since closed, so the cheapest
-remaining item is the **first two rows of B3**, which build discoverability for values that are already
-configurable. § B is down to B3 and B4, and B4 is a design decision rather than a build.
+smaller than either phase. B1, B2, B5, C1, C4, C5, C6, C7 and C8 have since closed, and **B3's first two
+rows closed 2026-08-28** — with a finding that is the point of that entry now: one of the two values was
+*not* already configurable. `app.json`'s `keywords_enabled` was parsed and read by nothing, so the item's
+own framing — "discoverability, not capability" — was true of one card and false of the other, and the
+entry had recorded `config.py` as *honouring* a key it only parses. **"Read the value" and "find its
+reader" are different checks, and only the second one closes this class of item.**
+
+§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build. The cheapest
+remaining item is now **§ C2**, which is correctness rather than surface.
 
 **§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
 display decision with three plausible options; the house rule for naming a file on screen was already in
@@ -299,16 +305,41 @@ in that section and in the work-log's § *Landed since*.
 [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built* item (c), after
 the save-disposition/restart pair and the MCP controls landed:
 
-| Item | State at HEAD (verified 2026-08-27) |
+| Item | State at HEAD (verified 2026-08-27, amended 2026-08-28) |
 |---|---|
-| Thinking display toggle | The engine field exists (`engine.json`'s `thinking_display`, read by `options.py`) and is reachable only by editing the file in the config card. No control. |
-| Doc enrichment toggle | Same shape: `app.json`'s `keywords_enabled` exists and is honoured by `config.py`. No control. |
+| Thinking display toggle | ✅ *Built 2026-08-28.* Three-state select over `engine.json`'s `thinking_display`; the field joins the restart list. |
+| Doc enrichment toggle | ✅ *Built 2026-08-28* — **and its premise was false**, see below. |
 | Deny-read scope reset | Nothing anywhere reads or writes `aic-dc-deny-read-scope`. Depends on B4 below being decided first. |
 | Session storage size | **Nothing to call.** The backend measures the session directory only as a turn-time warning (`_disk_warning`), never as a readable RPC. |
 
-The first two are the smaller job than they look — the value is already configurable, so what is being
-built is discoverability, not capability, and a card that merely edits the same field is worth less
-than the reload semantics it has to explain. Read § *Save Behavior* before adding either.
+**The premise this item was written on was half wrong, and the wrong half was the whole job.** "The value
+is already configurable, so what is being built is discoverability, not capability" held for
+`thinking_display`, which `options.py:273` genuinely reads. It did not hold for `keywords_enabled`:
+`config.py` *parses* it — which is what the entry above checked, and parsing is not honouring —
+and **nothing read it**. `EnrichmentConfig` never carried an `enabled` field, so enrichment ran whatever
+`app.json` said, and a card over it would have been a switch wired to nothing. Same shape as § B5 and
+§ C7, a third time: **a documented field with no reader on one side of it.** The choice was § B5's — write
+it or delete it — and writing won, because the spec names the effect and the thing being switched off
+costs about a gigabyte of resident model.
+
+**What the cards are actually made of is the sentence under the control**, because both fields stay
+editable in the textarea below them. The two take effect at different times and **neither takes effect
+now**: `thinking_display` is next-session and joins `_pendingFields` so the restart confirmation names it;
+`keywords_enabled` is next-*pass* — the reload is called and is real, but the consumer is a background
+build, so switching off does not un-enrich and switching on does not start a pass. The gate is a callable
+rather than a captured boolean for exactly this reason: a builder constructed at startup would otherwise
+have made it an app-restart field, and this tab has no third disposition to name.
+
+**A switch also had to stop being able to rewrite the file it edits.** `webapp/src/settings-preferences.js`
+replaces a value on its own line; a `JSON.stringify` round trip of this app's own `app.json` explodes two
+array lines into twenty-four, which is an unrequested rewrite performed by a control that promised to move
+one boolean. And the write bases itself on the **textarea** when that file is open, because a stale base
+would silently discard the user's unsaved edits — the one fault this control could cause that the textarea
+alone never could. Reasoning in [`5-webapp/settings.md`](5-webapp/settings.md) § *Preference Cards* and
+[`2-indexing/keyword-enrichment.md`](2-indexing/keyword-enrichment.md) § *Switching Enrichment Off*.
+
+**Not built, and it is B4's not this item's:** the deny-read scope reset. Session storage still has nothing
+to call.
 
 **B4 — The denial-scope prompt.** [`5-webapp/file-picker.md`](5-webapp/file-picker.md) specifies a
 modal asking whether a deny-read rule is session-scoped or written to `.claude/settings.local.json`,

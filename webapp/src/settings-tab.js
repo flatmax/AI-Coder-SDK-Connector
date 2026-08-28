@@ -42,6 +42,7 @@
 
 import { LitElement, css, html } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
+import { readPreference, writePreference } from './settings-preferences.js';
 
 /**
  * Config cards — one per whitelisted type. The `key` field
@@ -64,6 +65,76 @@ import { RpcMixin } from './rpc-mixin.js';
 const CONFIG_CARDS = [
   { key: 'engine', icon: '🤖', label: 'Engine Config', format: 'json', reloadable: false },
   { key: 'app', icon: '⚙️', label: 'App Config', format: 'json', reloadable: true },
+];
+
+/**
+ * Preference cards — a switch over one key of a config file.
+ *
+ * `specs5/5-webapp/settings.md` § Preference Cards. Each of these binds
+ * to a field that was already editable in the textarea beside it, so
+ * what a card adds is **discoverability, not capability** — and the part
+ * worth getting right is therefore not the control but the sentence
+ * under it, because the two cards below take effect at different times
+ * and neither takes effect now.
+ *
+ * `applies` is that sentence's key, and the two values are the whole
+ * point of the pair:
+ *
+ * - `next-session` — `engine.json` is read when the CLI subprocess
+ *   starts, so the Restart button below is what applies this. The field
+ *   joins `_pendingFields`, which is what makes the restart
+ *   confirmation name it
+ * - `next-pass` — `app.json` is reloadable and the save calls the
+ *   reload, but the consumer is a background build rather than a value
+ *   read per use. Switching enrichment off stops the *next* pass; it
+ *   does not remove keywords already computed, and switching it back on
+ *   does not start a pass. "Applied now" would be the wrong claim in
+ *   both directions
+ *
+ * The third row the spec lists — **Deny-read scope** — is not here. It
+ * resets a remembered answer to a prompt that does not exist yet
+ * (`file-picker.md`, and § B4 of `specs5/next.md`), so a control that
+ * forgets it would be a control over nothing.
+ */
+const PREFERENCE_CARDS = [
+  {
+    key: 'thinking-display',
+    configType: 'engine',
+    path: ['thinking_display'],
+    icon: '💭',
+    label: 'Thinking display',
+    control: 'select',
+    // '' is the file's `null` — "let the CLI decide", which is a real
+    // third state and not a synonym for either of the other two.
+    fallback: '',
+    options: [
+      { value: '', label: 'Engine default' },
+      { value: 'summarized', label: 'Summarised' },
+      { value: 'omitted', label: 'Omitted' },
+    ],
+    applies: 'next-session',
+    note: 'Read when the CLI starts — restart the session to apply it.',
+    title:
+      'Whether the engine sends thinking regions, and how. Engine default'
+      + ' leaves the choice to the CLI; Summarised sends condensed thinking;'
+      + ' Omitted sends none. engine.json → thinking_display.',
+  },
+  {
+    key: 'doc-enrichment',
+    configType: 'app',
+    path: ['doc_index', 'keywords_enabled'],
+    icon: '🔑',
+    label: 'Doc enrichment',
+    control: 'checkbox',
+    fallback: true,
+    applies: 'next-pass',
+    note: 'Applies to the next enrichment pass, not to keywords already found.',
+    title:
+      'Whether KeyBERT adds keywords to document outlines after the'
+      + ' structural build. Off saves roughly a gigabyte of resident model'
+      + ' and the pass that loads it; outlines keep their structure either'
+      + ' way. app.json → doc_index.keywords_enabled.',
+  },
 ];
 
 /**
@@ -279,6 +350,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _modelFlash: { type: Boolean, state: true },
     /** The same mark, for the editor a field-naming route opened. */
     _editorFlash: { type: Boolean, state: true },
+    /**
+     * Raw file text per config type, for the preference cards to read
+     * their values out of. `{engine: string, app: string}`, missing keys
+     * until the read lands.
+     *
+     * The whole file rather than the fields, because a preference write
+     * has to put the value back into the text it came from without
+     * disturbing the rest — see `settings-preferences.js`. Two reads on
+     * mount, of files this tab was going to read anyway the moment
+     * somebody opened a card.
+     */
+    _prefContent: { type: Object, state: true },
+    /** The preference card whose write is in flight, or null. */
+    _prefPending: { type: String, state: true },
   };
 
   static styles = css`
@@ -476,6 +561,75 @@ export class SettingsTab extends RpcMixin(LitElement) {
       padding: 0 0.2rem;
     }
 
+    /*
+      The preference grid. Same card chrome, wider track: a select
+      with "Engine default" in it needs more than the 110px an icon and
+      a two-word label need, and a preference card is read rather than
+      clicked so it is not competing for the same compactness.
+
+      Not hoverable and not clickable — the card is a frame around a
+      control, and a hover highlight on the frame would promise the
+      whole thing does something.
+    */
+    .pref-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .pref-card {
+      cursor: default;
+      text-align: left;
+      padding: 0.5rem 0.6rem;
+    }
+    .pref-card:hover {
+      background: rgba(22, 27, 34, 0.6);
+      border-color: rgba(240, 246, 252, 0.1);
+    }
+    .pref-card .card-icon {
+      display: inline;
+      margin-right: 0.35rem;
+    }
+    .pref-card .card-label {
+      color: var(--text-primary, #c9d1d9);
+      font-size: 0.8125rem;
+    }
+    .pref-control {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      margin-top: 0.4rem;
+      font-size: 0.8125rem;
+      color: var(--text-primary, #c9d1d9);
+    }
+    .pref-select {
+      background: rgba(13, 17, 23, 0.8);
+      border: 1px solid rgba(240, 246, 252, 0.15);
+      color: var(--text-primary, #c9d1d9);
+      border-radius: 4px;
+      padding: 0.2rem 0.35rem;
+      font-family: inherit;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .pref-control input:disabled,
+    .pref-select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    /*
+      The load-bearing line. Every field a preference card binds to is
+      also a line in the textarea below, so this sentence — when the
+      value starts being true — is the only thing the card adds.
+    */
+    .pref-note {
+      display: block;
+      margin-top: 0.35rem;
+      font-size: 0.6875rem;
+      line-height: 1.35;
+      color: var(--text-secondary, #8b949e);
+    }
+
     .card-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
@@ -666,6 +820,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._retiredDismissed = false;
     this._modelFlash = false;
     this._editorFlash = false;
+    this._prefContent = {};
+    this._prefPending = null;
     /** Pending flash-clear timer, so a second route restarts it. */
     this._flashTimer = null;
     // Bound so add/removeEventListener find the same reference.
@@ -694,6 +850,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
   onRpcReady() {
     this._loadInfo();
     this._loadModel();
+    this._loadPreferences();
   }
 
   /**
@@ -706,6 +863,220 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   onTabVisible() {
     this._loadModel();
+    // The files can move without this tab: the textarea in another
+    // window, `/permissions` in this one, an editor outside the app. A
+    // switch showing a value the file stopped holding is worse than the
+    // round trip, because the next click writes the stale one back.
+    this._loadPreferences();
+  }
+
+  /**
+   * Read the files the preference cards render from.
+   *
+   * Both types unconditionally, and failures are warned rather than
+   * surfaced: a card whose file could not be read renders its control
+   * disabled with the reason on the tooltip (`_prefState`), which is a
+   * better answer than a toast on a tab the user may have opened for
+   * something else entirely.
+   */
+  async _loadPreferences() {
+    if (!this.rpcConnected) return;
+    const types = [...new Set(PREFERENCE_CARDS.map((c) => c.configType))];
+    const reads = await Promise.all(
+      types.map(async (type) => {
+        try {
+          const res = await this.rpcExtract('Settings.get_config_content', type);
+          if (res && typeof res === 'object' && !res.error) {
+            return [type, typeof res.content === 'string' ? res.content : ''];
+          }
+          console.warn('[settings] get_config_content failed', type, res?.error);
+        } catch (err) {
+          console.warn('[settings] get_config_content failed', type, err);
+        }
+        return null;
+      }),
+    );
+    const next = { ...this._prefContent };
+    for (const entry of reads) {
+      if (entry) next[entry[0]] = entry[1];
+    }
+    this._prefContent = next;
+  }
+
+  /**
+   * What one card should show, and whether it can be operated.
+   *
+   * Three states rather than two, because "we have not read the file
+   * yet" and "the file will not parse" want different tooltips and only
+   * one of them is the user's problem.
+   *
+   * @param {object} card an entry of `PREFERENCE_CARDS`
+   * @returns {{value: *, ready: boolean, reason: string}}
+   */
+  _prefState(card) {
+    const content = this._prefContent[card.configType];
+    if (typeof content !== 'string') {
+      return { value: card.fallback, ready: false, reason: 'Reading the config file…' };
+    }
+    if (writePreference(content, card.path, card.fallback) === null) {
+      return {
+        value: card.fallback,
+        ready: false,
+        reason:
+          `${card.configType}.json is not a JSON object, so this switch cannot`
+          + ' edit it. Open the card below and fix the file.',
+      };
+    }
+    return {
+      value: readPreference(content, card.path, card.fallback),
+      ready: true,
+      reason: card.title,
+    };
+  }
+
+  /**
+   * Write one preference back to its file.
+   *
+   * The base is the **textarea** when that file is open for editing, and
+   * a fresh read otherwise. Not the copy in `_prefContent`: a switch that
+   * wrote a stale base would silently discard whatever the user had typed
+   * into the editor above it, which is the one failure this control could
+   * cause that the textarea alone never could. When the editor is open
+   * the result goes back into it too, so the two surfaces cannot end up
+   * describing different files.
+   */
+  async _setPreference(card, value) {
+    if (!this.rpcConnected || this._prefPending || this._isHost === false) return;
+    this._prefPending = card.key;
+    let wrote = false;
+    try {
+      const openHere = this._activeKey === card.configType;
+      const textarea = openHere
+        ? this.shadowRoot?.querySelector('.editor-textarea')
+        : null;
+      let base;
+      if (textarea) {
+        base = textarea.value;
+      } else {
+        const res = await this.rpcExtract(
+          'Settings.get_config_content',
+          card.configType,
+        );
+        if (!res || typeof res !== 'object' || res.error) {
+          this._emitToast(res?.error || 'Could not read the config file', 'error');
+          return;
+        }
+        base = typeof res.content === 'string' ? res.content : '';
+      }
+      const next = writePreference(base, card.path, value);
+      if (next === null) {
+        this._emitToast(
+          `${card.configType}.json does not parse, so ${card.label} could not be`
+          + ' written. Open the card below and fix the file.',
+          'error',
+        );
+        return;
+      }
+      const result = await this.rpcExtract(
+        'Settings.save_config_content',
+        card.configType,
+        next,
+      );
+      if (result && typeof result === 'object' && result.error) {
+        this._emitToast(result.error, 'error');
+        return;
+      }
+      wrote = true;
+      this._prefContent = { ...this._prefContent, [card.configType]: next };
+      if (textarea) {
+        textarea.value = next;
+        this._editorContent = next;
+        // The panel above the textarea describes an older save of this
+        // file and now sits over content it did not produce.
+        this._summary = null;
+      }
+      await this._announcePreference(card, value, result);
+    } catch (err) {
+      this._emitToast(`Save failed: ${err?.message || err}`, 'error');
+    } finally {
+      this._prefPending = null;
+      if (!wrote) this._restorePrefControl(card);
+    }
+  }
+
+  /**
+   * Put a control back to what its file says.
+   *
+   * A native `<select>` or checkbox flips itself on the gesture, before
+   * anything is written, and Lit will not put it back — the `.value`
+   * binding only re-commits when the bound value changes, and a save
+   * that failed changed nothing. So a refused write would leave the
+   * control claiming a setting the file does not have, which is the
+   * failure this tab exists to prevent one screen up (§ *Invariants*:
+   * no unqualified success for a field that did not apply).
+   *
+   * The same lesson as the model select's reply-is-authoritative rule,
+   * one control class down: the gesture is a request, the file is the
+   * answer.
+   */
+  _restorePrefControl(card) {
+    const state = this._prefState(card);
+    const root = this.shadowRoot;
+    if (!root) return;
+    if (card.control === 'checkbox') {
+      const box = root.querySelector(`.pref-card[data-pref="${card.key}"] input`);
+      if (box) box.checked = state.value !== false;
+      return;
+    }
+    const select = root.querySelector(`.pref-card[data-pref="${card.key}"] select`);
+    if (select) select.value = state.value ?? '';
+  }
+
+  /**
+   * Say where the value just written takes effect, and get it there.
+   *
+   * The disposition comes from the save rather than from the card,
+   * because the save is the thing that knows whether the field actually
+   * moved — flipping a switch back to what the file already said is a
+   * real gesture with nothing to report, and a card-shaped message would
+   * promise a restart for it.
+   */
+  async _announcePreference(card, value, result) {
+    const changed = fieldList(result?.disposition, 'changed');
+    const label = this._prefValueLabel(card, value);
+    if (!changed.length) {
+      this._emitToast(`${card.label}: ${label}. Already what the file said.`, 'info');
+      return;
+    }
+    if (card.applies === 'next-session') {
+      for (const field of fieldList(result?.disposition, 'next_session')) {
+        this._pendingFields.add(field);
+      }
+      this.requestUpdate();
+      this._emitToast(
+        `${card.label}: ${label}. Applies when the session next starts —`
+        + ' use Restart session below.',
+        'info',
+      );
+      return;
+    }
+    // `next-pass`. The reload is what lets the running process see the
+    // new value at all; without it the build would read the old one.
+    const reloaded = await this._reload(card.configType);
+    this._emitToast(
+      reloaded
+        ? `${card.label}: ${label}. ${card.note}`
+        : `${card.label}: ${label} — saved to the file, but the reload did not`
+          + ' apply, so the running process is still on the old value.',
+      reloaded ? 'success' : 'warning',
+    );
+  }
+
+  /** How a written value reads in a sentence. */
+  _prefValueLabel(card, value) {
+    if (card.control === 'checkbox') return value ? 'on' : 'off';
+    const option = card.options.find((o) => o.value === (value ?? ''));
+    return option ? option.label : String(value);
   }
 
   async _loadInfo() {
@@ -1110,13 +1481,21 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * fail or lie: engine.json's values were consumed when the
    * subprocess started.
    *
+   * `key` is the config type to reload, defaulting to the open editor's.
+   * A preference card writes a file that may not be open at all, and the
+   * reloadability question is about the *file*, never about which panel
+   * asked — reading it off `_activeKey` unconditionally would have made
+   * the switch's reload depend on whether a textarea happened to be
+   * showing.
+   *
+   * @param {string} [key]
    * @returns {Promise<boolean>} whether the reload applied. The save's
    *   summary reports fields as applied only on a true, so a reload that
    *   failed leaves them unclaimed rather than claimed by the call before it.
    */
-  async _reload() {
-    if (!this._activeKey) return false;
-    const card = CONFIG_CARDS.find((c) => c.key === this._activeKey);
+  async _reload(key = this._activeKey) {
+    if (!key) return false;
+    const card = CONFIG_CARDS.find((c) => c.key === key);
     if (!card || !card.reloadable) return false;
     try {
       const result = await this.rpcExtract('Settings.reload_app_config');
@@ -1281,6 +1660,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
       ${this._renderModelPanel()}
 
+      ${this._renderPreferenceCards()}
+
       <div class="card-grid">
         ${CONFIG_CARDS.map(
           (card) => html`
@@ -1354,6 +1735,77 @@ export class SettingsTab extends RpcMixin(LitElement) {
           with the agent's help, and which the Context tab prices in
           tokens.
         </p>
+      </div>
+    `;
+  }
+
+  /**
+   * The switches, above the files they write.
+   *
+   * Above rather than below, and in a grid of their own: these are the
+   * settings somebody came here to change, and the config cards under
+   * them are the escape hatch for everything that has no switch. Their
+   * own grid because a `<select>` does not fit the 110px track the icon
+   * cards use — same card chrome, wider column, which is what
+   * `specs5/5-webapp/settings.md` § Preference Cards asks for when it
+   * says "the same card shape".
+   *
+   * The note under each control is not decoration. Both fields are
+   * already editable in the textarea below, so the card adds nothing
+   * except the thing the textarea cannot say — when the value it just
+   * wrote starts being true.
+   */
+  _renderPreferenceCards() {
+    const readOnly = this._isHost === false;
+    return html`
+      <div class="pref-grid" role="group" aria-label="Preferences">
+        ${PREFERENCE_CARDS.map((card) => {
+          const state = this._prefState(card);
+          const busy = this._prefPending === card.key;
+          const disabled = !this.rpcConnected || readOnly || busy || !state.ready;
+          const title = readOnly
+            ? 'Only the host can change settings'
+            : state.reason;
+          return html`
+            <div class="card pref-card" data-pref=${card.key} title=${title}>
+              <span class="card-icon">${card.icon}</span>
+              <span class="card-label">${card.label}</span>
+              ${card.control === 'checkbox'
+                ? html`
+                    <label class="pref-control">
+                      <input
+                        type="checkbox"
+                        .checked=${state.value !== false}
+                        ?disabled=${disabled}
+                        aria-label=${card.label}
+                        @change=${(e) =>
+                          this._setPreference(card, e.target.checked)}
+                      />
+                      <span>${state.value !== false ? 'On' : 'Off'}</span>
+                    </label>
+                  `
+                : html`
+                    <select
+                      class="pref-control pref-select"
+                      .value=${state.value ?? ''}
+                      ?disabled=${disabled}
+                      autocomplete="off"
+                      aria-label=${card.label}
+                      @change=${(e) =>
+                        this._setPreference(card, e.target.value || null)}
+                    >
+                      ${card.options.map(
+                        (option) => html`<option
+                          value=${option.value}
+                          ?selected=${option.value === (state.value ?? '')}
+                        >${option.label}</option>`,
+                      )}
+                    </select>
+                  `}
+              <span class="pref-note">${busy ? 'Saving…' : card.note}</span>
+            </div>
+          `;
+        })}
       </div>
     `;
   }
@@ -1589,7 +2041,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ? html`
                 <button
                   class="toolbar-button"
-                  @click=${this._reload}
+                  @click=${() => this._reload()}
                   ?disabled=${!this.rpcConnected}
                   title="Reload config from disk"
                 >
