@@ -1,7 +1,7 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `f089416`. B1 is committed
-(`fbce225`), and the two commits above it are the tool-card header's left rail.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `837acaa` — § C2's commit, the
+last thing below recorded as landed. § C3's own commit sits above this line and is not in the SHA.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -93,7 +93,8 @@ own framing — "discoverability, not capability" — was true of one card and f
 entry had recorded `config.py` as *honouring* a key it only parses. **"Read the value" and "find its
 reader" are different checks, and only the second one closes this class of item.**
 
-§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build.
+§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build. **§ C has
+nothing left to build**, as of the entry three paragraphs down.
 
 **§ C2 closed 2026-08-28**, and it grew a finding on the way that the item could not have predicted: the
 toast channel its fix needed **had never worked**. The diff viewer's four dispatches named an event the
@@ -103,10 +104,19 @@ exists because a failure that reports nothing is indistinguishable from success,
 reporting was itself an instance of it. The lesson generalises past this file: *a reporting path is not
 exercised by the happy case, so nothing tells you it is broken until you need it.*
 
-With C2 gone, § C is down to **C3** — converge the two "absolute engine path → repo path" mechanisms —
-and everything else left is § D's verification debt or § E's declined. C2's work added a third caller of
-`toRepoPath` and one more copy of the two-call fetch left standing, so it moved C3's price up again
-without touching it.
+**§ C3 closed 2026-08-28**, and with it § C: everything left in this file is § D's verification debt or
+§ E's declined. The convergence went the way the item guessed, onto the client-side rule, and the item
+turned out to be **three deletions rather than one** — the server-side `relPath` enrichment it named, plus
+the duplicated repo fetch and the tool-card header summary, neither of which was on it when it was
+written. Both had been added to its price by later work that shipped one more caller. **A convergence item
+gets more expensive every time anything near it is built**, which is the argument for taking one early
+rather than when it is next in the queue.
+
+Two findings worth keeping. The header summary had been recorded as blocked on this item *and* on needing
+"a per-tool table of path keys", and **there was no table** — a value beginning with the repo root is a
+path by its shape. And there were **three** mechanisms, not the two the item counted:
+`Reindexer._relative` turns a written path into an index key, which is server-side with no browser in it,
+and it stays. The line is *who the answer is for*, not how many functions do string surgery on a path.
 
 **§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
 display decision with three plausible options; the house rule for naming a file on screen was already in
@@ -374,6 +384,11 @@ maps to a real field, so a key cannot again be serialised out of nothing.
 
 ## C. Found while working — correctness and honesty
 
+**Every item in this section is closed** as of 2026-08-28 — built, fixed, or decided. The entries stay
+because each one holds the reasoning for a change, and because two of them are the record of an item being
+blocked by its own framing rather than by any work: § C3 on a per-tool table that did not need to exist,
+§ C4 on a three-way display choice the app had already made.
+
 **C1 — A lost session keeps being polled.** ✅ *Fixed 2026-08-28 — leaves this queue.* `usage-hud.js`
 now listens for `engineHealth`, skips the fetch while the engine is gone, and renders a state instead of
 the last good breakdown. **The definition of "gone" was the whole of the work:** `connected: false` is
@@ -439,22 +454,49 @@ direction. It has its own test now rather than being trusted because the fetch t
 **The SVG viewer got the same rule**, since it holds a copy of the same two-call fetch and had the same
 blindness, and a blank SVG pane is even harder to doubt than a blank diff. The copy itself is left
 standing and recorded rather than half-converged — **one owner is the fix, and a third copy of the rule
-would not be it.** That is § C3's, not this item's.
+would not be it.** That is § C3's, not this item's. *(And it was: C3 gave the fetch one owner the same
+day, and found that the two copies had already diverged on how they read an error.)*
 
-**C3 — Two mechanisms answer "absolute engine path → repo path".** `_mark_openable_memory_files`
-enriches server-side with a `relPath`; `toRepoPath` converts client-side at the shell's
-`navigate-file` choke point. Both are correct; neither is wrong to exist; the next payload carrying an
-absolute path will pick one of them by accident. They should converge, most likely on the client-side
-one, which needs no per-payload enrichment. [`plan/README.md`](plan/README.md) open item 3. *(§ C4 made
-the client-side one strictly more capable — it now holds the root and serves labels as well as requests —
-so the convergence target is settled even though the convergence is not done. `relPath` still has one
-job nothing else does: it is what marks a row **openable**, which is a fact about the repo, not a
-rendering.)* **The 2026-08-28 header change raised the price of leaving this open:** a tool card's input
-summary wraps now instead of being elided, so the absolute prefix that used to be clipped off the end is
-fully rendered, and a nested path spends two or three rows of the card on a string identical for every
-file in the repo. The second change that day raised it again — the summary is a fixed column beside a
-metadata rail, so it is narrower than the widest it used to be and the same width on every card, which is
-another row of prefix on a deep path. Worth doing, still not worth a third mechanism.
+**C3 — Two mechanisms answer "absolute engine path → repo path".** ✅ *Built 2026-08-28 — leaves this
+queue.* Converged on the client-side rule, as the item guessed. [`plan/README.md`](plan/README.md) open
+item 3 is struck and holds the full account; the per-area reasoning is in
+[`3-engine/context-visibility.md`](3-engine/context-visibility.md),
+[`5-webapp/chat.md`](5-webapp/chat.md) § *Card Anatomy*,
+[`5-webapp/svg-viewer.md`](5-webapp/svg-viewer.md) § *When Neither Side Can Be Read* and
+[`5-webapp/shell.md`](5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
+
+**It was three deletions, and only one of them was on the item.** The `relPath` enrichment was named;
+the other two had been added to the price by later work. § C2 left the two-call repo fetch duplicated
+between the diff and SVG viewers and said explicitly that one owner was C3's job, not its own — and the
+copies had already stopped being copies, since the SVG viewer's error reader fell back to `String(err)`
+and rendered a rejection carrying no `message` as the literal text `[object Object]` in a toast. **That
+divergence is the argument for one owner**, better than tidiness is: the copy did not stay a copy, and
+nothing was going to notice. And the tool-card header's input summary was the *third*, which this item's
+own earlier text described only as a rising price rather than as work — see below.
+
+**The blocker on the header summary was this item, and this item removed it.**
+[`5-webapp/chat.md`](5-webapp/chat.md) had recorded the raw absolute path in a card header as deliberate,
+blocked on needing "a per-tool table of path keys" so a `key=value` join could tell which values were
+paths, which would have been a third mechanism. **There is no table.** A value that begins with the repo
+root is a path *by its shape* — the same discriminator `repo-path.js` already mirrors off the backend's
+containment check — so every string value is offered to the rule and the rule declines the rest. The join
+moved into the browser, where that rule lives; it costs nothing on the wire, because both card builders
+already shipped the whole `input` dict beside the summary they also shipped. Live cards and cards read
+back off a transcript now share one builder where they had two.
+
+**Openability had to move with naming.** The Context tab took *openable* from a server-computed
+`relPath`; it now takes it from the naming call itself, which returns a different string only for an
+absolute path inside the root — exactly when the read will work. Keeping a server-side `openable` boolean
+for the one case the server sees and the browser cannot — a path outside the root that *resolves* inside
+it — would have been useless rather than better: the browser could not have produced a name for that path
+either, so the row would have carried a link that opened nothing. That case is the whole cost, and it has
+a test.
+
+**There were three mechanisms, not two.** `Reindexer._relative` (`hooks.py`) is the one the item did not
+count, and it stays: it turns a written path into a key in a server-side index, with no browser involved.
+The line the convergence drew is *who the answer is for* — a name on screen is the browser's, a key in a
+server-side structure is not. `summarise_tool_input` survives on the same principle, as the permission
+dialog's headline fallback, which has to exist before there is a browser to ask.
 
 **C4 — Tool-card file chips still display the absolute path.** ✅ *Built 2026-08-28 — leaves this queue.*
 The label is now the repo-relative name with the engine's path on the tooltip, on the tool-card footer

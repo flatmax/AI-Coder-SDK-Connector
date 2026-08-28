@@ -57,8 +57,10 @@ import {
   renderTurnFooter,
   subagentBlocksExpanded,
   terminalBadge,
+  TOOL_SUMMARY_CHARS,
   toggleBlock,
   toggleSubagentBlocks,
+  toolInputSummary,
   toolLabel,
 } from './block-render.js';
 import { STYLES } from './styles.js';
@@ -107,7 +109,9 @@ function toolBlock({ tool = {}, ...rest } = {}) {
   return {
     kind: 'tool',
     block_id: 'toolu_01',
-    tool: { name: 'Bash', input: { command: 'ls -la' }, input_summary: 'ls -la', ...tool },
+    // No `input_summary` — the card carries only `input`, and the header's
+    // one-liner is rendered from it in the browser (§ C3).
+    tool: { name: 'Bash', input: { command: 'ls -la' }, ...tool },
     ...rest,
   };
 }
@@ -529,6 +533,87 @@ describe('toolLabel', () => {
   });
 });
 
+describe('toolInputSummary', () => {
+  // The header's one-liner, built here rather than shipped off the engine
+  // (§ C3). The whole reason for the move is the first test: the engine's
+  // join could not shorten a repo path, so the header spent rows on a prefix
+  // identical for every file in the repo.
+
+  it('names a file the way the rest of the app does', () => {
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ file_path: '/home/you/repo/src/a.js' }))
+      .toBe('file_path=src/a.js');
+  });
+
+  it('needs no table of which keys are paths', () => {
+    // The blocker `chat.md` recorded, and it was not one: a value that
+    // begins with the repo root is a path by its shape, so every string
+    // value can be offered to the rule and the rule declines the rest.
+    setRepoRoot('/home/you/repo');
+    expect(
+      toolInputSummary({
+        pattern: 'TODO',
+        path: '/home/you/repo/webapp/src',
+        '-i': true,
+      }),
+    ).toBe('pattern=TODO path=webapp/src -i=true');
+  });
+
+  it('leaves a path outside the repo, and one with no root yet, alone', () => {
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ file_path: '/etc/hosts' }))
+      .toBe('file_path=/etc/hosts');
+    resetRepoRoot();
+    expect(toolInputSummary({ file_path: '/home/you/repo/src/a.js' }))
+      .toBe('file_path=/home/you/repo/src/a.js');
+  });
+
+  it('leaves a path quoted inside a value alone', () => {
+    // The rule renames a path; it does not rewrite prose. An `old_string`
+    // that happens to quote an absolute path keeps it, because shortening
+    // the middle of a value would change text the user is about to compare
+    // against their file.
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ old_string: 'see /home/you/repo/src/a.js' }))
+      .toBe('old_string=see /home/you/repo/src/a.js');
+  });
+
+  it('is one line, whatever the input carried', () => {
+    // A Bash heredoc arrives with its newlines in it; a header row is one
+    // line. Same collapse the engine used to do.
+    expect(toolInputSummary({ command: 'echo one\ntwo\tthree' }))
+      .toBe('command=echo one two three');
+  });
+
+  it('caps the summary, ellipsis included in the count', () => {
+    const summary = toolInputSummary({ command: 'x'.repeat(500) });
+    expect(summary).toHaveLength(TOOL_SUMMARY_CHARS);
+    expect(summary.endsWith('…')).toBe(true);
+  });
+
+  it('renders a non-string value as JSON', () => {
+    // `[1,2]` where the engine wrote `[1, 2]` — that one space is the only
+    // rendering this move changes.
+    expect(toolInputSummary({ edits: [1, 2] })).toBe('edits=[1,2]');
+  });
+
+  it('loses only the value it cannot serialise', () => {
+    // `JSON.stringify` throws on a circular value, and a throw in here is a
+    // throw inside a render pass. Caught per value, so the part that could be
+    // read still reaches the header.
+    const circular = { file_path: 'a.js' };
+    circular.self = circular;
+    expect(toolInputSummary(circular)).toBe('file_path=a.js self=[object Object]');
+  });
+
+  it('is empty for nothing to summarise', () => {
+    expect(toolInputSummary(null)).toBe('');
+    expect(toolInputSummary({})).toBe('');
+    expect(toolInputSummary('file_path=a.js')).toBe('');
+    expect(toolInputSummary([1, 2])).toBe('');
+  });
+});
+
 describe('isDiffTool', () => {
   it('knows the four tools whose input is a diff in disguise', () => {
     for (const name of ['Edit', 'MultiEdit', 'Write', 'NotebookEdit']) {
@@ -768,7 +853,7 @@ describe('renderTurnBlocks', () => {
   });
 
   it('renders a subagent’s blocks inside its row, not at turn level', () => {
-    const task = toolBlock({ block_id: 'toolu_task', tool: { name: 'Task', input_summary: 'explore' } });
+    const task = toolBlock({ block_id: 'toolu_task', tool: { name: 'Task', input: { prompt: 'explore' } } });
     const inner = toolBlock({ block_id: 'toolu_inner', agent_id: 'toolu_task', tool: { name: 'Grep' } });
     const row = { key: 'task-1', task_id: 'task-1', tool_use_id: 'toolu_task', description: 'Explore' };
     const panel = stubPanel();
@@ -914,7 +999,11 @@ describe('renderToolCard', () => {
     expect(card.dataset.blockId).toBe('toolu_01');
     expect(card.dataset.tool).toBe('Bash');
     expect(text(card.querySelector('.tool-name'))).toBe('Bash');
-    expect(text(card.querySelector('.tool-summary'))).toBe('ls -la');
+    // `command=ls -la`, not `ls -la`: the fixture used to carry a hand-written
+    // `input_summary` that skipped the key, which the engine's own join never
+    // did. Rendering from `input` here means the header can only say what the
+    // engine would have said.
+    expect(text(card.querySelector('.tool-summary'))).toBe('command=ls -la');
     expect(card.querySelector('.tool-dot').getAttribute('title')).toBe('Finished');
     expect(text(card.querySelector('.tool-caret'))).toBe('▸');
     // Collapsed, so the body is not in the DOM at all.
@@ -1070,7 +1159,7 @@ describe('renderToolCard', () => {
     // The call never ran: its input is a proposal, and the reason the user
     // gave is the record — the agent read it too and acted on it.
     const host = draw(renderToolCard(stubPanel(), toolBlock({
-      tool: { name: 'Bash', input: { command: 'rm -rf /' }, input_summary: 'rm -rf /' },
+      tool: { name: 'Bash', input: { command: 'rm -rf /' } },
       denial: { action: 'deny', reason: 'Not on my machine.', resolvedBy: 'matt' },
     })));
     const body = host.querySelector('.tool-body');
@@ -1208,7 +1297,6 @@ describe('renderToolCard', () => {
       tool: {
         name: 'Edit',
         input: { file_path: 'src/a.js', old_string: 'let a', new_string: 'const a' },
-        input_summary: 'file_path=src/a.js',
       },
       result: { status: 'ok', preview: 'ok' },
     });
@@ -1240,7 +1328,7 @@ describe('renderToolCard', () => {
     expect(rule).toContain('overflow-wrap: anywhere');
     expect(rule).not.toContain('text-overflow');
     expect(rule).not.toContain('nowrap');
-    // One bound, not two: the engine's TOOL_INPUT_SUMMARY_CHARS cap already
+    // One bound, not two: `TOOL_SUMMARY_CHARS` in block-render.js already
     // limits the height a card can reach, and a line clamp on top of it would
     // be the same ellipsis three rows lower. Checked across the whole sheet
     // rather than this rule, because the clamp used to live in a Bash-only

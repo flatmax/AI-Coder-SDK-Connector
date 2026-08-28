@@ -74,12 +74,25 @@ Four consequences a capture alone could not have given us:
 - **`percentage` is `round(totalTokens / rawMaxTokens * 100)`**, and `maxTokens` and `rawMaxTokens` are
   assigned from one variable — equal by construction, not merely equal in the capture.
 
-One field is ours rather than the engine's. `memoryFiles[].path` is absolute, and the repo layer takes
-paths relative to the root and rejects absolute ones outright, so `ClaudeCodeService.get_context_usage`
-adds **`relPath`** to each entry inside the root — resolving symlinks on both sides, as the read itself
-will — and leaves entries outside it unmarked. That is the difference between a clickable row and a row
-that would offer to open a file the read path refuses. `session.get_context_usage` stays a pure
-pass-through; the annotation happens in the layer that knows where the root is.
+**Every field here is the engine's, `memoryFiles` included** (2026-08-28). One used not to be:
+`memoryFiles[].path` is absolute, the repo layer takes paths relative to the root and rejects absolute
+ones outright, and `ClaudeCodeService.get_context_usage` used to add a **`relPath`** to each entry inside
+the root — resolving symlinks on both sides, as the read itself would — so the browser could make exactly
+those rows clickable. It was a second answer to a question the browser already answers for every other
+path on screen ([`../5-webapp/shell.md` § The Same Rule Names Files On Screen](../5-webapp/shell.md#the-same-rule-names-files-on-screen)),
+and the second answer is the one that got deleted. The tab names each row with the browser's rule and
+takes *openable* from the same call: the rule returns a different string only when the path is absolute
+and inside the root, which is exactly the condition for the row being openable, so one question is asked
+once. `get_context_usage` now returns `{"usage": ..., "fetched_at": ...}` and nothing else, and
+`session.get_context_usage` is a pass-through into a pass-through.
+
+The symlink resolution is what was given up, and it is a smaller thing than it looks: a memory file whose
+reported path is outside the root but *resolves* inside it is no longer clickable. A server-side
+`openable: true` for that case would not have helped, because the browser could not have produced a
+relative name for a path that does not start with the root — the row would carry a link that opened
+nothing. What genuinely still needs a server-side answer is which repo file a tool *wrote*, since the
+index it keys lives here and no browser is involved: that is `Reindexer._relative` in `hooks.py`, and it
+stays.
 
 The engine also bands this pressure by *distance*, not proportion: its own reader warns within 20 000
 tokens of the effective ceiling and treats the last 3 000 before the raw window as blocked. Worth

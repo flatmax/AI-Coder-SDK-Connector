@@ -292,6 +292,8 @@ What happens on a failure is that nothing changes. An `openFile` that cannot rea
 
 The server half of the same event is [rpc-transport.md](../1-foundation/rpc-transport.md#when-a-service-method-raises) — fixing either half alone would have been enough to make the original bug reportable, which is why both are done.
 
+**This is the only implementation of it.** `fetch.js` is the one owner of "read a file out of the repo", and the SVG viewer imports it rather than holding the copy it used to ([svg-viewer.md](svg-viewer.md#when-neither-side-can-be-read)) — so everything above is a rule about both viewers rather than a rule this one follows and the other one resembles.
+
 ### Toasts Go To The Shell
 
 The viewer asks for a toast the way every other component does: a `window` event named `aic-toast`. It previously dispatched `show-toast` on itself — a name the shell has never listened for, on a target it does not listen on — so its export and copy failures went nowhere for as long as the feature had existed. Nothing had noticed because the failures are rare and their absence looks like success.

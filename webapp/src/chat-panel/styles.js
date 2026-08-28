@@ -2379,8 +2379,13 @@ export const STYLES = css`
    * them — a summary that may only break at a space is the
    * one that cannot break at all.
    *
-   * No line clamp on top of it. The engine caps the summary at
-   * TOOL_INPUT_SUMMARY_CHARS, which bounds the card already; a
+   * No line clamp on top of it. toolInputSummary caps the
+   * summary at TOOL_SUMMARY_CHARS, which bounds the card
+   * already — the cap moved out of the engine along with the
+   * render itself (specs5/next.md § C3), so the number this
+   * comment leans on now lives one file away in
+   * block-render.js. (No backticks in here: the whole of
+   * STYLES is one template literal and a stray one ends it.) A
    * clamp would be a second bound that re-introduced the
    * ellipsis three rows lower. pre-wrap because a Bash
    * heredoc arrives with its newlines in it and they are how

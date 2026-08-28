@@ -7,6 +7,15 @@
 // HEAD means new file, a missing working copy means
 // deleted (we still render whatever side we got).
 //
+// The SVG viewer reads through here too (`specs5/next.md`
+// § C3). It held its own copy of these four functions, and
+// the copy had drifted: its error reader fell back to
+// `String(err)`, so a rejection carrying no `message`
+// reached the user as the text `[object Object]`. This
+// module is under `diff-viewer/` because that is where it
+// was written and moving it would be churn for a path;
+// what it exports is about the repo, not about diffing.
+//
 // Errors on *both* sides are not, and that distinction is
 // the whole of `specs5/next.md` § C2's browser half. When
 // one call fails the other one supplies a real reading, so

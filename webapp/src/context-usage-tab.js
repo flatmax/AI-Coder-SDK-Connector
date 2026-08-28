@@ -43,6 +43,7 @@ import {
   warningPercent,
   windowPercent,
 } from './context-usage.js';
+import { toRepoPath } from './repo-path.js';
 
 /**
  * Deadline for a breakdown fetch. Without one, a reply dropped by a
@@ -1141,6 +1142,13 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * Minimizes this dialog as well as navigating, because the viewer is
    * behind it: a click that opens a file under an opaque panel is
    * indistinguishable from a click that did nothing.
+   *
+   * The path handed over is the *absolute* one the engine reported,
+   * like every other `navigate-file` dispatcher's. The shell's handler
+   * relativises at the choke point (`app-shell/viewers.js`), which is
+   * where that conversion is already owned; converting here as well
+   * would be the per-dispatcher duplication that comment argues
+   * against.
    */
   _openMemoryFile(path) {
     if (!path) return;
@@ -1708,21 +1716,29 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           <tbody>
             ${files.map((f) => {
               const path = f.path || f.name || '';
-              // `relPath` is the service's answer to "can the viewer
-              // actually open this": present only for a file inside the
-              // repo root, since every repo read rejects an absolute
-              // path and `~/.claude/CLAUDE.md` is outside the repo
-              // entirely. Rows without it stay text rather than
-              // offering a click that would fail.
-              const rel = typeof f.relPath === 'string' ? f.relPath : '';
+              // One question, asked once: `toRepoPath` gives back a
+              // *different* string only when the path is absolute and
+              // inside the repo root, which is exactly the condition
+              // for a row being openable — every repo read rejects an
+              // absolute path, and `~/.claude/CLAUDE.md` is outside the
+              // repo entirely. So the rule that names the file is also
+              // the rule that decides whether it is a link, and rows it
+              // does not recognise stay text rather than offering a
+              // click that would fail.
+              //
+              // The service used to answer this with a `relPath` field
+              // (`next.md` § C3). It no longer does, and this is the
+              // only reader that would have wanted it.
+              const rel = toRepoPath(path);
+              const openable = rel !== path;
               return html`
                 <tr>
                   <td class="path" title=${path}>
-                    ${rel
+                    ${openable
                       ? html`<button
                           class="link"
                           title="Open ${rel} in the viewer"
-                          @click=${() => this._openMemoryFile(rel)}
+                          @click=${() => this._openMemoryFile(path)}
                         >${rel}</button>`
                       : path || '—'}
                   </td>

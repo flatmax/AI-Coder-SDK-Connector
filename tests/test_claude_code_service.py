@@ -1956,51 +1956,30 @@ class TestLiveControls:
         assert len(caplog.records) == 4
         assert [r.exc_info for r in caplog.records] == [None, None, None, None]
 
-    async def test_a_memory_file_inside_the_repo_gets_a_relative_path(self, service):
-        """The Context tab can only open what the repo layer will read.
+    async def test_memory_files_cross_the_wire_unenriched(self, service):
+        """The service adds no name of its own to a memory file.
 
-        Every repo read takes a path relative to the root and rejects
-        absolute ones, so a clickable absolute path would be a row that
-        does nothing.
+        It used to add ``relPath`` — the repo-relative name, for rows
+        inside the root — which told the Context tab both what to label
+        the row and whether to make it clickable. Both are renderings,
+        and the browser owns that rule (``repo-path.js``); a second
+        answer here is the duplication ``specs5/next.md`` § C3 removes.
+        Asserted on a path *inside* the root, because that is the case
+        the enrichment used to change: an untouched list is the whole
+        contract now.
         """
         root = service._repo_root
         (root / ".claude").mkdir(parents=True, exist_ok=True)
         (root / ".claude" / "CLAUDE.md").write_text("hi", encoding="utf-8")
-        service.session.context_usage = {
-            "memoryFiles": [
-                {"path": str(root / ".claude" / "CLAUDE.md"), "tokens": 27},
-            ],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
-            {
-                "path": str(root / ".claude" / "CLAUDE.md"),
-                "tokens": 27,
-                "relPath": ".claude/CLAUDE.md",
-            },
-        ]
-
-    async def test_a_memory_file_outside_the_repo_is_left_unmarked(self, service):
-        """A user-level CLAUDE.md is genuinely unopenable from here."""
-        service.session.context_usage = {
-            "memoryFiles": [{"path": "/home/someone/.claude/CLAUDE.md", "tokens": 3}],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
+        reported = [
+            {"path": str(root / ".claude" / "CLAUDE.md"), "tokens": 27},
             {"path": "/home/someone/.claude/CLAUDE.md", "tokens": 3},
-        ]
-
-    async def test_memory_file_marking_survives_junk(self, service):
-        service.session.context_usage = {
-            "memoryFiles": [{"tokens": 1}, "nonsense", {"path": ""}, {"path": 7}],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
             {"tokens": 1},
             "nonsense",
-            {"path": ""},
-            {"path": 7},
         ]
+        service.session.context_usage = {"memoryFiles": reported}
+        answer = await service.get_context_usage()
+        assert answer["usage"]["memoryFiles"] == reported
 
     async def test_a_payload_without_memory_files_passes_through(self, service):
         service.session.context_usage = {"totalTokens": 5, "memoryFiles": None}

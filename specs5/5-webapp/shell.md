@@ -135,9 +135,12 @@ Two consequences worth stating, because both look like bugs from one side:
   `navigate-file` choke point is the one converter; a chip dispatches the path it was given. A display
   concern that became the navigation contract would put the conversion in two places, which is what
   having one choke point was for
-- **Where the backend already relativises, it stays relativised.** The permission dialog's paths and the
-  context tab's `relPath` are computed server-side and arrive short. Converting an already-relative path
-  is a no-op, so those views need no change and get none — the rule holds without a second code path
+- **Where the backend already relativises, it stays relativised.** The permission dialog's paths are
+  computed server-side and arrive short. Converting an already-relative path is a no-op, so that view
+  needs no change and gets none — the rule holds without a second code path. The context tab used to be
+  the other half of this sentence, arriving short via a `relPath` the service added; that field is gone
+  (2026-08-28) and the tab names its rows here like everything else
+  ([`../3-engine/context-visibility.md`](../3-engine/context-visibility.md))
 
 ### Telling the Server What Is Open
 

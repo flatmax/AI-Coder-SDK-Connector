@@ -771,11 +771,11 @@ describe('SvgViewer refreshOpenFiles', () => {
 });
 
 describe('SvgViewer when the file cannot be read', () => {
-  // The diff viewer's § C2 rule, applied to the other viewer that
-  // holds a copy of the same two-call fetch: one failure is a
-  // reading (new, or deleted), two failures are no answer, and an
-  // SVG pane blanked by a refused request looks exactly like an SVG
-  // that happens to be empty.
+  // The diff viewer's § C2 rule, now literally the same code: this
+  // viewer calls `fetchFileContent` rather than holding a copy of it
+  // (§ C3). One failure is a reading (new, or deleted), two failures
+  // are no answer, and an SVG pane blanked by a refused request looks
+  // exactly like an SVG that happens to be empty.
   let toasts;
   let onToast;
 
@@ -824,6 +824,27 @@ describe('SvgViewer when the file cannot be read', () => {
     expect(el._files[0].modified).toContain('v1');
     expect(toasts).toHaveLength(1);
     expect(toasts[0].message).toContain('Could not refresh');
+  });
+
+  it('reads a rejection with no message the way the diff viewer does', async () => {
+    // The divergence the private copy had already grown: it fell back
+    // to `String(err)`, which turns a rejection object carrying no
+    // `message` into the literal text `[object Object]` on screen.
+    // `rpcErrorMessage` — the shared owner — says "unknown error"
+    // instead. This is the whole argument for one owner: the copy did
+    // not stay a copy.
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => {
+        throw { code: -32000 };
+      }),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.svg' });
+    await settle(el);
+    expect(el._files).toHaveLength(0);
+    expect(toasts[0].message).toContain('unknown error');
+    expect(toasts[0].message).not.toContain('[object Object]');
   });
 });
 

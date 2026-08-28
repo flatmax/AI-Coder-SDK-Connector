@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './context-usage-tab.js';
 import { SharedRpc } from './rpc.js';
+import { resetRepoRoot, setRepoRoot } from './repo-path.js';
 
 const _mounted = [];
 
@@ -125,6 +126,9 @@ afterEach(() => {
   // The selected section persists, so a test that switches would
   // otherwise decide which section the next test opens on.
   localStorage.removeItem('aic-dc-context-section');
+  // Module state outlives a case: a test that publishes a root would
+  // otherwise decide what the next one's memory-file rows are called.
+  resetRepoRoot();
 });
 
 // ---------------------------------------------------------------------------
@@ -1646,15 +1650,15 @@ describe('ContextUsageTab memory files', () => {
 
   it('opens a memory file in the viewer when its path is clicked', async () => {
     // Knowing CLAUDE.md costs 1.8K tokens is half an answer; the other
-    // half is being in the file. `relPath` is the service's answer to
-    // "can the viewer actually open this" — every repo read rejects an
-    // absolute path, so that is the one it navigates with.
+    // half is being in the file. The engine's absolute path is what
+    // goes on the event, like every other `navigate-file` dispatcher's
+    // — the shell relativises at its choke point (§ C3).
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
         memoryFiles: [
           {
             path: '/repo/.claude/CLAUDE.md',
-            relPath: '.claude/CLAUDE.md',
             type: 'Project',
             tokens: 1800,
           },
@@ -1673,18 +1677,18 @@ describe('ContextUsageTab memory files', () => {
     }
     expect(navigated).toHaveBeenCalledTimes(1);
     expect(navigated.mock.calls[0][0].detail).toEqual({
-      path: '.claude/CLAUDE.md',
+      path: '/repo/.claude/CLAUDE.md',
     });
   });
 
   it('names an in-repo file the way the rest of the app does', async () => {
     // Relative in the cell, absolute on the tooltip: the engine's own
-    // name for it is still one hover away.
+    // name for it is still one hover away. The service sends only the
+    // absolute path now, and `toRepoPath` is what shortens it.
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
-        memoryFiles: [
-          { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
-        ],
+        memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
       }),
     );
     const el = mountTab();
@@ -1700,11 +1704,10 @@ describe('ContextUsageTab memory files', () => {
     async () => {
       // A click that opens a file under an opaque panel is
       // indistinguishable from a click that did nothing.
+      setRepoRoot('/repo');
       publishUsage(
         usageFixture({
-          memoryFiles: [
-            { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
-          ],
+          memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
         }),
       );
       const el = mountTab();
@@ -1718,7 +1721,10 @@ describe('ContextUsageTab memory files', () => {
 
   it('leaves a file outside the repo unclickable', async () => {
     // A user-level CLAUDE.md has no repo-relative name, and the read
-    // path would refuse it. Better no click than one that fails.
+    // path would refuse it. Better no click than one that fails. The
+    // root is published here so this is the outside-the-root branch
+    // rather than the no-root-yet one below.
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
         memoryFiles: [{ path: '/home/u/.claude/CLAUDE.md', tokens: 27 }],
@@ -1730,6 +1736,26 @@ describe('ContextUsageTab memory files', () => {
     expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
     expect(rows(el, 'Memory files')).toEqual([
       ['/home/u/.claude/CLAUDE.md', '—', '27'],
+    ]);
+  });
+
+  it('leaves every row unclickable before the root has arrived', async () => {
+    // The cost of moving the rule off the server: openability now
+    // depends on the shell's state snapshot having landed, where it
+    // used to ride along with the breakdown itself. A row with no
+    // shortened name is a row this tab cannot ask for, and text is the
+    // honest rendering of that — not a link the read path would refuse.
+    publishUsage(
+      usageFixture({
+        memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
+    expect(rows(el, 'Memory files')).toEqual([
+      ['/repo/CLAUDE.md', '—', '1.8K'],
     ]);
   });
 

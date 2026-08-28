@@ -61,7 +61,7 @@ Internal multi-file tracking without a visible tab bar, same pattern as diff vie
 ### When Neither Side Can Be Read
 Content is fetched with the same two calls and the same rule as the diff viewer's — see [diff-viewer.md](diff-viewer.md#when-neither-side-can-be-read) for the reasoning, which is not restated here. One failure is a reading (new, or deleted); two failures are no answer, so no tab opens, a failed refresh keeps the tab's last good content, and the report is a toast. A blank SVG pane is the one rendering this viewer cannot afford to guess at, because it is indistinguishable from an SVG that is genuinely empty.
 
-The two viewers hold a copy of this fetch each, which is a duplication that predates the rule and is tracked as such — the fix owed is a single owner, not a third copy.
+"The same two calls" is now literally the same code (2026-08-28). The two viewers held a copy each, and the copies had already stopped being copies: this one's error reader fell back to `String(err)`, which renders a rejection carrying no `message` as the text `[object Object]` in a toast, where the diff viewer's says "unknown error". That divergence is the argument for one owner rather than the duplication being untidy. The owner is `diff-viewer/fetch.js`, which the diff viewer already had and this viewer now imports — the file keeps its directory because that is where it was written, and moving it would be churn for a path; what it exports is named about the repo rather than about diffing.
 ## Interaction Modes
 Two modes switchable programmatically:
 | Mode | Left panel | Right panel | Purpose |

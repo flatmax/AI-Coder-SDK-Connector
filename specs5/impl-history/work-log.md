@@ -564,6 +564,49 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **One rule answers "absolute engine path → repo path"** — 2026-08-28, closing `next.md` § C3 and
+  [`../plan/README.md`](../plan/README.md) open item 3. Reasoning in
+  [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+  [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy*,
+  [`../5-webapp/svg-viewer.md`](../5-webapp/svg-viewer.md) § *When Neither Side Can Be Read* and
+  [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
+
+  **The item named one duplication and cost three.** The server-side `relPath` enrichment on memory files
+  was the one it was written about. The other two arrived after it: the two-call repo fetch, copied between
+  the diff and SVG viewers by § C2 the same week with a note saying one owner was C3's job; and the
+  tool-card header's input summary, which the chat spec had recorded as *blocked on this item*. **A
+  convergence item gets more expensive every time anything near it is built** — which is the case for
+  taking one when it is cheap rather than when it is next.
+
+  **The recorded blocker was false, and it was the interesting part.** Shortening paths in a `key=value`
+  join over a tool's input looked like it needed a per-tool table of which keys hold paths — a third
+  mechanism, which is what the item existed to prevent. There is no table: a value that begins with the
+  repo root **is a path by its shape**, which is the same discriminator the browser's rule already mirrors
+  off the backend's own containment check. Every string value can be offered to the rule, and the rule
+  declines the ones that are not paths. So the join moved to the browser to be where the rule lives, which
+  cost nothing on the wire because both card builders already shipped the whole `input` dict beside the
+  summary.
+
+  **The copies had already stopped being copies**, which is the better argument for one owner than
+  tidiness. The SVG viewer's error reader had drifted to `String(err)`, so a rejection carrying no
+  `message` reached the user as the literal text `[object Object]`, where the diff viewer's said "unknown
+  error". Nothing was going to notice: it is the § C2 lesson again, a reporting path that the happy case
+  never exercises.
+
+  **Openability moved with naming rather than staying behind.** The Context tab used to read a
+  server-computed `relPath` to decide which memory rows were clickable; it now takes that from the naming
+  call, which returns a different string only for an absolute path inside the root — exactly the condition
+  for the read succeeding, so one question is asked once. Keeping a server-side `openable` for the case
+  only the server can see — a path outside the root that *resolves* inside it — would have been useless
+  rather than better, because the browser could not have named that path either and the row would have
+  carried a link that opened nothing. Giving up that case is the entire cost and it is pinned by a test.
+
+  **And there were three mechanisms, not the two the item counted.** `Reindexer._relative` turns a written
+  path into a key in a server-side index, and `summarise_tool_input` still writes the permission dialog's
+  headline before a browser is in the picture. Neither is a second answer to the same question: the line is
+  *who the answer is for*. A name on screen belongs to the browser; a key in a server-side structure, and a
+  sentence that must exist before the browser connects, do not.
+
 - **A failed RPC is now reportable from both ends** — 2026-08-28, closing `next.md` § C2 and
   [`../plan/README.md`](../plan/README.md) open item 4. Reasoning in
   [`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md) § *When a Service Method Raises*

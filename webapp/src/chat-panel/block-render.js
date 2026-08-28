@@ -417,6 +417,71 @@ export function toolLabel(card) {
   return parts.length >= 3 ? parts.slice(2).join('__') : name;
 }
 
+/**
+ * The header's one-line rendering of a call's input, capped.
+ *
+ * The number is the header's whole defence against a card growing without
+ * bound: `.tool-summary` carries no ellipsis and no line clamp on purpose
+ * (see `styles.js`), because the header is the only place a collapsed card
+ * says what the call was about. The cap is what makes that safe.
+ */
+export const TOOL_SUMMARY_CHARS = 200;
+
+/**
+ * `key=value` over a tool call's input, with repo paths shortened.
+ *
+ * Built here rather than shipped as a `input_summary` field off the engine,
+ * which is what used to happen (`specs5/next.md` § C3). The reason is the
+ * paths: the engine's join could not shorten them, so the header read
+ * `file_path=/home/you/repo/src/a.js` and spent two or three of its rows on
+ * a prefix identical for every file in the repo. `chat.md` recorded that as
+ * blocked on needing "a per-tool table of path keys" — and **there is no
+ * table**. A value that begins with the repo root is a path by its shape,
+ * which is the same discriminator `repo-path.js` already mirrors off the
+ * backend's own check, so `toRepoPath` can be handed every string value and
+ * will decline the ones that are not paths. The card already carries its
+ * full `input`, so moving the render here costs no extra field on the wire
+ * and gives live cards and cards read back off a transcript one builder
+ * instead of two.
+ *
+ * Two limits worth naming. A path *inside* a value is left alone — the rule
+ * renames a path, it does not rewrite prose, so an `old_string` quoting an
+ * absolute path keeps it. And a value that merely starts with the root
+ * without being a path (a shell command, say) is shortened too, which is a
+ * gain rather than a cost: the prefix is noise either way.
+ *
+ * Non-string values are JSON, as they were on the server. `JSON.stringify`
+ * writes `[1,2]` where Python's `json.dumps` wrote `[1, 2]`; that one space
+ * is the only rendering this move changes. It is also the one call in here
+ * that can throw, so it is caught per value rather than per summary: a single
+ * circular value costs the header that one part and leaves the others, where
+ * letting the throw out would cost the whole panel the render pass.
+ */
+export function toolInputSummary(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
+  const parts = [];
+  for (const [key, value] of Object.entries(input)) {
+    let rendered;
+    if (typeof value === 'string') {
+      rendered = toRepoPath(value);
+    } else {
+      try {
+        rendered = JSON.stringify(value);
+      } catch {
+        rendered = String(value);
+      }
+    }
+    // Collapsed per part, then joined: a `Bash` heredoc arrives with its
+    // newlines in it and a header row is one line.
+    parts.push(`${key}=${String(rendered ?? '')}`.trim().split(/\s+/).join(' '));
+  }
+  const summary = parts.join(' ');
+  if (summary.length > TOOL_SUMMARY_CHARS) {
+    return `${summary.slice(0, TOOL_SUMMARY_CHARS - 1)}…`;
+  }
+  return summary;
+}
+
 // ---------------------------------------------------------------
 // Diffs for edit-shaped tools
 // ---------------------------------------------------------------
@@ -817,7 +882,7 @@ export function renderToolCard(panel, block) {
               >`
             : nothing}
         </span>
-        <span class="tool-summary">${card.input_summary || ''}</span>
+        <span class="tool-summary">${toolInputSummary(card.input)}</span>
       </button>
       ${expanded ? renderToolBody(block, card, result, segments) : nothing}
       ${files.length || duration
@@ -889,9 +954,12 @@ function renderToolInput(card) {
   try {
     text = JSON.stringify(input, null, 2);
   } catch {
-    // Circular or otherwise unserialisable input. The summary in the header
-    // already survived the trip, so the body degrades rather than throwing
-    // inside a render pass and taking the whole panel with it.
+    // Circular or otherwise unserialisable input. The body degrades rather
+    // than throwing inside a render pass and taking the whole panel with it.
+    // The header used to be the reason this was cheap — it arrived
+    // pre-joined off the engine and so could not fail. It is built here now
+    // (`toolInputSummary`, § C3) and catches the same throw per value, so
+    // both halves of the card degrade on their own.
     text = String(input);
   }
   return html`<pre class="tool-input">${text}</pre>`;

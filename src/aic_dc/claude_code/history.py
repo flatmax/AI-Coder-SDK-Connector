@@ -47,7 +47,6 @@ from aic_dc.claude_code.messages import (
     files_written_by,
     flatten_tool_result,
     mcp_server_name,
-    summarise_tool_input,
     truncate_tool_result,
 )
 
@@ -1086,7 +1085,10 @@ class _Turn:
             "tool_use_id": tool_use_id,
             "name": name,
             "server": mcp_server_name(name),
-            "input_summary": summarise_tool_input(tool_input),
+            # No `input_summary`, matching the live card — the browser
+            # builds the header from `input` (`specs5/next.md` § C3), which
+            # is also what gives a card read back off a transcript the same
+            # header it had while the turn was streaming.
             "input": tool_input,
             "status": "pending",
             "invoked_at": invoked_at,

@@ -58,8 +58,17 @@
 
 import { LitElement, css, html } from 'lit';
 
-import { SharedRpc } from './rpc.js';
 import { SvgEditor } from './svg-editor/index.js';
+// One owner for "read a file out of the repo", shared with the diff
+// viewer rather than copied beside it (`specs5/next.md` § C3). The
+// module lives under `diff-viewer/` because that is where it was
+// written, and the name it exports is about the repo rather than
+// about diffing — moving the file would be churn for a path.
+import {
+  extractBase64Uri,
+  fetchFileContent,
+  getRpcCall,
+} from './diff-viewer/fetch.js';
 import { toRepoPath } from './repo-path.js';
 
 /**
@@ -579,7 +588,7 @@ export class SvgViewer extends LitElement {
       // discard. Matches the contract that refresh is for
       // syncing disk → viewer, not viewer → disk.
       if (this._isDirty(file)) continue;
-      const fetched = await this._fetchFileContent(path);
+      const fetched = await fetchFileContent(path);
       if (!fetched) continue;
       // A refresh that read nothing leaves the tab's last
       // known-good content in place; the toast is what makes it
@@ -914,7 +923,7 @@ export class SvgViewer extends LitElement {
       this._dispatchActiveFileChanged();
       return;
     }
-    const fetched = await this._fetchFileContent(path);
+    const fetched = await fetchFileContent(path);
     if (!fetched) return;
     if (fetched.error) {
       // Nothing read — no tab is opened, so the viewer keeps
@@ -938,91 +947,6 @@ export class SvgViewer extends LitElement {
     this._lastRightContent = null;
     this._dispatchActiveFileChanged();
     this._recomputeDirtyCount();
-  }
-
-  /**
-   * HEAD and working copy for `path`.
-   *
-   * Same both-sides-tolerated rule as the diff viewer's
-   * `fetchFileContent`, including the part that is not tolerance:
-   * one failure is a reading (new file, or deleted), two failures
-   * are no answer at all, and returning the second as empty content
-   * paints a blank SVG over a request the server refused
-   * (`specs5/next.md` § C2). `error` is set only in that case.
-   *
-   * The duplication with `diff-viewer/fetch.js` is real and predates
-   * this — two viewers holding one rule is the shape § C3 tracks. It
-   * is left standing here rather than half-converged, because the
-   * two differ in how they reach the RPC proxy and the fix owed is a
-   * single owner, not a third copy with a fresh divergence in it.
-   */
-  async _fetchFileContent(path) {
-    const call = this._getRpcCall();
-    if (!call) {
-      return { original: '', modified: '', isNew: false, error: null };
-    }
-    let original = '';
-    let modified = '';
-    let isNew = false;
-    let headFailed = false;
-    let workingError = null;
-    try {
-      const headResult = await call['Repo.get_file_content'](
-        path,
-        'HEAD',
-      );
-      original = this._extractRpcContent(headResult);
-    } catch (_) {
-      isNew = true;
-      headFailed = true;
-    }
-    try {
-      const workingResult = await call['Repo.get_file_content'](path);
-      modified = this._extractRpcContent(workingResult);
-    } catch (err) {
-      // File missing from working copy (deleted); leave modified
-      // empty — unless HEAD failed too, in which case nothing read.
-      workingError = err;
-    }
-    if (headFailed && workingError !== null) {
-      return {
-        original: '',
-        modified: '',
-        isNew: false,
-        error: workingError?.message || String(workingError),
-      };
-    }
-    return { original, modified, isNew, error: null };
-  }
-
-  _extractRpcContent(result) {
-    if (typeof result === 'string') return result;
-    if (
-      result &&
-      typeof result === 'object' &&
-      typeof result.content === 'string'
-    ) {
-      return result.content;
-    }
-    if (result && typeof result === 'object') {
-      const keys = Object.keys(result);
-      if (keys.length === 1) {
-        return this._extractRpcContent(result[keys[0]]);
-      }
-    }
-    return '';
-  }
-
-  _getRpcCall() {
-    try {
-      const shared = globalThis.__sharedRpcOverride;
-      if (shared) return shared;
-    } catch (_) {}
-    try {
-      return SharedRpc.call || null;
-    } catch (_) {
-      return null;
-    }
   }
 
   // ---------------------------------------------------------------
@@ -1486,7 +1410,7 @@ export class SvgViewer extends LitElement {
    */
   async _resolveImageHrefs(container, svgPath) {
     if (!container || !svgPath) return;
-    const call = this._getRpcCall();
+    const call = getRpcCall();
     if (!call) return;
     const images = container.querySelectorAll('image');
     if (images.length === 0) return;
@@ -1549,7 +1473,7 @@ export class SvgViewer extends LitElement {
   async _resolveOneImageHref(imgEl, repoPath, call) {
     try {
       const result = await call['Repo.get_file_base64'](repoPath);
-      const dataUri = this._extractBase64Uri(result);
+      const dataUri = extractBase64Uri(result);
       if (!dataUri) {
         console.warn(
           `[svg-viewer] image resolution failed for ${repoPath}: empty response`,
@@ -1597,24 +1521,6 @@ export class SvgViewer extends LitElement {
         err?.message || err,
       );
     }
-  }
-
-  /**
-   * Extract a data URI from a Repo.get_file_base64
-   * response. Handles plain string, object with
-   * `data_uri` field, and jrpc-oo single-key envelope.
-   */
-  _extractBase64Uri(result) {
-    if (typeof result === 'string') return result;
-    if (result && typeof result === 'object') {
-      if (typeof result.data_uri === 'string') return result.data_uri;
-      if (typeof result.content === 'string') return result.content;
-      const keys = Object.keys(result);
-      if (keys.length === 1) {
-        return this._extractBase64Uri(result[keys[0]]);
-      }
-    }
-    return '';
   }
 
   // ---------------------------------------------------------------

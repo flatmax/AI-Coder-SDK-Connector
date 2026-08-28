@@ -203,12 +203,33 @@ interlude that found it; this list exists so that none of them has to be redisco
    out before the health push lands: the reply's `reason: 'no-engine'`. Writing the spec section also
    caught § *Data Flow* claiming the HUD makes no follow-up RPC, which has been false since phase 3.
    [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the Engine Is Gone*.
-3. **Two mechanisms now answer "absolute engine path → repo path".** `_mark_openable_memory_files` adds
-   a `relPath` field server-side so the Context tab knows which memory files are openable; `toRepoPath`
-   (`218f89d`) converts client-side at the shell's `navigate-file` choke point. Both are correct and
-   neither is wrong to exist, but the next payload carrying an absolute path will pick one of them by
-   accident. They should converge — most likely on the client-side one, which needs no per-payload
-   enrichment.
+3. ~~**Two mechanisms now answer "absolute engine path → repo path".**~~ — **converged on 2026-08-28,**
+   on the client-side one, as the item guessed. `_mark_openable_memory_files` and its `_repo_relative`
+   helper are deleted; the Context tab names each memory row with `toRepoPath` and takes *openable* from
+   the same call, since the rule returns a different string only for an absolute path inside the root,
+   which is exactly when the read will work. **Openability had to move with naming, not stay behind.** A
+   server-side `openable` boolean would have been strictly better on one case — a path outside the root
+   that *resolves* inside it, which the server can see and the browser cannot — and useless, because the
+   browser could not have produced a name for that path either, so the row would have carried a link that
+   opened nothing. Giving up that case is the whole cost, and it is pinned by a test.
+
+   **There were three mechanisms, not two, and the third stays.** `Reindexer._relative` (`hooks.py`)
+   turns a written path into an index key, and the index is server-side with no browser involved: it is
+   not answering the same question. The line the convergence drew is *who is the answer for* — a name on
+   screen is the browser's, a key in a server-side structure is not.
+
+   The item's price went up twice before it was paid, both times by work that shipped one more caller
+   rather than by anything changing here — which is the argument for paying a convergence item early.
+   Two of the three parts were not on the item when it was written: the duplicated repo fetch between the
+   two viewers, and the tool card header's input summary, which [`../5-webapp/chat.md`](../5-webapp/chat.md)
+   § *Card Anatomy* had recorded as blocked *on this item* and on needing "a per-tool table of path keys".
+   **There was no table** — a value beginning with the repo root is a path by its shape, the same
+   discriminator the browser's rule already mirrors off the backend's containment check, so every string
+   value can be offered to the rule and the rule declines the rest. The blocker was the item, and the item
+   was what removed it.
+   [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+   [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) and
+   [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy*.
 4. ~~**An RPC that fails behind a viewer open shows the user nothing.**~~ — **fixed on 2026-08-28.**
    Both halves, because the item's own claim was that either would have sufficed and doing one would
    have been taking the item's word for it. The server registers every service through one facade, and
