@@ -1,6 +1,6 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `ea5bd5f`.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `6224dc9`.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
