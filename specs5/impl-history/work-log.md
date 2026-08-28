@@ -557,6 +557,49 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The agent is told which file the user has open** — 2026-08-28, § C7, the first of § C5's findings to
+  close. `ViewerFraming` had two arrival paths and a writer on neither, so `Turn.viewer` was always
+  `None` and the `ui_state` tool answered "nothing is open in the user's viewer pane" for the entire life
+  of the app. `webapp/src/app-shell/viewer-framing.js` now pushes `set_viewer_state` from the shell's
+  `active-file-changed` handler.
+
+  **One writer, and the choice of which one is the whole design.** `chat_streaming`'s `viewer` argument
+  stays null; the service's existing fallback feeds both readers from the single push. Answering in both
+  places would have given one field two sources that can disagree — the shape § C3 keeps finding — and
+  the per-turn argument is the worse source, because it only knows about turns that start in this
+  browser, which is the case `ui_state` exists to answer. The server side needed no change: the fallback,
+  and `test_the_last_push_frames_a_turn_that_sends_no_viewer`, had been asserting against a writer that
+  did not exist.
+
+  **`active-file-changed` over `navigate-file`**, because it reports what a viewer *has* open rather than
+  what it was asked to open — a fetch can fail, and routing diverges when an SVG carries a scroll hint.
+  Three cases follow from the event's own shape and each is pinned: repeats for one path are deduped (the
+  SVG viewer re-emits on a same-file `openFile` on purpose, so the shell re-runs its visibility routing);
+  a `null` from the *hidden* viewer is ignored, since something is still on screen; and the SVG viewer's
+  synthesised `virtual://svg-compare/…` path reports as nothing open, because it is on screen but is not
+  a file anything can read. A reconnect re-pushes — server-side viewer state is in memory.
+
+  **The selection range is not wired, and that is stated rather than absorbed.** `set_viewer_state` takes
+  `start_line` / `end_line` and `build_framing` renders them, but no selection plumbing exists in either
+  viewer; it would take a debounced Monaco `onDidChangeCursorSelection` chain per editor, which is new
+  surface, and a range that lags the cursor points the agent at lines the user is not on — the failure
+  `chat-panel/input.js`'s own comment refused to risk. The file is the part worth having. § C7 carries
+  the residue and nothing schedules it.
+
+  **§ C5's test fired, which is the first evidence it works.** Adding the caller failed
+  `test_a_listed_method_is_not_called_from_the_browser` and the message named the new call's file and
+  line, so the stale `DORMANT` entry went in the same commit rather than surviving as an assertion that
+  the gap it had just closed was still open. `navigate_file`, the other half of what § C7 named, is
+  re-attributed to § E's collaboration pause where it belongs.
+
+  Eleven mutations, each checked to fail a test: dropping the dedupe, dropping the hidden-viewer gate,
+  treating `virtual://` as a real file, recording a push before it lands, dropping either RPC-availability
+  guard, resending without standing the dedupe down, unwiring the handler, moving the report after the
+  null-path return, and dropping the reconnect re-push. Two survived the first pass and both were the
+  code's fault, not the tests': a redundant `if (!open) return` in the resend that the dedupe already
+  covered (deleted), and a `typeof` guard whose only observable effect is *not* logging, which the test
+  now asserts.
+
 - **Every RPC is accounted for as called, internal or dormant** — 2026-08-28, § C5. `test_rpc_surface.py`
   partitions the 100 methods the five registered services expose and asserts the partition, so the next
   public method added to any of them fails a test until somebody answers "is this meant to be reachable
@@ -571,7 +614,8 @@ The classification tests work because they refuse to be read past, and that is t
 
   **Twelve are dormant, and three of those were news.** `set_viewer_state` and the hardcoded `null` in
   `chat-panel/input.js` mean `ViewerFraming` has two arrival paths and a writer on neither, so the
-  `ui_state` tool's `viewer` key is permanently null (§ C7). `shutdown` has no caller and a docstring
+  `ui_state` tool's `viewer` key is permanently null (§ C7 — *closed the same day; see the entry above,
+  which leaves eleven dormant*). `shutdown` has no caller and a docstring
   that reasons about one (§ C8). `get_review_file_diff` is dead on both services it exists on, because
   review mode's soft reset makes the diff viewer's ordinary HEAD-versus-working-tree pair *be* the review
   diff — recorded in the inventory rather than queued, since deleting it is a separate decision from

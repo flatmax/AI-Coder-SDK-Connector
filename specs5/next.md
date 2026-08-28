@@ -85,17 +85,15 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B2, B5, C1, C5 and C6 have since closed, so the cheapest remaining items are
-**C4** (tool-card chips still show the absolute path — the display decision is the only open question,
-the conversion already exists) and the **first two rows of B3**, which build discoverability for values
-that are already configurable.
+smaller than either phase. B2, B5, C1, C5, C6 and C7 have since closed, so the cheapest remaining items
+are **C4** (tool-card chips still show the absolute path — the display decision is the only open
+question, the conversion already exists) and the **first two rows of B3**, which build discoverability for
+values that are already configurable.
 
-**C5's audit is what to read first now, because it is done and it left work behind.** It classified all
-100 exposed RPCs and found a third of the surface reachable from a browser by accident, which is the
-standing cost of `add_service` publishing every public method. Two of its findings are queued as
-**§ C7** (viewer framing has no writer on either path — the agent is never told what the user is looking
-at) and **§ C8** (nothing calls `shutdown`, and its docstring asserts a caller that does not exist). C7
-is the one with a user-visible consequence; C8 is the cheapest decision on the page.
+**§ C8 is the cheapest decision on the page** and the last of § C5's audit findings still open: nothing
+calls `shutdown`, and its docstring asserts a caller that does not exist. Its sibling § C7 (the agent
+was never told what the user is looking at) closed 2026-08-28 and left one thing behind that is *not*
+scheduled — the viewer's **selection range** is still never sent, only the file. C7 says why.
 
 ---
 
@@ -363,7 +361,9 @@ internal-only, 12 are dormant** — so a third of the surface is reachable from 
 which is what `add_service` publishing every public method costs. The work-log guessed there were more
 cases like `reconnect_mcp_server`; there were ten more, and three were findings rather than
 confirmations: § C7 and § C8 below, plus `get_review_file_diff` being dead on *both* services it exists
-on, which needed no item and is recorded in the inventory instead.
+on, which needed no item and is recorded in the inventory instead. *(The dormant count is eleven from
+2026-08-28: § C7 gave `set_viewer_state` the caller it was waiting for, and the removal of its entry was
+prompted by the test failing, not by remembering to.)*
 
 **A fourth list runs the audit backwards**, and it independently reproduced § E's CC-12 claim without
 being told it: `LLMService.switch_mode` at `app-shell/mode.js:61` and `chat-panel/events.js:854` is the
@@ -376,15 +376,45 @@ it's not auto-exposed by jrpc-oo's `add_class` introspection — actually wait, 
 non-underscored. This IS a public method" — and concludes correctly that it is harmless. `shutdown`'s
 reasons about its gate not obstructing "the real caller", which § C8 is about.
 
-**C7 — The agent is never told what the user is looking at.** `ViewerFraming` has two arrival paths and
-a writer on neither, so `Turn.viewer` is always `None` and the `ui_state` tool's `viewer` key is always
-`null`. The per-turn argument is hardcoded (`chat-panel/input.js`: `null`, with a comment saying
-"wiring that gesture is phase 6's" — phase 6 shipped). `set_viewer_state` is the other path, and the
-service's own comment calls it "the one that keeps working when the turn comes from somewhere else";
-nothing in `webapp/src` calls it. Found by § C5's audit. **Same shape as § B5** — a field with no writer
-— except that here the field is an advertised input to the prompt, so the cost is that the agent reads
-a file the user is not looking at when it could have been told. The decision to make is whether the
-gesture is worth wiring or the pair is worth deleting; a third path is not one of the options.
+**C7 — The agent is never told what the user is looking at.** ✅ *Built 2026-08-28 — leaves this queue.*
+`ViewerFraming` had two arrival paths and a writer on neither, so `Turn.viewer` was always `None` and the
+`ui_state` tool's `viewer` key always `null`. The per-turn argument was hardcoded
+(`chat-panel/input.js`: `null`, with a comment saying "wiring that gesture is phase 6's" — phase 6
+shipped). `set_viewer_state` was the other path, and the service's own comment called it "the one that
+keeps working when the turn comes from somewhere else"; nothing in `webapp/src` called it. Found by
+§ C5's audit. **Same shape as § B5** — a field with no writer — except that the field is an advertised
+input to the prompt, so the cost was the agent reading a file the user was not looking at when it could
+have been told.
+
+**Wired, as one writer, not two.** `webapp/src/app-shell/viewer-framing.js` pushes
+`set_viewer_state` from the shell's `active-file-changed` handler; `chat_streaming`'s `viewer` argument
+stays `null` and its comment now says why rather than promising a phase. The service's existing fallback
+feeds both readers from the single write, which
+`test_the_last_push_frames_a_turn_that_sends_no_viewer` had already been asserting against a writer that
+did not exist. Answering in both places would have given one field two sources that can disagree — the
+shape § C3 keeps finding — and the per-turn argument would have been the worse of the two, since it only
+knows about turns that start in this browser.
+
+`active-file-changed` was chosen over `navigate-file` because it reports what a viewer *has* open rather
+than what it was asked to open (a fetch can fail, and routing diverges SVG→diff on a scroll hint), both
+viewers emit it, and it already carries `null` for the close. Three cases the event's own shape forces:
+repeats for one path are deduped (the SVG viewer re-dispatches on a same-file `openFile` on purpose, so
+the shell re-runs its visibility routing); a `null` from the *hidden* viewer is ignored, because
+something is still on screen; and the SVG viewer's synthesised `virtual://svg-compare/…` path is
+reported as nothing open, because it is on screen but is not a file anything can read. A reconnect
+re-pushes, since `_viewer_state` is in memory and a reconnect usually means a restarted server.
+
+**The selection range is not wired, and this is the residue.** `set_viewer_state` accepts
+`start_line` / `end_line` and `build_framing` renders "(lines X-Y selected)", but nothing sends them.
+No selection plumbing exists in either viewer: it would take a debounced Monaco
+`onDidChangeCursorSelection` chain per editor, which is new surface rather than a wire-up, and a range
+that lags the cursor points the agent at lines the user is not on — the failure
+`chat-panel/input.js`'s own comment refused to risk. **The file is the part worth having and the range
+is a separate item**, not a thing to claim as done. Nothing schedules it.
+
+The other half of what this item named stays dormant: `navigate_file` broadcasts navigation to all
+clients, and with the collaboration admission UI on pause there is one client. It is § E's, not this
+item's — `tests/test_rpc_surface.py` re-attributes it.
 
 **C8 — Nothing ever shuts the engine down, and the docstring says otherwise.**
 `ClaudeCodeService.shutdown` denies pending permissions, cancels turn tasks, closes the doc builder and

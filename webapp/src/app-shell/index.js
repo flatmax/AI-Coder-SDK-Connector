@@ -70,6 +70,7 @@ import {
   onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
   syncViewerInset,
 } from './viewers.js';
+import { resendViewerState } from './viewer-framing.js';
 import {
   saveViewportState, saveSvgViewportState, loadViewportState,
   tryReopenLastFile, doReopenLastFile, doReopenSvg, restoreViewport,
@@ -266,6 +267,11 @@ export class AppShell extends JRPCClient {
     // Default to diff viewer — most files route there.
     // Flipped to 'svg' on navigate-file to an .svg path.
     this._activeViewer = 'diff';
+    // The path last pushed to ClaudeCodeService.set_viewer_state, so
+    // repeated active-file-changed events for one file cost one call.
+    // Starts null because a fresh server holds null. See
+    // ./viewer-framing.js.
+    this._reportedViewerPath = null;
     this._repoName = '';
     // The repo's absolute root, from get_current_state. Held so
     // navigate-file can relativise the absolute paths the engine
@@ -685,6 +691,9 @@ export class AppShell extends JRPCClient {
       // startup overlay and show a success toast instead.
       this.overlayVisible = false;
       this._showToast('Reconnected', 'success');
+      // A reconnect usually means a restarted server, which holds
+      // no viewer state — tell it again what is on screen.
+      resendViewerState(this);
     }
     this._wasConnected = true;
 

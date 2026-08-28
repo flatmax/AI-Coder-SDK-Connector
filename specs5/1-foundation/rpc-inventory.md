@@ -47,6 +47,13 @@ wire; nothing forwards the old namespace.
 - Reset — reset-to-HEAD (records a system event)
 - Review — check ready, start, end, get state, get file diff
 - LSP — hover, definition, references, completions (coordinates are 1-indexed). Served from the surviving symbol index
+- Viewer state — record the file the caller has open, so the turn framing and the `ui_state` tool can say
+  where the user is looking. Localhost-only, because it is an input to the prompt. A falsy path clears
+  it — closing the pane means the agent stops being pointed at a file nobody is on. Pushed by the shell
+  as the viewers report their active file ([`../5-webapp/shell.md`](../5-webapp/shell.md)), and it is the
+  **only** writer: `chat_streaming`'s `viewer` argument is always null and the service falls back to the
+  last push, so one field has one source. The `start_line` / `end_line` parameters are accepted and
+  rendered but never sent — see [`../next.md`](../next.md) § C7 for why the selection range is not wired
 - Navigation — broadcast file navigation to all clients. **Never called** (verified 2026-08-28): the
   browser navigates through its own `navigate-file` window event and does not tell the server, so
   "all clients" is one client. Dominated by the collaboration pause — see [`../next.md`](../next.md) § E
@@ -157,6 +164,12 @@ carry prose: the entry *is* the finding. Of 100 exposed methods (verified 2026-0
 caller, 22 are internal-only, 12 are dormant. Most of the twelve confirmed something already decided;
 three were findings, and two of those became queue items — § C7 (viewer framing has no writer on either
 path) and § C8 (nothing ever calls `shutdown`).
+
+**The `DORMANT` list is eleven from 2026-08-28**, and how it lost an entry is the point of having it.
+§ C7 wired `set_viewer_state`; the commit that added the caller failed
+`test_a_listed_method_is_not_called_from_the_browser`, which named the new call's file and line, so the
+stale entry went in the same commit instead of surviving as an assertion that the gap it had just closed
+was still open.
 
 The third needs no item and is recorded here instead. **`get_review_file_diff` is unused on both
 services it exists on**, because review mode's own git arrangement already answers the question it asks:

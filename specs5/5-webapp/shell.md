@@ -118,6 +118,31 @@ permission request has stalled the turn.
 - **Every `navigate-file` path is normalised against `repo_root` before anything else happens.** Claude Code's file tools take absolute paths, so a tool card's file chip, a turn footer's "files modified" list and the context tab all carry absolute paths, while every `Repo` method takes a repo-relative one and rejects an absolute path outright (it resolves nothing, because resolving would be a way around the containment check). One normalisation here rather than one per dispatcher, and it covers the two side effects as well: the path that gets persisted as last-open and registered with the navigation grid is the relative one, so a bad path cannot survive a reload
 - A path outside the repo root is passed through unchanged rather than rewritten. It has no repo-relative name, and the backend refusing it is the correct outcome — a `../..` walk would ask for a different file
 
+### Telling the Server What Is Open
+
+The shell is the one place both viewers' `active-file-changed` events converge, so it is where the server
+is told what the user is looking at — `ClaudeCodeService.set_viewer_state`, which feeds the turn framing
+and the `ui_state` tool ([`../3-engine/session.md` § Turn framing](../3-engine/session.md#turn-framing)).
+It is the **only** writer: `chat_streaming`'s `viewer` argument stays null and the service falls back to
+the last push, so the field cannot be told two different things. The alternative — answering at send time
+from the chat panel — knows only about turns that start in this browser, which is the case the `ui_state`
+tool exists for.
+
+- `active-file-changed`, not `navigate-file`: it reports what a viewer *has* open rather than what it was
+  asked to open. A fetch can fail, and routing diverges (an SVG with a scroll hint goes to the diff
+  viewer), so the request and the result are not the same fact
+- Repeats for one path are deduped against the last value pushed. The event is deliberately re-emitted on
+  a same-file `openFile` so the shell can re-run its visibility routing, so without the dedupe every
+  redundant open would cost a round trip to say nothing
+- A `null` from the viewer that is *not* visible is ignored. Both viewers emit on their own file changing,
+  and the hidden one emptying does not mean nothing is on screen
+- The SVG viewer's synthesised `virtual://svg-compare/…` path is reported as nothing open. It is on
+  screen, but it is not a file anything can read, and leaving the previous path standing would point the
+  agent at a file that is no longer shown
+- A reconnect re-pushes. Server-side viewer state is in memory and a reconnect usually means a restarted
+  process, so the file still in front of the user is one the new process has never heard of
+- The **selection range is never sent** — only the file. See [`../next.md`](../next.md) § C7
+
 ### Reserved Strip
 
 The background layer's left edge is inset by the width the docked dialog occupies, published as the

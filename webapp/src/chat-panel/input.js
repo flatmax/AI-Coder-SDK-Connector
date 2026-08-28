@@ -120,10 +120,13 @@ export function _saveDraft(value) {
  *     `tool_use_id`, not by routing a separate stream (blocks.js).
  *   - `reasoning` / `effort` — the CLI decides when to think.
  *
- * `viewer` is passed null: it wants the file and selection range the
- * user is looking at, which lives in the shell's viewers, not here.
- * Wiring that gesture is phase 6's; sending a wrong answer now would
- * be worse than sending none.
+ * `viewer` is passed null, and stays that way. What it wants — the file
+ * the user is looking at — is now pushed by the shell as it happens
+ * (`app-shell/viewer-framing.js`), and the service falls back to that
+ * push whenever this argument is null. Answering here as well would give
+ * one field two sources that can disagree, and this one would be the
+ * worse source: it would have to ask the viewers at send time, and it
+ * only knows about turns that start in this browser.
  *
  * A `/command` is not intercepted. The service answers built-ins that
  * have an AIC⚡DC equivalent synchronously with `{status: "unsupported"}`

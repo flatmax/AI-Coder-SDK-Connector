@@ -13,7 +13,9 @@ neither one breaks a build:
   ``toggle_mcp_server`` sat callerless and unnoticed until the Context tab
   was written. ``specs5/impl-history/work-log.md`` § *How to keep this from
   recurring* asked for this test on the strength of that pair, and guessed
-  there were others; the audit behind the tables below found twelve.
+  there were others; the audit behind the tables below found twelve. One of
+  the twelve, ``set_viewer_state``, has since been given the caller it was
+  waiting for and is gone from :data:`DORMANT`.
 
 So the surface is partitioned three ways and the partition is asserted:
 called from the browser (derived by scanning ``webapp/src``, never listed
@@ -139,19 +141,14 @@ DORMANT: dict[str, str] = {
     # its transcript and every session with a repo mirrors. The service
     # method exists so the refusal has somewhere to come from.
     "ClaudeCodeService.rewind_files": "undo is not buildable (next.md § E, CC-20)",
-    # The viewer-framing pair, and the one finding in this audit with a
-    # consequence: ``set_viewer_state`` is the only writer of
-    # ``_viewer_state``, which is the only source for the ``ui_state``
-    # tool's ``viewer`` key and the fallback for ``Turn.viewer``. The
-    # other arrival path is hardcoded ``null`` at
-    # ``chat-panel/input.js`` with a comment deferring it to phase 6,
-    # which has shipped. So neither path has a writer and the agent is
-    # never told what the user is looking at. next.md § C7.
-    "ClaudeCodeService.set_viewer_state": "no writer on either path (next.md § C7)",
-    # Collaboration's file-navigation sync. The browser navigates through
-    # its own ``navigate-file`` window event and never broadcasts, so
-    # "when *any* client navigates" is one client. next.md § C7.
-    "ClaudeCodeService.navigate_file": "navigation is never broadcast (next.md § C7)",
+    # § E — collaboration's file-navigation sync. The browser navigates
+    # through its own ``navigate-file`` window event and never broadcasts,
+    # so "when *any* client navigates" is one client. Dormant for the same
+    # reason as the admission pair above: with one client there is nobody
+    # to sync to. ``set_viewer_state`` was the other half of next.md § C7
+    # and now has a caller (``app-shell/viewer-framing.js``); this half
+    # waits on the pause.
+    "ClaudeCodeService.navigate_file": "navigation is never broadcast (next.md § E)",
     # Graceful engine teardown, and its docstring names a caller that does
     # not exist: "an in-process teardown hook passes" the localhost gate.
     # There is no such hook. ``main.py`` exits through ``os._exit`` and
@@ -302,8 +299,10 @@ class TestRpcSurface:
     def test_a_listed_method_is_not_called_from_the_browser(self):
         """Rot in the other direction: a caller arrives, the entry stays.
 
-        Wiring up ``set_viewer_state`` and leaving it in :data:`DORMANT`
-        would leave the file asserting the gap it just closed.
+        This one has already fired for real. Wiring ``set_viewer_state``
+        (next.md § C7) failed here, naming the file and line of the new
+        caller, which is how the entry got removed in the same commit
+        rather than left asserting a gap it had just closed.
         """
         if not _webapp_present():
             return

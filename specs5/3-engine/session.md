@@ -180,7 +180,12 @@ A turn is not only the user's typed text. The server prepends a small, determini
 describing UI state the agent cannot otherwise see:
 
 - The active file in the viewer, and the cursor or selection range when the user invoked from an
-  editor gesture.
+  editor gesture. **The file is sent, the range is not** (verified 2026-08-28): the shell pushes the
+  active file as the viewers report it ([`../5-webapp/shell.md`](../5-webapp/shell.md) § *Telling the
+  Server What Is Open*), and nothing plumbs a selection out of either editor.
+  [`../next.md`](../next.md) § C7 holds the reasoning, including why a lagging range would be worse than
+  none. Both arrive through `set_viewer_state`; the per-turn `viewer` argument is always null and this
+  is the fallback it falls back to, deliberately, so the field has one writer.
 - Review-mode facts when review is active (branch, merge-base) — see
   [`../4-features/code-review.md`](../4-features/code-review.md).
 
