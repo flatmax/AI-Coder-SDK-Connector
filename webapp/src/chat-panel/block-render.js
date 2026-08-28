@@ -25,6 +25,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderEditBody } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
+import { toRepoPath } from '../repo-path.js';
 import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
 import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
@@ -888,8 +889,23 @@ function renderToolResult(result) {
  * A clickable path. Navigating to the diff viewer is the point of the footer:
  * "what did it just do to my repo" is only useful if the answer is one click
  * from the diff.
+ *
+ * **The label is repo-relative; the tooltip keeps the absolute path.** Every
+ * path on a tool card is absolute, because Claude Code's file tools require
+ * that, and an absolute path is the wrong label for a chip: it spends its
+ * width on a prefix that is the same for every file in the repo, and the part
+ * that identifies the file is the part that falls off the end. This is the
+ * house rule the Context tab's memory-file table already states — named
+ * relative to the root, engine's path on the tooltip — applied here
+ * (next.md § C4).
+ *
+ * The `detail.path` stays whatever it was. `onNavigateFile` normalises, has
+ * done since the click was fixed, and is the one place that should: a second
+ * conversion here would be a second thing to keep true, and the label is a
+ * display concern that must not become the navigation contract.
  */
 export function renderFileChip(path) {
+  const label = toRepoPath(path);
   return html`
     <span
       class="tool-file-chip"
@@ -901,7 +917,7 @@ export function renderFileChip(path) {
           bubbles: false,
         }));
       }}
-    >${path}</span>
+    >${label}</span>
   `;
 }
 

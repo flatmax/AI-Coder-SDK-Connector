@@ -85,10 +85,15 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B2, B5, C1, C5, C6, C7 and C8 have since closed, so the cheapest remaining
-items are **C4** (tool-card chips still show the absolute path — the display decision is the only open
-question, the conversion already exists) and the **first two rows of B3**, which build discoverability for
-values that are already configurable.
+smaller than either phase. B2, B5, C1, C4, C5, C6, C7 and C8 have since closed, so the cheapest remaining
+item is the **first two rows of B3**, which build discoverability for values that are already
+configurable.
+
+**§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
+display decision with three plausible options; the house rule for naming a file on screen was already in
+the Context tab's code — a day older than the commit that deferred the question — and it is what
+`toRepoPath` already did. **An item can be blocked by its own framing**
+— the question "which of these three" had no answer, and "what does this app already do" had one.
 
 **§ C5's audit findings are all closed as of 2026-08-28**, and the pair it produced left two pieces of
 residue that are *not* scheduled, both stated in their own entries. § C7 sends the viewer's **file** and
@@ -343,12 +348,37 @@ a real error painted an empty diff and left one bare line on the server's stderr
 enriches server-side with a `relPath`; `toRepoPath` converts client-side at the shell's
 `navigate-file` choke point. Both are correct; neither is wrong to exist; the next payload carrying an
 absolute path will pick one of them by accident. They should converge, most likely on the client-side
-one, which needs no per-payload enrichment. [`plan/README.md`](plan/README.md) open item 3.
+one, which needs no per-payload enrichment. [`plan/README.md`](plan/README.md) open item 3. *(§ C4 made
+the client-side one strictly more capable — it now holds the root and serves labels as well as requests —
+so the convergence target is settled even though the convergence is not done. `relPath` still has one
+job nothing else does: it is what marks a row **openable**, which is a fact about the repo, not a
+rendering.)*
 
-**C4 — Tool-card file chips still display the absolute path.** Only the navigation was converted. The
-display decision has its own question — basename, root-relative, or middle-elided — and this is the
-one place a multi-root future would want the root visible.
-[`plan/README.md`](plan/README.md) open item 5.
+**C4 — Tool-card file chips still display the absolute path.** ✅ *Built 2026-08-28 — leaves this queue.*
+The label is now the repo-relative name with the engine's path on the tooltip, on the tool-card footer
+chips, the turn footer's "files modified" list and the "Files Referenced" chips alike. Reasoning in
+[`5-webapp/shell.md`](5-webapp/shell.md) § *The Same Rule Names Files On Screen*;
+[`plan/README.md`](plan/README.md) open item 5 is struck and holds the account of why it sat open.
+
+**The three-way question was not open.** Basename / root-relative / middle-elided read as a decision to
+make; the house rule was in the Context tab's own code a day before the commit that deferred it, and it
+*is* `toRepoPath`'s existing behaviour. So there is no second helper for display — one function answers both
+"what should this ask for" and "what should this be called", which is the shape § C3 wants.
+
+**Three things the work found.** The chip had **no width budget at all** — no `max-width`, no ellipsis,
+unlike the file-summary chip it sits beside — so a long path stretched the footer row; that is fixed and
+pinned the way the slash palette pins its own layout rules, from the stylesheet source, since jsdom does
+no layout. `host._repoRoot` is **gone rather than duplicated**: the root moved into the module holding the
+rule, because the renderers take a path and no host, and the cheap alternative would have been a third
+holder of the same string. And the "Files Referenced" list **deduplicated on the raw path**, so a file an
+edit-block header named absolutely and prose named relatively was already two entries — invisible until
+both got the same label.
+
+**One path is deliberately left absolute**, and it is § C3's to close rather than this item's: the tool
+card *header*'s input summary still reads `file_path=/home/you/repo/…`. It is a server-built `key=value`
+join that does not know which keys are paths, so shortening it needs a per-tool table of path keys — a
+third mechanism answering "absolute → relative". Stated in
+[`5-webapp/chat.md`](5-webapp/chat.md) § *Card Anatomy* rather than left to be noticed.
 
 **C5 — `test_every_rpc_has_a_caller_or_is_listed_as_dormant`.** ✅ *Built 2026-08-28 — leaves this
 queue.* `tests/test_rpc_surface.py` partitions all five registered services three ways and asserts the

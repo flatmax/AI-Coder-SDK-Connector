@@ -2493,6 +2493,20 @@ export const STYLES = css`
     font-size: 0.7rem;
     cursor: pointer;
     transition: background 120ms ease;
+    /* Same budget the file-summary chips take, and the same
+     * reason: the full path is in the tooltip. Shortening
+     * the label to the repo-relative name (next.md § C4) is
+     * what usually fits it, but a deeply nested path still
+     * won't, and until now nothing here bounded the width —
+     * so one long path stretched the footer row.
+     *
+     * The hidden overflow also resolves this flex item's
+     * automatic minimum size to zero, without which the
+     * content-based minimum would outvote the max-width. */
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .tool-file-chip:hover {
     background: rgba(88, 166, 255, 0.2);

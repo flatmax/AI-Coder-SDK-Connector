@@ -31,6 +31,8 @@
 import { render } from 'lit';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resetRepoRoot, setRepoRoot } from '../repo-path.js';
+
 import {
   blockExpanded,
   compactionSummary,
@@ -59,6 +61,7 @@ import {
   toggleSubagentBlocks,
   toolLabel,
 } from './block-render.js';
+import { STYLES } from './styles.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -77,6 +80,9 @@ function draw(template) {
 
 afterEach(() => {
   while (hosts.length) hosts.pop().remove();
+  // The repo root is module state, and a chip test that publishes one would
+  // otherwise decide how every later test's paths are labelled.
+  resetRepoRoot();
 });
 
 /**
@@ -1237,6 +1243,68 @@ describe('renderFileChip', () => {
     const host = draw(renderFileChip('src/a.js'));
     expect(host.querySelector('.tool-file-chip').getAttribute('title'))
       .toBe('Open src/a.js');
+  });
+
+  it('labels an absolute path with its repo-relative name', () => {
+    // Every path on a tool card is absolute — Claude Code's file tools
+    // require it — and the identifying end of a long one is the end that
+    // falls off the chip. next.md § C4.
+    setRepoRoot('/home/dev/my-repo');
+    const host = draw(
+      renderFileChip('/home/dev/my-repo/src/chat-panel/block-render.js'),
+    );
+    expect(text(host.querySelector('.tool-file-chip')))
+      .toBe('src/chat-panel/block-render.js');
+  });
+
+  it('keeps the absolute path on the tooltip and in the click', () => {
+    // The label is a display concern. `onNavigateFile` is the one
+    // normaliser, so shortening the label must not shorten what is
+    // dispatched, and the full path stays reachable by hovering.
+    setRepoRoot('/home/dev/my-repo');
+    const abs = '/home/dev/my-repo/src/a.js';
+    const host = draw(renderFileChip(abs));
+    const chip = host.querySelector('.tool-file-chip');
+    expect(chip.getAttribute('title')).toBe(`Open ${abs}`);
+    const navigate = vi.fn();
+    window.addEventListener('navigate-file', navigate);
+    try {
+      chip.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(navigate.mock.calls[0][0].detail).toEqual({ path: abs });
+    } finally {
+      window.removeEventListener('navigate-file', navigate);
+    }
+  });
+
+  it('leaves a path outside the repo at its absolute name', () => {
+    // It has no other name here, so the absolute path is the label as well
+    // as the tooltip — the same non-answer `toRepoPath` gives navigation.
+    setRepoRoot('/home/dev/my-repo');
+    const host = draw(renderFileChip('/etc/hosts'));
+    expect(text(host.querySelector('.tool-file-chip'))).toBe('/etc/hosts');
+  });
+
+  it('shows the absolute path before a root is published', () => {
+    // No state snapshot yet. Measuring against '' would name the wrong file.
+    const host = draw(renderFileChip('/home/dev/my-repo/src/a.js'));
+    expect(text(host.querySelector('.tool-file-chip')))
+      .toBe('/home/dev/my-repo/src/a.js');
+  });
+
+  it('keeps the rules that bound a long path to one row', () => {
+    // A regression guard, not a layout test — jsdom does no layout and does
+    // not resolve Lit's adopted stylesheet, so the rules are read from the
+    // source, same as the slash palette's hint-width guard. The relative
+    // label fits the common case; a deeply nested path still does not, and
+    // this chip had no width budget at all before § C4.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-file-chip {');
+    expect(at, '.tool-file-chip rule is gone').toBeGreaterThan(-1);
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('max-width: 24rem');
+    expect(rule).toContain('overflow: hidden');
+    expect(rule).toContain('text-overflow: ellipsis');
+    expect(rule).toContain('white-space: nowrap');
   });
 });
 

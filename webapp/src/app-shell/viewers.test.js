@@ -20,6 +20,7 @@
 // after fake-timer flushes).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getRepoRoot, setRepoRoot } from '../repo-path.js';
 import { installAppShellTestSetup, mountShell } from './test-helpers.js';
 import { relayoutViewers, syncViewerInset } from './viewers.js';
 
@@ -195,7 +196,7 @@ describe('AppShell viewer routing and navigation', () => {
       // chip carries one. Every Repo RPC takes a repo-relative path and
       // refuses an absolute one, which is what a chip click used to earn.
       const shell = mountShell();
-      shell._repoRoot = '/home/dev/my-repo';
+      setRepoRoot('/home/dev/my-repo');
       await settle(shell);
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
@@ -211,7 +212,7 @@ describe('AppShell viewer routing and navigation', () => {
       // The absolute path used to be what got remembered as the last-open
       // file and handed to the nav grid, so one bad click survived a reload.
       const shell = mountShell();
-      shell._repoRoot = '/home/dev/my-repo';
+      setRepoRoot('/home/dev/my-repo');
       await settle(shell);
       const saved = vi.spyOn(shell, '_saveLastOpenFile');
       const nav = { openFile: vi.fn() };
@@ -230,7 +231,7 @@ describe('AppShell viewer routing and navigation', () => {
       // It has no repo-relative name. Rewriting it would ask for a
       // different file; the backend refusing it is the correct outcome.
       const shell = mountShell();
-      shell._repoRoot = '/home/dev/my-repo';
+      setRepoRoot('/home/dev/my-repo');
       await settle(shell);
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
@@ -254,7 +255,7 @@ describe('AppShell viewer routing and navigation', () => {
       };
       await shell._fetchCurrentState();
       await settle(shell);
-      expect(shell._repoRoot).toBe('/home/dev/my-repo');
+      expect(getRepoRoot()).toBe('/home/dev/my-repo');
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
           detail: { path: '/home/dev/my-repo/src/main.js' },
@@ -270,7 +271,7 @@ describe('AppShell viewer routing and navigation', () => {
       // against an empty root would produce a wrong path.
       const shell = mountShell();
       await settle(shell);
-      expect(shell._repoRoot).toBe('');
+      expect(getRepoRoot()).toBe('');
       window.dispatchEvent(
         new CustomEvent('navigate-file', {
           detail: { path: '/home/dev/my-repo/a.py' },

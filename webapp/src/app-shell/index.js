@@ -273,11 +273,10 @@ export class AppShell extends JRPCClient {
     // ./viewer-framing.js.
     this._reportedViewerPath = null;
     this._repoName = '';
-    // The repo's absolute root, from get_current_state. Held so
-    // navigate-file can relativise the absolute paths the engine
-    // reports for tool calls — see repo-path.js. Empty until the
-    // first snapshot lands, which leaves such a path as it was.
-    this._repoRoot = '';
+    // The repo's absolute root is *not* held here. It lives in
+    // repo-path.js, published once by the state-snapshot handler,
+    // because the chip renderers that need it take a path and no
+    // host — and one repo should have one answer (next.md § C4).
     this._initComplete = false;
     // Doc Convert availability — flipped to true when the
     // backend's get_current_state reports markitdown is

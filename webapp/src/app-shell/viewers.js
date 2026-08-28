@@ -37,7 +37,7 @@ export function onNavigateFile(host, event) {
   // two side effects below as well — an absolute path used to be what got
   // persisted as the last-open file and registered with the nav grid, so the
   // failure survived a reload.
-  const path = toRepoPath(detail.path, host._repoRoot);
+  const path = toRepoPath(detail.path);
   if (typeof path !== 'string' || !path) return;
   let target = viewerForPath(path);
   if (!target) return;

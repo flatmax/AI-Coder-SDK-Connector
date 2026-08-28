@@ -214,9 +214,21 @@ interlude that found it; this list exists so that none of them has to be redisco
    a bare `Failed: Absolute paths not accepted:` line on the server's stderr. Two independent halves —
    jrpc-oo prints raw exception text with no request context, and the diff viewer treats a failed fetch
    as empty content — and **fixing either one alone would have made the bug reportable**.
-5. **Tool-card file chips still display the absolute path.** Only the navigation was converted.
-   Shortening the label is a display decision with its own question (basename, root-relative,
-   middle-elided) and it is the one place a multi-root future would want the root visible.
+5. ~~**Tool-card file chips still display the absolute path.**~~ — **fixed on 2026-08-28.** Only the
+   navigation had been converted, and the label was left open because shortening it looked like a design
+   decision: basename, root-relative, or middle-elided. **It was not open — it was already answered.**
+   The Context tab's memory-file table had stated the house rule in a code comment **the day before the
+   commit that deferred it** — `daa7fa9` on 2026-08-16 against `218f89d` on 2026-08-17: "a file inside the
+   repo is named the way every other view in this app names files — relative to the root — with the
+   engine's absolute path on the row's tooltip. One outside it keeps the absolute path, because that is
+   the only name it has here". The permission dialog follows the same rule because the
+   *backend* relativises, and root-relative-inside-with-absolute-outside is `toRepoPath`'s existing
+   behaviour exactly. So there was no display decision left to make and **no second function to write**:
+   the conversion built for navigation is the label rule, and the work was applying it. The item's own
+   framing was the obstacle — three plausible options, no reason to prefer one, so it kept being
+   deferred. The multi-root concern it raised is unaffected either way; the absolute path is one hover
+   away, and a multi-root future changes what the *root* is, not how a path is named against it.
+   [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
 6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
    three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
    rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the

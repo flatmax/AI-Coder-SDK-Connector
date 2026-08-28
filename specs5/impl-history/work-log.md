@@ -557,6 +557,61 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A file chip is named the way the rest of the app names files** — 2026-08-28, § C4. Every path on a
+  tool card is absolute, because the CLI's file tools require it, and the chips displayed it: a label
+  spending its width on a prefix identical for every file in the repo, with the part that identifies the
+  file at the end that falls off. The label is now the repo-relative name, on the tool-card footer chips,
+  the turn footer's "files modified" list and the "Files Referenced" chips alike, with the engine's path
+  on the tooltip and the accessible name. [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule
+  Names Files On Screen* holds the rule.
+
+  **The item had been open eleven days on a question that was already answered.** It was filed as a
+  display decision with three options — basename, root-relative, middle-elided — and no reason to prefer
+  one, so it kept being the thing to do later. The Context tab's memory-file table had stated the rule in
+  a code comment **the day before** (`daa7fa9`, 2026-08-16; the chip fix that deferred the question is
+  `218f89d`, 2026-08-17): *"A file inside the repo is named the way every other view in this app names
+  files — relative to the root — with the engine's absolute path on the row's tooltip. One outside it
+  keeps the absolute path, because that is the only name it has here."* The permission dialog already
+  follows it, because the backend relativises before sending. And that rule *is* `toRepoPath`, which was
+  built for navigation in `218f89d` and behaves exactly that way. So the work was applying an existing
+  function, there is **no second helper for display**, and the two cannot drift apart. **An item can be
+  blocked by its own framing:** "which of these three" had no answer and "what does this app already do"
+  had one.
+
+  **Three things the work found, none of them the item.** The chip had **no width budget at all** — no
+  `max-width`, no ellipsis, unlike the `.file-chip` it sits beside, whose comment says "Full path is in
+  the tooltip" — so one long path stretched the footer row. That is fixed and pinned from the stylesheet
+  source, the way the slash palette pins its hint-width rules and for the same stated reason: jsdom does
+  no layout, so only the rules' presence is checked. The shell's `_repoRoot` property is **gone rather
+  than duplicated** — the root moved into the module holding the rule, because the chip renderers take a
+  path and no host, and the cheap route would have been a third holder of the same string reached through
+  the existing `state-loaded` event. And the "Files Referenced" list **deduplicated on the raw path**: its
+  two sources spell paths differently — prose mentions are matched against the picker's list and so are
+  relative, edit-block headers carry whatever the model wrote — so a file named both ways was already two
+  entries, invisible until § C4 gave both the same label and would have rendered them as two identical
+  chips. The key is now the relative name; the entry keeps the path as found, which is what leaves the
+  absolute one available to the tooltip.
+
+  **One path is left absolute on purpose.** The card *header*'s input summary still reads
+  `file_path=/home/you/repo/…`. It is built server-side by `summarise_tool_input`, a `key=value` join over
+  whatever keys the input happens to have, so it has no idea which of them are paths; giving it that idea
+  means a per-tool table of path keys — which `permissions.py` already keeps a private copy of, and which
+  would be a *third* mechanism answering "absolute → relative" against a suite that already has an item
+  open about there being two. It belongs to that convergence, and it is stated in
+  [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy* rather than left to be noticed.
+
+  Fifteen mutations, each checked to fail a test. On the module holding the root: dropping
+  `setRepoRoot`'s guard (a snapshot without a `repo_root` then un-sets one an earlier snapshot
+  established), making it write-once (a reconnect to a different repo then keeps the old root), making the
+  test hook a no-op, defaulting `toRepoPath`'s root to `''` instead of the published one, and having
+  `getRepoRoot` report `''`. On the chips: labelling with the raw path, putting the *relative* path on the
+  tooltip, dispatching the label instead of the path, and the same three for the summary chips plus
+  storing the relative form in the entry. On the stylesheet: removing the width budget. Two more re-pin
+  behaviour that only moved house — deleting the snapshot's `setRepoRoot` call, and un-normalising
+  `navigate-file` — and one pins the test suite itself: without `resetRepoRoot` in the shared
+  `beforeEach`/`afterEach`, a test that publishes a root decides how every later test's paths are
+  labelled, and the case asserting an absolute path *stays* absolute is the one that breaks.
+
 - **The engine gets a graceful teardown, bounded, before the hard exit** — 2026-08-28, § C8, the last of
   § C5's findings to close. `ClaudeCodeService.shutdown` had no caller for its whole life while its
   docstring reasoned about one: the localhost gate "does not get in the way of the real caller ... so an

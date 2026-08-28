@@ -7,10 +7,22 @@
 // stripping a leading slash, or walking up with `../` — would turn a refused
 // request into a request for the wrong file.
 
-import { describe, expect, it } from 'vitest';
-import { toRepoPath } from './repo-path.js';
+import { beforeEach, describe, expect, it } from 'vitest';
+import {
+  getRepoRoot,
+  resetRepoRoot,
+  setRepoRoot,
+  toRepoPath,
+} from './repo-path.js';
 
 const ROOT = '/home/dev/my-repo';
+
+// The root is module state, so it outlives a test case. Every test below
+// either passes a root explicitly or expects none to be published; without
+// this, one that publishes would decide the answer for the rest of the file.
+beforeEach(() => {
+  resetRepoRoot();
+});
 
 describe('toRepoPath', () => {
   it('relativises a path inside the repo', () => {
@@ -56,6 +68,8 @@ describe('toRepoPath', () => {
   it('passes the path through when no root is known', () => {
     // The state snapshot has not landed yet: unchanged is the old
     // behaviour, and measuring against '' would produce a wrong path.
+    // `undefined` takes the default, which the beforeEach has just cleared,
+    // so all three arrive at the same guard.
     const abs = `${ROOT}/a.js`;
     expect(toRepoPath(abs, '')).toBe(abs);
     expect(toRepoPath(abs, undefined)).toBe(abs);
@@ -75,5 +89,59 @@ describe('toRepoPath', () => {
     expect(toRepoPath('C:/repo/src/a.js', 'C:/repo')).toBe('src/a.js');
     expect(toRepoPath('D:/elsewhere/a.js', 'C:/repo'))
       .toBe('D:/elsewhere/a.js');
+  });
+});
+
+// The module holds the root as well as the rule, so that the chip renderers
+// — which take a path and no host — can label a path without one being
+// threaded down to them, and so one repo has one answer.
+describe('the published root', () => {
+  it('is empty until a snapshot publishes one', () => {
+    expect(getRepoRoot()).toBe('');
+  });
+
+  it('is what toRepoPath measures against when no root is passed', () => {
+    setRepoRoot(ROOT);
+    expect(getRepoRoot()).toBe(ROOT);
+    expect(toRepoPath(`${ROOT}/src/a.js`)).toBe('src/a.js');
+    expect(toRepoPath('/etc/passwd')).toBe('/etc/passwd');
+  });
+
+  it('cannot be un-set by a snapshot that omits it', () => {
+    // An older backend sends no `repo_root`. Storing that would make every
+    // absolute path stop resolving for the rest of the session, which is
+    // worse than the reconnect having told us nothing new.
+    setRepoRoot(ROOT);
+    setRepoRoot(undefined);
+    setRepoRoot(null);
+    setRepoRoot('');
+    setRepoRoot(42);
+    expect(getRepoRoot()).toBe(ROOT);
+    expect(toRepoPath(`${ROOT}/src/a.js`)).toBe('src/a.js');
+  });
+
+  it('is replaced when the snapshot names a different repo', () => {
+    // Reconnecting to another server is a real case, and the last snapshot
+    // is the authority — not the first one to arrive.
+    setRepoRoot(ROOT);
+    setRepoRoot('/home/dev/other');
+    expect(getRepoRoot()).toBe('/home/dev/other');
+    expect(toRepoPath('/home/dev/other/a.js')).toBe('a.js');
+    expect(toRepoPath(`${ROOT}/a.js`)).toBe(`${ROOT}/a.js`);
+  });
+
+  it('is overridden by an explicit root argument', () => {
+    // The parameter is what lets the rule be tested without module state.
+    setRepoRoot(ROOT);
+    expect(toRepoPath('/elsewhere/a.js', '/elsewhere')).toBe('a.js');
+    expect(toRepoPath(`${ROOT}/a.js`, '/elsewhere')).toBe(`${ROOT}/a.js`);
+  });
+
+  it('is forgotten by resetRepoRoot', () => {
+    // The test hook, for the same reason `SharedRpc.reset()` exists.
+    setRepoRoot(ROOT);
+    resetRepoRoot();
+    expect(getRepoRoot()).toBe('');
+    expect(toRepoPath(`${ROOT}/a.js`)).toBe(`${ROOT}/a.js`);
   });
 });
