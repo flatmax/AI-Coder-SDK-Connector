@@ -1,6 +1,7 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `dfda621` — B1 landed on top of it and is not yet committed.
+**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `f089416`. B1 is committed
+(`fbce225`), and the two commits above it are the tool-card header's left rail.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
