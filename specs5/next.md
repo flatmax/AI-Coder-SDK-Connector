@@ -352,7 +352,10 @@ one, which needs no per-payload enrichment. [`plan/README.md`](plan/README.md) o
 the client-side one strictly more capable — it now holds the root and serves labels as well as requests —
 so the convergence target is settled even though the convergence is not done. `relPath` still has one
 job nothing else does: it is what marks a row **openable**, which is a fact about the repo, not a
-rendering.)*
+rendering.)* **The 2026-08-28 header change raised the price of leaving this open:** a tool card's input
+summary wraps now instead of being elided, so the absolute prefix that used to be clipped off the end is
+fully rendered, and a nested path spends two or three rows of the card on a string identical for every
+file in the repo. Worth doing, still not worth a third mechanism.
 
 **C4 — Tool-card file chips still display the absolute path.** ✅ *Built 2026-08-28 — leaves this queue.*
 The label is now the repo-relative name with the engine's path on the tooltip, on the tool-card footer

@@ -768,14 +768,20 @@ export function renderToolCard(panel, block) {
           : nothing}
         <span class="tool-name">${toolLabel(card)}</span>
         <span class="tool-summary">${card.input_summary || ''}</span>
-        ${block.gated
-          ? html`<span
-              class="tool-gated"
-              title="This call went through a permission prompt"
-            >gated</span>`
-          : nothing}
-        ${renderToolTime(panel, status, card)}
-        <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
+        <!-- The row's right-hand end, in one element rather than three
+             siblings, because the header wraps now: three siblings wrap
+             one at a time, and the first thing a narrow pane did was
+             strand the caret alone on a line of its own. -->
+        <span class="tool-header-end">
+          ${block.gated
+            ? html`<span
+                class="tool-gated"
+                title="This call went through a permission prompt"
+              >gated</span>`
+            : nothing}
+          ${renderToolTime(panel, status, card)}
+          <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
+        </span>
       </button>
       ${expanded ? renderToolBody(block, card, result, segments) : nothing}
       ${files.length || duration

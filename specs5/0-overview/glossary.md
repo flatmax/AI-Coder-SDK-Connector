@@ -34,7 +34,7 @@ SDK actually does.
 
 ## Tools and Permissions
 
-- **Tool card** — the chat-panel rendering of one tool call: name, one-line input summary, status, duration, expandable full input and result. Created on `PreToolUse` and correlated to its result by `tool_use_id`. Failures are expanded by default; successes are collapsed.
+- **Tool card** — the chat-panel rendering of one tool call: name, input summary (wrapped, never elided), status, duration, expandable full input and result. Created on `PreToolUse` and correlated to its result by `tool_use_id`. Failures are expanded by default; successes are collapsed.
 - **Permission request** — a `can_use_tool` callback suspended in the engine while a browser dialog is answered. The engine is genuinely blocked; the dialog is not advisory.
 - **Permission decision** — allow once, deny with a reason, or always-allow. Always-allow writes a scoped tool-plus-pattern rule (`Bash(npm test:*)`, `Edit(src/**)`) into project permission settings via a `PermissionUpdate` — never a bare tool grant and never an invisible in-memory one.
 - **Permission mode** — the session's standing posture: `default`, `plan`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `auto`. Switched live, always visible in the UI, broadcast to all clients, and recorded as a system event.

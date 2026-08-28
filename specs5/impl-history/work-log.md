@@ -557,6 +557,47 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A tool card's header wraps its summary instead of eliding it** — 2026-08-28, reported from a screenshot
+  rather than found in the queue. A `Read` card read `file_path=/home/…/repos/softwaredesignlifec…`, which
+  names no file: the header is the only place a *collapsed* card says what the call was about, it carries no
+  tooltip, and the card's own body is a JSON echo, so the identifying tail of a path was not reachable
+  anywhere. Every summary wraps now — [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy* holds the
+  rule.
+
+  **The exception was already there and its argument was general.** `Bash` summaries had wrapped since phase
+  2, for the stated reason that "eliding it eats exactly the tail that says what it does: which paths, which
+  flags, which test file" — a sentence with nothing in it about `Bash`. The same entry then kept every other
+  tool on one line to buy a uniform row height. So this was not a new decision so much as noticing that one
+  had been made twice, in opposite directions, two paragraphs apart
+  ([`../plan/delivery.md`](../plan/delivery.md) § *`Bash` summaries wrap; nothing else does*, now annotated).
+  Three `[data-tool='Bash']` blocks over five selectors are gone, and what they said is what `.tool-summary`
+  and `.tool-header` say now for every tool.
+
+  **The line clamp went too, and that is the part worth arguing.** A three-row `-webkit-line-clamp` is the
+  same ellipsis three rows lower. The engine's 200-character `TOOL_INPUT_SUMMARY_CHARS` cap already bounds
+  how tall a card can get, so the clamp was a second bound on a quantity that had one.
+
+  **A browser found the bug the suite could not.** `overflow-wrap: anywhere` on a `flex: 1` item was correct
+  and not sufficient: the summary's basis was 0, so the row never wrapped and the summary absorbed every
+  shortfall instead — at `DIALOG_MIN_WIDTH` (300px) an MCP card, which spends its row on a server chip, a
+  long tool name, a gated marker and a time chip, squeezed the summary to about ten pixels and rendered a
+  hundred-character path as **one broken character per line** — a column taller than the viewport. That is worse than the
+  ellipsis it replaced, it is reachable by dragging the dialog, and jsdom cannot see it. Two changes fixed
+  it: a `10rem` flex basis, which is what makes the summary the item that *does not fit* and therefore the
+  one that wraps, and `flex-wrap` on the header. Read at 520, 400 and 300px in Chrome against a scratch page
+  that mounted the real renderer with the real stylesheet.
+
+  **One DOM change fell out of the same check.** The gated marker, the time chip and the caret are now one
+  `.tool-header-end` element rather than three siblings, because three siblings wrap one at a time and the
+  first thing a narrow pane did was strand the caret alone on a line of its own. As a group they travel
+  together and an auto margin pins them right, which is also what stopped the gated marker reading as part
+  of the wrapped path beside it.
+
+  The guard is read from `STYLES.cssText`, the convention § C4 established for rules jsdom cannot execute,
+  and it was checked to fail with the elision restored. It pins the absence of `line-clamp` and of any
+  `data-tool='Bash'` rule across the whole sheet rather than the presence of properties in one rule, because
+  the way this regresses is someone re-adding the special case, not someone editing this declaration.
+
 - **A file chip is named the way the rest of the app names files** — 2026-08-28, § C4. Every path on a
   tool card is absolute, because the CLI's file tools require it, and the chips displayed it: a label
   spending its width on a prefix identical for every file in the repo, with the part that identifies the

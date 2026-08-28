@@ -1217,6 +1217,43 @@ describe('renderToolCard', () => {
     render(renderToolCard(panel, block), host);
     expect(host.querySelector('.tool-body')).toBeNull();
   });
+
+  it('keeps the rules that let a long summary wrap instead of eliding', () => {
+    // Read from the source for the reason the file-chip guard below states:
+    // jsdom does no layout and does not resolve Lit's adopted stylesheet, so
+    // the rules' presence is all that can be checked here.
+    //
+    // Worth a guard because the header is the *only* place a collapsed card
+    // says what the call was about and it carries no tooltip — so an ellipsis
+    // put the identifying tail of a path or a flag run out of reach entirely.
+    // `anywhere` is the load-bearing word: those strings have no spaces in
+    // them, and a summary that may only break at a space cannot break.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-summary {');
+    expect(at, '.tool-summary rule is gone').toBeGreaterThan(-1);
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('white-space: pre-wrap');
+    expect(rule).toContain('overflow-wrap: anywhere');
+    expect(rule).not.toContain('text-overflow');
+    expect(rule).not.toContain('nowrap');
+    // One bound, not two: the engine's TOOL_INPUT_SUMMARY_CHARS cap already
+    // limits the height a card can reach, and a line clamp on top of it would
+    // be the same ellipsis three rows lower. Checked across the whole sheet
+    // rather than this rule, because the clamp used to live in a Bash-only
+    // rule of its own — and the argument for that exception was never about
+    // Bash.
+    expect(
+      cssText,
+      'no tool summary should carry a line clamp; if some other rule in this '
+        + 'sheet wants one, narrow this check to the tool-card rules',
+    ).not.toContain('line-clamp');
+    expect(cssText).not.toContain("data-tool='Bash'");
+    // The row's chrome aligns to the summary's first line rather than to the
+    // middle of a block that may now be several lines tall.
+    const headerAt = cssText.indexOf('.tool-header {');
+    const headerRule = cssText.slice(headerAt, cssText.indexOf('}', headerAt));
+    expect(headerRule).toContain('align-items: flex-start');
+  });
 });
 
 describe('renderFileChip', () => {

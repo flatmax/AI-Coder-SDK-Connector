@@ -2230,13 +2230,24 @@ export const STYLES = css`
   .tool-card.tool-status-denied {
     border-color: rgba(210, 153, 34, 0.4);
   }
-  /* One line, always. The summary truncates rather than
-   * wrapping so a card's height never depends on how
-   * long its arguments were — thirty calls in a turn
-   * means thirty identical rows. */
+  /* The summary wraps, so the row is as tall as its own
+   * arguments and the chrome around it aligns to the top
+   * rather than to the middle of a block.
+   *
+   * The row wraps too, and that is what makes the wrapping
+   * summary safe in a narrow pane. The dialog can be dragged
+   * to DIALOG_MIN_WIDTH (300px), where the name, the chips
+   * and the time chip can want the whole row between them:
+   * with a single line the summary is squeezed to whatever is
+   * left, which was ten pixels and one broken character per
+   * line. Wrapping gives it the flex-basis below or a line of
+   * its own — checked in a browser at 520, 400 and 300px,
+   * since jsdom does no layout and the unit tests cannot see
+   * this. */
   .tool-header {
     display: flex;
-    align-items: center;
+    flex-wrap: wrap;
+    align-items: flex-start;
     gap: 0.4rem;
     width: 100%;
     padding: 0.3rem 0.5rem;
@@ -2252,8 +2263,14 @@ export const STYLES = css`
   .tool-header:hover {
     background: rgba(240, 246, 252, 0.04);
   }
+  /* The dot is the one item on the row that is not text,
+   * so top-aligning it with the wrapped summary leaves it
+   * riding above the first line. The margin drops it to
+   * that line's centre; every text item on the row already
+   * lands there, within a pixel, from its own line box. */
   .tool-dot {
     flex-shrink: 0;
+    margin-top: 0.3rem;
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
@@ -2262,8 +2279,10 @@ export const STYLES = css`
     text-align: center;
   }
   /* Only the awaiting dot carries a glyph (🔒), and it
-   * needs the room. The rest are bare dots. */
+   * needs the room. The rest are bare dots — and a taller
+   * box needs less of a drop to sit on the same line. */
   .tool-dot.status-awaiting {
+    margin-top: 0.15rem;
     width: auto;
     height: auto;
     border-radius: 0;
@@ -2293,46 +2312,54 @@ export const STYLES = css`
     font-family: 'SFMono-Regular', Consolas, monospace;
     font-size: 0.78125rem;
   }
+  /* Every summary wraps, and the elision this replaced was
+   * the whole reason the row was hard to read: the header is
+   * the only place a collapsed card says what the call was
+   * *about*, it carries no tooltip, and an ellipsis eats
+   * exactly the tail that identifies the thing — which file,
+   * which flags, which test. Bash used to be the one
+   * exception; the argument for it was never about Bash.
+   *
+   * "anywhere" rather than "break-word", because the strings
+   * that overflowed are paths and flag runs with no spaces in
+   * them — a summary that may only break at a space is the
+   * one that cannot break at all.
+   *
+   * No line clamp on top of it. The engine caps the summary at
+   * TOOL_INPUT_SUMMARY_CHARS, which bounds the card already; a
+   * clamp would be a second bound that re-introduced the
+   * ellipsis three rows lower. pre-wrap because a Bash
+   * heredoc arrives with its newlines in it and they are how
+   * it reads. */
   .tool-summary {
-    flex: 1;
+    /* A real basis rather than 0, because the basis is what the
+     * row wraps on: at 0 the summary is never the item that
+     * does not fit, so the row never wraps and the summary is
+     * squeezed instead. 10rem is around twenty characters at
+     * this size — enough to be worth reading on one line,
+     * little enough that a normal pane keeps the row to one. */
+    flex: 1 1 10rem;
     min-width: 0;
     color: var(--text-secondary, #8b949e);
     font-family: 'SFMono-Regular', Consolas, monospace;
     font-size: 0.75rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Bash is the exception to the one-line rule above, and
-   * the reason is what the row is for: a command is the one
-   * input that cannot be reconstructed from anywhere else on
-   * the card, and an ellipsis eats exactly the tail that says
-   * what it does — which paths, which flags, which test file.
-   * So it wraps. The engine already caps the summary at
-   * TOOL_INPUT_SUMMARY_CHARS on one collapsed line, and the
-   * clamp bounds it again at three rows, so a long command
-   * costs a couple of lines rather than a screen. */
-  .tool-card[data-tool='Bash'] .tool-header {
-    align-items: flex-start;
-  }
-  /* The dot, the time and the caret sit on the first line
-   * of the wrapped summary rather than at the top of the
-   * block. Bash is the tool most worth timing — it is the
-   * one that hangs — so the chip has to land level with
-   * the row's other chrome on the card that wraps. */
-  .tool-card[data-tool='Bash'] .tool-dot,
-  .tool-card[data-tool='Bash'] .tool-time,
-  .tool-card[data-tool='Bash'] .tool-caret {
-    margin-top: 0.25rem;
-  }
-  .tool-card[data-tool='Bash'] .tool-summary {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    text-overflow: clip;
+  }
+  /* The gated marker, the time chip and the caret, as one
+   * item. They are the row's right-hand end and they wrap
+   * together or not at all — as three siblings they wrapped
+   * one at a time, and a lone caret on a line of its own
+   * reads as a layout fault rather than a narrow pane. The
+   * auto margin is inert while the summary is growing beside
+   * them and pins the group to the right edge once it has a
+   * line to itself. */
+  .tool-header-end {
+    display: flex;
+    align-items: flex-start;
+    flex-shrink: 0;
+    gap: 0.4rem;
+    margin-left: auto;
   }
   /* Which MCP server a call went to. Its own chip
    * because "Edit" from a server and the built-in Edit
