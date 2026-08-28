@@ -994,7 +994,11 @@ describe('renderToolCard', () => {
       const host = draw(renderToolCard(ticking(), timedBlock()));
       const chip = host.querySelector('.tool-time');
       expect(text(host.querySelector('.tool-elapsed'))).toBe('2m 41s');
-      expect(text(chip)).toBe(`${clock()} · 2m 41s`);
+      // Two spans, stacked in the rail rather than joined by a middle dot:
+      // side by side the pair wanted about 110px of a 112px rail, and more
+      // than all of it once a restored card puts a date in front of the clock.
+      expect(text(chip.querySelector('.tool-clock'))).toBe(clock());
+      expect(text(chip)).toBe(`${clock()} 2m 41s`);
       expect(chip.getAttribute('title'))
         .toBe(`Invoked at ${clock()} by the engine's clock — running for 2m 41s`);
     });
@@ -1248,11 +1252,52 @@ describe('renderToolCard', () => {
         + 'sheet wants one, narrow this check to the tool-card rules',
     ).not.toContain('line-clamp');
     expect(cssText).not.toContain("data-tool='Bash'");
-    // The row's chrome aligns to the summary's first line rather than to the
-    // middle of a block that may now be several lines tall.
-    const headerAt = cssText.indexOf('.tool-header {');
-    const headerRule = cssText.slice(headerAt, cssText.indexOf('}', headerAt));
-    expect(headerRule).toContain('align-items: flex-start');
+  });
+
+  it('keeps the header two columns, with the chrome in the left one', () => {
+    // The structural half of the rule: everything that is not the summary
+    // sits in one rail element, so the summary's width is the pane minus the
+    // rail and minus nothing else. As three columns — chrome, summary, more
+    // chrome — the right-hand group was subtracted from every line of the
+    // summary rather than only from the line it was on, because the summary
+    // is one box.
+    const host = draw(renderToolCard(stubPanel({ _streamTimerInterval: 7 }), toolBlock({
+      gated: true,
+      tool: { invoked_at: new Date(2026, 7, 27, 14, 32, 7).toISOString() },
+    })));
+    const header = host.querySelector('.tool-header');
+    expect([...header.children].map((el) => el.className))
+      .toEqual(['tool-meta', 'tool-summary']);
+    // The caret leads the rail: it is the one item that cannot afford to wrap
+    // onto a line of its own, and first is the position where it cannot.
+    const rail = header.querySelector('.tool-meta');
+    expect(text(rail.querySelector('.tool-meta-line > :first-child'))).toBe('▸');
+    for (const cls of ['.tool-dot', '.tool-name', '.tool-time', '.tool-gated']) {
+      expect(rail.querySelector(cls), `${cls} belongs in the rail`).not.toBeNull();
+    }
+  });
+
+  it('gives the rail no second line when it would be an empty one', () => {
+    // Every card written before `invoked_at` existed carries no time, and an
+    // ungated one of those has nothing to put on the rail's second row.
+    const host = draw(renderToolCard(stubPanel(), toolBlock()));
+    expect(host.querySelectorAll('.tool-meta-line').length).toBe(1);
+  });
+
+  it('fixes the rail width so the summary starts at the same x on every card', () => {
+    // A rail as wide as its own widest line is not a column: the summary's
+    // left edge would step in and out card by card, and a long MCP tool name
+    // or a restored card's date-and-time chip would move it. They wrap inside
+    // the rail instead. Read from the source for the reason the guard above
+    // states — jsdom does no layout.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-header {');
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('display: grid');
+    expect(rule).toMatch(/grid-template-columns: [\d.]+rem 1fr/);
+    // The rail aligns with the summary's first line, not with the middle of a
+    // block several lines tall.
+    expect(rule).toContain('align-items: start');
   });
 });
 

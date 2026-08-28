@@ -355,7 +355,9 @@ job nothing else does: it is what marks a row **openable**, which is a fact abou
 rendering.)* **The 2026-08-28 header change raised the price of leaving this open:** a tool card's input
 summary wraps now instead of being elided, so the absolute prefix that used to be clipped off the end is
 fully rendered, and a nested path spends two or three rows of the card on a string identical for every
-file in the repo. Worth doing, still not worth a third mechanism.
+file in the repo. The second change that day raised it again — the summary is a fixed column beside a
+metadata rail, so it is narrower than the widest it used to be and the same width on every card, which is
+another row of prefix on a deep path. Worth doing, still not worth a third mechanism.
 
 **C4 — Tool-card file chips still display the absolute path.** ✅ *Built 2026-08-28 — leaves this queue.*
 The label is now the repo-relative name with the engine's path on the tooltip, on the tool-card footer
@@ -500,12 +502,20 @@ and browser both reading `status: null, terminal: false` and the LED cyan. So th
 interchangeable and **the webapp's own ⏹ is the only thing that can verify itself.**
 [`plan/README.md`](plan/README.md) open item 9, last clause.
 
-**D2 — Two rendering behaviours cannot be tested from jsdom.** The `Bash` summary's three-row clamp is
-layout, and the permission dialog's Monaco style-clone tests assert that the rules *arrive*, not that
+**D2 — Two rendering behaviours cannot be tested from jsdom.** ~~The `Bash` summary's three-row clamp is
+layout,~~ and the permission dialog's Monaco style-clone tests assert that the rules *arrive*, not that
 the editor lays out. A screenshot-based regression harness is the only thing that would catch a
 re-break, and it **must write files rather than return images inline** — raising the buffer ceiling
 made one inline screenshot survivable, and a ceiling is not a budget.
 [`plan/README.md`](plan/README.md) open item 6.
+
+**The clamp is gone and this item grew rather than shrank (2026-08-28).** What replaced it is *more*
+layout, not less: the header is a two-column grid, its left rail is a fixed `7rem` chosen because a
+narrower one stranded a caret and a dot above a wrapped tool name, and a container query lies the whole
+thing down under 360px. Three of the four defects in that change were visible only in a browser, and the
+guards now in `block-render.test.js` say the rules exist — which is the same distance from a pixel that
+the Monaco clone tests are. Widths were read at 520, 400 and 300px by hand, twice, and neither reading
+is repeatable by anything in the suite.
 
 **D3 — The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
 supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —

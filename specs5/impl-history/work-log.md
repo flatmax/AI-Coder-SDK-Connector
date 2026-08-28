@@ -557,6 +557,56 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A tool card's header is two columns, and nothing is pinned right** — 2026-08-28, asked for in the same
+  conversation as the entry below and superseding its `.tool-header-end` group. The user's question was
+  whether the time chip could move under the tool name, "so that we have only two columns, left (tool tag,
+  time chips) and right which is the assistant / user entries in the chat", with the observation that closed
+  the argument: *everything is line wrapped now, so there is rarely a one line entry*. The rail's second line
+  is therefore free, and my first answer — that stacking would cost every card a line — was priced against a
+  one-line card that had stopped existing the day before.
+
+  **The measurement that made it worth doing is not the one either of us was arguing about.** Chrome pinned
+  to the right is subtracted from *every* line of the summary, not just the line it sits on, because the
+  summary is one box and a box that ends before the time chip ends before it all the way down. Measured in a
+  520px pane across eight cards, the old layout gave the summary between **180px and 402px** depending on how
+  much chrome its card carried — an MCP call with a server chip, a long name, a gated marker and a clock got
+  180 — and every card started its text at a different x. The rail gives all eight **384px from one x**.
+  So the honest gain is not the ~8px a plain `Bash` card wins on the right; it is that the cards that were
+  squeezed worst stopped being squeezed at all, and that the column is a column.
+
+  **The rail is sized by the tool name, not by the clock.** Sized to the clock (5.5rem) it looked right until
+  `TodoWrite` and `NotebookEdit`, which are wider than a time-of-day, dropped to a rail line of their own and
+  left a caret and a status dot stranded on the line above. A name whose line number depends on its character
+  count is the one thing in the rail that cannot wrap, because the name is what a reader scans the rail *for*.
+  7rem holds the longest built-in beside the caret and the dot. MCP names are unbounded and wrap; a server
+  chip wider than the rail now breaks inside itself rather than overflowing into the summary's column, which
+  is the one place on the card that must have no chrome in it.
+
+  **Under 360px the rail lies down.** The first version of this was a straight loss at the width the previous
+  day's work had gone to trouble over: 7rem out of a 300px pane is over a third of it, and the summary
+  measured **164px against the 231px** the flex layout gave it, because that layout could drop a squeezed
+  summary onto a line of its own and a fixed column cannot. So below a card width of 360px the header
+  collapses to one column with the metadata as a row above the summary — 282px there, better than either.
+  It is a container query, not a media query: the pane is a dialog the user drags, so the viewport's width
+  is not the question being asked. `.tool-card` carries `container-type: inline-size`, which is safe on a
+  card because a card's width comes from the column it sits in and never from its contents. The override
+  block sits last in the section, since a container query adds no specificity and source order is all that
+  decides — the first placement put it before the `.tool-time` rule it overrides, and the clock went on
+  stacking in the flattened row until a screenshot showed it.
+
+  **The clock and the elapsed stack instead of sharing a line.** `12:29:29 PM · 2m 41s` wants about 110px
+  of the rail's 112 — a two-pixel fit, and no fit at all on a card restored from another day, whose chip
+  carries a date in front of the clock — and while the rail was still 88px the middle dot was left dangling
+  at the end of a wrapped line, which is what the change was made to stop. The two spans keep a space between them in the markup — it draws nothing, since
+  whitespace between flex items is discarded, and it is the only thing stopping "14:32:07" and "2m 41s"
+  running together into one word for anything reading text content.
+
+  The guards are structural where they can be: the header's children are asserted to be exactly the rail and
+  the summary, every piece of chrome is asserted to be *inside* the rail, and an untimed ungated card is
+  asserted to draw one rail line rather than an empty second one. Only the fixed track width is read from
+  `STYLES.cssText`, per § C4. Read in Chrome at 520, 400 and 300px, including an expanded `Edit` card, to
+  check that containment left the diff body alone.
+
 - **A tool card's header wraps its summary instead of eliding it** — 2026-08-28, reported from a screenshot
   rather than found in the queue. A `Read` card read `file_path=/home/…/repos/softwaredesignlifec…`, which
   names no file: the header is the only place a *collapsed* card says what the call was about, it carries no
@@ -591,7 +641,9 @@ The classification tests work because they refuse to be read past, and that is t
   `.tool-header-end` element rather than three siblings, because three siblings wrap one at a time and the
   first thing a narrow pane did was strand the caret alone on a line of its own. As a group they travel
   together and an auto margin pins them right, which is also what stopped the gated marker reading as part
-  of the wrapped path beside it.
+  of the wrapped path beside it. **Superseded within the day** by the entry above: the group is gone and its
+  three items are in the rail. The lesson survived the element — the caret is still kept where it cannot
+  strand, which is now first rather than grouped.
 
   The guard is read from `STYLES.cssText`, the convention § C4 established for rules jsdom cannot execute,
   and it was checked to fail with the elision restored. It pins the absence of `line-clamp` and of any

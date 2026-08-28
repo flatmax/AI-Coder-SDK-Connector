@@ -722,6 +722,13 @@ const RUNNING_STATUSES = new Set(['pending', 'awaiting']);
  * the *browser's*, so a skew between two machines — or an NTP correction on
  * either — can otherwise produce a call that has been running for minus four
  * seconds. Same reasoning as `_elapsed_ms` in the engine's history.py.
+ *
+ * The two halves stack rather than sitting on one line joined by a middle dot.
+ * The chip lives in the header's metadata rail now, and a rail is a narrow
+ * column: `12:29:29 PM · 2m 41s` wants all of one and a restored card's
+ * `Aug 27, 12:29:29 PM · 2m 41s` wants more, so the dot version wrapped to
+ * `12:29:29 PM ·` with the separator dangling at the end of a line. Stacked,
+ * each half gets a line of a column that has lines to spare.
  */
 function renderToolTime(panel, status, card) {
   const invokedMs = invokedAtMs(card);
@@ -732,10 +739,15 @@ function renderToolTime(panel, status, card) {
   const title = elapsed
     ? `Invoked at ${clock} by the engine's clock — running for ${elapsed}`
     : `Invoked at ${clock} by the engine's clock`;
+  // The space between the two spans is deliberate. They stack, so it draws
+  // nothing — whitespace between flex items is discarded — but it is the
+  // only thing keeping "14:32:07" and "2m 41s" from running together into
+  // one word for a screen reader, or for anything else reading text content.
   return html`
-    <span class="tool-time" title=${title}
-      >${clock}${elapsed ? html` · <span class="tool-elapsed">${elapsed}</span>` : nothing}</span
-    >
+    <span class="tool-time" title=${title}>
+      <span class="tool-clock">${clock}</span>
+      ${elapsed ? html`<span class="tool-elapsed">${elapsed}</span>` : nothing}
+    </span>
   `;
 }
 
@@ -747,6 +759,11 @@ export function renderToolCard(panel, block) {
   const segments = diffSegments(block);
   const files = Array.isArray(result?.files_modified) ? result.files_modified : [];
   const duration = formatDuration(result?.duration_ms);
+  // The rail's second line, drawn only when it has something on it: an
+  // untimed card (no `invoked_at`, which is every card written before the
+  // field existed) that nobody gated would otherwise carry an empty row.
+  const timeChip = renderToolTime(panel, status, card);
+  const railTail = timeChip !== nothing || block.gated;
 
   return html`
     <div
@@ -759,29 +776,45 @@ export function renderToolCard(panel, block) {
         aria-expanded=${expanded ? 'true' : 'false'}
         @click=${() => toggleBlock(panel, block)}
       >
-        <span
-          class="tool-dot status-${status}"
-          title=${STATUS_TITLE[status] || status}
-        >${STATUS_GLYPH[status] || ''}</span>
-        ${card.server
-          ? html`<span class="tool-server-chip" title="MCP server">${card.server}</span>`
-          : nothing}
-        <span class="tool-name">${toolLabel(card)}</span>
-        <span class="tool-summary">${card.input_summary || ''}</span>
-        <!-- The row's right-hand end, in one element rather than three
-             siblings, because the header wraps now: three siblings wrap
-             one at a time, and the first thing a narrow pane did was
-             strand the caret alone on a line of its own. -->
-        <span class="tool-header-end">
-          ${block.gated
-            ? html`<span
-                class="tool-gated"
-                title="This call went through a permission prompt"
-              >gated</span>`
+        <!-- The header is two columns, and this is the left one: what the
+             call *is* — status, server, name, when it was made, whether it
+             was gated — with the summary alone in the column beside it.
+             Nothing is pinned to the right edge any more. A right-hand
+             group was subtracted from every line of the summary rather
+             than only the first: the summary is one box, and a box that
+             stops short of the time chip stops short of it all the way
+             down.
+
+             The caret leads, as it does on a thinking region's toggle. It
+             is also the one thing here that cannot afford to wrap onto a
+             line of its own, and first is the position where it can't. -->
+        <span class="tool-meta">
+          <span class="tool-meta-line">
+            <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
+            <span
+              class="tool-dot status-${status}"
+              title=${STATUS_TITLE[status] || status}
+            >${STATUS_GLYPH[status] || ''}</span>
+            ${card.server
+              ? html`<span class="tool-server-chip" title="MCP server">${card.server}</span>`
+              : nothing}
+            <span class="tool-name">${toolLabel(card)}</span>
+          </span>
+          ${railTail
+            ? html`
+                <span class="tool-meta-line">
+                  ${timeChip}
+                  ${block.gated
+                    ? html`<span
+                        class="tool-gated"
+                        title="This call went through a permission prompt"
+                      >gated</span>`
+                    : nothing}
+                </span>
+              `
             : nothing}
-          ${renderToolTime(panel, status, card)}
-          <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
         </span>
+        <span class="tool-summary">${card.input_summary || ''}</span>
       </button>
       ${expanded ? renderToolBody(block, card, result, segments) : nothing}
       ${files.length || duration

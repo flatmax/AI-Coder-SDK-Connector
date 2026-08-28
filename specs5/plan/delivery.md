@@ -2271,6 +2271,11 @@ fix is scoped to `.tool-card[data-tool='Bash']`: a three-row `-webkit-line-clamp
 does not centre them against three rows of text. Three rows and not unbounded, because the value of a
 scannable log is that rows are the same height; three is enough for a long path plus flags.
 
+**The alignment half of that is also out of date as of 2026-08-28.** The header is two columns now — a
+metadata rail, then the summary — so the dot has a tool name beside it rather than three rows of arguments,
+and it is that name's line it is dropped to. Only the dot: the caret leads the rail's first line and needs
+no nudge. Same entry in [`../impl-history/work-log.md`](../impl-history/work-log.md) § *Landed since*.
+
 ~~Every other tool keeps its single elided line. A `Read` is a path, a `Grep` is a pattern — one line is the
 whole summary, and wrapping them would cost the uniform row for nothing.~~ **Wrong — corrected 2026-08-28.**
 A `Read` *is* a path, and one line is where it stops being one: `file_path=/home/you/…/repos/softwaredesignlifec…`
