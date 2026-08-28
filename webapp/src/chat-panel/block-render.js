@@ -759,11 +759,10 @@ export function renderToolCard(panel, block) {
   const segments = diffSegments(block);
   const files = Array.isArray(result?.files_modified) ? result.files_modified : [];
   const duration = formatDuration(result?.duration_ms);
-  // The rail's second line, drawn only when it has something on it: an
-  // untimed card (no `invoked_at`, which is every card written before the
-  // field existed) that nobody gated would otherwise carry an empty row.
+  // Hoisted because the rail draws a line for it or draws no line at all —
+  // a card with no `invoked_at`, which is every card written before the
+  // field existed, would otherwise carry an empty row.
   const timeChip = renderToolTime(panel, status, card);
-  const railTail = timeChip !== nothing || block.gated;
 
   return html`
     <div
@@ -787,7 +786,15 @@ export function renderToolCard(panel, block) {
 
              The caret leads, as it does on a thinking region's toggle. It
              is also the one thing here that cannot afford to wrap onto a
-             line of its own, and first is the position where it can't. -->
+             line of its own, and first is the position where it can't.
+
+             A line each, rather than the time and the gated marker sharing
+             one. Together they wanted all of the rail and a little more on
+             a card whose clock carries a date, so the marker wrapped under
+             the clock on some cards and sat beside it on others — which is
+             the reader having to look in two places for the same fact.
+             Rail lines are the cheap thing here; the summary beside them
+             is usually taller anyway. -->
         <span class="tool-meta">
           <span class="tool-meta-line">
             <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
@@ -800,18 +807,14 @@ export function renderToolCard(panel, block) {
               : nothing}
             <span class="tool-name">${toolLabel(card)}</span>
           </span>
-          ${railTail
-            ? html`
-                <span class="tool-meta-line">
-                  ${timeChip}
-                  ${block.gated
-                    ? html`<span
-                        class="tool-gated"
-                        title="This call went through a permission prompt"
-                      >gated</span>`
-                    : nothing}
-                </span>
-              `
+          ${timeChip !== nothing ? html`<span class="tool-meta-line">${timeChip}</span>` : nothing}
+          ${block.gated
+            ? html`<span class="tool-meta-line"
+                ><span
+                  class="tool-gated"
+                  title="This call went through a permission prompt"
+                >gated</span></span
+              >`
             : nothing}
         </span>
         <span class="tool-summary">${card.input_summary || ''}</span>

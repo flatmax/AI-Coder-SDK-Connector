@@ -1275,13 +1275,24 @@ describe('renderToolCard', () => {
     for (const cls of ['.tool-dot', '.tool-name', '.tool-time', '.tool-gated']) {
       expect(rail.querySelector(cls), `${cls} belongs in the rail`).not.toBeNull();
     }
+    // A line each, down the rail: name, then time, then the gated marker.
+    // Sharing a line, the marker sat beside the clock on a card timed today
+    // and wrapped under it on one restored from another day, so where a
+    // reader looked for it depended on how old the card was.
+    expect([...rail.children].map((line) => line.lastElementChild.className))
+      .toEqual(['tool-name', 'tool-time', 'tool-gated']);
   });
 
-  it('gives the rail no second line when it would be an empty one', () => {
+  it('gives the rail no line it would leave empty', () => {
     // Every card written before `invoked_at` existed carries no time, and an
-    // ungated one of those has nothing to put on the rail's second row.
+    // ungated one of those has nothing to put below its name.
     const host = draw(renderToolCard(stubPanel(), toolBlock()));
     expect(host.querySelectorAll('.tool-meta-line').length).toBe(1);
+    // Gated but untimed: the marker moves up rather than sitting under a gap.
+    const gatedHost = draw(renderToolCard(stubPanel(), toolBlock({ gated: true })));
+    const lines = gatedHost.querySelectorAll('.tool-meta-line');
+    expect(lines.length).toBe(2);
+    expect(lines[1].firstElementChild.className).toBe('tool-gated');
   });
 
   it('fixes the rail width so the summary starts at the same x on every card', () => {

@@ -664,13 +664,25 @@ The classification tests work because they refuse to be read past, and that is t
   **The clock and the elapsed stack instead of sharing a line.** `12:29:29 PM · 2m 41s` wants about 110px
   of the rail's 112 — a two-pixel fit, and no fit at all on a card restored from another day, whose chip
   carries a date in front of the clock — and while the rail was still 88px the middle dot was left dangling
-  at the end of a wrapped line, which is what the change was made to stop. The two spans keep a space between them in the markup — it draws nothing, since
-  whitespace between flex items is discarded, and it is the only thing stopping "14:32:07" and "2m 41s"
-  running together into one word for anything reading text content.
+  at the end of a wrapped line, which is what the change was made to stop. The two spans keep a space
+  between them in the markup — it draws nothing, since whitespace between flex items is discarded, and it
+  is the only thing stopping "14:32:07" and "2m 41s" running together into one word for anything reading
+  text content.
+
+  **The gated marker took a rail line of its own an hour later**, asked for from a screenshot of a `Bash`
+  card — "perhaps move the gated chip to the left column below the time?". Beside the clock it fitted with
+  about six pixels to spare on a card timed today and wrapped under the clock on one restored from another
+  day, so *where* a reader looked for it depended on how old the card was, which is the fault the rail was
+  built to remove one column over. Down the rail it is name, time, marker, always. It costs nothing at
+  the widths that matter — the summary is 384.4px at 520px and 282.8px at 300px either way, and the rail is
+  shorter than the summary on every card measured except the one with both a date and a marker, which grew
+  by one line. In the flattened layout under 360px the three lines flow back into a row, which is what a
+  row is for.
 
   The guards are structural where they can be: the header's children are asserted to be exactly the rail and
-  the summary, every piece of chrome is asserted to be *inside* the rail, and an untimed ungated card is
-  asserted to draw one rail line rather than an empty second one. Only the fixed track width is read from
+  the summary, every piece of chrome is asserted to be *inside* the rail, the rail's lines are asserted to
+  end in name, time and marker in that order, and a card with no time draws no line for one — nor an empty
+  line above a marker, when it is gated but untimed. Only the fixed track width is read from
   `STYLES.cssText`, per § C4. Read in Chrome at 520, 400 and 300px, including an expanded `Edit` card, to
   check that containment left the diff body alone.
 
