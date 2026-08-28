@@ -47,7 +47,9 @@ wire; nothing forwards the old namespace.
 - Reset — reset-to-HEAD (records a system event)
 - Review — check ready, start, end, get state, get file diff
 - LSP — hover, definition, references, completions (coordinates are 1-indexed). Served from the surviving symbol index
-- Navigation — broadcast file navigation to all clients
+- Navigation — broadcast file navigation to all clients. **Never called** (verified 2026-08-28): the
+  browser navigates through its own `navigate-file` window event and does not tell the server, so
+  "all clients" is one client. Dominated by the collaboration pause — see [`../next.md`](../next.md) § E
 - TeX — availability, compile
 
 Deleted with the native engine: context breakdown by tier, manual cache rebuild, file map block,
@@ -121,9 +123,59 @@ replaced by the block-identity contract; the event name survives, its semantics 
 - Registered-in-browser methods follow the same pattern (e.g., `AcApp.streamChunk`)
 - The namespace is derived from the Python class name, so renaming a service class is a wire-visible change and must be done deliberately
 
+## Who Calls These
+
+The catalog above says what exists. It does not say what is *reached*, and those are different
+questions, because `add_service` publishes every public method on the five registered instances — the
+RPC surface is not a list anybody wrote, it is whatever those classes happen to expose. Two things go
+wrong because of that, and neither one breaks a build: a method written for a single Python caller
+silently becomes an RPC, and an RPC that loses its last caller silently stays.
+
+`tests/test_rpc_surface.py` partitions the surface three ways and asserts the partition, so a new
+public method fails a test until somebody decides which bucket it is in:
+
+| Bucket | How it is established | What an entry means |
+|---|---|---|
+| Called from the browser | **derived** — `webapp/src` is scanned for the quoted fully-qualified name | nothing is recorded; the scan is the evidence |
+| `INTERNAL_ONLY` | **listed**, with the file that calls it from Python, and that call is checked | not a defect. The method works — it is an RPC nobody designed, whose docstring will not say what happens when a browser calls it |
+| `DORMANT` | **listed**, with the reason nothing calls it | a decision in [`../next.md`](../next.md) § E, a queued item, or an admission that it is unused |
+
+A fourth list runs the audit backwards. `UNEXPOSED` holds calls *from* `webapp/src` into a namespace no
+service registers; it has one standing entry ([CC-12](../plan/decisions.md)'s inert preset selector) and
+a second would be a new defect, because such a call fails as a transport error rather than as a missing
+method and so reads as a dropped connection.
+
+The scan's rule is narrow on purpose — a fully-qualified name inside quotes, on a line that is not a
+comment. Both calling conventions spell it that way (`call['Repo.get_file_tree']` and
+`this.rpcExtract('Repo.get_file_tree')`), and the one indirection, `rpc-mixin.js`'s `call[method]`,
+takes the name from its caller, so there is nothing dynamic to miss. A test asserts the narrow scan and
+a comment-inclusive one agree, because if they ever diverge the tables are wrong in the direction that
+hides a dormant RPC.
+
+**The audit is [`../next.md`](../next.md) § C5 and the test is its by-product**, which is why the tables
+carry prose: the entry *is* the finding. Of 100 exposed methods (verified 2026-08-28), 66 have a browser
+caller, 22 are internal-only, 12 are dormant. Most of the twelve confirmed something already decided;
+three were findings, and two of those became queue items — § C7 (viewer framing has no writer on either
+path) and § C8 (nothing ever calls `shutdown`).
+
+The third needs no item and is recorded here instead. **`get_review_file_diff` is unused on both
+services it exists on**, because review mode's own git arrangement already answers the question it asks:
+the soft reset puts `HEAD` at the merge-base, so every review change is a staged modification and the
+diff viewer's ordinary `Repo.get_file_content(path, 'HEAD')`-versus-working-tree pair *is* the review
+diff ([`../4-features/code-review.md`](../4-features/code-review.md) § *Git State Machine — Entry
+Sequence*, step 6). A unified diff
+string has no consumer either way — the viewer hands two contents to Monaco. The entries above keep it
+listed rather than promising a path nothing takes; deleting the pair is a separate decision from
+recording that it is dead.
+
 ## Invariants
 
 - Every method listed here is implemented exactly once on exactly one service
 - No mutating method, and no permission resolution, is callable by a non-localhost participant
 - Every server→browser event that belongs to a turn carries that turn's request id
 - Adding a new RPC method requires updating this inventory
+- **Every exposed method is accounted for as browser-called, internal-only, or dormant**, and a dormant
+  one carries the reason nothing calls it. The surface is published by introspection, so "nobody
+  decided to expose this" is never a defence
+- **No call from `webapp/src` names a namespace no service registers.** The exception list is one entry
+  long and each entry is checked to still exist

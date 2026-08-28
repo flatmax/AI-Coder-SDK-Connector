@@ -85,11 +85,17 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B2, B5, C1 and C6 have since closed, so the cheapest remaining items are
+smaller than either phase. B2, B5, C1, C5 and C6 have since closed, so the cheapest remaining items are
 **C4** (tool-card chips still show the absolute path — the display decision is the only open question,
 the conversion already exists) and the **first two rows of B3**, which build discoverability for values
-that are already configurable. **C5 is the one to read before picking anything**: it is an audit of every
-RPC for callers, and the test is its by-product rather than the job.
+that are already configurable.
+
+**C5's audit is what to read first now, because it is done and it left work behind.** It classified all
+100 exposed RPCs and found a third of the surface reachable from a browser by accident, which is the
+standing cost of `add_service` publishing every public method. Two of its findings are queued as
+**§ C7** (viewer framing has no writer on either path — the agent is never told what the user is looking
+at) and **§ C8** (nothing calls `shutdown`, and its docstring asserts a caller that does not exist). C7
+is the one with a user-visible consequence; C8 is the cheapest decision on the page.
 
 ---
 
@@ -345,15 +351,51 @@ display decision has its own question — basename, root-relative, or middle-eli
 one place a multi-root future would want the root visible.
 [`plan/README.md`](plan/README.md) open item 5.
 
-**C5 — `test_every_rpc_has_a_caller_or_is_listed_as_dormant`.** The mechanism
-[`impl-history/work-log.md`](impl-history/work-log.md) § *How to keep this from recurring* argues for,
-in the same shape as the `test_every_rpc_is_classified` that has twice refused a new RPC until it was
-filed — `get_model`, then `restart_session`. Its two
-motivating cases were `reconnect_mcp_server` and `toggle_mcp_server`, which sat callerless and
-unnoticed; the work-log's own claim that it "would have caught these years earlier" implies there are
-others. Deliberately not built as a rider on that work, because writing it means auditing every RPC
-for callers and arbitrating each callerless one. **That audit is the task, and the test is its
-by-product.**
+**C5 — `test_every_rpc_has_a_caller_or_is_listed_as_dormant`.** ✅ *Built 2026-08-28 — leaves this
+queue.* `tests/test_rpc_surface.py` partitions all five registered services three ways and asserts the
+partition: browser-called (derived by scanning `webapp/src`, never listed), `INTERNAL_ONLY` (a Python
+caller exists, and the named file is checked to still contain the call), `DORMANT` (nothing calls it,
+with the reason). The reasoning is in [`1-foundation/rpc-inventory.md`](1-foundation/rpc-inventory.md)
+§ *Who Calls These*.
+
+**The audit was the task and it paid.** Of 100 exposed methods, **66 have a browser caller, 22 are
+internal-only, 12 are dormant** — so a third of the surface is reachable from a browser by accident,
+which is what `add_service` publishing every public method costs. The work-log guessed there were more
+cases like `reconnect_mcp_server`; there were ten more, and three were findings rather than
+confirmations: § C7 and § C8 below, plus `get_review_file_diff` being dead on *both* services it exists
+on, which needed no item and is recorded in the inventory instead.
+
+**A fourth list runs the audit backwards**, and it independently reproduced § E's CC-12 claim without
+being told it: `LLMService.switch_mode` at `app-shell/mode.js:61` and `chat-panel/events.js:854` is the
+only call in `webapp/src` naming a namespace no service registers. A second one would be a new defect,
+and it would present as a dropped connection rather than as a missing method.
+
+**Two docstrings had already noticed and stopped at prose**, which is the argument for a test rather
+than more reading. `Settings.is_reloadable` works the problem out mid-sentence — "Underscore-prefixed so
+it's not auto-exposed by jrpc-oo's `add_class` introspection — actually wait, jrpc-oo exposes everything
+non-underscored. This IS a public method" — and concludes correctly that it is harmless. `shutdown`'s
+reasons about its gate not obstructing "the real caller", which § C8 is about.
+
+**C7 — The agent is never told what the user is looking at.** `ViewerFraming` has two arrival paths and
+a writer on neither, so `Turn.viewer` is always `None` and the `ui_state` tool's `viewer` key is always
+`null`. The per-turn argument is hardcoded (`chat-panel/input.js`: `null`, with a comment saying
+"wiring that gesture is phase 6's" — phase 6 shipped). `set_viewer_state` is the other path, and the
+service's own comment calls it "the one that keeps working when the turn comes from somewhere else";
+nothing in `webapp/src` calls it. Found by § C5's audit. **Same shape as § B5** — a field with no writer
+— except that here the field is an advertised input to the prompt, so the cost is that the agent reads
+a file the user is not looking at when it could have been told. The decision to make is whether the
+gesture is worth wiring or the pair is worth deleting; a third path is not one of the options.
+
+**C8 — Nothing ever shuts the engine down, and the docstring says otherwise.**
+`ClaudeCodeService.shutdown` denies pending permissions, cancels turn tasks, closes the doc builder and
+disconnects the session — and has no caller anywhere (verified 2026-08-28). Its docstring assumes one:
+the localhost gate "does not get in the way of the real caller ... so an in-process teardown hook
+passes." There is no teardown hook. `main.py` exits through `os._exit` and says so in a neighbouring
+comment — "the SDK cleans up in `disconnect()`, and `os._exit` never gets there" — which is why
+`_purge_resume_dirs` exists to clean up one consequence by hand. The question this raises is whether the
+other consequences matter on exit (a `can_use_tool` callback left waiting, the doc builder's executor)
+or whether `shutdown` is dead code that should say so. **Deciding it is cheap; the reason it is a
+correctness item and not a tidy-up is that the docstring currently asserts a caller into existence.**
 
 **C6 — [`known-issues.md`](known-issues.md).** ✅ *Its one entry fixed 2026-08-28; the inbox is now
 empty.* A "compacting conversation" indicator did not survive a browser refresh — same class as the
@@ -432,6 +474,15 @@ decision that parked them.
   [`0-overview/implementation-guide.md`](0-overview/implementation-guide.md) § *Verifying UI Work Against
   a Running Engine* with two real clients, and noting that the specs now describe two clients watching
   one *agent* session, which is a different claim from two watching a prompt being assembled.
+
+  **§ C5's audit added a third callerless piece to this pause (2026-08-28):** `navigate_file` — the RPC
+  that makes "broadcast when *any* client navigates to a file" true — is never called either. The
+  browser navigates through its own `navigate-file` window event and does not tell the server, so file
+  navigation is per-client today. Recorded here rather than queued because it is dominated by the same
+  pause: broadcasting to all clients is worth nothing while nobody can join, and wiring it means the
+  two-real-clients workflow this bullet already says is the precondition. `Collab.admit_client` and
+  `Collab.deny_client` are callerless for the same reason and are listed as such in
+  `tests/test_rpc_surface.py`, so the absence now fails a test if anybody deletes the explanation.
 - **CC-12 — the preset selector.** The code/doc mode toggle stays mounted and inert, annotated where it
   sits, because removing a receiver while leaving its consumer mounted moves the break instead of
   fixing it. **Open item 11 is down to this pair:** the five other dead `LLMService.*` names it lists

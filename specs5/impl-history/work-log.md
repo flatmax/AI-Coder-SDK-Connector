@@ -540,7 +540,51 @@ with no emitter, and browser call sites into a retired `LLMService`. A caller-le
 image and appears on no list, which is exactly why two of them sat unnoticed. Modelled on that section
 rather than already covered by it.
 
+**✅ Built 2026-08-28 as `tests/test_rpc_surface.py`** (next.md § C5), and the guess in the paragraph
+above was low. It covers all five registered services rather than the one this section was about, and
+the audit that had to happen first found **ten more callerless RPCs, not two** — plus, running the same
+scan backwards, the one browser call into a namespace no service registers, which is the *other*
+direction this section says it does not cover. So one test now watches both. Of 100 exposed methods, 66
+have a browser caller, 22 are internal-only and 12 are dormant; the reasoning lives in
+[`../1-foundation/rpc-inventory.md`](../1-foundation/rpc-inventory.md) § *Who Calls These* and the two
+findings worth building are next.md §§ C7–C8.
+
+**The part worth carrying forward is why reading had not already found these.** Two docstrings had
+noticed and stopped: `Settings.is_reloadable` reasons its way to the right answer mid-sentence
+("actually wait, jrpc-oo exposes everything non-underscored"), and `shutdown` explains why its gate does
+not obstruct a caller that does not exist. Both are careful prose by someone looking straight at it.
+The classification tests work because they refuse to be read past, and that is the difference.
+
 ### Landed since
+
+- **Every RPC is accounted for as called, internal or dormant** — 2026-08-28, § C5. `test_rpc_surface.py`
+  partitions the 100 methods the five registered services expose and asserts the partition, so the next
+  public method added to any of them fails a test until somebody answers "is this meant to be reachable
+  from a browser?".
+
+  **The audit was the deliverable and the test is what is left of it.** `add_service` publishes every
+  public method, so the surface is not a list anybody wrote — 22 of the 100 turn out to be internal
+  helpers that a browser can call, and their docstrings describe an internal contract. That is not a
+  defect to fix; it is a fact to record, which is why `INTERNAL_ONLY` names the Python caller and a test
+  checks that the named file still contains the call. A helper whose caller moves on becomes dormant
+  without anything else noticing.
+
+  **Twelve are dormant, and three of those were news.** `set_viewer_state` and the hardcoded `null` in
+  `chat-panel/input.js` mean `ViewerFraming` has two arrival paths and a writer on neither, so the
+  `ui_state` tool's `viewer` key is permanently null (§ C7). `shutdown` has no caller and a docstring
+  that reasons about one (§ C8). `get_review_file_diff` is dead on both services it exists on, because
+  review mode's soft reset makes the diff viewer's ordinary HEAD-versus-working-tree pair *be* the review
+  diff — recorded in the inventory rather than queued, since deleting it is a separate decision from
+  knowing it is dead.
+
+  **Deliberately not fixed here.** The audit's job was to find and arbitrate, and turning three findings
+  into three fixes in the same sitting is how an audit stops being repeatable. Each one is either queued
+  with the decision it needs stated, or recorded with the reason it needs none.
+
+  Every assertion was checked to fail without the code it pins — seven mutations, one per test: dropping
+  a `DORMANT` entry, listing a live method as dormant, naming a deleted method, pointing an
+  `INTERNAL_ONLY` entry at the wrong file, dropping the CC-12 exception, leaving a stale exception, and
+  widening the scan's skip rule so it loses real call sites.
 
 - **A control-request timeout stops printing a traceback** — 2026-08-28, the server-side half of § C1.
 
