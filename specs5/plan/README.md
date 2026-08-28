@@ -209,11 +209,24 @@ interlude that found it; this list exists so that none of them has to be redisco
    neither is wrong to exist, but the next payload carrying an absolute path will pick one of them by
    accident. They should converge — most likely on the client-side one, which needs no per-payload
    enrichment.
-4. **An RPC that fails behind a viewer open shows the user nothing.** That is what kept the chip bug
-   unreported for as long as it was: the viewer painted an empty diff and the only evidence anywhere was
-   a bare `Failed: Absolute paths not accepted:` line on the server's stderr. Two independent halves —
-   jrpc-oo prints raw exception text with no request context, and the diff viewer treats a failed fetch
-   as empty content — and **fixing either one alone would have made the bug reportable**.
+4. ~~**An RPC that fails behind a viewer open shows the user nothing.**~~ — **fixed on 2026-08-28.**
+   Both halves, because the item's own claim was that either would have sufficed and doing one would
+   have been taking the item's word for it. The server registers every service through one facade, and
+   that facade now wraps each exposed method so a failure is logged with the call that caused it —
+   substituting jrpc-oo's *callback* rather than the method, because service methods have Python callers
+   too and wrapping those would report a deliberately-caught `RepoError` as a fault. The browser half is
+   a rule rather than a message test: **one failed fetch is a reading, two are no answer.** No HEAD means
+   new, no working copy means deleted, and both failing means nothing was read — which the viewer used to
+   render as an empty document marked new. **The pre-fix behaviour was worse than silence**: an empty file
+   the user can scroll is a claim about the repo, made over a request the backend refused.
+   [`../5-webapp/diff-viewer.md`](../5-webapp/diff-viewer.md) § *When Neither Side Can Be Read* and
+   [`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md) § *When a Service Method Raises*.
+
+   **The fix needed a channel that turned out not to work.** The diff viewer's four toast dispatches
+   named `show-toast` and fired on the element; the shell listens for `aic-toast` on `window`. Both the
+   name and the target were wrong, so every export and copy failure the viewer has ever had went nowhere
+   — and nothing noticed, because a rare failure that reports nothing looks exactly like success. It has
+   its own test now rather than being trusted because the fetch tests pass.
 5. ~~**Tool-card file chips still display the absolute path.**~~ — **fixed on 2026-08-28.** Only the
    navigation had been converted, and the label was left open because shortening it looked like a design
    decision: basename, root-relative, or middle-elided. **It was not open — it was already answered.**

@@ -59,6 +59,14 @@ DEFAULT_REMOTE_TIMEOUT = 120.0
 # providing back-pressure against pathological payloads.
 DEFAULT_MAX_MESSAGE_SIZE = 64 * 1024 * 1024
 
+# Ceilings for the argument summary in a failed-call log line. A
+# string argument is clipped *before* it is repr'd rather than after,
+# because a pasted screenshot arrives as a multi-megabyte data URI and
+# building its repr only to throw the tail away would cost the same
+# memory twice for a log line nobody wants that wide.
+_MAX_ARG_CHARS = 120
+_MAX_ARGS_CHARS = 400
+
 
 # ---------------------------------------------------------------------------
 # Port discovery
@@ -186,6 +194,103 @@ class EventLoopHandle:
             ``async def`` and not awaiting it.
         """
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+
+# ---------------------------------------------------------------------------
+# Failed-call context
+# ---------------------------------------------------------------------------
+#
+# jrpc-oo catches every exception a service method raises and prints one
+# line — ``Failed: {e}`` or ``Async method failed: {e}`` — with no method
+# name, no arguments and no timestamp (``ExposeClass.expose_all_fns``).
+# A real failure therefore reaches the operator as a bare sentence like
+# ``Failed: Absolute paths not accepted: /home/you/repo/a.py``, which
+# names neither the call that made it nor the caller that will now render
+# nothing. That is one half of ``specs5/next.md`` § C2; the browser half
+# is the diff viewer treating a failed fetch as empty content.
+#
+# jrpc-oo is a dependency rather than vendored code, so the print stays.
+# What we can do is put a properly-attributed record beside it, and the
+# seam is the callback: ``add_class`` leaves a ``{name: wrapper}`` dict on
+# the inner server, each wrapper takes ``(params, next_cb)``, and it
+# signals failure by calling ``next_cb(error, None)``. Replacing the
+# callback sees every error jrpc-oo swallows without touching the method
+# itself — which matters, because service methods have Python callers too
+# and wrapping *those* would log a handled ``RepoError`` as if it were a
+# fault.
+#
+# What that costs: the exception object is gone by the time the callback
+# runs, so this records the message and never a traceback. Recovering the
+# traceback means intercepting where the method is called, which is the
+# thing above that we are declining to do.
+
+
+def _summarise_arg(value: Any) -> str:
+    """One argument, rendered short and without building a long string.
+
+    Containers are described by shape rather than contents. A log line
+    exists to say *which call* failed; the payload that failed with it is
+    the browser's to report, and a dict of base64 image data rendered in
+    full would bury the method name it sits beside.
+    """
+    if isinstance(value, str):
+        if len(value) > _MAX_ARG_CHARS:
+            clipped = value[:_MAX_ARG_CHARS]
+            return f"{clipped!r}…(+{len(value) - _MAX_ARG_CHARS} chars)"
+        return repr(value)
+    if isinstance(value, (bool, int, float, type(None))):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return f"{type(value).__name__}[{len(value)}]"
+    if isinstance(value, dict):
+        keys = ", ".join(sorted(str(k) for k in value)[:6])
+        return "{" + keys + "}"
+    return f"<{type(value).__name__}>"
+
+
+def summarise_rpc_params(params: Any) -> str:
+    """The argument list of an RPC call, as a bounded one-line string.
+
+    jrpc-oo delivers browser arguments as ``{"args": [...]}`` and a
+    direct call as the bare value; both are flattened here so the log
+    line reads like the call the browser made.
+    """
+    if isinstance(params, dict) and "args" in params:
+        args = params["args"]
+        if not isinstance(args, list):
+            args = [args]
+    elif params is None:
+        args = []
+    else:
+        args = [params]
+    joined = ", ".join(_summarise_arg(a) for a in args)
+    if len(joined) > _MAX_ARGS_CHARS:
+        return joined[:_MAX_ARGS_CHARS] + "…"
+    return joined
+
+
+def _with_failure_context(fn_name: str, wrapper: Any) -> Any:
+    """Wrap a jrpc-oo method wrapper so failures are logged with context.
+
+    Delegates to ``wrapper`` unchanged and only substitutes the callback,
+    so the error the browser receives is byte-identical to the one it
+    received before.
+    """
+
+    def contextual(params: Any, next_cb: Any) -> Any:
+        def logging_cb(error: Any, result: Any = None) -> Any:
+            if error is not None:
+                logger.error(
+                    "RPC %s(%s) failed: %s",
+                    fn_name,
+                    summarise_rpc_params(params),
+                    error,
+                )
+            return next_cb(error, result)
+
+        return wrapper(params, logging_cb)
+
+    return contextual
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +437,30 @@ class RpcServer:
         # jrpc-oo's add_class signature is (instance, obj_name=None).
         # Forward ``name`` verbatim so the caller's override wins.
         self._inner.add_class(instance, name)
+        self._install_failure_logging()
+
+    def _install_failure_logging(self) -> None:
+        """Give the just-registered service's methods failed-call logging.
+
+        ``add_class`` appends one ``{qualified_name: wrapper}`` dict per
+        service to the inner server's ``classes`` list, and
+        ``setup_remote`` copies that dict into each remote as it connects.
+        Mutating the dict in place — rather than rebuilding it — is what
+        makes the substitution reach connections that do not exist yet,
+        and registration is required to precede :meth:`start`, so none do.
+
+        Silently does nothing if jrpc-oo stops exposing ``classes``. This
+        adds a log line; it is not worth failing a startup over, and the
+        test that pins the behaviour is where a version bump reports it.
+        """
+        classes = getattr(self._inner, "classes", None)
+        if not classes:
+            return
+        exposed = classes[-1]
+        if not isinstance(exposed, dict):
+            return
+        for fn_name, wrapper in list(exposed.items()):
+            exposed[fn_name] = _with_failure_context(fn_name, wrapper)
 
 
 # ---------------------------------------------------------------------------

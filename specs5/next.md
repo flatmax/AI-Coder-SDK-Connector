@@ -93,8 +93,20 @@ own framing — "discoverability, not capability" — was true of one card and f
 entry had recorded `config.py` as *honouring* a key it only parses. **"Read the value" and "find its
 reader" are different checks, and only the second one closes this class of item.**
 
-§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build. The cheapest
-remaining item is now **§ C2**, which is correctness rather than surface.
+§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build.
+
+**§ C2 closed 2026-08-28**, and it grew a finding on the way that the item could not have predicted: the
+toast channel its fix needed **had never worked**. The diff viewer's four dispatches named an event the
+shell does not listen for, on a target it does not listen on, so every export and copy failure since that
+feature shipped had gone nowhere. **This is § C2's own thesis arriving from the other side** — the item
+exists because a failure that reports nothing is indistinguishable from success, and the mechanism for
+reporting was itself an instance of it. The lesson generalises past this file: *a reporting path is not
+exercised by the happy case, so nothing tells you it is broken until you need it.*
+
+With C2 gone, § C is down to **C3** — converge the two "absolute engine path → repo path" mechanisms —
+and everything else left is § D's verification debt or § E's declined. C2's work added a third caller of
+`toRepoPath` and one more copy of the two-call fetch left standing, so it moved C3's price up again
+without touching it.
 
 **§ C4 closed by finding its own answer already written down** (2026-08-28). It had been deferred as a
 display decision with three plausible options; the house rule for naming a file on screen was already in
@@ -392,11 +404,42 @@ Flow* said the HUD "renders entirely from the `streamComplete` payload", with an
 gate could not sit next to one denying the call exists, so both are corrected. Reasoning lives in that
 file § *When the Engine Is Gone*; [`plan/README.md`](plan/README.md) open item 2 is struck.
 
-**C2 — An RPC that fails behind a viewer open shows the user nothing.** Two independent halves, and
-**fixing either one alone would have made the bug that found this reportable**: jrpc-oo prints raw
-exception text with no request context, and the diff viewer treats a failed fetch as empty content, so
-a real error painted an empty diff and left one bare line on the server's stderr.
-[`plan/README.md`](plan/README.md) open item 4.
+**C2 — An RPC that fails behind a viewer open shows the user nothing.** ✅ *Built 2026-08-28 — leaves
+this queue.* Both halves, because the entry's own claim was that either would have sufficed and building
+one would have been taking that claim on trust. Reasoning in
+[`1-foundation/rpc-transport.md`](1-foundation/rpc-transport.md) § *When a Service Method Raises* and
+[`5-webapp/diff-viewer.md`](5-webapp/diff-viewer.md) § *When Neither Side Can Be Read*;
+[`plan/README.md`](plan/README.md) open item 4 is struck.
+
+**The browser half is a rule about shape, and finding it is what made the item small.** The framing —
+"treats a failed fetch as empty content" — reads as though every failure needs reporting, but two of the
+three cases are *readings*: a HEAD that fails means the file is new, a working copy that fails means it
+was deleted, and both are true things to render. Only the case where **both** calls fail has nothing
+behind it, and that is the one the viewer painted as an empty document marked new. **The pre-fix
+behaviour was worse than silence** — an empty file the user can scroll is a claim about the repo, made
+over a request the backend refused. And because the discriminator is how many sides answered, there is no
+message to sniff; a text test would need a table saying which wordings mean "deleted", which is a table
+that goes stale the first time the backend rewords anything.
+
+**The server half wraps the callback, not the method**, and that is the whole design. jrpc-oo catches
+every exception and prints `Failed: {e}` with no method name; the seam that fixes it is the
+`{name: wrapper}` dict `add_class` leaves behind, because substituting the *callback* sees every error
+the library swallows while leaving the method untouched. Wrapping the method would have been the obvious
+move and would have logged every `RepoError` a Python caller deliberately catches as if it were a fault.
+The residue is stated where it bites: the exception object is gone by the time the callback runs, so the
+record holds the message and the call and never a traceback.
+
+**Found while building it, and it is the finding worth keeping: the toast channel the fix needed did not
+work.** The diff viewer dispatched `show-toast` on itself; the shell listens for `aic-toast` on `window`.
+Wrong name *and* wrong target, so all four dispatches — every export and copy failure the viewer has ever
+had — went nowhere for as long as the feature has existed. Nothing noticed because **a rare failure that
+reports nothing is indistinguishable from success**, which is § C2's own thesis arriving from the other
+direction. It has its own test now rather than being trusted because the fetch tests pass.
+
+**The SVG viewer got the same rule**, since it holds a copy of the same two-call fetch and had the same
+blindness, and a blank SVG pane is even harder to doubt than a blank diff. The copy itself is left
+standing and recorded rather than half-converged — **one owner is the fix, and a third copy of the rule
+would not be it.** That is § C3's, not this item's.
 
 **C3 — Two mechanisms answer "absolute engine path → repo path".** `_mark_openable_memory_files`
 enriches server-side with a `relPath`; `toRepoPath` converts client-side at the shell's

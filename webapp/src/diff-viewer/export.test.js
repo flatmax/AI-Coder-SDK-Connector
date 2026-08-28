@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   beforeEachSetup,
   mountViewer,
@@ -239,6 +239,47 @@ describe('copyPreviewAsHtml', () => {
         value: originalClipboard,
       });
     }
+  });
+});
+
+describe('export and copy report on the channel the shell hears', () => {
+  // These four dispatches used to be `show-toast` on the element.
+  // The shell listens for `aic-toast` on `window`, so both the name
+  // and the target were wrong and every export failure since the
+  // feature shipped went nowhere. Found while wiring § C2's fetch
+  // failures, which need this channel to work before they can use
+  // it — so the channel gets a test of its own rather than being
+  // trusted because the § C2 tests pass.
+  let toasts;
+  let onToast;
+
+  beforeEach(() => {
+    toasts = [];
+    onToast = (ev) => toasts.push(ev.detail);
+    window.addEventListener('aic-toast', onToast);
+  });
+
+  afterEach(() => {
+    window.removeEventListener('aic-toast', onToast);
+  });
+
+  it('reports an export failure', async () => {
+    const el = mountViewer();
+    await settle(el);
+    // No markdown file open — exportPreviewAsHtml refuses.
+    await el._onExportPreviewAsHtml();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[0].message).toMatch(/Export failed/);
+  });
+
+  it('reports a copy failure', async () => {
+    const el = mountViewer();
+    await settle(el);
+    await el._onCopyPreviewAsHtml();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[0].message).toMatch(/Copy failed/);
   });
 });
 

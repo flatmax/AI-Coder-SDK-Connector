@@ -60,6 +60,7 @@ import { LitElement, css, html } from 'lit';
 
 import { SharedRpc } from './rpc.js';
 import { SvgEditor } from './svg-editor/index.js';
+import { toRepoPath } from './repo-path.js';
 
 /**
  * Default empty SVG shown when a panel has no content
@@ -580,6 +581,16 @@ export class SvgViewer extends LitElement {
       if (this._isDirty(file)) continue;
       const fetched = await this._fetchFileContent(path);
       if (!fetched) continue;
+      // A refresh that read nothing leaves the tab's last
+      // known-good content in place; the toast is what makes it
+      // stale-and-said-so rather than stale-and-silent.
+      if (fetched.error) {
+        this._emitToast(
+          `Could not refresh ${toRepoPath(path)}: ${fetched.error}`,
+          'error',
+        );
+        continue;
+      }
       file.original = fetched.original;
       file.modified = fetched.modified;
       file.savedContent = fetched.modified;
@@ -905,6 +916,15 @@ export class SvgViewer extends LitElement {
     }
     const fetched = await this._fetchFileContent(path);
     if (!fetched) return;
+    if (fetched.error) {
+      // Nothing read — no tab is opened, so the viewer keeps
+      // whatever it had rather than growing a blank one.
+      this._emitToast(
+        `Could not open ${toRepoPath(path)}: ${fetched.error}`,
+        'error',
+      );
+      return;
+    }
     const file = {
       path,
       original: fetched.original,
@@ -920,14 +940,32 @@ export class SvgViewer extends LitElement {
     this._recomputeDirtyCount();
   }
 
+  /**
+   * HEAD and working copy for `path`.
+   *
+   * Same both-sides-tolerated rule as the diff viewer's
+   * `fetchFileContent`, including the part that is not tolerance:
+   * one failure is a reading (new file, or deleted), two failures
+   * are no answer at all, and returning the second as empty content
+   * paints a blank SVG over a request the server refused
+   * (`specs5/next.md` § C2). `error` is set only in that case.
+   *
+   * The duplication with `diff-viewer/fetch.js` is real and predates
+   * this — two viewers holding one rule is the shape § C3 tracks. It
+   * is left standing here rather than half-converged, because the
+   * two differ in how they reach the RPC proxy and the fix owed is a
+   * single owner, not a third copy with a fresh divergence in it.
+   */
   async _fetchFileContent(path) {
     const call = this._getRpcCall();
     if (!call) {
-      return { original: '', modified: '', isNew: false };
+      return { original: '', modified: '', isNew: false, error: null };
     }
     let original = '';
     let modified = '';
     let isNew = false;
+    let headFailed = false;
+    let workingError = null;
     try {
       const headResult = await call['Repo.get_file_content'](
         path,
@@ -936,14 +974,25 @@ export class SvgViewer extends LitElement {
       original = this._extractRpcContent(headResult);
     } catch (_) {
       isNew = true;
+      headFailed = true;
     }
     try {
       const workingResult = await call['Repo.get_file_content'](path);
       modified = this._extractRpcContent(workingResult);
-    } catch (_) {
-      // File missing from working copy (deleted); leave modified empty.
+    } catch (err) {
+      // File missing from working copy (deleted); leave modified
+      // empty — unless HEAD failed too, in which case nothing read.
+      workingError = err;
     }
-    return { original, modified, isNew };
+    if (headFailed && workingError !== null) {
+      return {
+        original: '',
+        modified: '',
+        isNew: false,
+        error: workingError?.message || String(workingError),
+      };
+    }
+    return { original, modified, isNew, error: null };
   }
 
   _extractRpcContent(result) {

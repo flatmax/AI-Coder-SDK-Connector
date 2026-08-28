@@ -564,6 +564,60 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A failed RPC is now reportable from both ends** — 2026-08-28, closing `next.md` § C2 and
+  [`../plan/README.md`](../plan/README.md) open item 4. Reasoning in
+  [`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md) § *When a Service Method Raises*
+  and [`../5-webapp/diff-viewer.md`](../5-webapp/diff-viewer.md) § *When Neither Side Can Be Read*.
+
+  **Both halves, deliberately.** The item's own claim was that fixing either one alone would have made the
+  original bug reportable, and building one would have been taking that claim on trust for the next bug
+  rather than the last one.
+
+  **The browser half turned out to be a rule about shape, not a message test**, and finding that is what
+  made it small. "Treats a failed fetch as empty content" reads as though every failure needs a report,
+  but two of the three cases are *readings*: HEAD failing means the file is new, the working copy failing
+  means it was deleted. Only **both** failing has nothing behind it — and that is the case the viewer
+  rendered as an empty document marked new. The alternative discriminator was the error text, which needs
+  a table saying that `File not found` means deleted and `Absolute paths not accepted` means refused; that
+  table goes stale the first time the backend rewords anything, and "how many sides answered" is a fact the
+  fetch already holds.
+
+  Worth being plain about what the old behaviour was, because "shows the user nothing" undersells it: an
+  empty document the user can scroll, select and save from is **a claim about their repo**, made over a
+  request the server had refused. Silence would have been better.
+
+  **The server half substitutes jrpc-oo's callback rather than the service method.** The library catches
+  every exception and prints `Failed: {e}` — no method, no arguments, no timestamp — and it is a pip
+  dependency, so that print stays. The seam is the `{qualified name: wrapper}` dict `add_class` leaves on
+  the inner server: each wrapper reports failure by invoking a callback, so replacing the callback sees
+  every error the library swallows. **The obvious move — wrapping the method — would have been wrong**,
+  because service methods have Python callers too and it would have logged every `RepoError` an internal
+  caller deliberately catches as though it were a fault. Two consequences are stated rather than left to be
+  found: the record carries the message and never a traceback, since the exception object is gone by the
+  time the callback runs; and arguments are summarised by shape with strings clipped *before* `repr`,
+  because a pasted screenshot arrives as a multi-megabyte data URI and the naive version copies it twice to
+  build a line nobody wants that wide.
+
+  **The finding is the one nobody was looking for: the toast channel the fix needed had never worked.**
+  The diff viewer dispatched `show-toast` on itself; the shell listens for `aic-toast` on `window`. Wrong
+  name and wrong target, so all four dispatches — every export and copy failure the viewer has ever had —
+  went nowhere for as long as the feature has existed. **This is § C2's own thesis arriving from the other
+  direction**: a rare failure that reports nothing is indistinguishable from success, which is why nothing
+  noticed, and it means a reporting path gets no exercise from the happy case. It has a test of its own now
+  rather than being trusted because the fetch tests pass.
+
+  **The SVG viewer got the same rule**, holding as it does a copy of the same two-call fetch and the same
+  blindness — and a blank SVG pane is harder to doubt than a blank diff, since an empty SVG is a thing that
+  exists. The duplication is left standing and recorded in both spec files rather than half-converged:
+  **one owner is the fix, and a third copy of the rule is not it.** That belongs to § C3, whose price this
+  work moved up twice without touching it — one more copy of the fetch, and a third caller of `toRepoPath`.
+
+  Pinned by 12 Python tests and 10 browser ones. Three of the Python cases and eight of the browser cases
+  were checked to fail without the change; the rest are invariants that hold either way by design — that
+  the error reaching the caller is byte-identical, that a success logs nothing, that a one-sided failure
+  still opens silently, and that a missing RPC proxy is not reported as a failure because pre-connection is
+  the health banner's to say.
+
 - **The first two preference cards** — 2026-08-28, closing the first two rows of `next.md` § B3 and most of
   item (c) above. Thinking display and Doc enrichment now render above the config grid; the third row, the
   deny-read scope reset, stays blocked on § B4. Reasoning in
