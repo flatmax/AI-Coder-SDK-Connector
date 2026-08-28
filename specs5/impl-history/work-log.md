@@ -557,6 +557,85 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The engine gets a graceful teardown, bounded, before the hard exit** — 2026-08-28, § C8, the last of
+  § C5's findings to close. `ClaudeCodeService.shutdown` had no caller for its whole life while its
+  docstring reasoned about one: the localhost gate "does not get in the way of the real caller ... so an
+  in-process teardown hook passes". There was no hook. `main._shut_the_engine_down` is now that caller.
+
+  **The analysis said delete it, and checking the specs reversed the decision.** Three of `shutdown`'s
+  four steps are meaningless before `os._exit` — cancelling turn tasks, closing an executor and
+  disconnecting a session all describe a process that is about to stop existing, and the two consequences
+  that genuinely outlive it (the CLI child, the resumed session's temp config dir) were already handled by
+  hand for exactly that reason. Step by step it reads as dead code. What it misses is two calls further
+  down: `cancel_all` → `_deny_unanswered` → `_announce` **pushes the denial to the browser**, and the
+  browser outlives the server. [`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md)
+  § *Multiple Clients* enumerates four `cause` values a denial can name and `shutdown` was the one nothing
+  could produce, so a user who stopped the server with a dialog open kept a live-looking dialog that never
+  resolved. **The lesson is the order of operations**: reading the method bottom-up gave the wrong answer,
+  and the spec that consumed its output gave the right one.
+
+  **A courtesy, never a condition of exiting.** 2 seconds, then abandoned; every failure including the
+  timeout swallowed at debug; a second Ctrl-C skips it entirely. The handler moved from `signal.signal` to
+  `loop.add_signal_handler` for one reason — a C-level handler cannot await a coroutine — and the hard
+  `os._exit` stays, because asyncio's runner cleanup is what hangs on `_heavy_init`'s model load. What the
+  loop gets is one bounded task, not its own shutdown.
+
+  **Two residues, both stated where they bite.** Windows has no graceful step at all, because
+  `add_signal_handler` raises `NotImplementedError` on the proactor loop — the same platform split as
+  `_kill_vite`'s process group, logged rather than worked around. And `is_caller_localhost` reads the
+  *current* RPC caller, so a remote participant's call caught mid-dispatch by the signal can have the gate
+  refuse the host's own teardown; the caller logs a warning instead of bypassing the gate, because a
+  teardown path that does not consult the gate is a worse thing to own than a rare log line.
+  [`../4-features/collaboration.md`](../4-features/collaboration.md) carries that one.
+
+  **§ C5's own list did not catch this closure, and that is a finding about the list.** Wiring
+  `set_viewer_state` a few hours earlier failed a test loudly (§ C7 below); wiring `shutdown` failed
+  nothing. `DORMANT` is asserted against browser callers in both directions, but the Python direction is
+  only asserted for `INTERNAL_ONLY`, where an entry names a file and the call in it is checked — so a
+  dormant method that gains a *Python* caller keeps a stale entry until somebody moves it. This one moved
+  by hand, after checking rather than assuming. The asymmetry is now written above `DORMANT`, with why the
+  obvious repo-wide `.method(` scan is not the fix: `shutdown` is its own counter-example, since
+  `doc_index/background.py`'s `self._executor.shutdown(wait=False)` is a different method spelled the same
+  way. `DocIndexBuilder.close()` is still reached only through `shutdown`, so it is now reached at all.
+
+  **The wiring was untested until it was extracted, and extracting it is what made the gap visible.**
+  The graceful step is a module-level function and was pinned from the start; the arrangement that runs
+  it — two `add_signal_handler` calls, the second-signal escape, the Windows fallback — was a closure
+  inside `main()`, which the suite never drives. So `_install_exit_handlers(loop, service, teardown)` came
+  out to module level, taking the teardown as a parameter because that is the only part that genuinely
+  needs `main`'s locals (`vite_process`). Its tests fire **real signals at the test process** rather than
+  calling the callback: what is worth pinning is that a Ctrl-C reaches the coroutine at all, and a
+  hand-called callback would pass against `signal.signal` wiring that cannot await one.
+
+  Twelve mutations, each checked to fail a test. On the step: dropping the `wait_for` bound (a hung engine
+  then hangs the exit), narrowing the `except` so a raise escapes, dropping the early return after the
+  log, dropping the `restricted` check, and warning on every answer. On the wiring: installing SIGINT and
+  forgetting SIGTERM, tearing down before awaiting the graceful step rather than after, dropping the
+  second-signal escape, never setting the `exiting` flag, dropping the `NotImplementedError` fallback, and
+  using C-level `signal.signal` handlers instead of loop ones.
+
+  Three findings came out of that pass rather than out of reading:
+
+  - **A survivor that was the code's fault.** An `if service is None: return` guard whose state is
+    unreachable, since the handlers are installed after the service is built. Both it and the test that
+    asserted otherwise — "the signal can arrive before phase 1 has built one", which is false — were
+    deleted rather than kept as unpinnable code.
+  - **A test that passed for the wrong reason.** The second-Ctrl-C test polled for 5 seconds against a
+    2-second grace period, so it passed with the escape deleted: the *first* signal's timeout produced the
+    teardown. The window is now 0.2s, with the margin asserted rather than assumed, and the docstring says
+    what it caught.
+  - **A latent dependence on `os._exit` never returning.** `on_signal` fell through after the second
+    teardown and queued another graceful step against an engine already being torn down — invisible in
+    production precisely because `teardown` does not come back. A `return` makes the behaviour not depend
+    on that, and the test now pins it by counting the engine's calls rather than the teardowns.
+
+  Two stale names went with it: `resume_cleanup` and `session.py` both referred to `main._signal_handler`,
+  which no longer exists, and both said the exit path "never reaches `disconnect()`" — it now reaches it
+  on a 2-second budget on POSIX, which is a weaker claim than the by-hand cleanup needs, so the cleanup
+  stays and says why. A third, unrelated, was found while making
+  [`../6-deployment/startup.md`](../6-deployment/startup.md) § *Graceful Shutdown* true:
+  `_cleanup_tex_preview_dir`'s docstring claimed a startup call that has never existed.
+
 - **The agent is told which file the user has open** — 2026-08-28, § C7, the first of § C5's findings to
   close. `ViewerFraming` had two arrival paths and a writer on neither, so `Turn.viewer` was always
   `None` and the `ui_state` tool answered "nothing is open in the user's viewer pane" for the entire life

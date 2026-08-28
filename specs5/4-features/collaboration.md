@@ -111,6 +111,15 @@ read: `shutdown` ends every other participant's view of the turn in progress, an
 launches a process against the host's repository and the host's credentials. They are easy to overlook
 when auditing the surface — neither reads like a mutation of repository state, which is what the other
 rows have in common.
+
+**`shutdown`'s gate has a caveat worth naming, found when [`../next.md`](../next.md) § C8 gave it its
+first caller.** `is_caller_localhost` reads the *current* RPC caller and returns `True` when there is
+none, which is what lets the in-process teardown hook through. But the hook runs from a signal handler on
+the loop, so if a remote participant's call happens to be mid-dispatch at that moment the gate reads
+*their* address and refuses the host's own teardown. The window is microseconds wide and the cost is one
+skipped courtesy — `main.py` still exits — so the caller logs a warning rather than bypassing the gate.
+Bypassing it would mean a teardown path that does not consult the gate at all, which is a worse thing to
+own than a rare log line.
 ### Read-Only Operations (Available to All)
 - File content, file tree, search, engine state snapshot
 - Flat file list, LSP queries, doc outlines

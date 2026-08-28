@@ -593,8 +593,9 @@ class EngineSession:
             # connect would price the new session's first turn as a refund.
             self._cost.reset()
             # A resume with a store materialises a temp CLAUDE_CONFIG_DIR
-            # that only disconnect() cleans up, and the signal handler
-            # never reaches disconnect(). Recorded here, removed there.
+            # that only disconnect() cleans up, and the exit path reaches
+            # disconnect() on a 2s budget at best (next.md § C8) and not at
+            # all on Windows. Recorded here, removed by resume_cleanup.
             resume_cleanup.remember(client)
             if resume and not fork_session:
                 # The init message will report the resumed ID; recording it

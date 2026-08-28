@@ -160,16 +160,27 @@ a comment-inclusive one agree, because if they ever diverge the tables are wrong
 hides a dormant RPC.
 
 **The audit is [`../next.md`](../next.md) § C5 and the test is its by-product**, which is why the tables
-carry prose: the entry *is* the finding. Of 100 exposed methods (verified 2026-08-28), 66 have a browser
-caller, 22 are internal-only, 12 are dormant. Most of the twelve confirmed something already decided;
-three were findings, and two of those became queue items — § C7 (viewer framing has no writer on either
-path) and § C8 (nothing ever calls `shutdown`).
+carry prose: the entry *is* the finding. **As the audit found it**, of 100 exposed methods 66 had a
+browser caller, 22 were internal-only and 12 dormant. Most of the twelve confirmed something already
+decided; three were findings, and two of those became queue items — § C7 (viewer framing has no writer on
+either path) and § C8 (nothing ever calls `shutdown`). Both have since been built, which is what moved
+the numbers below.
 
-**The `DORMANT` list is eleven from 2026-08-28**, and how it lost an entry is the point of having it.
-§ C7 wired `set_viewer_state`; the commit that added the caller failed
+**The `DORMANT` list is ten from 2026-08-28** (and `INTERNAL_ONLY` 23, browser callers 67 — the total
+does not move), and how it lost each of the two is the point of having it. § C7 wired
+`set_viewer_state`; the commit that added the caller failed
 `test_a_listed_method_is_not_called_from_the_browser`, which named the new call's file and line, so the
 stale entry went in the same commit instead of surviving as an assertion that the gap it had just closed
 was still open.
+
+§ C8 wired `shutdown` from `main.py` and **nothing failed**, which is the other half of what the list is
+worth knowing. The browser direction is asserted both ways; the Python direction is only asserted for
+`INTERNAL_ONLY`, where an entry names a file and the call in it is checked. So a dormant method that
+gains a *Python* caller keeps its entry until somebody moves it, and this one moved by hand after being
+checked rather than assumed. The asymmetry is now written above `DORMANT`, together with why the obvious
+repo-wide `.method(` scan is not the fix: it over-matches on names the tree shares, and `shutdown` is
+its own counter-example — `self._executor.shutdown(wait=False)` in `doc_index/background.py` is a
+different method spelled the same way.
 
 The third needs no item and is recorded here instead. **`get_review_file_diff` is unused on both
 services it exists on**, because review mode's own git arrangement already answers the question it asks:

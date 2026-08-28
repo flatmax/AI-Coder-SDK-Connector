@@ -846,16 +846,29 @@ class ClaudeCodeService:
         """Disconnect the engine as part of graceful shutdown.
         **Localhost only.**
 
-        Pending permission requests are denied first. A ``can_use_tool``
-        callback still waiting on a browser would otherwise be cancelled
-        without ever answering the CLI's control request.
+        Called from :func:`aic_dc.main._shut_the_engine_down`, on the loop,
+        bounded, before the signal handler's ``os._exit``. For most of its
+        life it had no caller at all and this docstring reasoned about one
+        anyway (``next.md`` § C8); the wiring, and the reason only one of
+        the four steps below justifies it, are recorded there.
+
+        **What survives the process is the point.** The kill and the temp-dir
+        purge that ``session.disconnect()`` would do are already done by hand
+        in ``main.py``, and cancelling asyncio tasks in a process about to
+        ``os._exit`` achieves nothing. Denying pending permissions does: the
+        deny reaches the CLI's waiting control request, and
+        ``permissionResolved`` reaches the *browser*, which outlives the
+        server. Without it a dialog open at Ctrl-C stayed on screen forever.
 
         Gated because ``add_service`` exposes every public method, which
         makes process teardown reachable from a browser: without the check
         a participant could kill the host's engine mid-turn, which is a
         broader denial than ``cancel_streaming``. The gate does not get in
         the way of the real caller — ``is_caller_localhost`` trusts a call
-        with no RPC caller behind it, so an in-process teardown hook passes.
+        with no RPC caller behind it, so the teardown hook passes. It reads
+        the *current* RPC caller, though, so a remote participant's call
+        caught mid-dispatch by the signal can refuse the teardown; the
+        caller logs that rather than papering over it.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:

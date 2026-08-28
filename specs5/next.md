@@ -85,15 +85,16 @@ than silent. Reasoning in [`plan/decisions.md#cc-18`](plan/decisions.md); phase 
 this its largest known hole ([`plan/delivery.md`](plan/delivery.md#deviations-from-inventorymd-1)).
 
 **Both numbered phases are now done**, phase 7 modulo a runner. Everything left is in §§ B–D, all of it
-smaller than either phase. B2, B5, C1, C5, C6 and C7 have since closed, so the cheapest remaining items
-are **C4** (tool-card chips still show the absolute path — the display decision is the only open
+smaller than either phase. B2, B5, C1, C5, C6, C7 and C8 have since closed, so the cheapest remaining
+items are **C4** (tool-card chips still show the absolute path — the display decision is the only open
 question, the conversion already exists) and the **first two rows of B3**, which build discoverability for
 values that are already configurable.
 
-**§ C8 is the cheapest decision on the page** and the last of § C5's audit findings still open: nothing
-calls `shutdown`, and its docstring asserts a caller that does not exist. Its sibling § C7 (the agent
-was never told what the user is looking at) closed 2026-08-28 and left one thing behind that is *not*
-scheduled — the viewer's **selection range** is still never sent, only the file. C7 says why.
+**§ C5's audit findings are all closed as of 2026-08-28**, and the pair it produced left two pieces of
+residue that are *not* scheduled, both stated in their own entries. § C7 sends the viewer's **file** and
+never its **selection range**. § C8 gives the engine a graceful teardown on POSIX only — Windows keeps
+the immediate exit, because `add_signal_handler` is not available there to run a coroutine before
+`os._exit`. Neither is a defect being deferred quietly; each says what it costs.
 
 ---
 
@@ -361,9 +362,11 @@ internal-only, 12 are dormant** — so a third of the surface is reachable from 
 which is what `add_service` publishing every public method costs. The work-log guessed there were more
 cases like `reconnect_mcp_server`; there were ten more, and three were findings rather than
 confirmations: § C7 and § C8 below, plus `get_review_file_diff` being dead on *both* services it exists
-on, which needed no item and is recorded in the inventory instead. *(The dormant count is eleven from
-2026-08-28: § C7 gave `set_viewer_state` the caller it was waiting for, and the removal of its entry was
-prompted by the test failing, not by remembering to.)*
+on, which needed no item and is recorded in the inventory instead. *(The dormant count is **ten** from
+2026-08-28, and the internal-only count 23. § C7 gave `set_viewer_state` the caller it was waiting for
+and the removal of its entry was prompted by the test failing, not by remembering to; § C8 gave
+`shutdown` a Python caller, which moved it to `INTERNAL_ONLY` by hand, because that direction is the one
+the test does not check — see § C8.)*
 
 **A fourth list runs the audit backwards**, and it independently reproduced § E's CC-12 claim without
 being told it: `LLMService.switch_mode` at `app-shell/mode.js:61` and `chat-panel/events.js:854` is the
@@ -416,16 +419,27 @@ The other half of what this item named stays dormant: `navigate_file` broadcasts
 clients, and with the collaboration admission UI on pause there is one client. It is § E's, not this
 item's — `tests/test_rpc_surface.py` re-attributes it.
 
-**C8 — Nothing ever shuts the engine down, and the docstring says otherwise.**
-`ClaudeCodeService.shutdown` denies pending permissions, cancels turn tasks, closes the doc builder and
-disconnects the session — and has no caller anywhere (verified 2026-08-28). Its docstring assumes one:
-the localhost gate "does not get in the way of the real caller ... so an in-process teardown hook
-passes." There is no teardown hook. `main.py` exits through `os._exit` and says so in a neighbouring
-comment — "the SDK cleans up in `disconnect()`, and `os._exit` never gets there" — which is why
-`_purge_resume_dirs` exists to clean up one consequence by hand. The question this raises is whether the
-other consequences matter on exit (a `can_use_tool` callback left waiting, the doc builder's executor)
-or whether `shutdown` is dead code that should say so. **Deciding it is cheap; the reason it is a
-correctness item and not a tidy-up is that the docstring currently asserts a caller into existence.**
+**C8 — Nothing ever shuts the engine down, and the docstring says otherwise.** ✅ *Decided 2026-08-28
+— wired, not deleted; leaves this queue.* `ClaudeCodeService.shutdown` had no caller for its whole life
+while its docstring reasoned about one. **The decision turns on a single effect**: three of its four
+steps are meaningless before `os._exit`, but denying pending permissions announces `permissionResolved`
+with cause `shutdown` to the *browser*, which outlives the server — so a dialog open at Ctrl-C stopped
+hanging forever. That cause is enumerated in
+[`5-webapp/permission-dialog.md`](5-webapp/permission-dialog.md) § *Multiple Clients* and nothing could
+produce it. The full argument, and the three findings the mutation pass turned up, are in the work-log
+§ *Landed since*; the mechanism is [`6-deployment/startup.md`](6-deployment/startup.md) § *Graceful
+Shutdown*.
+
+**Two residues, each recorded where it bites.** Windows gets no graceful step at all, because
+`add_signal_handler` raises `NotImplementedError` on the proactor loop — startup.md's invariants say so.
+And `is_caller_localhost` reads the *current* RPC caller, so a remote participant's call caught
+mid-dispatch by the signal can refuse the host's own teardown; logged, not bypassed, per
+[`4-features/collaboration.md`](4-features/collaboration.md).
+
+**§ C5's own list did not catch this closure**, which is a finding about the test. `DORMANT` is asserted
+against browser callers both ways, but the Python direction only for `INTERNAL_ONLY` — so this entry
+moved by hand. The asymmetry, and why a repo-wide `.method(` scan is not the fix, are written above
+`DORMANT` in `tests/test_rpc_surface.py`.
 
 **C6 — [`known-issues.md`](known-issues.md).** ✅ *Its one entry fixed 2026-08-28; the inbox is now
 empty.* A "compacting conversation" indicator did not survive a browser refresh — same class as the

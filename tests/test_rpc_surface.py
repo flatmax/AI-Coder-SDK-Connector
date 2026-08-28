@@ -117,6 +117,10 @@ INTERNAL_ONLY: dict[str, str] = {
     # ``get_current_state`` and never asks for either on its own.
     "ClaudeCodeService.get_denied_read_files": "src/aic_dc/claude_code/service.py",
     "ClaudeCodeService.get_review_state": "src/aic_dc/claude_code/service.py",
+    # Graceful teardown, from the exit path's bounded window on the loop.
+    # Dormant until next.md § C8 decided it, with a docstring that had
+    # reasoned about this caller for its whole life.
+    "ClaudeCodeService.shutdown": "src/aic_dc/main.py",
 }
 
 
@@ -128,6 +132,16 @@ INTERNAL_ONLY: dict[str, str] = {
 # in ``specs5/next.md`` § E, a queued item, or an admission that the method
 # is unused. "Unused" is a legitimate entry — the point of the list is that
 # the absence is written down instead of being rediscovered as a bug.
+#
+# **What is asserted about this list is narrower than what it claims.** The
+# browser direction is checked both ways; the Python direction is only
+# checked for :data:`INTERNAL_ONLY`, where an entry names a file and the
+# call in it is verified. So a dormant method that *gains* a Python caller
+# keeps a stale entry until somebody moves it — which is what happened to
+# ``shutdown`` (next.md § C8), and it moved by hand. A repo-wide scan for
+# ``.method(`` would catch that case and is deliberately not here: it
+# over-matches on names the tree shares, and ``shutdown`` is the example —
+# ``self._executor.shutdown(wait=False)`` is not this method.
 
 DORMANT: dict[str, str] = {
     # § E — the collaboration admission UI is on pause. The browser
@@ -149,12 +163,6 @@ DORMANT: dict[str, str] = {
     # and now has a caller (``app-shell/viewer-framing.js``); this half
     # waits on the pause.
     "ClaudeCodeService.navigate_file": "navigation is never broadcast (next.md § E)",
-    # Graceful engine teardown, and its docstring names a caller that does
-    # not exist: "an in-process teardown hook passes" the localhost gate.
-    # There is no such hook. ``main.py`` exits through ``os._exit`` and
-    # says so — "the SDK cleans up in ``disconnect()``, and ``os._exit``
-    # never gets there". next.md § C8.
-    "ClaudeCodeService.shutdown": "nothing calls it; exit is os._exit (next.md § C8)",
     # A second answer to a question review mode's own git arrangement
     # already answers. The soft reset puts HEAD at the merge-base, so every
     # review change is a staged modification and the diff viewer's ordinary
