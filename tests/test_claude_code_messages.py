@@ -1044,10 +1044,17 @@ class TestToolCards:
         assert names(events) == ["toolUse"]
         assert events[0].payload["tool_use_id"] == "toolu_1"
 
-    def test_card_summarises_the_input_and_keeps_the_full_copy(self, translator):
+    def test_card_carries_the_input_and_no_summary_of_it(self, translator):
+        """The header's one-liner is the browser's to render (§ C3).
+
+        The card used to carry both the dict and a pre-joined `key=value`
+        string built from it. Only the dict crosses now — the string was the
+        copy that could not shorten a repo path, because the rule for that
+        is in the browser.
+        """
         events = self._use(translator)
         payload = events[0].payload
-        assert "file_path=src/a.py" in payload["input_summary"]
+        assert "input_summary" not in payload
         assert payload["input"]["old_string"] == "x"
         assert payload["status"] == "pending"
         assert payload["gated"] is False
@@ -1399,6 +1406,10 @@ class TestResult:
 
 
 class TestTruncation:
+    # `summarise_tool_input` is the permission layer's one-liner now, not the
+    # tool card's header — that one is built in the browser from the card's
+    # `input` (§ C3). These still pin it, because `summarise_request` and
+    # `build_command_payload` both fall back to it.
     def test_input_summary_is_one_line(self):
         summary = summarise_tool_input({"command": "echo one\ntwo\tthree"})
         assert "\n" not in summary

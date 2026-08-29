@@ -273,6 +273,12 @@ class TestToolBlocks:
         assert block["tool"]["name"] == "Read"
         assert block["tool"]["status"] == "ok"
         assert block["result"]["preview"] == "contents"
+        # The whole input, and no pre-joined one-liner over it. A card read
+        # back off a transcript and a live one are rendered by the same
+        # browser-side builder (``specs5/next.md`` § C3), so a summary shipped
+        # from here would be the one copy that could not shorten a repo path.
+        assert block["tool"]["input"] == {"file_path": "/a.py"}
+        assert "input_summary" not in block["tool"]
 
     def test_a_call_with_no_result_stays_pending(self):
         """A turn the server was killed in the middle of. The card must show

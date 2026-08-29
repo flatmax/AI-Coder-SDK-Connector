@@ -20,6 +20,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './usage-hud.js';
 import { SharedRpc } from './rpc.js';
+import { resetRepoRoot, setRepoRoot } from './repo-path.js';
+import { UsageHud } from './usage-hud.js';
+import { PERMISSION_DIALOG_STYLES } from './permission-dialog/styles.js';
+
+/**
+ * The permission dialog's own z-index, read from its stylesheet rather than
+ * copied. A constant copied here would go stale exactly when the dialog moved
+ * up the ladder, which is the one change that could reintroduce the bug.
+ */
+const PERMISSION_DIALOG_Z = Number(
+  /\.dialog\s*\{[^}]*z-index:\s*(\d+)/.exec(PERMISSION_DIALOG_STYLES.cssText)?.[1],
+);
 
 const _mounted = [];
 
@@ -208,10 +220,21 @@ function turnText(el) {
   return row ? row.querySelector('.value').textContent.replace(/\s+/g, ' ').trim() : '';
 }
 
-function contextRow(el) {
-  return [...el.shadowRoot.querySelectorAll('.row')].find((r) =>
-    r.querySelector('.label')?.textContent.includes('Context'),
+/**
+ * A collapsible section's head, by the name it displays.
+ *
+ * The head carries the section's headline figure, so every assertion that
+ * used to read a `.row`'s `.value` still reads one — the row grew a caret and
+ * a click handler, not a different number.
+ */
+function sectionHead(el, name) {
+  return [...el.shadowRoot.querySelectorAll('.sec-head')].find((head) =>
+    head.querySelector('.sec-name')?.textContent.trim() === name,
   );
+}
+
+function contextRow(el) {
+  return sectionHead(el, 'Context');
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,5 +1309,711 @@ describe('UsageHud session changes', () => {
     pushSessionChanged();
     await Promise.resolve();
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A lost engine — the poll gate and the state to sit in
+// ---------------------------------------------------------------------------
+//
+// `get_context_usage` is a control request to the CLI subprocess. Once the
+// engine is gone every call is a round trip that cannot succeed, and the
+// expensive failure is not the tidy one: a pump that dies without the
+// session being marked lost leaves a client that still looks usable and a
+// subprocess whose reply nobody reads, so the call hangs to the SDK's own
+// 60-second control deadline and is logged server-side with a traceback.
+// Four of those in one log is the bug these tests pin.
+//
+// Two halves, and each covers a case the other cannot. The health push
+// stops the polling — but it lands *after* the `streamComplete` of the turn
+// that died, so it cannot stop that turn's own fetch. The reply's
+// `reason: 'no-engine'` catches that one. Neither alone is the fix.
+
+describe('UsageHud engine gone', () => {
+  /** A health payload for a live engine, past the handshake. */
+  function healthy(extra = {}) {
+    return {
+      connected: true,
+      cli_version: '2.1.229',
+      credential_source: 'subscription',
+      last_error: null,
+      mirror_gaps: 0,
+      degradations: [],
+      ...extra,
+    };
+  }
+
+  /** A health payload for a session that lost its engine. */
+  function lost(extra = {}) {
+    return healthy({
+      connected: false,
+      last_error: 'The engine closed the stream before the turn finished.',
+      ...extra,
+    });
+  }
+
+  function pushHealth(health) {
+    window.dispatchEvent(
+      new CustomEvent('engine-health', { detail: health }),
+    );
+  }
+
+  function pushSessionChanged() {
+    window.dispatchEvent(
+      new CustomEvent('session-changed', { detail: { messages: [] } }),
+    );
+  }
+
+  function goneNote(el) {
+    return el.shadowRoot.querySelector('.gone');
+  }
+
+  it('sends no control request once the engine is reported gone', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('says so rather than leaving the last good numbers looking current', async () => {
+    // The whole point of the state: a breakdown from before the loss
+    // describes a window no engine holds any more.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el)).toBeTruthy();
+
+    pushHealth(lost());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el)).toBeUndefined();
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+  });
+
+  it('leaves the reason to the health banner', async () => {
+    // One owner of the words. The HUD says there is nothing to read and
+    // points at the surface that says why.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost({ last_error: 'CLIJSONDecodeError: line too long' }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(goneNote(el).textContent).not.toContain('CLIJSONDecodeError');
+    expect(goneNote(el).textContent).toContain('health banner');
+  });
+
+  it('still reports what the dying turn cost', async () => {
+    // A turn that failed after spending something keeps its receipt —
+    // the engine being gone is a reason to stop polling, not to stop
+    // reporting. This is the crash footer AIC⚡DC writes itself, which is
+    // the one a lost engine actually produces.
+    publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    pushComplete(crashFixture({ tool_calls: 4, response: 'partial answer' }));
+    await settle(el);
+    expect(hud(el)).toBeTruthy();
+    expect(turnText(el)).toContain('cost unknown');
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+  });
+
+  it('does not read a disconnected-but-never-started engine as gone', async () => {
+    // `connected` is false before the first prompt too, which is the
+    // ordinary state of a freshly loaded page. Gating on it alone would
+    // stop the HUD ever fetching. `last_error` is the discriminator, and
+    // it is the same one the health banner uses.
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(healthy({ connected: false, last_error: null }));
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el)).toBeNull();
+  });
+
+  it('closes the gate from the reply when the push has not arrived yet', async () => {
+    // The racing case, and the reason the reply is read as well as the
+    // push: the engine emits `streamComplete` before the `engineHealth`
+    // that follows a loss, so this fetch is already out.
+    const handler = vi.fn(() => ({
+      error: 'The Claude Code session was lost.',
+      reason: 'no-engine',
+    }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el).textContent).toContain('The engine is gone');
+
+    // And the next turn does not ask again.
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('still shows a live engine its error text', async () => {
+    // The other half of `reason`: a request that failed against an engine
+    // that is there is a mishap worth retrying, not a state to sit in, and
+    // it must not be dressed as a loss.
+    const handler = vi.fn(() => ({
+      error: 'Could not read context usage: boom',
+      reason: 'failed',
+    }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': handler });
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(goneNote(el)).toBeNull();
+    expect(el.shadowRoot.querySelector('.error').textContent).toContain('boom');
+    // Still polling, because there is something to poll.
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it('reopens the gate when the engine comes back', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).not.toHaveBeenCalled();
+
+    pushHealth(healthy());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(goneNote(el)).toBeNull();
+  });
+
+  it('gives a new session one chance, whatever the last one did', async () => {
+    // Starting or resuming is exactly what the note tells the user to do,
+    // so a flag surviving them doing it would report a dead engine at a
+    // live one until a health push happened to arrive.
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(lost());
+    await settle(el);
+    pushSessionChanged();
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a malformed health payload rather than guessing', async () => {
+    const handler = publishUsage();
+    const el = mountHud();
+    await settle(el);
+    pushHealth(null);
+    pushHealth('gone');
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops listening for health once removed', async () => {
+    const el = mountHud();
+    await settle(el);
+    el.remove();
+    pushHealth(lost());
+    await Promise.resolve();
+    expect(el._engineGone).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Files modified
+// ---------------------------------------------------------------------------
+
+describe('UsageHud files modified', () => {
+  function chips(el) {
+    return [...el.shadowRoot.querySelectorAll('.file-chip')];
+  }
+
+  function labels(el) {
+    return chips(el).map((chip) => chip.textContent.trim());
+  }
+
+  afterEach(() => {
+    resetRepoRoot();
+  });
+
+  it('renders no section for a turn that changed nothing', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({ files_modified: [] }));
+    await settle(el);
+    expect(sectionHead(el, 'Files modified')).toBeUndefined();
+  });
+
+  it('names each file relative to the repo root', async () => {
+    // The house rule every file on screen follows: relative inside the root,
+    // absolute outside it, engine's path on the tooltip (next.md § C4). The
+    // engine reports absolute paths and always will — its file tools require
+    // them — so this is the only thing standing between the reader and 300px
+    // of prefix that is the same for every file in the repo.
+    setRepoRoot('/home/you/repo');
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({
+      files_modified: ['/home/you/repo/src/a.js', '/elsewhere/b.js'],
+    }));
+    await settle(el);
+    expect(labels(el)).toEqual(['src/a.js', '/elsewhere/b.js']);
+    expect(chips(el).map((c) => c.getAttribute('title'))).toEqual([
+      'Open /home/you/repo/src/a.js',
+      'Open /elsewhere/b.js',
+    ]);
+  });
+
+  it('navigates with the path the engine sent, not the label', async () => {
+    // The label is a display concern and must not become the navigation
+    // contract: `onNavigateFile` normalises, and it is the one place that
+    // should. A second conversion here would be a second thing to keep true.
+    setRepoRoot('/home/you/repo');
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({ files_modified: ['/home/you/repo/src/a.js'] }));
+    await settle(el);
+
+    const seen = [];
+    const listener = (event) => seen.push(event.detail.path);
+    window.addEventListener('navigate-file', listener);
+    chips(el)[0].click();
+    window.removeEventListener('navigate-file', listener);
+
+    expect(seen).toEqual(['/home/you/repo/src/a.js']);
+  });
+
+  it('deduplicates on the raw path, not the label', async () => {
+    // A turn that edits one file three times reports it three times. Dedup on
+    // the label would additionally collapse two *different* files that happen
+    // to render the same, which is the bug the "Files Referenced" list had.
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({
+      files_modified: ['/r/a.js', '/r/a.js', '/r/b.js'],
+    }));
+    await settle(el);
+    expect(labels(el)).toEqual(['/r/a.js', '/r/b.js']);
+    expect(sectionHead(el, 'Files modified').textContent).toContain('2');
+  });
+
+  it('drops entries that are not usable paths', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({ files_modified: ['/r/a.js', '', null, 7] }));
+    await settle(el);
+    expect(labels(el)).toEqual(['/r/a.js']);
+  });
+
+  it('clears the list when the next turn changes nothing', async () => {
+    // `_turn` is replaced wholesale, so this cannot regress by accident — but
+    // a HUD still listing the previous turn's files would be reporting the
+    // wrong turn's work, which is the failure worth pinning.
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture({ files_modified: ['/r/a.js'] }));
+    await settle(el);
+    expect(chips(el)).toHaveLength(1);
+
+    pushComplete(resultFixture({ files_modified: [] }), 'req-2');
+    await settle(el);
+    expect(chips(el)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rate limits
+// ---------------------------------------------------------------------------
+
+describe('UsageHud rate limits', () => {
+  /** An hour from now, in the Unix *seconds* the CLI sends. */
+  function soon(offsetSeconds = 3600) {
+    return Math.floor(Date.now() / 1000) + offsetSeconds;
+  }
+
+  function limitFixture(overrides = {}) {
+    return {
+      status: 'allowed',
+      rate_limit_type: 'five_hour',
+      utilization: 0.42,
+      resets_at: soon(),
+      overage_status: null,
+      overage_resets_at: null,
+      overage_disabled_reason: null,
+      raw: {},
+      ...overrides,
+    };
+  }
+
+  function pushLimit(data) {
+    window.dispatchEvent(
+      new CustomEvent('rate-limit', { detail: { requestId: 'req-1', data } }),
+    );
+  }
+
+  function pushStateLoaded(state) {
+    window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
+  }
+
+  function head(el) {
+    return [...el.shadowRoot.querySelectorAll('.sec-head')].find((h) =>
+      h.querySelector('.sec-name')?.textContent.trim().endsWith('limit'),
+    );
+  }
+
+  function notes(el) {
+    return [...el.shadowRoot.querySelectorAll('.rl-note')]
+      .map((n) => n.textContent.replace(/\s+/g, ' ').trim());
+  }
+
+  it('renders nothing before the CLI has sent a record', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeUndefined();
+  });
+
+  it('shows utilisation at a healthy status, not only at a warning', async () => {
+    // The decision R-6 forces: under a subscription this is the only figure
+    // that maps to anything the user can act on, so a section that appeared
+    // only at `allowed_warning` would be a second alarm rather than a gauge.
+    // The chat panel's toast is the alarm and stays silent on `allowed`.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({ status: 'allowed' }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeTruthy();
+    expect(head(el).querySelector('.sec-name').textContent.trim())
+      .toBe('5-hour limit');
+    expect(head(el).querySelector('.value').textContent.trim()).toBe('42%');
+  });
+
+  it('names the reset time in the body, not only in a tooltip', async () => {
+    // "72% used" is a fact; "72% used, resets at 14:30" is a decision.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture());
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(notes(el).join(' ')).toMatch(/^Resets at \d/);
+  });
+
+  it('drops a record whose window has already reset', async () => {
+    // A rate limit is emitted on a status *change*, so one record stands for
+    // hours and outlives its own window. Past the reset the counter is back
+    // at zero and the figure is a claim about a window that no longer exists
+    // — with nothing else on screen to contradict it.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({ resets_at: soon(-60) }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeUndefined();
+  });
+
+  it('reports a rejection in red whatever the utilisation says', async () => {
+    // An overage cut-off can refuse a turn at a utilisation the colour bands
+    // would call healthy. The colour reports the outcome, not the arithmetic.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({ status: 'rejected', utilization: 0.1 }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el).querySelector('.value').style.color).toBe('rgb(248, 81, 73)');
+    expect(notes(el).join(' ')).toContain('Limit reached');
+  });
+
+  it('renders a record that carries a type but no figure', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({ utilization: null }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el).querySelector('.value').textContent.trim()).toBe('—');
+    expect(el.shadowRoot.querySelector('.bar')).toBeTruthy(); // the context bar
+  });
+
+  it('gives an unavailable overage the CLI\'s own reason', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({
+      overage_status: 'rejected',
+      overage_disabled_reason: 'no payment method on file',
+    }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(notes(el).join(' ')).toContain('Overage unavailable — no payment method on file');
+  });
+
+  it('says overage is available without inventing a figure for it', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({ overage_status: 'allowed', overage_resets_at: soon() }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(notes(el).join(' ')).toMatch(/Overage available, resets at \d/);
+  });
+
+  it('adopts the record from the first-paint snapshot', async () => {
+    // The CLI emits this on a status *transition*, so a browser that reloads
+    // an hour into a five-hour window would otherwise have nothing to show
+    // until the next transition — which may be the rejection the figure
+    // exists to give warning of. Same lesson as the compaction indicator: a
+    // broadcast is not a record.
+    publishUsage();
+    const el = mountHud();
+    pushStateLoaded({ rate_limit: limitFixture({ utilization: 0.77 }) });
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el).querySelector('.value').textContent.trim()).toBe('77%');
+  });
+
+  it('keeps a pushed record when a later snapshot carries none', async () => {
+    // A reconnect re-delivers the snapshot mid-session, and a backend older
+    // than the field sends nothing at all. Neither is evidence that a limit
+    // the browser has been told about has gone away.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture());
+    pushStateLoaded({ messages: [] });
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeTruthy();
+  });
+
+  it('survives a session change, because the window belongs to the account', async () => {
+    // `/clear` does not give the tokens back.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture());
+    window.dispatchEvent(new CustomEvent('session-changed', { detail: {} }));
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeTruthy();
+  });
+
+  it('ignores a malformed push rather than blanking a good record', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture());
+    pushLimit(null);
+    pushLimit('rejected');
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(head(el)).toBeTruthy();
+  });
+
+  it('stops listening once removed', async () => {
+    const el = mountHud();
+    await settle(el);
+    el.remove();
+    pushLimit(limitFixture());
+    await Promise.resolve();
+    expect(el._rateLimit).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Collapse
+// ---------------------------------------------------------------------------
+
+describe('UsageHud section collapse', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem('aic-dc-hud-collapsed');
+  });
+
+  afterEach(() => {
+    window.localStorage.removeItem('aic-dc-hud-collapsed');
+  });
+
+  function stored() {
+    return JSON.parse(window.localStorage.getItem('aic-dc-hud-collapsed') || 'null');
+  }
+
+  it('opens every section by default', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    const heads = [...el.shadowRoot.querySelectorAll('.sec-head')];
+    expect(heads.length).toBeGreaterThan(0);
+    expect(heads.every((h) => h.getAttribute('aria-expanded') === 'true')).toBe(true);
+  });
+
+  it('hides the body but keeps the headline when collapsed', async () => {
+    // The point of collapsing costing no height: the percentage and the
+    // totals are the answer, and the bar and the legend are the working.
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.cats')).toBeTruthy();
+
+    sectionHead(el, 'Context').click();
+    await settle(el);
+
+    expect(el.shadowRoot.querySelector('.cats')).toBeNull();
+    expect(el.shadowRoot.querySelector('.bar')).toBeNull();
+    expect(contextRow(el).querySelector('.value').textContent).toContain('23%');
+    expect(contextRow(el).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('persists the collapse to localStorage as a set of names', async () => {
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    sectionHead(el, 'Context').click();
+    await settle(el);
+    expect(stored()).toEqual(['Context']);
+
+    sectionHead(el, 'Context').click();
+    await settle(el);
+    expect(stored()).toEqual([]);
+  });
+
+  it('restores the collapse on the next mount', async () => {
+    window.localStorage.setItem(
+      'aic-dc-hud-collapsed', JSON.stringify(['Context']),
+    );
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el).getAttribute('aria-expanded')).toBe('false');
+    expect(el.shadowRoot.querySelector('.cats')).toBeNull();
+  });
+
+  it('keys the rate-limit section on a name that does not move', async () => {
+    // The label is the window's name — "5-hour limit" becomes "7-day limit"
+    // when the account's binding limit changes — so keying the preference on
+    // it would silently re-open a section the user closed, on the day the
+    // label changed.
+    window.localStorage.setItem(
+      'aic-dc-hud-collapsed', JSON.stringify(['Rate limits']),
+    );
+    publishUsage();
+    const el = mountHud();
+    window.dispatchEvent(new CustomEvent('rate-limit', {
+      detail: {
+        data: {
+          status: 'allowed',
+          rate_limit_type: 'seven_day_opus',
+          utilization: 0.5,
+          resets_at: Math.floor(Date.now() / 1000) + 3600,
+        },
+      },
+    }));
+    pushComplete(resultFixture());
+    await settle(el);
+    const head = sectionHead(el, '7-day Opus limit');
+    expect(head).toBeTruthy();
+    expect(head.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('leaves "This turn" as a plain row with no disclosure control', async () => {
+    // Its entire content is its headline, so a caret there would hide the
+    // figure the HUD exists to show and cost a row to do it.
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(turnRow(el)).toBeTruthy();
+    expect(turnRow(el).querySelector('.sec-caret')).toBeNull();
+    expect(sectionHead(el, 'This turn')).toBeUndefined();
+  });
+
+  it('survives a corrupt stored value rather than failing to open', async () => {
+    window.localStorage.setItem('aic-dc-hud-collapsed', '{not json');
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    expect(contextRow(el).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps a name it does not render rather than dropping it', async () => {
+    // Two browsers on one profile, or a downgrade: each would otherwise clear
+    // the other's preferences for the sections it does not draw.
+    window.localStorage.setItem(
+      'aic-dc-hud-collapsed', JSON.stringify(['Context', 'Some later section']),
+    );
+    publishUsage();
+    const el = mountHud();
+    pushComplete(resultFixture());
+    await settle(el);
+    sectionHead(el, 'Context').click();
+    await settle(el);
+    expect(stored()).toEqual(['Some later section']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
+
+describe('UsageHud geometry', () => {
+  /**
+   * Read from the stylesheet source, the way the slash palette and the tool
+   * card pin their own layout rules. jsdom does no layout, so an assertion on
+   * a measured height would be an assertion about nothing — what can be
+   * checked is that the rule exists, which is § D2's standing limit and not
+   * this test's failing.
+   */
+  function rule(selector) {
+    const css = UsageHud.styles.cssText;
+    const at = css.indexOf(`${selector} {`);
+    expect(at).toBeGreaterThan(-1);
+    return css.slice(at, css.indexOf('}', at));
+  }
+
+  it('bounds its own height and scrolls inside', () => {
+    // Specified since phase 3 and never written. A turn that touches forty
+    // files is an ordinary refactor, and the Files modified section is the
+    // first thing here that grows with the work rather than being a fixed
+    // handful of rows.
+    const hudRule = rule('.hud');
+    expect(hudRule).toContain('max-height: 80vh');
+    expect(hudRule).toContain('overflow-y: auto');
+  });
+
+  it('sits below the permission dialog, which is modal over everything', () => {
+    // The one surface in the app that blocks a turn. This was 10000 — above
+    // the dialog's 9000 — for three phases while § Placement said the
+    // opposite, so a permission request arriving inside the HUD's eight
+    // seconds had an overlay floating over its top-right corner and taking
+    // the clicks there. Asserted as an ordering rather than a number, since
+    // the number is only ever wrong relative to another one.
+    const host = rule(':host');
+    const z = Number(/z-index:\s*(\d+)/.exec(host)?.[1]);
+    expect(z).toBe(500);
+    expect(z).toBeLessThan(PERMISSION_DIALOG_Z);
+  });
+
+  it('gives a file chip a width budget', () => {
+    // The failure the tool-card chip had: no `max-width`, no ellipsis, so one
+    // long path stretched the row it sat in.
+    const chip = rule('.file-chip');
+    expect(chip).toContain('max-width: 100%');
+    expect(chip).toContain('text-overflow: ellipsis');
   });
 });

@@ -70,6 +70,7 @@ import {
   onActiveFileChanged, scheduleViewerRelayout, relayoutViewers,
   syncViewerInset,
 } from './viewers.js';
+import { resendViewerState } from './viewer-framing.js';
 import {
   saveViewportState, saveSvgViewportState, loadViewportState,
   tryReopenLastFile, doReopenLastFile, doReopenSvg, restoreViewport,
@@ -266,12 +267,16 @@ export class AppShell extends JRPCClient {
     // Default to diff viewer — most files route there.
     // Flipped to 'svg' on navigate-file to an .svg path.
     this._activeViewer = 'diff';
+    // The path last pushed to ClaudeCodeService.set_viewer_state, so
+    // repeated active-file-changed events for one file cost one call.
+    // Starts null because a fresh server holds null. See
+    // ./viewer-framing.js.
+    this._reportedViewerPath = null;
     this._repoName = '';
-    // The repo's absolute root, from get_current_state. Held so
-    // navigate-file can relativise the absolute paths the engine
-    // reports for tool calls — see repo-path.js. Empty until the
-    // first snapshot lands, which leaves such a path as it was.
-    this._repoRoot = '';
+    // The repo's absolute root is *not* held here. It lives in
+    // repo-path.js, published once by the state-snapshot handler,
+    // because the chip renderers that need it take a path and no
+    // host — and one repo should have one answer (next.md § C4).
     this._initComplete = false;
     // Doc Convert availability — flipped to true when the
     // backend's get_current_state reports markitdown is
@@ -685,6 +690,9 @@ export class AppShell extends JRPCClient {
       // startup overlay and show a success toast instead.
       this.overlayVisible = false;
       this._showToast('Reconnected', 'success');
+      // A reconnect usually means a restarted server, which holds
+      // no viewer state — tell it again what is on screen.
+      resendViewerState(this);
     }
     this._wasConnected = true;
 

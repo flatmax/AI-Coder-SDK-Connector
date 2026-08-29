@@ -31,6 +31,8 @@
 import { render } from 'lit';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { resetRepoRoot, setRepoRoot } from '../repo-path.js';
+
 import {
   blockExpanded,
   compactionSummary,
@@ -55,10 +57,13 @@ import {
   renderTurnFooter,
   subagentBlocksExpanded,
   terminalBadge,
+  TOOL_SUMMARY_CHARS,
   toggleBlock,
   toggleSubagentBlocks,
+  toolInputSummary,
   toolLabel,
 } from './block-render.js';
+import { STYLES } from './styles.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -77,6 +82,9 @@ function draw(template) {
 
 afterEach(() => {
   while (hosts.length) hosts.pop().remove();
+  // The repo root is module state, and a chip test that publishes one would
+  // otherwise decide how every later test's paths are labelled.
+  resetRepoRoot();
 });
 
 /**
@@ -101,7 +109,9 @@ function toolBlock({ tool = {}, ...rest } = {}) {
   return {
     kind: 'tool',
     block_id: 'toolu_01',
-    tool: { name: 'Bash', input: { command: 'ls -la' }, input_summary: 'ls -la', ...tool },
+    // No `input_summary` — the card carries only `input`, and the header's
+    // one-liner is rendered from it in the browser (§ C3).
+    tool: { name: 'Bash', input: { command: 'ls -la' }, ...tool },
     ...rest,
   };
 }
@@ -422,6 +432,17 @@ describe('formatBytes', () => {
     expect(formatBytes(1024 * 1024)).toBe('1.0 MB');
     expect(formatBytes(5.5 * 1024 * 1024)).toBe('5.5 MB');
   });
+
+  it('stops at gigabytes, for the session directory', () => {
+    // The tier the tool cards never needed: a truncated result stops in the
+    // hundreds of KB, but `.aic-dc/sessions/` is warned about in gigabytes
+    // and `1782.4 MB` is a number the reader has to divide first.
+    const gb = 1024 * 1024 * 1024;
+    expect(formatBytes(gb - 1)).toBe('1024.0 MB');
+    expect(formatBytes(gb)).toBe('1.0 GB');
+    expect(formatBytes(2.2 * gb)).toBe('2.2 GB');
+    expect(formatBytes(1500 * gb)).toBe('1500.0 GB');
+  });
 });
 
 describe('formatTokens', () => {
@@ -520,6 +541,87 @@ describe('toolLabel', () => {
     expect(toolLabel(null)).toBe('');
     expect(toolLabel({})).toBe('');
     expect(toolLabel({ name: 42 })).toBe('');
+  });
+});
+
+describe('toolInputSummary', () => {
+  // The header's one-liner, built here rather than shipped off the engine
+  // (§ C3). The whole reason for the move is the first test: the engine's
+  // join could not shorten a repo path, so the header spent rows on a prefix
+  // identical for every file in the repo.
+
+  it('names a file the way the rest of the app does', () => {
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ file_path: '/home/you/repo/src/a.js' }))
+      .toBe('file_path=src/a.js');
+  });
+
+  it('needs no table of which keys are paths', () => {
+    // The blocker `chat.md` recorded, and it was not one: a value that
+    // begins with the repo root is a path by its shape, so every string
+    // value can be offered to the rule and the rule declines the rest.
+    setRepoRoot('/home/you/repo');
+    expect(
+      toolInputSummary({
+        pattern: 'TODO',
+        path: '/home/you/repo/webapp/src',
+        '-i': true,
+      }),
+    ).toBe('pattern=TODO path=webapp/src -i=true');
+  });
+
+  it('leaves a path outside the repo, and one with no root yet, alone', () => {
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ file_path: '/etc/hosts' }))
+      .toBe('file_path=/etc/hosts');
+    resetRepoRoot();
+    expect(toolInputSummary({ file_path: '/home/you/repo/src/a.js' }))
+      .toBe('file_path=/home/you/repo/src/a.js');
+  });
+
+  it('leaves a path quoted inside a value alone', () => {
+    // The rule renames a path; it does not rewrite prose. An `old_string`
+    // that happens to quote an absolute path keeps it, because shortening
+    // the middle of a value would change text the user is about to compare
+    // against their file.
+    setRepoRoot('/home/you/repo');
+    expect(toolInputSummary({ old_string: 'see /home/you/repo/src/a.js' }))
+      .toBe('old_string=see /home/you/repo/src/a.js');
+  });
+
+  it('is one line, whatever the input carried', () => {
+    // A Bash heredoc arrives with its newlines in it; a header row is one
+    // line. Same collapse the engine used to do.
+    expect(toolInputSummary({ command: 'echo one\ntwo\tthree' }))
+      .toBe('command=echo one two three');
+  });
+
+  it('caps the summary, ellipsis included in the count', () => {
+    const summary = toolInputSummary({ command: 'x'.repeat(500) });
+    expect(summary).toHaveLength(TOOL_SUMMARY_CHARS);
+    expect(summary.endsWith('…')).toBe(true);
+  });
+
+  it('renders a non-string value as JSON', () => {
+    // `[1,2]` where the engine wrote `[1, 2]` — that one space is the only
+    // rendering this move changes.
+    expect(toolInputSummary({ edits: [1, 2] })).toBe('edits=[1,2]');
+  });
+
+  it('loses only the value it cannot serialise', () => {
+    // `JSON.stringify` throws on a circular value, and a throw in here is a
+    // throw inside a render pass. Caught per value, so the part that could be
+    // read still reaches the header.
+    const circular = { file_path: 'a.js' };
+    circular.self = circular;
+    expect(toolInputSummary(circular)).toBe('file_path=a.js self=[object Object]');
+  });
+
+  it('is empty for nothing to summarise', () => {
+    expect(toolInputSummary(null)).toBe('');
+    expect(toolInputSummary({})).toBe('');
+    expect(toolInputSummary('file_path=a.js')).toBe('');
+    expect(toolInputSummary([1, 2])).toBe('');
   });
 });
 
@@ -762,7 +864,7 @@ describe('renderTurnBlocks', () => {
   });
 
   it('renders a subagent’s blocks inside its row, not at turn level', () => {
-    const task = toolBlock({ block_id: 'toolu_task', tool: { name: 'Task', input_summary: 'explore' } });
+    const task = toolBlock({ block_id: 'toolu_task', tool: { name: 'Task', input: { prompt: 'explore' } } });
     const inner = toolBlock({ block_id: 'toolu_inner', agent_id: 'toolu_task', tool: { name: 'Grep' } });
     const row = { key: 'task-1', task_id: 'task-1', tool_use_id: 'toolu_task', description: 'Explore' };
     const panel = stubPanel();
@@ -908,7 +1010,11 @@ describe('renderToolCard', () => {
     expect(card.dataset.blockId).toBe('toolu_01');
     expect(card.dataset.tool).toBe('Bash');
     expect(text(card.querySelector('.tool-name'))).toBe('Bash');
-    expect(text(card.querySelector('.tool-summary'))).toBe('ls -la');
+    // `command=ls -la`, not `ls -la`: the fixture used to carry a hand-written
+    // `input_summary` that skipped the key, which the engine's own join never
+    // did. Rendering from `input` here means the header can only say what the
+    // engine would have said.
+    expect(text(card.querySelector('.tool-summary'))).toBe('command=ls -la');
     expect(card.querySelector('.tool-dot').getAttribute('title')).toBe('Finished');
     expect(text(card.querySelector('.tool-caret'))).toBe('▸');
     // Collapsed, so the body is not in the DOM at all.
@@ -988,7 +1094,11 @@ describe('renderToolCard', () => {
       const host = draw(renderToolCard(ticking(), timedBlock()));
       const chip = host.querySelector('.tool-time');
       expect(text(host.querySelector('.tool-elapsed'))).toBe('2m 41s');
-      expect(text(chip)).toBe(`${clock()} · 2m 41s`);
+      // Two spans, stacked in the rail rather than joined by a middle dot:
+      // side by side the pair wanted about 110px of a 112px rail, and more
+      // than all of it once a restored card puts a date in front of the clock.
+      expect(text(chip.querySelector('.tool-clock'))).toBe(clock());
+      expect(text(chip)).toBe(`${clock()} 2m 41s`);
       expect(chip.getAttribute('title'))
         .toBe(`Invoked at ${clock()} by the engine's clock — running for 2m 41s`);
     });
@@ -1060,7 +1170,7 @@ describe('renderToolCard', () => {
     // The call never ran: its input is a proposal, and the reason the user
     // gave is the record — the agent read it too and acted on it.
     const host = draw(renderToolCard(stubPanel(), toolBlock({
-      tool: { name: 'Bash', input: { command: 'rm -rf /' }, input_summary: 'rm -rf /' },
+      tool: { name: 'Bash', input: { command: 'rm -rf /' } },
       denial: { action: 'deny', reason: 'Not on my machine.', resolvedBy: 'matt' },
     })));
     const body = host.querySelector('.tool-body');
@@ -1198,7 +1308,6 @@ describe('renderToolCard', () => {
       tool: {
         name: 'Edit',
         input: { file_path: 'src/a.js', old_string: 'let a', new_string: 'const a' },
-        input_summary: 'file_path=src/a.js',
       },
       result: { status: 'ok', preview: 'ok' },
     });
@@ -1210,6 +1319,95 @@ describe('renderToolCard', () => {
     host.querySelector('.tool-header').click();
     render(renderToolCard(panel, block), host);
     expect(host.querySelector('.tool-body')).toBeNull();
+  });
+
+  it('keeps the rules that let a long summary wrap instead of eliding', () => {
+    // Read from the source for the reason the file-chip guard below states:
+    // jsdom does no layout and does not resolve Lit's adopted stylesheet, so
+    // the rules' presence is all that can be checked here.
+    //
+    // Worth a guard because the header is the *only* place a collapsed card
+    // says what the call was about and it carries no tooltip — so an ellipsis
+    // put the identifying tail of a path or a flag run out of reach entirely.
+    // `anywhere` is the load-bearing word: those strings have no spaces in
+    // them, and a summary that may only break at a space cannot break.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-summary {');
+    expect(at, '.tool-summary rule is gone').toBeGreaterThan(-1);
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('white-space: pre-wrap');
+    expect(rule).toContain('overflow-wrap: anywhere');
+    expect(rule).not.toContain('text-overflow');
+    expect(rule).not.toContain('nowrap');
+    // One bound, not two: `TOOL_SUMMARY_CHARS` in block-render.js already
+    // limits the height a card can reach, and a line clamp on top of it would
+    // be the same ellipsis three rows lower. Checked across the whole sheet
+    // rather than this rule, because the clamp used to live in a Bash-only
+    // rule of its own — and the argument for that exception was never about
+    // Bash.
+    expect(
+      cssText,
+      'no tool summary should carry a line clamp; if some other rule in this '
+        + 'sheet wants one, narrow this check to the tool-card rules',
+    ).not.toContain('line-clamp');
+    expect(cssText).not.toContain("data-tool='Bash'");
+  });
+
+  it('keeps the header two columns, with the chrome in the left one', () => {
+    // The structural half of the rule: everything that is not the summary
+    // sits in one rail element, so the summary's width is the pane minus the
+    // rail and minus nothing else. As three columns — chrome, summary, more
+    // chrome — the right-hand group was subtracted from every line of the
+    // summary rather than only from the line it was on, because the summary
+    // is one box.
+    const host = draw(renderToolCard(stubPanel({ _streamTimerInterval: 7 }), toolBlock({
+      gated: true,
+      tool: { invoked_at: new Date(2026, 7, 27, 14, 32, 7).toISOString() },
+    })));
+    const header = host.querySelector('.tool-header');
+    expect([...header.children].map((el) => el.className))
+      .toEqual(['tool-meta', 'tool-summary']);
+    // The caret leads the rail: it is the one item that cannot afford to wrap
+    // onto a line of its own, and first is the position where it cannot.
+    const rail = header.querySelector('.tool-meta');
+    expect(text(rail.querySelector('.tool-meta-line > :first-child'))).toBe('▸');
+    for (const cls of ['.tool-dot', '.tool-name', '.tool-time', '.tool-gated']) {
+      expect(rail.querySelector(cls), `${cls} belongs in the rail`).not.toBeNull();
+    }
+    // A line each, down the rail: name, then time, then the gated marker.
+    // Sharing a line, the marker sat beside the clock on a card timed today
+    // and wrapped under it on one restored from another day, so where a
+    // reader looked for it depended on how old the card was.
+    expect([...rail.children].map((line) => line.lastElementChild.className))
+      .toEqual(['tool-name', 'tool-time', 'tool-gated']);
+  });
+
+  it('gives the rail no line it would leave empty', () => {
+    // Every card written before `invoked_at` existed carries no time, and an
+    // ungated one of those has nothing to put below its name.
+    const host = draw(renderToolCard(stubPanel(), toolBlock()));
+    expect(host.querySelectorAll('.tool-meta-line').length).toBe(1);
+    // Gated but untimed: the marker moves up rather than sitting under a gap.
+    const gatedHost = draw(renderToolCard(stubPanel(), toolBlock({ gated: true })));
+    const lines = gatedHost.querySelectorAll('.tool-meta-line');
+    expect(lines.length).toBe(2);
+    expect(lines[1].firstElementChild.className).toBe('tool-gated');
+  });
+
+  it('fixes the rail width so the summary starts at the same x on every card', () => {
+    // A rail as wide as its own widest line is not a column: the summary's
+    // left edge would step in and out card by card, and a long MCP tool name
+    // or a restored card's date-and-time chip would move it. They wrap inside
+    // the rail instead. Read from the source for the reason the guard above
+    // states — jsdom does no layout.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-header {');
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('display: grid');
+    expect(rule).toMatch(/grid-template-columns: [\d.]+rem 1fr/);
+    // The rail aligns with the summary's first line, not with the middle of a
+    // block several lines tall.
+    expect(rule).toContain('align-items: start');
   });
 });
 
@@ -1237,6 +1435,68 @@ describe('renderFileChip', () => {
     const host = draw(renderFileChip('src/a.js'));
     expect(host.querySelector('.tool-file-chip').getAttribute('title'))
       .toBe('Open src/a.js');
+  });
+
+  it('labels an absolute path with its repo-relative name', () => {
+    // Every path on a tool card is absolute — Claude Code's file tools
+    // require it — and the identifying end of a long one is the end that
+    // falls off the chip. next.md § C4.
+    setRepoRoot('/home/dev/my-repo');
+    const host = draw(
+      renderFileChip('/home/dev/my-repo/src/chat-panel/block-render.js'),
+    );
+    expect(text(host.querySelector('.tool-file-chip')))
+      .toBe('src/chat-panel/block-render.js');
+  });
+
+  it('keeps the absolute path on the tooltip and in the click', () => {
+    // The label is a display concern. `onNavigateFile` is the one
+    // normaliser, so shortening the label must not shorten what is
+    // dispatched, and the full path stays reachable by hovering.
+    setRepoRoot('/home/dev/my-repo');
+    const abs = '/home/dev/my-repo/src/a.js';
+    const host = draw(renderFileChip(abs));
+    const chip = host.querySelector('.tool-file-chip');
+    expect(chip.getAttribute('title')).toBe(`Open ${abs}`);
+    const navigate = vi.fn();
+    window.addEventListener('navigate-file', navigate);
+    try {
+      chip.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(navigate.mock.calls[0][0].detail).toEqual({ path: abs });
+    } finally {
+      window.removeEventListener('navigate-file', navigate);
+    }
+  });
+
+  it('leaves a path outside the repo at its absolute name', () => {
+    // It has no other name here, so the absolute path is the label as well
+    // as the tooltip — the same non-answer `toRepoPath` gives navigation.
+    setRepoRoot('/home/dev/my-repo');
+    const host = draw(renderFileChip('/etc/hosts'));
+    expect(text(host.querySelector('.tool-file-chip'))).toBe('/etc/hosts');
+  });
+
+  it('shows the absolute path before a root is published', () => {
+    // No state snapshot yet. Measuring against '' would name the wrong file.
+    const host = draw(renderFileChip('/home/dev/my-repo/src/a.js'));
+    expect(text(host.querySelector('.tool-file-chip')))
+      .toBe('/home/dev/my-repo/src/a.js');
+  });
+
+  it('keeps the rules that bound a long path to one row', () => {
+    // A regression guard, not a layout test — jsdom does no layout and does
+    // not resolve Lit's adopted stylesheet, so the rules are read from the
+    // source, same as the slash palette's hint-width guard. The relative
+    // label fits the common case; a deeply nested path still does not, and
+    // this chip had no width budget at all before § C4.
+    const cssText = STYLES.cssText;
+    const at = cssText.indexOf('.tool-file-chip {');
+    expect(at, '.tool-file-chip rule is gone').toBeGreaterThan(-1);
+    const rule = cssText.slice(at, cssText.indexOf('}', at));
+    expect(rule).toContain('max-width: 24rem');
+    expect(rule).toContain('overflow: hidden');
+    expect(rule).toContain('text-overflow: ellipsis');
+    expect(rule).toContain('white-space: nowrap');
   });
 });
 

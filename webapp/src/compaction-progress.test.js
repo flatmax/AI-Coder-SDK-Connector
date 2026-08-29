@@ -625,3 +625,133 @@ describe('CompactionProgress cleanup', () => {
     expect(el._state).toBe('hidden');
   });
 });
+
+// -----------------------------------------------------------
+// Restoring across a page reload
+// -----------------------------------------------------------
+//
+// Every signal above is live: it says what the engine is doing
+// now, to whoever happens to be connected. Refresh during the
+// pause and all of them have already been and gone, so the
+// indicator that existed to explain a long silence was itself
+// erased by the one action a user watching a silent UI is most
+// likely to take. `get_current_state` now carries the pause as
+// state, and the shell's `state-loaded` restores it.
+
+/** The shell's snapshot broadcast, as `state-fetch.js` sends it. */
+function fireStateLoaded(state) {
+  window.dispatchEvent(new CustomEvent('state-loaded', { detail: state }));
+}
+
+describe('CompactionProgress restoring after a reload', () => {
+  it('shows the pause a refresh would otherwise have erased', async () => {
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 12 } });
+    await el.updateComplete;
+    const overlay = el.shadowRoot.querySelector('.overlay');
+    expect(overlay).not.toBeNull();
+    expect(overlay.textContent).toContain('Compacting conversation');
+  });
+
+  it('resumes the counter where the wait actually is', async () => {
+    // Restarting from zero would be a fresh lie in place of the old one:
+    // the user has been waiting 42 seconds and the screen would say 0.
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 42 } });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent).toContain('42');
+  });
+
+  it('keeps counting from the restored value', async () => {
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 42 } });
+    await el.updateComplete;
+    vi.advanceTimersByTime(3000);
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent).toContain('45');
+  });
+
+  it('stays quiet when nothing is compacting', async () => {
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: null });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay')).toBeNull();
+  });
+
+  it('stays quiet when the field is absent', async () => {
+    // An older engine, or a snapshot that failed partway.
+    const el = mountOverlay();
+    fireStateLoaded({ session_id: 's-1' });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay')).toBeNull();
+  });
+
+  it('ignores a malformed elapsed value', async () => {
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 'ages' } });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay')).toBeNull();
+  });
+
+  it('is treated as confirmed, so it gets the long ceiling', async () => {
+    // The server only sets this from the engine's own status frame, never
+    // from the ambiguous PreCompact hook, so a restore can never be a
+    // speculative background precompute. It must not vanish at the short
+    // unconfirmed ceiling the way a hook-only indicator does.
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 5 } });
+    await el.updateComplete;
+    vi.advanceTimersByTime(UNCONFIRMED_MS + 1000);
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay')).not.toBeNull();
+  });
+
+  it('spends the ceiling the compaction has already used', async () => {
+    // The budget is for the whole compaction, not for this component's view
+    // of it. A restore 170s in must not buy another 180 — a compaction that
+    // died before the refresh would sit there claiming to work.
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: MAX_ACTIVE_MS / 1000 - 10 } });
+    await el.updateComplete;
+    vi.advanceTimersByTime(11000);
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent)
+      .toContain('has not reported finishing');
+  });
+
+  it('does not restart an indicator already on screen', async () => {
+    // A reconnect can deliver a snapshot while the live signals are still
+    // arriving. The live one is at least as fresh, and re-entering would
+    // re-phase the counter.
+    const el = mountOverlay();
+    startPause('auto');
+    await el.updateComplete;
+    vi.advanceTimersByTime(4000);
+    await el.updateComplete;
+    fireStateLoaded({ compaction: { elapsed_seconds: 99 } });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent).toContain('4');
+    expect(el.shadowRoot.querySelector('.overlay').textContent).not.toContain('99');
+  });
+
+  it('does not pre-empt a hook still inside its grace period', async () => {
+    const el = mountOverlay();
+    firePreCompact('auto');
+    fireStateLoaded({ compaction: { elapsed_seconds: 99 } });
+    vi.advanceTimersByTime(GRACE_MS + 100);
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent).not.toContain('99');
+  });
+
+  it('completes normally from a restored state', async () => {
+    // The restored indicator is an ordinary active state, so the live
+    // signals that end one still end it.
+    const el = mountOverlay();
+    fireStateLoaded({ compaction: { elapsed_seconds: 8 } });
+    await el.updateComplete;
+    fireBoundary({ pre_tokens: 120000, post_tokens: 30000 });
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelector('.overlay').textContent)
+      .not.toContain('Compacting conversation');
+  });
+});

@@ -234,19 +234,51 @@ class TestGetConfigContent:
 
 
 class TestGetConfigInfo:
-    def test_returns_the_config_dir_and_nothing_else(
+    def test_it_reports_the_dir_and_what_is_retired_in_it(
         self, settings, isolated_config_dir
     ):
-        """One key. The model names it used to carry belong to the engine.
+        """Two keys, and no model name among them.
 
-        They described the native engine's primary/smaller pair, and the
-        model actually in force can be changed mid-session through
-        ``ClaudeCodeService.set_model`` — so reading it from a config
-        file here would show the user a value that is merely a default.
+        The model names this used to carry belong to the engine: they
+        described the native engine's primary/smaller pair, and the model
+        actually in force can be changed mid-session through
+        ``ClaudeCodeService.set_model``, so reading one from a config file
+        here would show the user a value that is merely a default.
+
+        ``retired_files`` is here rather than on an RPC of its own because
+        it is one more fact about the same directory.
         """
         assert settings.get_config_info() == {
-            "config_dir": str(isolated_config_dir)
+            "config_dir": str(isolated_config_dir),
+            "retired_files": [],
         }
+
+    def test_a_retired_file_on_disk_is_named(
+        self, settings, isolated_config_dir
+    ):
+        """The whole point: the Settings tab can only explain the card
+        that vanished if it knows this install had the file."""
+        (isolated_config_dir / "system_extra.md").write_text(
+            "months of the user's own prompt work\n", encoding="utf-8"
+        )
+        assert settings.get_config_info()["retired_files"] == [
+            "system_extra.md"
+        ]
+
+    def test_a_fresh_install_is_told_nothing(
+        self, settings, isolated_config_dir
+    ):
+        """A note naming files the user has never had would be noise,
+        and relevance is the only thing this note has going for it."""
+        assert settings.get_config_info()["retired_files"] == []
+
+    def test_live_config_files_are_not_called_retired(
+        self, settings, isolated_config_dir
+    ):
+        """engine.json and app.json are current, and both exist."""
+        (isolated_config_dir / "engine.json").write_text("{}", encoding="utf-8")
+        (isolated_config_dir / "app.json").write_text("{}", encoding="utf-8")
+        assert settings.get_config_info()["retired_files"] == []
 
     def test_allowed_for_non_localhost(self, settings):
         settings._collab = _StubCollab(is_localhost=False)

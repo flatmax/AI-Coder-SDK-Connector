@@ -12,9 +12,11 @@ than one that says so.
 
 > **Parts of this file are ahead of the build.** The tab renders a toolbar, a one-row info banner, the
 > model panel, a two-card grid, an inline editor, the per-field save disposition (§ Save Behavior) and
-> the restart control that applies what a save could not (§ Session Controls). What remains
-> specified-but-unbuilt is now only work that genuinely belongs *here*: three preference cards
-> (§ Preference Cards), session-storage size (§ Session Controls), and the § Deleted cards note. Each is
+> the restart control that applies what a save could not (§ Session Controls), the session-storage
+> figure beside it (§ Session Controls, built 2026-08-29), and the retired-files
+> note (§ Deleted cards, built 2026-08-28). What remains
+> specified-but-unbuilt is now only one preference card — Deny-read scope
+> (§ Preference Cards), which waits on the prompt it would reset. It is
 > classified in
 > [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size)
 > under *(c) Neither side exists*.
@@ -111,15 +113,27 @@ starts in; the running one is the composer's selector ([`chat.md`](chat.md) § P
 read, never migrated (see
 [`../../specs-reference/1-foundation/configuration.md § Retired files`](../../specs-reference/1-foundation/configuration.md)).
 
-**The note below is not built** — no retired-file note is rendered. It is the cheapest item in this
-file's backlog and the only one whose absence the spec already argues is a mistake, in the next
-paragraph.
-
 Their absence needs a sentence in the UI, not silence. A user who customised `system_extra.md` over
 months and finds the card gone deserves to know why, so the grid carries a dismissible note: retired
 files are listed by name, with the explanation that the agent's instructions now come from `CLAUDE.md`
 and `.claude/` — which the user edits in the viewer like any other repository file, with the agent's help,
-and which the Context tab prices in tokens.
+and which the Context tab prices in tokens. **Built 2026-08-28.** Three properties are load-bearing,
+and each of them is a way the obvious implementation would have been worse:
+
+- **It is shown only to installs that have such a file.** The note explains a disappearance, so a
+  reader who never had the cards would be reading about something they did not witness. That is why
+  `get_config_info` answers with the names *on this disk* rather than the constant list — the
+  relevance is computed on the server, where the directory is.
+- **The dismissal is keyed on the file list, not a boolean.** If a later upgrade retires something
+  else, that name has never been explained to this user and the note is owed again. A flag would
+  swallow it.
+- **It says the files are not deleted.** That is the reassurance the leave-alone rule exists to
+  provide; a note that only said "these are obsolete" would read as a warning that they are about to
+  be cleaned up.
+
+The rule the note depends on — that an upgrade never migrates or removes these files — is pinned by a
+test alongside the reporting, because if an upgrade ever started cleaning them up the note would
+quietly stop having anything to say.
 
 There is no "system prompt" for AIC⚡DC to own any more. That is the conversion in one card.
 
@@ -152,17 +166,58 @@ regression named in
 
 ## Preference Cards
 
-**Not built.** No preference card exists; the grid holds the two config cards and nothing else. None of
-the three below has an implementation on either side.
+**Two of the three are built.** Thinking display and Doc enrichment render above the config grid; Deny-read
+scope waits on the prompt it would reset (§ B4 of [`../next.md`](../next.md)), because a control that
+forgets a remembered answer to a question nobody is asked yet is a control over nothing.
 
 Cards that hold a switch rather than an editor, laid out in the same card shape with the control beneath
-the icon and label. Descriptions live in the `title` attribute so the grid stays visually uniform.
+the icon and label, in a grid of their own — a `<select>` with "Engine default" in it does not fit the
+110px track the icon cards use. Long descriptions live in the `title` attribute so the grid stays visually
+uniform.
 
 | Card | Backed by | Effect |
 |---|---|---|
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
-| Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask` |
+| ~~Deny-read scope~~ | — | **Declined 2026-08-29 — this card will never exist.** It was to reset a remembered answer to the file picker's denial-scope prompt, and that prompt is now decided against rather than deferred, so there is no preference to reset. A reset control is downstream of a choice; when the choice went, the card went with it. [`file-picker.md`](file-picker.md) § *Denial Scope Prompt — declined*, [`../next.md`](../next.md) § E |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
+
+**The note under each control is the card.** Both fields were already editable in the textarea below —
+`engine.json` and `app.json` are the two config cards — so a switch adds no capability whatsoever. What it
+adds is discoverability plus the one thing a textarea cannot say: when the value it just wrote starts being
+true. The two cards deliberately answer that differently, and **neither answers "now"**:
+
+- **Thinking display** is next-session, like every other field in `engine.json` bar the model. The field
+  joins the waiting list, which is what makes the restart confirmation name it — so the card hands the
+  reader to the control that finishes the job rather than reporting a success it did not achieve
+- **Doc enrichment** is next-*pass*. `app.json` is reloadable and the card calls the reload, but the
+  consumer is a background build, not a value read per use. Switching enrichment off stops the next pass;
+  it does not remove keywords already computed, and switching it back on does not start one. Reporting it
+  as applied would be wrong in both directions
+
+**Thinking display is a three-state select, not a switch.** `null` means "let the CLI decide", which is a
+different claim from either `summarized` or `omitted` — the null rule in
+[`../1-foundation/configuration.md`](../1-foundation/configuration.md) is load-bearing here, and a checkbox
+could not have expressed it.
+
+**A switch writes text, not a re-serialised file.** `webapp/src/settings-preferences.js` replaces the value
+on its own line and leaves every other byte alone, falling back to parse-and-stringify only for a key the
+file does not have yet. Round-tripping this app's own `app.json` through `JSON.stringify` explodes
+`extensions` and `keywords_ngram_range` from one line each to twelve: not data loss, but an unrequested
+rewrite of the user's file performed by a control that promised to move one boolean. When the file will not
+parse at all the switch is disabled and says so, and the reader is sent to the textarea — the surface that
+can actually fix it.
+
+**A switch writes through the open textarea when there is one.** If the card's file is open for editing,
+the base for the write is the textarea's current content and the result goes back into it. Basing the write
+on a stale read is the one failure this control could cause that the textarea alone never could: it would
+silently discard whatever the user had typed above it.
+
+**`doc_index.keywords_enabled` had no consumer until this card was built** (found 2026-08-28). It was
+parsed by `ConfigManager.doc_index_config` from the day the section existed and read by nothing —
+`EnrichmentConfig` never carried an `enabled` field — so enrichment ran whatever the file said. The gate
+now lives in `DocIndexBuilder.run_enrichment`, as a callable rather than a captured boolean so an
+`app.json` reload reaches a builder constructed at startup. See
+[`../2-indexing/keyword-enrichment.md`](../2-indexing/keyword-enrichment.md) § Switching Enrichment Off.
 
 Two rows that stood here have been removed rather than marked, because neither is this tab's to hold. The
 **permission chime** is a `localStorage` preference owned by the surface that rings it — see
@@ -185,7 +240,8 @@ other rule.
 
 ## Session Controls
 
-**Restart session is built; session storage is not.** They are what is left of this section after the
+**Both of these are built** (restart 2026-08-26, session storage 2026-08-29). They are what is left of
+this section after the
 things it described that live elsewhere were removed from it: engine health and MCP server status —
 including the reconnect and enable/disable controls — are the Context tab's, beside the connection state
 and token cost that motivate them. See [`viewers-hud.md` § Session Section](viewers-hud.md).
@@ -204,9 +260,21 @@ configures:
   [`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option)
   for the mechanism and the two refusals
 - **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion.
-  Deletion happens there, next to what is being deleted, not behind a settings button. Nothing to call
-  yet: the backend measures the session directory only as a turn-time warning (`_disk_warning`), not as a
-  readable RPC
+  Deletion happens there, next to what is being deleted, not behind a settings button: a delete on this
+  tab would be a second way to destroy a transcript, sited where the thing destroyed is not on screen.
+  The link asks the chat panel to open the browser and minimizes the dialog on the way, the same as the
+  Context tab's file links, because the browser opens behind it. Read from
+  `ClaudeCodeService.get_session_storage`, which walks the directory the turn-time warning walks and is
+  deliberately **not** routed through `_disk_warning`: that one is latched to fire once per server
+  lifetime, so borrowing it would mean opening this tab silently spends a warning the user has not seen.
+  The reply is `{bytes, over_warning}` — the *verdict*, not the threshold, matching how the health banner
+  is handed a mirror-gap verdict rather than `history.mirror_gap_tolerance`; the number behind it is
+  user-editable (`history.session_dir_warning_bytes`) and a second copy of it in the browser is a second
+  answer waiting to disagree. Three renderings for three answers, and two of them are not sizes: a run
+  with no repo says it is not mirrored, and a failed walk says so instead of showing a zero. Nothing is
+  rendered before the first read lands. Re-read when the tab is revealed, which is what closes the loop —
+  the figure argues for a deletion, the deletion happens in another surface, and coming back here is when
+  the new number is worth a round trip
 
 ## Editing Flow
 
@@ -294,8 +362,11 @@ One row, one fact:
 - Config directory path. *(Specified as clickable to open in the system file manager; it renders as plain
   text with no handler.)*
 
-That is the whole banner, and it matches the RPC: `get_config_info` returns `{"config_dir": ...}` and
-nothing else. The credential source, the auth warning, and the resolved `claude` path and version were
+That is the whole banner. `get_config_info` returns one more key than the banner renders —
+`retired_files`, the retired config files this install still has on disk — and that is deliberate: it
+is a second fact about the same directory, it feeds § Deleted cards rather than the banner, and a
+list that is usually empty does not deserve a round trip of its own. The credential source, the auth
+warning, and the resolved `claude` path and version were
 specified here and are not here — they come from `get_engine_health`, and they are reported where that
 RPC is already called, in the Context tab and the chat panel's health banner.
 

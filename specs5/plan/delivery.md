@@ -2271,8 +2271,17 @@ fix is scoped to `.tool-card[data-tool='Bash']`: a three-row `-webkit-line-clamp
 does not centre them against three rows of text. Three rows and not unbounded, because the value of a
 scannable log is that rows are the same height; three is enough for a long path plus flags.
 
-Every other tool keeps its single elided line. A `Read` is a path, a `Grep` is a pattern — one line is the
-whole summary, and wrapping them would cost the uniform row for nothing.
+**The alignment half of that is also out of date as of 2026-08-28.** The header is two columns now — a
+metadata rail, then the summary — so the dot has a tool name beside it rather than three rows of arguments,
+and it is that name's line it is dropped to. Only the dot: the caret leads the rail's first line and needs
+no nudge. Same entry in [`../impl-history/work-log.md`](../impl-history/work-log.md) § *Landed since*.
+
+~~Every other tool keeps its single elided line. A `Read` is a path, a `Grep` is a pattern — one line is the
+whole summary, and wrapping them would cost the uniform row for nothing.~~ **Wrong — corrected 2026-08-28.**
+A `Read` *is* a path, and one line is where it stops being one: `file_path=/home/you/…/repos/softwaredesignlifec…`
+identifies no file. Every summary wraps now, the clamp went with the exception, and the reason this paragraph
+gave for keeping the elision was the same reason the paragraph above it gave for dropping it. See
+[`../impl-history/work-log.md`](../impl-history/work-log.md) § *Landed since*.
 
 ### What the tests could not tell us
 
@@ -2282,9 +2291,12 @@ entirely a layout failure. So the fix was confirmed against the running app — 
 `permission-request` dispatched client-side so the user's live session was never touched, and a DOM probe:
 97 cloned styles, 27 laid-out view lines, 9 change decorations. That is the assertion the suite cannot make.
 
-The wrapping has no test at all, for the same reason and with less excuse: `-webkit-line-clamp` is a
+~~The wrapping has no test at all, for the same reason and with less excuse: `-webkit-line-clamp` is a
 rendering rule, and asserting the rule exists in `styles.js` would test that the file contains the string we
-just typed into it.
+just typed into it.~~ **It has one from 2026-08-28**, and the argument above is half right: the assertion
+cannot see a pixel, so it is a regression guard and not a layout test. What it is worth is what the guards
+added with § C4 are worth — the rule is load-bearing and easy to delete by tidying, and the test says so in
+the place a tidier would look.
 
 ### Tests
 
@@ -3116,6 +3128,10 @@ None caused by this work; all three were spec claiming something the code never 
   key no code reads or writes. Every denial goes to `settings.local.json` unconditionally. Marked **Not
   built** rather than deleted: `specs-reference/3-engine/permissions.md` § There is no runtime rule API
   already explains what a `session` option would have to mean, and that is worth keeping.
+  *(**Declined 2026-08-29** — and the section cited here is why it took three phases: it reached the wall
+  from the SDK's side and stopped, where the remaining question was whether AIC⚡DC's own `can_use_tool`
+  could enforce a session rule. It cannot — the CLI never routes `Read` through it. See
+  `../5-webapp/file-picker.md` § Denial Scope Prompt — declined and `../next.md` § E.)*
 - **The reference doc's context-menu action IDs were invented.** It listed `deny-read`, `allow-read`,
   `deny-read-all`, `allow-read-all` and `doc-convert`; the code dispatches `exclude`, `include`,
   `exclude-all`, `include-all` and has no `doc-convert` row action at all. The IDs kept the old

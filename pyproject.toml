@@ -135,16 +135,14 @@ packages = ["src/aic_dc"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/aic_dc"]
 
-# NOTE on webapp bundling:
-# The final packaged wheel needs to ship webapp/dist/ at aic_dc/webapp_dist/
-# so pip-installed releases can serve the webapp without a separate npm build.
-# Hatchling's `force-include` fails loudly when the source path is missing,
-# which breaks `uv sync` in dev checkouts (webapp/dist only exists after
-# `npm run build`). Layer 6 (deployment) will wire this up properly — either
-# via a release-only config overlay, a pre-build hook that ensures webapp/dist
-# exists, or a conditional include. For now the wheel ships backend only,
-# which is correct for development and for the `aic-dc --dev`/`--preview`
-# modes that run Vite as a subprocess.
+# Webapp bundling: the wheel ships webapp/dist/ at aic_dc/webapp_dist/, which
+# is the third entry in aic_dc.main._find_webapp_dist's priority list, so a
+# pip-installed release serves the webapp without a separate npm build. The
+# include is conditional — a declarative `force-include` fails the build when
+# webapp/dist is absent, which is every dev checkout before its first Vite
+# build. hatch_build.py explains the trade-off and does the asking.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -152,6 +150,9 @@ include = [
     "README.md",
     "LICENSE",
     "pyproject.toml",
+    # The wheel build hook — an sdist without it builds a wheel that
+    # silently omits the webapp.
+    "hatch_build.py",
 ]
 
 # Version is declared statically in [project] above. We don't use

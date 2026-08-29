@@ -67,7 +67,8 @@ All dispatch to window-level custom events that the relevant child components li
 - On setup-done, fetch a full current-state snapshot via a single RPC call
 - Dispatch a state-loaded event with the full state as detail
 - Browser tab title updated from the repo name in state (no prefix, no branding)
-- The snapshot's `repo_root` — the repo's absolute path — is kept for path normalisation (see [Viewer Background](#viewer-background)). It is the only absolute path the browser is given, and it is given it so it can stop sending them back. Guarded rather than defaulted: a snapshot without it leaves paths untouched instead of measuring them against an empty root
+- The snapshot's `repo_root` — the repo's absolute path — is published for path normalisation (see [Viewer Background](#viewer-background)). It is the only absolute path the browser is given, and it is given it so it can stop sending them back. Guarded rather than defaulted: a snapshot without it leaves paths untouched instead of measuring them against an empty root, and cannot un-set a root an earlier snapshot established
+- **It is not kept on the shell.** It goes to the module that holds the conversion rule, for the reason the call proxy is a singleton ([Shared RPC Publishing](#shared-rpc-publishing)): the renderers that need it take a path and no host, so the alternative is threading a string down to every chip. The publisher is the state-snapshot handler and there is no second one — one repo, one answer to "where is the repo"
 - Files tab restores messages, hinted files, active-stream blocks, permission posture, and any pending permission requests
 - File picker sync deferred so the picker has loaded its tree before selection is applied
 - Chat panel detects bulk message load and triggers scroll-to-bottom
@@ -117,6 +118,54 @@ permission request has stalled the turn.
 - Both viewers keep independent tab state; switching between file types just toggles the layer
 - **Every `navigate-file` path is normalised against `repo_root` before anything else happens.** Claude Code's file tools take absolute paths, so a tool card's file chip, a turn footer's "files modified" list and the context tab all carry absolute paths, while every `Repo` method takes a repo-relative one and rejects an absolute path outright (it resolves nothing, because resolving would be a way around the containment check). One normalisation here rather than one per dispatcher, and it covers the two side effects as well: the path that gets persisted as last-open and registered with the navigation grid is the relative one, so a bad path cannot survive a reload
 - A path outside the repo root is passed through unchanged rather than rewritten. It has no repo-relative name, and the backend refusing it is the correct outcome — a `../..` walk would ask for a different file
+
+#### The Same Rule Names Files On Screen
+
+**A file inside the repo is displayed relative to the root; one outside it keeps its absolute path,
+because that is the only name it has here.** The engine's path stays on the element's tooltip and
+accessible name. This is the house rule for every view in the app that shows a file — the Context tab's
+memory-file table, the permission dialog, tool-card footers, the "Files Referenced" chips — and it is the
+same rule as the navigation conversion above, applied to a label rather than to a request. So it is the
+*same function*: there is no second helper for display, and no way for the two to disagree about where a
+file is.
+
+Two consequences worth stating, because both look like bugs from one side:
+
+- **Shortening a label must never shorten what the click sends.** The normalisation at the
+  `navigate-file` choke point is the one converter; a chip dispatches the path it was given. A display
+  concern that became the navigation contract would put the conversion in two places, which is what
+  having one choke point was for
+- **Where the backend already relativises, it stays relativised.** The permission dialog's paths are
+  computed server-side and arrive short. Converting an already-relative path is a no-op, so that view
+  needs no change and gets none — the rule holds without a second code path. The context tab used to be
+  the other half of this sentence, arriving short via a `relPath` the service added; that field is gone
+  (2026-08-28) and the tab names its rows here like everything else
+  ([`../3-engine/context-visibility.md`](../3-engine/context-visibility.md))
+
+### Telling the Server What Is Open
+
+The shell is the one place both viewers' `active-file-changed` events converge, so it is where the server
+is told what the user is looking at — `ClaudeCodeService.set_viewer_state`, which feeds the turn framing
+and the `ui_state` tool ([`../3-engine/session.md` § Turn framing](../3-engine/session.md#turn-framing)).
+It is the **only** writer: `chat_streaming`'s `viewer` argument stays null and the service falls back to
+the last push, so the field cannot be told two different things. The alternative — answering at send time
+from the chat panel — knows only about turns that start in this browser, which is the case the `ui_state`
+tool exists for.
+
+- `active-file-changed`, not `navigate-file`: it reports what a viewer *has* open rather than what it was
+  asked to open. A fetch can fail, and routing diverges (an SVG with a scroll hint goes to the diff
+  viewer), so the request and the result are not the same fact
+- Repeats for one path are deduped against the last value pushed. The event is deliberately re-emitted on
+  a same-file `openFile` so the shell can re-run its visibility routing, so without the dedupe every
+  redundant open would cost a round trip to say nothing
+- A `null` from the viewer that is *not* visible is ignored. Both viewers emit on their own file changing,
+  and the hidden one emptying does not mean nothing is on screen
+- The SVG viewer's synthesised `virtual://svg-compare/…` path is reported as nothing open. It is on
+  screen, but it is not a file anything can read, and leaving the previous path standing would point the
+  agent at a file that is no longer shown
+- A reconnect re-pushes. Server-side viewer state is in memory and a reconnect usually means a restarted
+  process, so the file still in front of the user is one the new process has never heard of
+- The **selection range is never sent** — only the file. See [`../next.md`](../next.md) § C7
 
 ### Reserved Strip
 
@@ -195,6 +244,28 @@ be an animation rather than a measurement. The reasoning holds; the conclusion d
 and the only thing announcing it was a 3-second toast, which expires long before the condition it
 describes — so the honest half of a progress bar came back, and the toast went (see
 [chat.md § Engine Event Routing](chat.md#engine-event-routing)).
+
+**It survives a page reload, because a broadcast is not a record.** Every signal driving the indicator
+is live — it says what the engine is doing *now*, to whoever happens to be connected — so a refresh
+during the pause used to reconnect into a session that looked idle while the engine was still
+summarising. Tens of seconds of apparently hung UI: the exact failure the indicator exists to prevent,
+reintroduced by the one action a user watching a silent screen is most likely to take. Same class as the
+compaction divider phase 2 shipped client-side only, and the same fix. `get_current_state` now carries a
+`compaction` key — `null`, or `{elapsed_seconds}` — and `state-loaded` restores the indicator from it.
+
+Three things about that key are decisions rather than details:
+
+- **The server computes the elapsed seconds; it does not send a start timestamp.** A timestamp would
+  make the browser difference two clocks, and a collaborating client can be on another machine.
+- **It is set from the engine's status frame, never from the `PreCompact` hook**, so a restored
+  indicator can never be a speculative background precompute — which is why it restores as *confirmed*
+  and gets the long ceiling rather than the short unconfirmed one.
+- **The ceiling budgets the whole compaction, not this component's view of it.** A restore arriving 170
+  seconds in gets the remaining 10, not a fresh 180; otherwise a compaction that died before the refresh
+  would sit there for three more minutes claiming to work.
+
+The trigger is deliberately absent from the restored state: it belongs to the hook, not the frame. A
+restored indicator says how long, not why.
 
 A boundary with no start ahead of it is **ignored**, not flashed: microcompaction can report one without
 the hook ever firing, and by the time it lands there is no pause left to explain — the divider records it.
@@ -380,3 +451,5 @@ Components dispatch toast events; the shell catches and renders them. Chat panel
 - The permission-mode indicator remains visible in every dialog layout state, including minimized
 - The context-capacity bar is fed only by pushed or tab-initiated context snapshots; it never issues its own RPC
 - The compaction indicator never displays a percentage or an `aria-valuenow`, and never stays active longer than its ceiling: the engine reports only the start and the end of a compaction, so anything between the two would be invented, and a spinner nothing retracts is worse than no notice at all
+- One writer publishes the repo root, the state-snapshot handler, and one function answers "absolute engine path → the name to use" for both navigation and display
+- No chip, row or label sends the path it displays. What is dispatched is the path as received; the shortening is a label

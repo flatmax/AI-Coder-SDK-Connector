@@ -191,26 +191,78 @@ interlude that found it; this list exists so that none of them has to be redisco
    [`../1-foundation/configuration.md`](../1-foundation/configuration.md). **The SDK probe reported this
    one independently** (item 10), having found it from the wheel rather than from this list, which is
    also how the other two items closed that day.
-2. **A lost session keeps being polled.** After that pump died, the usage HUD went on calling
-   `get_context_usage` — each attempt a control request that ends in a 60-second
-   `Control request timeout` traceback, four of them in one log. `get_context_usage` catches
-   `EngineNotReadyError` and `SessionLostError`, but nothing gates the *poll* on engine health, and the
-   HUD has no "the engine is gone" state to sit in. The tracebacks are noise about a thing already
-   reported by the banner.
-3. **Two mechanisms now answer "absolute engine path → repo path".** `_mark_openable_memory_files` adds
-   a `relPath` field server-side so the Context tab knows which memory files are openable; `toRepoPath`
-   (`218f89d`) converts client-side at the shell's `navigate-file` choke point. Both are correct and
-   neither is wrong to exist, but the next payload carrying an absolute path will pick one of them by
-   accident. They should converge — most likely on the client-side one, which needs no per-payload
-   enrichment.
-4. **An RPC that fails behind a viewer open shows the user nothing.** That is what kept the chip bug
-   unreported for as long as it was: the viewer painted an empty diff and the only evidence anywhere was
-   a bare `Failed: Absolute paths not accepted:` line on the server's stderr. Two independent halves —
-   jrpc-oo prints raw exception text with no request context, and the diff viewer treats a failed fetch
-   as empty content — and **fixing either one alone would have made the bug reportable**.
-5. **Tool-card file chips still display the absolute path.** Only the navigation was converted.
-   Shortening the label is a display decision with its own question (basename, root-relative,
-   middle-elided) and it is the one place a multi-root future would want the root visible.
+2. ~~**A lost session keeps being polled.**~~ — **fixed on 2026-08-28.** After that pump died, the usage
+   HUD went on calling `get_context_usage` — each attempt a control request that ends in a 60-second
+   `Control request timeout` traceback, four of them in one log. `get_context_usage` caught
+   `EngineNotReadyError` and `SessionLostError`, but nothing gated the *poll* on engine health, and the
+   HUD had no "the engine is gone" state to sit in. The tracebacks were noise about a thing already
+   reported by the banner. **The gate is now on the pushed `engineHealth` record, and the interesting
+   part was deciding what it reads:** `connected: false` is also true of a freshly loaded page, so the
+   discriminator is a non-empty `last_error` — the same rule the health banner uses, kept single-owner
+   deliberately. A second signal was needed for the turn that *causes* the loss, whose fetch is already
+   out before the health push lands: the reply's `reason: 'no-engine'`. Writing the spec section also
+   caught § *Data Flow* claiming the HUD makes no follow-up RPC, which has been false since phase 3.
+   [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the Engine Is Gone*.
+3. ~~**Two mechanisms now answer "absolute engine path → repo path".**~~ — **converged on 2026-08-28,**
+   on the client-side one, as the item guessed. `_mark_openable_memory_files` and its `_repo_relative`
+   helper are deleted; the Context tab names each memory row with `toRepoPath` and takes *openable* from
+   the same call, since the rule returns a different string only for an absolute path inside the root,
+   which is exactly when the read will work. **Openability had to move with naming, not stay behind.** A
+   server-side `openable` boolean would have been strictly better on one case — a path outside the root
+   that *resolves* inside it, which the server can see and the browser cannot — and useless, because the
+   browser could not have produced a name for that path either, so the row would have carried a link that
+   opened nothing. Giving up that case is the whole cost, and it is pinned by a test.
+
+   **There were three mechanisms, not two, and the third stays.** `Reindexer._relative` (`hooks.py`)
+   turns a written path into an index key, and the index is server-side with no browser involved: it is
+   not answering the same question. The line the convergence drew is *who is the answer for* — a name on
+   screen is the browser's, a key in a server-side structure is not.
+
+   The item's price went up twice before it was paid, both times by work that shipped one more caller
+   rather than by anything changing here — which is the argument for paying a convergence item early.
+   Two of the three parts were not on the item when it was written: the duplicated repo fetch between the
+   two viewers, and the tool card header's input summary, which [`../5-webapp/chat.md`](../5-webapp/chat.md)
+   § *Card Anatomy* had recorded as blocked *on this item* and on needing "a per-tool table of path keys".
+   **There was no table** — a value beginning with the repo root is a path by its shape, the same
+   discriminator the browser's rule already mirrors off the backend's containment check, so every string
+   value can be offered to the rule and the rule declines the rest. The blocker was the item, and the item
+   was what removed it.
+   [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+   [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) and
+   [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy*.
+4. ~~**An RPC that fails behind a viewer open shows the user nothing.**~~ — **fixed on 2026-08-28.**
+   Both halves, because the item's own claim was that either would have sufficed and doing one would
+   have been taking the item's word for it. The server registers every service through one facade, and
+   that facade now wraps each exposed method so a failure is logged with the call that caused it —
+   substituting jrpc-oo's *callback* rather than the method, because service methods have Python callers
+   too and wrapping those would report a deliberately-caught `RepoError` as a fault. The browser half is
+   a rule rather than a message test: **one failed fetch is a reading, two are no answer.** No HEAD means
+   new, no working copy means deleted, and both failing means nothing was read — which the viewer used to
+   render as an empty document marked new. **The pre-fix behaviour was worse than silence**: an empty file
+   the user can scroll is a claim about the repo, made over a request the backend refused.
+   [`../5-webapp/diff-viewer.md`](../5-webapp/diff-viewer.md) § *When Neither Side Can Be Read* and
+   [`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md) § *When a Service Method Raises*.
+
+   **The fix needed a channel that turned out not to work.** The diff viewer's four toast dispatches
+   named `show-toast` and fired on the element; the shell listens for `aic-toast` on `window`. Both the
+   name and the target were wrong, so every export and copy failure the viewer has ever had went nowhere
+   — and nothing noticed, because a rare failure that reports nothing looks exactly like success. It has
+   its own test now rather than being trusted because the fetch tests pass.
+5. ~~**Tool-card file chips still display the absolute path.**~~ — **fixed on 2026-08-28.** Only the
+   navigation had been converted, and the label was left open because shortening it looked like a design
+   decision: basename, root-relative, or middle-elided. **It was not open — it was already answered.**
+   The Context tab's memory-file table had stated the house rule in a code comment **the day before the
+   commit that deferred it** — `daa7fa9` on 2026-08-16 against `218f89d` on 2026-08-17: "a file inside the
+   repo is named the way every other view in this app names files — relative to the root — with the
+   engine's absolute path on the row's tooltip. One outside it keeps the absolute path, because that is
+   the only name it has here". The permission dialog follows the same rule because the
+   *backend* relativises, and root-relative-inside-with-absolute-outside is `toRepoPath`'s existing
+   behaviour exactly. So there was no display decision left to make and **no second function to write**:
+   the conversion built for navigation is the label rule, and the work was applying it. The item's own
+   framing was the obstacle — three plausible options, no reason to prefer one, so it kept being
+   deferred. The multi-root concern it raised is unaffected either way; the absolute path is one hover
+   away, and a multi-root future changes what the *root* is, not how a path is named against it.
+   [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
 6. **Two rendering behaviours have no test and cannot get one from jsdom.** The `Bash` summary's
    three-row clamp is layout, and jsdom has none; the dialog's Monaco style-clone tests assert that the
    rules *arrive*, not that the editor lays out. Both were verified by driving a live tab and probing the
@@ -434,9 +486,12 @@ in the tree:
 - **A session load must not pop the HUD.** `session-changed` refreshes the numbers and shows nothing,
   because a HUD that appears on resume reports a turn nobody took. Auto-resume means this fires on
   every server start now, not just on a click.
-- **`EngineHealth.mcp` is a field with no writer.** This bullet used to say the health payload already
-  carried what a per-server status view needs. It does not: `mcp` is declared on `EngineHealth`,
-  serialised by `to_dict()`, and assigned by nothing in `src/`, so every consumer reads `[]`. The
+- **`EngineHealth.mcp` was a field with no writer. Deleted 2026-08-28.** This bullet used to say the
+  health payload already carried what a per-server status view needs. It did not: `mcp` was declared on
+  `EngineHealth`, serialised by `to_dict()`, and assigned by nothing in `src/`, so every consumer read
+  `[]`. **The choice was write it or delete it, and deleting won** — the question it looked like it
+  answered already had a better answer, and an empty list does not say "no servers", it says "no
+  answer". Nothing broke when it went, which is the clearest evidence available that it was dead. The
   Context tab's Session section therefore calls `ClaudeCodeService.get_mcp_status()` alongside the
   breakdown and tolerates it failing — health is a decoration on the numbers, so its error must not
   replace them. Anything else wanting per-server status has the same two options, and the empty list is

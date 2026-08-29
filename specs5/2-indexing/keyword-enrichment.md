@@ -37,6 +37,33 @@ Keyword extraction for document outlines. Disambiguates sections with similar he
 - TF-IDF fallback threshold (character count)
 - Maximum document frequency (corpus-aware filter)
 
+## Switching Enrichment Off
+
+The enabled flag above is `app.json`'s `doc_index.keywords_enabled`, and **it was read by nothing until
+2026-08-28.** `ConfigManager.doc_index_config` parsed it from the day the section existed, `EnrichmentConfig`
+never carried a matching field, and no other caller looked — so the configuration surface documented a
+switch and enrichment ran whatever the file said. Found while building the Settings tab's preference card
+for it ([`../5-webapp/settings.md`](../5-webapp/settings.md) § Preference Cards): the card's premise was
+that the value was "already configurable, just not discoverable", and it was not.
+
+The gate is now the first thing `DocIndexBuilder.run_enrichment` checks. Four properties, each of which
+is the answer to a way of getting this wrong:
+
+- **It is a callable, not a captured boolean.** The builder is constructed once per process and `app.json`
+  is reloadable, so a value read at construction would make the switch an app-restart field — and the
+  Settings tab has no disposition between "now" and "next session" to describe that with
+- **`disabled` is a different status word from `unavailable`.** `unavailable` means the keyword library is
+  not installed and drives a one-shot "install `aic-dc[docs]`" toast in the browser (§ Packaged Release
+  Degradation). Telling somebody how to install the thing they have just switched off is the one certainly
+  wrong response, so the gate runs *before* the installed-ness probe. The frontend no-ops on any status it
+  does not recognise, so `disabled` is silent by construction rather than by a second branch over there
+- **It fails open.** A preference that cannot be read leaves enrichment running and logs why. The opposite
+  default turns a config error into a missing feature, which is the hardest kind to attribute
+- **It gates the pass, not the cache.** Switching off stops the next pass and removes nothing already
+  computed; switching on does not start a pass, only permits the next one. A build runs at startup and on
+  review entry and exit, so "next pass" is a real event and not a euphemism for a relaunch — but it is not
+  the same as "now", and the card says so
+
 ## Quality Improvements
 
 ### Content-Type Hints

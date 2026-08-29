@@ -400,9 +400,12 @@ class TexPreviewMixin:
     def _cleanup_tex_preview_dir(tex_preview_dir: Path) -> None:
         """Remove previous compilation's temp directories.
 
-        Called before each new compilation and on server startup.
-        Keeps at most zero temp dirs alive (the new one is created
-        after this call).
+        Called before each new compilation and nowhere else — an earlier
+        version of this docstring claimed a startup call that has never
+        existed. So the sweep is forward-looking: the exit path leaves the
+        last compilation's dir behind and the next preview removes it.
+        Recorded in ``specs5/6-deployment/startup.md`` § *Graceful
+        Shutdown* as one of the two things teardown does not clean up.
         """
         if not tex_preview_dir.exists():
             return

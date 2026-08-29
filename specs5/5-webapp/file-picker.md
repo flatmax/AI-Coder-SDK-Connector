@@ -155,24 +155,66 @@ Deleted with the tiering system: `set_excluded_index_files`, the cache-shaping f
 application points, the dir-block seeding filter, and the per-turn dir-block refresh filter. An
 exclusion is now one rule in one file.
 
-### Denial Scope Prompt
+### Denial Scope Prompt — declined
 
-**Not built.** Predates CC-21 and is untouched by it — recorded here because the design is still wanted,
-not because it ships. What the code does today is write every denial straight to
-`.claude/settings.local.json` (the "Save for this checkout" branch below) with no dialog and no
-preference key, and report the one thing the dropped L0 dialog was honest about — that the rule is not
-instant — through a `takes_effect` toast shown once per session. A reader comparing this section against
-the picker will find no scope dialog and no `aic-dc-deny-read-scope` in `localStorage`.
+**Declined 2026-08-29**, after sitting unbuilt since before CC-21. It is written up here rather than
+deleted because the reasoning is the useful part: the dialog was not hard to build, it was **impossible
+to make honest**, and that only became visible when somebody went looking for the mechanism behind each
+of its two buttons. [`../next.md`](../next.md) § E carries the decision; what ships is what already
+shipped — every denial goes straight to `.claude/settings.local.json`, with no dialog, no
+`aic-dc-deny-read-scope` key, and a `takes_effect` toast once per session naming the destination file and
+saying the rule applies from the CLI's next read of its settings sources.
 
-- Denying a file or directory opens a small dialog asking where the rule should live: **This session only** (dropped when the session ends) or **Save for this checkout** (written to `.claude/settings.local.json`, git-ignored, survives restarts)
-- Two buttons plus Cancel. A "Don't ask again" checkbox persists the chosen scope as the default for future denials; Cancel never persists a preference
-- Removing a denial never prompts. The user explicitly wants the agent to see the file again, and there is no scope question to answer — every rule the picker wrote for that path is removed
-- Preference stored in `localStorage` under `aic-dc-deny-read-scope` with values `ask` (default), `session`, or `local`. Resettable from Settings
-- The dialog states the destination file by name. A rule the user cannot find is a rule the user cannot revoke
+**The two options were the same write.** "This session only" and "Save for this checkout" both put the
+same bytes in the same file at the same instant, because *that is the only way a read can be denied at
+all*. What differed was cleanup — AIC⚡DC deleting the rule again at session end — so the dialog asked
+the user to choose a scope and gave them a choice of housekeeping.
 
-This replaces the old L0-invalidation prompt, which asked a question about our cache. The question is now
-about durability and blast radius, which is a question about the user's repository — a better question to
-be asking, and one with a consequence the user can inspect afterwards.
+Three findings, in the order that closed the question:
+
+- **The cleanup cannot be relied on.** It needs a clean exit, and there is not always one.
+  [`../6-deployment/startup.md`](../6-deployment/startup.md) § *Graceful Shutdown* is POSIX-only —
+  `add_signal_handler` raises `NotImplementedError` on Windows' proactor loop — and no crash, `kill -9`
+  or power loss runs it on any platform. A rule labelled "this session only" that outlives the session
+  breaks its promise **silently**: the next launch renders the file struck through in the picker with
+  nothing on screen saying which session put it there.
+- **Making it reliable requires a second record that can disagree with the first.** Nothing today knows
+  which rules a given session wrote. The settings file is the only record, and `write_denied_read_files`
+  is authoritative-replace over every `Read(...)` rule in it. Surviving a crash would mean persisting a
+  "remove these later" list *beside* a file that both the user and the `claude` CLI also edit — a second
+  source of truth for one question, which is the shape §§ C3, C7 and B1 in [`../next.md`](../next.md)
+  each converged away from.
+- **The mechanism that would have made a session scope real does not exist**, and this is the finding
+  that ended it. A genuine session rule would be enforced in memory and touch no file — and AIC⚡DC
+  already owns a rule engine that could do it, the `can_use_tool` callback. It cannot help here: **the
+  CLI never asks about `Read`, `Glob` or `Grep`**, so the callback never fires for the tool the rule is
+  about (`aic_dc/claude_code/permissions.py`, the `AIC_DC_MCP_SERVER` early return and its comment;
+  `GATED_BY_DEFAULT["read"]` is `False`). Writing the settings file is not the mechanism we preferred, it
+  is the only one there is. See
+  [`../../specs-reference/3-engine/permissions.md`](../../specs-reference/3-engine/permissions.md)
+  § *There is no runtime rule API*, which had reached the same wall from the SDK side and stopped one
+  step short of it.
+
+**And the dialog cost more than the thing it guarded.** A deny is one shift-click; it renders visibly
+(strikethrough, badge, tooltip); and it is undone by the same gesture with no prompt — this section's own
+rule was that removing a denial never asks. A modal in front of a reversible, visible, one-gesture action
+is a confirmation dialog on an undo. It would have been worst exactly where it is most expensive: a
+directory or root deny expands to one rule per descendant file, so the gesture that most needs to stay
+cheap is the one that would have collected the modal.
+
+**What the prompt was really for is already shipped.** It replaced an older L0-invalidation prompt that
+asked a question about our cache, and the improvement was that it asked about durability and blast
+radius instead — a question about the user's own repository. The honest half of that is disclosure: name
+the destination file, and say the rule is not instant. Both are in the `takes_effect` toast and in
+`set_denied_read_files`' `settings_file` return value. The half that went is the *choice*, because only
+one of the two answers was ever real.
+
+**Reopening this means one of two things, not this dialog.** Either the CLI grows a way to gate reads,
+in which case a session scope has a mechanism and this section is worth rewriting; or the question is
+re-asked on the axis that does have two honest answers — `.claude/settings.json`, committed and
+team-wide, versus `.claude/settings.local.json`, git-ignored and per-user. That second one is real
+durability-and-blast-radius, both destinations exist, both are CLI settings sources, and neither promises
+any cleanup. It is a different feature from the one declined here and nobody has asked for it.
 
 ### Binary Files
 - The picker rejects nothing on a binary row (xlsx, pdf, png, zip). Its path can be inserted and its read can be denied like any other, because neither operation puts content anywhere

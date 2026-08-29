@@ -370,7 +370,7 @@ def detect_credentials() -> tuple[str, str | None]:
     env = os.environ
     gateway = next((var for var in _GATEWAY_VARS if _truthy(env.get(var))), None)
     api_key_var = next((var for var in _API_KEY_VARS if env.get(var)), None)
-    subscription = _subscription_credential_path()
+    subscription = subscription_credential_path()
     endpoint_overrides = [var for var in _ENDPOINT_VARS if env.get(var)]
 
     if gateway:
@@ -452,13 +452,49 @@ def _credential_base() -> Path:
     return cli_config_dir()
 
 
-def _subscription_credential_path() -> Path | None:
-    """Locate the CLI's own credential file, honouring CLAUDE_CONFIG_DIR."""
+def subscription_credential_path() -> Path | None:
+    """Locate the CLI's own credential file, honouring CLAUDE_CONFIG_DIR.
+
+    Public because :mod:`aic_dc.claude_code.account_usage` reads the OAuth
+    token out of this same file to fetch the account's rate-limit windows,
+    and the panel and the health banner disagreeing about *which* login is
+    in play would be a bug neither surface could explain.
+    """
     base = _credential_base()
     for name in (".credentials.json", "credentials.json"):
         candidate = base / name
         if candidate.exists():
             return candidate
+    return None
+
+
+def credential_redirect() -> str | None:
+    """Why this machine's turns do not bill to the subscription, if they don't.
+
+    The same environment :func:`detect_credentials` inspects, asked as a
+    yes/no question instead of reported as a source line. Split out for
+    :mod:`aic_dc.claude_code.account_usage`, which must not answer "you
+    have used 48% of your five-hour window" to a session whose turns are
+    going to Bedrock, an API key, or a redirected endpoint — that figure is
+    real, and about a different account (``specs5/plan/risks.md`` R-9).
+
+    Returns a sentence for the reader, or ``None`` when the engine is
+    running on the subscription login these windows describe.
+    """
+    env = os.environ
+    gateway = next((var for var in _GATEWAY_VARS if _truthy(env.get(var))), None)
+    if gateway:
+        provider = "Amazon Bedrock" if "BEDROCK" in gateway else "Google Vertex AI"
+        return f"${gateway} points the engine at {provider}, which bills separately."
+    api_key_var = next((var for var in _API_KEY_VARS if env.get(var)), None)
+    if api_key_var:
+        return (
+            f"${api_key_var} is set, so turns bill to that key rather than to "
+            f"the subscription these windows describe."
+        )
+    endpoint = next((var for var in _ENDPOINT_VARS if env.get(var)), None)
+    if endpoint:
+        return f"${endpoint} redirects the engine to another endpoint."
     return None
 
 
@@ -493,7 +529,16 @@ class EngineHealth:
     version_warning: str | None = None
     credential_source: str = "unknown"
     auth_warning: str | None = None
-    mcp: list[dict[str, Any]] = field(default_factory=list)
+    #
+    # There is deliberately no ``mcp`` field here. One was declared and
+    # serialised for three phases with nothing ever assigning it, so every
+    # consumer read ``[]`` — and an empty list is not "no servers", it is
+    # "no answer", which is the shape that made the Context tab's own MCP
+    # claim wrong for a week. Per-server status comes from
+    # ``ClaudeCodeService.get_mcp_status()``, which asks the CLI and can
+    # fail visibly; ``degradations`` below answers the *different*
+    # question of what the session started without. See
+    # ``specs5/plan/README.md`` § Open items carried forward.
     mirror_gaps: int = 0
     last_error: str | None = None
     #: Capabilities the session started *without*, one sentence each.
@@ -602,7 +647,6 @@ class EngineHealth:
             "version_warning": self.version_warning,
             "credential_source": self.credential_source,
             "auth_warning": self.auth_warning,
-            "mcp": list(self.mcp),
             "mirror_gaps": self.mirror_gaps,
             "mirror_gaps_escalated": self._escalated(),
             "last_error": self.last_error,

@@ -71,6 +71,26 @@ _USER_FILES = frozenset({
     "engine.json",
 })
 
+# The eight the comment above names, as a set rather than as prose,
+# because the Settings tab has to *say* which of them a given install
+# still has. Deliberately in neither file set: the upgrade iterator
+# walks their union and must keep skipping these.
+#
+# Order is the order the note lists them, so it is the reading order and
+# not alphabetical — the provider file first because a leftover
+# ``llm.json`` is the one startup already mentions, then the prompt
+# files in the order they used to compose.
+RETIRED_FILES: tuple[str, ...] = (
+    "llm.json",
+    "system.md",
+    "system_extra.md",
+    "system_doc.md",
+    "system_agentic_appendix.md",
+    "system_reminder.md",
+    "review.md",
+    "compaction.md",
+)
+
 # Version marker filename inside the user config dir. Hidden (leading
 # dot), not in either file set so the upgrade iterator skips it.
 _VERSION_MARKER = ".bundled_version"
@@ -584,6 +604,33 @@ class ConfigManager:
     def config_dir(self) -> Path:
         """The resolved user config directory."""
         return self._user_dir
+
+    def retired_files_present(self) -> list[str]:
+        """Which retired config files this install still has on disk.
+
+        Retired files are left alone on upgrade — never read, never
+        migrated, never deleted — because ``system_extra.md`` may hold
+        months of a user's own prompt work and throwing it away would be
+        irreversible and pointless (see the module comment on
+        :data:`RETIRED_FILES`). The cost of that rule is silence: the
+        cards that edited these files are gone from the Settings tab and
+        nothing says why.
+
+        This is what lets the tab break that silence, and it is a
+        *query about this install* rather than the constant list. A
+        fresh install has none of them and must be told nothing — a note
+        naming files the user has never had would be noise, and the one
+        thing the note has to be is relevant.
+
+        Names only, in :data:`RETIRED_FILES` order, no paths: the
+        directory is already on screen in the info banner, and the
+        browser has no use for an absolute path it cannot open.
+        """
+        return [
+            name
+            for name in RETIRED_FILES
+            if (self._user_dir / name).is_file()
+        ]
 
     @property
     def aic_dc_dir(self) -> Path | None:

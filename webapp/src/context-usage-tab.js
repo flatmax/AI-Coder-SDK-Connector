@@ -43,6 +43,20 @@ import {
   warningPercent,
   windowPercent,
 } from './context-usage.js';
+import { toRepoPath } from './repo-path.js';
+// The rate-limit derivations are shared with the HUD and the chat panel's
+// toast rather than reimplemented: `windowIsOpen` in particular is the single
+// definition of "has this window reset yet", which the server deliberately
+// does not answer (`specs5/next.md` § C3).
+import {
+  formatResetTime,
+  limitTypeLabel,
+  utilizationPercent,
+  windowIsOpen,
+} from './rate-limit.js';
+// `formatCost` is the CLI's own format, and `usageSplit` reads either
+// spelling of the counters. Both shared with the HUD for the same reason.
+import { formatCost, usageSplit } from './turn-cost.js';
 
 /**
  * Deadline for a breakdown fetch. Without one, a reply dropped by a
@@ -146,6 +160,76 @@ function _fmtTokens(n) {
 }
 
 /**
+ * Fold one rate-limit record into a list, keyed by window.
+ *
+ * Keyed rather than appended because the CLI re-sends a window on every
+ * transition: a list that grew per event would draw the five-hour window
+ * three times, at three different utilisations, all of them claiming to be
+ * current. An untyped record gets a placeholder key rather than being
+ * dropped — the enum is the CLI's to extend, and a figure under a made-up
+ * key is more use than no figure.
+ *
+ * Returns a new array, because Lit's default `hasChanged` is identity.
+ */
+function _mergeRateLimit(records, record) {
+  if (!record || typeof record !== 'object') return records;
+  const key = record.rate_limit_type || '_untyped';
+  const kept = (records || []).filter(
+    (r) => (r?.rate_limit_type || '_untyped') !== key,
+  );
+  return [...kept, record];
+}
+
+/**
+ * The session's wall duration, aged from when the snapshot was taken.
+ *
+ * The server measures on a monotonic clock and sends a *number of seconds*,
+ * not an instant, so a figure rendered straight from the snapshot is frozen
+ * at whenever that snapshot happened — which on a long session is the one
+ * moment it is certainly wrong about. Ageing it here is the same rule the
+ * rate-limit windows follow: the server serves the record raw and the
+ * browser reads it against its own clock.
+ *
+ * No timer drives this. It re-reads on every render, which is every turn and
+ * every tab entry — often enough for a figure nobody watches tick.
+ */
+function _sessionSeconds(usage) {
+  const base = Number(usage?.duration_seconds);
+  if (!Number.isFinite(base) || base < 0) return null;
+  const takenAt = Number(usage?._takenAt);
+  if (!Number.isFinite(takenAt)) return base;
+  return base + Math.max(0, (Date.now() - takenAt) / 1000);
+}
+
+/** A duration in the CLI's own shape: `0s`, `3s`, `4m 12s`, `2h 5m`. */
+function _fmtDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—';
+  const total = Math.floor(seconds);
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+  return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+}
+
+/**
+ * A recorded failure's ISO timestamp, in the reader's own time.
+ *
+ * Absolute rather than relative ("3 hours ago"), which is the opposite of
+ * how the history browser stamps a session. The question here is not how
+ * long ago it happened but whether it lines up with something the user
+ * remembers doing — opening a terminal, a laptop waking, a token expiring —
+ * and a relative stamp cannot be matched against a memory of a clock.
+ *
+ * Unparseable text is shown verbatim rather than swallowed: it came out of
+ * a file, and a reader who can see the raw string can tell a corrupt record
+ * from a missing one.
+ */
+function _engineErrorTime(iso) {
+  if (!iso) return '—';
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime()) ? String(iso) : when.toLocaleString();
+}
+
+/**
  * How many hook events the Debug section keeps.
  *
  * A ring buffer rather than the session's whole traffic: the `PostToolUse`
@@ -223,6 +307,44 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     _stale: { type: Boolean, state: true },
     /** Which section is on screen: one of `_SECTIONS`'s ids. */
     _section: { type: String, state: true },
+    /**
+     * What this session has spent: `{total_cost_usd, model_usage,
+     * duration_seconds}`, or null before the first snapshot.
+     *
+     * The **cumulative** figures, deliberately, and the only place in this
+     * app that reads them as such. Everywhere else `total_cost_usd` and
+     * `model_usage` rendered as a turn's are the bug `turn-cost.js` exists
+     * to prevent; the question this block answers is the one they actually
+     * answer. Labelled "Session" on screen for the same reason.
+     */
+    _sessionUsage: { type: Object, state: true },
+    /**
+     * Every rate-limit window the account has open, newest arrival last.
+     *
+     * An array rather than the HUD's single record, because an account has
+     * several at once — the CLI's own `/usage` draws a gauge for the
+     * five-hour window, one for the week across all models, and one per
+     * model with its own cap. Merged by `rate_limit_type` from two arrivals
+     * (the snapshot and the live push) the same way the HUD merges its one.
+     */
+    _rateLimits: { type: Array, state: true },
+    /**
+     * `ClaudeCodeService.get_account_usage` — the windows the CLI's own
+     * `/usage` draws, read from the account rather than from the engine.
+     *
+     * **This is the figures; `_rateLimits` above is the alarms.** The
+     * engine's channel emits on a transition and mostly carries no
+     * utilisation at all, so it can say *that something changed* and not
+     * *where you stand*; the server reads the same REST endpoint the CLI
+     * reads to answer the second question. Held separately rather than
+     * merged into `_rateLimits` because the two disagree about what a
+     * record even is, and because this one is available with **no engine
+     * running** — which is the state a rate-limited reader is in.
+     *
+     * Shape: `{ok, windows[], fetched_at}` or `{ok: false, reason, detail}`.
+     * Null before the first fetch answers.
+     */
+    _accountUsage: { type: Object, state: true },
     /**
      * The SDK's `McpStatusResponse` from the last successful fetch, or
      * null. Separate from `_usage` because it comes from a second call
@@ -369,6 +491,20 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     }
     .bar.gauge {
       height: 18px;
+    }
+    /**
+     * One rate-limit window. Several stack, and without the gap a run of
+     * them reads as one gauge with several fills — which is the misreading
+     * the single-slot record used to force on the HUD.
+     */
+    .limit {
+      margin-bottom: 0.7rem;
+    }
+    .limit:last-child {
+      margin-bottom: 0;
+    }
+    .limit .note {
+      margin: 0.2rem 0 0;
     }
     .bar-seg {
       height: 100%;
@@ -561,7 +697,36 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      * sections under it off screen makes the Debug section unreadable in
      * the one situation it exists for.
      */
-    pre.json {
+    h4 {
+      margin: 0.8rem 0 0.3rem;
+      font-size: 0.8125rem;
+      color: var(--text-primary, #e6edf3);
+    }
+    /**
+     * One recorded engine failure. Ruled off on the left rather than
+     * boxed, because several of these stack and a run of boxes reads as a
+     * list of unrelated things when it is usually one fault repeating.
+     */
+    .engine-error {
+      margin: 0 0 0.6rem;
+      padding-left: 0.6rem;
+      border-left: 2px solid rgba(248, 81, 73, 0.4);
+    }
+    .engine-error p.error {
+      margin: 0 0 0.3rem;
+    }
+    /**
+     * The stderr dump shares this rule rather than getting its own: it is
+     * the same decision — a raw payload capped in height so it cannot push
+     * the sections under it off screen — applied to text that happens not
+     * to be JSON. Two rules would be one rule that could drift.
+     *
+     * (No backticks anywhere in this block: the whole of the styles is one
+     * template literal, and a stray backtick in a comment ends it. The
+     * failure is a parse error hundreds of lines away with no line number.)
+     */
+    pre.json,
+    pre.stderr {
       margin: 0;
       max-height: 16rem;
       overflow: auto;
@@ -627,13 +792,29 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._healthSeq = 0;
     /** `get_server_info()`'s reply, fetched when Debug is first opened. */
     this._serverInfo = null;
+    /**
+     * Recent engine failures, or null before the first read.
+     *
+     * The one thing in this section that outlives the process it describes.
+     * Everything else here is what the *running* engine resolved; this is
+     * why an earlier one did not run, read back off disk, which is the only
+     * way a failure the user has already closed the terminal on can still
+     * be diagnosed.
+     */
+    this._engineErrors = null;
     this._debugError = '';
     this._debugLoading = false;
+
+    this._sessionUsage = null;
+    this._rateLimits = [];
+    this._accountUsage = null;
 
     this._onStreamComplete = this._onStreamComplete.bind(this);
     this._onSessionChanged = this._onSessionChanged.bind(this);
     this._onHookEvent = this._onHookEvent.bind(this);
     this._onEngineHealth = this._onEngineHealth.bind(this);
+    this._onRateLimit = this._onRateLimit.bind(this);
+    this._onStateLoaded = this._onStateLoaded.bind(this);
   }
 
   connectedCallback() {
@@ -646,6 +827,13 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // happened during the turn the reader is now asking about.
     window.addEventListener('hook-event', this._onHookEvent);
     window.addEventListener('engine-health', this._onEngineHealth);
+    // The same two arrivals the HUD reads, for the same reason: the push is
+    // the only thing that reports a *transition*, and the snapshot is the
+    // only thing a browser that reloaded between transitions will ever get.
+    // This section outlives the HUD's 8.8 seconds, which is the whole point
+    // of it being here — `/usage` opens onto this tab.
+    window.addEventListener('rate-limit', this._onRateLimit);
+    window.addEventListener('state-loaded', this._onStateLoaded);
   }
 
   disconnectedCallback() {
@@ -653,7 +841,47 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     window.removeEventListener('session-changed', this._onSessionChanged);
     window.removeEventListener('hook-event', this._onHookEvent);
     window.removeEventListener('engine-health', this._onEngineHealth);
+    window.removeEventListener('rate-limit', this._onRateLimit);
+    window.removeEventListener('state-loaded', this._onStateLoaded);
     super.disconnectedCallback();
+  }
+
+  /**
+   * One window's record arrived. Merge it by type; never clear on nothing.
+   *
+   * Merged rather than appended, because the CLI re-sends a window on every
+   * transition and a list that grew per event would draw the same window
+   * three times with three different utilisations.
+   */
+  _onRateLimit(event) {
+    const record = event?.detail?.data;
+    if (!record || typeof record !== 'object') return;
+    this._rateLimits = _mergeRateLimit(this._rateLimits, record);
+  }
+
+  /**
+   * The shell's first-paint snapshot: every open window, and the session's
+   * own totals.
+   *
+   * A snapshot carrying neither leaves both alone rather than clearing them.
+   * A reconnect re-delivers the snapshot mid-session and a backend older
+   * than these fields sends nothing at all; neither is evidence that a limit
+   * the browser has been told about has gone away.
+   */
+  _onStateLoaded(event) {
+    const detail = event?.detail;
+    if (!detail || typeof detail !== 'object') return;
+    if (Array.isArray(detail.rate_limits) && detail.rate_limits.length) {
+      this._rateLimits = detail.rate_limits.reduce(_mergeRateLimit, this._rateLimits);
+    }
+    if (detail.session_usage && typeof detail.session_usage === 'object') {
+      // Stamped on arrival so the duration can be aged at render time. The
+      // server measures wall time on a monotonic clock and sends a number,
+      // not an instant; without the stamp the figure would be frozen at
+      // whenever the snapshot happened to be taken, which on a long session
+      // is the one moment it is guaranteed to be wrong about.
+      this._sessionUsage = { ...detail.session_usage, _takenAt: Date.now() };
+    }
   }
 
   async onRpcReady() {
@@ -685,7 +913,31 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     return this.offsetParent !== null;
   }
 
-  _onStreamComplete() {
+  _onStreamComplete(event) {
+    // The session's running totals ride in on every result, so this block
+    // stays current without a fetch — unlike the breakdown below it. Adopted
+    // even while the tab is hidden, because it costs nothing and the
+    // alternative is a stale figure the moment the tab is opened.
+    //
+    // `total_cost_usd` and `model_usage` **as reported**, which is the one
+    // reading of them this app permits (`turn-cost.js` § the module note).
+    // A result that carries neither leaves the last good figures alone: a
+    // synthetic failure footer writes `null` into both, and a session does
+    // not stop having cost what it cost because one turn died.
+    const result = event?.detail;
+    if (result && typeof result === 'object') {
+      const cost = typeof result.total_cost_usd === 'number'
+        ? result.total_cost_usd
+        : this._sessionUsage?.total_cost_usd ?? null;
+      const models = result.model_usage && typeof result.model_usage === 'object'
+        ? result.model_usage
+        : this._sessionUsage?.model_usage ?? null;
+      this._sessionUsage = {
+        ...(this._sessionUsage || {}),
+        total_cost_usd: cost,
+        model_usage: models,
+      };
+    }
     // Only fetch when the user can see the result. Unlike the old tab,
     // which fetched eagerly on every completion, this costs a control
     // request to the CLI subprocess rather than a local computation —
@@ -762,12 +1014,28 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
   // Data
   // ---------------------------------------------------------------
 
-  async _refresh() {
+  /**
+   * @param {{force?: boolean}} opts — `force` bypasses the server's cache
+   *   for the account windows. Set by the Refresh button and by nothing
+   *   else: a tab entry or a finished turn wants *current enough*, while
+   *   somebody pressing Refresh is asking a question the cached answer has
+   *   already failed to settle.
+   */
+  async _refresh({ force = false } = {}) {
     if (this._loading) return;
     if (!this.rpcConnected) return;
     this._loading = true;
     try {
-      await this._refreshBreakdown();
+      // Started together and awaited together, but they are **not** the
+      // same kind of call and neither one's failure may take the other
+      // down: the breakdown is a control request to a running engine, and
+      // the account windows are a REST read that answers whether or not
+      // one exists. `_fetchAccountUsage` swallows its own errors for that
+      // reason, so a `Promise.all` here cannot reject on its account.
+      await Promise.all([
+        this._refreshBreakdown(),
+        this._fetchAccountUsage({ force }),
+      ]);
     } finally {
       this._loading = false;
     }
@@ -825,6 +1093,35 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       // that dropped under it. Either way a request failed, which is
       // what 'failed' claims; whether an engine is up it cannot say.
       this._errorReason = 'failed';
+    }
+  }
+
+  /**
+   * The account's rate-limit windows, fetched beside the breakdown.
+   *
+   * Quiet on failure like `_fetchMcpStatus`, and for a stronger reason:
+   * the server already turns every failure it can name into an
+   * `{ok: false, reason}` answer, so anything thrown here is the *call*
+   * failing — a timeout, a dropped socket, or a backend too old to have
+   * the method. None of those is worth an error paragraph over a page of
+   * working numbers, and the last good answer is better company for the
+   * reader than a blank section.
+   *
+   * **The previous answer is kept on a thrown call, not cleared.** A
+   * window that read 48% ten seconds ago has not become unknown because
+   * one request did not land, and the server marks its own staleness when
+   * it is the one that could not read (`stale`).
+   */
+  async _fetchAccountUsage({ force = false } = {}) {
+    try {
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_account_usage', force),
+        _FETCH_TIMEOUT_MS,
+        'get_account_usage',
+      );
+      if (res && typeof res === 'object') this._accountUsage = res;
+    } catch {
+      // Deliberately quiet — see above.
     }
   }
 
@@ -1008,18 +1305,22 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // newest thing we have.
     const seq = this._healthSeq;
     try {
-      const [health, info] = await Promise.all([
+      const [health, info, errors] = await Promise.all([
         this._fetchEngineHealth(),
         withRpcTimeout(
           this.rpcExtract('ClaudeCodeService.get_server_info'),
           _FETCH_TIMEOUT_MS,
           'get_server_info',
         ),
+        this._fetchEngineErrors(),
       ]);
       // So: a fetch that answers nothing, *and* one that answers late,
       // both leave whatever arrived pushed in place. `mirror_gaps` moves
       // during a turn, and this fetch is seconds wide.
       if (health && this._healthSeq === seq) this._health = health;
+      // No sequence guard, unlike health: nothing pushes this, so a late
+      // answer cannot be older than what is already here.
+      this._engineErrors = errors;
       if (info && info.error) {
         this._debugError = String(info.error);
       } else {
@@ -1055,6 +1356,34 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       // Deliberately quiet — see above.
     }
     return null;
+  }
+
+  /**
+   * Why earlier engines would not start.
+   *
+   * Not quiet on failure, unlike `_fetchEngineHealth` above, and the
+   * difference is that this read has no second source. Health arrives
+   * pushed as well as fetched, so a failed fetch costs nothing; nothing
+   * pushes this file, so a swallowed error would render as "no failures
+   * recorded" — which is the one sentence here that must not be produced
+   * by a read that did not happen.
+   *
+   * @returns {Promise<{errors?: object[], error?: string}>}
+   */
+  async _fetchEngineErrors() {
+    try {
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_engine_errors'),
+        _FETCH_TIMEOUT_MS,
+        'get_engine_errors',
+      );
+      if (res && typeof res === 'object') return res;
+      return { error: 'The engine gave no answer for its error log.' };
+    } catch (err) {
+      return {
+        error: `Could not read the engine error log: ${err?.message || err}`,
+      };
+    }
   }
 
   _goBackToChat() {
@@ -1141,6 +1470,13 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * Minimizes this dialog as well as navigating, because the viewer is
    * behind it: a click that opens a file under an opaque panel is
    * indistinguishable from a click that did nothing.
+   *
+   * The path handed over is the *absolute* one the engine reported,
+   * like every other `navigate-file` dispatcher's. The shell's handler
+   * relativises at the choke point (`app-shell/viewers.js`), which is
+   * where that conversion is already owned; converting here as well
+   * would be the per-dispatcher duplication that comment argues
+   * against.
    */
   _openMemoryFile(path) {
     if (!path) return;
@@ -1166,7 +1502,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           class="tool-btn"
           ?disabled=${this._loading || !this.rpcConnected}
           title="Ask the engine for a fresh breakdown"
-          @click=${this._refresh}
+          @click=${() => this._refresh({ force: true })}
         >${this._loading ? 'Reading…' : '↻ Refresh'}</button>
         ${this._stale
           ? html`<span class="stale-badge">● stale</span>`
@@ -1214,16 +1550,27 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     if (this._section === 'debug') {
       return html`${this._renderDebugSection()}${this._renderFooter()}`;
     }
+    // The rate-limit section rides above both of the no-breakdown
+    // branches, because it is the one thing on this tab that **does not
+    // come from the engine**. A reader who has been cut off by a weekly
+    // limit has no session to interrogate — which is exactly when the
+    // breakdown fails and exactly when they came to look at their
+    // windows. Leaving it inside the success branch meant the panel
+    // vanished precisely when it was the reason for opening the tab.
     if (this._error && !this._usage) {
       return html`
+        ${this._renderRateLimits()}
         <p class="error">${this._error}</p>
         ${this._renderErrorNote()}
       `;
     }
     if (!this._usage) {
-      return html`<p class="empty">
-        ${this._loading ? 'Reading context…' : 'No breakdown yet.'}
-      </p>`;
+      return html`
+        ${this._renderRateLimits()}
+        <p class="empty">
+          ${this._loading ? 'Reading context…' : 'No breakdown yet.'}
+        </p>
+      `;
     }
     return html`
       ${this._section === 'session'
@@ -1278,12 +1625,352 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // that cannot change between them.
     const comp = messageComposition(this._usage);
     return html`
+      ${this._renderSessionUsage()}
+      ${this._renderRateLimits()}
       ${this._renderHeadline()}
       ${this._renderCategories()}
       ${this._renderMessageBreakdown(comp)}
       ${this._renderToolTraffic(comp)}
       ${this._renderAttachments(comp)}
     `;
+  }
+
+  /**
+   * Session — what this conversation has cost so far.
+   *
+   * This block and the gauges under it are what `/usage` opens onto, and
+   * until 2026-08-29 neither existed: the command's own reply promised "the
+   * Context tab's cost and per-model token breakdown" and the tab rendered
+   * context-window composition and nothing else. The figures were on the
+   * wire the whole time — they were rendered only in the per-turn HUD, which
+   * auto-hides after 8.8 seconds and never appears at all for a session that
+   * has not run a turn.
+   *
+   * **Cumulative on purpose, which is the opposite of every other cost on
+   * screen.** `total_cost_usd` and `model_usage` are the session's running
+   * totals; rendering them as a turn's is the bug `turn-cost.js` exists to
+   * prevent, and this is the one question they answer directly. The heading
+   * says "Session" and every row is labelled, so the two readings cannot be
+   * confused by anyone reading the panel rather than the source.
+   *
+   * Absent rather than empty before the first priced result: a session that
+   * has run nothing has no cost, and `$0.0000` is a claim about it.
+   */
+  _renderSessionUsage() {
+    const usage = this._sessionUsage;
+    const cost = formatCost(usage?.total_cost_usd);
+    const seconds = _sessionSeconds(usage);
+    const models = usage?.model_usage && typeof usage.model_usage === 'object'
+      ? Object.entries(usage.model_usage)
+      : [];
+    const rows = models
+      .map(([key, entry]) => ({
+        model: entry?.canonicalModel || key,
+        ...usageSplit(entry),
+      }))
+      .filter((row) => row.total > 0)
+      .sort((a, b) => b.total - a.total);
+    if (cost === null && seconds === null && rows.length === 0) return '';
+
+    return html`
+      <section>
+        <h3>
+          Session
+          ${cost !== null
+            ? html`<span class="sub">— ${cost} so far</span>`
+            : ''}
+        </h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th class="num">Prompt</th>
+              <th class="num">Completion</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => html`
+              <tr>
+                <td title=${row.model}>${row.model}</td>
+                <td
+                  class="num"
+                  title=${`${row.input.toLocaleString()} uncached · ${row.cacheRead.toLocaleString()} cache read · ${row.cacheCreation.toLocaleString()} cache write`}
+                >${_fmtTokens(row.prompt)}</td>
+                <td class="num">${_fmtTokens(row.output)}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+        ${seconds !== null
+          ? html`<p class="note">
+              ${_fmtDuration(seconds)} since the engine connected. No API-time
+              figure sits beside it: the CLI does not say whether its duration
+              fields are per-turn or cumulative, and reading that wrong is
+              silent.
+            </p>`
+          : ''}
+        ${rows.length === 0 && cost !== null
+          ? html`<p class="note">
+              No per-model figures yet — the engine reports them with the first
+              priced result.
+            </p>`
+          : ''}
+      </section>
+    `;
+  }
+
+  /**
+   * Rate limits — one gauge per window the account has open.
+   *
+   * **Two sources, and only one of them has the figures.** The engine's
+   * `RateLimitEvent` channel emits on a *transition* and carried no
+   * utilisation at all in the record measured 2026-08-29, which is what
+   * put a grey "no figure" where the CLI's own `/usage` was showing 37%
+   * and two more windows besides. `ClaudeCodeService.get_account_usage`
+   * reads the endpoint the CLI itself reads, so `_accountUsage.windows`
+   * is the panel and `_rateLimits` is reduced to the alarms it always
+   * was. When the account read is unavailable the event records are drawn
+   * as gauges again, exactly as before, because a transition notice is
+   * still better than an empty section.
+   *
+   * The account records arrive **already in this file's units** — fraction
+   * and Unix seconds — converted once on the server, where the mismatch
+   * with the endpoint's own percent-and-ISO is documented
+   * (`account_usage.py`). Nothing here needs to know which source a record
+   * came from to read its numbers, which is the point.
+   *
+   * **Expiry is decided here and only here.** The server serves each record
+   * raw, so a window whose `resets_at` has passed is dropped by
+   * `windowIsOpen` — the same function the HUD and the chat toast call, so
+   * there is one definition of "still open" and three readers rather than
+   * three definitions (`specs5/next.md` § C3). A window with **no** reset
+   * counts as open, which is what shows the per-model weekly cap for a
+   * model you have not used this week: 0%, no reset, and a real answer.
+   *
+   * Most-constrained first, unlike the HUD's single record, which shows the
+   * window that most recently *transitioned*. A list has room to rank and a
+   * gauge does not; the window nearest its ceiling is the one the reader
+   * came to find.
+   */
+  _renderRateLimits() {
+    const account = this._accountUsage;
+    const windows =
+      account && account.ok && Array.isArray(account.windows)
+        ? account.windows
+            .filter((w) => windowIsOpen(w))
+            .sort((a, b) => (utilizationPercent(b) ?? 0) - (utilizationPercent(a) ?? 0))
+        : [];
+    const open = (this._rateLimits || [])
+      .filter((record) => windowIsOpen(record))
+      .sort((a, b) => (utilizationPercent(b) ?? 0) - (utilizationPercent(a) ?? 0));
+    // The account read is the answer when it came. The event records are
+    // then demoted to what they are — notices about transitions — and
+    // only the ones carrying something the gauges cannot say are kept:
+    // an overage rejection, or a window actively refusing calls. Neither
+    // is in the account payload's vocabulary.
+    //
+    // **Demoted means the headline goes too, not just the row.** Keeping
+    // the gauge markup here drew "5-hour — no figure" directly beneath
+    // the 5-hour gauge reading 48%: one window claiming to be two, and
+    // the grey "no figure" contradicting the real number right above it.
+    // So a kept record renders as its sentence alone (`_renderEventNotice`)
+    // and only becomes a gauge again when there are no account windows for
+    // it to contradict.
+    const notices = windows.length
+      ? open.filter((r) => r.status === 'rejected' || r.overage_status)
+      : open;
+    if (!windows.length && !notices.length && !(account && account.ok === false)) {
+      return '';
+    }
+
+    return html`
+      <section>
+        <h3>
+          Rate limits
+          <span class="sub"
+            >— ${windows.length
+              ? `${windows.length} window${windows.length === 1 ? '' : 's'}`
+              : `${open.length} open window${open.length === 1 ? '' : 's'}`}</span
+          >
+        </h3>
+        ${windows.map((w) => this._renderAccountWindow(w))}
+        ${this._renderAccountNote(notices.length > 0)}
+        ${windows.length
+          ? notices.map((record) => this._renderEventNotice(record))
+          : notices.map((record) => this._renderEventLimit(record))}
+      </section>
+    `;
+  }
+
+  /**
+   * One event record as a gauge — the pre-account rendering, unchanged.
+   *
+   * Reached only when the account read gave nothing, which is when a
+   * transition notice is the best information on the page.
+   */
+  _renderEventLimit(record) {
+    const pct = utilizationPercent(record);
+    const rejected = record.status === 'rejected';
+    // **No figure is not a figure of zero**, and this is the one thing
+    // this section must not get wrong. `utilization` is absent from real
+    // records — the CLI's whole payload is six fields and that is not one
+    // of them (§ The Rate-Limit Channel Is An Alarm, Not A Usage Panel) —
+    // so falling through to `_pctColor(0)` painted "we were not told" in
+    // the healthy band, above an empty bar that reads as 0% used. An empty
+    // list does not say "no servers", it says "no answer": the same rule,
+    // one surface over.
+    const unknown = pct === null && !rejected;
+    // Red at any figure when the limit is refusing calls: an overage
+    // cut-off can reject at a utilisation the bands would call healthy.
+    const color = rejected
+      ? '#f85149'
+      : unknown
+        ? 'var(--text-muted, #8b949e)'
+        : _pctColor(pct);
+    const resets = formatResetTime(record.resets_at);
+    return html`
+      <div class="limit">
+        <div class="headline">
+          <span class="of">${limitTypeLabel(record.rate_limit_type)}</span>
+          <span class="pct" style="color: ${color}">
+            ${rejected ? 'reached' : unknown ? 'no figure' : `${Math.round(pct)}%`}
+          </span>
+        </div>
+        ${unknown
+          ? ''
+          : html`<div class="bar" role="presentation">
+              <div
+                class="bar-seg"
+                style=${`width:${Math.min(100, pct)}%;background:${color}`}
+              ></div>
+            </div>`}
+        ${resets ? html`<p class="note">Resets ${resets}</p>` : ''}
+        ${unknown
+          ? html`<p class="note">
+              Reported without a utilisation, which is the usual case: the
+              percentage the CLI's own <code>/usage</code> shows is not in the
+              event it sends us. The window and its reset are what is known.
+            </p>`
+          : ''}
+        ${this._renderOverageNote(record)}
+      </div>
+    `;
+  }
+
+  /**
+   * A kept event record beside the gauges: its sentence, and no headline.
+   *
+   * What survives the demotion is only what the account payload has no
+   * words for — a window actively refusing calls, and the state of
+   * overage. The window's *name* is carried in the sentence rather than
+   * in a heading, and there is deliberately **no `.limit` wrapper**: that
+   * class is the gauge, and a notice wearing it is a fourth window to
+   * anything counting them, including this panel's own tests.
+   */
+  _renderEventNotice(record) {
+    const label = limitTypeLabel(record.rate_limit_type);
+    return html`
+      ${record.status === 'rejected'
+        ? html`<p class="note" style="color: #f85149">
+            The ${label || 'rate'} limit is refusing calls right now.
+          </p>`
+        : ''}
+      ${this._renderOverageNote(record)}
+    `;
+  }
+
+  /**
+   * Overage, as the engine reported it.
+   *
+   * Shared by both renderings above because it is the one thing on this
+   * channel worth keeping either way, and because it says something the
+   * account endpoint does not: `overage_status` is *why pay-as-you-go is
+   * unavailable*, and `is_using_overage` separates "you have overage and
+   * are not on it" from "you are on it right now".
+   */
+  _renderOverageNote(record) {
+    if (record.overage_status === 'rejected') {
+      return html`<p class="note">
+        Overage unavailable${
+          record.overage_disabled_reason
+            ? html` — ${record.overage_disabled_reason.replace(/_/g, ' ')}`
+            : ''
+        }, so this window is a hard ceiling rather than a warning.
+      </p>`;
+    }
+    if (record.overage_status) {
+      return html`<p class="note">
+        Overage ${record.overage_status.replace(/_/g, ' ')}${
+          record.is_using_overage ? ', and in use' : ''
+        }.
+      </p>`;
+    }
+    return '';
+  }
+
+  /**
+   * One gauge from the account read.
+   *
+   * Simpler than its event-record neighbour by construction: this source
+   * always carries a figure, so there is no "no figure" branch and no
+   * grey band to fall into. The label is the server's — a scoped weekly
+   * window is named after the model the account holds the cap for, and
+   * that name is read from the payload rather than mapped from an enum,
+   * because a per-model cap for a model shipped tomorrow is exactly the
+   * row the fixed enum could never carry.
+   *
+   * A missing `resets_at` draws no reset line rather than a placeholder.
+   * The window is real either way, and the endpoint leaves it null for a
+   * cap that has not started counting.
+   */
+  _renderAccountWindow(w) {
+    const pct = utilizationPercent(w);
+    if (pct === null) return '';
+    const color = _pctColor(pct);
+    const resets = formatResetTime(w.resets_at);
+    return html`
+      <div class="limit">
+        <div class="headline">
+          <span class="of">${w.label || 'Window'}</span>
+          <span class="pct" style="color: ${color}">${Math.round(pct)}%</span>
+        </div>
+        <div class="bar" role="presentation">
+          <div class="bar-seg" style=${`width:${Math.min(100, pct)}%;background:${color}`}></div>
+        </div>
+        ${resets ? html`<p class="note">Resets ${resets}</p>` : ''}
+      </div>
+    `;
+  }
+
+  /**
+   * Where the gauges came from, or why there are none.
+   *
+   * **The failure sentence is the feature.** Every reason the server can
+   * name is a different thing for the reader to do — refresh a login, run
+   * a turn, or stop expecting subscription figures on a machine whose
+   * turns bill to an API key — and collapsing them into "unavailable"
+   * sends all three of those readers to the wrong place. So the server's
+   * `detail` is printed as written.
+   */
+  _renderAccountNote(hasNotices) {
+    const account = this._accountUsage;
+    if (!account || typeof account !== 'object') return '';
+    if (account.ok) {
+      if (!account.stale) return '';
+      // A figure from the last good read, over a read that failed. Said
+      // out loud, because an unqualified percentage is a claim about now.
+      return html`<p class="note">
+        Last successful reading — the account endpoint could not be reached
+        just now${account.stale_detail ? html` (${account.stale_detail})` : ''}.
+      </p>`;
+    }
+    return html`<p class="note">
+      Account usage unavailable. ${account.detail ? html`${account.detail} ` : ''}${
+        hasNotices
+          ? 'What follows is the engine reporting a change, not a reading.'
+          : ''
+      }
+    </p>`;
   }
 
   /**
@@ -1708,21 +2395,29 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
           <tbody>
             ${files.map((f) => {
               const path = f.path || f.name || '';
-              // `relPath` is the service's answer to "can the viewer
-              // actually open this": present only for a file inside the
-              // repo root, since every repo read rejects an absolute
-              // path and `~/.claude/CLAUDE.md` is outside the repo
-              // entirely. Rows without it stay text rather than
-              // offering a click that would fail.
-              const rel = typeof f.relPath === 'string' ? f.relPath : '';
+              // One question, asked once: `toRepoPath` gives back a
+              // *different* string only when the path is absolute and
+              // inside the repo root, which is exactly the condition
+              // for a row being openable — every repo read rejects an
+              // absolute path, and `~/.claude/CLAUDE.md` is outside the
+              // repo entirely. So the rule that names the file is also
+              // the rule that decides whether it is a link, and rows it
+              // does not recognise stay text rather than offering a
+              // click that would fail.
+              //
+              // The service used to answer this with a `relPath` field
+              // (`next.md` § C3). It no longer does, and this is the
+              // only reader that would have wanted it.
+              const rel = toRepoPath(path);
+              const openable = rel !== path;
               return html`
                 <tr>
                   <td class="path" title=${path}>
-                    ${rel
+                    ${openable
                       ? html`<button
                           class="link"
                           title="Open ${rel} in the viewer"
-                          @click=${() => this._openMemoryFile(rel)}
+                          @click=${() => this._openMemoryFile(path)}
                         >${rel}</button>`
                       : path || '—'}
                   </td>
@@ -2267,7 +2962,85 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
               whenever it changes, so this fills in as soon as the engine
               reports.
             </p>`}
+        ${this._renderEngineErrors()}
       </section>
+    `;
+  }
+
+  /**
+   * Engine failures recorded on disk, newest last.
+   *
+   * Outside the health branch above on purpose. Health is what the
+   * *running* engine resolved, so an engine that never started has none —
+   * and "never started" is precisely when the reader needs this. Nesting
+   * it would have hidden the record in the only case it exists for.
+   *
+   * Each row carries the credential source and the resolved binary rather
+   * than the message alone, because for the failure this was built after —
+   * an authentication error on a cold start — which credentials were
+   * resolved *is* the diagnosis, and it is the one fact no live surface
+   * keeps once the process is gone. The CLI's own stderr goes underneath,
+   * preformatted, for the reason the health banner shows it: on a failed
+   * connect it is the only account from the thing that actually failed.
+   *
+   * Silence when the file is empty and has been read, because an engine
+   * that has never failed is the ordinary case and a heading over nothing
+   * is noise. A read that *failed* says so instead — that distinction is
+   * the whole reason the RPC answers a dict rather than a bare list.
+   */
+  _renderEngineErrors() {
+    const state = this._engineErrors;
+    if (!state) return '';
+    if (state.error) {
+      return html`<p class="warn">
+        ${state.reason === 'no_repo'
+          ? 'Engine failures are not recorded for a run with no repo directory.'
+          : state.error}
+      </p>`;
+    }
+    const errors = Array.isArray(state.errors) ? state.errors : [];
+    if (errors.length === 0) return '';
+    return html`
+      <h4>Engine failures</h4>
+      <p class="note">
+        Read from <code>.aic-dc/engine-errors.jsonl</code>. These outlive the
+        server that wrote them, which is the point: a failed start is
+        otherwise only a broadcast to whoever was watching.
+      </p>
+      ${errors.map(
+        (e) => html`
+          <div class="engine-error">
+            <p class="error">${e.message || 'The engine failed to start.'}</p>
+            <table>
+              <tbody>
+                <tr>
+                  <td>When</td>
+                  <td class="path">${_engineErrorTime(e.timestamp)}</td>
+                </tr>
+                ${e.credential_source
+                  ? html`<tr>
+                      <td>Credentials</td>
+                      <td class="path">${e.credential_source}</td>
+                    </tr>`
+                  : ''}
+                ${e.cli_path
+                  ? html`<tr>
+                      <td>Binary</td>
+                      <td class="path">
+                        ${e.cli_path}${e.cli_version
+                          ? ` (${e.cli_version})`
+                          : ''}
+                      </td>
+                    </tr>`
+                  : ''}
+              </tbody>
+            </table>
+            ${Array.isArray(e.cli_stderr) && e.cli_stderr.length
+              ? html`<pre class="stderr">${e.cli_stderr.join('\n')}</pre>`
+              : ''}
+          </div>
+        `,
+      )}
     `;
   }
 

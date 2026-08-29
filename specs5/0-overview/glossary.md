@@ -34,7 +34,7 @@ SDK actually does.
 
 ## Tools and Permissions
 
-- **Tool card** — the chat-panel rendering of one tool call: name, one-line input summary, status, duration, expandable full input and result. Created on `PreToolUse` and correlated to its result by `tool_use_id`. Failures are expanded by default; successes are collapsed.
+- **Tool card** — the chat-panel rendering of one tool call: name, input summary (wrapped, never elided), status, duration, expandable full input and result. Created on `PreToolUse` and correlated to its result by `tool_use_id`. Failures are expanded by default; successes are collapsed.
 - **Permission request** — a `can_use_tool` callback suspended in the engine while a browser dialog is answered. The engine is genuinely blocked; the dialog is not advisory.
 - **Permission decision** — allow once, deny with a reason, or always-allow. Always-allow writes a scoped tool-plus-pattern rule (`Bash(npm test:*)`, `Edit(src/**)`) into project permission settings via a `PermissionUpdate` — never a bare tool grant and never an invisible in-memory one.
 - **Permission mode** — the session's standing posture: `default`, `plan`, `acceptEdits`, `dontAsk`, `bypassPermissions`, `auto`. Switched live, always visible in the UI, broadcast to all clients, and recorded as a system event.
@@ -47,6 +47,7 @@ SDK actually does.
 
 - **Engine transcript** — the session record the SDK resumes from, in the CLI's own format, opaque to us and stored verbatim. Written through our `SessionStore` so a copy lands under `.aic-dc/sessions/`. Compacted by the engine, on the engine's schedule. It is the only transcript: [CC-19](../plan/decisions.md#cc-19) retired the second one.
 - **Derived index** — AIC⚡DC's search, session-summary and request-ID-to-session index under `.aic-dc/`, built entirely from the transcript. Holds no content of its own, so it can be stale but cannot disagree; deleting it is supported and it rebuilds.
+- **Engine error log** — `.aic-dc/engine-errors.jsonl`. Why the engine would not start: the message, the credential source, the resolved binary and the CLI's stderr tail. Separate from the events log because that one drops a record with no session, and a connect that fails on authentication is a failure with no session. The one record in `.aic-dc/` that outlives the process that wrote it and describes that process's death.
 - **Events log** — `.aic-dc/events.jsonl`. AIC⚡DC's own operational events (commit, reset, review entry and exit, preset switch, permission-mode change), keyed by session and request ID, carrying no message content. Separate from the transcript because the store is never given an entry the CLI did not write, and separate from the index because nothing here is derivable.
 - **Mirror gap** — a hole in the mirrored transcript, announced by the SDK as a `MirrorErrorMessage` and surfaced as an engine-health banner. Non-fatal: the turn continues and the CLI's own local transcript is unaffected. A silent gap would leave a wrong record looking right, and would surface much later as a failed resume.
 - **Resume** — restoring a session by passing its ID to the SDK, which restores its own context including its own compactions. Never a replay: AIC⚡DC does not read the transcript back into a prompt, which is exactly how a session comes to look correct in the UI while the model's view has diverged.

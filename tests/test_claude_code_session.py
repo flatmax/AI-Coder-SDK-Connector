@@ -1941,3 +1941,268 @@ class TestBackgroundDrain:
         from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 
         assert session_module.DEFERRING_TASK_TYPES == DEFERRING_TASK_TYPES
+
+
+# ---------------------------------------------------------------------------
+# The rate-limit record survives a reload
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitState:
+    """The same lesson as `TestCompactionState`, over a much longer gap.
+
+    A compaction lasts tens of seconds, so the window in which a reload loses
+    the fact is small. The CLI emits a rate limit only when the status
+    *changes* — the SDK's own docstring says so — so a browser that reloads
+    between transitions has nothing to show for as long as the status holds:
+    hours, on a seven-day window, and possibly right up to the rejection the
+    figure exists to give warning of.
+
+    The HUD's Rate limits section is the subscription-mode replacement for a
+    cost figure (`specs5/plan/risks.md` § R-6), so "nothing to show" is not a
+    cosmetic outcome there.
+    """
+
+    def fold(self, engine, event):
+        """Push one translated event through the session's folding step."""
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        return engine._fold_session_state(active, event)
+
+    def record(self, **overrides):
+        payload = {
+            "status": "allowed_warning",
+            "rate_limit_type": "five_hour",
+            "resets_at": 1_800_000_000,
+            "utilization": 0.82,
+            "overage_status": None,
+            "overage_resets_at": None,
+            "overage_disabled_reason": None,
+            "raw": {},
+        }
+        payload.update(overrides)
+        return Event("rateLimit", payload)
+
+    async def test_an_untouched_session_has_no_record(self, engine):
+        assert engine.rate_limit is None
+
+    async def test_a_pushed_record_is_remembered(self, engine):
+        self.fold(engine, self.record())
+        assert engine.rate_limit["utilization"] == 0.82
+        assert engine.rate_limit["rate_limit_type"] == "five_hour"
+
+    async def test_the_event_is_still_forwarded_unchanged(self, engine):
+        """Folding records; it must not swallow. The chat panel's toast is
+        still driven by the broadcast — this only adds the snapshot."""
+        out = self.fold(engine, self.record())
+        assert out.name == "rateLimit"
+        assert out.payload["status"] == "allowed_warning"
+
+    async def test_a_later_record_replaces_the_earlier_one(self, engine):
+        self.fold(engine, self.record(utilization=0.42))
+        self.fold(engine, self.record(utilization=0.99, status="rejected"))
+        assert engine.rate_limit["utilization"] == 0.99
+        assert engine.rate_limit["status"] == "rejected"
+
+    async def test_the_record_is_copied_out(self, engine):
+        """A caller that mutates what it was handed must not edit the
+        session's own copy — this is served to every client that connects."""
+        self.fold(engine, self.record())
+        handed = engine.rate_limit
+        handed["utilization"] = 0.0
+        assert engine.rate_limit["utilization"] == 0.82
+
+    async def test_a_turn_ending_does_not_clear_it(self, engine):
+        """Unlike a compaction, which never outlives its turn. A five-hour
+        window is not a property of the turn that happened to observe it."""
+        self.fold(engine, self.record())
+        self.fold(engine, Event("streamComplete", {}))
+        assert engine.rate_limit is not None
+
+    async def test_disconnect_does_not_clear_it(self, tmp_path):
+        """The engine going away does not give the tokens back.
+
+        `compaction_state` clears here because it is a claim about what the
+        engine is *doing*; this is a claim about the account, and it stays
+        true across the restart the browser outlives.
+        """
+        session = EngineSession(
+            tmp_path, EngineConfig(), clock=lambda: "2026-08-14T00:00:00Z"
+        )
+        await session.connect()
+        self.fold(session, self.record())
+        await session.disconnect()
+        assert session.rate_limit is not None
+
+    async def test_expiry_is_not_decided_here(self, engine):
+        """`resets_at` in the past is served as-is.
+
+        Whether the window has closed is the browser's question: a pushed
+        record has to be aged client-side regardless, so a second test here
+        could only come to disagree with it (`specs5/next.md` § C3).
+        """
+        self.fold(engine, self.record(resets_at=1))
+        assert engine.rate_limit["resets_at"] == 1
+
+    async def test_a_second_window_does_not_overwrite_the_first(self, engine):
+        """The defect this keying fixes.
+
+        An account has several windows open at once — the CLI's own `/usage`
+        draws a gauge for each — and each arrives as its own record. With one
+        slot the seven-day event replaced the five-hour one, so the browser
+        could only ever show whichever transitioned last, and a five-hour
+        figure silently became a seven-day figure under the same heading.
+        """
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+
+        kinds = {r["rate_limit_type"]: r["utilization"] for r in engine.rate_limits}
+        assert kinds == {"five_hour": 0.82, "seven_day": 0.09}
+
+    async def test_a_newer_record_for_one_window_replaces_only_that_window(self, engine):
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+        self.fold(engine, self.record(utilization=0.95))
+
+        kinds = {r["rate_limit_type"]: r["utilization"] for r in engine.rate_limits}
+        assert kinds == {"five_hour": 0.95, "seven_day": 0.09}
+
+    async def test_the_singular_reading_is_the_newest_arrival(self, engine):
+        """What the HUD shows, and it is unchanged by the keying.
+
+        Recency rather than "the most constrained": the HUD's section reports
+        a *transition*, and the window that just transitioned is the one worth
+        interrupting for whatever its utilisation says.
+        """
+        self.fold(engine, self.record(utilization=0.95))
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+        assert engine.rate_limit["rate_limit_type"] == "seven_day"
+
+    async def test_an_untyped_record_is_kept_rather_than_dropped(self, engine):
+        """The enum is the CLI's to extend, so an unknown shape still counts."""
+        self.fold(engine, self.record(rate_limit_type=None, utilization=0.4))
+        assert [r["utilization"] for r in engine.rate_limits] == [0.4]
+        assert engine.rate_limit["utilization"] == 0.4
+
+    async def test_a_model_scoped_weekly_window_is_its_own_row(self, engine):
+        """`Current week (Fable)` in the CLI's panel — a third open window."""
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day"))
+        self.fold(engine, self.record(rate_limit_type="seven_day_opus"))
+        assert len(engine.rate_limits) == 3
+
+
+# ---------------------------------------------------------------------------
+# Compaction survives a reload
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionState:
+    """A broadcast is not a record.
+
+    The compaction indicator was driven entirely by live `compactionEvent`
+    broadcasts, so a browser refreshed *during* the pause reconnected into a
+    session that looked idle while the engine was still summarising. On a long
+    session that is tens of seconds of apparently hung UI — the exact failure
+    the indicator exists to prevent, reintroduced by the one action a user
+    watching a silent UI is most likely to take.
+
+    Same class as the compaction divider phase 2 shipped client-side only.
+    """
+
+    def fold(self, engine, stage, **payload):
+        """Push one translated event through the session's folding step."""
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        return engine._fold_session_state(
+            active, Event("compactionEvent", {"stage": stage, **payload})
+        )
+
+    async def test_an_idle_session_is_not_compacting(self, engine):
+        assert engine.compaction_state is None
+
+    async def test_a_start_frame_is_remembered(self, engine):
+        self.fold(engine, "compaction_started")
+        state = engine.compaction_state
+        assert state is not None
+        assert state["elapsed_seconds"] >= 0
+
+    async def test_the_end_frame_clears_it(self, engine):
+        self.fold(engine, "compaction_started")
+        self.fold(engine, "compaction_ended", result="success")
+        assert engine.compaction_state is None
+
+    async def test_a_failed_compaction_also_clears_it(self, engine):
+        """The only report a failure produces. Holding the flag past it
+        would leave every later browser a spinner for a pause that ended."""
+        self.fold(engine, "compaction_started")
+        self.fold(engine, "compaction_ended", result="failed")
+        assert engine.compaction_state is None
+
+    async def test_a_boundary_alone_does_not_start_one(self, engine):
+        """Microcompaction reports a boundary with no pause behind it.
+
+        Starting on it would hand a reloading browser an indicator for a
+        compaction that never made anyone wait — and, worse, one with no
+        end frame coming to clear it.
+        """
+        self.fold(engine, "compact_boundary", pre_tokens=100)
+        assert engine.compaction_state is None
+
+    async def test_the_event_is_still_forwarded_unchanged(self, engine):
+        """Folding records; it must not swallow. The live indicator is
+        still driven by the broadcast — this only adds the snapshot."""
+        out = self.fold(engine, "compaction_started")
+        assert out.name == "compactionEvent"
+        assert out.payload["stage"] == "compaction_started"
+
+    async def test_elapsed_grows(self, engine, monkeypatch):
+        """A settable clock rather than a list of ticks: this patches the
+        real `time.monotonic`, so anything else that reads it during the
+        test must keep getting an answer."""
+        now = [100.0]
+        monkeypatch.setattr(session_module.time, "monotonic", lambda: now[0])
+        self.fold(engine, "compaction_started")
+        assert engine.compaction_state["elapsed_seconds"] == pytest.approx(0.0)
+        now[0] = 142.5
+        assert engine.compaction_state["elapsed_seconds"] == pytest.approx(42.5)
+
+    async def test_a_turn_ending_clears_a_stuck_compaction(self, engine):
+        """A compaction never outlives its turn.
+
+        Without this, a turn that died mid-compaction leaves the flag set and
+        every browser connecting afterwards is handed a spinner for something
+        that stopped when the engine went away.
+        """
+        self.fold(engine, "compaction_started")
+        active = SimpleNamespace(
+            translator=SimpleNamespace(session_id="s-1"),
+            request_id="req-1",
+            tasks_in_flight=set(),
+            accrue=lambda result: result,
+            note_task_flight=lambda payload: None,
+        )
+        engine._fold_session_state(active, Event("streamComplete", {}))
+        assert engine.compaction_state is None
+
+    async def test_disconnect_clears_it(self, tmp_path):
+        """Nothing is compacting once there is no engine, and the browser
+        outlives the process — it will ask for state before the first turn."""
+        session = EngineSession(
+            tmp_path, EngineConfig(), clock=lambda: "2026-08-14T00:00:00Z"
+        )
+        await session.connect()
+        self.fold(session, "compaction_started")
+        assert session.compaction_state is not None
+        await session.disconnect()
+        assert session.compaction_state is None

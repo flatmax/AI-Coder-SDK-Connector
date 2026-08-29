@@ -54,8 +54,10 @@ from pathlib import Path
 from typing import Any
 
 from aic_dc.claude_code import sdk_surface
+from aic_dc.claude_code.account_usage import AccountUsage
 from aic_dc.claude_code.cost import UNPRICED
 from aic_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
+from aic_dc.claude_code.engine_log import DEFAULT_TAIL as DEFAULT_ENGINE_ERROR_TAIL
 from aic_dc.claude_code.events_log import (
     permission_mode_content,
     review_end_content,
@@ -85,6 +87,7 @@ from aic_dc.claude_code.session import (
     ViewerFraming,
 )
 from aic_dc.claude_code.session_store import DISK_WARNING_BYTES, RepoSessionStore
+from aic_dc.claude_code.turn_hud import log_turn_hud
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +150,19 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
     # them cumulative over the session (`cost.py`), so the tab does not just
     # show them prettier — it stays true afterwards, and it is where the
     # per-model breakdown already lives.
+    # `/usage` names the rate-limit windows as well as the cost, because
+    # since 2026-08-29 the tab reads the *same endpoint the CLI's own
+    # `/usage` reads* (`account_usage.py`) and shows the five-hour window,
+    # the week, and the per-model weekly caps. The reply naming a surface
+    # that does not exist is the exact defect § Session Usage Is The One
+    # Cumulative Reading records; a surface that has grown and a reply that
+    # has not is the same defect, half-sized.
     "usage": {
         "target": "tab:context#usage",
-        "surface": "the Context tab's cost and per-model token breakdown",
+        "surface": (
+            "the Context tab's rate-limit windows, cost and per-model "
+            "token breakdown"
+        ),
         "palette": "Session cost and token usage, in the Context tab",
         "during_turn": True,
     },
@@ -250,6 +263,47 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_control_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` is the SDK's control-request deadline firing.
+
+    The SDK gives this failure no class of its own — ``Query._send_control_request``
+    raises a bare ``Exception(f"Control request timeout: {subtype}")`` — so the
+    durable evidence is the ``TimeoutError`` that ``anyio.fail_after`` chains
+    underneath it. Matched on the cause rather than on the message, because the
+    string is prose the SDK is free to reword and a check that a reword silences
+    is worse than no check.
+
+    Read defensively in the same spirit as :func:`_is_connection_failure`: an SDK
+    that stops chaining degrades to "not a timeout", which logs a full stack. The
+    failure mode of being wrong here is a noisy log, never a quiet one.
+    """
+    return isinstance(exc.__cause__, TimeoutError)
+
+
+def _log_control_failure(exc: Exception, what: str) -> None:
+    """Log a failed control request, with a stack only when it earns one.
+
+    A control-request timeout is an *expected* failure with a known shape and
+    nothing in the traceback a reader can act on: every frame is SDK plumbing
+    between here and an ``anyio.fail_after``. What it means is that the CLI did
+    not answer inside 60s, and the two reasons for that — an engine busy with a
+    turn, or an engine whose reader task has died and will never answer another
+    control request — are indistinguishable from this side. See
+    ``specs5/5-webapp/viewers-hud.md`` § *When the Engine Is Gone*, which states
+    that residue rather than guessing at it.
+
+    So a timeout gets one sentence and everything else keeps its stack. The
+    polled caller is what made this worth separating: four tracebacks in one log,
+    all of them about a loss the health banner had already reported in better
+    words. ``reconnect_mcp_server`` and ``toggle_mcp_server`` already logged this
+    shape without a stack; this makes the rule general instead of incidental.
+    """
+    if _is_control_timeout(exc):
+        logger.warning("%s: %s", what, exc)
+        return
+    logger.exception("%s failed", what)
+
+
 def _review_file_paths(changed_files: Any) -> list[str]:
     """Just the paths out of a review's changed-file dicts.
 
@@ -345,6 +399,11 @@ class ClaudeCodeService:
         # startup path. `None` without a repo, where there is nowhere to
         # write and nothing to browse.
         self.events_log = self._build_events_log()
+        # The failures that happen before any session exists to hold them.
+        # A separate file rather than a second event type, because the log
+        # above drops a record with no session by design and a connect that
+        # fails on authentication has none (`specs5/next.md` § C9).
+        self.engine_log = self._build_engine_log()
         # Derived from the store, so it is built with it and `None` for the
         # same reason: nothing to derive from without a repo.
         self.history_index = self._build_history_index()
@@ -418,6 +477,12 @@ class ClaudeCodeService:
         for sentence in self._degradations:
             self.session.health.note_degradation(sentence)
 
+        # The account's rate-limit windows, read from the CLI's own usage
+        # endpoint rather than from the engine. Held here because it is
+        # cached and because it belongs to the *account*, not to a session:
+        # it answers with no engine running, which is the point — a reader
+        # who has been rate-limited has no session to ask.
+        self._account_usage = AccountUsage()
         # Last-known viewer state, pushed by the browser on navigation.
         # Held on the service rather than passed per turn because a tool
         # call can ask for it mid-turn, long after the prompt was composed.
@@ -448,6 +513,15 @@ class ClaudeCodeService:
         # fine should not be told again every turn — that is how a warning
         # worth reading becomes one nobody reads.
         self._disk_warned = False
+
+        # The turn footer the terminal HUD prints, held between the
+        # `streamComplete` that carries it and the `_post_response` that has
+        # the context figure to print beside it. One slot rather than a map
+        # keyed by request: turns are sequential, and a map would grow for
+        # every turn whose post-response never ran. The request ID travels
+        # with it so a stale footer cannot be printed under a later turn's
+        # context usage.
+        self._turn_footer: tuple[str, dict[str, Any]] | None = None
 
         self.review = ReviewMode(
             repo=repo,
@@ -510,6 +584,21 @@ class ClaudeCodeService:
 
         return EventsLog(Path(aic_dc_dir) / "events.jsonl")
 
+    def _build_engine_log(self) -> Any:
+        """``.aic-dc/engine-errors.jsonl``, or ``None`` without a repo.
+
+        Built beside the events log and `None` on the same condition, but
+        for a different loss: without a repo there is nowhere to write, and
+        a run with no repo is also the one run whose engine failure has no
+        project to be diagnosed against.
+        """
+        aic_dc_dir = getattr(self._config, "aic_dc_dir", None)
+        if aic_dc_dir is None:
+            return None
+        from aic_dc.claude_code.engine_log import EngineLog
+
+        return EngineLog(Path(aic_dc_dir) / "engine-errors.jsonl")
+
     def _build_history_index(self) -> Any:
         """``.aic-dc/index/<project_key>.json``, or ``None`` without a store.
 
@@ -569,6 +658,36 @@ class ClaudeCodeService:
         except Exception:
             logger.exception("Could not record a %r event", event)
 
+    async def _record_engine_failure(self, kind: str, message: str) -> None:
+        """Append one engine failure to ``.aic-dc/engine-errors.jsonl``.
+
+        Every failure path here is a no-op on purpose, and more emphatically
+        than :meth:`_record_event`'s: this is called from a path that is
+        already failing, so an exception raised out of the recorder would
+        replace the engine's own error with a disk error in the message the
+        user reads. The engine's error is the one worth keeping.
+
+        The health snapshot travels with the record because the fields that
+        diagnose a startup failure — which binary was resolved, which
+        credentials it would have used, what the CLI said on stderr — are in
+        memory at this moment and nowhere else afterwards.
+
+        Unlike an operational event, a missing session is not a reason to
+        drop this. It is the expected case: the failure being recorded is
+        the reason there is no session.
+        """
+        if self.engine_log is None:
+            return
+        try:
+            await self.engine_log.append(
+                kind,
+                message=message,
+                health=self.session.health.to_dict(),
+                session_id=self.session.session_id,
+            )
+        except Exception:
+            logger.exception("Could not record a %r engine failure", kind)
+
     def _session_project_key(self) -> str:
         """The store's project key for this repo.
 
@@ -616,9 +735,29 @@ class ClaudeCodeService:
         return DocIndexBuilder(
             doc_index=doc_index,
             enricher=enricher,
+            enrichment_enabled=self._keyword_enrichment_enabled,
             repo=self._repo,
             progress=self._send_startup_progress,
         )
+
+    def _keyword_enrichment_enabled(self) -> bool:
+        """``app.json``'s ``doc_index.keywords_enabled``, read fresh.
+
+        Handed to :class:`DocIndexBuilder` as a callable, so a reload of
+        ``app.json`` — which the Settings tab performs after a save —
+        reaches the next enrichment pass without a relaunch. Reading it
+        once here and passing the boolean would make the preference an
+        app-restart field, and there is no third disposition on that tab
+        between "now" and "next session".
+
+        The key was parsed by ``ConfigManager.doc_index_config`` from the
+        day the section existed and read by nothing until this method: it
+        was a documented switch with no wire behind it, so enrichment ran
+        whatever the file said. See ``specs5/2-indexing/keyword-enrichment.md``
+        § Switching Enrichment Off.
+        """
+        doc_config = getattr(self._config, "doc_index_config", None) or {}
+        return bool(doc_config.get("keywords_enabled", True))
 
     def _build_bridge_wiring(self) -> tuple[Any, Any]:
         """The ``hooks`` and ``mcp_servers`` the session is built with.
@@ -739,6 +878,14 @@ class ClaudeCodeService:
             except EngineStartupError as exc:
                 self._connect_error = str(exc)
                 logger.error("Claude Code engine failed to start: %s", exc)
+                # Before the broadcast, so the durable record exists even if
+                # the process dies between the two. The other three things
+                # this path does are all ephemeral — a log line to a
+                # terminal nobody may be reading, a broadcast to whichever
+                # browsers happen to be listening, and a return value with
+                # one caller — which is how § C9's auth error came to leave
+                # no trace at all.
+                await self._record_engine_failure("startup_failed", str(exc))
                 await self._broadcast(
                     Event("engineHealth", self.session.health.to_dict(), turn_scoped=False)
                 )
@@ -805,16 +952,29 @@ class ClaudeCodeService:
         """Disconnect the engine as part of graceful shutdown.
         **Localhost only.**
 
-        Pending permission requests are denied first. A ``can_use_tool``
-        callback still waiting on a browser would otherwise be cancelled
-        without ever answering the CLI's control request.
+        Called from :func:`aic_dc.main._shut_the_engine_down`, on the loop,
+        bounded, before the signal handler's ``os._exit``. For most of its
+        life it had no caller at all and this docstring reasoned about one
+        anyway (``next.md`` § C8); the wiring, and the reason only one of
+        the four steps below justifies it, are recorded there.
+
+        **What survives the process is the point.** The kill and the temp-dir
+        purge that ``session.disconnect()`` would do are already done by hand
+        in ``main.py``, and cancelling asyncio tasks in a process about to
+        ``os._exit`` achieves nothing. Denying pending permissions does: the
+        deny reaches the CLI's waiting control request, and
+        ``permissionResolved`` reaches the *browser*, which outlives the
+        server. Without it a dialog open at Ctrl-C stayed on screen forever.
 
         Gated because ``add_service`` exposes every public method, which
         makes process teardown reachable from a browser: without the check
         a participant could kill the host's engine mid-turn, which is a
         broader denial than ``cancel_streaming``. The gate does not get in
         the way of the real caller — ``is_caller_localhost`` trusts a call
-        with no RPC caller behind it, so an in-process teardown hook passes.
+        with no RPC caller behind it, so the teardown hook passes. It reads
+        the *current* RPC caller, though, so a remote participant's call
+        caught mid-dispatch by the signal can refuse the teardown; the
+        caller logs that rather than papering over it.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -905,6 +1065,26 @@ class ClaudeCodeService:
             "engine_ready": self.session.ready,
             "streaming_active": self.session.streaming_active,
             "active_streams": self.session.active_streams(),
+            # None unless the engine is compacting right now. A browser
+            # refreshed during the pause used to reconnect into a session that
+            # looked idle while the engine was still summarising — tens of
+            # seconds of apparently hung UI, which is the failure the
+            # indicator exists to prevent.
+            "compaction": self.session.compaction_state,
+            # The last rate-limit record, for the HUD's Rate limits section.
+            # None until the CLI sends one, which it does on a status change
+            # rather than per turn — so unlike `compaction` above, this is
+            # usually the *only* way a browser learns the figure at all.
+            "rate_limit": self.session.rate_limit,
+            # Every window the account has open, for the Context tab's Usage
+            # section. The singular field above stays, and is the newest of
+            # these rather than a different fact: the HUD shows the window
+            # that just transitioned, the tab shows all of them.
+            "rate_limits": self.session.rate_limits,
+            # The session's own totals — the one reading in this app where the
+            # engine's cumulative cost and per-model figures are the answer
+            # rather than the trap (`cost.py` § session_totals).
+            "session_usage": self.session.session_usage,
             "permission_mode": self.session.permission_mode,
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
@@ -1169,6 +1349,17 @@ class ClaudeCodeService:
             except Exception as exc:
                 # A failed refetch is a stale tab, not a failed turn.
                 logger.debug("Could not refresh context usage: %s", exc)
+
+        # The terminal HUD, printed here rather than at `streamComplete`
+        # because this is the first point that holds both halves of it: the
+        # turn's footer and the context figure fetched above. Popped, so a
+        # second `_post_response` for the same turn — the background-subagent
+        # path below — prints only if a revised footer arrived with it.
+        footer = self._turn_footer
+        if footer is not None and footer[0] == request_id:
+            self._turn_footer = None
+            log_turn_hud(footer[1], context_usage, self._repo_root)
+
         await self._dispatch(
             Event(
                 "postResponseComplete",
@@ -1419,7 +1610,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("set_permission_mode(%r) failed", mode)
+            _log_control_failure(exc, f"set_permission_mode({mode!r})")
             return {"error": f"Could not change the permission mode: {exc}"}
         await self._record_event(
             "permission_mode",
@@ -1502,7 +1693,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("set_model(%r) failed", model)
+            _log_control_failure(exc, f"set_model({model!r})")
             return {"error": f"Could not change the model: {exc}"}
         await self._broadcast(
             Event("modelChanged", {"model": applied, "by": "user"}, turn_scoped=False)
@@ -1543,7 +1734,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("rewind_files(%r) failed", user_message_id)
+            _log_control_failure(exc, f"rewind_files({user_message_id!r})")
             return {"error": f"Could not rewind: {exc}"}
         return {"restored": [], "user_message_id": user_message_id}
 
@@ -1570,7 +1761,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("stop_task(%r) failed", task_id)
+            _log_control_failure(exc, f"stop_task({task_id!r})")
             return {"error": f"Could not stop the task: {exc}"}
         return {"status": "stopping", "task_id": task_id}
 
@@ -1594,58 +1785,47 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc), "reason": "no-engine"}
         except Exception as exc:
-            logger.exception("get_context_usage failed")
+            _log_control_failure(exc, "get_context_usage")
             return {
                 "error": f"Could not read context usage: {exc}",
                 "reason": "failed",
             }
-        return {"usage": self._mark_openable_memory_files(usage), "fetched_at": _now()}
+        # The memory-file list crosses the wire exactly as the engine
+        # reported it, absolute paths and all. This used to enrich each
+        # entry with a ``relPath`` — the repo-relative name, added only
+        # for files inside the root, which told the browser which rows
+        # were clickable and what to label them. Both of those are
+        # questions about *rendering*, and the browser already answers
+        # them with ``repo-path.js``'s ``toRepoPath`` for every other
+        # path it is handed. Two answers to one question is what
+        # ``specs5/next.md`` § C3 exists to remove, and the enrichment
+        # was the copy that had to go, because a name is not a fact
+        # about the repo. What genuinely needs a server-side answer is
+        # which repo file a tool *wrote*, since the index it keys is
+        # here and no browser is involved: that is
+        # ``Reindexer._relative`` (``hooks.py``), and it stays.
+        return {"usage": usage, "fetched_at": _now()}
 
-    def _mark_openable_memory_files(self, usage: Any) -> Any:
-        """Tag each memory file the viewer can actually open.
+    async def get_account_usage(self, force: bool = False) -> dict[str, Any]:
+        """The account's rate-limit windows, as the CLI's ``/usage`` sees them.
 
-        The engine reports memory files by absolute path, and every repo
-        read takes a path *relative* to the root and rejects absolute ones
-        outright. So a Context tab that made every path clickable would
-        offer to open files the read path refuses — and a user-level
-        ``~/.claude/CLAUDE.md`` is genuinely unopenable, being outside the
-        repo altogether.
+        **Not a control request, and not the engine's answer.** Every other
+        method in this section asks the running CLI something; this one
+        reads ``api.anthropic.com`` directly, because the figures the
+        engine's ``RateLimitEvent`` channel carries are transition notices
+        rather than readings and the CLI builds its own panel the same way
+        (:mod:`aic_dc.claude_code.account_usage`). Two consequences worth
+        stating: it answers **with no session connected**, which matters
+        because a rate-limited reader has no engine to interrogate; and it
+        cannot fail the way a control request fails, so there is no
+        ``no-engine`` reason here.
 
-        ``relPath`` is therefore added only where the file is inside the
-        root, which lets the browser make exactly the openable rows
-        clickable. Answered here because this is the layer that knows
-        where the root is; ``session.get_context_usage`` stays the pure
-        pass-through it is documented as being.
+        Never raises. Every failure comes back as ``ok: false`` with a
+        named ``reason``, because this sits beside a breakdown that can
+        fail on its own and a thrown exception here would take that panel
+        down with it.
         """
-        if not isinstance(usage, dict):
-            return usage
-        files = usage.get("memoryFiles")
-        if not isinstance(files, list):
-            return usage
-        marked = []
-        for entry in files:
-            rel = (
-                self._repo_relative(entry.get("path"))
-                if isinstance(entry, dict)
-                else None
-            )
-            marked.append({**entry, "relPath": rel} if rel else entry)
-        return {**usage, "memoryFiles": marked}
-
-    def _repo_relative(self, path: Any) -> str | None:
-        """``path`` as a repo-relative string, or None if it is outside.
-
-        Symlinks are resolved on both sides, matching the containment
-        check the repo layer applies when the read actually happens — a
-        path that passes here and fails there would be the clickable row
-        that does nothing.
-        """
-        if not isinstance(path, str) or not path:
-            return None
-        try:
-            return str(Path(path).resolve().relative_to(self._repo_root.resolve()))
-        except (OSError, ValueError, RuntimeError):
-            return None
+        return await self._account_usage.snapshot(force=bool(force))
 
     async def get_mcp_status(self) -> dict[str, Any]:
         try:
@@ -1653,7 +1833,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("get_mcp_status failed")
+            _log_control_failure(exc, "get_mcp_status")
             return {"error": f"Could not read MCP status: {exc}"}
 
     async def reconnect_mcp_server(self, name: str) -> dict[str, Any]:
@@ -1691,7 +1871,7 @@ class ClaudeCodeService:
         except (EngineNotReadyError, SessionLostError) as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("get_server_info failed")
+            _log_control_failure(exc, "get_server_info")
             return {"error": f"Could not read server info: {exc}"}
         return info or {}
 
@@ -1736,7 +1916,7 @@ class ClaudeCodeService:
         except SessionLostError as exc:
             return {"error": str(exc)}
         except Exception as exc:
-            logger.exception("list_commands failed")
+            _log_control_failure(exc, "list_commands")
             return {"error": f"Could not read the command list: {exc}"}
         commands: list[dict[str, Any]] = []
         for entry in (info or {}).get("commands") or []:
@@ -2427,6 +2607,84 @@ class ClaudeCodeService:
         )
         return {"session_id": session_id, "status": "deleted"}
 
+    async def get_session_storage(self) -> dict[str, Any]:
+        """How much disk ``.aic-dc/sessions/`` is using.
+
+        The readable half of a measurement that until now existed only as a
+        turn-time warning. ``_disk_warning`` walks the same directory and
+        compares it to the same threshold, and this method is deliberately
+        **not** routed through it: that one is latched to fire once per server
+        lifetime, so borrowing it would mean opening the Settings tab silently
+        spends the warning the user has not seen yet. Two callers, one
+        measurement, one latch — and the latch belongs to the caller that
+        interrupts rather than the one that was asked.
+
+        ``over_warning`` is the verdict, not the threshold, matching how
+        ``EngineHealth`` hands the browser a mirror-gap verdict rather than
+        ``history.mirror_gap_tolerance``. The comparison is configured here,
+        in one place, and a tab that re-derived it would be a second copy of a
+        number the user can edit.
+
+        Unrestricted, for ``history_list``'s reason: this is the size of the
+        history a read-only participant is already allowed to read, and the
+        deletion it argues for is gated where deletion happens.
+
+        A failed walk is reported rather than swallowed. ``_disk_warning``
+        swallows one because a size it could not read is not worth failing a
+        completed turn over; here the size *is* the answer, so silence would
+        leave the card showing nothing with no account of why.
+        """
+        if self.session_store is None:
+            return {
+                "error": "No session history: this run has no repo directory",
+                "reason": "no_repo",
+            }
+        try:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(None, self.session_store.total_bytes)
+        except Exception as exc:
+            logger.exception("Could not measure the session directory")
+            return {"error": f"Could not measure the session directory: {exc}"}
+        threshold = self._history_config().get(
+            "session_dir_warning_bytes", DISK_WARNING_BYTES
+        )
+        return {"bytes": int(total), "over_warning": int(total) >= int(threshold)}
+
+    async def get_engine_errors(self, limit: int | None = None) -> dict[str, Any]:
+        """Recent engine failures, newest last.
+
+        The readable end of ``.aic-dc/engine-errors.jsonl``. A failed start
+        already reaches a listening browser as an ``engineHealth``
+        broadcast; this answers the question that broadcast cannot, which is
+        what happened *before* this browser — or this server — existed
+        (``specs5/next.md`` § C9).
+
+        Wrapped in a dict rather than answering a bare list, unlike
+        ``history_list``. The two failure modes here are "no failures" and
+        "could not read the file", and a bare list renders them
+        identically — which is the fault the history reads' own error
+        handling exists to avoid, applied at the point of writing rather
+        than after the fact.
+
+        Unrestricted, for ``get_engine_health``'s reason: it reports the
+        same facts about the same engine — the resolved binary, the
+        credential source — and a participant watching a session that will
+        not start is entitled to the reason.
+        """
+        if self.engine_log is None:
+            return {
+                "error": "No engine error log: this run has no repo directory",
+                "reason": "no_repo",
+            }
+        try:
+            records = await self.engine_log.load(
+                DEFAULT_ENGINE_ERROR_TAIL if limit is None else int(limit)
+            )
+        except Exception as exc:
+            logger.exception("Could not read the engine error log")
+            return {"error": f"Could not read the engine error log: {exc}"}
+        return {"errors": records}
+
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int
     ) -> dict[str, Any]:
@@ -2842,6 +3100,11 @@ class ClaudeCodeService:
         if event.name == "subagentEvent":
             await self._sweep_ended_subagent(event.payload)
         elif event.name == "streamComplete" and request_id:
+            # Stashed before the background check, because that check can run
+            # `_post_response` synchronously from here and the footer has to
+            # be there when it does.
+            if isinstance(event.payload, dict):
+                self._turn_footer = (request_id, event.payload)
             await self._post_response_for_background(event.payload, request_id)
 
     async def _post_response_for_background(

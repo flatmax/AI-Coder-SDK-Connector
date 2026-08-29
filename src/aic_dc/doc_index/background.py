@@ -12,9 +12,17 @@ Principle):
    an extractor handles, hand them to :meth:`DocIndex.index_repo` on a
    worker thread. Flips ``ready``.
 2. **Keyword enrichment** — per file, read the source and let KeyBERT add
-   keywords to the outline. Flips ``enriched``. Optional: when KeyBERT is
-   not installed the status becomes ``unavailable`` and phase 1's outlines
-   stand on their own.
+   keywords to the outline. Flips ``enriched``. Optional twice over: when
+   KeyBERT is not installed the status becomes ``unavailable``, and when the
+   user has switched enrichment off it becomes ``disabled``. Phase 1's
+   outlines stand on their own either way.
+
+   **The two are different words on purpose.** ``unavailable`` drives a
+   one-shot "install ``aic-dc[docs]``" toast in the browser
+   (``webapp/src/app-shell/toasts.js``), and telling somebody how to install
+   the thing they have just turned off is the one response that is certainly
+   wrong. The frontend no-ops on any other value, so ``disabled`` is silent
+   by construction rather than by a second branch over there.
 
 What the conversion changed here is ownership and coupling, not logic.
 This used to be four module-level functions reaching into
@@ -59,6 +67,14 @@ class DocIndexBuilder:
     enricher:
         The :class:`~aic_dc.doc_index.keyword_enricher.KeywordEnricher`, or
         ``None`` to skip phase 2 entirely.
+    enrichment_enabled:
+        ``() -> bool``, asked at the top of every enrichment pass. A
+        callable rather than a flag because ``app.json``'s
+        ``doc_index.keywords_enabled`` is reloadable and this object is
+        built once per process: a boolean captured here would pin the
+        value the app started with and make the Settings tab's switch a
+        control that needs a relaunch. Defaults to always-on, which is
+        what every caller that does not care about the preference wants.
     repo:
         The ``Repo``, for the tracked-file list and file reads. Without one
         there is nothing to index.
@@ -77,12 +93,14 @@ class DocIndexBuilder:
         *,
         doc_index: Any,
         enricher: Any = None,
+        enrichment_enabled: Callable[[], bool] | None = None,
         repo: Any = None,
         progress: Callable[[str, str, int], Awaitable[None]] | None = None,
         executor: Executor | None = None,
     ) -> None:
         self._doc_index = doc_index
         self._enricher = enricher
+        self._enrichment_enabled = enrichment_enabled
         self._repo = repo
         self._progress = progress
         self._executor = executor
@@ -241,6 +259,27 @@ class DocIndexBuilder:
     # Phase 2 — keyword enrichment
     # ------------------------------------------------------------------
 
+    def _enrichment_wanted(self) -> bool:
+        """Whether the user has left keyword enrichment switched on.
+
+        Fails **open**: a callable that raises leaves enrichment running,
+        because the alternative is that an unreadable ``app.json`` silently
+        turns off a feature nobody asked to turn off. The opposite default
+        would be a config error presenting as a missing feature, which is
+        the hardest kind to attribute.
+        """
+        if self._enrichment_enabled is None:
+            return True
+        try:
+            return bool(self._enrichment_enabled())
+        except Exception as exc:
+            logger.warning(
+                "Could not read the keyword-enrichment preference (%s); "
+                "leaving enrichment on",
+                exc,
+            )
+            return True
+
     async def run_enrichment(self) -> None:
         """Add keywords to every outline that wants them.
 
@@ -248,7 +287,15 @@ class DocIndexBuilder:
         between files so the WebSocket carrying the progress bar keeps
         flowing. A file that fails is logged and skipped — the outline
         simply keeps its structure and no keywords.
+
+        The preference is read here, before the installed-ness probe, so a
+        user who has switched enrichment off is never told how to install
+        KeyBERT. It is also read here rather than at construction so that
+        an ``app.json`` reload reaches it — see ``enrichment_enabled``.
         """
+        if not self._enrichment_wanted():
+            self.enrichment_status = "disabled"
+            return
         if self._enricher is None:
             self.enrichment_status = "unavailable"
             return

@@ -12,6 +12,7 @@
 
 import { toRepoPath } from '../repo-path.js';
 import { viewerForPath } from '../viewer-routing.js';
+import { reportViewerFile } from './viewer-framing.js';
 import { rememberDiffViewport } from './viewport.js';
 
 /**
@@ -36,7 +37,7 @@ export function onNavigateFile(host, event) {
   // two side effects below as well — an absolute path used to be what got
   // persisted as the last-open file and registered with the nav grid, so the
   // failure survived a reload.
-  const path = toRepoPath(detail.path, host._repoRoot);
+  const path = toRepoPath(detail.path);
   if (typeof path !== 'string' || !path) return;
   let target = viewerForPath(path);
   if (!target) return;
@@ -303,16 +304,22 @@ export function onToggleSvgMode(host, event) {
  * Uses `event.composedPath()` to identify which viewer
  * emitted the event, so the handler is robust even if
  * additional viewers are added later.
+ *
+ * This is also where the server is told what the user is
+ * looking at (`./viewer-framing.js`). The identification
+ * happens before the null-path return, because a viewer
+ * closing its last file is exactly the case the server
+ * needs to hear about and the identity is what says
+ * whether that viewer was the visible one.
  */
 export function onActiveFileChanged(host, event) {
   const detail = event.detail || {};
-  if (!detail.path) return;
   // Identify the source viewer by walking the composed
   // path — the event originates inside the viewer's
   // shadow root and bubbles up through the host element.
-  const path = event.composedPath ? event.composedPath() : [];
+  const chain = event.composedPath ? event.composedPath() : [];
   let newActive = null;
-  for (const el of path) {
+  for (const el of chain) {
     if (el && el.tagName === 'AIC-SVG-VIEWER') {
       newActive = 'svg';
       break;
@@ -322,6 +329,8 @@ export function onActiveFileChanged(host, event) {
       break;
     }
   }
+  if (newActive) reportViewerFile(host, detail.path, newActive);
+  if (!detail.path) return;
   if (!newActive) return;
   host._activeViewer = newActive;
   // Save a baseline viewport now that the viewer has a

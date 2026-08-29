@@ -32,6 +32,8 @@ from the pid being gone.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import shutil
 import signal
@@ -44,10 +46,13 @@ import pytest
 
 from aic_dc.claude_code import resume_cleanup
 from aic_dc.main import (
+    _SHUTDOWN_GRACE,
     _child_exited,
+    _install_exit_handlers,
     _kill_cli_children,
     _kill_vite,
     _purge_resume_dirs,
+    _shut_the_engine_down,
 )
 
 # Sleeps until killed. No SIGTERM handler, so it dies on the polite one.
@@ -559,3 +564,194 @@ class TestPurgingTheResumeDirs:
         monkeypatch.setitem(sys.modules, "aic_dc.claude_code.resume_cleanup", object())
 
         _purge_resume_dirs()  # must not raise
+
+
+class TestTheGracefulStep:
+    """What the exit does *before* ``os._exit`` — phase 8, `next.md` § C8.
+
+    ``ClaudeCodeService.shutdown`` had no caller for its whole life while
+    its docstring reasoned about one. Three of its four steps are pointless
+    on the way out (the CLI is about to be killed by hand, the temp dir
+    purged by hand, and asyncio tasks die with the process); the fourth
+    leaves the process, because the browser outlives the server. A pending
+    permission dialog has to be told the server is going, or it stays on
+    screen forever waiting for an answer nobody will send.
+
+    So the contract here is narrow and entirely about not blocking the
+    exit: run it, bound it, and never let it raise.
+    """
+
+    class _Service:
+        def __init__(self, answer=None, delay=0.0, boom=None):
+            self.answer = answer
+            self.delay = delay
+            self.boom = boom
+            self.calls = 0
+
+        async def shutdown(self):
+            self.calls += 1
+            if self.boom is not None:
+                raise self.boom
+            if self.delay:
+                await asyncio.sleep(self.delay)
+            return self.answer
+
+    async def test_the_service_teardown_runs(self):
+        service = self._Service()
+        await _shut_the_engine_down(service)
+        assert service.calls == 1
+
+    async def test_a_hung_teardown_is_abandoned_at_the_timeout(self):
+        """Ctrl-C has to work on a wedged engine, which is the whole reason
+        the await is bounded rather than plain."""
+        service = self._Service(delay=30)
+        started = time.monotonic()
+        await _shut_the_engine_down(service, timeout=0.05)
+        assert time.monotonic() - started < 5
+
+    async def test_a_raising_teardown_does_not_propagate(self):
+        """Anything that escapes here stops the exit, which is worse than
+        skipping the courtesy it was doing."""
+        service = self._Service(boom=RuntimeError("engine is wedged"))
+        await _shut_the_engine_down(service)  # must not raise
+
+    async def test_a_refusal_by_the_localhost_gate_is_reported(self, caplog):
+        """``is_caller_localhost`` reads the *current* RPC caller, so a
+        remote participant's call caught mid-dispatch refuses the teardown.
+        Narrow, but a silent skip would look like it ran."""
+        service = self._Service(answer={"error": "restricted", "reason": "nope"})
+        with caplog.at_level(logging.WARNING, logger="aic_dc.main"):
+            await _shut_the_engine_down(service)
+        assert "refused by the localhost gate" in caplog.text
+
+    async def test_an_ordinary_answer_is_not_reported(self, caplog):
+        service = self._Service(answer=None)
+        with caplog.at_level(logging.WARNING, logger="aic_dc.main"):
+            await _shut_the_engine_down(service)
+        assert "localhost gate" not in caplog.text
+
+
+class TestTheSignalWiring:
+    """That the grace period is reachable *from a real signal*.
+
+    The step above is only worth having if a Ctrl-C actually runs it, and
+    the mechanism that arranges that is the part with a platform split in
+    it. So these fire real signals at the test process rather than calling
+    the callback: what is being pinned is that
+    ``loop.add_signal_handler`` was used, on the running loop, for both
+    signals — a C-level handler could not await the coroutine, and the
+    failure mode of getting that wrong is a graceful step that silently
+    never runs.
+
+    ``teardown`` is a fake here for the obvious reason: the real one ends
+    in ``os._exit`` and would take the test runner with it.
+    """
+
+    class _Service(TestTheGracefulStep._Service):
+        pass
+
+    @staticmethod
+    def _restore(loop):
+        """Hand SIGINT/SIGTERM back, or the next test inherits our handler."""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with suppress(NotImplementedError, RuntimeError):
+                loop.remove_signal_handler(sig)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+    async def test_a_real_signal_runs_the_grace_period_then_the_teardown(self, sig):
+        """Both signals, because wiring one and forgetting the other is the
+        mistake that shows up only under a process manager."""
+        loop = asyncio.get_running_loop()
+        service = self._Service()
+        done = asyncio.Event()
+        _install_exit_handlers(loop, service, lambda *_: done.set())
+        try:
+            os.kill(os.getpid(), sig)
+            await asyncio.wait_for(done.wait(), 5)
+        finally:
+            self._restore(loop)
+        assert service.calls == 1, "the graceful step did not run before teardown"
+
+    async def test_the_teardown_waits_for_the_grace_period(self):
+        """Ordering, not just occurrence. A teardown that races the engine
+        shutdown would kill the CLI while the denial was still in flight —
+        which is the announce this whole item exists for."""
+        loop = asyncio.get_running_loop()
+        service = self._Service(delay=0.05)
+        order: list[str] = []
+
+        def teardown(*_args):
+            order.append("teardown")
+
+        _install_exit_handlers(loop, service, teardown)
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+            for _ in range(500):
+                if order:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            self._restore(loop)
+        assert order == ["teardown"] and service.calls == 1
+
+    async def test_a_second_signal_withdraws_the_grace_period(self):
+        """The courtesy is bounded at 2s, and a user who presses Ctrl-C
+        again has said 2s is too long.
+
+        The window below is deliberately far shorter than
+        ``_SHUTDOWN_GRACE``, and that is the whole assertion: a version
+        that ignores the second signal still tears down eventually, when
+        the first attempt's timeout expires, so a generous poll would
+        pass against code that does nothing here at all. Checked — with
+        a 5s window this test passed with the escape deleted.
+        """
+        assert _SHUTDOWN_GRACE > 1, "the margin this test relies on is gone"
+        loop = asyncio.get_running_loop()
+        service = self._Service(delay=30)
+        teardowns = []
+        _install_exit_handlers(loop, service, lambda *_: teardowns.append(1))
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+            await asyncio.sleep(0.05)
+            assert teardowns == [], "the first signal should still be waiting"
+            os.kill(os.getpid(), signal.SIGINT)
+            for _ in range(20):
+                if teardowns:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            self._restore(loop)
+        assert teardowns == [1], "the second signal did not exit immediately"
+        # And it did not also queue a *second* graceful step against an
+        # engine already being torn down.
+        assert service.calls == 1
+
+    async def test_no_loop_signal_handlers_falls_back_to_an_immediate_exit(
+        self, monkeypatch, caplog
+    ):
+        """Windows' proactor loop owns no signals. The graceful step has
+        nowhere to run there and the pre-§C8 behaviour has to stand, rather
+        than the install raising and taking the whole startup with it."""
+        loop = asyncio.get_running_loop()
+        service = self._Service()
+
+        def no_signals(*_args, **_kwargs):
+            raise NotImplementedError
+
+        monkeypatch.setattr(loop, "add_signal_handler", no_signals)
+        installed = {}
+        monkeypatch.setattr(
+            signal, "signal", lambda sig, handler: installed.setdefault(sig, handler)
+        )
+
+        def teardown(*_args):
+            pass
+
+        with caplog.at_level(logging.DEBUG, logger="aic_dc.main"):
+            _install_exit_handlers(loop, service, teardown)
+
+        assert installed == {signal.SIGINT: teardown, signal.SIGTERM: teardown}
+        assert "without the grace period" in caplog.text
+        assert service.calls == 0

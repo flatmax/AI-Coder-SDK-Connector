@@ -72,6 +72,7 @@ import { renderEditCard } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { imageRefKey, imageRefsOf } from '../image-refs.js';
 import { renderMarkdown } from '../markdown.js';
+import { toRepoPath } from '../repo-path.js';
 import {
   compactionSummary,
   renderLiveUsage,
@@ -1597,6 +1598,20 @@ function onFileSearchHeaderClick(filePath) {
  * `repoFiles` is non-empty, using the same
  * longest-first substring matching as
  * `findFileMentions`.
+ *
+ * Entries keep the path as it was found, and
+ * the dedup key is `toRepoPath` of it. The two
+ * sources do not have to agree on spelling: a
+ * prose mention is matched against `repoFiles`
+ * and so is always repo-relative, while an edit
+ * block header carries whatever the LLM wrote,
+ * which is absolute when it echoed a tool
+ * result. On raw strings those are two entries
+ * for one file, and since `next.md` § C4 both
+ * would carry the same label — two chips that
+ * look identical. Keeping the found spelling is
+ * what leaves the absolute path available to
+ * the chip's tooltip.
  */
 export function collectMessageFiles(panel, msg) {
   if (!msg || msg.role !== 'assistant') return [];
@@ -1612,11 +1627,13 @@ export function collectMessageFiles(panel, msg) {
       if (
         (seg.type === 'edit' || seg.type === 'edit-pending') &&
         typeof seg.filePath === 'string' &&
-        seg.filePath &&
-        !seen.has(seg.filePath)
+        seg.filePath
       ) {
-        seen.add(seg.filePath);
-        out.push({ path: seg.filePath });
+        const key = toRepoPath(seg.filePath);
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({ path: seg.filePath });
+        }
       }
     }
   }
@@ -1725,6 +1742,19 @@ function isMentionBoundary(ch, position) {
  * useful on its own: the files this message
  * named, collected in one place, one click from
  * open.
+ *
+ * The chip is labelled with the repo-relative
+ * name and keeps the path as found on its
+ * tooltip and its accessible name, which is the
+ * house rule the Context tab states in full
+ * (`context-usage-tab.js`) and § C4 applied to
+ * every chip. Almost every entry here is already
+ * relative — the prose half is matched against
+ * `repoFiles` — so this shows up on edit block
+ * headers that echoed an absolute tool result.
+ * The click passes the untouched path, because
+ * `onNavigateFile` is the one normaliser and a
+ * label must not become the navigation contract.
  */
 export function renderFileSummary(panel, files) {
   if (!Array.isArray(files) || files.length === 0) return '';
@@ -1749,7 +1779,7 @@ export function renderFileSummary(panel, files) {
               aria-label="Open ${file.path}"
             >
               <span class="file-chip-mark" aria-hidden="true">↗</span>
-              <span class="file-chip-path">${file.path}</span>
+              <span class="file-chip-path">${toRepoPath(file.path)}</span>
             </button>
           `,
         )}

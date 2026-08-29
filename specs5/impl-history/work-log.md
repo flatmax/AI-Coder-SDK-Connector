@@ -501,30 +501,48 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   session" summary.~~ **Built 2026-08-26 — see § Landed since.** The invariant that depended on it —
   *"a save never shows an unqualified success for a field that did not apply"* — is now enforced at the
   toast, not only in the panel.
-- **Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.
-- **Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.
-- **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
+- ~~**Thinking display toggle** — no `thinking_display` reference anywhere in `webapp/src`.~~ **Built
+  2026-08-28 — see § Landed since.**
+- ~~**Doc enrichment toggle** — no `keywords_enabled` reference anywhere in `webapp/src`.~~ **Built
+  2026-08-28 — see § Landed since**, and it needed a backend half nobody had looked for: the key had no
+  reference anywhere in `src/aic_dc` either, beyond the line that parses it. This bullet had measured
+  the browser side of a field that was dead on both.
+- ~~**Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.~~ **Closed
+  2026-08-29 by declining the thing upstream of it**, not by building it. The card was to reset a
+  remembered answer to the file picker's denial-scope prompt; that prompt is decided against, so there is
+  no answer to remember and no preference to reset. Worth keeping as a shape: **this bullet measured the
+  absence of a key and could not have told you the feature behind it was unbuildable** — the same reading
+  error as the doc-enrichment bullet three lines up, which measured the browser side of a field that was
+  dead on both. Reasoning in [`../5-webapp/file-picker.md`](../5-webapp/file-picker.md) § *Denial Scope
+  Prompt — declined*; the decision is [`../next.md`](../next.md) § E. **This closes item (c) and this
+  list with it.**
 - **The permission chime's mute.** Added to this list by (a)'s arbitration rather than found in it: the
   dialog *reads* `aic-dc.permission-chime` and nothing writes it, so the mute is reachable only from a
   devtools console. It was a Settings preference card, which is why the gap read as "specified, not built"
   on a tab that should never have held it. Now owned by
   [`../5-webapp/permission-dialog.md` § Attention](../5-webapp/permission-dialog.md), beside the thing
   that rings.
-- **Session storage size** — nothing to call. The backend measures the session directory only as a
-  turn-time warning (`_disk_warning`), not as a readable RPC.
-- **The retired-files note.** § Deleted cards argues for it at some length — a user who customised
+- ~~**Session storage size** — nothing to call. The backend measures the session directory only as a
+  turn-time warning (`_disk_warning`), not as a readable RPC.~~ **Built 2026-08-29 — see § Landed
+  since.** This bullet's "nothing to call" was accurate and still understated the item: the measurement
+  existed, and the reason it could not simply be exposed was the latch on it.
+- ~~**The retired-files note.** § Deleted cards argues for it at some length — a user who customised
   `system_extra.md` over months and finds the card gone "deserves to know why" — and then no note is
-  rendered. Of everything in this list it is the cheapest to build and the only one whose absence the
-  spec has already called out as a mistake.
+  rendered.~~ **Built 2026-08-28 — see § Landed since.** It was the cheapest item in this list and the
+  only one whose absence the spec had already called a mistake, which is a combination that should have
+  got it built two phases earlier than it was.
 
 **Where to start.** ~~(b) is an afternoon and closes a real gap.~~ **(b) is done.** ~~Then (a), because a
 spec that names the wrong tab is how `/permissions` came to lie and the same trap is still set for eight
 more items~~ **— (a) is done too** — and note that (b) turned up a ninth of exactly that kind, since this
 section's own table filed the MCP server list under Settings when the right home for it was the Context
 tab all along. ~~**(c) is what is left**, and within it the restart-session pair first, since two
-invariants currently have nothing behind them.~~ **That pair is built.** What is left of (c) is the three
+invariants currently have nothing behind them.~~ **That pair is built.** ~~What is left of (c) is the three
 preference-card items (thinking display, doc enrichment, deny-read scope), session-storage size — which
-still has no RPC to call — and the retired-files note, which remains the cheapest thing on this list.
+still has no RPC to call — and the retired-files note, which remains the cheapest thing on this list.~~
+**What is left of (c) is two items**: the deny-read scope reset, which is blocked on the prompt it would
+reset (next.md § B4), and session-storage size, which still has no RPC to call. The retired-files note and
+the first two preference cards all landed 2026-08-28.
 
 **How to keep this from recurring.** The drift was invisible because nothing reads a spec section
 against the component that implements it. The two mechanisms that *did* catch things this session were
@@ -539,7 +557,1065 @@ with no emitter, and browser call sites into a retired `LLMService`. A caller-le
 image and appears on no list, which is exactly why two of them sat unnoticed. Modelled on that section
 rather than already covered by it.
 
+**✅ Built 2026-08-28 as `tests/test_rpc_surface.py`** (next.md § C5), and the guess in the paragraph
+above was low. It covers all five registered services rather than the one this section was about, and
+the audit that had to happen first found **ten more callerless RPCs, not two** — plus, running the same
+scan backwards, the one browser call into a namespace no service registers, which is the *other*
+direction this section says it does not cover. So one test now watches both. Of 100 exposed methods, 66
+have a browser caller, 22 are internal-only and 12 are dormant; the reasoning lives in
+[`../1-foundation/rpc-inventory.md`](../1-foundation/rpc-inventory.md) § *Who Calls These* and the two
+findings worth building are next.md §§ C7–C8.
+
+**The part worth carrying forward is why reading had not already found these.** Two docstrings had
+noticed and stopped: `Settings.is_reloadable` reasons its way to the right answer mid-sentence
+("actually wait, jrpc-oo exposes everything non-underscored"), and `shutdown` explains why its gate does
+not obstruct a caller that does not exist. Both are careful prose by someone looking straight at it.
+The classification tests work because they refuse to be read past, and that is the difference.
+
 ### Landed since
+
+- **The rate-limit figures were a REST call away, and the "cannot" above was wrong** — 2026-08-29, same
+  day, from the same user pointing at a screenshot of what the entry below had just shipped: *"even worse
+  and no weekly + fable reporting"*. Reasoning in
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *The Figures Were A REST Call Away*.
+
+  **What the entry below got right stands; its closing inference does not.** `RateLimitEvent` really is a
+  transition notice, really carries one window, and really arrived with no `utilization` — all measured.
+  The error was concluding from that that the figures were unreachable *until the SDK grows a usage
+  query*. The reasoning behind it was "the CLI builds `/usage` from a source the SDK does not expose".
+  The CLI builds it from **no SDK source at all**: its `fetchUtilization` is
+  `GET /api/oauth/usage` on `api.anthropic.com` with the OAuth token from `~/.claude/.credentials.json`,
+  read straight out of the shipped binary. `account_usage.py` makes the same call and
+  `ClaudeCodeService.get_account_usage` serves it. Against a real account it returns exactly the three
+  windows the report named: five-hour at 48%, the week at 11%, and **`Current week (Fable)`**.
+
+  **The Fable row could never have come from the enum**, which is the part worth keeping. A per-model cap
+  arrives in `limits[]` as a `weekly_scoped` entry whose `scope.model.display_name` is the model's name —
+  so the label is *read from the payload*, and a model released after this build ships arrives already
+  named. Any amount of further work on `RateLimitType` would have produced nothing.
+
+  **The two channels use the same field names for different units**, and the plausible failure is the
+  dangerous one: `utilization` is a fraction on the event channel and a **percent** here, `resets_at` is
+  Unix seconds there and an **ISO string** here. Getting it backwards renders 48% as 4800% — visibly
+  broken, so it would be caught — or as **0.48%**, which nobody would question. The conversion happens
+  once, on the server, into the event channel's convention, so `rate-limit.js` keeps one definition of a
+  window record (§ C3).
+
+  **Three things were refused rather than shipped.** The refresh token is never used and nothing is
+  written: rotating it would invalidate the CLI's own copy and could lock the user out of their editor,
+  so an expired token is a sentence, not a repair — and the engine spawning the CLI is what keeps the
+  file fresh anyway. A redirected engine (Bedrock, Vertex, an API key, a base-URL override) is **never
+  asked**, because subscription windows there would be a real figure about a different account, which is
+  R-9's failure mode with nothing about it looking broken. And a failed read serves the last good
+  reading marked stale rather than emptying the section, because an empty section reads as "you have no
+  limits".
+
+  **The first cut of the merge reproduced the very defect it was fixing, and a test caught it this time.**
+  Keeping the event record's gauge markup beside the new gauges drew "5-hour — no figure" directly beneath
+  the 5-hour gauge reading 48% — one window claiming to be two, the grey non-answer contradicting the real
+  number immediately above it. Demoted records now render as their sentence alone. Worth recording
+  because the entry below closes on "every instance so far has been found by running the thing, and never
+  by reading it": this one was found by a test asserting the count of gauges, written before the code it
+  covers was finished.
+
+  **And the section now renders above the no-breakdown branches.** It is the one part of the tab that does
+  not come from the engine, and a reader cut off by a weekly limit has no engine to ask — so the
+  breakdown errors and the windows used to vanish at exactly the moment they were the reason for opening
+  the tab.
+
+- **`/usage` now opens onto what its own reply promises** — 2026-08-29, from a user comparing the
+  Context tab against the CLI's `/usage` panel and reporting "I don't see that level of detail here".
+  Reasoning in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)
+  §§ *Session Usage Is The One Cumulative Reading* and *Rate Limits Are Several Windows, Not One*;
+  shapes in the [reference twin](../../specs-reference/5-webapp/viewers-hud.md) § *Session usage* and
+  § *Rate-limit record*.
+
+  **The command never reached the CLI, and that was fine; what was not fine is that its answer was
+  false.** `/usage` is in `SLASH_ROUTES` deliberately and replies *"/usage is the Context tab's cost and
+  per-model token breakdown here."* That tab rendered context-*window* composition and nothing else — no
+  cost, no per-model rows, no rate limits. **The reply named a surface that did not exist**, and the
+  figures had been on the wire the whole time, drawn only in the per-turn HUD that auto-hides after 8.8
+  seconds and never appears for a session that has not run a turn.
+
+  **This is § B5 and § C7's shape with one difference that matters: the promise is printed to the user.**
+  A field with no reader is invisible until someone audits the code. A routed slash command *tells you
+  what you are about to see*, so the gap is discoverable only by doing what the reply says and looking —
+  which is what the bug report was. **No test could have caught it**, because both halves were
+  internally consistent: the route table was right about where it pointed and the tab was right about
+  what it drew. Nothing compared the two. There is an invariant for it now.
+
+  **The rate-limit half was built on a premise that was wrong, and running it is what found that out.**
+  The reasoning was: the CLI draws a gauge per open window, each window arrives as its own
+  `RateLimitEvent`, and `EngineSession`'s single slot was throwing all but the last away. The first half
+  is true and **the second is not**. Verified against `claude-agent-sdk` 0.2.137 after the user ran the
+  result and saw one window where the CLI shows three: `RateLimitEvent` carries exactly one
+  `RateLimitInfo`, emitted on a status *transition*; none of `ClaudeSDKClient`'s fifteen methods queries
+  usage or limits; and `utilization` was **absent** on the real record while the CLI showed 37% for that
+  same window at that same moment.
+
+  **The record that proved it is the finding.** It carried `rate_limit_type: five_hour`, a reset time,
+  `overage_status: rejected` and `overage_disabled_reason: org_level_disabled`, and no utilisation —
+  which is not a usage reading with a field missing, it is a **transition notice about overage being
+  refused**. So the channel reports *that something changed*, never *where you stand*, and § B1's own
+  heading — "Rate Limits Is A Gauge, Not A Second Alarm" — is backwards. It can only be an alarm.
+  AIC⚡DC cannot reproduce `/usage` and the specs now say so rather than implying otherwise.
+
+  **The keying survives on smaller grounds than it was built on**, which is worth separating from the
+  retraction: two windows *can* transition in one session, and the single slot would have let the second
+  overwrite the first. The failure that would cause is the one worth keeping in view — § B1's HUD takes
+  its heading from the record's own type, so a five-hour reading would become a seven-day reading **under
+  a heading that changed with it**, staying self-consistent while describing something else.
+
+  **Then the raw payload was logged and settled it.** The whole record the CLI sends is six fields —
+  `status`, `resetsAt`, `rateLimitType`, `overageStatus`, `overageDisabledReason`, `isUsingOverage` —
+  with no utilisation and one window, while the CLI's panel showed 37% and two more. So the figures are
+  not unmapped, they are **not sent**, and the ceiling is measured rather than argued. `isUsingOverage`
+  is now carried, read off `raw` because the SDK does not model it.
+
+  **And the first cut of the rendering shipped the defect this suite names most often.** With no
+  utilisation, `_pctColor(pct ?? 0)` put the missing figure in the **healthy green band** above a
+  0%-wide bar — "0% used, you're fine" painted over "we were not told". It is `EngineHealth.mcp` again
+  (§ B5: an empty list does not say "no servers", it says "no answer"), and **thirteen tests written
+  alongside it all passed, because every one supplied a utilisation.** A user's screenshot caught it.
+  Eight more tests are built from the measured payload; the row now reads `no figure`, greyed, with no
+  bar, beside the window and reset that *are* known.
+
+  **Also corrected: an overage rejection is not a failure.** In the real record `status` is `allowed` —
+  the window is fine — while `overageStatus` is `rejected`, which the SDK glosses as why overage is
+  *unavailable*. "Overage rejected" read like something broke; it means pay-as-you-go is off at the org,
+  so the window is a hard ceiling rather than a warning.
+
+  **The lesson is the one this suite keeps paying for and paid for twice here: reasoning is what missed
+  it.** The premise was inferred from a spec table of `rate_limit_type` values and never checked against
+  the SDK's own dataclass, which answers it in one line; the green-on-nothing followed from a `?? 0`
+  that no test could see because no test lacked the field. § A2 (d) records the same shape twice in one
+  phase — two checks quietly inert, both found by running the artefact rather than reading the build.
+  **Every instance so far has been found by running the thing, and never by reading it.**
+
+  **Two things were refused rather than approximated.** There is no API-duration figure: the SDK
+  documents `total_cost_usd` and `modelUsage` as cumulative in a streaming-input session and says nothing
+  either way about the duration fields, so summing them would double-count if they are cumulative and
+  undercount if a turn ends more than once — the silent-wrongness `cost.py` exists to prevent for its
+  neighbour. The session clock is AIC⚡DC's own monotonic one instead, and the absence is stated on
+  screen. And the CLI's "total code changes: N lines added, N removed" is not reported at all, because
+  no payload carries it and computing it from the mirror is a different feature.
+
+  **The cumulative-reading exemption is now written down rather than assumed.** `total_cost_usd` and
+  `model_usage` are the session's running totals, and rendering them as a turn's is the bug phase 6
+  existed to fix — so this block is the one surface permitted to read them, under a heading that says
+  *Session*, through a `CostLedger.session_totals()` accessor separate from `price()`, and under the
+  engine's own field names rather than `session_*` aliases. Renaming them at the one honest use would
+  have made that use the one place they are disguised.
+
+- **The terminal HUD** — 2026-08-29, closing `next.md` § B6 the day it opened.
+  `aic_dc/claude_code/turn_hud.py` prints one log record per turn from
+  `ClaudeCodeService._post_response`, which is the first point that holds both halves of the block: the
+  turn's priced footer, stashed off the `streamComplete` that carried it, and the context figure that
+  pass already fetches. Reasoning in
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Terminal HUD*; the layout, the column
+  rules and the six-row source table are in the
+  [reference twin](../../specs-reference/5-webapp/viewers-hud.md) § *Terminal HUD format*.
+
+  **It was specified in four places and printed by nothing, for four phases.** Two spec files describe
+  it, a reference twin gave the exact column alignment, and **both spec files assert it as an
+  invariant** — "the terminal HUD prints after every completed turn". Nothing checked. That is the whole
+  explanation for how it survived: **an invariant is not a test**, and the 29 tests that now pin it are
+  the actual fix for the class of problem, not the printing.
+
+  **How it was found is the part worth keeping.** Not by planning — by clearing the last entry in
+  `known-issues.md`, which named one stale section of one reference twin. Correcting that section found
+  the section *beside* it stale from the same cause, and reading far enough to check the third found a
+  whole surface with no producer. **A twin does not go stale one section at a time:** the phase that
+  corrected the main file did it section by section, and the twin sections nothing pointed at are
+  exactly the ones nobody revisited.
+
+  **Building it forced two corrections that no amount of reading would have produced.** The specs said
+  this line prints "cost or billing mode" — the pre-phase-6 reading of `total_cost_usd`, from when it
+  was believed to be per-turn and null under a subscription. Shipping it as written would have put a
+  second definition of what a turn cost on a surface the browser cannot be seen contradicting. And
+  `context-visibility.md` claimed the cache hit rate "is shown in the per-model rows", which was true of
+  **neither** surface; it is now true of exactly one, because the terminal has the width the browser's
+  300px does not. **A sentence about two surfaces cannot be checked while one of them is missing** —
+  that one had been false since phase 6 with nothing able to catch it.
+
+  **Three deliberate divergences from the browser HUD**, each because a terminal is a log rather than an
+  overlay, and each recorded so it reads as a decision rather than as drift: an empty turn still prints
+  (a missing log record reads as a missed turn; a missing overlay reads as nothing); the hit rate is
+  computed rather than left to the reader; and a background-subagent continuation says `revised after
+  background work`, because a terminal cannot replace a line it has already printed the way the browser
+  replaces its reading. One `logger.info` record rather than one per line, so nothing can interleave
+  with the block; every failure inside it swallowed at `debug`, because a summary of successful work
+  must never fail the turn it summarises.
+
+  **Path naming needed an exemption argued rather than assumed.** § C3 converged absolute-to-repo naming
+  onto the browser, and this is a server-side naming of a file for a human. It is the exemption C3
+  itself names — some surfaces "have to exist before there is a browser to ask" — and a terminal line
+  never has one, so it follows `build_diff_payload`'s existing rule (relative to the root, absolute when
+  outside it) rather than becoming a fourth mechanism.
+
+- **The denial-scope prompt, declined** — 2026-08-29, closing `next.md` § B4 and the last row of this
+  file's § *Specified but not yet built*. Reasoning in
+  [`../5-webapp/file-picker.md`](../5-webapp/file-picker.md) § *Denial Scope Prompt — declined*; the
+  decision is `next.md` § E. Both offered scopes wrote the same bytes to the same file and differed only
+  by a cleanup at session end that Windows never runs and no crash runs anywhere; the in-memory
+  alternative is closed because **the CLI does not route `Read`, `Glob` or `Grep` through
+  `can_use_tool`**, so our own permission callback never sees the tool the rule would be about. The
+  lesson is about where a blocker gets written down: `specs-reference/3-engine/permissions.md`
+  § *There is no runtime rule API* had reached the same wall from the SDK's side and stopped, treating
+  the file write as a fallback rather than as the only option. **A constraint written from one side
+  reads as a limitation; the same constraint checked from both sides is a decision.**
+
+- **A failed engine start now leaves something behind** — 2026-08-29, closing the buildable half of
+  `next.md` § C9. Reasoning in [`../3-engine/session.md`](../3-engine/session.md) § *A failed start is
+  recorded, not only announced*; schema in the
+  [reference twin](../../specs-reference/3-engine/history.md) § *Engine error log*; the browser half in
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Debug Section*.
+
+  **The bug report could not be investigated, and that was the finding.** A user saw an authentication
+  error starting the server from a cold terminal, once, and could not reproduce it. Every persisted
+  surface this repo owns was searched — `events.jsonl` held three unrelated records for the day, the
+  mirrored transcripts were clean, so were the CLI's own under `~/.claude/projects/`. **None of them
+  could have held it.** `connect_engine`'s failure path does four things and all four are ephemeral: a
+  `last_error` in memory, a log line to whatever terminal launched the server, a broadcast to whichever
+  browsers happen to be listening, and a return value with one caller. The terminal scrollback was the
+  only copy.
+
+  **This is the third time the same sentence has closed an item — a broadcast is not a record** (§ C6's
+  compaction indicator, § B1's rate-limit window). The two before it were fixed by giving the thing a
+  home on the state snapshot; this one needed a file, because the state snapshot dies with the process
+  and the process is what failed.
+
+  **The design question was where a pre-session failure belongs**, and it is why this was not a one-line
+  `_record_event` call. That helper drops a record with no session on purpose — every record in
+  `events.jsonl` is rendered inside a session's transcript, and one written under a placeholder ID would
+  appear in somebody else's history. **A connect that fails on authentication is exactly a failure with
+  no session, because the failure is why there is no session.** So it got its own file,
+  `.aic-dc/engine-errors.jsonl`, where `session_id` is present-and-null rather than absent: a reader has
+  to be able to tell "no session" from "field not written" without knowing which file it is reading.
+
+  **What a record carries was chosen for one job.** Not the message alone but the credential source, the
+  resolved binary and the CLI's own stderr tail — because for an auth failure the credential source *is*
+  the diagnosis, and it is the one fact no live surface keeps once the process exits. The browser reads
+  the record's copy rather than the running engine's, which matters exactly when it differs: a server
+  since pointed at other credentials would otherwise report the wrong diagnosis with full confidence.
+  The stderr tail is copied rather than referenced, because the health ring keeps mutating.
+
+  **Two placement decisions were caught by breaking them deliberately.** The failure list renders
+  *outside* the health branch in the Debug section — an engine that never started has no health record,
+  so nesting it would have hidden the report in the one case it exists for. And its fetch is the only
+  one on that tab that is *not* quiet on failure: health has a second source in the `engineHealth` push
+  and can afford a swallowed read, while nothing pushes this, so a swallowed error would render as "the
+  engine has never failed". That is also why the RPC answers `{errors: [...]}` rather than a bare list.
+
+  **A test that asserted the right thing about the wrong element** turned up in the same negative pass.
+  The credential-source assertion read the whole shadow root, where the live health table renders a
+  credential row of its own — so it passed with the record's own row deleted. Scoped to `.engine-error`
+  and paired with a test where the two sources disagree, which is the only arrangement that pins it.
+
+  **The item stays open.** What landed makes the *next* occurrence legible; it does not explain the one
+  that was reported, and nothing here tried to reproduce it — an intermittent failure at connect may
+  never be provoked on demand. C9's exit criterion is now an event rather than a commit, which makes it
+  the only item in `next.md` shaped that way.
+
+- **The session directory became something you can ask about, not only something you get told**
+  — 2026-08-29, closing `next.md` § B3's last buildable row. Reasoning in
+  [`../5-webapp/settings.md`](../5-webapp/settings.md) § *Session Controls*.
+
+  **The saving that would have been the bug.** `_disk_warning` already walked `.aic-dc/sessions/` and
+  already compared it to the configured threshold, so routing the new read through it looked free. It is
+  latched — the first check over the threshold returns the sentence and every later one returns nothing,
+  whether it came from a turn ending or a browser's first paint — which means a Settings tab that borrowed
+  it would silently spend the user's one warning on a card they opened for an unrelated reason. **The
+  latch belongs to the caller that interrupts, not the caller that was asked.** Two callers, one
+  measurement, one latch, and the load-bearing test is the one asserting that reading the figure leaves
+  `_disk_warned` alone.
+
+  **The same divergence runs through the failure case, in the other direction.** A directory walk that
+  raises is swallowed by the warning, because a size it could not read is not worth failing a completed
+  turn over. Here the size *is* the answer, so the failure is reported: silence would leave a blank card
+  and no account of why, which is exactly the "the transcripts are tiny" / "the walk failed" ambiguity the
+  card exists to resolve.
+
+  **`over_warning` is the verdict, not the threshold** — `EngineHealth`'s rule for the mirror gap, applied
+  to the one other number a tab could have been tempted to compare for itself. The threshold is
+  user-editable (`history.session_dir_warning_bytes`), and a browser-side copy is a second answer waiting
+  to disagree with the first.
+
+  **Deletion is a link, not a button.** The card argues for deleting sessions and then sends the user to
+  where sessions are; a delete sited on a tab that cannot show the transcript would be a second route to
+  destroying one, with the thing destroyed off screen. The link opens the history browser via a window
+  event and minimizes the dialog on the way — the Context tab's file links already do both, for the same
+  reason: the browser opens *behind* the dialog, and a click that reveals nothing reads as a click that
+  did nothing. Nothing pushes the size, so the figure re-reads when the tab is revealed, which is what
+  closes the loop from figure to deletion and back.
+
+  Small, but the same shape as § C3 a day earlier: `formatBytes` grew a GB tier rather than the Settings
+  tab growing a private copy of a rendering that already had an owner.
+
+- **One rule answers "absolute engine path → repo path"** — 2026-08-28, closing `next.md` § C3 and
+  [`../plan/README.md`](../plan/README.md) open item 3. Reasoning in
+  [`../3-engine/context-visibility.md`](../3-engine/context-visibility.md),
+  [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy*,
+  [`../5-webapp/svg-viewer.md`](../5-webapp/svg-viewer.md) § *When Neither Side Can Be Read* and
+  [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule Names Files On Screen*.
+
+  **The item named one duplication and cost three.** The server-side `relPath` enrichment on memory files
+  was the one it was written about. The other two arrived after it: the two-call repo fetch, copied between
+  the diff and SVG viewers by § C2 the same week with a note saying one owner was C3's job; and the
+  tool-card header's input summary, which the chat spec had recorded as *blocked on this item*. **A
+  convergence item gets more expensive every time anything near it is built** — which is the case for
+  taking one when it is cheap rather than when it is next.
+
+  **The recorded blocker was false, and it was the interesting part.** Shortening paths in a `key=value`
+  join over a tool's input looked like it needed a per-tool table of which keys hold paths — a third
+  mechanism, which is what the item existed to prevent. There is no table: a value that begins with the
+  repo root **is a path by its shape**, which is the same discriminator the browser's rule already mirrors
+  off the backend's own containment check. Every string value can be offered to the rule, and the rule
+  declines the ones that are not paths. So the join moved to the browser to be where the rule lives, which
+  cost nothing on the wire because both card builders already shipped the whole `input` dict beside the
+  summary.
+
+  **The copies had already stopped being copies**, which is the better argument for one owner than
+  tidiness. The SVG viewer's error reader had drifted to `String(err)`, so a rejection carrying no
+  `message` reached the user as the literal text `[object Object]`, where the diff viewer's said "unknown
+  error". Nothing was going to notice: it is the § C2 lesson again, a reporting path that the happy case
+  never exercises.
+
+  **Openability moved with naming rather than staying behind.** The Context tab used to read a
+  server-computed `relPath` to decide which memory rows were clickable; it now takes that from the naming
+  call, which returns a different string only for an absolute path inside the root — exactly the condition
+  for the read succeeding, so one question is asked once. Keeping a server-side `openable` for the case
+  only the server can see — a path outside the root that *resolves* inside it — would have been useless
+  rather than better, because the browser could not have named that path either and the row would have
+  carried a link that opened nothing. Giving up that case is the entire cost and it is pinned by a test.
+
+  **And there were three mechanisms, not the two the item counted.** `Reindexer._relative` turns a written
+  path into a key in a server-side index, and `summarise_tool_input` still writes the permission dialog's
+  headline before a browser is in the picture. Neither is a second answer to the same question: the line is
+  *who the answer is for*. A name on screen belongs to the browser; a key in a server-side structure, and a
+  sentence that must exist before the browser connects, do not.
+
+- **A failed RPC is now reportable from both ends** — 2026-08-28, closing `next.md` § C2 and
+  [`../plan/README.md`](../plan/README.md) open item 4. Reasoning in
+  [`../1-foundation/rpc-transport.md`](../1-foundation/rpc-transport.md) § *When a Service Method Raises*
+  and [`../5-webapp/diff-viewer.md`](../5-webapp/diff-viewer.md) § *When Neither Side Can Be Read*.
+
+  **Both halves, deliberately.** The item's own claim was that fixing either one alone would have made the
+  original bug reportable, and building one would have been taking that claim on trust for the next bug
+  rather than the last one.
+
+  **The browser half turned out to be a rule about shape, not a message test**, and finding that is what
+  made it small. "Treats a failed fetch as empty content" reads as though every failure needs a report,
+  but two of the three cases are *readings*: HEAD failing means the file is new, the working copy failing
+  means it was deleted. Only **both** failing has nothing behind it — and that is the case the viewer
+  rendered as an empty document marked new. The alternative discriminator was the error text, which needs
+  a table saying that `File not found` means deleted and `Absolute paths not accepted` means refused; that
+  table goes stale the first time the backend rewords anything, and "how many sides answered" is a fact the
+  fetch already holds.
+
+  Worth being plain about what the old behaviour was, because "shows the user nothing" undersells it: an
+  empty document the user can scroll, select and save from is **a claim about their repo**, made over a
+  request the server had refused. Silence would have been better.
+
+  **The server half substitutes jrpc-oo's callback rather than the service method.** The library catches
+  every exception and prints `Failed: {e}` — no method, no arguments, no timestamp — and it is a pip
+  dependency, so that print stays. The seam is the `{qualified name: wrapper}` dict `add_class` leaves on
+  the inner server: each wrapper reports failure by invoking a callback, so replacing the callback sees
+  every error the library swallows. **The obvious move — wrapping the method — would have been wrong**,
+  because service methods have Python callers too and it would have logged every `RepoError` an internal
+  caller deliberately catches as though it were a fault. Two consequences are stated rather than left to be
+  found: the record carries the message and never a traceback, since the exception object is gone by the
+  time the callback runs; and arguments are summarised by shape with strings clipped *before* `repr`,
+  because a pasted screenshot arrives as a multi-megabyte data URI and the naive version copies it twice to
+  build a line nobody wants that wide.
+
+  **The finding is the one nobody was looking for: the toast channel the fix needed had never worked.**
+  The diff viewer dispatched `show-toast` on itself; the shell listens for `aic-toast` on `window`. Wrong
+  name and wrong target, so all four dispatches — every export and copy failure the viewer has ever had —
+  went nowhere for as long as the feature has existed. **This is § C2's own thesis arriving from the other
+  direction**: a rare failure that reports nothing is indistinguishable from success, which is why nothing
+  noticed, and it means a reporting path gets no exercise from the happy case. It has a test of its own now
+  rather than being trusted because the fetch tests pass.
+
+  **The SVG viewer got the same rule**, holding as it does a copy of the same two-call fetch and the same
+  blindness — and a blank SVG pane is harder to doubt than a blank diff, since an empty SVG is a thing that
+  exists. The duplication is left standing and recorded in both spec files rather than half-converged:
+  **one owner is the fix, and a third copy of the rule is not it.** That belongs to § C3, whose price this
+  work moved up twice without touching it — one more copy of the fetch, and a third caller of `toRepoPath`.
+
+  Pinned by 12 Python tests and 10 browser ones. Three of the Python cases and eight of the browser cases
+  were checked to fail without the change; the rest are invariants that hold either way by design — that
+  the error reaching the caller is byte-identical, that a success logs nothing, that a one-sided failure
+  still opens silently, and that a missing RPC proxy is not reported as a failure because pre-connection is
+  the health banner's to say.
+
+- **The first two preference cards** — 2026-08-28, closing the first two rows of `next.md` § B3 and most of
+  item (c) above. Thinking display and Doc enrichment now render above the config grid; the third row, the
+  deny-read scope reset, stays blocked on § B4. Reasoning in
+  [`../5-webapp/settings.md`](../5-webapp/settings.md) § *Preference Cards*.
+
+  **The queue entry's premise was half wrong, and the wrong half was the entire job.** It read: "the value
+  is already configurable, so what is being built is discoverability, not capability". True of
+  `thinking_display`, which `options.py` genuinely passes to the SDK. False of `app.json`'s
+  `keywords_enabled`, which `ConfigManager.doc_index_config` **parses** — the entry had recorded that as
+  *honoured* — and which nothing then read. `EnrichmentConfig` never carried an `enabled` field and no other
+  caller looked, so keyword enrichment ran whatever the file said and a card over it would have been a
+  switch wired to nothing.
+
+  This is the third field-with-a-missing-end in a week — § B5's `EngineHealth.mcp` had no writer, § C7's
+  `Turn.viewer` had no writer, this one had no reader — and the check that would have caught all three is
+  the same one: **grep for the consumer, not for the name.** A key appears in a config reader whether or
+  not anything downstream ever asks for it, so "the value exists and is read by `config.py`" is a sentence
+  that can be true of a dead key.
+
+  **Written rather than deleted**, unlike § B5, and for two reasons that did not apply there: the spec
+  names the effect ("Whether keyword enrichment runs"), and the thing being switched off is roughly a
+  gigabyte of resident sentence-transformer plus the pass that loads it — a user on a small machine has a
+  real reason to want the switch that the field promised them. The gate is the first check in
+  `DocIndexBuilder.run_enrichment`, and it is a **callable rather than a captured boolean**: the builder is
+  constructed once per process and `app.json` is reloadable, so reading the value at construction would have
+  made the switch an app-restart field, and the Settings tab has no disposition between "now" and "next
+  session" to describe one with. It also gets its own status word — `disabled`, not `unavailable` — because
+  `unavailable` drives a one-shot "install `aic-dc[docs]`" toast, and telling somebody how to install what
+  they just turned off is the one certainly wrong answer. Details in
+  [`../2-indexing/keyword-enrichment.md`](../2-indexing/keyword-enrichment.md) § *Switching Enrichment Off*.
+
+  **What the cards are made of is the note under the control.** Both fields remain editable as text in the
+  two config cards below, so the switch adds no capability at all — it adds discoverability plus the one
+  thing a textarea cannot say, which is when the value it just wrote starts being true. The pair was worth
+  building together precisely because their answers differ and **neither is "now"**: `thinking_display`
+  joins `_pendingFields` so the restart confirmation names it, and `keywords_enabled` is next-*pass* —
+  the reload is called and is real, but the consumer is a background build, so switching off does not
+  un-enrich what is cached and switching on does not start a pass.
+
+  **Two things the work found in the writing.** A switch that re-serialised its file would reformat it:
+  `JSON.stringify(_, null, 2)` over this app's own `app.json` explodes `extensions` and
+  `keywords_ngram_range` from one line each into twenty-four, which is an unrequested rewrite of a user's
+  config performed by a control that promised to move one boolean — so `settings-preferences.js` replaces
+  the value on its own line and only falls back to reserialising for a key the file does not have yet. And
+  a switch that based its write on a cached read would **silently discard the user's unsaved textarea
+  edits** when that file happened to be open: the base is the textarea when there is one, and the result
+  goes back into it, so the two surfaces cannot end up describing different files. That is the only fault
+  this control could cause that the config card alone never could.
+
+  `_reload` had to stop keying on `_activeKey`, since a preference writes a file that may not be open at
+  all — reloadability is a fact about the file, never about which panel asked.
+
+- **The usage HUD's last three sections** — 2026-08-28, closing `next.md` § B1. Rate limits, Files modified
+  and collapse persistence had been specified for three phases with nothing rendering any of them. The
+  reasoning is in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) §§ *Rate Limits Is A Gauge, Not
+  A Second Alarm* and *Files Modified Reuses The Rule, Not The Chip*; the field shapes and the collapse keys
+  are in its [reference twin](../../specs-reference/5-webapp/viewers-hud.md).
+
+  **The item was scoped as three frontend sections and one of them had a backend half.** The SDK's own
+  docstring is what found it: the CLI emits `RateLimitEvent` when the status *transitions*, not per turn. So
+  a HUD reading only the live push would show nothing to any browser that reloaded between transitions —
+  days, on a seven-day window, and possibly right up to the rejection the figure exists to warn about. The
+  session now holds the record and `get_current_state` carries it, which is § C6's compaction fix a day
+  earlier applied to a gap two orders of magnitude longer. **A broadcast is not a record**, and the interval
+  between broadcasts is how much that costs.
+
+  **Where the spec's wording had to be read rather than followed.** "When a rate-limit event is in play"
+  reads as *an event just fired*; taken that way the section would have been a second copy of the toast that
+  already fires on the same transition. It has to mean *the window has not reset yet* — which is also what
+  makes expiry a requirement rather than a nicety, because a record stands for hours and outlives its own
+  window, and "82% of your 5-hour limit" an hour after the reset has nothing on screen to contradict it.
+
+  **Expiry has an obvious wrong home.** Testing `resets_at` server-side at snapshot time looks like the
+  tidy place for it and is not: a pushed record has to be aged client-side regardless, so the server test
+  would have been a second definition of "still open" that could only come to disagree with the first — the
+  shape `next.md` § C3 keeps finding. The server serves the record raw and says so in the property's
+  docstring, and a test pins that it does.
+
+  **Two units, each with exactly one plausible wrong reading and neither failing visibly.** `utilization` is
+  a fraction 0.0–1.0, so read as a percentage every real figure renders as under one percent; `resets_at` is
+  Unix seconds, so read as milliseconds the reset lands in 1970. Both are pinned, in `rate-limit.test.js`,
+  against the SDK's `RateLimitInfo` docstring rather than against a guess.
+
+  **One spec sentence was corrected instead of implemented.** § *Sections* said *all* sections collapse.
+  "This turn" is its own headline, so a disclosure control there hides the one figure the HUD exists to show
+  and spends a caret doing it — a collapsed section that says nothing is not a smaller section, it is an
+  absent one. Four collapse; each head keeps its headline, so closing one costs no height and hides no
+  answer.
+
+  **The collapse key is deliberately not the label.** The rate-limit section's head reads "5-hour limit" or
+  "7-day Opus limit" depending on which window the account is bound by, and that moves. Keying the stored
+  preference on it would silently re-open a section the user closed, on the day the label changed — which is
+  the day they are least likely to want to look at it. Pinned by a test that sets the preference under one
+  window and asserts it under another.
+
+  **Two reuses, and the line between them is the point.** `formatResetTime` moved out of
+  `chat-panel/streaming.js` into a shared `rate-limit.js`, so the toast and the section name one limit the
+  same way — the toast's wording changed as a result, from the raw `five_hour` to "5-hour". But the file
+  chips are *not* the tool card's chips: the rule they share is `toRepoPath` and the unconverted
+  `detail.path`, which is the part that could drift, while the markup and the stylesheet are the HUD's own
+  because a shadow root does not inherit another's and there is nothing there for two copies to disagree
+  about.
+
+  **Two things the work found that were not the work.** The HUD had **no `max-height`** — specified
+  since phase 3 as "fixed width, max height with internal scroll", harmless while it was four short
+  rows, and a real problem the moment Files modified made a section that grows with the turn: forty
+  files is an ordinary refactor. And it sat at **`z-index: 10000`, above the permission dialog's
+  9000**, for three phases while its own § Placement said "below the permission dialog, which is modal
+  over everything". A request arriving inside the HUD's eight seconds had this overlay across its
+  top-right corner and taking the clicks there. Both were found by reading the reference twin's ladder
+  for where a fifth section could go — which is an argument for reading the twin, since neither is
+  visible from the behavioural spec and neither fails a test that existed.
+
+  **Checked by mutation, not by passing.** Six behaviours — the window's expiry, the raw-path dedup, the
+  stable collapse key, rendering at `allowed`, the repo-relative label, and adopting the snapshot record —
+  were each reverted in turn and the suite confirmed to fail. Five of them cost one test each; gating the
+  section on `allowed_warning` cost ten, which is the difference between a detail and the decision the
+  section is built on.
+
+- **A tool card's header is two columns, and nothing is pinned right** — 2026-08-28, asked for in the same
+  conversation as the entry below and superseding its `.tool-header-end` group. The user's question was
+  whether the time chip could move under the tool name, "so that we have only two columns, left (tool tag,
+  time chips) and right which is the assistant / user entries in the chat", with the observation that closed
+  the argument: *everything is line wrapped now, so there is rarely a one line entry*. The rail's second line
+  is therefore free, and my first answer — that stacking would cost every card a line — was priced against a
+  one-line card that had stopped existing the day before.
+
+  **The measurement that made it worth doing is not the one either of us was arguing about.** Chrome pinned
+  to the right is subtracted from *every* line of the summary, not just the line it sits on, because the
+  summary is one box and a box that ends before the time chip ends before it all the way down. Measured in a
+  520px pane across eight cards, the old layout gave the summary between **180px and 402px** depending on how
+  much chrome its card carried — an MCP call with a server chip, a long name, a gated marker and a clock got
+  180 — and every card started its text at a different x. The rail gives all eight **384px from one x**.
+  So the honest gain is not the ~8px a plain `Bash` card wins on the right; it is that the cards that were
+  squeezed worst stopped being squeezed at all, and that the column is a column.
+
+  **The rail is sized by the tool name, not by the clock.** Sized to the clock (5.5rem) it looked right until
+  `TodoWrite` and `NotebookEdit`, which are wider than a time-of-day, dropped to a rail line of their own and
+  left a caret and a status dot stranded on the line above. A name whose line number depends on its character
+  count is the one thing in the rail that cannot wrap, because the name is what a reader scans the rail *for*.
+  7rem holds the longest built-in beside the caret and the dot. MCP names are unbounded and wrap; a server
+  chip wider than the rail now breaks inside itself rather than overflowing into the summary's column, which
+  is the one place on the card that must have no chrome in it.
+
+  **Under 360px the rail lies down.** The first version of this was a straight loss at the width the previous
+  day's work had gone to trouble over: 7rem out of a 300px pane is over a third of it, and the summary
+  measured **164px against the 231px** the flex layout gave it, because that layout could drop a squeezed
+  summary onto a line of its own and a fixed column cannot. So below a card width of 360px the header
+  collapses to one column with the metadata as a row above the summary — 282px there, better than either.
+  It is a container query, not a media query: the pane is a dialog the user drags, so the viewport's width
+  is not the question being asked. `.tool-card` carries `container-type: inline-size`, which is safe on a
+  card because a card's width comes from the column it sits in and never from its contents. The override
+  block sits last in the section, since a container query adds no specificity and source order is all that
+  decides — the first placement put it before the `.tool-time` rule it overrides, and the clock went on
+  stacking in the flattened row until a screenshot showed it.
+
+  **The clock and the elapsed stack instead of sharing a line.** `12:29:29 PM · 2m 41s` wants about 110px
+  of the rail's 112 — a two-pixel fit, and no fit at all on a card restored from another day, whose chip
+  carries a date in front of the clock — and while the rail was still 88px the middle dot was left dangling
+  at the end of a wrapped line, which is what the change was made to stop. The two spans keep a space
+  between them in the markup — it draws nothing, since whitespace between flex items is discarded, and it
+  is the only thing stopping "14:32:07" and "2m 41s" running together into one word for anything reading
+  text content.
+
+  **The gated marker took a rail line of its own an hour later**, asked for from a screenshot of a `Bash`
+  card — "perhaps move the gated chip to the left column below the time?". Beside the clock it fitted with
+  about six pixels to spare on a card timed today and wrapped under the clock on one restored from another
+  day, so *where* a reader looked for it depended on how old the card was, which is the fault the rail was
+  built to remove one column over. Down the rail it is name, time, marker, always. It costs nothing at
+  the widths that matter — the summary is 384.4px at 520px and 282.8px at 300px either way, and the rail is
+  shorter than the summary on every card measured except the one with both a date and a marker, which grew
+  by one line. In the flattened layout under 360px the three lines flow back into a row, which is what a
+  row is for.
+
+  The guards are structural where they can be: the header's children are asserted to be exactly the rail and
+  the summary, every piece of chrome is asserted to be *inside* the rail, the rail's lines are asserted to
+  end in name, time and marker in that order, and a card with no time draws no line for one — nor an empty
+  line above a marker, when it is gated but untimed. Only the fixed track width is read from
+  `STYLES.cssText`, per § C4. Read in Chrome at 520, 400 and 300px, including an expanded `Edit` card, to
+  check that containment left the diff body alone.
+
+- **A tool card's header wraps its summary instead of eliding it** — 2026-08-28, reported from a screenshot
+  rather than found in the queue. A `Read` card read `file_path=/home/…/repos/softwaredesignlifec…`, which
+  names no file: the header is the only place a *collapsed* card says what the call was about, it carries no
+  tooltip, and the card's own body is a JSON echo, so the identifying tail of a path was not reachable
+  anywhere. Every summary wraps now — [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy* holds the
+  rule.
+
+  **The exception was already there and its argument was general.** `Bash` summaries had wrapped since phase
+  2, for the stated reason that "eliding it eats exactly the tail that says what it does: which paths, which
+  flags, which test file" — a sentence with nothing in it about `Bash`. The same entry then kept every other
+  tool on one line to buy a uniform row height. So this was not a new decision so much as noticing that one
+  had been made twice, in opposite directions, two paragraphs apart
+  ([`../plan/delivery.md`](../plan/delivery.md) § *`Bash` summaries wrap; nothing else does*, now annotated).
+  Three `[data-tool='Bash']` blocks over five selectors are gone, and what they said is what `.tool-summary`
+  and `.tool-header` say now for every tool.
+
+  **The line clamp went too, and that is the part worth arguing.** A three-row `-webkit-line-clamp` is the
+  same ellipsis three rows lower. The engine's 200-character `TOOL_INPUT_SUMMARY_CHARS` cap already bounds
+  how tall a card can get, so the clamp was a second bound on a quantity that had one.
+
+  **A browser found the bug the suite could not.** `overflow-wrap: anywhere` on a `flex: 1` item was correct
+  and not sufficient: the summary's basis was 0, so the row never wrapped and the summary absorbed every
+  shortfall instead — at `DIALOG_MIN_WIDTH` (300px) an MCP card, which spends its row on a server chip, a
+  long tool name, a gated marker and a time chip, squeezed the summary to about ten pixels and rendered a
+  hundred-character path as **one broken character per line** — a column taller than the viewport. That is worse than the
+  ellipsis it replaced, it is reachable by dragging the dialog, and jsdom cannot see it. Two changes fixed
+  it: a `10rem` flex basis, which is what makes the summary the item that *does not fit* and therefore the
+  one that wraps, and `flex-wrap` on the header. Read at 520, 400 and 300px in Chrome against a scratch page
+  that mounted the real renderer with the real stylesheet.
+
+  **One DOM change fell out of the same check.** The gated marker, the time chip and the caret are now one
+  `.tool-header-end` element rather than three siblings, because three siblings wrap one at a time and the
+  first thing a narrow pane did was strand the caret alone on a line of its own. As a group they travel
+  together and an auto margin pins them right, which is also what stopped the gated marker reading as part
+  of the wrapped path beside it. **Superseded within the day** by the entry above: the group is gone and its
+  three items are in the rail. The lesson survived the element — the caret is still kept where it cannot
+  strand, which is now first rather than grouped.
+
+  The guard is read from `STYLES.cssText`, the convention § C4 established for rules jsdom cannot execute,
+  and it was checked to fail with the elision restored. It pins the absence of `line-clamp` and of any
+  `data-tool='Bash'` rule across the whole sheet rather than the presence of properties in one rule, because
+  the way this regresses is someone re-adding the special case, not someone editing this declaration.
+
+- **A file chip is named the way the rest of the app names files** — 2026-08-28, § C4. Every path on a
+  tool card is absolute, because the CLI's file tools require it, and the chips displayed it: a label
+  spending its width on a prefix identical for every file in the repo, with the part that identifies the
+  file at the end that falls off. The label is now the repo-relative name, on the tool-card footer chips,
+  the turn footer's "files modified" list and the "Files Referenced" chips alike, with the engine's path
+  on the tooltip and the accessible name. [`../5-webapp/shell.md`](../5-webapp/shell.md) § *The Same Rule
+  Names Files On Screen* holds the rule.
+
+  **The item had been open eleven days on a question that was already answered.** It was filed as a
+  display decision with three options — basename, root-relative, middle-elided — and no reason to prefer
+  one, so it kept being the thing to do later. The Context tab's memory-file table had stated the rule in
+  a code comment **the day before** (`daa7fa9`, 2026-08-16; the chip fix that deferred the question is
+  `218f89d`, 2026-08-17): *"A file inside the repo is named the way every other view in this app names
+  files — relative to the root — with the engine's absolute path on the row's tooltip. One outside it
+  keeps the absolute path, because that is the only name it has here."* The permission dialog already
+  follows it, because the backend relativises before sending. And that rule *is* `toRepoPath`, which was
+  built for navigation in `218f89d` and behaves exactly that way. So the work was applying an existing
+  function, there is **no second helper for display**, and the two cannot drift apart. **An item can be
+  blocked by its own framing:** "which of these three" had no answer and "what does this app already do"
+  had one.
+
+  **Three things the work found, none of them the item.** The chip had **no width budget at all** — no
+  `max-width`, no ellipsis, unlike the `.file-chip` it sits beside, whose comment says "Full path is in
+  the tooltip" — so one long path stretched the footer row. That is fixed and pinned from the stylesheet
+  source, the way the slash palette pins its hint-width rules and for the same stated reason: jsdom does
+  no layout, so only the rules' presence is checked. The shell's `_repoRoot` property is **gone rather
+  than duplicated** — the root moved into the module holding the rule, because the chip renderers take a
+  path and no host, and the cheap route would have been a third holder of the same string reached through
+  the existing `state-loaded` event. And the "Files Referenced" list **deduplicated on the raw path**: its
+  two sources spell paths differently — prose mentions are matched against the picker's list and so are
+  relative, edit-block headers carry whatever the model wrote — so a file named both ways was already two
+  entries, invisible until § C4 gave both the same label and would have rendered them as two identical
+  chips. The key is now the relative name; the entry keeps the path as found, which is what leaves the
+  absolute one available to the tooltip.
+
+  **One path is left absolute on purpose.** The card *header*'s input summary still reads
+  `file_path=/home/you/repo/…`. It is built server-side by `summarise_tool_input`, a `key=value` join over
+  whatever keys the input happens to have, so it has no idea which of them are paths; giving it that idea
+  means a per-tool table of path keys — which `permissions.py` already keeps a private copy of, and which
+  would be a *third* mechanism answering "absolute → relative" against a suite that already has an item
+  open about there being two. It belongs to that convergence, and it is stated in
+  [`../5-webapp/chat.md`](../5-webapp/chat.md) § *Card Anatomy* rather than left to be noticed.
+
+  Fifteen mutations, each checked to fail a test. On the module holding the root: dropping
+  `setRepoRoot`'s guard (a snapshot without a `repo_root` then un-sets one an earlier snapshot
+  established), making it write-once (a reconnect to a different repo then keeps the old root), making the
+  test hook a no-op, defaulting `toRepoPath`'s root to `''` instead of the published one, and having
+  `getRepoRoot` report `''`. On the chips: labelling with the raw path, putting the *relative* path on the
+  tooltip, dispatching the label instead of the path, and the same three for the summary chips plus
+  storing the relative form in the entry. On the stylesheet: removing the width budget. Two more re-pin
+  behaviour that only moved house — deleting the snapshot's `setRepoRoot` call, and un-normalising
+  `navigate-file` — and one pins the test suite itself: without `resetRepoRoot` in the shared
+  `beforeEach`/`afterEach`, a test that publishes a root decides how every later test's paths are
+  labelled, and the case asserting an absolute path *stays* absolute is the one that breaks.
+
+- **The engine gets a graceful teardown, bounded, before the hard exit** — 2026-08-28, § C8, the last of
+  § C5's findings to close. `ClaudeCodeService.shutdown` had no caller for its whole life while its
+  docstring reasoned about one: the localhost gate "does not get in the way of the real caller ... so an
+  in-process teardown hook passes". There was no hook. `main._shut_the_engine_down` is now that caller.
+
+  **The analysis said delete it, and checking the specs reversed the decision.** Three of `shutdown`'s
+  four steps are meaningless before `os._exit` — cancelling turn tasks, closing an executor and
+  disconnecting a session all describe a process that is about to stop existing, and the two consequences
+  that genuinely outlive it (the CLI child, the resumed session's temp config dir) were already handled by
+  hand for exactly that reason. Step by step it reads as dead code. What it misses is two calls further
+  down: `cancel_all` → `_deny_unanswered` → `_announce` **pushes the denial to the browser**, and the
+  browser outlives the server. [`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md)
+  § *Multiple Clients* enumerates four `cause` values a denial can name and `shutdown` was the one nothing
+  could produce, so a user who stopped the server with a dialog open kept a live-looking dialog that never
+  resolved. **The lesson is the order of operations**: reading the method bottom-up gave the wrong answer,
+  and the spec that consumed its output gave the right one.
+
+  **A courtesy, never a condition of exiting.** 2 seconds, then abandoned; every failure including the
+  timeout swallowed at debug; a second Ctrl-C skips it entirely. The handler moved from `signal.signal` to
+  `loop.add_signal_handler` for one reason — a C-level handler cannot await a coroutine — and the hard
+  `os._exit` stays, because asyncio's runner cleanup is what hangs on `_heavy_init`'s model load. What the
+  loop gets is one bounded task, not its own shutdown.
+
+  **Two residues, both stated where they bite.** Windows has no graceful step at all, because
+  `add_signal_handler` raises `NotImplementedError` on the proactor loop — the same platform split as
+  `_kill_vite`'s process group, logged rather than worked around. And `is_caller_localhost` reads the
+  *current* RPC caller, so a remote participant's call caught mid-dispatch by the signal can have the gate
+  refuse the host's own teardown; the caller logs a warning instead of bypassing the gate, because a
+  teardown path that does not consult the gate is a worse thing to own than a rare log line.
+  [`../4-features/collaboration.md`](../4-features/collaboration.md) carries that one.
+
+  **§ C5's own list did not catch this closure, and that is a finding about the list.** Wiring
+  `set_viewer_state` a few hours earlier failed a test loudly (§ C7 below); wiring `shutdown` failed
+  nothing. `DORMANT` is asserted against browser callers in both directions, but the Python direction is
+  only asserted for `INTERNAL_ONLY`, where an entry names a file and the call in it is checked — so a
+  dormant method that gains a *Python* caller keeps a stale entry until somebody moves it. This one moved
+  by hand, after checking rather than assuming. The asymmetry is now written above `DORMANT`, with why the
+  obvious repo-wide `.method(` scan is not the fix: `shutdown` is its own counter-example, since
+  `doc_index/background.py`'s `self._executor.shutdown(wait=False)` is a different method spelled the same
+  way. `DocIndexBuilder.close()` is still reached only through `shutdown`, so it is now reached at all.
+
+  **The wiring was untested until it was extracted, and extracting it is what made the gap visible.**
+  The graceful step is a module-level function and was pinned from the start; the arrangement that runs
+  it — two `add_signal_handler` calls, the second-signal escape, the Windows fallback — was a closure
+  inside `main()`, which the suite never drives. So `_install_exit_handlers(loop, service, teardown)` came
+  out to module level, taking the teardown as a parameter because that is the only part that genuinely
+  needs `main`'s locals (`vite_process`). Its tests fire **real signals at the test process** rather than
+  calling the callback: what is worth pinning is that a Ctrl-C reaches the coroutine at all, and a
+  hand-called callback would pass against `signal.signal` wiring that cannot await one.
+
+  Twelve mutations, each checked to fail a test. On the step: dropping the `wait_for` bound (a hung engine
+  then hangs the exit), narrowing the `except` so a raise escapes, dropping the early return after the
+  log, dropping the `restricted` check, and warning on every answer. On the wiring: installing SIGINT and
+  forgetting SIGTERM, tearing down before awaiting the graceful step rather than after, dropping the
+  second-signal escape, never setting the `exiting` flag, dropping the `NotImplementedError` fallback, and
+  using C-level `signal.signal` handlers instead of loop ones.
+
+  Three findings came out of that pass rather than out of reading:
+
+  - **A survivor that was the code's fault.** An `if service is None: return` guard whose state is
+    unreachable, since the handlers are installed after the service is built. Both it and the test that
+    asserted otherwise — "the signal can arrive before phase 1 has built one", which is false — were
+    deleted rather than kept as unpinnable code.
+  - **A test that passed for the wrong reason.** The second-Ctrl-C test polled for 5 seconds against a
+    2-second grace period, so it passed with the escape deleted: the *first* signal's timeout produced the
+    teardown. The window is now 0.2s, with the margin asserted rather than assumed, and the docstring says
+    what it caught.
+  - **A latent dependence on `os._exit` never returning.** `on_signal` fell through after the second
+    teardown and queued another graceful step against an engine already being torn down — invisible in
+    production precisely because `teardown` does not come back. A `return` makes the behaviour not depend
+    on that, and the test now pins it by counting the engine's calls rather than the teardowns.
+
+  Two stale names went with it: `resume_cleanup` and `session.py` both referred to `main._signal_handler`,
+  which no longer exists, and both said the exit path "never reaches `disconnect()`" — it now reaches it
+  on a 2-second budget on POSIX, which is a weaker claim than the by-hand cleanup needs, so the cleanup
+  stays and says why. A third, unrelated, was found while making
+  [`../6-deployment/startup.md`](../6-deployment/startup.md) § *Graceful Shutdown* true:
+  `_cleanup_tex_preview_dir`'s docstring claimed a startup call that has never existed.
+
+- **The agent is told which file the user has open** — 2026-08-28, § C7, the first of § C5's findings to
+  close. `ViewerFraming` had two arrival paths and a writer on neither, so `Turn.viewer` was always
+  `None` and the `ui_state` tool answered "nothing is open in the user's viewer pane" for the entire life
+  of the app. `webapp/src/app-shell/viewer-framing.js` now pushes `set_viewer_state` from the shell's
+  `active-file-changed` handler.
+
+  **One writer, and the choice of which one is the whole design.** `chat_streaming`'s `viewer` argument
+  stays null; the service's existing fallback feeds both readers from the single push. Answering in both
+  places would have given one field two sources that can disagree — the shape § C3 keeps finding — and
+  the per-turn argument is the worse source, because it only knows about turns that start in this
+  browser, which is the case `ui_state` exists to answer. The server side needed no change: the fallback,
+  and `test_the_last_push_frames_a_turn_that_sends_no_viewer`, had been asserting against a writer that
+  did not exist.
+
+  **`active-file-changed` over `navigate-file`**, because it reports what a viewer *has* open rather than
+  what it was asked to open — a fetch can fail, and routing diverges when an SVG carries a scroll hint.
+  Three cases follow from the event's own shape and each is pinned: repeats for one path are deduped (the
+  SVG viewer re-emits on a same-file `openFile` on purpose, so the shell re-runs its visibility routing);
+  a `null` from the *hidden* viewer is ignored, since something is still on screen; and the SVG viewer's
+  synthesised `virtual://svg-compare/…` path reports as nothing open, because it is on screen but is not
+  a file anything can read. A reconnect re-pushes — server-side viewer state is in memory.
+
+  **The selection range is not wired, and that is stated rather than absorbed.** `set_viewer_state` takes
+  `start_line` / `end_line` and `build_framing` renders them, but no selection plumbing exists in either
+  viewer; it would take a debounced Monaco `onDidChangeCursorSelection` chain per editor, which is new
+  surface, and a range that lags the cursor points the agent at lines the user is not on — the failure
+  `chat-panel/input.js`'s own comment refused to risk. The file is the part worth having. § C7 carries
+  the residue and nothing schedules it.
+
+  **§ C5's test fired, which is the first evidence it works.** Adding the caller failed
+  `test_a_listed_method_is_not_called_from_the_browser` and the message named the new call's file and
+  line, so the stale `DORMANT` entry went in the same commit rather than surviving as an assertion that
+  the gap it had just closed was still open. `navigate_file`, the other half of what § C7 named, is
+  re-attributed to § E's collaboration pause where it belongs.
+
+  Eleven mutations, each checked to fail a test: dropping the dedupe, dropping the hidden-viewer gate,
+  treating `virtual://` as a real file, recording a push before it lands, dropping either RPC-availability
+  guard, resending without standing the dedupe down, unwiring the handler, moving the report after the
+  null-path return, and dropping the reconnect re-push. Two survived the first pass and both were the
+  code's fault, not the tests': a redundant `if (!open) return` in the resend that the dedupe already
+  covered (deleted), and a `typeof` guard whose only observable effect is *not* logging, which the test
+  now asserts.
+
+- **Every RPC is accounted for as called, internal or dormant** — 2026-08-28, § C5. `test_rpc_surface.py`
+  partitions the 100 methods the five registered services expose and asserts the partition, so the next
+  public method added to any of them fails a test until somebody answers "is this meant to be reachable
+  from a browser?".
+
+  **The audit was the deliverable and the test is what is left of it.** `add_service` publishes every
+  public method, so the surface is not a list anybody wrote — 22 of the 100 turn out to be internal
+  helpers that a browser can call, and their docstrings describe an internal contract. That is not a
+  defect to fix; it is a fact to record, which is why `INTERNAL_ONLY` names the Python caller and a test
+  checks that the named file still contains the call. A helper whose caller moves on becomes dormant
+  without anything else noticing.
+
+  **Twelve are dormant, and three of those were news.** `set_viewer_state` and the hardcoded `null` in
+  `chat-panel/input.js` mean `ViewerFraming` has two arrival paths and a writer on neither, so the
+  `ui_state` tool's `viewer` key is permanently null (§ C7 — *closed the same day; see the entry above,
+  which leaves eleven dormant*). `shutdown` has no caller and a docstring
+  that reasons about one (§ C8). `get_review_file_diff` is dead on both services it exists on, because
+  review mode's soft reset makes the diff viewer's ordinary HEAD-versus-working-tree pair *be* the review
+  diff — recorded in the inventory rather than queued, since deleting it is a separate decision from
+  knowing it is dead.
+
+  **Deliberately not fixed here.** The audit's job was to find and arbitrate, and turning three findings
+  into three fixes in the same sitting is how an audit stops being repeatable. Each one is either queued
+  with the decision it needs stated, or recorded with the reason it needs none.
+
+  Every assertion was checked to fail without the code it pins — seven mutations, one per test: dropping
+  a `DORMANT` entry, listing a live method as dormant, naming a deleted method, pointing an
+  `INTERNAL_ONLY` entry at the wrong file, dropping the CC-12 exception, leaving a stale exception, and
+  widening the scan's skip rule so it loses real call sites.
+
+- **A control-request timeout stops printing a traceback** — 2026-08-28, the server-side half of § C1.
+
+  The client gate above needs health to say the engine is gone, and there is one failure mode that never
+  says it. **The SDK routes control responses on a detached reader task**, started once per session
+  (`Query.start` → `spawn_detached(self._read_messages())`), not on the per-turn pump — which is why
+  `get_context_usage` works between turns at all. When that reader dies it sends one error into the
+  message stream and exits; after that every control request waits out its full 60 seconds forever, and
+  `connected` stays true because nothing disconnected. The `CLIJSONDecodeError` from an oversized line
+  that closed open item 1 is this path, and it is the one that produced the four tracebacks.
+
+  **The obvious fix is ruled out by a measurement already in the specs.** Treating a timeout as evidence
+  of a dead engine would kill working sessions: the call is measured at 3-14s and exceeds 60s often
+  enough to log eight timeouts in one healthy half-hour run, so a threshold on consecutive timeouts
+  would be a guess at a number the same paragraph says is routinely passed. Detecting the dead reader
+  honestly means reading the SDK's private `_read_task`. So the residue is accepted and *stated* —
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *When the Engine Is Gone* — in the shape
+  CC-18 established: the absence is written down rather than left silent, and pinned by tests.
+
+  What is treated is the symptom the queue actually complained about. `_log_control_failure` logs a
+  timeout as one sentence and everything else with its stack; the traceback was pure SDK plumbing
+  between the service and an `anyio.fail_after`, and a polled caller repeated it. **Two details decide
+  whether this is worth anything:** it keys on the chained `TimeoutError` rather than on the message,
+  because the SDK raises a *bare* `Exception` with no class of its own and the wording is prose it may
+  reword — a check a reword could silence is worse than none; and it fails towards noise, so anything
+  unclassified keeps its stack. Applied to all eight control-request handlers rather than the polled
+  one, since the reasoning is about control requests. `reconnect_mcp_server` and `toggle_mcp_server`
+  had already logged this shape without a stack, so the rule was there incidentally and is now general.
+
+- **A lost engine stops being polled, and the HUD has somewhere to sit** — 2026-08-28, closing
+  [`../next.md`](../next.md) § C1 and [`../plan/README.md`](../plan/README.md) open item 2.
+
+  The usage HUD called `get_context_usage` once per turn with no reference to whether there was an engine
+  to call. Against a lost session that is a wasted round trip; against the worse case — a message pump
+  that died *without* the session being marked lost, which leaves a client that still looks usable and a
+  subprocess whose reply nobody is reading — it is a 60-second control-request timeout logged with a
+  traceback, four of them in one log. None of it told anyone anything: the health banner had already
+  reported the loss, in the engine's own words.
+
+  **The fix is four lines of behaviour and one definition, and the definition was the work.** The HUD now
+  listens for the pushed `engineHealth` record and treats the engine as gone when `connected` is false
+  *and* `last_error` is non-empty. Gating on `connected` alone is the obvious version and it is wrong in
+  a way that would have looked like a different bug: the field is false before the first prompt too, so
+  the HUD would have stopped fetching on a freshly loaded page and never started. `last_error` is what
+  separates "died" from "not yet", and it is reused rather than invented — `health-banner.js` already
+  draws the line there, for the surface this note points the user at. One definition, two readers.
+
+  **Two signals, and neither is redundant.** The push covers every turn after the loss but arrives after
+  the `streamComplete` of the turn that *caused* it, so it cannot stop that turn's own fetch; the reply's
+  `reason: 'no-engine'` closes the gate on that one. A reply cannot pre-empt the request it rides on, and
+  a push cannot overtake the event ahead of it — so the two cases are disjoint and each needs its own
+  signal. The `reason` field already existed for the Context tab's error note and needed nothing new.
+
+  The state clears on a `connected: true` push, on a breakdown that arrives anyway, and on
+  `session-changed` — that last one because starting or resuming is precisely what the note tells the
+  user to do, and a flag surviving it would report a dead engine at a live one until a push happened
+  along. The note is amber rather than error red (a condition, not a failed request), replaces the last
+  good breakdown rather than sitting beside it (numbers from before the loss describe a window no engine
+  holds), and says only that there is nothing to read — the banner owns the why. The turn's own receipt
+  is untouched: a turn that failed after spending something still reports what it cost.
+
+  **A spec claim fell out of writing it.** [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)
+  § *Data Flow* said the HUD "renders entirely from the `streamComplete` payload", with a matching
+  invariant that it "renders without a follow-up RPC", describing a design where the context percentage
+  arrived on `postResponseComplete`. That payload has no such key and `usage-hud.js` has made the call
+  since phase 3, so the claim was false for three phases and nothing caught it — the section documenting
+  the gate could not be written next to one denying the call exists. Both are corrected. Eleven tests,
+  each checked to fail without the code it pins, including the discriminator.
+
+- **The compaction indicator survives a reload: a broadcast is not a record** — 2026-08-28, closing
+  [`../next.md`](../next.md) § C6 and emptying [`../known-issues.md`](../known-issues.md).
+
+  **The defect was small and the shape of it was not.** Every signal driving the indicator is live: it
+  says what the engine is doing *now*, to whoever happens to be connected. Refresh during the pause and
+  all of them have already been and gone, so the component that existed to explain a long silence was
+  erased by the one action a user watching a silent screen is most likely to take — and what they got
+  back was a session that looked idle while the engine was still summarising. This is the same class as
+  the compaction divider phase 2 shipped client-side only, which suggests the lesson is worth naming: a
+  UI state driven only by a push is a UI state that does not survive a reload, and reload is not an
+  exotic case.
+
+  The fix is that `EngineSession` now *holds* the fact rather than only forwarding it.
+  `_fold_session_state` — already the place where translated events complete against session state —
+  sets a monotonic start on `compaction_started` and clears it on `compaction_ended`, and
+  `get_current_state` carries `compaction`. The event is still forwarded unchanged, so the live path is
+  untouched; this only adds the snapshot.
+
+  Four decisions inside it, each of which the obvious version gets wrong:
+
+  - **The server computes elapsed seconds; it does not send a start timestamp.** A timestamp makes the
+    browser difference two clocks, and a collaborating client can be on another machine.
+  - **Only the status frames move it.** `compact_boundary` is the transcript's record and can arrive for
+    a microcompaction that never paused anything, so ending on it would clear a state it never set —
+    and starting on it would hand a reloading browser an indicator with no end frame coming.
+  - **A turn ending clears it, and so does disconnect.** A compaction never outlives its turn; without
+    that, a turn dying mid-compaction leaves every later browser a spinner for a pause that ended when
+    the engine went away.
+  - **The client's ceiling budgets the whole compaction**, not its own view of it. A restore 170 seconds
+    in gets the remaining 10, not a fresh 180.
+
+  The restore is treated as *confirmed*, because the server only ever sets it from the engine's own
+  status frame and never from the ambiguous `PreCompact` hook — so it cannot be a speculative background
+  precompute and must not vanish at the short unconfirmed ceiling. The trigger is deliberately absent: it
+  belongs to the hook, not the frame, so a restored indicator says how long and not why.
+
+  `test_current_state_has_every_key_the_frontend_reads` asserts an exact key set and caught the addition,
+  which is the test doing its job rather than an obstacle.
+
+- **`EngineHealth.mcp` deleted: a field that always answered `[]` was answering the wrong question** —
+  2026-08-28, closing [`../next.md`](../next.md) § B5. Declared, serialised by `to_dict()`, assigned by
+  nothing in `src/` for three phases.
+
+  **The size was two lines; the choice was the work.** Write it or delete it, and deleting won because
+  the question it looked like it answered already had a better answer. `get_mcp_status()` asks the CLI
+  and is *allowed to fail visibly*, which is exactly what a status pill needs — it can be absent. A
+  field that always answers `[]` cannot fail, and an empty list does not say "no servers", it says "no
+  answer". That conflation is what made the Context tab's own MCP claim wrong for a week before anyone
+  checked.
+
+  **The whole suite passed unchanged when the field went**, which is the clearest evidence available
+  that nothing had been reading it — and is itself the argument against declared-and-empty fields: for
+  three phases the codebase could not tell the difference between this field working and this field not
+  existing.
+
+  Three tests pin the absence, and the third is the general form: every key in the health payload must
+  map to a dataclass field or a named computed property, so a key cannot again be serialised out of
+  nothing at all. `degradations` is untouched and is *not* a second attempt at the same thing — it
+  records what the session started **without**, one sentence per loss, and it has a writer.
+
+- **The retired-files note: the leaving-alone was right, the silence was the mistake** — built
+  2026-08-28, closing [`../next.md`](../next.md) § B2 and the last entry of *(c)* below that belongs
+  to this tab's own surface. Phase 3 retired eight config files, left them on disk deliberately —
+  `system_extra.md` can hold months of a user's own prompt work, and deleting it would be irreversible
+  and pointless since nothing reads it either way — and then never told anyone. Six cards vanished from
+  the Settings tab with no explanation for three phases.
+
+  **The design decision was relevance, and it is what made this more than a paragraph of static text.**
+  A note is only owed to an install that *has* one of these files; a fresh install never had the cards,
+  so explaining their disappearance would be explaining something the reader never witnessed. So
+  `ConfigManager.retired_files_present()` stats the eight names and `get_config_info` carries the
+  result — a new key on the banner's existing RPC rather than an RPC of its own, because it is one more
+  fact about the same directory and a list that is usually empty does not deserve a round trip. It also
+  keeps the RPC inventory unchanged, which is the classification burden § C5 is about.
+
+  **The dismissal is keyed on the file list, not a boolean.** If a later upgrade retires something new,
+  that name has never been explained to this user and the note is owed again — a flag would swallow it,
+  and the bug would be invisible because the failure mode is silence, which is the exact failure this
+  item exists to fix.
+
+  Two smaller things worth keeping: the note **says the files will not be deleted**, because that is the
+  reassurance the leave-alone rule exists to provide and a note that only said "obsolete" would read as
+  a deletion warning; and `retired_files_present` uses `is_file`, so a directory that happens to be
+  called `review.md` is not offered as a prompt somebody wrote. The upgrade-preserves-them rule is now
+  pinned by a test *next to* the reporting, because if an upgrade ever started cleaning these up the
+  note would quietly stop having anything to say.
+
+  Found while there and fixed: `specs-reference/1-foundation/rpc-inventory.md` still described
+  `get_config_info` as returning `{model, config_dir, cli_path}`, two of which had been gone since the
+  conversion.
+
+- **Phase 8: index freshness after `Bash`, by asking the disk instead of the command line** — built
+  2026-08-28, closing [`../next.md`](../next.md) § A1 and deciding
+  [`../plan/decisions.md#cc-18`](../plan/decisions.md). Phase 4's largest known hole, and the last
+  phase-shaped correctness item in the suite.
+
+  **None of CC-18's four options was taken, because the question had a false premise.** The table
+  offered a filesystem watcher, parsing paths out of the command line, re-indexing after every `Bash`,
+  or documenting the gap — and all four assume freshness needs a *new* source of truth. It did not.
+  `BaseCache.get(path, mtime)` has returned `None` on a stale entry since Layer 2.7, so per-file
+  staleness was always computable; it had simply never been asked as a question in its own right, only
+  as a side effect of re-indexing a file someone already knew had changed. `SymbolIndex.find_stale_files`
+  is that question, and it is forty lines of `stat` and dict lookup.
+
+  **Two costs defused rather than paid.** The `Bash` hook sets a boolean and does nothing else, so an
+  `ls` re-indexes nothing — the sweep only runs when something *reads* an index, which is
+  `Reindexer.flush()`, which every index-reading MCP tool already awaited. And `reindex_files` is called
+  only when the sweep returns a non-empty set, so its two whole-index passes (call-site re-resolution,
+  reference-graph rebuild) are never paid for a sweep that found nothing. No watcher, no debounce
+  tuning, no gitignore logic, no cross-platform behaviour.
+
+  **The gap is a decision, and it is pinned.** A file a shell command *creates* holds no cached mtime to
+  disagree with, so the sweep cannot see it; catching it means re-walking the repo per sweep, which is
+  the cost being avoided. Modification and deletion — `sed -i`, formatters, `git checkout` over a tracked
+  file, `mv` away — are covered. `test_a_file_the_index_never_knew_is_not_reported` asserts the
+  limitation so it stays a decision rather than becoming a surprise, and
+  [`../2-indexing/symbol-index.md`](../2-indexing/symbol-index.md) § *Freshness After a Shell Command*
+  states it.
+
+  **Tested against tree-sitter, not against a mock.** The unit tests run on a `FakeIndex`, which proves
+  the wiring and not the effect — the failure mode this project has hit twice. So there is also an
+  end-to-end pair on a real `SymbolIndex`: a `sed -i` behind the index's back, then the hook, then the
+  flush, asserting `after` is in the symbol map and `before` is gone — **plus the counter-test that runs
+  the identical edit with no `Bash` hook and asserts the map is still wrong**, so the positive test
+  cannot pass for free. 3460 tests green.
+
+- **Phase 7 (d): the release path is verified by running it, not by reading it** — built 2026-08-27,
+  closing [`../next.md`](../next.md) § A2 (d). Three things landed; the interesting part is what the
+  third one found.
+
+  **`aic-dc --check-engine`.** The build already asserted the bundled `claude` was *in* the onefile
+  archive. That cannot answer whether the extracted copy runs, and the two are separate claims for a
+  concrete reason: `--collect-all` files are data, and data files carry no permission bits. The new flag
+  resolves the binary the SDK would actually spawn — via the same `resolve_cli` the app calls, so a green
+  check and a working launch cannot disagree — prints it, and exits **1** when nothing resolves, **2**
+  when something resolved and would not run. It needs no credentials and asserts nothing about them,
+  because a runner has no login and a check that demanded one could not run there. Exiting non-zero does
+  not contradict [`../6-deployment/startup.md`](../6-deployment/startup.md) § *Engine Health in the
+  Overlay*, which governs the *launch* path; a diagnostic that cannot fail reports nothing.
+
+  **A container, because a runner is not a fresh machine.** Phase 7's criterion is "a fresh machine can
+  install and run without a manual `npm i -g @anthropic-ai/claude-code`", and the runner has Node,
+  Python, a uv environment and the repo. The Linux leg now runs the artefact in `ubuntu:24.04` with
+  `claude`, `node`, `npm` and `python3` asserted absent *first* — a check that could pass by finding a
+  system engine is not a check. Verified locally against a real 237 MiB build: the container populated
+  the user config directory on first run, resolved `_MEI*/claude_agent_sdk/_bundled/claude`, and got
+  `2.1.229` out of it. Bonus coverage nobody planned — that first-run config population is a packaging
+  invariant that had never been watched happening on a machine that had never run the app.
+
+  **The find: the release binary could not fail.** `src/aic_dc/__main__.py` is the script PyInstaller
+  builds from, and it called `main()` and discarded the return value. Every exit code the CLI computed
+  was therefore invisible to a shell, so the CI step whose entire output is an exit status would have
+  passed whether or not the artefact had a working engine. Confirmed both ways on the rebuilt artefact:
+  a bad `cli_path` in a container returned 0 before the one-line fix and 1 after it. **This is the second
+  inert check in one phase** — § A2 (a)'s `--collect-all` for uninstalled packages was the first — and
+  both were found by running the thing, not by reading it. The pattern is worth naming: a verification
+  step is code, and untested code does not work.
+
+  **The wheel carries the webapp.** `_find_webapp_dist`'s third priority is installed package data at
+  `aic_dc/webapp_dist`, and nothing had ever put anything there, so pip installs fell through to the
+  GitHub Pages fallback for no visible reason. The include is conditional via `hatch_build.py` rather
+  than a declarative `force-include`, which fails the build when `webapp/dist` is missing — and it is
+  missing in every dev checkout until someone builds a frontend they may not be working on. That would
+  have turned `uv sync`, the first command in the contributing path, into an error. The residual risk is
+  a release built without the Vite step shipping a silently webapp-less wheel, so CI asserts on the
+  built wheel instead of trusting the ordering of its own steps. Both branches tested: wheel with the
+  webapp (13 entries), wheel without (builds clean, backend only), and an editable install with the
+  webapp present.
 
 - **A tool card says when it was invoked, and counts up while it hasn't answered** — built 2026-08-27
   from § Known issues: *"a time chip for when the particular mcp task was invoked. This allows me to see

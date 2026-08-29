@@ -339,8 +339,20 @@ class Settings:
         live through ``ClaudeCodeService.get_current_state()``. Reading
         it from a config file here would go stale the moment the user
         switched model mid-session.
+
+        It also carries ``retired_files``: the names of retired config
+        files this install still has on disk, empty on a fresh one. A
+        field on the banner's existing RPC rather than an RPC of its
+        own, because it is one more fact about the same config
+        directory and a second call would be a second round trip for a
+        list that is usually empty. The Settings tab renders it as the
+        note explaining the cards that disappeared — see
+        ``specs5/5-webapp/settings.md`` § Deleted cards.
         """
-        return {"config_dir": str(self._config.config_dir)}
+        return {
+            "config_dir": str(self._config.config_dir),
+            "retired_files": self._config.retired_files_present(),
+        }
 
     # ------------------------------------------------------------------
     # Write operations (localhost-only)

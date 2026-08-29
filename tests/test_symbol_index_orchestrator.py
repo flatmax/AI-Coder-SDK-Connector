@@ -20,6 +20,7 @@ Governing spec: specs4/2-indexing/symbol-index.md.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -910,3 +911,126 @@ class TestNameQueries:
     ) -> None:
         assert populated.files_importing("lib.py") == ["app.py"]
         assert populated.files_importing("app.py") == []
+
+# ---------------------------------------------------------------------------
+# Staleness detection — find_stale_files (CC-18)
+# ---------------------------------------------------------------------------
+
+
+def _touch_newer(path: Path, seconds: float = 10.0) -> None:
+    """Push a file's mtime forward, without depending on clock
+    resolution.
+
+    Writing the same file twice in a fast test can land inside one
+    filesystem timestamp tick, which would make a genuine change look
+    unchanged and the test pass for the wrong reason.
+    """
+    stamp = path.stat().st_mtime + seconds
+    os.utime(path, (stamp, stamp))
+
+
+class TestFindStaleFiles:
+    """What changed when nothing told us — the `Bash` blind spot.
+
+    The mtime cache has always been able to answer this; until CC-18
+    nothing asked it. These tests are about the question, not the
+    caching, so they change files behind the index's back rather than
+    through `reindex_files`.
+    """
+
+    def test_an_untouched_index_is_not_stale(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        assert index.find_stale_files() == []
+
+    def test_an_empty_index_reports_nothing(
+        self, index: SymbolIndex
+    ) -> None:
+        assert index.find_stale_files() == []
+
+    def test_a_file_changed_behind_our_back_is_found(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The `sed -i` case, which is the whole reason this exists."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+
+        _write(repo_dir / "a.py", "def foo(): pass\ndef added(): pass\n")
+        _touch_newer(repo_dir / "a.py")
+
+        assert index.find_stale_files() == ["a.py"]
+
+    def test_a_deleted_file_is_stale_not_silent(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """An `mv` away or an `rm`. Reported rather than dropped: this
+        is a query, and the caller may not be about to re-index."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        _write(repo_dir / "b.py", "def bar(): pass\n")
+        index.index_repo(["a.py", "b.py"])
+
+        (repo_dir / "a.py").unlink()
+
+        assert index.find_stale_files() == ["a.py"]
+
+    def test_only_the_changed_file_is_named(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The saving that makes the sweep affordable: `reindex_files`
+        ends in two whole-index passes, so a sweep that over-reported
+        would cost as much as re-indexing everything."""
+        for name in ("a.py", "b.py", "c.py"):
+            _write(repo_dir / name, f"def {name[0]}(): pass\n")
+        index.index_repo(["a.py", "b.py", "c.py"])
+
+        _write(repo_dir / "b.py", "def b(): pass\ndef more(): pass\n")
+        _touch_newer(repo_dir / "b.py")
+
+        assert index.find_stale_files() == ["b.py"]
+
+    def test_a_file_the_index_never_knew_is_not_reported(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """The documented gap. A file a shell command *created* holds no
+        cached mtime to disagree with, so the sweep cannot see it —
+        catching it would mean re-walking the repo. Recorded in
+        specs5/2-indexing/symbol-index.md; asserted here so the
+        limitation is a decision rather than a surprise.
+        """
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+
+        _write(repo_dir / "created_by_a_shell.py", "def new(): pass\n")
+
+        assert index.find_stale_files() == []
+
+    def test_it_is_a_query_and_mutates_nothing(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """Asking twice gives the same answer, and the index still
+        serves the old content until someone re-indexes."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        _write(repo_dir / "a.py", "def renamed(): pass\n")
+        _touch_newer(repo_dir / "a.py")
+
+        assert index.find_stale_files() == ["a.py"]
+        assert index.find_stale_files() == ["a.py"]
+        assert index.get_indexed_files() == ["a.py"]
+        assert "foo" in index.get_symbol_map()
+
+    def test_the_sweep_feeds_reindex_and_closes_the_gap(
+        self, index: SymbolIndex, repo_dir: Path
+    ) -> None:
+        """End to end: the pair is what phase 8 actually ships."""
+        _write(repo_dir / "a.py", "def foo(): pass\n")
+        index.index_repo(["a.py"])
+        _write(repo_dir / "a.py", "def foo(): pass\ndef added(): pass\n")
+        _touch_newer(repo_dir / "a.py")
+
+        index.reindex_files(index.find_stale_files())
+
+        assert "added" in index.get_symbol_map()
+        assert index.find_stale_files() == []

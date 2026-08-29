@@ -23,6 +23,22 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 - Browser-side: root component registers methods the server can call
 - Underscore-prefixed methods are never exposed
 
+## When a Service Method Raises
+
+jrpc-oo catches every exception a service method raises, returns its text to the caller, and prints one line: `Failed: {e}`, or `Async method failed: {e}` from a coroutine. That line carries no method name, no arguments and no timestamp, which is how a real refusal — `Absolute paths not accepted: /home/you/repo/a.py` — reached the operator as a sentence naming neither the call that produced it nor the view that would now render nothing.
+
+The registration facade wraps every exposed method so a failure is also logged with the call that caused it: the qualified name, the arguments, and the message. Three decisions shape it, and each one is a thing the obvious version would have got wrong.
+
+**The seam is the callback, not the method.** Registration leaves a `{qualified name: wrapper}` dict on the inner server; the wrapper signals failure by invoking a callback. Substituting that callback sees every error jrpc-oo swallows while leaving the method itself untouched — which matters because service methods have Python callers too, and wrapping the method would log a `RepoError` that an internal caller deliberately catches as though it were a fault.
+
+**The arguments are summarised, not rendered.** A string is clipped before it is repr'd, and a list or dict is described by shape rather than contents. Users paste screenshots as data URIs into chat arguments, so the naive version copies megabytes to build a log line and then throws most of it away. A clip that reports how much it dropped is the difference between a bounded line and a silent one.
+
+**The error the caller receives is unchanged.** Only the callback is substituted, so the browser sees exactly the string it saw before. That is what makes the wrapping safe to install on every service rather than on the ones somebody remembered.
+
+What it does not recover is the traceback: the exception object is gone by the time the callback runs, so the record holds the message and the call, not the stack. Getting the stack means intercepting the method, which is the thing above that this declines to do. The library's own bare print also stays, because jrpc-oo is a dependency rather than vendored code.
+
+This is one half of a failure being reportable. The other half is the browser: see [diff-viewer.md](../5-webapp/diff-viewer.md#when-neither-side-can-be-read), where a viewer that renders a failed fetch as empty content hides the same event from the other end.
+
 ## Calling Conventions
 
 - Server → browser: uses bracket-notation proxy on a `call` attribute
@@ -74,3 +90,5 @@ Bidirectional JSON-RPC 2.0 over a single WebSocket connection, using the jrpc-oo
 - A captured event-loop reference is always usable from a worker thread
 - A reconnecting client never receives duplicate state that would double-apply history or selections
 - Methods on registered objects must return a value (server awaits every browser-side call)
+- Every exposed method carries failed-call logging; a service reaches the wire through one registration path and that path installs it, so "which services are covered" is not a list anybody maintains
+- Adding that logging never changes what a caller receives — the wrapper substitutes a callback and nothing else

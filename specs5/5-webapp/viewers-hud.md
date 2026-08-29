@@ -89,6 +89,8 @@ verbatim from the old tab — the mechanism it protected changed, the bug it fix
 
 ### Usage Section
 
+- **Session** — what this conversation has cost so far: the running total, the per-model prompt and completion counters, and the wall time since the engine connected. **Added 2026-08-29** — see § *Session Usage Is The One Cumulative Reading* below for why it had been missing and why these are the fields it reads.
+- **Rate limits** — a gauge per window the account has open, most constrained first, each with its utilisation and reset time: the five-hour window, the current week, and a **per-model weekly cap named after its model**. Read from the same endpoint the CLI's own `/usage` reads (`account_usage.py`), not from the engine — so it answers **with no session connected**, which is the state a rate-limited reader is in. The engine's `RateLimitEvent` records are kept beside it for what that endpoint has no words for: a window refusing calls, and the state of overage. All 2026-08-29, in two passes: see § *The Rate-Limit Channel Is An Alarm, Not A Usage Panel* for what the event channel can and cannot say, and § *The Figures Were A REST Call Away* for where the numbers actually come from.
 - **Budget gauge** — `totalTokens` against `maxTokens`, coloured green / amber / red by percentage, with the **auto-compact threshold marked on the bar**. The mark is the point of the gauge: "68% full" does not answer "am I about to be compacted?", and a marked threshold does.
 - **Category bar** — one stacked proportional bar from `categories`, in the engine's own colours, with a legend below carrying label and token count per category. Only non-zero categories appear. Deferred categories are labelled as deferred rather than silently counted, because a deferred category is not occupying context right now.
 - **Message breakdown** — conversation composition from `messageBreakdown`.
@@ -96,6 +98,195 @@ verbatim from the old tab — the mechanism it protected changed, the bug it fix
 
 Categories are not expandable. The engine reports category totals, not per-item membership, and a
 disclosure triangle that opens onto nothing is worse than no triangle.
+
+### Session Usage Is The One Cumulative Reading
+
+**Added 2026-08-29, from a user comparing this tab against the CLI's own `/usage`.** The report was
+"I don't see that level of detail here", and the cause was a promise with nothing behind it.
+
+`/usage` never reaches the CLI: it is in `SLASH_ROUTES`, deliberately, and answers *"/usage is the
+Context tab's cost and per-model token breakdown here."* **That sentence named a surface that did not
+exist.** This section rendered context-*window* composition and nothing else — no cost, no per-model
+rows, no rate limits. The figures were on the wire the whole time and were drawn only in the per-turn
+HUD, which auto-hides after 8.8 seconds and never appears at all for a session that has not run a turn.
+So the command opened a tab that did not contain the thing its own reply had just named. **Same shape as
+§ B5 and § C7 in [`../next.md`](../next.md) — a field with no reader — except that here the promise is
+printed to the user in answer to the command**, which is the one variant of it that cannot be discovered
+by reading the code alone.
+
+**This block reads `total_cost_usd` and `model_usage` as the cumulative figures they are, and it is the
+only place in this app permitted to.** Everywhere else — the HUD, the turn footer, the terminal block —
+rendering them as a turn's is the exact bug § *Cost Is Cumulative* exists to prevent. The question this
+block asks is the one they answer directly, which is the case that section already anticipated for the
+budget bar. Three things keep the two readings from being confused: the heading is *Session*, the
+figures are served under the engine's own field names rather than `session_*` aliases (those names mean
+"cumulative" everywhere, and disguising them at the one honest use would be the worse trade), and
+`CostLedger.session_totals()` is a separate accessor from `price()` rather than a second interpretation
+of one.
+
+**Cost is absent rather than `$0.0000` before the first priced result**, on the same grounds as
+`turn_cost_basis`: a session that has run nothing has no estimate, and a zero is a claim about it.
+
+**A `/clear` moves the figure down**, because the engine restarts its ledger and this follows it. Holding
+the pre-`/clear` number would report something nothing tracks any more and would disagree with the CLI's
+own panel, which restarts too. The cost is stated rather than hidden: after a `/clear` the figure
+understates what the account was billed, and the turn that straddled the reset is the one whose cost is
+lost. The per-model rows move with it, because one figure from each side of a reset is worse than both
+from one side.
+
+**Wall duration is measured here; there is no API-time figure beside it.** The SDK documents
+`total_cost_usd` and `modelUsage` as cumulative in a streaming-input session and says **nothing either
+way** about `duration_ms` / `duration_api_ms`. Summing them would double-count if they are cumulative and
+undercount if a turn ends more than once, and neither error announces itself — which is the failure
+`cost.py` exists to prevent for its neighbour. So the session clock is AIC⚡DC's own monotonic one, from
+connect, and the absent API figure is stated on screen rather than approximated. The number is aged
+client-side from the snapshot's reading, because the server sends a *duration* and not an instant, and a
+figure rendered straight from a snapshot is frozen at the one moment it is certainly wrong about.
+
+**Not reported, and it is the CLI's alone:** total lines added and removed. Nothing in any payload
+carries it — `files_modified` names files, not diffs — so it would have to be computed from the mirror,
+which is a different feature.
+
+### The Rate-Limit Channel Is An Alarm, Not A Usage Panel
+
+**Written 2026-08-29 on a wrong premise, and corrected the same day by running it.** The claim here was
+that the CLI's `/usage` draws a gauge per open window because *each window arrives as its own
+`RateLimitEvent`*. **It does not.** Verified against `claude-agent-sdk` 0.2.137:
+
+- **`RateLimitEvent` carries exactly one `RateLimitInfo`** (`types.py`), emitted "whenever the rate
+  limit status **transitions**". One window, on a state change — not a periodic reading and not a set.
+- **No client method returns the panel.** `ClaudeSDKClient` exposes `connect`, `disconnect`, `query`,
+  `receive_messages`, `receive_response`, `interrupt`, `set_model`, `set_permission_mode`, `stop_task`,
+  `rewind_files`, `get_context_usage`, `get_server_info`, `get_mcp_status`, `reconnect_mcp_server` and
+  `toggle_mcp_server`. Nothing queries usage or limits. **The CLI builds `/usage` from a source the SDK
+  does not expose**, the same way § R-8 turned out to have the engine-resolution order backwards.
+- **`utilization` is not in the payload at all.** Measured 2026-08-29 by logging the raw dict the CLI
+  sends, after the inference above had already been written down and shipped. The **whole** record is
+  six fields:
+
+  ```
+  {'status': 'allowed', 'resetsAt': 1788006000, 'rateLimitType': 'five_hour',
+   'overageStatus': 'rejected', 'overageDisabledReason': 'org_level_disabled',
+   'isUsingOverage': False}
+  ```
+
+  No utilisation, no weekly window, and the one field the SDK does not model is `isUsingOverage`, a
+  boolean. The CLI's own panel showed **37%** and two further windows at that same moment. So the
+  figures are not merely unmapped — they are not sent.
+
+**That last record is the finding.** It is not a usage reading with a missing field; it is a *transition
+notice* about overage being refused, carrying the fields relevant to the transition. So this channel
+reports **that something changed**, not **where you stand** — and § *Rate Limits Is A Gauge, Not A
+Second Alarm* has it exactly backwards. It can only be an alarm. A percentage is what it happens to
+carry when the transition was about a percentage.
+
+**What this app can therefore show is bounded, and the bound is stated rather than worked around:** the
+last transition per window, with a figure only if one came.
+
+**A record with no utilisation renders as "no figure", greyed, with no bar** — and getting that wrong is
+the defect this section exists to prevent, because the first cut shipped it. The colour came from
+`_pctColor(pct ?? 0)`, so an absent utilisation fell into the **healthy green band**, above a 0%-wide
+track. It read as "0% used, you're fine": a confident answer painted over no answer. **§ B5's rule, one
+surface over — an empty list does not say "no servers", it says "no answer"** — and it was caught by a
+user looking at a screenshot, not by the thirteen tests written alongside it, because every one of them
+supplied a utilisation. There are eight more now built from the real payload above.
+
+The window and its reset time *are* known and are still shown, with a sentence saying the percentage is
+not in the event. A fabricated figure beside them would be the `$0.00` mistake in another currency.
+
+**An overage rejection is not a failure and is no longer worded as one.** In the measured record
+`status` is `allowed` — the five-hour window is fine — while `overageStatus` is `rejected`, which the
+SDK's own docstring glosses as why overage is *unavailable*. It means pay-as-you-go is switched off at
+the organisation, so the window is a hard ceiling rather than a warning. `isUsingOverage` is carried too,
+because `overage_status` alone cannot tell "you have overage and are not on it" from "you are on it now".
+
+**The keying survives the correction, on smaller grounds than it was built on.** `_rate_limits` is keyed
+by `rate_limit_type` rather than held in one slot. That no longer promises three gauges — the CLI sends
+one window at a time — but it is still right: two windows *can* transition in one session, and the one
+slot would have let the second overwrite the first. The failure that would have caused is worth keeping
+in view, because § B1's HUD takes its heading from the record's own type: a five-hour reading would
+become a seven-day reading **under a heading that changed with it**, staying self-consistent while
+describing something else. An untyped record keeps a slot under a placeholder key, because the enum is
+the CLI's to extend.
+
+**Reopening this means the SDK growing a usage query**, not more work on this channel. Until then the
+honest gap is that AIC⚡DC cannot reproduce `/usage`, and the tab says what it has rather than implying
+it has the panel.
+
+### The Figures Were A REST Call Away — `account_usage.py`
+
+**Superseded the same day, 2026-08-29, by a user pointing at a screenshot: "even worse and no weekly +
+fable reporting".** Everything above about the *event channel* is still true and still governs
+`_rateLimits`. What was wrong was the closing inference — that the figures were unreachable until the
+SDK grew a query. The premise behind it was that the CLI builds `/usage` from a source the SDK does not
+expose. It does not build it from any SDK source at all: **the CLI makes its own REST call**, and so can
+we.
+
+Read out of the shipped binary (`@anthropic-ai/claude-code` 2.x), its `fetchUtilization` is
+`GET /api/oauth/usage` on `api.anthropic.com`, authenticated with the OAuth token in
+`~/.claude/.credentials.json`, and the panel is drawn from the response. `aic_dc/claude_code/account_usage.py`
+makes the same call, served to the browser as `ClaudeCodeService.get_account_usage`. Measured against a
+real account, it returns the three windows the user was missing: the five-hour session window, the week
+across all models, and a **per-model weekly cap named after its model**.
+
+**The per-model window is why an enum could never have carried this.** It arrives in the response's
+`limits[]` array as a `weekly_scoped` entry whose `scope.model.display_name` is the model's name —
+"Fable" — not as a member of `RateLimitType`. The label is *read from the payload*, so a model released
+after this build ships arrives already named. `limits[]` is what the CLI's own panel renders and is
+therefore what `normalise` reads; the flat `five_hour` / `seven_day` keys beside it are a fallback for
+an older response shape, never a second source to merge, because merging them draws the five-hour window
+twice.
+
+**The same two field names mean different things on the two channels, and this is the trap the
+conversion exists for.** On `RateLimitEvent`, `utilization` is a fraction 0.0–1.0 and `resets_at` is
+Unix seconds. On this endpoint, `utilization` is a **percent 0–100** and `resets_at` is an **ISO 8601
+string**. A record from one rendered by a reader expecting the other shows 4800% and a reset in 1970 —
+or, far worse, 0.48%, which is a plausible figure nobody would question. `normalise` converts on the
+server into the event channel's convention, so `rate-limit.js` keeps **one** definition of what a window
+record is and the browser cannot pick the wrong one ([`../next.md`](../next.md) § C3).
+
+**Nothing is written and the refresh token is never used.** The CLI refreshes its own token on a 401 and
+rewrites the credential file; doing that from here would rotate the token out from under the CLI's copy
+and could lock the user out of their own editor — a far worse outcome than a missing gauge. An expired
+token is reported as a reason, not repaired, which costs nothing in practice because AIC⚡DC *spawns*
+the CLI and a turn is what keeps the file fresh.
+
+**A redirected engine is never asked.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, an API
+key, or a base-URL override in the environment, turns bill somewhere this endpoint knows nothing about
+(`../plan/risks.md` R-9). Answering with subscription windows there would be a **real figure about a
+different account** — the most dangerous wrong answer available, because nothing about it looks broken.
+`health.credential_redirect()` is the gate, and the reader is told which variable did it.
+
+**Every failure is a named reason with a sentence, and the sentence is the feature.** An expired login, a
+refused token, a redirected engine and a dropped packet are four different things for the reader to do,
+and "unavailable" sends three of those readers to the wrong place. A failed read after a good one serves
+the **last good reading marked stale** rather than emptying the section, because a section that empties
+itself reads as "you have no limits".
+
+**The event records are demoted, not dropped.** With account windows on screen, `_rateLimits` renders
+only what the endpoint has no words for: a window actively refusing calls, and `overage_status` /
+`is_using_overage`. Crucially the *headline* goes with the demotion — the first cut kept the gauge
+markup and drew "5-hour — no figure" directly beneath the 5-hour gauge reading 48%, one window claiming
+to be two with the grey non-answer contradicting the real number above it. With no account reading
+available they become gauges again, unchanged, because a transition notice is still the best thing on
+the page.
+
+**The section renders above the no-breakdown branches**, which is the other half of the fix. It is the
+one part of this tab that does not come from the engine, and a reader cut off by a weekly limit **has no
+engine to ask** — so the breakdown errors, and previously the windows vanished at precisely the moment
+they were the reason for opening the tab.
+
+**The HUD's reading is unchanged**, and the split is the point. It shows the *newest arrival*, because
+its section exists to report a transition and the window that just transitioned is the one worth
+interrupting for whatever its utilisation says. The tab shows **all** of them, ranked most-constrained
+first, because a list has room to rank and a gauge does not, and the window nearest its ceiling is the
+one a reader who opened `/usage` came to find. One store, two readings — not two sources.
+
+**Expiry stays the browser's question, in both surfaces and in one function.** `windowIsOpen` is called
+by the HUD, the chat toast and now this tab; the server still serves every record raw. A server-side
+test would be a second definition of "still open" that could only come to disagree with the first
+([`../next.md`](../next.md) § C3), and the tab's whole purpose is to be read hours after the record
+arrived — which is exactly when a stale window would still be on screen.
 
 ### Session Section
 
@@ -111,7 +302,7 @@ the old tab could not, and it is mostly a set of tables:
 
 Two deliberate details:
 
-- **Memory files are clickable — the ones that can be opened.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it. Clicking one also minimizes the dialog, because the viewer is behind it and a click that opens a file under an opaque panel is indistinguishable from a click that did nothing. The engine reports these paths as *absolute* and every repo read rejects an absolute path, so `get_context_usage` adds `relPath` to each entry that lives inside the repo root and the browser makes exactly those rows clickable. A user-level `~/.claude/CLAUDE.md` is outside the repo, has no repo-relative name, and stays text.
+- **Memory files are clickable — the ones that can be opened.** `CLAUDE.md` is the most-edited file in a Claude Code repo, its cost was previously unknowable, and the natural next action after seeing that it costs 4 000 tokens is to go edit it. Clicking one also minimizes the dialog, because the viewer is behind it and a click that opens a file under an opaque panel is indistinguishable from a click that did nothing. The engine reports these paths as *absolute* and every repo read rejects an absolute path, so the browser asks its own naming rule for a short name and takes *openable* from the answer: the rule gives back a different string only for an absolute path inside the root, which is exactly when the read will work, so the tab asks one question rather than reading a server-computed `relPath` beside it — that field existed until 2026-08-28 and was the second of two answers ([`../3-engine/context-visibility.md`](../3-engine/context-visibility.md)). A user-level `~/.claude/CLAUDE.md` is outside the repo, has no repo-relative name, and stays text; so does every row before the repo root has arrived over RPC, which is the honest rendering of not yet knowing where the repo is. The rows are *named* by the rule this table was the first to state and which now covers every file shown anywhere in the app — relative inside the root, absolute outside it, engine's path on the tooltip ([shell.md § The Same Rule Names Files On Screen](shell.md#the-same-rule-names-files-on-screen)). Nothing changed here to make that true: an already-relative path converts to itself.
 - **`aic-dc` appears in the tools table like any other MCP server**, with its token cost. Our own bridge is not exempt from the accounting it exists to provide (see [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md)).
 
 Two of the interactions above are not implementable from this payload, and saying so here is cheaper than
@@ -131,8 +322,10 @@ Two more shapes the implementation had to answer for:
   the union of `mcpTools` and `get_mcp_status()`, and an unwell server sorts above a heavier healthy one.
 - **Health comes from `get_mcp_status()`, fetched beside the breakdown and allowed to fail.** The
   breakdown is the point of the tab and health is a decoration on it, so a status call that times out
-  leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it is a
-  field with no writer. A pill is never carried over from an earlier fetch — "connected" is a claim about
+  leaves the numbers on screen and the groups unpilled. `EngineHealth.mcp` is not the source: it was a
+  field with no writer, and it was deleted in 2026-08-28 rather than filled in, because a status call
+  that can fail is what a pill needs and a field that always answers `[]` cannot fail. A pill is never
+  carried over from an earlier fetch — "connected" is a claim about
   now, and this is the one figure where being out of date is worse than being absent.
 - **A host can act on a server row: Reconnect and Disable / Enable.** `reconnect_mcp_server(name)` and
   `toggle_mcp_server(name, enabled)` had existed with no browser caller at all, which is what made this
@@ -212,6 +405,22 @@ it back on the next visit like the other two. It diagnoses the engine, not the c
   the binary resolution is AIC⚡DC's, recorded in `claude_code/health.py`, and the engine's own reply
   knows nothing about it. Health arrives pushed on `engineHealth` and a pushed record wins over the
   fetched one, because `mirror_gaps` moves during a turn.
+- **Engine failures** from `get_engine_errors()`, read off `.aic-dc/engine-errors.jsonl` on the way into
+  the section. The one thing here that outlives the process it describes: everything else in the Engine
+  block is what the *running* engine resolved, and this is why an earlier one did not run. Each record
+  shows its own credential source and binary rather than the message alone, because for the failure it
+  was built after — an authentication error on a cold start — the credential source *is* the diagnosis,
+  and it must be the record's rather than the live engine's: those differ exactly when it matters, which
+  is when the server has since been pointed somewhere else. The CLI's own stderr goes underneath,
+  preformatted, for the reason the health banner shows it. Rendered **outside** the health branch, not
+  within it: an engine that never started has no health record, and "never started" is precisely when
+  this is worth reading. Silent when the file is empty, because an engine that has never failed is the
+  ordinary case and a heading over nothing is noise — but a read that *failed* says so, which is why the
+  RPC answers a dict rather than a bare list and why this fetch, alone among the ones on this tab, is
+  not quiet on failure. Health has a second source in the `engineHealth` push and can afford a swallowed
+  fetch; nothing pushes this, so a swallowed error would render as "the engine has never failed". The
+  reasoning for the file is [`../3-engine/session.md`](../3-engine/session.md) § *A failed start is
+  recorded, not only announced*.
 - **The initialize reply** from `get_server_info()`, summarised by key and then printed verbatim. By
   key, because this repo has not read a schema for its shape and naming unverified fields is the exact
   mistake § *Verified field shapes* records. One control request, on the way into the section and not
@@ -272,24 +481,63 @@ Floating overlay on the viewer background, appearing after each turn.
 ### Placement
 
 - Top-level element in the app-shell shadow DOM, sibling of the dialog and viewer containers
-- Fixed position near a top corner, high z-index — but **below the permission dialog**, which is modal over everything (see [permission-dialog.md](permission-dialog.md))
+- Fixed position near a top corner, high z-index — but **below the permission dialog**, which is modal
+  over everything (see [permission-dialog.md](permission-dialog.md)). *This line was true and the code
+  was not*: the HUD shipped at `z-index: 10000` against the dialog's 9000 from phase 3 until
+  2026-08-28, so a permission request arriving inside the HUD's eight seconds had a transient overlay
+  floating over its top-right corner, taking the clicks there as well. Corrected to the 500 the
+  [reference ladder](../../specs-reference/5-webapp/shell.md) always assigned it, and pinned by a test
+  that reads the dialog's own stylesheet rather than copying its number — a copied constant goes stale
+  exactly when the dialog moves, which is the one change that could reintroduce this.
 - Triggered by the stream-complete window event, filtered to exclude errored and empty turns
 
 ### Data Flow
 
-One step, not two. The HUD renders entirely from the `streamComplete` payload: the per-turn
-`turn_cost_usd` / `turn_cost_basis` / `turn_model_usage` (never the cumulative `model_usage` or
-`total_cost_usd` beside them — see § Cost Is Cumulative below), `duration_ms`, `num_turns`,
-`terminal_reason`, `permission_prompts`. Context
-percentage comes from the `context_usage` carried on `postResponseComplete`, which arrives moments
-later and updates that one line in place.
+**Two sources, and the split is along which numbers the payload actually carries.** Everything about the
+turn comes from the `streamComplete` payload and needs no round trip: the per-turn `turn_cost_usd` /
+`turn_cost_basis` / `turn_model_usage` (never the cumulative `model_usage` or `total_cost_usd` beside
+them — see § Cost Is Cumulative below), `duration_ms`, `num_turns`, `terminal_reason`,
+`permission_prompts`.
 
-The old two-phase flow — immediate partial display, then a breakdown RPC to fill in the rest — is gone.
-There is nothing left that needs a second round trip.
+**The context breakdown is a second round trip**, `ClaudeCodeService.get_context_usage`, fetched on
+`stream-complete` and on `session-changed`. This section and the invariant beside it used to say the
+opposite — "one step, not two", "the HUD renders without a follow-up RPC" — describing a design where
+the percentage rode in on `postResponseComplete`. It does not: the payload carries no `context_usage`
+key, `usage-hud.js` has called the RPC since phase 3, and the corrected sentence is the one the tree
+can support. What *is* still true is the part that mattered: the HUD shows the turn immediately and
+never waits on the fetch to render.
+
+That second call is a control request to the CLI subprocess, which is what makes § When The Engine Is
+Gone below a requirement rather than a nicety.
+
+**A third source arrived with the Rate limits section, and it is neither per-turn nor fetched.** The
+`rateLimit` push carries a record that is not about the turn at all, and the shell's first-paint
+`state-loaded` snapshot carries the last one the engine held. Both write the same field, because the
+CLI sends this on a status *change* rather than per turn: the push is the only thing that reports a
+transition, and the snapshot is the only thing a browser that reloaded between transitions will ever
+get. Neither costs a round trip the HUD makes.
 
 ### Sections
 
-All collapsible; collapse state persisted to `localStorage` as a serialised set of section names.
+Collapsible where there is a body to collapse; the set of collapsed section names is persisted to
+`localStorage` (`aic-dc-hud-collapsed`).
+
+**A section's head keeps its headline figure**, so closing one costs no height and hides no answer —
+Context collapsed still reads `23% · 45.2K/200K`, and what goes away is the bar and the category
+legend. That is what makes the control worth having in an overlay this small: the numbers are the
+answer and the bars are the working.
+
+**"This turn" is the exception and stays a plain row.** This section previously said *all* sections
+collapse. Its entire content is its headline, so a disclosure control there would hide the one figure
+the HUD exists to show and spend a caret doing it — a collapsed section that says nothing is not a
+smaller section, it is an absent one. The four that do collapse are Context, Per-model usage, Rate
+limits and Files modified.
+
+**The stored name is not always the displayed one.** Rate limits is keyed on `Rate limits` while its
+head reads "5-hour limit" or "7-day Opus limit", because the window an account is bound by changes and
+keying the preference on the label would silently re-open a section the user closed, on the day the
+label changed. A stored name this build does not render is kept rather than dropped, so two browsers
+on one profile — or a downgrade — do not each clear the other's preferences.
 
 | Section | Content |
 |---|---|
@@ -297,11 +545,86 @@ All collapsible; collapse state persisted to `localStorage` as a serialised set 
 | This turn | This turn's cost or why there is none, duration, engine-internal turn count, terminal reason, permission-prompt count |
 | Per-model usage | One row per entry in `turn_model_usage`: the model, then `↑ prompt · ↓ output`. `↑` is the **whole** prompt — the uncached part and the cached part added together — because three input-side counters do not fit in 300px beside a model name, and their sum is the one figure that is not misleading on its own (see [chat.md § The Token Split](chat.md#the-token-split)). The tooltip carries all four counters unrounded. Per-row cost and context window belong to the Context tab; this row exists to answer whether a turn's tokens were prompt or completion, which the cost line alone cannot |
 | Context | `totalTokens` / `maxTokens` with the auto-compact mark |
-| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play |
+| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play. Overage on its own line when the record mentions it |
 | Files modified | The turn's `files_modified`, each clickable to the diff viewer |
 
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
 immediately after an agentic turn is which files changed.
+
+### Rate Limits Is A Gauge, Not A Second Alarm
+
+**It renders at any status, including `allowed`.** The chat panel's toast is the alarm and stays silent
+below `allowed_warning` ([chat.md § Engine Event Routing](chat.md#engine-event-routing)); this section
+is the standing figure. Gating it on the same threshold would have left the HUD with nothing to say in
+exactly the billing mode [§ R-6](../plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap) is
+about, where the dollar rows above stop mapping to money and this is the only number a user can act on.
+R-6 asks for "first-class display", and a control that appears only when something is wrong is not a
+display of anything.
+
+**"In play" is a window that has not reset yet, not an event that just fired.** The SDK is explicit
+that the CLI emits `RateLimitEvent` when the status *transitions*, not per turn, and two consequences
+follow that a live-only reading would get wrong in opposite directions:
+
+- **A record must survive a reload.** Between transitions there is nothing to receive, and on a
+  seven-day window that gap is measured in days — possibly right up to the rejection the figure exists
+  to give warning of. So `EngineSession` holds the last record and `get_current_state` carries it as
+  `rate_limit`, and the HUD adopts it on `state-loaded`. Same lesson as the compaction indicator and a
+  much longer gap: **a broadcast is not a record.** A snapshot carrying no record leaves a pushed one
+  alone — a reconnect re-delivers the snapshot mid-session, and a backend older than the field sends
+  nothing, and neither is evidence that a limit has gone away.
+- **A record must expire.** One stands for hours and outlives its own window: past `resets_at` the
+  counter is back at zero and "82% of your 5-hour limit" is a claim about a window that no longer
+  exists, with nothing else on screen to contradict it. So the section disappears at the reset rather
+  than going stale.
+
+**Expiry is the browser's question, and only the browser's.** A pushed record has to be aged
+client-side regardless — the HUD can hold one for hours without another arriving — so testing it
+server-side as well would be a second definition of "still open" that could only come to disagree with
+the first ([next.md § C3](../next.md)). The server serves the record raw. `resets_at` is a wall-clock
+instant the HUD already renders against the browser's own clock, and minutes of skew do not matter to a
+five-hour window.
+
+**The record is not cleared by a session change or by a disconnect**, unlike the compaction state
+beside it. A five-hour window belongs to the account rather than to the conversation: `/clear` does not
+give the tokens back, and neither does the engine going away.
+
+**A rejection is red whatever the utilisation says.** An overage cut-off can refuse a turn at a figure
+the colour bands would call healthy, and the colour reports the outcome rather than the arithmetic.
+Overage itself gets one line and no second gauge — it is a fallback rather than a budget, the CLI
+reports it as a status and a reason rather than a figure, and `overage_disabled_reason` is printed in
+the CLI's own words because paraphrasing a reason this repo has never enumerated would be inventing
+one.
+
+`utilization` is a **fraction, 0.0–1.0** (`RateLimitInfo`), and `resets_at` is **Unix seconds** — not
+milliseconds and not ISO. Both are pinned by tests, because each has exactly one plausible wrong
+reading and neither fails visibly: a fraction read as a percentage renders every real figure as under
+one percent, and seconds read as milliseconds put the reset in 1970.
+
+**`max_budget_usd`'s spend-against-budget bar is still not built.** § *Cost Is Cumulative* says one
+appears in this section's place when a budget is configured; nothing renders it, and it is not what
+this section is. Recorded here rather than left to be noticed, and queued in
+[`next.md`](../next.md) § B.
+
+### Files Modified Reuses The Rule, Not The Chip
+
+The chips are the tool-card footer's chips in every way that could drift and none of the ways that
+could not. The **rule** is shared — `toRepoPath` names the file, the tooltip keeps the engine's
+absolute path, and `detail.path` on the `navigate-file` event stays exactly what the engine sent, so
+the label remains a display concern and never becomes the navigation contract
+([shell.md § The Same Rule Names Files On Screen](shell.md#the-same-rule-names-files-on-screen),
+[next.md § C4](../next.md)). The **markup and the stylesheet** are this component's own, because a
+shadow root does not inherit another's rules and there is nothing there that two copies can disagree
+about.
+
+The list is deduplicated **on the raw path, not on the label**. A turn that edits one file three times
+reports it three times, and deduplicating after conversion would additionally collapse two genuinely
+different files that happen to render the same — the bug the "Files Referenced" list had, in the
+opposite direction.
+
+**A click does not dismiss the HUD**, unlike a click on the Context tab's memory-file rows. Those
+minimise the dialog because it is opaque over the viewer they just opened a file in; this is a small
+corner overlay, and hovering it has already stopped the auto-hide, so a reader opening three files in
+turn keeps the list and it fades on its own once they move away.
 
 ### Cost Is Cumulative, and the HUD Reports One Turn
 
@@ -357,7 +680,12 @@ here reads like the one the terminal shows. Two decimals throughout would render
 `$0.00`.
 
 The rate-limit section remains the analogue of a cost signal for a user who does not care about dollar
-estimates, and when `max_budget_usd` is configured a spend-against-budget bar appears in its place.
+estimates — see § *Rate Limits Is A Gauge, Not A Second Alarm*, which is what that sentence turned into
+when it was built. When `max_budget_usd` is configured a spend-against-budget bar appears in its place;
+**that half is specified and not built**, and it is a different reading of the same payload rather than
+a variant of the section beside it — the budget is a session total against a configured ceiling, so it
+is `total_cost_usd` read deliberately as the cumulative figure it is, which is the one place in this
+app where that is the right field.
 
 ### Per-Model Rows Are Not Summed
 
@@ -386,11 +714,106 @@ figure beside four the engine measured. The counters are there for a reader who 
   nothing: there is no number, and the chat panel and a toast already carry the error.
 - A turn that ended with a mirror gap shows a marker linking to the health banner, because a HUD reporting a clean turn over a failed transcript append would be misleading
 
+### When the Engine Is Gone
+
+**The poll is gated on engine health, and the HUD has a state to sit in.** Without the gate a lost
+session went on being polled once per turn, and the expensive failure is not the tidy one: a message
+pump that dies *without* the session being marked lost leaves a client that still looks usable and a
+subprocess whose reply nobody is reading, so each call hangs to the SDK's own 60-second control
+deadline and is logged server-side with a traceback. Four of those appeared in one log. They were noise
+about a thing the health banner had already reported.
+
+**"Gone" is `connected: false` **and** a non-empty `last_error`** — not `connected` alone. That field is
+false before the first prompt as well, which is the ordinary state of a freshly loaded page, so gating
+on it by itself would stop the HUD ever fetching. `last_error` is the discriminator because a session
+that loses its engine sets it on the way out. This is deliberately the same rule
+[chat.md](chat.md)'s health banner uses to decide it has something to say: one definition of gone, two
+readers, because a second one could only come to disagree with the surface the HUD defers to.
+
+**Both directions are needed, and each covers a case the other cannot.**
+
+| Signal | Covers | Why the other cannot |
+|---|---|---|
+| The pushed `engineHealth` record | Every turn after the loss | It arrives *after* the `streamComplete` of the turn that died, so it cannot stop that turn's own fetch |
+| `reason: 'no-engine'` on the reply | The fetch from the dying turn | It is a reply, so it can only arrive by sending the request the gate exists to prevent |
+
+The state clears as readily as it sets — a `connected: true` push, a breakdown that arrives anyway, or a
+`session-changed` — because starting or resuming a session is exactly what the note tells the user to
+do, and a flag that survived them doing it would report a dead engine at a live one.
+
+**What the note says is that there is nothing to read, and not why.** The health banner owns the reason
+and states it in the engine's own words; a HUD that reproduced them would be a second owner of the
+wording. It is amber rather than the error red, because this is a condition to sit in rather than a
+request that failed. It also replaces the last good breakdown rather than sitting beside it — numbers
+from before the loss describe a window no engine holds any more, which is the same reason the error
+string was split from the payload in the first place.
+
+The turn's own receipt is unaffected. A turn that failed after spending something still reports what it
+cost; the engine being gone is a reason to stop polling, not a reason to stop reporting.
+
+**What this does not cover, and why it is not fixable from here.** The gate needs health to say the
+engine is gone. One failure mode never says it: the SDK routes control responses on a *detached reader
+task* started once per session, not on the per-turn pump, and when that reader dies — an oversized line
+raising `CLIJSONDecodeError` inside it is the case that has actually happened — it surfaces one error
+into the message stream and exits. From then on every control request waits out its full 60 seconds and
+no answer is ever coming, while `connected` stays true because nothing disconnected.
+
+**The tempting fix is wrong and the spec says so above:** a control-request timeout is *not* evidence of
+a dead engine. This call is measured at 3-14s and goes past 60s often enough to log eight timeouts in one
+healthy half-hour run. Marking the session lost on a timeout would kill working sessions, and a
+consecutive-timeout threshold would be a guess at a number the same paragraph says is routinely exceeded.
+Detecting it properly means reading the SDK's private `_read_task`, which is exactly the kind of internal
+the suite declines to depend on.
+
+So the residue is accepted and stated rather than guessed at, and only its *symptom* is treated: a
+control-request timeout is logged as one sentence instead of a traceback. The stack was pure SDK plumbing
+between the service and an `anyio.fail_after`, and a polled caller repeated it — four tracebacks in one
+log, all of them about a loss the health banner had already reported in better words. The rule lives in
+one helper covering every control request rather than in the polled handler, because the reasoning is
+about control requests and not about this RPC. A failure that is not demonstrably the SDK's deadline
+keeps its stack: being wrong here must cost a noisy log, never a silent one.
+
 ## Terminal HUD
 
-Printed server-side after each turn, in reduced form: model, per-model usage, cost or billing mode,
-context percentage, duration, and terminal reason. Printed for cancelled turns as well as completed
-ones — a cancelled turn still consumed tokens.
+**Built 2026-08-29** (`aic_dc/claude_code/turn_hud.py`), after four phases in which two spec files
+asserted it as an invariant and nothing printed it. Printed server-side after each turn, in reduced
+form: model, per-model usage, the turn's cost or the reason it is unknown, context percentage, duration,
+and terminal reason. Printed for cancelled turns as well as completed ones — a cancelled turn still
+consumed tokens. The exact layout is in the [reference twin](../../specs-reference/5-webapp/viewers-hud.md)
+§ *Terminal HUD format*.
+
+**"Cost or billing mode" is how this section read before phase 6, and building it is what forced the
+correction.** The terminal line takes the same three-way answer the browser does — a figure, "nothing
+extra", or "cost unknown" with the reason — because a second definition of what a turn cost is exactly
+what § *Cost Is Cumulative* exists to prevent. It reads `turn_cost_usd` / `turn_cost_basis` /
+`turn_model_usage` and never `total_cost_usd` or `model_usage`, and the one place the session's running
+total appears it is labelled as such on the same line. Had this been built when it was specified it
+would have shipped the pre-phase-6 reading and become a second surface to correct.
+
+**Why the terminal at all, when the browser says the same thing:** it is the only surface that survives
+the browser. A turn that ends with nothing connected reports to nobody otherwise, and the operator
+watching the process start — which is how § C9's auth failure was noticed — has no other view of the
+engine.
+
+**Three places it deliberately differs from the browser HUD**, each because a terminal is a log rather
+than an overlay:
+
+- **An empty turn still prints.** The browser HUD must earn its interruption and so never appears for a
+  turn with nothing in it; a log entry saying a turn happened and cost nothing is a record, and its
+  absence would read as the server having missed the turn.
+- **The cache hit rate is computed here and not there.** The browser reports the two counters and lets
+  the reader do the division, because in 300px there is no room for it beside a model name
+  (§ *Per-Model Rows Are Not Summed*). A terminal line has the width. This is the one figure the two
+  surfaces do not share, and it is a layout difference rather than a disagreement.
+- **A revised block says it is a revision.** A turn with a background subagent reaches both surfaces
+  twice; the browser replaces its reading, and a terminal cannot replace a line it has already printed,
+  so the second block's `Turn:` row carries `revised after background work` rather than reading as a
+  second turn.
+
+Printed as **one log record rather than one per line**, so nothing the engine logs concurrently can
+interleave with it — a HUD split down the middle is worse than no HUD. Every failure inside it is
+swallowed at `debug`: this is a summary of work that already succeeded, and no formatting bug is worth
+turning a completed turn into an error.
 
 Deleted with the tiering system: the boxed cache-block table, per-tier token counts with entry-N
 thresholds, the tier-changes log, the mode-aware category table, and the one-shot startup
@@ -406,13 +829,42 @@ tier-distribution HUD.
 - `gridRows` is rendered only in the Debug section and never used for layout.
 - The Debug section is off by default and never required to understand normal usage.
 - Memory files, system prompt sections, and every MCP server including `aic-dc` appear in the Session section with their token cost.
-- The HUD renders without a follow-up RPC.
+- The HUD renders the turn without waiting on an RPC. The context breakdown is a follow-up control
+  request and fills in when it lands.
+- The HUD sends no `get_context_usage` while the engine is known gone, and says so rather than leaving
+  the last good breakdown on screen looking current.
+- "Gone" is never concluded from `connected` alone; that field is also false before the first prompt.
+- A control-request timeout is never treated as evidence that the engine is dead. A healthy engine
+  exceeds 60s often enough that it cannot be.
+- A control-request timeout is logged as a sentence, not a traceback, and the rule covers every control
+  request rather than the polled one. Anything not demonstrably the SDK's deadline keeps its stack.
 - The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
 - No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running
-  totals and only ever appear labelled as such.
+  totals and only ever appear labelled as such. The Context tab's Session block is the one surface that
+  reads them at all, under a heading that says which they are.
+- Every rate-limit window the CLI reports is kept as its own record. No window's record can overwrite
+  another's, and no surface renders a figure from one window under another's name.
+- No surface invents a utilisation for a record that carries none. `—` is the answer, beside the window
+  and reset time that *are* known.
+- No surface claims to show the CLI's `/usage` figures. The SDK does not expose them.
+- A slash command routed to an AIC⚡DC surface names something that surface actually shows.
 - A turn whose cost cannot be established is never rendered as `$0.00`, and never as a claim about the
   billing plan; the reason is named instead.
 - A turn that genuinely cost nothing extra renders differently from one whose cost is unknown.
-- Per-model usage rows are never summed into one line.
-- HUD section collapse state persists across sessions via `localStorage`.
-- The terminal HUD prints after every completed turn, cancelled or not.
+- Per-model usage rows are never summed into one line — including by the section head, whose headline
+  is a count of rows and never a total of them.
+- HUD section collapse state persists across sessions via `localStorage`, keyed on a section name that
+  does not move when the section's label does. A stored name this build does not render is preserved.
+- A collapsed section still shows its headline figure. Collapsing hides working, never answers.
+- The HUD's rate-limit section renders at any status, not only when a limit is being approached: it is
+  the subscription-mode cost signal, not a second alarm.
+- A rate-limit record is never rendered past the `resets_at` it names, and expiry is decided in exactly
+  one place — the browser.
+- A rate-limit record survives a reload, a session change and a disconnect. The window belongs to the
+  account, and the CLI only re-sends on a status change.
+- Every file named on the HUD follows the same rule as every file named anywhere else: repo-relative
+  label, engine's path on the tooltip, unconverted path in the navigation event.
+- The terminal HUD prints after every completed turn, cancelled or not — including a turn with nothing
+  in it, which is where it parts company with the browser HUD's own invariant two lines above.
+- The terminal HUD and the browser HUD read the same cost fields and give the same three-way answer.
+  Neither surface derives a turn's cost from `total_cost_usd`.

@@ -26,6 +26,7 @@ from aic_dc.claude_code.health import (
     _ENDPOINT_VARS,
     _GATEWAY_VARS,
     _credential_base,
+    credential_redirect,
     detect_credentials,
 )
 
@@ -306,3 +307,100 @@ class TestReadOnlyContract:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(missing))
         detect_credentials()
         assert not missing.exists()
+
+
+class TestNoDeclaredAndEmptyFields:
+    """A serialised field that nothing writes is worse than no field.
+
+    ``EngineHealth`` carried an ``mcp`` list for three phases: declared,
+    serialised by ``to_dict()``, and assigned by nothing in ``src/``. Every
+    consumer therefore read ``[]`` — and an empty list does not say "no
+    servers", it says "no answer", which is the shape that made the Context
+    tab's own MCP claim wrong for a week before anyone checked.
+
+    Deleted rather than filled in, because the question it looked like it
+    answered has a better answer already: ``get_mcp_status()`` asks the CLI
+    and is allowed to fail visibly, so a status pill can be absent instead
+    of confidently blank. ``degradations`` answers the different question of
+    what the session started *without*, and it has a writer.
+
+    Pinned here so the field cannot come back by looking useful.
+    """
+
+    def test_the_payload_has_no_mcp_key(self):
+        from aic_dc.claude_code.health import EngineHealth
+
+        assert "mcp" not in EngineHealth().to_dict()
+
+    def test_the_dataclass_has_no_mcp_field(self):
+        import dataclasses
+
+        from aic_dc.claude_code.health import EngineHealth
+
+        names = {f.name for f in dataclasses.fields(EngineHealth)}
+        assert "mcp" not in names
+
+    def test_every_serialised_key_has_a_writer_or_a_default_that_means_it(
+        self,
+    ):
+        """The general form of the rule, as far as a test can state it.
+
+        Not "every key is non-empty" — plenty are legitimately empty on a
+        fresh session. What this asserts is narrower and is the thing that
+        actually went wrong: every key in the payload corresponds to a
+        dataclass field or a computed property, so a key cannot be
+        serialised out of nothing at all.
+        """
+        import dataclasses
+
+        from aic_dc.claude_code.health import EngineHealth
+
+        health = EngineHealth()
+        payload = health.to_dict()
+        declared = {f.name for f in dataclasses.fields(EngineHealth)}
+        computed = {"mirror_gaps_escalated"}
+        assert set(payload) <= declared | computed
+
+
+class TestCredentialRedirect:
+    """Whether the account's own usage windows describe this engine's turns.
+
+    Split out of ``detect_credentials`` for
+    :mod:`aic_dc.claude_code.account_usage`, which reads the subscription's
+    rate-limit windows from Anthropic directly. On a machine pointed at
+    Bedrock, Vertex or an API key those windows are a **real figure about a
+    different account** — the most dangerous kind of wrong answer, because
+    nothing about it looks broken (``specs5/plan/risks.md`` R-9).
+    """
+
+    def test_a_plain_subscription_login_is_not_a_redirect(self, config_dir):
+        login(config_dir)
+        assert credential_redirect() is None
+
+    def test_bedrock_names_the_variable_that_did_it(self, monkeypatch, config_dir):
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        answer = credential_redirect()
+        assert "CLAUDE_CODE_USE_BEDROCK" in answer
+        assert "Amazon Bedrock" in answer
+
+    def test_vertex_names_its_provider(self, monkeypatch, config_dir):
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        assert "Google Vertex AI" in credential_redirect()
+
+    @pytest.mark.parametrize("var", _API_KEY_VARS)
+    def test_an_api_key_redirects_the_billing(self, monkeypatch, config_dir, var):
+        """The variable, never the value — this sentence is rendered in a tab."""
+        monkeypatch.setenv(var, "sk-ant-secret")
+        answer = credential_redirect()
+        assert f"${var}" in answer
+        assert "secret" not in answer
+
+    @pytest.mark.parametrize("var", _ENDPOINT_VARS)
+    def test_an_endpoint_override_redirects(self, monkeypatch, config_dir, var):
+        monkeypatch.setenv(var, "https://proxy.internal")
+        assert f"${var}" in credential_redirect()
+
+    def test_a_falsy_gateway_flag_is_not_a_gateway(self, monkeypatch, config_dir):
+        """``CLAUDE_CODE_USE_BEDROCK=0`` is a switch turned off, not a redirect."""
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "0")
+        assert credential_redirect() is None

@@ -2,6 +2,7 @@
 // pull authoritative state snapshots from the backend and
 // hydrate the host's reactive properties.
 
+import { setRepoRoot } from '../repo-path.js';
 import { withRpcTimeout } from '../rpc.js';
 
 /**
@@ -62,14 +63,15 @@ export async function fetchCurrentState(host) {
       host._repoName = state.repo_name;
       document.title = state.repo_name;
     }
-    // The absolute repo root, kept so navigate-file can relativise the
-    // absolute paths the engine reports for tool calls (repo-path.js).
-    // Guarded rather than defaulted: an older backend that does not send
-    // it leaves those paths alone instead of having them measured against
-    // an empty string.
-    if (typeof state.repo_root === 'string' && state.repo_root) {
-      host._repoRoot = state.repo_root;
-    }
+    // The absolute repo root, published so navigate-file can relativise the
+    // absolute paths the engine reports for tool calls, and so the chip
+    // renderers can *label* them the same way (repo-path.js, next.md § C4).
+    // It goes to the module rather than onto `host` because the renderers
+    // that need it take a path and no host, and because one repo should have
+    // one answer. `setRepoRoot` ignores a missing value, so an older backend
+    // that does not send it leaves those paths alone instead of having them
+    // measured against an empty string.
+    setRepoRoot(state.repo_root);
     host._initComplete = !!state.init_complete;
     // Hydrate mode state from the snapshot. Guarded because
     // `ClaudeCodeService.get_current_state` does not report a

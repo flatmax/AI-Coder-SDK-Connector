@@ -71,6 +71,7 @@ import sys
 import time
 import traceback
 import webbrowser
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -204,6 +205,95 @@ def _purge_resume_dirs() -> None:
         resume_cleanup.purge()
     except Exception as exc:
         logger.debug("Could not purge resume temp dirs: %s", exc)
+
+
+# How long the graceful step below gets before the exit stops waiting for
+# it. The useful work is milliseconds — denying a pending permission and
+# getting the notice onto the websocket — and the slow part is the SDK's
+# own disconnect against a CLI that may be wedged. Ctrl-C has to work on
+# a wedged engine, so it is bounded rather than awaited.
+_SHUTDOWN_GRACE = 2.0
+
+
+async def _shut_the_engine_down(service: Any, timeout: float = _SHUTDOWN_GRACE) -> None:
+    """Run the service's graceful teardown, bounded, before the hard exit.
+
+    Everything ``ClaudeCodeService.shutdown`` does that survives process
+    death is already done by hand below — ``_kill_cli_children`` and
+    ``_purge_resume_dirs`` exist precisely because ``disconnect()`` is
+    unreachable from here. What it adds is the one effect that leaves this
+    process: **a pending permission request gets denied, and the denial is
+    announced to the browser**, which survives the server. Without this a
+    user who stops the server with a dialog open keeps a live-looking
+    dialog that will never resolve, and
+    ``5-webapp/permission-dialog.md``'s ``shutdown`` cause — one of the
+    four it says a denial must name — was unreachable.
+
+    Failures are logged at debug and swallowed. Nothing here may be the
+    reason the server will not exit; a second Ctrl-C skips it entirely.
+    """
+    try:
+        answer = await asyncio.wait_for(service.shutdown(), timeout)
+    except Exception as exc:
+        # Includes the timeout. A wedged CLI is the expected case.
+        logger.debug("Graceful engine shutdown did not finish: %r", exc)
+        return
+    if isinstance(answer, dict) and answer.get("error") == "restricted":
+        # The localhost gate reads the *current RPC caller*, and a remote
+        # participant's call can be mid-dispatch when the signal lands.
+        # Logged rather than worked around: the window is microseconds
+        # wide, and a silent skip would look like the teardown ran.
+        logger.warning("Graceful engine shutdown was refused by the localhost gate")
+
+
+def _install_exit_handlers(
+    loop: asyncio.AbstractEventLoop,
+    service: Any,
+    teardown: Callable[..., None],
+) -> None:
+    """Route SIGINT/SIGTERM through the grace period, then ``teardown``.
+
+    Installed on the *loop* on POSIX, and that is the whole reason this
+    function exists rather than a pair of ``signal.signal`` calls: a
+    C-level handler cannot await a coroutine, and the one part of teardown
+    whose effect leaves this process is a coroutine
+    (:func:`_shut_the_engine_down`).
+
+    ``teardown`` ends in ``os._exit``, so nothing here returns twice in the
+    normal case. The second signal is the exception and it is deliberate:
+    the grace period is a courtesy, and a user pressing Ctrl-C again has
+    just withdrawn it.
+
+    On Windows the proactor loop owns no signals, ``add_signal_handler``
+    raises :exc:`NotImplementedError`, and the immediate exit that was
+    here before ``next.md`` § C8 stands. Stated rather than worked around
+    — the same platform split as :func:`_kill_vite`'s process group.
+    """
+    exiting = False
+
+    async def graceful_then_exit() -> None:
+        await _shut_the_engine_down(service)
+        teardown()
+
+    def on_signal() -> None:
+        nonlocal exiting
+        if exiting:
+            teardown()
+            # ``teardown`` ends in ``os._exit`` so this never runs in
+            # production. It is here so the behaviour does not *depend* on
+            # that: without it a second Ctrl-C also queues a second
+            # graceful step, against an engine already being torn down.
+            return
+        exiting = True
+        loop.create_task(graceful_then_exit())
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, on_signal)
+        loop.add_signal_handler(signal.SIGTERM, on_signal)
+    except NotImplementedError:
+        logger.debug("No loop signal handlers here; exiting without the grace period")
+        signal.signal(signal.SIGINT, teardown)
+        signal.signal(signal.SIGTERM, teardown)
 
 
 def _child_exited(pid: int) -> bool:
@@ -386,6 +476,12 @@ def _find_webapp_dist() -> Path | None:
     1. PyInstaller bundle (sys._MEIPASS)
     2. Source tree (project_root/webapp/dist)
     3. Installed package data (package_dir/webapp_dist)
+
+    Entry 3's producer is ``hatch_build.py``, whose ``WHEEL_DEST`` has to
+    name the same ``webapp_dist`` directory this looks for. Changing one
+    without the other yields an install that serves nothing;
+    ``test_wheel_destination_matches_the_runtime_lookup`` holds them
+    together.
     """
     # PyInstaller bundle
     meipass = getattr(sys, "_MEIPASS", None)
@@ -1085,13 +1181,25 @@ async def run(
     # session's temp ``CLAUDE_CONFIG_DIR``, cleaned in
     # ``disconnect()``, which this path never reaches. Purged
     # after the kill, never before — see ``_purge_resume_dirs``.
-    def _signal_handler(sig: int, frame: Any) -> None:
+    #
+    # Ahead of all of that, ``_shut_the_engine_down`` gets a bounded
+    # turn on the loop — see ``_install_exit_handlers``, which owns the
+    # reason the handler goes on the loop rather than on the signal.
+    # We still ``os._exit`` at the end; what the loop gets is one
+    # bounded task, not asyncio's runner cleanup.
+    #
+    # This closure is what ``vite_process`` is captured for, which is why
+    # the wiring around it lives in a module-level function and this does
+    # not: everything below needs ``main``'s locals, and nothing above
+    # does.
+    def _tear_down_and_exit(*_args: Any) -> None:
         _kill_vite(vite_process)
         _kill_cli_children()
         _purge_resume_dirs()
         os._exit(0)
 
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    _install_exit_handlers(
+        asyncio.get_running_loop(), claude_code_service, _tear_down_and_exit
+    )
 
     await asyncio.Event().wait()

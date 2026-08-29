@@ -25,6 +25,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderEditBody } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { renderMarkdown } from '../markdown.js';
+import { toRepoPath } from '../repo-path.js';
 import { costLabel, modelUsageLines, taskUsage } from '../turn-cost.js';
 
 import { collectToolPaths, isTodoWrite, latestTodos, toolStatus } from './blocks.js';
@@ -255,11 +256,25 @@ export function formatInvokedAt(ms) {
   }
 }
 
+/**
+ * A byte count as a short string. The one owner of that rendering.
+ *
+ * Grew a GB tier when the Settings tab's session-storage figure started
+ * calling it: a truncated tool result is a few hundred KB and stops at MB,
+ * but `.aic-dc/sessions/` is warned about in gigabytes, and `1782.4 MB` is a
+ * number a reader has to divide before it means anything. Same 1024 base
+ * throughout, and the existing tiers' labels are left as they are — the
+ * engine's own warning sentence says GiB for the same arithmetic, and one
+ * function using two labelling conventions would be worse than the mismatch.
+ */
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return `${Math.round(bytes)} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 export function formatTokens(count) {
@@ -414,6 +429,71 @@ export function toolLabel(card) {
   if (!name.startsWith('mcp__')) return name;
   const parts = name.split('__');
   return parts.length >= 3 ? parts.slice(2).join('__') : name;
+}
+
+/**
+ * The header's one-line rendering of a call's input, capped.
+ *
+ * The number is the header's whole defence against a card growing without
+ * bound: `.tool-summary` carries no ellipsis and no line clamp on purpose
+ * (see `styles.js`), because the header is the only place a collapsed card
+ * says what the call was about. The cap is what makes that safe.
+ */
+export const TOOL_SUMMARY_CHARS = 200;
+
+/**
+ * `key=value` over a tool call's input, with repo paths shortened.
+ *
+ * Built here rather than shipped as a `input_summary` field off the engine,
+ * which is what used to happen (`specs5/next.md` § C3). The reason is the
+ * paths: the engine's join could not shorten them, so the header read
+ * `file_path=/home/you/repo/src/a.js` and spent two or three of its rows on
+ * a prefix identical for every file in the repo. `chat.md` recorded that as
+ * blocked on needing "a per-tool table of path keys" — and **there is no
+ * table**. A value that begins with the repo root is a path by its shape,
+ * which is the same discriminator `repo-path.js` already mirrors off the
+ * backend's own check, so `toRepoPath` can be handed every string value and
+ * will decline the ones that are not paths. The card already carries its
+ * full `input`, so moving the render here costs no extra field on the wire
+ * and gives live cards and cards read back off a transcript one builder
+ * instead of two.
+ *
+ * Two limits worth naming. A path *inside* a value is left alone — the rule
+ * renames a path, it does not rewrite prose, so an `old_string` quoting an
+ * absolute path keeps it. And a value that merely starts with the root
+ * without being a path (a shell command, say) is shortened too, which is a
+ * gain rather than a cost: the prefix is noise either way.
+ *
+ * Non-string values are JSON, as they were on the server. `JSON.stringify`
+ * writes `[1,2]` where Python's `json.dumps` wrote `[1, 2]`; that one space
+ * is the only rendering this move changes. It is also the one call in here
+ * that can throw, so it is caught per value rather than per summary: a single
+ * circular value costs the header that one part and leaves the others, where
+ * letting the throw out would cost the whole panel the render pass.
+ */
+export function toolInputSummary(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return '';
+  const parts = [];
+  for (const [key, value] of Object.entries(input)) {
+    let rendered;
+    if (typeof value === 'string') {
+      rendered = toRepoPath(value);
+    } else {
+      try {
+        rendered = JSON.stringify(value);
+      } catch {
+        rendered = String(value);
+      }
+    }
+    // Collapsed per part, then joined: a `Bash` heredoc arrives with its
+    // newlines in it and a header row is one line.
+    parts.push(`${key}=${String(rendered ?? '')}`.trim().split(/\s+/).join(' '));
+  }
+  const summary = parts.join(' ');
+  if (summary.length > TOOL_SUMMARY_CHARS) {
+    return `${summary.slice(0, TOOL_SUMMARY_CHARS - 1)}…`;
+  }
+  return summary;
 }
 
 // ---------------------------------------------------------------
@@ -721,6 +801,13 @@ const RUNNING_STATUSES = new Set(['pending', 'awaiting']);
  * the *browser's*, so a skew between two machines — or an NTP correction on
  * either — can otherwise produce a call that has been running for minus four
  * seconds. Same reasoning as `_elapsed_ms` in the engine's history.py.
+ *
+ * The two halves stack rather than sitting on one line joined by a middle dot.
+ * The chip lives in the header's metadata rail now, and a rail is a narrow
+ * column: `12:29:29 PM · 2m 41s` wants all of one and a restored card's
+ * `Aug 27, 12:29:29 PM · 2m 41s` wants more, so the dot version wrapped to
+ * `12:29:29 PM ·` with the separator dangling at the end of a line. Stacked,
+ * each half gets a line of a column that has lines to spare.
  */
 function renderToolTime(panel, status, card) {
   const invokedMs = invokedAtMs(card);
@@ -731,10 +818,15 @@ function renderToolTime(panel, status, card) {
   const title = elapsed
     ? `Invoked at ${clock} by the engine's clock — running for ${elapsed}`
     : `Invoked at ${clock} by the engine's clock`;
+  // The space between the two spans is deliberate. They stack, so it draws
+  // nothing — whitespace between flex items is discarded — but it is the
+  // only thing keeping "14:32:07" and "2m 41s" from running together into
+  // one word for a screen reader, or for anything else reading text content.
   return html`
-    <span class="tool-time" title=${title}
-      >${clock}${elapsed ? html` · <span class="tool-elapsed">${elapsed}</span>` : nothing}</span
-    >
+    <span class="tool-time" title=${title}>
+      <span class="tool-clock">${clock}</span>
+      ${elapsed ? html`<span class="tool-elapsed">${elapsed}</span>` : nothing}
+    </span>
   `;
 }
 
@@ -746,6 +838,10 @@ export function renderToolCard(panel, block) {
   const segments = diffSegments(block);
   const files = Array.isArray(result?.files_modified) ? result.files_modified : [];
   const duration = formatDuration(result?.duration_ms);
+  // Hoisted because the rail draws a line for it or draws no line at all —
+  // a card with no `invoked_at`, which is every card written before the
+  // field existed, would otherwise carry an empty row.
+  const timeChip = renderToolTime(panel, status, card);
 
   return html`
     <div
@@ -758,23 +854,49 @@ export function renderToolCard(panel, block) {
         aria-expanded=${expanded ? 'true' : 'false'}
         @click=${() => toggleBlock(panel, block)}
       >
-        <span
-          class="tool-dot status-${status}"
-          title=${STATUS_TITLE[status] || status}
-        >${STATUS_GLYPH[status] || ''}</span>
-        ${card.server
-          ? html`<span class="tool-server-chip" title="MCP server">${card.server}</span>`
-          : nothing}
-        <span class="tool-name">${toolLabel(card)}</span>
-        <span class="tool-summary">${card.input_summary || ''}</span>
-        ${block.gated
-          ? html`<span
-              class="tool-gated"
-              title="This call went through a permission prompt"
-            >gated</span>`
-          : nothing}
-        ${renderToolTime(panel, status, card)}
-        <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
+        <!-- The header is two columns, and this is the left one: what the
+             call *is* — status, server, name, when it was made, whether it
+             was gated — with the summary alone in the column beside it.
+             Nothing is pinned to the right edge any more. A right-hand
+             group was subtracted from every line of the summary rather
+             than only the first: the summary is one box, and a box that
+             stops short of the time chip stops short of it all the way
+             down.
+
+             The caret leads, as it does on a thinking region's toggle. It
+             is also the one thing here that cannot afford to wrap onto a
+             line of its own, and first is the position where it can't.
+
+             A line each, rather than the time and the gated marker sharing
+             one. Together they wanted all of the rail and a little more on
+             a card whose clock carries a date, so the marker wrapped under
+             the clock on some cards and sat beside it on others — which is
+             the reader having to look in two places for the same fact.
+             Rail lines are the cheap thing here; the summary beside them
+             is usually taller anyway. -->
+        <span class="tool-meta">
+          <span class="tool-meta-line">
+            <span class="tool-caret">${expanded ? '▾' : '▸'}</span>
+            <span
+              class="tool-dot status-${status}"
+              title=${STATUS_TITLE[status] || status}
+            >${STATUS_GLYPH[status] || ''}</span>
+            ${card.server
+              ? html`<span class="tool-server-chip" title="MCP server">${card.server}</span>`
+              : nothing}
+            <span class="tool-name">${toolLabel(card)}</span>
+          </span>
+          ${timeChip !== nothing ? html`<span class="tool-meta-line">${timeChip}</span>` : nothing}
+          ${block.gated
+            ? html`<span class="tool-meta-line"
+                ><span
+                  class="tool-gated"
+                  title="This call went through a permission prompt"
+                >gated</span></span
+              >`
+            : nothing}
+        </span>
+        <span class="tool-summary">${toolInputSummary(card.input)}</span>
       </button>
       ${expanded ? renderToolBody(block, card, result, segments) : nothing}
       ${files.length || duration
@@ -846,9 +968,12 @@ function renderToolInput(card) {
   try {
     text = JSON.stringify(input, null, 2);
   } catch {
-    // Circular or otherwise unserialisable input. The summary in the header
-    // already survived the trip, so the body degrades rather than throwing
-    // inside a render pass and taking the whole panel with it.
+    // Circular or otherwise unserialisable input. The body degrades rather
+    // than throwing inside a render pass and taking the whole panel with it.
+    // The header used to be the reason this was cheap — it arrived
+    // pre-joined off the engine and so could not fail. It is built here now
+    // (`toolInputSummary`, § C3) and catches the same throw per value, so
+    // both halves of the card degrade on their own.
     text = String(input);
   }
   return html`<pre class="tool-input">${text}</pre>`;
@@ -888,8 +1013,23 @@ function renderToolResult(result) {
  * A clickable path. Navigating to the diff viewer is the point of the footer:
  * "what did it just do to my repo" is only useful if the answer is one click
  * from the diff.
+ *
+ * **The label is repo-relative; the tooltip keeps the absolute path.** Every
+ * path on a tool card is absolute, because Claude Code's file tools require
+ * that, and an absolute path is the wrong label for a chip: it spends its
+ * width on a prefix that is the same for every file in the repo, and the part
+ * that identifies the file is the part that falls off the end. This is the
+ * house rule the Context tab's memory-file table already states — named
+ * relative to the root, engine's path on the tooltip — applied here
+ * (next.md § C4).
+ *
+ * The `detail.path` stays whatever it was. `onNavigateFile` normalises, has
+ * done since the click was fixed, and is the one place that should: a second
+ * conversion here would be a second thing to keep true, and the label is a
+ * display concern that must not become the navigation contract.
  */
 export function renderFileChip(path) {
+  const label = toRepoPath(path);
   return html`
     <span
       class="tool-file-chip"
@@ -901,7 +1041,7 @@ export function renderFileChip(path) {
           bubbles: false,
         }));
       }}
-    >${path}</span>
+    >${label}</span>
   `;
 }
 

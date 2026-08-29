@@ -57,6 +57,11 @@ Internal multi-file tracking without a visible tab bar, same pattern as diff vie
 | Dirty (orange pulsing) | Modified content differs from last saved content |
 | New file (cyan) | File does not exist in HEAD |
 | Clean (green) | No unsaved changes |
+
+### When Neither Side Can Be Read
+Content is fetched with the same two calls and the same rule as the diff viewer's — see [diff-viewer.md](diff-viewer.md#when-neither-side-can-be-read) for the reasoning, which is not restated here. One failure is a reading (new, or deleted); two failures are no answer, so no tab opens, a failed refresh keeps the tab's last good content, and the report is a toast. A blank SVG pane is the one rendering this viewer cannot afford to guess at, because it is indistinguishable from an SVG that is genuinely empty.
+
+"The same two calls" is now literally the same code (2026-08-28). The two viewers held a copy each, and the copies had already stopped being copies: this one's error reader fell back to `String(err)`, which renders a rejection carrying no `message` as the text `[object Object]` in a toast, where the diff viewer's says "unknown error". That divergence is the argument for one owner rather than the duplication being untidy. The owner is `diff-viewer/fetch.js`, which the diff viewer already had and this viewer now imports — the file keeps its directory because that is where it was written, and moving it would be churn for a path; what it exports is named about the repo rather than about diffing.
 ## Interaction Modes
 Two modes switchable programmatically:
 | Mode | Left panel | Right panel | Purpose |
@@ -414,6 +419,7 @@ Orchestrates the switch:
 - Handle elements are always excluded from hit-testing so clicking a handle never starts a drag on the underlying element
 - Both panels have their browser-side aspect-ratio preservation disabled so the editor's viewBox is the single source of truth for what's visible
 - Injection deduplication guarantees that rapid openFile calls for the same file never attach editors to stale content
+- A fetch that fails on both sides opens no tab and clears no content — an empty pane is never the report of a failed read
 - View sync never produces infinite feedback loops — the silent-write flag on set-view-box prevents the callback from firing on the sibling, and the shared mutex provides defense-in-depth
 - The on-view-change callback receives the freshly-written viewBox, not a read-back from the attribute — callers can trust the value is authoritative at the moment of the write
 - Save commits any active text edit and removes handles before serializing — saved content is always clean

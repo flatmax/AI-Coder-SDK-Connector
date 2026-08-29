@@ -140,13 +140,38 @@ contents, and file contents are never logged at any level.
 
 ## Graceful Shutdown
 
-- SIGINT / SIGTERM handler triggers clean exit
-- Child processes (Vite dev/preview) terminated with a timeout, then killed if needed
-- **Live `claude` subprocess disconnected via `ClaudeSDKClient.disconnect()`**, with a timeout and a kill fallback. A turn in flight is interrupted first so the CLI can flush its own transcript — the engine's session files are the primary record, and a hard kill mid-turn can leave them short of what the user saw
-- WebSocket server stopped cleanly
-- Pending background tasks allowed a brief grace period before forced termination
-- Pending permission requests resolved as denials, so nothing is left blocked
-- Temp directories (TeX preview working dirs) cleaned up where possible
+The exit is `os._exit`, and that is a measured decision rather than a shortcut: asyncio's runner cleanup
+hangs on `_heavy_init`'s sentence-transformer load in the default executor, so Ctrl-C would not work.
+Everything below follows from it — nothing that needs `atexit`, `__del__`, or the loop shutting down
+itself can be relied on, so each consequence that outlives the process is handled by hand and named.
+
+- **SIGINT / SIGTERM are handled on the event loop** (`loop.add_signal_handler`), not by a C-level
+  handler, for one reason: a coroutine has to run before the hard exit and a C-level handler cannot await
+  one. On a platform where `add_signal_handler` raises `NotImplementedError` — Windows' proactor loop —
+  the old `signal.signal` handlers are installed instead and there is **no graceful step at all**. Logged
+  at debug, not worked around
+- **The graceful step is `ClaudeCodeService.shutdown`, bounded at 2 seconds** and then abandoned. It
+  denies pending permission requests, cancels turn tasks, closes the doc builder's executor and
+  disconnects the session. Only the first of those has an effect that leaves this process — the denial is
+  pushed to the browser as `permissionResolved` with cause `shutdown`, and the browser outlives the
+  server ([`../5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md) § *Multiple Clients*).
+  Failures, including the timeout, are swallowed at debug: the courtesy may never be the reason the
+  server will not exit. **A second Ctrl-C skips it** and exits immediately
+- Child processes (Vite dev/preview) terminated with a timeout, then killed if needed — as a process
+  group, so `npx`'s grandchildren go too
+- **The live `claude` subprocess is killed by hand**, SIGTERM then SIGKILL after a short grace, because
+  the SDK's only orphan guard is an `atexit` hook that `os._exit` skips. Measured without it: ~38 seconds
+  of orphan reparented to init, still holding the repo as its cwd. `disconnect()` may also have reached
+  the CLI inside the 2-second window; the kill does not depend on it having
+- **A resumed session's temp `CLAUDE_CONFIG_DIR` is purged by hand**, after the kill and never before —
+  the directory is the live config dir of the children being killed
+  ([`resume_cleanup.py`](../../src/aic_dc/claude_code/resume_cleanup.py)). Also best-effort, and
+  idempotent, so a directory `disconnect()` already removed costs nothing
+- The WebSocket server and the TeX preview working dir are **not** cleaned up on this path, and this is
+  recorded rather than claimed as handled. The socket dies with the process, which is what the browser's
+  reconnect logic already expects. The TeX dir is swept by `_cleanup_tex_preview_dir` immediately before
+  each compilation, so at most one is left behind and the next preview removes it — the sweep is
+  forward-looking, and nothing calls it at startup despite its docstring having said so
 
 ## Security Considerations
 
@@ -201,6 +226,7 @@ its recovery to attempt, visible to us only as whatever it reports.
 - Port selection always succeeds or exits with a clear error — never silently binds to an unexpected port
 - Both the WebSocket port and webapp port are probed before the server starts; a second concurrent instance probes past the first's ports rather than cross-wiring into it
 - Browser tab title always matches the repo name; no branding prefix
-- SIGINT / SIGTERM always trigger clean shutdown with child process termination, including any live `claude` subprocess
+- SIGINT / SIGTERM always terminate every child process, including any live `claude` subprocess, and always purge a resumed session's temp config dir — by hand, because the exit is `os._exit` and nothing that needs `atexit` runs
+- **The graceful engine teardown is a bounded courtesy, never a condition of exiting.** It gets 2 seconds on POSIX and none on Windows; a second signal skips it; every failure inside it is swallowed. A wedged engine can never stop Ctrl-C from working
 - No startup path writes `os.environ`, and no config reload does either
 - A missing or unauthenticated `claude` CLI degrades to a working editor with a health banner and a disabled chat input — never a failed startup and never a live-looking send button

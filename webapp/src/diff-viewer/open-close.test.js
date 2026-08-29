@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mountViewer, settle, setFakeRpc, clearFakeRpc, monacoState, beforeEachSetup } from './test-helpers.js';
+import { resetRepoRoot, setRepoRoot } from '../repo-path.js';
 
 beforeEach(beforeEachSetup);
 
@@ -245,6 +246,124 @@ describe('DiffViewer openFile', () => {
     await settle(el);
     expect(el._file?.path).toBe('fast.py');
     expect(el._file?.modified).not.toBe('stale content');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A fetch that fails on both sides — specs5/next.md § C2
+// ---------------------------------------------------------------------------
+
+describe('DiffViewer openFile when the file cannot be read', () => {
+  let toasts;
+  let onToast;
+
+  beforeEach(() => {
+    resetRepoRoot();
+    toasts = [];
+    onToast = (ev) => toasts.push(ev.detail);
+    window.addEventListener('aic-toast', onToast);
+  });
+
+  afterEach(() => {
+    window.removeEventListener('aic-toast', onToast);
+    resetRepoRoot();
+  });
+
+  function refuseBothSides(message = 'Absolute paths not accepted: /x/a.py') {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => {
+        throw new Error(message);
+      }),
+    });
+  }
+
+  it('opens nothing and reports the error', async () => {
+    refuseBothSides();
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: '/x/a.py' });
+    await settle(el);
+    // The pre-fix behaviour was an empty document marked new. An
+    // empty file the user can scroll is a claim about the repo;
+    // this is the case where the app has nothing to claim.
+    expect(el.hasOpenFiles).toBe(false);
+    expect(el._file).toBe(null);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[0].message).toContain('Absolute paths not accepted');
+  });
+
+  it('leaves the previously-open file in place', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => 'good content'),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'good.py' });
+    await settle(el);
+    refuseBothSides('File not found: gone.py');
+    await el.openFile({ path: 'gone.py' });
+    await settle(el);
+    expect(el._file?.path).toBe('good.py');
+    expect(el._file?.modified).toBe('good content');
+  });
+
+  it('names the file the way every other view names it', async () => {
+    // The house rule from § C4 — repo-relative inside the root.
+    setRepoRoot('/home/you/repo');
+    refuseBothSides('Binary file cannot be read as text');
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: '/home/you/repo/assets/logo.png' });
+    await settle(el);
+    expect(toasts[0].message).toContain('assets/logo.png');
+    expect(toasts[0].message).not.toContain('/home/you/repo/assets');
+  });
+
+  it('a one-sided failure still opens and says nothing', async () => {
+    // The discriminator is the shape, not the message: HEAD alone
+    // failing is a new file, which is a reading rather than a fault.
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async (_path, ref) => {
+        if (ref === 'HEAD') throw new Error('not in HEAD');
+        return 'fresh';
+      }),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'new.py' });
+    await settle(el);
+    expect(el._file?.isNew).toBe(true);
+    expect(toasts).toHaveLength(0);
+  });
+
+  it('a failed refresh keeps the last good content', async () => {
+    setFakeRpc({
+      'Repo.get_file_content': vi.fn(async () => 'v1'),
+    });
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    refuseBothSides('File not found: a.py');
+    await el.refreshActiveFile();
+    await settle(el);
+    // Stale beats blank: the buffer is the last copy the user had.
+    expect(el._file?.modified).toBe('v1');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].message).toContain('Could not refresh');
+  });
+
+  it('no RPC at all is not reported as a failure', async () => {
+    // Pre-connection is the health banner's to say, not a toast
+    // per open.
+    clearFakeRpc();
+    const el = mountViewer();
+    await settle(el);
+    await el.openFile({ path: 'a.py' });
+    await settle(el);
+    expect(el.hasOpenFiles).toBe(true);
+    expect(toasts).toHaveLength(0);
   });
 });
 

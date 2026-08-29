@@ -180,7 +180,7 @@ Default extensions list:
 ```pseudo
 DocIndexConfig:
     keyword_model: string                  // Sentence-transformer model name
-    keywords_enabled: bool                 // Default true
+    keywords_enabled: bool                 // Default true. Read per enrichment pass, not at startup
     keywords_top_n: int                    // Default 3
     keywords_ngram_range: [int, int]       // Default [1, 2]
     keywords_min_section_chars: int        // Default 50
@@ -191,6 +191,12 @@ DocIndexConfig:
 ```
 
 Default `keyword_model` is `"BAAI/bge-small-en-v1.5"` — a compact English sentence-transformer. Changing the model invalidates all cached keyword enrichments (the cache key includes the model name). Unchanged by the conversion; the document index survives it.
+
+`keywords_enabled` is asked at the top of every enrichment pass rather than read into the builder at
+startup, so an `app.json` reload reaches it — which is what lets the Settings tab offer it as a switch
+rather than as an app-restart field. It had **no consumer at all** until 2026-08-28: it was parsed here
+and read nowhere, so enrichment ran whatever the file said. See
+[`../../specs5/2-indexing/keyword-enrichment.md` § Switching Enrichment Off](../../specs5/2-indexing/keyword-enrichment.md).
 
 **`indexing` section:**
 

@@ -103,6 +103,13 @@ class CostLedger:
         self._baseline_models: dict[str, dict[str, float]] = {}
         self._total: float | None = None
         self._models: dict[str, dict[str, float]] = {}
+        #: The last result's ``model_usage`` **as reported**, not snapshotted.
+        #: :func:`_snapshot` keeps only :data:`COUNTER_FIELDS`, which is right
+        #: for differencing and wrong for display: it drops ``canonicalModel``,
+        #: so a session total rendered from it would label every row with the
+        #: raw provider id. Held beside the snapshot rather than folded into
+        #: it, because the two answer different questions.
+        self._reported_models: dict[str, dict[str, Any]] = {}
 
     def reset(self) -> None:
         """Forget the baseline, because the engine just forgot its own."""
@@ -110,6 +117,39 @@ class CostLedger:
         self._baseline_models = {}
         self._total = None
         self._models = {}
+        self._reported_models = {}
+
+    def session_totals(self) -> dict[str, Any]:
+        """What the session has spent so far, under names that say so.
+
+        The one reading in this codebase where the engine's cumulative figures
+        are the answer rather than the trap. Everywhere else — the HUD, the
+        turn footer, the terminal block — a cumulative figure rendered as a
+        turn's is the bug this module exists to prevent; here the question
+        genuinely is "what has this session cost", which is what the CLI's own
+        ``/usage`` panel reports and what
+        ``specs5/5-webapp/viewers-hud.md`` § *Cost Is Cumulative* already
+        names as the legitimate case.
+
+        The keys are deliberately the engine's own — ``total_cost_usd`` and
+        ``model_usage`` — rather than ``session_*`` aliases. Those two names
+        mean "cumulative" everywhere in this codebase, and renaming them here
+        would make the one honest use of them the one place they are called
+        something else.
+
+        ``total_cost_usd`` is ``None`` before any result has been priced, which
+        is a different fact from ``0.0`` and is why it is not defaulted: a
+        session that has not run a turn has no cost estimate, and printing
+        ``$0.0000`` for it would be the same claim ``turn_cost_basis`` exists
+        to avoid making.
+        """
+        return {
+            "total_cost_usd": self._total,
+            "model_usage": (
+                {name: dict(entry) for name, entry in self._reported_models.items()}
+                or None
+            ),
+        }
 
     def start_turn(self) -> None:
         """Anchor pricing where the session's total stands now.
@@ -155,6 +195,7 @@ class CostLedger:
             # of this turn is priced from the new zero rather than reporting
             # `reset` forever, and lose only the result that straddled it.
             self._models = _snapshot(result.get("model_usage"))
+            self._reported_models = _reported(result.get("model_usage"))
             self._baseline = total
             self._baseline_models = self._models
             return _answer(None, RESET, None)
@@ -164,6 +205,7 @@ class CostLedger:
             models, self._baseline_models, result.get("model_usage")
         )
         self._models = models
+        self._reported_models = _reported(result.get("model_usage"))
         return _answer(round(total - baseline, 10), MEASURED, turn_models)
 
 
@@ -189,6 +231,23 @@ def _as_cost(value: Any) -> float | None:
     if value != value or value in (float("inf"), float("-inf")):  # NaN / infinity
         return None
     return float(value)
+
+
+def _reported(model_usage: Any) -> dict[str, dict[str, Any]]:
+    """Each model entry as the engine reported it, for display rather than maths.
+
+    Unlike :func:`_snapshot` this keeps every field, including the ones that
+    describe the *model* rather than the spend — ``canonicalModel`` above all,
+    since it is the difference between a row labelled ``claude-opus-5`` and one
+    labelled ``us.anthropic.claude-opus-5-v1:0``.
+    """
+    if not isinstance(model_usage, dict):
+        return {}
+    return {
+        name: dict(entry)
+        for name, entry in model_usage.items()
+        if isinstance(name, str) and isinstance(entry, dict)
+    }
 
 
 def _snapshot(model_usage: Any) -> dict[str, dict[str, float]]:

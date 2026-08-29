@@ -99,6 +99,43 @@ A tree-sitter based code analysis engine. Extracts classes, functions, variables
 - This handles files deleted from disk or removed from git tracking, including by the agent's own `Bash` calls
 - Must run before an index-reading tool answers, or a deleted file reappears in the map and the agent is sent to read a path that no longer exists
 
+## Freshness After a Shell Command
+
+`PostToolUse` names the file for `Write`, `Edit`, `MultiEdit` and `NotebookEdit`. For `Bash` it hands
+over a command line, which is not reliably parseable into "which files did this touch" — pipelines,
+redirects, `xargs`, subshells and anything behind a script all defeat it. So the shell path does not
+ask the tool input. It asks the disk.
+
+**The mechanism.** The `Bash` hook records only *that* a command ran — a boolean, no work. The sweep
+happens in `Reindexer.flush()`, which every index-reading MCP tool already awaits before it answers:
+`SymbolIndex.find_stale_files()` stats each known file and compares its mtime against the one the
+cache recorded, and whatever disagrees joins the re-index queue. This reuses the mtime cache's
+existing per-file staleness check, which could always answer this question and was never asked it.
+
+Two properties are what make the cost acceptable, and both are the reason the rejected options were
+rejected:
+
+- **An `ls` costs nothing.** The flag is set, but no sweep runs until something reads an index — so
+  "re-index after every `Bash`" is avoided without needing to know what the `Bash` did.
+- **An unchanged repo costs nothing beyond the stats.** `reindex_files` ends in two whole-index
+  passes (call-site re-resolution, reference-graph rebuild), and it is only called when the sweep
+  returns a non-empty set.
+
+**The gap, stated rather than discovered.** The sweep sees only paths the index already knows — the
+union of the symbol map and the cache. A file a shell command *creates* is in neither, so no mtime
+exists to disagree with and the sweep cannot see it. `git checkout` of a deleted file, `cp`, a code
+generator and an unpack all land in this hole, and the file stays absent from the map until the next
+full build. Closing it means re-walking the repo on every sweep, which is the cost this approach was
+chosen to avoid; the trade was made deliberately (decisions.md § CC-18) and
+`test_a_file_the_index_never_knew_is_not_reported` pins it, so it is a decision rather than a
+surprise. Modification and deletion — `sed -i`, formatters, `git checkout` over a tracked file, `mv`
+away — are covered.
+
+A second, narrower residue: a `Bash` run **in the background** is hooked when it is launched rather
+than when it finishes, so files it writes after that moment are not seen by the sweep that its own
+launch armed. The next shell command re-arms the flag and picks them up, so this self-corrects in an
+active session and persists only for a long build that nothing follows.
+
 ## Consumers
 
 The index has three consumers, none of which is prompt assembly:

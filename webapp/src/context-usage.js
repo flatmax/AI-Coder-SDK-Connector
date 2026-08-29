@@ -380,8 +380,11 @@ const _MCP_STATUS = {
  * the most misleading row this tab could draw.
  *
  * `EngineHealth.mcp` would have been the cheaper source — the health
- * payload is already pushed to the browser — but that field is declared,
- * serialised, and never written by anything, so it is always `[]`.
+ * payload is already pushed to the browser — but that field never had a
+ * writer, so it always answered `[]`, and an empty list here does not
+ * mean "no servers", it means "no answer". It has since been deleted
+ * rather than filled in: this call asks the CLI and is allowed to fail
+ * visibly, which is the behaviour a status pill needs.
  *
  * @param {object|null|undefined} status An `McpStatusResponse`.
  * @returns {Map<string, {status: string, label: string, color: string,

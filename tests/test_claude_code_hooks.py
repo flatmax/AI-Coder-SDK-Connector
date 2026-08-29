@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 
 import pytest
@@ -34,9 +35,11 @@ import pytest
 from aic_dc.claude_code.hooks import (
     DEBOUNCE_SECONDS,
     PATH_KEYS,
+    SHELL_TOOL_MATCHER,
     WRITE_TOOL_MATCHER,
     Reindexer,
     build_hook_matchers,
+    build_post_shell_hook,
     build_post_tool_use_hook,
     build_pre_compact_hook,
     extract_written_paths,
@@ -45,18 +48,29 @@ from aic_dc.claude_code.messages import Event
 
 
 class FakeIndex:
-    """Records the batches it is asked to re-index."""
+    """Records the batches it is asked to re-index, and what it calls stale."""
 
-    def __init__(self, error=None, indexed=None):
+    def __init__(self, error=None, indexed=None, stale=(), stale_error=None):
         self.batches: list[list[str]] = []
         self.error = error
         self._indexed = indexed
+        self._stale = list(stale)
+        self.stale_error = stale_error
+        # Counted, not just recorded: the point of the flag is that the
+        # sweep happens once per shell command, not once per flush.
+        self.stale_calls = 0
 
     def reindex_files(self, paths):
         self.batches.append(list(paths))
         if self.error is not None:
             raise self.error
         return list(paths) if self._indexed is None else list(self._indexed)
+
+    def find_stale_files(self):
+        self.stale_calls += 1
+        if self.stale_error is not None:
+            raise self.stale_error
+        return list(self._stale)
 
 
 class FakeDocBuilder:
@@ -146,17 +160,28 @@ class TestItDecidesNothing:
         for case in cases:
             assert await hook(case, "toolu_01", {"signal": None}) == {}
 
-    def test_only_the_write_tools_are_matched(self):
-        """Bash is deliberately absent: `PostToolUse` gives us a command,
-        not the files it touched, and guessing would be wrong often."""
+    def test_bash_is_not_treated_as_a_write_tool(self):
+        """It is matched (CC-18), but never by the path-reading hook:
+        `PostToolUse` gives us a command, not the files it touched."""
         assert WRITE_TOOL_MATCHER == "Write|Edit|MultiEdit|NotebookEdit"
         assert "Bash" not in WRITE_TOOL_MATCHER
+        assert SHELL_TOOL_MATCHER == "Bash"
 
     def test_the_matcher_mapping_subscribes_to_two_events(self, reindexer):
         matchers = build_hook_matchers(reindexer)
         assert sorted(matchers) == ["PostToolUse", "PreCompact"]
         assert matchers["PostToolUse"][0].matcher == WRITE_TOOL_MATCHER
         assert len(matchers["PostToolUse"][0].hooks) == 1
+
+    def test_the_write_and_shell_paths_register_separately(self, reindexer):
+        """One alternation would give both tools the same hook, and the
+        whole point is that they need different ones."""
+        posts = build_hook_matchers(reindexer)["PostToolUse"]
+        assert [m.matcher for m in posts] == [
+            WRITE_TOOL_MATCHER,
+            SHELL_TOOL_MATCHER,
+        ]
+        assert posts[0].hooks[0] is not posts[1].hooks[0]
 
     def test_precompact_registers_without_a_tool_matcher(self, reindexer):
         """The field filters on a tool name, and this event has none."""
@@ -576,3 +601,273 @@ class TestReindexedTally:
         await reindexer.flush()
         assert docs.calls == ["notes.md"]
         assert reindexer.take_reindexed() == ["notes.md"]
+
+
+# ---------------------------------------------------------------------------
+# Freshness after a shell command — CC-18
+# ---------------------------------------------------------------------------
+
+
+def post_shell_input(command="sed -i s/a/b/ a.py"):
+    """The shape the CLI hands the hook for a `Bash` call.
+
+    Note what it contains and the hook ignores: the command line. That
+    is the input CC-18 rejected parsing, and it is present here so a
+    future heuristic that starts reading it fails a test.
+    """
+    return {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command, "description": "edit a file"},
+        "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+        "tool_use_id": "toolu_02",
+    }
+
+
+class TestShellHookDoesNoWork:
+    async def test_it_returns_an_empty_dict(self, reindexer):
+        """Same invariant as every other hook here."""
+        hook = build_post_shell_hook(reindexer)
+        assert await hook(post_shell_input(), "toolu_02", None) == {}
+
+    async def test_a_shell_call_alone_reindexes_nothing(
+        self, reindexer, index
+    ):
+        """The objection to hooking Bash was that an `ls` would re-index.
+
+        It does not: the hook sets a flag, and until something reads an
+        index there is no sweep and no re-index.
+        """
+        hook = build_post_shell_hook(reindexer)
+        for _ in range(5):
+            await hook(post_shell_input("ls"), None, None)
+        assert index.stale_calls == 0
+        assert index.batches == []
+
+    async def test_the_command_line_is_never_parsed_for_paths(
+        self, reindexer, index, tmp_path
+    ):
+        """A command naming a file must not queue that file by name.
+
+        If it did, the heuristic CC-18 rejected would be back — and it
+        would be wrong for pipelines, xargs and anything behind a script.
+        """
+        hook = build_post_shell_hook(reindexer)
+        await hook(post_shell_input("sed -i s/a/b/ a.py"), None, None)
+        await reindexer.flush()
+        # The sweep ran, found nothing (FakeIndex reports no stale files),
+        # and so nothing was re-indexed. `a.py` was never inferred.
+        assert index.stale_calls == 1
+        assert index.batches == []
+
+    async def test_a_broken_flag_is_swallowed(self, caplog):
+        class Exploding(Reindexer):
+            def note_shell_ran(self):
+                raise RuntimeError("nope")
+
+        hook = build_post_shell_hook(Exploding())
+        with caplog.at_level(logging.WARNING):
+            assert await hook(post_shell_input(), None, None) == {}
+        assert "shell hook failed" in caplog.text
+
+
+class TestShellSweep:
+    async def test_a_flush_after_a_shell_call_reindexes_what_moved(
+        self, tmp_path, docs
+    ):
+        """The whole feature: a `sed -i` reaches the index."""
+        index = FakeIndex(stale=["a.py", "b.py"])
+        reindexer = Reindexer(
+            symbol_index=lambda: index, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        assert index.batches == [["a.py", "b.py"]]
+
+    async def test_a_sweep_that_finds_nothing_does_not_touch_the_index(
+        self, reindexer, index
+    ):
+        """`reindex_files` ends in two whole-index passes. An unchanged
+        repo must not pay for them."""
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        assert index.stale_calls == 1
+        assert index.batches == []
+
+    async def test_the_flag_is_cleared_by_the_sweep(self, reindexer, index):
+        """Otherwise every later flush re-stats the whole known set."""
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        await reindexer.flush()
+        await reindexer.flush()
+        assert index.stale_calls == 1
+
+    async def test_a_later_shell_call_earns_a_new_sweep(
+        self, reindexer, index
+    ):
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        assert index.stale_calls == 2
+
+    async def test_swept_files_join_the_writes_in_one_batch(
+        self, tmp_path, docs
+    ):
+        """A turn that writes and shells should still be one drain."""
+        index = FakeIndex(stale=["swept.py"])
+        reindexer = Reindexer(
+            symbol_index=lambda: index, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_writes([str(tmp_path / "written.py")])
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        assert index.batches == [["swept.py", "written.py"]]
+
+    async def test_the_sweep_precedes_the_drain(self, tmp_path, docs):
+        """A flush that drained first would answer from the index it was
+        about to discover was stale."""
+        index = FakeIndex(stale=["swept.py"])
+        reindexer = Reindexer(
+            symbol_index=lambda: index, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        # One batch, containing the swept file — not an empty first drain
+        # followed by a second one that noticed.
+        assert index.batches == [["swept.py"]]
+
+    async def test_a_missing_index_keeps_the_flag_for_later(
+        self, tmp_path, docs
+    ):
+        """Writes and shell calls can land while the index is still built.
+
+        The build reads the disk as it is now, so nothing is lost — but
+        the flag must survive, because a command landing *during* the
+        build is not covered by it.
+        """
+        index = FakeIndex(stale=["a.py"])
+        current = None
+        reindexer = Reindexer(
+            symbol_index=lambda: current, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_shell_ran()
+        await reindexer.flush()
+        assert index.stale_calls == 0
+        current = index
+        await reindexer.flush()
+        assert index.batches == [["a.py"]]
+
+    async def test_a_failing_sweep_costs_freshness_not_the_turn(
+        self, tmp_path, docs, caplog
+    ):
+        index = FakeIndex(stale_error=OSError("no such directory"))
+        reindexer = Reindexer(
+            symbol_index=lambda: index, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_shell_ran()
+        with caplog.at_level(logging.WARNING):
+            await reindexer.flush()
+        assert "sweep failed" in caplog.text
+        assert index.batches == []
+
+    async def test_a_failed_sweep_does_not_retry_forever(
+        self, tmp_path, docs, caplog
+    ):
+        """The flag is cleared before the scan, so a sweep that raises
+        does not re-arm itself into a loop on every later flush."""
+        index = FakeIndex(stale_error=OSError("gone"))
+        reindexer = Reindexer(
+            symbol_index=lambda: index, doc_builder=docs, repo_root=tmp_path
+        )
+        reindexer.note_shell_ran()
+        with caplog.at_level(logging.WARNING):
+            await reindexer.flush()
+            await reindexer.flush()
+        assert index.stale_calls == 1
+
+
+class TestShellFreshnessEndToEnd:
+    """The real index, the real reindexer, the real hook.
+
+    Everything above this point runs against `FakeIndex`, which proves
+    the wiring and not the effect. Twice in this project a check has
+    turned out to be quietly inert and both were found by running the
+    thing rather than reading it, so CC-18's claim — a `sed -i` reaches
+    the symbol map — gets asserted against tree-sitter.
+    """
+
+    @pytest.fixture
+    def real(self, tmp_path):
+        from aic_dc.symbol_index.index import SymbolIndex
+        from aic_dc.symbol_index.parser import TreeSitterParser
+
+        if not TreeSitterParser().is_available("python"):
+            pytest.skip("tree_sitter_python not installed")
+        return SymbolIndex(repo_root=tmp_path)
+
+    @staticmethod
+    def _rewrite(path, content):
+        """Write, then force a distinct mtime — a fast test can land
+        inside one filesystem timestamp tick."""
+        path.write_text(content, encoding="utf-8")
+        stamp = path.stat().st_mtime + 10
+        os.utime(path, (stamp, stamp))
+
+    async def test_a_shell_edit_reaches_the_symbol_map(
+        self, tmp_path, real
+    ):
+        source = tmp_path / "a.py"
+        source.write_text("def before(): pass\n", encoding="utf-8")
+        real.index_repo(["a.py"])
+        assert "before" in real.get_symbol_map()
+
+        # The agent runs `sed -i`. Nothing tells the index anything.
+        self._rewrite(source, "def after(): pass\n")
+
+        reindexer = Reindexer(symbol_index=lambda: real, repo_root=tmp_path)
+        hook = build_post_shell_hook(reindexer)
+        await hook(post_shell_input("sed -i s/before/after/ a.py"), None, None)
+
+        # ...and then an MCP tool reads an index, which is the flush.
+        await reindexer.flush()
+
+        symbol_map = real.get_symbol_map()
+        assert "after" in symbol_map
+        assert "before" not in symbol_map
+
+    async def test_without_the_shell_hook_the_map_stays_wrong(
+        self, tmp_path, real
+    ):
+        """The counter-test, so the one above cannot pass for free.
+
+        Same edit, same flush, no `Bash` hook — the stale answer this
+        whole phase exists to remove.
+        """
+        source = tmp_path / "a.py"
+        source.write_text("def before(): pass\n", encoding="utf-8")
+        real.index_repo(["a.py"])
+        self._rewrite(source, "def after(): pass\n")
+
+        reindexer = Reindexer(symbol_index=lambda: real, repo_root=tmp_path)
+        await reindexer.flush()
+
+        assert "before" in real.get_symbol_map()
+
+    async def test_a_shell_deletion_leaves_the_map(self, tmp_path, real):
+        """An `mv` away or an `rm`: the symbols must go with the file."""
+        (tmp_path / "a.py").write_text("def gone(): pass\n", encoding="utf-8")
+        (tmp_path / "b.py").write_text("def kept(): pass\n", encoding="utf-8")
+        real.index_repo(["a.py", "b.py"])
+
+        (tmp_path / "a.py").unlink()
+
+        reindexer = Reindexer(symbol_index=lambda: real, repo_root=tmp_path)
+        hook = build_post_shell_hook(reindexer)
+        await hook(post_shell_input("rm a.py"), None, None)
+        await reindexer.flush()
+
+        symbol_map = real.get_symbol_map()
+        assert "gone" not in symbol_map
+        assert "kept" in symbol_map
+        assert real.get_indexed_files() == ["b.py"]

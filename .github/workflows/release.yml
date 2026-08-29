@@ -8,10 +8,14 @@
 # naming convention; `master` is the release decision, so the
 # merge target is the only gate. Never triggers on direct pushes.
 #
-# `workflow_dispatch` builds without publishing by default —
-# set `publish_release: true` to also cut a GitHub Release. A
-# manual run is the way to prove the build command works without
-# putting an artefact in front of users.
+# A merged pull request is the *only* trigger. There is deliberately
+# no `workflow_dispatch`: a manual run builds three ~230 MiB
+# artefacts on three runners to answer a question the merge will
+# answer anyway, and an unpressed button is still a button. The cost
+# is that a new build or verification step stays unproven on a runner
+# until a real PR carries it — verify locally against these exact
+# flags and say the runner half is outstanding, rather than firing a
+# run to close it.
 #
 # Builds per-platform single-file binaries in parallel, then
 # attaches all artefacts to a GitHub Release. The release tag on
@@ -33,7 +37,14 @@
 # Bundleable — so a build that drops it silently demotes every
 # user to a PATH search, and a machine without `claude` gets a
 # binary that starts, renders and indexes but cannot hold a
-# conversation. Hence the verification step below.
+# conversation.
+#
+# Hence three verification steps, in increasing strength: the
+# engine is in the archive, the unpacked engine resolves and
+# answers `--version`, and both of those still hold inside a
+# container with no Node, Python or `claude` in it. The third is
+# phase 7's stated exit criterion; the first two would all pass on
+# a machine that happened to have its own engine installed.
 #
 # Docs extras split into two groups in pyproject.toml:
 #   [docs-convert] — markitdown, pymupdf, python-pptx, openpyxl
@@ -50,12 +61,6 @@ on:
   pull_request:
     types: [closed]
     branches: [master]
-  workflow_dispatch:
-    inputs:
-      publish_release:
-        description: "Publish a GitHub Release from this manual run"
-        type: boolean
-        default: false
 
 permissions:
   contents: write  # needed to create releases and attach artefacts
@@ -65,10 +70,8 @@ jobs:
     name: Build ${{ matrix.label }}
     # Gate: PR closed events only build when the PR was actually
     # merged, not merely closed. No head-branch pattern — see the
-    # header comment. workflow_dispatch always builds.
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.merged == true
+    # header comment.
+    if: github.event.pull_request.merged == true
     strategy:
       fail-fast: false
       matrix:
@@ -217,6 +220,84 @@ jobs:
           echo "Running --version:"
           "./dist/${{ matrix.binary-name }}" --version
 
+      # The runtime half of the same tripwire, and the reason a green
+      # matrix was never the exit criterion. The step above proves the
+      # engine went *into* the archive; it cannot prove the process that
+      # unpacks it can find and spawn it. Those are different failures:
+      # --collect-all files are data, data files carry no permission
+      # bits, and "present but not executable" produces an engine that
+      # exists and cannot run. --check-engine resolves the binary the SDK
+      # would spawn and runs it, exiting 1 when nothing resolves and 2
+      # when something resolved and would not run.
+      #
+      # Needs no credentials and asserts nothing about them: a runner has
+      # no login, and a check that required one could not run here.
+      - name: Verify the binary resolves and runs its engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          "./dist/${{ matrix.binary-name }}" --check-engine
+
+      # Phase 7's actual exit criterion: "a fresh machine can install and
+      # run without a manual `npm i -g @anthropic-ai/claude-code`"
+      # (specs5/6-deployment/packaging.md). The runner is not a fresh
+      # machine — it has Node, Python, a uv environment and this
+      # repository. A container with none of them is.
+      #
+      # Linux only, because that is where a runner can host a container
+      # cheaply. The Windows and macOS legs get the step above, which
+      # exercises the same code path against the same bundled engine
+      # without the clean-environment guarantee.
+      #
+      # ubuntu:24.04 deliberately matches the runner image. A PyInstaller
+      # binary needs a glibc at least as new as the one it was built
+      # against, so an older base would fail for a reason that is not the
+      # one under test.
+      - name: Fresh-machine test (container with no Node, Python or claude)
+        if: matrix.label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:24.04 bash -euo pipefail -c '
+            # Negative controls first. Without them this test could pass
+            # by resolving a system engine, and a test that would pass
+            # anyway proves nothing.
+            for tool in claude node npm python3; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "::error::$tool is present in the test container, so the fresh-machine test is vacuous."
+                exit 1
+              fi
+            done
+            echo "Confirmed absent: claude, node, npm, python3"
+            /dist/aic-dc-linux --check-engine
+          '
+
+      # Closes the other half of the packaging story: a pip-installed
+      # release has to be able to serve the webapp, which means the wheel
+      # carries webapp/dist at aic_dc/webapp_dist (hatch_build.py). The
+      # include is conditional on the Vite build having run, and the Vite
+      # build is an earlier step in this job — so this asserts on the
+      # built wheel rather than trusting that ordering. Built and checked,
+      # not published; putting a wheel on PyPI is a separate decision.
+      - name: Verify the wheel carries the webapp
+        if: matrix.label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv build --wheel --out-dir wheelhouse
+          WHEEL="$(ls wheelhouse/*.whl | head -1)"
+          echo "Built: $WHEEL"
+          if ! unzip -l "$WHEEL" | grep -q "aic_dc/webapp_dist/index.html"; then
+            echo "::error::$WHEEL has no aic_dc/webapp_dist/index.html."
+            echo "A pip install from this wheel cannot serve the webapp and falls through"
+            echo "to the GitHub Pages fallback. hatch_build.py includes webapp/dist only"
+            echo "when it exists — check that the Vite build step ran before this one."
+            unzip -l "$WHEEL" | head -30
+            exit 1
+          fi
+          echo "Webapp present in wheel:"
+          unzip -l "$WHEEL" | grep "webapp_dist" | head -5
+
       - name: Upload artefact
         uses: actions/upload-artifact@v4
         with:
@@ -228,12 +309,9 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: build
-    # A merge into master publishes. A manual run only publishes
-    # when asked, so the build can be exercised without putting an
-    # artefact in front of users.
-    if: |
-      github.event_name != 'workflow_dispatch' ||
-      github.event.inputs.publish_release == 'true'
+    # No condition. Anything reaching here came from a merged PR into
+    # master — `needs: build` and the build job's own gate are the
+    # whole answer, and a merge into master publishes by definition.
     runs-on: ubuntu-latest
     steps:
       - name: Download all artefacts

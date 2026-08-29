@@ -366,6 +366,13 @@ who returns should be able to see that a decision was taken for them and what it
 - **Racing localhost clients** — the first decision wins. `permissionResolved` closes the dialog everywhere with an attribution note ("allowed by another window"), including on the client that was mid-typing a deny reason. The losing client's in-progress reason text is discarded, not resubmitted against the next request in the queue.
 - A `resolve_permission` that arrives late gets `already_resolved` with the winner's identity, and the UI shows the attribution rather than an error.
 - **A denial by the session names its own cause.** `permissionResolved` carries a `cause` — `stopped`, `turn_ended`, `agent_ended`, `shutdown` — because `action` cannot distinguish them: all four of those resolve as `cancelled` or `shutdown`, and a dialog that read the action alone announced whichever one was hardcoded, telling a user who had just pressed Stop that "the turn it belonged to ended". `agent_ended` matters most: a background subagent's dialog outlives the turn that spawned it, so blaming the turn would send the user looking in the wrong place. With no `cause` the notice stays vague rather than asserting a reason it cannot know.
+- **`shutdown` was the one cause nothing could produce**, until [`../next.md`](../next.md) § C8 wired
+  `ClaudeCodeService.shutdown` into the exit path on 2026-08-28. The enumeration above was written from
+  the deny paths in `permissions.py`, and `cancel_all`'s was reachable only from a method with no caller —
+  so a user who stopped the server with a dialog open kept a live-looking dialog that never resolved.
+  This bullet is why the item was wired rather than deleted as dead code: it is the only part of engine
+  teardown whose effect leaves the process, because the browser outlives the server. It arrives on a
+  2-second budget and only on POSIX, so a wedged engine still means the old behaviour.
 
 ## Reconnect
 

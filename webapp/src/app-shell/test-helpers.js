@@ -16,6 +16,7 @@
 // tests prevents cross-file mock leakage.
 
 import { afterEach, beforeEach, vi } from 'vitest';
+import { resetRepoRoot } from '../repo-path.js';
 import { SharedRpc } from '../rpc.js';
 
 vi.mock('monaco-editor/esm/vs/editor/edcore.main.js', () => {
@@ -153,6 +154,11 @@ export function installAppShellTestSetup() {
 
   beforeEach(async () => {
     SharedRpc.reset();
+    // Same reason, and it is the shell that publishes it: a test that lets
+    // `_fetchCurrentState` run leaves the repo root set for every test after
+    // it, and a path a later test expects to come out absolute would come
+    // out relative instead.
+    resetRepoRoot();
     vi.useRealTimers();
     localStorage.clear();
     _origFetchContextUsage = AppShell.prototype._fetchContextUsage;
@@ -183,6 +189,7 @@ export function installAppShellTestSetup() {
       }
     }
     SharedRpc.reset();
+    resetRepoRoot();
     AppShell.prototype._fetchContextUsage = _origFetchContextUsage;
     const { FilesTab } =
       await import('../files-tab/index.js');

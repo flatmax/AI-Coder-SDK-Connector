@@ -277,6 +277,26 @@ Used for:
 - Original (left) always read-only
 - Modified (right) always editable — user can make changes and save regardless of whether the file has uncommitted changes
 - Response normalization — the content RPC may return a plain string or an object with a content field; handler accepts both shapes
+
+### When Neither Side Can Be Read
+
+One failure is tolerated because the other side answers: no HEAD means the file is new, no working copy means it was deleted, and in both cases what renders is a reading of the repo. Two failures are not the same thing scaled up. Nothing was read, so there is no reading — and the viewer used to render that as an empty document marked new, which the user could scroll and select and take for a fact about their repo. The only trace of the refusal behind it was one unattributed line on the server's stderr.
+
+So the fetch reports an error when, and only when, both calls fail. **The discriminator is the shape of the failure, never its text.** A message test would have to know that `File not found` means deleted and `Absolute paths not accepted` means refused, which is a table that goes stale the first time the backend rewords anything; "how many sides answered" is a fact the fetch already has.
+
+The message reported is the working copy's. The HEAD call's error is git's stderr about a ref, which answers a question the user did not ask.
+
+What happens on a failure is that nothing changes. An `openFile` that cannot read leaves whatever was already open in place, and a `refreshActiveFile` that cannot read keeps the buffer it has — stale content the user may still be reading beats a blank pane, and the toast is what makes it stale-and-said-so. Replacing a real file with an empty one would be a second thing needing explanation.
+
+**No RPC published is not this case.** That is the pre-connection state of a freshly loaded page; the health banner already says so, and a toast per open would be a second voice on a condition that is on screen.
+
+The server half of the same event is [rpc-transport.md](../1-foundation/rpc-transport.md#when-a-service-method-raises) — fixing either half alone would have been enough to make the original bug reportable, which is why both are done.
+
+**This is the only implementation of it.** `fetch.js` is the one owner of "read a file out of the repo", and the SVG viewer imports it rather than holding the copy it used to ([svg-viewer.md](svg-viewer.md#when-neither-side-can-be-read)) — so everything above is a rule about both viewers rather than a rule this one follows and the other one resembles.
+
+### Toasts Go To The Shell
+
+The viewer asks for a toast the way every other component does: a `window` event named `aic-toast`. It previously dispatched `show-toast` on itself — a name the shell has never listened for, on a target it does not listen on — so its export and copy failures went nowhere for as long as the feature had existed. Nothing had noticed because the failures are rare and their absence looks like success.
 ### Editor Reuse
 - Single diff editor instance created on first `openFile`, reused across subsequent opens
 - Every open disposes the old model pair and creates a new one on the existing editor
@@ -318,6 +338,8 @@ The virtual-comparison slot is tracked separately with:
 
 At most one of the two slots is active at any time; opening a real file clears the virtual slot and vice versa.
 
+The content fetch returns a separate shape, and it is not the file object: original, modified, new-file flag, and an error that is a string only when neither side could be read. A caller builds a file object from it or reports the error; it never does both, and there is no fetch result that carries content *and* an error.
+
 ## Invariants
 - Editor configuration installation precedes any editor construction — worker setup and MATLAB tokenizer registration must happen at module load time
 - Component-level patch flag for cross-file navigation prevents override-closure chains regardless of how many times the editor is recreated
@@ -328,4 +350,7 @@ At most one of the two slots is active at any time; opening a real file clears t
 - Cross-file Monaco Go-to-Definition dispatches `navigate-file` on the window; it never calls the viewer's `openFile` directly, so the app shell's full pipeline (grid registration, collab broadcast, last-open persistence, viewer switch) always runs
 - Scroll-lock mutex in markdown preview prevents infinite feedback loops between editor and preview scrolling
 - Preview image resolution runs as a post-processing step; never blocks initial render
+- A fetch that fails on both sides never becomes a rendered document — the viewer's content is always something the backend actually returned
+- A failed open or refresh leaves the viewer's current state untouched; the report is a toast, never a blanked pane
+- Toast requests go to `window` under the shell's event name — a component that invents its own name is dispatching into nothing
 - Preview export reuses the live DOM after awaiting image resolution; it never re-renders from the source markdown, so anything visible in the preview pane is what gets exported (and vice versa — anything not in the live DOM is not in the export)

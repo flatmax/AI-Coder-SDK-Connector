@@ -180,7 +180,12 @@ A turn is not only the user's typed text. The server prepends a small, determini
 describing UI state the agent cannot otherwise see:
 
 - The active file in the viewer, and the cursor or selection range when the user invoked from an
-  editor gesture.
+  editor gesture. **The file is sent, the range is not** (verified 2026-08-28): the shell pushes the
+  active file as the viewers report it ([`../5-webapp/shell.md`](../5-webapp/shell.md) § *Telling the
+  Server What Is Open*), and nothing plumbs a selection out of either editor.
+  [`../next.md`](../next.md) § C7 holds the reasoning, including why a lagging range would be worse than
+  none. Both arrive through `set_viewer_state`; the per-turn `viewer` argument is always null and this
+  is the fallback it falls back to, deliberately, so the field has one writer.
 - Review-mode facts when review is active (branch, merge-base) — see
   [`../4-features/code-review.md`](../4-features/code-review.md).
 
@@ -552,10 +557,51 @@ the set someone watching a turn go by reaches for.
 | MCP server (ours) fails to start | Session continues without the `aic-dc` tools; a banner reports the loss, because the agent will otherwise appear inexplicably worse at repo-wide questions. |
 | The CLI writes to stderr | Logged, and the last 20 lines are kept on `EngineHealth` and rendered in the health banner. Deliberately **not** a health problem in itself: the CLI writes routine chatter there, so the tail can neither open the banner nor undo a dismissal — it is context underneath whatever did open it. The case it was added for is a connect that fails, where the CLI's own words are the only diagnosis and the banner is already open. |
 
+### A failed start is recorded, not only announced
+
+Everything in the table above is *live*. A connect that fails sets `last_error`, writes a log line,
+broadcasts `engineHealth`, and returns an error to its one caller — and all four die with the process.
+The log line goes to whatever terminal launched the server, which for a desktop launch is nowhere; the
+broadcast reaches whichever browsers happened to be listening at that instant. So a user who saw an
+authentication error on a cold start, closed the terminal, and came back to ask what it said had no way
+to find out, and neither did anyone reading the repo afterwards.
+
+A failed start therefore also appends to **`.aic-dc/engine-errors.jsonl`**, before the broadcast, so the
+durable record exists even if the process dies between the two.
+
+**It is a second file rather than a seventh event type in `events.jsonl`, and the reason is structural
+rather than tidiness.** Every record in the events log is rendered inside a session's transcript, so one
+with no session is *dropped* — and a connect that fails on authentication is exactly a failure with no
+session, because the failure is why there is no session. Writing it under a placeholder ID would put it
+in somebody else's history. The two files answer different questions: what the user did in a session,
+and why the engine would not run.
+
+**A record carries the state that explains the failure, not just the message** — the resolved binary,
+the credential source, and the tail of the CLI's own stderr. For an authentication failure the
+credential source *is* the diagnosis, and it is the one fact no live surface keeps once the process is
+gone. The stderr tail is copied rather than referenced, because `EngineHealth`'s ring keeps mutating and
+a later session's chatter reported against this failure would be worse than none.
+
+**Nothing is deduplicated and nothing is capped.** A relaunch loop that fails forty times writes forty
+records, because forty is the fact worth seeing and collapsing it would hide the loop — the same
+position `note_cli_stderr` takes on repeated stderr. Readers ask for a tail rather than the whole file,
+which is what keeps an unbounded archive cheap to consume.
+
+**Turn-time failures are deliberately absent.** A turn that fails has a session, reaches the browser as
+a `streamComplete` carrying `terminal_reason`, and is visible in the transcript it belongs to. Recording
+it here would be the second account of one event that `events.jsonl` already refuses to keep.
+
+The browser reads it through `get_engine_errors` and renders it in the Context tab's Debug section
+beside the live health it explains — see [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)
+§ *Engine*.
+
 ## Invariants
 
 - Exactly one connected `ClaudeSDKClient` per process; it is never re-created behind the user's
   back to recover from an error.
+- A start that fails leaves a durable record before it announces itself, and never fails *harder* for
+  having tried: a recorder that cannot write is counted and swallowed, so the engine's own error is
+  what the caller receives rather than a disk error in its place.
 - Every server-push event carries the request ID of the turn it belongs to; the transport never
   assumes a singleton turn.
 - The message pump runs to `ResultMessage` for every turn, including cancelled and errored turns,

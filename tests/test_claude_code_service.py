@@ -47,6 +47,22 @@ REQUEST_ID = "1736956800000-a1b2c3"
 PNG = "data:image/png;base64,aGk="
 
 
+def _control_timeout(subtype: str) -> Exception:
+    """The exception the SDK really raises when a control request times out.
+
+    Built to shape rather than approximated, because the shape is the whole
+    of what the service can key on: ``Query._send_control_request`` raises a
+    *bare* ``Exception`` — the failure has no class of its own — and chains
+    the ``TimeoutError`` from ``anyio.fail_after`` underneath it as
+    ``__cause__``. A test that skipped the cause would be testing a
+    different exception from the one production sees, and would pass against
+    a service that only pattern-matched the message.
+    """
+    exc = Exception(f"Control request timeout: {subtype}")
+    exc.__cause__ = TimeoutError()
+    return exc
+
+
 class FakeConfig:
     def __init__(self, repo_root, config_dir=None, aic_dc_dir=None):
         self.repo_root = repo_root
@@ -76,6 +92,23 @@ class FakeSession:
         self.connected = False
         self.session_id = None
         self.streaming_active = False
+        # `None` the way the real property reports "not compacting", which is
+        # every state a test sets up unless it says otherwise.
+        self.compaction_state = None
+        # `None` the way the real property reports "the CLI has never sent a
+        # rate limit", which is every session that has not been near one.
+        self.rate_limit = None
+        # Every window the account has open, which the real session keys by
+        # `rate_limit_type`. Empty rather than None: the property returns a
+        # list, and a session that has heard nothing has heard nothing about
+        # zero windows rather than about an unknown number of them.
+        self.rate_limits = []
+        # No priced result and no connect, so no cost and no clock.
+        self.session_usage = {
+            "total_cost_usd": None,
+            "model_usage": None,
+            "duration_seconds": None,
+        }
         self.permission_mode = "default"
         self.model = None
         self.config = EngineConfig()
@@ -331,6 +364,26 @@ def events():
     return Recorder()
 
 
+class FakeAccountUsage:
+    """The account reader, stubbed — **no test may reach the network**.
+
+    ``get_account_usage`` is the one RPC on this service that talks to
+    something other than the engine: it reads ``api.anthropic.com`` for the
+    rate-limit windows the CLI's own ``/usage`` shows. The collaboration
+    suite below *calls every read-only method* to prove a participant is
+    not refused, so without this stub that sweep would fire a real HTTPS
+    request with the developer's OAuth token — slow, offline-fragile, and
+    a test asserting on somebody's actual weekly usage.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    async def snapshot(self, *, force=False):
+        self.calls.append(force)
+        return {"ok": True, "windows": [], "fetched_at": "2026-08-29T00:00:00+00:00"}
+
+
 @pytest.fixture
 def service(tmp_path, events):
     """A service on a fake engine, with no CLI anywhere in sight."""
@@ -340,6 +393,7 @@ def service(tmp_path, events):
         engine_config=EngineConfig(),
     )
     svc.session = FakeSession()
+    svc._account_usage = FakeAccountUsage()
     return svc
 
 
@@ -625,6 +679,153 @@ class TestLazyConnect:
         await service.connect_engine()
         service.session.health.last_error = "broken pipe"
         assert service.get_engine_health()["last_error"] == "broken pipe"
+
+
+class TestTheEngineErrorRecord:
+    """A failed start has to survive the process it happened in.
+
+    Before this, the four things ``connect_engine`` did on failure were all
+    ephemeral — a log line to whatever terminal launched the server, a
+    broadcast to whichever browsers were listening, a health record in
+    memory, and a return value with one caller. An authentication error on a
+    cold start therefore left nothing at all
+    (``specs5/next.md`` § C9; ``specs5/3-engine/session.md``).
+    """
+
+    @pytest.fixture
+    def failing(self, service):
+        service.session.connect_error = EngineStartupError(
+            "Could not start a Claude Code session: invalid API key"
+        )
+        service.session.health.credential_source = "ANTHROPIC_API_KEY"
+        service.session.health.note_cli_stderr("error: not authenticated")
+        return service
+
+    async def test_a_failed_start_is_written_to_disk(self, failing):
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["kind"] == "startup_failed"
+        assert "invalid API key" in record["message"]
+
+    async def test_the_record_survives_the_service_that_wrote_it(
+        self, failing, tmp_path, events
+    ):
+        """The point of the file. A second service over the same repo reads
+        what the first one's failure said, which is what a user who closed
+        the terminal has to be able to do."""
+        await failing.connect_engine()
+        reader = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        reader.session = FakeSession()
+        assert "invalid API key" in (await reader.get_engine_errors())["errors"][0][
+            "message"
+        ]
+
+    async def test_it_carries_the_credentials_that_explain_an_auth_failure(
+        self, failing
+    ):
+        """The diagnosis, and the one fact no live surface keeps once the
+        process is gone."""
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["credential_source"] == "ANTHROPIC_API_KEY"
+        assert record["cli_stderr"] == ["error: not authenticated"]
+
+    async def test_it_is_recorded_with_no_session_at_all(self, failing):
+        """The case ``events.jsonl`` structurally cannot hold: a connect that
+        fails on auth is a failure with no session, which is why this is a
+        second file rather than a seventh event type."""
+        assert failing.session.session_id is None
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["session_id"] is None
+
+    async def test_the_operational_log_is_left_alone(self, failing):
+        """Two files, two questions. An engine failure is not something the
+        user did in a session, and a record of it in the transcript would be
+        rendered against a conversation it did not belong to."""
+        await failing.connect_engine()
+        assert await failing.events_log.load() == []
+
+    async def test_a_successful_connect_records_nothing(self, service):
+        await service.connect_engine()
+        assert await service.engine_log.load() == []
+
+    async def test_every_attempt_is_recorded(self, failing):
+        """Not deduplicated: three records is a relaunch loop, and one
+        record would hide that it repeated."""
+        for _ in range(3):
+            failing.session.ready = False
+            await failing.connect_engine()
+        assert len(await failing.engine_log.load()) == 3
+
+    async def test_a_recorder_that_throws_never_replaces_the_engines_error(
+        self, failing
+    ):
+        """This runs on a path that is already failing. A disk error here
+        would be reported in place of the reason the engine did not start."""
+
+        class Exploding:
+            async def append(self, *args, **kwargs):
+                raise OSError("the filesystem went away")
+
+        failing.engine_log = Exploding()
+        answer = await failing.connect_engine()
+        assert answer["reason"] == "startup_failed"
+        assert "invalid API key" in answer["error"]
+
+    async def test_a_run_with_no_repo_records_nothing_and_still_answers(
+        self, events, tmp_path
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        svc.session.connect_error = EngineStartupError("claude not found")
+        assert svc.engine_log is None
+        answer = await svc.connect_engine()
+        assert answer == {"error": "claude not found", "reason": "startup_failed"}
+
+    async def test_the_reader_says_why_it_has_nothing_without_a_repo(
+        self, events, tmp_path
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        answer = await svc.get_engine_errors()
+        assert answer["reason"] == "no_repo"
+        assert "errors" not in answer
+
+    async def test_the_reader_answers_a_dict_not_a_bare_list(self, service):
+        """"No failures" and "could not read the file" render identically as
+        a bare list, which is the fault the history reads' error handling
+        exists to correct — applied here at the point of writing."""
+        assert await service.get_engine_errors() == {"errors": []}
+
+    async def test_a_read_that_fails_says_so(self, service):
+        class Exploding:
+            async def load(self, limit=None):
+                raise OSError("the filesystem went away")
+
+        service.engine_log = Exploding()
+        answer = await service.get_engine_errors()
+        assert "the filesystem went away" in answer["error"]
+        assert "errors" not in answer
+
+    async def test_the_reader_returns_a_bounded_tail_by_default(self, failing):
+        from aic_dc.claude_code.engine_log import DEFAULT_TAIL
+
+        for _ in range(DEFAULT_TAIL + 3):
+            failing.session.ready = False
+            await failing.connect_engine()
+        assert len((await failing.get_engine_errors())["errors"]) == DEFAULT_TAIL
+        assert len((await failing.get_engine_errors(2))["errors"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1332,6 +1533,37 @@ class TestEventDispatch:
         assert payload["context_usage"] == {"total_tokens": 1000}
         assert payload["disk_warning"] is None
 
+    async def test_the_turn_prints_a_terminal_hud_beside_the_browser_event(
+        self, service, caplog
+    ):
+        """`next.md` § B6: two spec files assert this and nothing checked.
+
+        The wiring is the part worth pinning rather than the formatting —
+        `turn_hud.py` has its own tests. What can only break here is the
+        footer never reaching the post-turn pass that holds the context
+        figure, which is the one thing the two halves of the block need.
+        """
+        with caplog.at_level(logging.INFO, logger="aic_dc.claude_code.turn_hud"):
+            await send(service)
+        blocks = [r.getMessage() for r in caplog.records if "Turn summary" in r.getMessage()]
+        assert len(blocks) == 1
+        assert "Turn:" in blocks[0]
+
+    async def test_a_stale_footer_is_never_printed_under_a_later_turns_context(
+        self, service, caplog
+    ):
+        """The footer slot is popped, not left for the next post-turn pass.
+
+        `_post_response` runs a second time when background work ends, and
+        without the pop that run would reprint the first result's figures
+        beside the second's context usage — two turns' facts in one block.
+        """
+        with caplog.at_level(logging.INFO, logger="aic_dc.claude_code.turn_hud"):
+            await send(service)
+            await service._post_response(REQUEST_ID)
+        blocks = [r.getMessage() for r in caplog.records if "Turn summary" in r.getMessage()]
+        assert len(blocks) == 1
+
     async def test_background_work_ending_runs_the_housekeeping_again(
         self, service, events
     ):
@@ -1625,6 +1857,8 @@ class TestState:
         assert set(state) == {
             "messages",
             "denied_read_files",
+            "rate_limits",
+            "session_usage",
             "session_id",
             "repo_name",
             "repo_root",
@@ -1632,6 +1866,8 @@ class TestState:
             "engine_ready",
             "streaming_active",
             "active_streams",
+            "compaction",
+            "rate_limit",
             "permission_mode",
             "model",
             "pending_permissions",
@@ -1644,6 +1880,18 @@ class TestState:
             "doc_convert_available",
             "disk_warning",
         }
+
+    async def test_the_snapshot_carries_the_rate_limit_record(self, service):
+        """The HUD's Rate limits section has no other way to learn the figure.
+
+        The CLI emits a rate limit on a status *change*, so a browser that
+        reloads between transitions never sees the push — this snapshot is the
+        only thing that tells it, and it may be hours before another arrives.
+        """
+        assert (await service.get_current_state())["rate_limit"] is None
+        service.session.rate_limit = {"status": "allowed_warning", "utilization": 0.9}
+        state = await service.get_current_state()
+        assert state["rate_limit"]["utilization"] == 0.9
 
     async def test_current_state_reports_the_engine_as_not_yet_ready(self, service):
         state = await service.get_current_state()
@@ -1828,6 +2076,27 @@ class TestLiveControls:
         assert answer["usage"] == {"total_tokens": 1000}
         assert answer["fetched_at"].startswith("20")
 
+    async def test_account_usage_answers_with_no_engine(self, service):
+        """**Not a control request.**
+
+        Every other read in this section asks the running CLI something and
+        fails with ``no-engine`` when there is none. The account's
+        rate-limit windows come from Anthropic directly, which is the whole
+        point: the reader who has been cut off by a weekly limit has no
+        session to interrogate, and that is exactly when they come looking
+        for the figure.
+        """
+        service.session.control_error = EngineNotReadyError("not connected")
+        answer = await service.get_account_usage()
+        assert answer["ok"] is True
+        assert service.session.control_calls == []
+
+    async def test_account_usage_passes_a_forced_read_through(self, service):
+        """Refresh means refresh — the cache is bypassed, not consulted."""
+        await service.get_account_usage()
+        await service.get_account_usage(True)
+        assert service._account_usage.calls == [False, True]
+
     async def test_context_usage_on_a_cold_engine_reports_the_reason(self, service):
         service.session.control_error = EngineNotReadyError("not connected")
         assert await service.get_context_usage() == {
@@ -1861,51 +2130,89 @@ class TestLiveControls:
         answer = await service.get_context_usage()
         assert "reason" not in answer
 
-    async def test_a_memory_file_inside_the_repo_gets_a_relative_path(self, service):
-        """The Context tab can only open what the repo layer will read.
+    async def test_a_control_timeout_is_logged_without_a_traceback(self, service, caplog):
+        """One sentence, not a stack of SDK plumbing.
 
-        Every repo read takes a path relative to the root and rejects
-        absolute ones, so a clickable absolute path would be a row that
-        does nothing.
+        Every frame between here and the ``anyio.fail_after`` belongs to the
+        SDK, so the traceback tells a reader nothing the message does not —
+        and this is the failure a *polled* caller repeats, which is how four
+        of them ended up in one log describing a loss the health banner had
+        already reported. Pinned on ``exc_info`` rather than on the text,
+        because that is what makes a log entry a traceback.
+        """
+        service.session.control_error = _control_timeout("context_usage")
+        with caplog.at_level(logging.WARNING):
+            answer = await service.get_context_usage()
+        assert answer["reason"] == "failed"
+        assert "Control request timeout" in caplog.text
+        assert [r.exc_info for r in caplog.records] == [None]
+
+    async def test_an_unexpected_control_failure_keeps_its_stack(self, service, caplog):
+        """The other half. Only the known shape loses its traceback.
+
+        Being wrong about which is which must fail towards a noisy log, never
+        a quiet one, so anything that is not demonstrably the SDK's deadline
+        is still worth a stack.
+        """
+        service.session.control_error = RuntimeError("something unforeseen")
+        with caplog.at_level(logging.WARNING):
+            answer = await service.get_context_usage()
+        assert answer["reason"] == "failed"
+        assert [r.exc_info is not None for r in caplog.records] == [True]
+
+    async def test_a_timeout_without_a_cause_still_gets_a_stack(self, service, caplog):
+        """The check reads the chained cause, not the wording.
+
+        The message is prose the SDK is free to reword, and a check a reword
+        could silence would be worse than none. So a bare exception that only
+        *says* timeout is treated as unclassified — which costs a traceback
+        and never a missing one.
+        """
+        service.session.control_error = RuntimeError("Control request timeout: x")
+        with caplog.at_level(logging.WARNING):
+            await service.get_context_usage()
+        assert [r.exc_info is not None for r in caplog.records] == [True]
+
+    async def test_every_control_request_shares_the_timeout_rule(self, service, caplog):
+        """Not just the polled one.
+
+        The reasoning is about control requests, not about this RPC, so a
+        rule that lived in one handler would be incidental. `get_context_usage`
+        is only the caller that repeats it.
+        """
+        service.session.control_error = _control_timeout("mcp_status")
+        with caplog.at_level(logging.WARNING):
+            await service.get_mcp_status()
+        await service.set_model("claude-opus-5")
+        await service.stop_task("task-1")
+        await service.get_server_info()
+        assert len(caplog.records) == 4
+        assert [r.exc_info for r in caplog.records] == [None, None, None, None]
+
+    async def test_memory_files_cross_the_wire_unenriched(self, service):
+        """The service adds no name of its own to a memory file.
+
+        It used to add ``relPath`` — the repo-relative name, for rows
+        inside the root — which told the Context tab both what to label
+        the row and whether to make it clickable. Both are renderings,
+        and the browser owns that rule (``repo-path.js``); a second
+        answer here is the duplication ``specs5/next.md`` § C3 removes.
+        Asserted on a path *inside* the root, because that is the case
+        the enrichment used to change: an untouched list is the whole
+        contract now.
         """
         root = service._repo_root
         (root / ".claude").mkdir(parents=True, exist_ok=True)
         (root / ".claude" / "CLAUDE.md").write_text("hi", encoding="utf-8")
-        service.session.context_usage = {
-            "memoryFiles": [
-                {"path": str(root / ".claude" / "CLAUDE.md"), "tokens": 27},
-            ],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
-            {
-                "path": str(root / ".claude" / "CLAUDE.md"),
-                "tokens": 27,
-                "relPath": ".claude/CLAUDE.md",
-            },
-        ]
-
-    async def test_a_memory_file_outside_the_repo_is_left_unmarked(self, service):
-        """A user-level CLAUDE.md is genuinely unopenable from here."""
-        service.session.context_usage = {
-            "memoryFiles": [{"path": "/home/someone/.claude/CLAUDE.md", "tokens": 3}],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
+        reported = [
+            {"path": str(root / ".claude" / "CLAUDE.md"), "tokens": 27},
             {"path": "/home/someone/.claude/CLAUDE.md", "tokens": 3},
-        ]
-
-    async def test_memory_file_marking_survives_junk(self, service):
-        service.session.context_usage = {
-            "memoryFiles": [{"tokens": 1}, "nonsense", {"path": ""}, {"path": 7}],
-        }
-        answer = await service.get_context_usage()
-        assert answer["usage"]["memoryFiles"] == [
             {"tokens": 1},
             "nonsense",
-            {"path": ""},
-            {"path": 7},
         ]
+        service.session.context_usage = {"memoryFiles": reported}
+        answer = await service.get_context_usage()
+        assert answer["usage"]["memoryFiles"] == reported
 
     async def test_a_payload_without_memory_files_passes_through(self, service):
         service.session.context_usage = {"totalTokens": 5, "memoryFiles": None}
@@ -2110,9 +2417,22 @@ GATED_METHODS: dict[str, tuple] = {
 # (``specs5/4-features/collaboration.md`` § Read-Only).
 READ_ONLY_METHODS: dict[str, tuple] = {
     "get_engine_health": (),
+    # Why the engine would not start. The same facts about the same engine
+    # as the line above — resolved binary, credential source — and a
+    # participant watching a session that will not start is entitled to the
+    # reason rather than to a spinner.
+    "get_engine_errors": (),
     "get_current_state": (),
     "get_denied_read_files": (),
     "get_context_usage": (),
+    # The host's rate-limit windows. Account data rather than session data,
+    # so it is worth stating why a participant may read it: the engine's
+    # `rateLimit` events are **already broadcast to every client**, and a
+    # window that has stopped the session is the reason the session has
+    # stopped. Gating the reading while pushing the alarm would leave a
+    # participant knowing something is wrong and unable to see what.
+    # Nothing here is a credential; it is percentages and reset times.
+    "get_account_usage": (),
     "get_mcp_status": (),
     "get_server_info": (),
     # The model in force, and the menu. Reading it is not the same as
@@ -2152,6 +2472,10 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "history_load": ("sess-1",),
     "history_image": ("sess-1", "sess-1-u1", 0),
     "history_search": ("parser",),
+    # The size of that history, for the same reason: it is a figure about
+    # what a participant may already read, and the deletion it argues for
+    # is gated where deletion happens.
+    "get_session_storage": (),
     "list_subagent_transcripts": (),
     "get_subagent_transcript": ("a1",),
 }
@@ -2441,6 +2765,46 @@ class TestSessionStoreWiring:
         )
 
 
+class TestKeywordEnrichmentPreference:
+    """``doc_index.keywords_enabled`` reaches the builder, and stays live.
+
+    Before this wiring the key was parsed by ``ConfigManager`` and read by
+    nobody: ``app.json`` documented a switch, the Settings tab now offers
+    one, and enrichment ran regardless of both.
+    """
+
+    def test_the_builder_gets_a_callable_not_a_boolean(self, tmp_path, events):
+        """A boolean captured here would pin the value the app started with.
+
+        The builder is constructed once per process and ``app.json`` is
+        reloadable, so the preference has to be a question the builder can
+        ask again — otherwise the Settings switch needs a relaunch, and
+        that tab has no way to say so.
+        """
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        assert callable(svc.doc_builder._enrichment_enabled)
+        assert svc.doc_builder._enrichment_enabled == svc._keyword_enrichment_enabled
+
+    def test_it_reads_the_config_each_time_it_is_asked(self, tmp_path, events):
+        config = FakeConfig(tmp_path)
+        config.doc_index_config = {"keywords_enabled": True}
+        svc = ClaudeCodeService(
+            config, event_callback=events, engine_config=EngineConfig()
+        )
+        assert svc._keyword_enrichment_enabled() is True
+        config.doc_index_config = {"keywords_enabled": False}
+        assert svc._keyword_enrichment_enabled() is False
+
+    def test_a_config_without_the_key_leaves_enrichment_on(self, tmp_path, events):
+        """Absent means on, the same way ``ConfigManager`` reads it."""
+        svc = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        assert svc._keyword_enrichment_enabled() is True
+
+
 class TestTheDiskWarning:
     """One sentence, once, about the one thing under `.aic-dc/` that does
     not rebuild.
@@ -2543,6 +2907,96 @@ class TestTheDiskWarning:
         assert await service._disk_warning() is None
         service._config.history_config = {"session_dir_warning_bytes": 4_000}
         assert await service._disk_warning() is not None
+
+
+class TestTheReadableSessionSize:
+    """The same measurement as the warning, asked for rather than announced.
+
+    ``get_session_storage`` walks the same directory against the same
+    threshold, and the whole point of it being a separate method is the
+    latch: a Settings tab that borrowed ``_disk_warning`` would spend the
+    one-shot on a user who had not seen it
+    (``specs5/5-webapp/settings.md`` § Session Controls).
+    """
+
+    @pytest.fixture
+    def over_threshold(self, service, monkeypatch):
+        from aic_dc.claude_code import service as service_mod
+
+        monkeypatch.setattr(
+            service.session_store,
+            "total_bytes",
+            lambda: service_mod.DISK_WARNING_BYTES + 1,
+        )
+        return service
+
+    async def test_a_small_directory_is_a_size_and_a_no(self, service, monkeypatch):
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 4_096)
+        assert await service.get_session_storage() == {
+            "bytes": 4_096,
+            "over_warning": False,
+        }
+
+    async def test_a_big_directory_is_a_size_and_a_yes(self, over_threshold):
+        result = await over_threshold.get_session_storage()
+        assert result["over_warning"] is True
+        assert result["bytes"] > 1024 * 1024 * 1024
+
+    async def test_the_browser_is_handed_the_verdict_not_the_threshold(
+        self, over_threshold
+    ):
+        """``EngineHealth``'s rule, applied to the one other number a tab
+        could be tempted to compare for itself: the configured limit stays
+        here, in the one place the user edits it."""
+        assert set(await over_threshold.get_session_storage()) == {
+            "bytes",
+            "over_warning",
+        }
+
+    async def test_reading_the_figure_does_not_spend_the_warning(self, over_threshold):
+        """The load-bearing one. Opening Settings measures the directory,
+        and the turn that ends afterwards still gets to say the sentence."""
+        await over_threshold.get_session_storage()
+        await over_threshold.get_session_storage()
+        assert over_threshold._disk_warned is False
+        assert await over_threshold._disk_warning() is not None
+
+    async def test_a_spent_warning_does_not_silence_the_figure(self, over_threshold):
+        """And the other direction: the latch is the warning's, not the
+        measurement's, so a card opened after the sentence still reads."""
+        assert await over_threshold._disk_warning() is not None
+        assert (await over_threshold.get_session_storage())["over_warning"] is True
+
+    async def test_the_threshold_comes_from_app_json(self, service, monkeypatch):
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 5_000)
+        service._config.history_config = {"session_dir_warning_bytes": 4_000}
+        assert (await service.get_session_storage())["over_warning"] is True
+        service._config.history_config = {"session_dir_warning_bytes": 6_000}
+        assert (await service.get_session_storage())["over_warning"] is False
+
+    async def test_a_size_that_cannot_be_read_is_reported(self, service, monkeypatch):
+        """Where the warning swallows the failure, this one says it: the
+        size *is* the answer here, so silence would leave a blank card with
+        no account of why."""
+
+        def boom():
+            raise OSError("the filesystem went away")
+
+        monkeypatch.setattr(service.session_store, "total_bytes", boom)
+        result = await service.get_session_storage()
+        assert "the filesystem went away" in result["error"]
+        assert "bytes" not in result
+
+    async def test_without_a_store_there_is_nothing_to_measure(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        result = await svc.get_session_storage()
+        assert result["reason"] == "no_repo"
+        assert "bytes" not in result
 
 
 class TestTheMirrorGapTolerance:

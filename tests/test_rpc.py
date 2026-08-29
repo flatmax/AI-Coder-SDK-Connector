@@ -30,6 +30,7 @@ from aic_dc.rpc import (
     EventLoopHandle,
     RpcServer,
     find_available_port,
+    summarise_rpc_params,
 )
 
 
@@ -362,6 +363,180 @@ class TestRpcServerAddService:
         await server.stop()
         # Does not raise.
         server.add_service(object())
+
+
+class _FailingService:
+    """Service whose methods raise, for the failed-call log tests."""
+
+    def refuse(self, path: str) -> str:
+        """Raise the way ``Repo.get_file_content`` refuses a path."""
+        raise ValueError(f"Absolute paths not accepted: {path}")
+
+    async def refuse_async(self, path: str) -> str:
+        """Same, from a coroutine — jrpc-oo's other error path."""
+        raise ValueError(f"Absolute paths not accepted: {path}")
+
+    def succeed(self, value: str) -> str:
+        """Return the argument. Proves success logs nothing."""
+        return value
+
+
+def _exposed_wrapper(server: RpcServer, name: str) -> Any:
+    """The registered jrpc-oo wrapper for ``Namespace.method``."""
+    return server._inner.classes[-1][name]
+
+
+class TestFailedCallContext:
+    """A failed RPC leaves a record naming the call that failed.
+
+    jrpc-oo prints a bare ``Failed: {e}`` with no method name and no
+    arguments, which is one half of ``specs5/next.md`` § C2 — the
+    other half being a viewer that renders the failure as empty
+    content. These pin the half that lives on this side.
+    """
+
+    def test_failure_logs_method_name_and_arguments(
+        self, caplog: Any
+    ) -> None:
+        """The log line names the call, not just the exception."""
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        wrapper = _exposed_wrapper(server, "Repo.refuse")
+        with caplog.at_level("ERROR", logger="aic_dc.rpc"):
+            wrapper({"args": ["/home/you/repo/a.py"]}, lambda e, r: None)
+        assert "Repo.refuse" in caplog.text
+        assert "/home/you/repo/a.py" in caplog.text
+        assert "Absolute paths not accepted" in caplog.text
+
+    def test_error_reaching_the_caller_is_unchanged(self) -> None:
+        """The browser receives exactly what it received before.
+
+        The wrapper substitutes the callback and nothing else, so
+        adding the log cannot change what a client sees — which is
+        what makes this safe to install on every service.
+        """
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        wrapper = _exposed_wrapper(server, "Repo.refuse")
+        seen: list[Any] = []
+        wrapper(
+            {"args": ["/tmp/x.py"]},
+            lambda error, result: seen.append((error, result)),
+        )
+        assert seen == [
+            ("Absolute paths not accepted: /tmp/x.py", None)
+        ]
+
+    async def test_async_failure_is_logged_too(
+        self, caplog: Any
+    ) -> None:
+        """Coroutine methods take jrpc-oo's other error branch.
+
+        ``Async method failed`` is printed from inside a task the
+        wrapper spawns, so the callback substitution has to survive
+        the hop — hence a separate case rather than a parametrise.
+        """
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        wrapper = _exposed_wrapper(server, "Repo.refuse_async")
+        done: asyncio.Event = asyncio.Event()
+        with caplog.at_level("ERROR", logger="aic_dc.rpc"):
+            wrapper(
+                {"args": ["/srv/a.py"]},
+                lambda e, r: done.set(),
+            )
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+        assert "Repo.refuse_async" in caplog.text
+        assert "/srv/a.py" in caplog.text
+
+    def test_successful_call_logs_nothing(self, caplog: Any) -> None:
+        """Only failures are recorded — this is not a call trace."""
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        wrapper = _exposed_wrapper(server, "Repo.succeed")
+        with caplog.at_level("ERROR", logger="aic_dc.rpc"):
+            wrapper({"args": ["fine"]}, lambda e, r: None)
+        assert caplog.text == ""
+
+    def test_every_registered_method_is_wrapped(self) -> None:
+        """Registration covers the whole service, not the first one.
+
+        The substitution walks the dict jrpc-oo just appended; if a
+        version bump changed that structure this is the test that
+        reports it, since ``_install_failure_logging`` is deliberately
+        silent about a shape it does not recognise.
+        """
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        exposed = server._inner.classes[-1]
+        assert set(exposed) >= {
+            "Repo.refuse",
+            "Repo.refuse_async",
+            "Repo.succeed",
+        }
+        for name in ("Repo.refuse", "Repo.refuse_async", "Repo.succeed"):
+            assert exposed[name].__name__ == "contextual"
+
+    def test_a_second_service_does_not_double_wrap_the_first(
+        self,
+    ) -> None:
+        """Each registration wraps only its own dict.
+
+        ``_install_failure_logging`` reads ``classes[-1]``; taking the
+        whole list would re-wrap earlier services once per later
+        registration, and five services would log the first one's
+        failures five times.
+        """
+        server = RpcServer()
+        server.add_service(_FailingService(), name="Repo")
+        first = server._inner.classes[0]["Repo.refuse"]
+        server.add_service(_FailingService(), name="Settings")
+        assert server._inner.classes[0]["Repo.refuse"] is first
+
+
+class TestSummariseRpcParams:
+    """Argument rendering — bounded by construction, not by clipping."""
+
+    def test_browser_args_are_flattened(self) -> None:
+        """jrpc-oo delivers browser arguments as ``{"args": [...]}``."""
+        assert summarise_rpc_params({"args": ["a.py", "HEAD"]}) == (
+            "'a.py', 'HEAD'"
+        )
+
+    def test_a_bare_value_is_a_single_argument(self) -> None:
+        """A direct call passes the value rather than an args dict."""
+        assert summarise_rpc_params("a.py") == "'a.py'"
+
+    def test_no_arguments_renders_empty(self) -> None:
+        """A no-arg call reads as ``Namespace.method()``."""
+        assert summarise_rpc_params({"args": []}) == ""
+        assert summarise_rpc_params(None) == ""
+
+    def test_a_long_string_is_clipped_with_its_length(self) -> None:
+        """A pasted screenshot must not become the log line.
+
+        The clip happens before ``repr``, so the multi-megabyte
+        string is never copied — the count at the end is what makes
+        the omission visible rather than silent.
+        """
+        rendered = summarise_rpc_params({"args": ["x" * 5000]})
+        assert len(rendered) < 200
+        assert "(+4880 chars)" in rendered
+
+    def test_containers_are_described_by_shape(self) -> None:
+        """A list or dict argument reports its shape, not contents."""
+        assert summarise_rpc_params({"args": [[1, 2, 3]]}) == "list[3]"
+        assert summarise_rpc_params(
+            {"args": [{"b": 1, "a": 2}]}
+        ) == "{a, b}"
+
+    def test_the_whole_list_is_bounded(self) -> None:
+        """Many arguments cannot add up to an unbounded line."""
+        rendered = summarise_rpc_params(
+            {"args": ["y" * 100 for _ in range(50)]}
+        )
+        assert len(rendered) <= 401
+        assert rendered.endswith("…")
 
 
 class TestRpcServerFactoryHook:

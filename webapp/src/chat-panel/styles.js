@@ -2211,6 +2211,13 @@ export const STYLES = css`
     border-radius: 6px;
     background: rgba(13, 17, 23, 0.4);
     overflow: hidden;
+    /* So the header below can ask how wide *this card* is. The
+     * pane is a dialog the user drags, so its width has
+     * nothing to do with the viewport's and a media query
+     * would be answering the wrong question. Safe on a card
+     * because a card's width comes from the column it is in
+     * and never from its contents. */
+    container-type: inline-size;
     /* Border colour is the status channel, so it has to
      * animate rather than jump when a result lands. */
     transition: border-color 150ms ease;
@@ -2230,13 +2237,49 @@ export const STYLES = css`
   .tool-card.tool-status-denied {
     border-color: rgba(210, 153, 34, 0.4);
   }
-  /* One line, always. The summary truncates rather than
-   * wrapping so a card's height never depends on how
-   * long its arguments were — thirty calls in a turn
-   * means thirty identical rows. */
+  /* Two columns: a metadata rail, then the summary. The rail
+   * holds everything that says what the call is — caret,
+   * status dot, server chip, tool name, invocation time, the
+   * gated marker — and the right column holds nothing but the
+   * arguments, so a turn reads as one content column with the
+   * cards' chrome stacked down its left.
+   *
+   * The chrome used to be a third column pinned to the right
+   * edge, and that cost more than it looked like. The summary
+   * is a single box, and a box narrow enough to clear the time
+   * chip clears it on every line, not only on the line the
+   * chip is on — so the chip was charged to all three or four
+   * lines of a wrapped summary while occupying one.
+   * Folding it left gives the text those pixels back all the
+   * way down, and the rail's second line is free — the
+   * summary wraps to two or three lines on most cards, so the
+   * rail has lines to spend before it is the tallest thing in
+   * the row.
+   *
+   * The rail is a fixed width, not the width of its own widest
+   * line. A column that only lines up when neighbouring cards
+   * happen to agree is not a column: the summary's left edge
+   * would step in and out card by card. Anything wider wraps
+   * inside the rail instead — a long MCP tool name, or a card
+   * restored from another day, whose chip carries a date as
+   * well as a clock. That spends a line of the rail and
+   * nothing of the summary.
+   *
+   * 7rem is the tool name, which is what sets this width —
+   * the clock needs about 66px and the longest built-in name
+   * needs 90 on top of the caret and the dot beside it. The
+   * first try was sized to the clock, and the names too long
+   * for it dropped to a line of their own, leaving a caret and
+   * a dot alone above them: a name is the thing being scanned
+   * for down the rail, so a name whose line number depends on
+   * how many characters it has is the one thing here that
+   * cannot wrap. Read in a browser at 520, 400 and 300px
+   * (DIALOG_MIN_WIDTH), since jsdom does no layout and the
+   * unit tests cannot see any of this. */
   .tool-header {
-    display: flex;
-    align-items: center;
+    display: grid;
+    grid-template-columns: 7rem 1fr;
+    align-items: start;
     gap: 0.4rem;
     width: 100%;
     padding: 0.3rem 0.5rem;
@@ -2252,8 +2295,31 @@ export const STYLES = css`
   .tool-header:hover {
     background: rgba(240, 246, 252, 0.04);
   }
+  .tool-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
+    min-width: 0;
+  }
+  /* One line of the rail — items flow along it and wrap
+   * within the rail's width rather than widening it. */
+  .tool-meta-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+  /* The dot is the one item on the row that is not text,
+   * so top-aligning it with a name that may wrap to two
+   * lines leaves it riding above the first. The margin
+   * drops it to that line's centre; every text item beside
+   * it already lands there, within a pixel, from its own
+   * line box. */
   .tool-dot {
     flex-shrink: 0;
+    margin-top: 0.3rem;
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
@@ -2262,8 +2328,10 @@ export const STYLES = css`
     text-align: center;
   }
   /* Only the awaiting dot carries a glyph (🔒), and it
-   * needs the room. The rest are bare dots. */
+   * needs the room. The rest are bare dots — and a taller
+   * box needs less of a drop to sit on the same line. */
   .tool-dot.status-awaiting {
+    margin-top: 0.15rem;
     width: auto;
     height: auto;
     border-radius: 0;
@@ -2287,58 +2355,67 @@ export const STYLES = css`
     0%, 100% { opacity: 0.35; }
     50% { opacity: 1; }
   }
+  /* Breaks mid-word rather than overflowing the rail. A
+   * built-in's name fits it; an MCP tool's, stripped of its
+   * server prefix, is often two rail lines long, and the rail
+   * would rather be tall than push the summary right. */
   .tool-name {
-    flex-shrink: 0;
+    min-width: 0;
     font-weight: 600;
     font-family: 'SFMono-Regular', Consolas, monospace;
     font-size: 0.78125rem;
+    overflow-wrap: anywhere;
   }
+  /* Every summary wraps, and the elision this replaced was
+   * the whole reason the row was hard to read: the header is
+   * the only place a collapsed card says what the call was
+   * *about*, it carries no tooltip, and an ellipsis eats
+   * exactly the tail that identifies the thing — which file,
+   * which flags, which test. Bash used to be the one
+   * exception; the argument for it was never about Bash.
+   *
+   * "anywhere" rather than "break-word", because the strings
+   * that overflowed are paths and flag runs with no spaces in
+   * them — a summary that may only break at a space is the
+   * one that cannot break at all.
+   *
+   * No line clamp on top of it. toolInputSummary caps the
+   * summary at TOOL_SUMMARY_CHARS, which bounds the card
+   * already — the cap moved out of the engine along with the
+   * render itself (specs5/next.md § C3), so the number this
+   * comment leans on now lives one file away in
+   * block-render.js. (No backticks in here: the whole of
+   * STYLES is one template literal and a stray one ends it.) A
+   * clamp would be a second bound that re-introduced the
+   * ellipsis three rows lower. pre-wrap because a Bash
+   * heredoc arrives with its newlines in it and they are how
+   * it reads. */
   .tool-summary {
-    flex: 1;
+    /* The whole of the second column, so its width is the
+     * pane minus the rail and minus nothing else. It needs no
+     * flex basis to defend itself now: it used to grow into
+     * whatever the chrome on either side left over, which at
+     * DIALOG_MIN_WIDTH was ten pixels and one broken
+     * character per line. */
     min-width: 0;
     color: var(--text-secondary, #8b949e);
     font-family: 'SFMono-Regular', Consolas, monospace;
     font-size: 0.75rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Bash is the exception to the one-line rule above, and
-   * the reason is what the row is for: a command is the one
-   * input that cannot be reconstructed from anywhere else on
-   * the card, and an ellipsis eats exactly the tail that says
-   * what it does — which paths, which flags, which test file.
-   * So it wraps. The engine already caps the summary at
-   * TOOL_INPUT_SUMMARY_CHARS on one collapsed line, and the
-   * clamp bounds it again at three rows, so a long command
-   * costs a couple of lines rather than a screen. */
-  .tool-card[data-tool='Bash'] .tool-header {
-    align-items: flex-start;
-  }
-  /* The dot, the time and the caret sit on the first line
-   * of the wrapped summary rather than at the top of the
-   * block. Bash is the tool most worth timing — it is the
-   * one that hangs — so the chip has to land level with
-   * the row's other chrome on the card that wraps. */
-  .tool-card[data-tool='Bash'] .tool-dot,
-  .tool-card[data-tool='Bash'] .tool-time,
-  .tool-card[data-tool='Bash'] .tool-caret {
-    margin-top: 0.25rem;
-  }
-  .tool-card[data-tool='Bash'] .tool-summary {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    text-overflow: clip;
   }
   /* Which MCP server a call went to. Its own chip
    * because "Edit" from a server and the built-in Edit
-   * are different tools with the same name. */
+   * are different tools with the same name.
+   *
+   * Breaks rather than holding its width: a server name is
+   * whatever someone called their server, and one wider than
+   * the rail overflowed it — into the summary's column, which
+   * is the one place on this card that must not have chrome in
+   * it. Two lines of chip is the cheaper failure. */
   .tool-server-chip {
-    flex-shrink: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 0 0.25rem;
     border-radius: 3px;
     background: rgba(163, 113, 247, 0.15);
@@ -2360,11 +2437,26 @@ export const STYLES = css`
     font-weight: 600;
   }
   /* When the call was made, and while it runs, how long
-   * ago. Rightmost on the row so a column of thirty cards
-   * has its times in a column too — the reason the chip
-   * exists is scanning for the one that has stopped
+   * ago. In the rail, under the tool's name, so a column of
+   * thirty cards has its times in a column too — the reason
+   * the chip exists is scanning for the one that has stopped
    * moving, and that is a comparison down the page rather
-   * than a fact about any single card.
+   * than a fact about any single card. The rail gives it a
+   * better column than the right edge did, because the rail
+   * is a fixed width and the chip starts at the same x on
+   * every card whatever the chip says.
+   *
+   * The clock and the elapsed stack. Side by side, with the
+   * middle dot they used to share, they wanted about 110px:
+   * more than the rail had when this was decided, and inside
+   * the 112px it has now by two pixels, which is not a margin
+   * to design against — a card restored from another day
+   * carries a date in front of the clock and is past it
+   * outright. Stacked, each half has a line of a column with
+   * lines to spare. Neither is pinned against shrinking: a
+   * clock too wide for the rail wraps at the space the locale
+   * put after the date, which is the only break its digits
+   * offer.
    *
    * tabular-nums so a ticking elapsed does not shift the
    * digits beside it four times a second. Secondary colour
@@ -2373,11 +2465,11 @@ export const STYLES = css`
    * healthy, so accenting every one of them would spend
    * the reader's attention on the normal case. */
   .tool-time {
-    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
     font-size: 0.7rem;
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary, #8b949e);
-    white-space: nowrap;
   }
   .tool-elapsed {
     color: var(--text-primary, #c9d1d9);
@@ -2386,6 +2478,40 @@ export const STYLES = css`
     flex-shrink: 0;
     font-size: 0.65rem;
     color: var(--text-secondary, #8b949e);
+  }
+  /* Below this width the rail stops paying for itself and
+   * lies down: one column, with the metadata as a row above
+   * the summary. 7rem out of a 300px pane is over a third of
+   * it, and the summary measured *worse* off there than
+   * before the rail existed — 164px against 231px — because
+   * the layout the rail replaced could drop a squeezed
+   * summary onto a line of its own. A fixed column cannot do
+   * that, so where the trade turns, the rail is what goes.
+   *
+   * A container query and not a media query: the pane is a
+   * dialog the user drags, so the viewport's width is not the
+   * question. The threshold is the card's own width, and
+   * 360px is about where the column beside a rail falls under
+   * thirty characters.
+   *
+   * Last in the section on purpose. A container query adds no
+   * specificity, so every declaration here has to come after
+   * the one it overrides. */
+  @container (max-width: 360px) {
+    .tool-header {
+      grid-template-columns: 1fr;
+    }
+    .tool-meta {
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 0.25rem 0.4rem;
+    }
+    /* Stacking a clock over its elapsed is a rail habit;
+     * across a row there is width for both. */
+    .tool-time {
+      flex-direction: row;
+      gap: 0.3rem;
+    }
   }
   .tool-body {
     border-top: 1px solid rgba(240, 246, 252, 0.08);
@@ -2493,6 +2619,20 @@ export const STYLES = css`
     font-size: 0.7rem;
     cursor: pointer;
     transition: background 120ms ease;
+    /* Same budget the file-summary chips take, and the same
+     * reason: the full path is in the tooltip. Shortening
+     * the label to the repo-relative name (next.md § C4) is
+     * what usually fits it, but a deeply nested path still
+     * won't, and until now nothing here bounded the width —
+     * so one long path stretched the footer row.
+     *
+     * The hidden overflow also resolves this flex item's
+     * automatic minimum size to zero, without which the
+     * content-based minimum would outvote the max-width. */
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .tool-file-chip:hover {
     background: rgba(88, 166, 255, 0.2);

@@ -1,8 +1,13 @@
 """Command-line entry point for ``aic-dc``.
 
-Layer 0 stub — prints a startup banner, parses arguments, and exits. Full
-startup orchestration (port selection, WebSocket server, webapp serving,
-deferred indexing) lands in Layer 6 per specs4/6-deployment/startup.md.
+Parses arguments, prints the startup banner, and hands off to
+:func:`aic_dc.main.run` for startup orchestration (port selection,
+WebSocket server, webapp serving, deferred indexing) per
+specs5/6-deployment/startup.md.
+
+``--check-engine`` is the one flag that does not launch anything: it
+resolves the ``claude`` binary, reports it, and exits. See
+:func:`_check_engine`.
 
 Exposed via the ``aic-dc`` console script declared in pyproject.toml.
 """
@@ -12,6 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from aic_dc import __version__
 from aic_dc.logging_setup import configure as configure_logging
@@ -22,9 +28,8 @@ logger = logging.getLogger(__name__)
 def _build_parser() -> argparse.ArgumentParser:
     """Construct the argparse parser.
 
-    The flag set matches specs4/6-deployment/startup.md#cli-arguments so that
-    flags are stable from day one. Layer 0 only honours --version and --help;
-    other flags are accepted but currently produce a not-implemented banner.
+    The flag set matches specs5/6-deployment/startup.md#cli-arguments so that
+    flags are stable from day one.
     """
     parser = argparse.ArgumentParser(
         prog="aic-dc",
@@ -77,7 +82,120 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable collaboration mode (bind all interfaces, admission-gated)",
     )
+    parser.add_argument(
+        "--check-engine",
+        action="store_true",
+        help=(
+            "Report which claude binary would be used and exit without "
+            "starting a server. Exit 0 when the engine is resolvable and "
+            "answers --version, 1 when no engine can be resolved, 2 when one "
+            "was found but could not be run"
+        ),
+    )
     return parser
+
+
+#: ``--check-engine`` exit codes. The two failures are distinct because they
+#: need different fixes: nothing to run, versus something that will not run.
+CHECK_ENGINE_OK = 0
+CHECK_ENGINE_UNRESOLVED = 1
+CHECK_ENGINE_UNRUNNABLE = 2
+
+
+def _check_engine() -> int:
+    """Resolve the engine, report what was found, and exit without launching.
+
+    The runtime half of the packaging tripwire
+    (specs5/6-deployment/build.md § The Engine Is Not Bundleable). The
+    build-time assertion can only prove the bundled CLI is *in* the archive;
+    it cannot prove the process that unpacks it can find and spawn it. That
+    gap is not hypothetical — the collected engine is a data file, and data
+    files carry no permission bits, so "present but not executable" is the
+    exact shape this has to rule out.
+
+    Reports rather than predicts. Every line is something already resolved:
+    the path the SDK would spawn, where it came from, what it answered, and
+    which credential source is visible. Nothing here starts a session, so
+    it needs no credentials to be useful and does not fail without them —
+    a fresh container has no login, and a check that required one could
+    never run there.
+
+    Exiting non-zero does not contradict specs5/6-deployment/startup.md
+    § Engine Health in the Overlay, which requires the *launch* path to
+    degrade to a working editor with a health banner. This is a diagnostic,
+    and a diagnostic that cannot fail reports nothing.
+
+    Deliberately does not take ``--repo-path``: ``cli_path`` lives in the
+    user config directory, not a per-repo one, and a diagnostic should not
+    create ``.aic-dc/`` or edit ``.gitignore`` in whatever directory it was
+    run from.
+
+    Returns
+    -------
+    int
+        :data:`CHECK_ENGINE_OK`, :data:`CHECK_ENGINE_UNRESOLVED` or
+        :data:`CHECK_ENGINE_UNRUNNABLE`.
+    """
+    import shutil
+
+    from aic_dc.claude_code.engine_config import EngineConfig
+    from aic_dc.claude_code.health import (
+        EngineStartupError,
+        detect_credentials,
+        minimum_cli_version,
+        resolve_cli,
+        sdk_cli_pin,
+        sdk_version,
+    )
+    from aic_dc.config import ConfigManager
+
+    print(f"aic-dc:      {__version__}")
+    print(
+        f"sdk:         claude-agent-sdk {sdk_version()} "
+        f"(pins CLI {sdk_cli_pin()}, floor {minimum_cli_version()})"
+    )
+
+    config = EngineConfig.load(ConfigManager(repo_root=None).config_dir)
+    try:
+        resolution = resolve_cli(config.cli_path)
+    except EngineStartupError as exc:
+        print("engine:      NOT RESOLVED")
+        print(f"\n{exc}", file=sys.stderr)
+        return CHECK_ENGINE_UNRESOLVED
+
+    print(f"engine:      {resolution.path}")
+    print(f"source:      {resolution.source}")
+    print(f"version:     {resolution.version}")
+
+    # The resolution order surprises people, and it surprised this spec
+    # twice: the wheel's copy wins over a `claude` on PATH. Say so only
+    # when both exist, which is the one case where the answer looks wrong.
+    on_path = shutil.which("claude")
+    if on_path and str(Path(on_path)) != str(Path(resolution.path)):
+        print(
+            f"note:        `claude` is also on PATH at {on_path}, which is NOT "
+            f"what will run. Set cli_path in engine.json to prefer it."
+        )
+
+    credentials, credential_warning = detect_credentials()
+    print(f"credentials: {credentials}")
+    if credential_warning:
+        print(f"warning:     {credential_warning}")
+    if resolution.version_warning:
+        print(f"warning:     {resolution.version_warning}")
+
+    if resolution.version == "unknown":
+        # Found, and did not run. For the launch path this is a warning and
+        # the session still tries; for a packaging check it is the failure
+        # the check exists to catch.
+        print(
+            f"\nThe engine at {resolution.path} did not answer `--version`. It "
+            f"was found but could not be run — check that it is executable and "
+            f"that its dynamic libraries are present.",
+            file=sys.stderr,
+        )
+        return CHECK_ENGINE_UNRUNNABLE
+    return CHECK_ENGINE_OK
 
 
 def _print_banner() -> None:
@@ -116,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
     # Install logging before anything else that might want to log.
     configure_logging(verbose=args.verbose)
     logger.debug("aic-dc invoked with args=%s", args)
+
+    # Before the banner: the report is the output, and a banner above it is
+    # noise in a CI log and in a pasted bug report.
+    if args.check_engine:
+        return _check_engine()
+
     _print_banner()
 
     # Launch the full startup orchestrator.

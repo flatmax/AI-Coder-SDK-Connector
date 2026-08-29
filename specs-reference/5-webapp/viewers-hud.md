@@ -32,12 +32,20 @@ per-variant column.
 |---|---|
 | Position | `position: fixed; top: 16px; right: 16px` |
 | Z-index | 500 — **below** the permission dialog's 2000 (see `specs-reference/5-webapp/shell.md` § Viewport-scoped overlay z-index ladder) |
-| Width | 340 px fixed |
-| Max height | 80 vh with overflow scroll |
+| Width | 300 px fixed |
+| Max height | 80 vh with `overflow-y: auto` |
 
-The z-index dropped from 10000. A HUD floating over a modal permission request would obscure the one
-surface in the app that blocks a turn, and the HUD is transient information about a turn that is already
-over.
+The z-index dropped from 10000 **on 2026-08-28, not when this table was written**. For three phases the
+table said 500 and the stylesheet said 10000, so a HUD did float over a modal permission request —
+obscuring the one surface in the app that blocks a turn, and taking the clicks in its corner, with the
+HUD carrying transient information about a turn that was already over. It is now pinned by a test in
+`usage-hud.test.js` that reads the dialog's z-index out of `permission-dialog/styles.js` rather than
+copying it.
+
+The width figure was 340 here and 300 in the stylesheet over the same period; 300 is what shipped and
+what the component's own comments size their columns against, so this table now says 300. The max
+height was likewise unwritten until the Files modified section made it load-bearing — a section whose
+height grows with the turn is the first thing here that could run off the screen.
 
 ### Context gauge colour thresholds
 
@@ -79,46 +87,184 @@ composition model; the engine now supplies both the categories and their colours
 
 ### Per-model row derivations
 
-`model_usage` rows are rendered as-is with two computed columns:
+Rows come from **`turn_model_usage`** — this turn's counters — read by `modelUsageLines`
+(`webapp/src/turn-cost.js`). `model_usage` is the session's running total and is never a source for
+these rows; see `specs5/5-webapp/viewers-hud.md` § *Cost Is Cumulative, and the HUD Reports One Turn*.
 
-| Column | Formula | Suppressed when |
-|---|---|---|
-| Cache hit % | `cacheReadInputTokens / (inputTokens + cacheReadInputTokens) × 100` | Denominator is 0 → render `—` |
-| Context window | `contextWindow` from the row, formatted with thousands separators | Field absent |
+| Aspect | Value |
+|---|---|
+| Row label | `canonicalModel` when present, otherwise the map key. The key is the raw provider string, which on Bedrock or Vertex is an id like `us.anthropic.claude-opus-5-v1:0`. There is no `modelName` field |
+| Ordering | Total tokens descending |
+| Suppressed when | The entry's four counters total ≤ 0 |
+| Counter spelling | camelCase first, snake_case second — the wire schema uses the first, a replayed transcript the second. Missing reads as 0, negatives are ignored |
+| Rendered per row | `↑ prompt · ↓ output`, where `prompt` is `input + cacheCreation + cacheRead` |
+| In the tooltip only | The four counters apart, `input` being the uncached remainder rather than the prompt |
 
-Cache-hit colour thresholds are retained from the native engine (≥ 50% green, ≥ 20% amber, below that
-default text) but the metric is demoted from a header badge to a table column. It was headline-worthy
-only while AIC⚡DC was the thing doing the caching.
+**There is no cache-hit column and no context-window column.** Both were the native engine's, and the
+ratio is not computed anywhere: the two cache counters are reported and a reader who wants the rate can
+take it (`specs5/5-webapp/viewers-hud.md` § *Per-Model Rows Are Not Summed*). `↑` is the whole prompt
+because 300px does not hold three numbers beside a model name, and the sum is the honest one to show.
 
-**Rows are never summed.** No total row, no aggregate header figure. A turn that delegated to a cheaper
-model reports two rows and keeps two rows.
+**Rows are never summed** — no total row, and the section head's headline is `{n} models`, a count. A
+turn that delegated to a cheaper model reports two rows and keeps two rows. A one-model turn gets no
+headline, because the model name is already on the HUD's header.
 
 Deleted with the cache: `provider_cache_rate` and its precedence rule over a locally computed
-`cache_hit_rate` (there is no local computation to prefer against), and Cache ROI
+`cache_hit_rate` (there is no local computation to prefer against), Cache ROI
 (`(cache_read / cache_write − 1) × 100`), which answered "is our cache paying for itself" about a cache
-we no longer own.
+we no longer own, and the cache-hit colour bands that went with them.
 
 ### Cost rendering
 
-Driven by `total_cost_usd` on the `ResultMessage`, which is `null` under subscription billing.
+**Corrected in phase 6** against the CLI's wire schema; this section described the pre-phase-6 HUD until
+2026-08-29. Driven by **`turn_cost_basis` and `turn_cost_usd`** — the per-turn fields
+`aic_dc/claude_code/cost.py` computes as a difference against session state. `total_cost_usd` is the
+session's running total and is read for one tooltip and nothing else. Derivations in
+`webapp/src/turn-cost.js`; the reasoning is
+`specs5/5-webapp/viewers-hud.md` § *Cost Is Cumulative, and the HUD Reports One Turn*.
 
-| Condition | Row | Value | Tooltip |
+| `turn_cost_basis` | Row | Value | What the tooltip names |
 |---|---|---|---|
-| `total_cost_usd` is a positive number | Shown | `$0.0000` (4 decimals) | Absolute turn cost |
-| `total_cost_usd` is `0` and tokens were consumed | Shown | Billing-mode label, e.g. `subscription` | `This turn is billed under your plan, not per token.` |
-| `total_cost_usd` is `null` | Shown | Billing-mode label | Same |
-| `max_budget_usd` configured | Additional bar | `spent / max_budget_usd` with the gauge palette | Remaining budget in dollars |
+| `measured`, figure > 0 | Shown | The formatted cost | What the turn added, and the session total it moved to |
+| `measured`, figure 0 | Shown | `nothing extra` | That the estimate did not move — **explicitly not a claim about the billing plan** |
+| `reset` | Shown | `cost unknown` | The running total restarted mid-turn (a `/clear`, a resumed session); the next turn is priced normally |
+| `unpriced` | Shown | `cost unknown` | No usable figure; the spend is not lost — it lands on the next turn the engine prices |
+| Absent or unrecognised | **No row at all** | — | — |
+| `max_budget_usd` configured | Additional bar | `total_cost_usd / max_budget_usd` with the gauge palette | Remaining budget in dollars. **Not built** |
 
-**`$0.00` is never rendered.** A zero cost for a turn that plainly consumed tokens reads as a broken HUD
-and teaches users to ignore the figure (`specs5/plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap`).
+`measured` with no usable number behind it is downgraded to `unpriced`: a basis and a figure that
+contradict each other are resolved in favour of the figure. A negative cost is treated as absent — a bug
+upstream, not a refund.
 
-4-decimal precision is retained for the priced case: a turn whose subagents ran on a cheap model can cost
-fractions of a cent, and 2 decimals would round it to `$0.00` — the exact display this rule exists to
-prevent.
+| Rule | Value |
+|---|---|
+| Format | `n > 0.5 ? $n.toFixed(2) : $n.toFixed(4)` — the bundled `claude` binary's own format, so a figure here reads like the terminal's |
+| Absent row means | A browsed turn. Cost is not in the CLI's transcript, so it was never recorded — a different fact from "we lost track of it" |
+| Billing-mode label | **None.** No surface labels a cost with a billing mode |
+
+**`$0.00` is never rendered**, and neither is a billing-mode label. A zero cost for a turn that plainly
+consumed tokens reads as a broken HUD and teaches users to ignore the figure
+(`specs5/plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap`) — but the fix is naming the reason,
+not claiming a plan. Four decimals matter for the priced case: a turn whose subagents ran on a cheap
+model can cost fractions of a cent, and two decimals would round it to `$0.00`, the exact display this
+rule exists to prevent.
+
+**There is no null branch.** The schema types `total_cost_usd` as a plain number; every null in this
+codebase is one AIC⚡DC wrote itself, on a synthetic failure footer or a replayed turn.
+`credential_source` on the engine-health record is the only real billing-mode signal.
 
 The native engine's `priced_request_count` / `unpriced_request_count` split is gone. It existed because
 litellm's pricing table could lack an entry for a configured model; the CLI reports cost or reports
 nothing, with no third "we could not price this" state.
+
+### Session usage
+
+`get_current_state().session_usage`, and the Context tab's Session block. **The one reading of the
+engine's cumulative figures this app permits** — see `specs5/5-webapp/viewers-hud.md`
+§ *Session Usage Is The One Cumulative Reading*.
+
+| Key | Source | `None` when |
+|---|---|---|
+| `total_cost_usd` | `CostLedger._total` — the last result's running total, verbatim | No result has been priced. **Not defaulted to 0.0**: a session that ran nothing has no estimate |
+| `model_usage` | the last result's `model_usage` **as reported**, keeping `canonicalModel` and the rest | Same |
+| `duration_seconds` | AIC⚡DC's own monotonic clock, from connect | The engine has never connected |
+
+| Rule | Value |
+|---|---|
+| Field names | The engine's own, not `session_*` aliases — those names mean "cumulative" everywhere, and the one honest use of them should not be the one place they are renamed |
+| Reset behaviour | A `/clear` moves cost **and** rows down together, following the engine's ledger. One figure from each side of a reset is worse than both from one side |
+| Reconnect | Cleared, with the ledger. Both describe what this engine process did |
+| API duration | **Not reported.** The SDK does not say whether `duration_api_ms` is per-turn or cumulative in a streaming-input session; the absence is stated on screen rather than approximated |
+| Lines added/removed | **Not available.** The CLI's `/usage` computes it; no payload carries it |
+| Client-side ageing | The browser stamps arrival and adds elapsed time, because the server sends a duration and not an instant |
+
+### Rate-limit record
+
+Field shapes are the SDK's `RateLimitInfo`, passed through unchanged by
+`aic_dc/claude_code/messages.py::_rate_limit`, held on the session **keyed by `rate_limit_type`**
+(`_rate_limits`) and served two ways.
+
+| Reader | Field | Which records | Why |
+|---|---|---|---|
+| Usage HUD | `rate_limit` | The newest **arrival** | The section reports a *transition*, and the window that just transitioned is the one worth interrupting for |
+| Context tab | `rate_limits` | All open windows, most-constrained first | A list has room to rank; the window nearest its ceiling is what a reader who typed `/usage` came for |
+
+**One slot until 2026-08-29.** Keying it fixes a real overwrite — two windows can transition in one
+session, and the HUD's heading comes from the record's own type, so the display would have stayed
+self-consistent while describing a different window. An untyped record is kept under the key `_untyped`
+rather than dropped; the enum is the CLI's to extend.
+
+**What this does *not* do is reproduce the CLI's `/usage` panel**, and the keying was originally built
+on the belief that it would. Verified against `claude-agent-sdk` 0.2.137:
+
+| Claim | Reality |
+|---|---|
+| One event per open window | **No.** `RateLimitEvent` carries one `RateLimitInfo`, emitted on a status *transition* |
+| An SDK call returns the panel | **No.** None of the client's 15 methods queries usage or limits |
+| `utilization` is always present | **No.** Not in the payload at all — measured, below |
+
+**The measured payload** (2026-08-29, logged from the CLI; the whole record, not an excerpt):
+
+```
+{'status': 'allowed', 'resetsAt': 1788006000, 'rateLimitType': 'five_hour',
+ 'overageStatus': 'rejected', 'overageDisabledReason': 'org_level_disabled',
+ 'isUsingOverage': False}
+```
+
+Six fields, no utilisation, one window. `isUsingOverage` is the only field the SDK does not model; it is
+read off `raw` and carried, because `overage_status` alone cannot separate "have overage, not on it"
+from "on it now". The CLI's panel showed 37% and two further windows at that moment.
+
+| Record state | Figure | Bar | Colour |
+|---|---|---|---|
+| `utilization` present | `{n}%` | Drawn to `n%` | Gauge bands |
+| `status: rejected` | `reached` | Drawn | `#f85149` at any figure |
+| No `utilization` | `no figure` | **None** | Muted |
+
+**The no-utilisation row is the one that was wrong on first ship.** `_pctColor(pct ?? 0)` put an absent
+figure in the healthy green band over a 0%-wide track, which reads as "0% used". Rendering "no answer"
+as a confident answer is `EngineHealth.mcp`'s defect on another surface. Reasoning in
+`specs5/5-webapp/viewers-hud.md` § *The Rate-Limit Channel Is An Alarm, Not A Usage Panel*.
+
+| Field | Type | Note |
+|---|---|---|
+| `status` | `allowed` \| `allowed_warning` \| `rejected` | The HUD renders at all three; the chat panel's toast fires on the last two only |
+| `rate_limit_type` | `five_hour` \| `seven_day` \| `seven_day_opus` \| `seven_day_sonnet` \| `overage` | Unknown values render with underscores opened out rather than dropped — the enum is the CLI's to extend |
+| `utilization` | float **0.0–1.0** | A *fraction*. Read as a percentage it renders every real figure as under 1% |
+| `resets_at` | int, **Unix seconds** | Not milliseconds, not ISO. `× 1000` before `new Date` |
+| `overage_status` | same three words, or null | One line, no second gauge |
+| `overage_resets_at` | int, Unix seconds | |
+| `overage_disabled_reason` | string or null | Printed in the CLI's own words |
+
+Both unit facts are pinned by tests, because each has exactly one plausible wrong reading and neither
+fails visibly.
+
+| Rule | Value |
+|---|---|
+| Utilisation colour | The context gauge's bands above, applied to the percentage — **except** `status: "rejected"`, which is `#f85149` at any figure |
+| Section absent when | `windowIsOpen` is false (`resets_at × 1000 ≤ Date.now()`), or the record carries no figure, no type and no rejection |
+| Expiry decided in | The browser only. The server serves the record raw |
+| Cleared by | Nothing short of a newer record — not a session change, not a disconnect |
+
+Labels: `five_hour` → "5-hour", `seven_day` → "7-day", `seven_day_opus` → "7-day Opus",
+`seven_day_sonnet` → "7-day Sonnet", `overage` → "Overage". The section's *head* reads
+`{label} limit`; its *stored collapse key* is the constant `Rate limits`.
+
+The derivations live in `webapp/src/rate-limit.js`, shared with `chat-panel/streaming.js` —
+`formatResetTime` moved there from the latter when the HUD needed the same sentence.
+
+### HUD section collapse
+
+| Section | Collapse key | Head's headline |
+|---|---|---|
+| Context | `Context` | `{pct}% · {total}/{max}`, in the gauge colour |
+| Per-model usage | `Per-model usage` | `{n} models` when n > 1, otherwise nothing — **never a token total** |
+| Rate limits | `Rate limits` | `{pct}%`, or `reached`, or `—` |
+| Files modified | `Files modified` | The de-duplicated file count |
+| This turn | *(not collapsible)* | — |
+
+Stored as a JSON array under `aic-dc-hud-collapsed`. Unparseable values, non-arrays and non-string
+members all degrade to "nothing collapsed". Names the build does not render round-trip untouched.
 
 ### Thinking token rendering
 
@@ -142,20 +288,43 @@ replaced it: `get_context_usage()` is fetched on state change only.
 
 ### Terminal HUD format
 
-Printed server-side after each turn, cancelled or not:
+**Built 2026-08-29** — `aic_dc/claude_code/turn_hud.py`, emitted as one `logger.info` record from
+`ClaudeCodeService._post_response`. Printed server-side after each turn, cancelled or not, and after a
+turn with nothing in it. The sample below is real output, not a sketch:
 
 ```
 Model: claude-opus-4-6
 Turn:  8.4s · 3 turns · completed · 2 permission prompts
-Usage: claude-opus-4-6      12,481 in / 1,208 out · cache 41,502 r / 0 w · 78% hit
-       claude-haiku-4-5      3,004 in /   612 out · cache      0 r / 0 w ·  0% hit
-Cost:  $0.1842
+Usage: claude-opus-4-6   12,481 in / 1,208 out · cache 41,502 r / 0 w ·  77% hit
+       claude-haiku-4-5   3,004 in /   612 out · cache      0 r / 0 w ·   0% hit
+Cost:  $0.1842 this turn · $3.21 session total
 Ctx:   118,204 / 200,000 (59%) · auto-compact at 160,000
 Files: src/auth/session.py, src/auth/tokens.py
 ```
 
-One `Usage:` line per `model_usage` entry, first line labelled, continuations aligned. `Cost:` prints the
-billing mode when `total_cost_usd` is null. `Files:` is omitted when the turn modified nothing.
+| Row | Source | Absent when |
+|---|---|---|
+| `Model` | the busiest `turn_model_usage` row's `canonicalModel`, else its key | No per-model counters |
+| `Turn` | `duration_ms`, `num_turns`, `cancelled` / `terminal_reason` / `is_error`, `permission_prompts` | Never — this row is the block |
+| `Usage` | one line per `turn_model_usage` entry, busiest first, first labelled and continuations aligned | No per-model counters |
+| `Cost` | `turn_cost_basis` + `turn_cost_usd`; `total_cost_usd` appears only labelled `session total` | Basis absent or unrecognised (a browsed turn) |
+| `Ctx` | the `get_context_usage()` response the same post-turn pass fetched | The engine could not answer |
+| `Files` | `files_modified`, repo-relative | The turn modified nothing |
+
+| Rule | Value |
+|---|---|
+| Model column | Padded to the longest name, capped at 28 chars; an over-long name keeps its **tail** behind a `…`, since the distinguishing part of `us.anthropic.claude-opus-5-v1:0` is the end |
+| Counter columns | Right-aligned across the whole block, so two models' figures compare down the column |
+| Cache hit % | `cacheRead / (input + cacheRead)`, rounded; `—` when the denominator is 0. **Computed here and not in the browser** — a width difference, not a disagreement |
+| Path naming | Repo-relative; a path outside the root prints absolute, `build_diff_payload`'s rule |
+| `Files` ceiling | 8 paths, then `, and N more` |
+| Extra `Turn` clauses | `not mirrored` when `mirror_gap`; `revised after background work` when `continuation` |
+| Failure | Swallowed at `debug`. A summary of successful work never fails the turn it summarises |
+
+`Cost:` follows the browser's rule exactly — the turn's own figure, "nothing extra", or "cost unknown"
+with the reason, and never a billing-mode label (§ *Cost rendering*). Building this is what forced that
+section's correction: the spec had said this line prints "cost or billing mode", which is the
+pre-phase-6 reading of a cumulative field.
 
 Deleted: the boxed `╭─ Cache Blocks ─╮` table with per-tier `(entry_n+)` thresholds, the mode-aware
 category table with its "Symbol Map" / "Doc Map" label swap, the 📈/📉 tier-change log, and the one-shot

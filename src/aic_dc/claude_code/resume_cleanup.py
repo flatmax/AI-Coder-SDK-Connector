@@ -8,11 +8,19 @@ and point the CLI subprocess at it through ``CLAUDE_CONFIG_DIR``
 — :func:`~aic_dc.claude_code.session._quiet_disconnect` reaches it from
 every teardown that runs inside the event loop.
 
-``main._signal_handler`` does not. It exits via ``os._exit``, which is
-the whole reason ``main._kill_cli_children`` exists — the SDK's only
+``main._tear_down_and_exit`` does not. It exits via ``os._exit``, which
+is the whole reason ``main._kill_cli_children`` exists — the SDK's only
 orphan guard for its children is an ``atexit`` hook, and ``os._exit``
 skips ``atexit``. This cleanup was lost to exactly the same gap, one
 layer up, and it needed exactly the same hand-written answer.
+
+``main._shut_the_engine_down`` now gets a bounded turn ahead of that exit
+(``next.md`` § C8) and *does* reach ``disconnect()``, so on a quick
+teardown the SDK may remove the directory itself. That does not retire
+this module: the window is 2 seconds against a CLI that may be wedged, a
+second Ctrl-C skips it, and Windows has no such step at all. It costs
+nothing either way — see :func:`purge` on why the double removal is a
+no-op rather than an error.
 
 Measured after two restarts, before this module existed:
 ``/tmp/claude-resume-fatfygyc``, 900 KiB, abandoned by a Ctrl-C, nothing
@@ -78,18 +86,19 @@ def remember(client: Any) -> Path | None:
 def purge() -> None:
     """Remove every registered temp config dir, synchronously.
 
-    Called from ``main._signal_handler`` immediately before ``os._exit``,
-    and **after** ``_kill_cli_children``. The order is a requirement, not
-    a preference: the directory is the live ``CLAUDE_CONFIG_DIR`` of the
-    children being killed, and pulling it out from under a CLI still
-    flushing its transcript would trade a disk leak for a write error on
-    the way out.
+    Called from ``main._tear_down_and_exit`` immediately before
+    ``os._exit``, and **after** ``_kill_cli_children``. The order is a
+    requirement, not a preference: the directory is the live
+    ``CLAUDE_CONFIG_DIR`` of the children being killed, and pulling it out
+    from under a CLI still flushing its transcript would trade a disk leak
+    for a write error on the way out.
 
     Best-effort by construction. ``ignore_errors`` covers the directory
-    the SDK already removed on a graceful disconnect, which is the normal
-    case for every client but the last one, and it covers a partial
-    removal — a leaked directory is what we started with, so failing
-    loudly here would only replace it with a server that will not exit.
+    the SDK already removed on a graceful disconnect — the normal case for
+    every client but the last one, and since § C8 sometimes the last one
+    too — and it covers a partial removal. A leaked directory is what we
+    started with, so failing loudly here would only replace it with a
+    server that will not exit.
 
     Blocking in a signal handler is acceptable for the same reason the
     kill's grace period is: the next statement is ``os._exit``, nothing

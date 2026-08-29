@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './context-usage-tab.js';
 import { SharedRpc } from './rpc.js';
+import { resetRepoRoot, setRepoRoot } from './repo-path.js';
 
 const _mounted = [];
 
@@ -125,6 +126,9 @@ afterEach(() => {
   // The selected section persists, so a test that switches would
   // otherwise decide which section the next test opens on.
   localStorage.removeItem('aic-dc-context-section');
+  // Module state outlives a case: a test that publishes a root would
+  // otherwise decide what the next one's memory-file rows are called.
+  resetRepoRoot();
 });
 
 // ---------------------------------------------------------------------------
@@ -1646,15 +1650,15 @@ describe('ContextUsageTab memory files', () => {
 
   it('opens a memory file in the viewer when its path is clicked', async () => {
     // Knowing CLAUDE.md costs 1.8K tokens is half an answer; the other
-    // half is being in the file. `relPath` is the service's answer to
-    // "can the viewer actually open this" — every repo read rejects an
-    // absolute path, so that is the one it navigates with.
+    // half is being in the file. The engine's absolute path is what
+    // goes on the event, like every other `navigate-file` dispatcher's
+    // — the shell relativises at its choke point (§ C3).
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
         memoryFiles: [
           {
             path: '/repo/.claude/CLAUDE.md',
-            relPath: '.claude/CLAUDE.md',
             type: 'Project',
             tokens: 1800,
           },
@@ -1673,18 +1677,18 @@ describe('ContextUsageTab memory files', () => {
     }
     expect(navigated).toHaveBeenCalledTimes(1);
     expect(navigated.mock.calls[0][0].detail).toEqual({
-      path: '.claude/CLAUDE.md',
+      path: '/repo/.claude/CLAUDE.md',
     });
   });
 
   it('names an in-repo file the way the rest of the app does', async () => {
     // Relative in the cell, absolute on the tooltip: the engine's own
-    // name for it is still one hover away.
+    // name for it is still one hover away. The service sends only the
+    // absolute path now, and `toRepoPath` is what shortens it.
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
-        memoryFiles: [
-          { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
-        ],
+        memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
       }),
     );
     const el = mountTab();
@@ -1700,11 +1704,10 @@ describe('ContextUsageTab memory files', () => {
     async () => {
       // A click that opens a file under an opaque panel is
       // indistinguishable from a click that did nothing.
+      setRepoRoot('/repo');
       publishUsage(
         usageFixture({
-          memoryFiles: [
-            { path: '/repo/CLAUDE.md', relPath: 'CLAUDE.md', tokens: 1800 },
-          ],
+          memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
         }),
       );
       const el = mountTab();
@@ -1718,7 +1721,10 @@ describe('ContextUsageTab memory files', () => {
 
   it('leaves a file outside the repo unclickable', async () => {
     // A user-level CLAUDE.md has no repo-relative name, and the read
-    // path would refuse it. Better no click than one that fails.
+    // path would refuse it. Better no click than one that fails. The
+    // root is published here so this is the outside-the-root branch
+    // rather than the no-root-yet one below.
+    setRepoRoot('/repo');
     publishUsage(
       usageFixture({
         memoryFiles: [{ path: '/home/u/.claude/CLAUDE.md', tokens: 27 }],
@@ -1730,6 +1736,26 @@ describe('ContextUsageTab memory files', () => {
     expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
     expect(rows(el, 'Memory files')).toEqual([
       ['/home/u/.claude/CLAUDE.md', '—', '27'],
+    ]);
+  });
+
+  it('leaves every row unclickable before the root has arrived', async () => {
+    // The cost of moving the rule off the server: openability now
+    // depends on the shell's state snapshot having landed, where it
+    // used to ride along with the breakdown itself. A row with no
+    // shortened name is a row this tab cannot ask for, and text is the
+    // honest rendering of that — not a link the read path would refuse.
+    publishUsage(
+      usageFixture({
+        memoryFiles: [{ path: '/repo/CLAUDE.md', tokens: 1800 }],
+      }),
+    );
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Session');
+    expect(sectionFor(el, 'Memory files').querySelector('.link')).toBeNull();
+    expect(rows(el, 'Memory files')).toEqual([
+      ['/repo/CLAUDE.md', '—', '1.8K'],
     ]);
   });
 
@@ -3062,5 +3088,720 @@ describe('ContextUsageTab footer', () => {
       (n) => n.textContent,
     );
     expect(notes.some((t) => t.includes('Read from the engine'))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recorded engine failures
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab engine failures', () => {
+  const HEALTH = {
+    connected: false,
+    cli_path: '/opt/aic-dc/bundled/claude',
+    cli_version: '2.1.4',
+    cli_source: 'bundled',
+    sdk_version: '0.9.1',
+    credential_source: 'ANTHROPIC_API_KEY',
+    mirror_gaps: 0,
+  };
+
+  const FAILURE = {
+    id: '1787987700500-abc',
+    timestamp: '2026-08-29T07:15:00.500000+00:00',
+    kind: 'startup_failed',
+    message: 'Could not start a Claude Code session: invalid API key',
+    session_id: null,
+    credential_source: 'ANTHROPIC_API_KEY',
+    cli_path: '/opt/aic-dc/bundled/claude',
+    cli_version: '2.1.4',
+    cli_stderr: ['error: not authenticated', 'run `claude login`'],
+  };
+
+  async function openWith(reply, { health = HEALTH } = {}) {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => health,
+      'ClaudeCodeService.get_engine_errors': () => reply,
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+    await settle(el);
+    return el;
+  }
+
+  function text(el) {
+    return el.shadowRoot.textContent.replace(/\s+/g, ' ');
+  }
+
+  /**
+   * One recorded failure's own text, *not* the whole shadow root.
+   *
+   * Scoped deliberately. The live health table above renders a credential
+   * source too, so a whole-panel assertion for one passes whether or not
+   * the record carries its own — which is the fact that matters here,
+   * because the record is what survives the process.
+   */
+  function failureText(el, index = 0) {
+    const blocks = el.shadowRoot.querySelectorAll('.engine-error');
+    return blocks[index]?.textContent.replace(/\s+/g, ' ') ?? '';
+  }
+
+  it('reports a recorded failure with the credentials that explain it', async () => {
+    const el = await openWith({ errors: [FAILURE] });
+    expect(text(el)).toContain('Engine failures');
+    // The diagnosis for an auth error, and the one fact no live surface
+    // keeps once the process that failed is gone — read off the record
+    // itself, not off the running engine's table above it.
+    expect(failureText(el)).toContain('invalid API key');
+    expect(failureText(el)).toContain('ANTHROPIC_API_KEY');
+    expect(failureText(el)).toContain('/opt/aic-dc/bundled/claude (2.1.4)');
+  });
+
+  it('reports the record’s credentials, not the live engine’s', async () => {
+    // The two differ exactly when it matters: the failure happened under
+    // one credential source and the server has since been pointed at
+    // another. Reading the live one would report the wrong diagnosis with
+    // full confidence.
+    const el = await openWith({
+      errors: [{ ...FAILURE, credential_source: 'subscription login' }],
+      health: { ...HEALTH, credential_source: 'ANTHROPIC_API_KEY' },
+    });
+    expect(failureText(el)).toContain('subscription login');
+    expect(failureText(el)).not.toContain('ANTHROPIC_API_KEY');
+  });
+
+  it("shows the CLI's own last words", async () => {
+    const el = await openWith({ errors: [FAILURE] });
+    const dump = el.shadowRoot.querySelector('pre.stderr');
+    expect(dump.textContent).toContain('error: not authenticated');
+    expect(dump.textContent).toContain('run `claude login`');
+  });
+
+  it('renders even when no engine health has ever arrived', async () => {
+    // The case the record exists for. An engine that never started has no
+    // health, so nesting this inside the health branch would have hidden
+    // the failure in exactly the situation it was written for.
+    const el = await openWith({ errors: [FAILURE] }, { health: null });
+    expect(text(el)).toContain('No engine health has arrived yet');
+    expect(text(el)).toContain('invalid API key');
+  });
+
+  it('says nothing at all when the engine has never failed', async () => {
+    const el = await openWith({ errors: [] });
+    expect(text(el)).not.toContain('Engine failures');
+    expect(el.shadowRoot.querySelector('.engine-error')).toBeNull();
+  });
+
+  it('distinguishes a failed read from an empty file', async () => {
+    // The whole reason the RPC answers a dict rather than a bare list: a
+    // swallowed read error would render as "the engine has never failed".
+    const el = await openWith({ error: 'Could not read the engine error log' });
+    expect(text(el)).toContain('Could not read the engine error log');
+    expect(text(el)).not.toContain('Engine failures');
+  });
+
+  it('says a repoless run records none, rather than showing an error', async () => {
+    const el = await openWith({
+      error: 'No engine error log: this run has no repo directory',
+      reason: 'no_repo',
+    });
+    expect(text(el)).toContain('not recorded for a run with no repo');
+  });
+
+  it('does not swallow a thrown read', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => HEALTH,
+      'ClaudeCodeService.get_engine_errors': () => {
+        throw new Error('the socket went away');
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(text(el)).toContain('the socket went away');
+  });
+
+  it('lists several failures, because a repeat is the fact worth seeing', async () => {
+    const el = await openWith({
+      errors: [
+        { ...FAILURE, id: 'a', message: 'first attempt' },
+        { ...FAILURE, id: 'b', message: 'second attempt' },
+        { ...FAILURE, id: 'c', message: 'third attempt' },
+      ],
+    });
+    expect(el.shadowRoot.querySelectorAll('.engine-error')).toHaveLength(3);
+    expect(text(el)).toContain('third attempt');
+  });
+
+  it('survives a record carrying nothing but a message', async () => {
+    const el = await openWith({
+      errors: [{ kind: 'startup_failed', message: 'bare' }],
+    });
+    expect(text(el)).toContain('bare');
+    expect(el.shadowRoot.querySelector('pre.stderr')).toBeNull();
+  });
+
+  it('shows an unparseable timestamp verbatim rather than dropping it', async () => {
+    const el = await openWith({
+      errors: [{ ...FAILURE, timestamp: 'the other day' }],
+    });
+    expect(text(el)).toContain('the other day');
+  });
+
+  it('is not asked for until Debug is opened', async () => {
+    const errors = vi.fn(() => ({ errors: [] }));
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => HEALTH,
+      'ClaudeCodeService.get_engine_errors': errors,
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(errors).not.toHaveBeenCalled();
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Session usage and rate limits — what `/usage` opens onto
+// ---------------------------------------------------------------------------
+
+/**
+ * The command routes here (`service.py` SLASH_ROUTES) and its reply promises
+ * "the Context tab's cost and per-model token breakdown". Until 2026-08-29
+ * the tab rendered context-window composition and neither of those, so the
+ * reply named a surface that did not exist — the figures were on the wire the
+ * whole time and drawn only in the per-turn HUD, which auto-hides after 8.8
+ * seconds and never appears for a session that has not run a turn.
+ */
+describe('ContextUsageTab session usage', () => {
+  it('renders nothing before the first priced result', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    // Absent rather than "$0.0000", which is a claim about a session that has
+    // not spent anything yet.
+    expect(sectionFor(el, 'Session')).toBeUndefined();
+  });
+
+  it('reads the cumulative figures, which no other surface may', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 3.21,
+        duration_seconds: 42,
+        model_usage: {
+          'claude-opus-4-6': {
+            inputTokens: 12481,
+            outputTokens: 1208,
+            cacheReadInputTokens: 41502,
+            cacheCreationInputTokens: 0,
+          },
+        },
+      },
+    });
+    await settle(el);
+
+    expect(heading(el, 'Session')).toContain('$3.21 so far');
+    expect(rows(el, 'Session')).toEqual([['claude-opus-4-6', '54.0K', '1.2K']]);
+  });
+
+  it('prefers the canonical model name over the provider key', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 0.5,
+        model_usage: {
+          'us.anthropic.claude-opus-5-v1:0': {
+            inputTokens: 10,
+            canonicalModel: 'claude-opus-5',
+          },
+        },
+      },
+    });
+    await settle(el);
+    expect(rows(el, 'Session')[0][0]).toBe('claude-opus-5');
+  });
+
+  it('follows the session total up as turns land, without a fetch', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { total_cost_usd: 1.0 } });
+    await settle(el);
+    pushEvent('stream-complete', { total_cost_usd: 2.5, model_usage: {} });
+    await settle(el);
+    expect(heading(el, 'Session')).toContain('$2.50');
+  });
+
+  it('keeps the last good figures when a turn reports none', async () => {
+    // A synthetic failure footer writes null into both, and a session does
+    // not stop having cost what it cost because one turn died.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { total_cost_usd: 1.75 } });
+    await settle(el);
+    pushEvent('stream-complete', { total_cost_usd: null, model_usage: null });
+    await settle(el);
+    expect(heading(el, 'Session')).toContain('$1.75');
+  });
+
+  it('says why there is no API-time figure rather than omitting one', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { duration_seconds: 42 } });
+    await settle(el);
+    const note = sectionFor(el, 'Session').textContent.replace(/\s+/g, ' ');
+    expect(note).toContain('42s since the engine connected');
+    expect(note).toContain('per-turn or cumulative');
+  });
+});
+
+describe('ContextUsageTab rate limits', () => {
+  function limit(overrides = {}) {
+    return {
+      status: 'allowed_warning',
+      rate_limit_type: 'five_hour',
+      resets_at: Math.floor(Date.now() / 1000) + 3600,
+      utilization: 0.24,
+      overage_status: null,
+      ...overrides,
+    };
+  }
+
+  it('draws every open window, not just the newest', async () => {
+    // The defect the backend keying fixes: an account has three windows open
+    // and the CLI reports each separately.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [
+        limit(),
+        limit({ rate_limit_type: 'seven_day', utilization: 0.09 }),
+        limit({ rate_limit_type: 'seven_day_opus', utilization: 0 }),
+      ],
+    });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(3);
+    expect(heading(el, 'Rate limits')).toContain('3 open windows');
+  });
+
+  it('merges a live push into the window it belongs to', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit(), limit({ rate_limit_type: 'seven_day', utilization: 0.09 })],
+    });
+    await settle(el);
+    pushEvent('rate-limit', { data: limit({ utilization: 0.95 }) });
+    await settle(el);
+
+    // Still two windows — a list that appended would draw five_hour twice,
+    // at two utilisations, both claiming to be current.
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(2);
+    expect(rendered.textContent).toContain('95%');
+    expect(rendered.textContent).not.toContain('24%');
+  });
+
+  it('drops a window whose reset has passed', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit({ resets_at: 1 }), limit({ rate_limit_type: 'seven_day' })],
+    });
+    await settle(el);
+    // Expiry is the browser's question and `windowIsOpen` is its one answer,
+    // shared with the HUD and the toast.
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+
+  it('renders nothing when every window has closed', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [limit({ resets_at: 1 })] });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits')).toBeUndefined();
+  });
+
+  it('ranks the most constrained window first', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [
+        limit({ rate_limit_type: 'seven_day', utilization: 0.09 }),
+        limit({ utilization: 0.88 }),
+      ],
+    });
+    await settle(el);
+    const first = sectionFor(el, 'Rate limits').querySelector('.limit');
+    expect(first.textContent).toContain('88%');
+  });
+
+  it('reads a rejection as reached at whatever the figure says', async () => {
+    // An overage cut-off can refuse at a utilisation the bands call healthy.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit({ status: 'rejected', utilization: 0.4 })],
+    });
+    await settle(el);
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.textContent).toContain('reached');
+    expect(rendered.querySelector('.pct').getAttribute('style')).toContain('#f85149');
+  });
+
+  it('a snapshot carrying nothing leaves a known window alone', async () => {
+    // A reconnect re-delivers the snapshot, and a backend older than the
+    // field sends nothing — neither is evidence the limit went away.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [limit()] });
+    await settle(el);
+    pushEvent('state-loaded', {});
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+});
+
+/**
+ * The bug a screenshot caught that 13 tests did not.
+ *
+ * `utilization` is absent from real records — the CLI's whole
+ * `rate_limit_event` payload is six fields and that is not one of them — so
+ * the first cut fell through to `_pctColor(pct ?? 0)` and painted "we were
+ * not told" in the healthy green band, above a 0%-wide bar. It read as "0%
+ * used, you're fine". An empty list does not say "no servers", it says "no
+ * answer"; the same rule, one surface over.
+ */
+describe('ContextUsageTab rate limits without a figure', () => {
+  // The exact payload observed on a real account, 2026-08-29.
+  function real(overrides = {}) {
+    return {
+      status: 'allowed',
+      resets_at: Math.floor(Date.now() / 1000) + 3600,
+      rate_limit_type: 'five_hour',
+      overage_status: 'rejected',
+      overage_disabled_reason: 'org_level_disabled',
+      is_using_overage: false,
+      utilization: undefined,
+      ...overrides,
+    };
+  }
+
+  async function show(records) {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: records });
+    await settle(el);
+    return sectionFor(el, 'Rate limits');
+  }
+
+  it('never paints an unknown utilisation in the healthy band', async () => {
+    const rendered = await show([real()]);
+    const style = rendered.querySelector('.pct').getAttribute('style');
+    // Green is a claim about a number we do not have.
+    expect(style).not.toContain('#7ee787');
+    expect(style).toContain('muted');
+  });
+
+  it('draws no bar at all rather than an empty one', async () => {
+    // A 0%-wide track under a window heading reads as "0% used".
+    const rendered = await show([real()]);
+    expect(rendered.querySelector('.bar')).toBeNull();
+  });
+
+  it('says there is no figure rather than showing a dash', async () => {
+    const rendered = await show([real()]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('no figure');
+  });
+
+  it('still reports what it does know', async () => {
+    const rendered = await show([real()]);
+    expect(rendered.textContent).toContain('Resets');
+    expect(rendered.textContent).toContain('5-hour');
+  });
+
+  it('explains that the CLI did not send the percentage', async () => {
+    const text = (await show([real()])).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('not in the event it sends us');
+  });
+
+  it('reads a refused overage as unavailable, not as a failure', async () => {
+    // `status` is `allowed` here: the window is fine and pay-as-you-go is
+    // switched off at the org. The SDK's own docstring calls this field "why
+    // overage is *unavailable*".
+    const text = (await show([real()])).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Overage unavailable — org level disabled');
+    expect(text).toContain('hard ceiling');
+  });
+
+  it('still bars and colours a window that does carry a figure', async () => {
+    const rendered = await show([real({ utilization: 0.37 })]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('37%');
+    expect(rendered.querySelector('.bar-seg').getAttribute('style')).toContain('37%');
+  });
+
+  it('a rejection is still red with no figure behind it', async () => {
+    const rendered = await show([real({ status: 'rejected' })]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('reached');
+    expect(rendered.querySelector('.pct').getAttribute('style')).toContain('#f85149');
+  });
+});
+
+/**
+ * The windows the CLI's own `/usage` draws.
+ *
+ * The section above documents what the *engine's* channel can say, which
+ * is "something changed" and — measured on a real account — no percentage
+ * at all. These tests cover the second source: `get_account_usage`, which
+ * reads the endpoint the CLI itself reads and comes back with the figures.
+ *
+ * The two sources disagree about units on the wire (percent vs fraction,
+ * ISO vs Unix seconds); the server converts, so everything below is in
+ * this file's one convention. That is the property worth pinning — a
+ * regression there renders 48% as 4800% or, far worse, as 0.48%.
+ */
+describe('ContextUsageTab account rate limits', () => {
+  const soon = () => Math.floor(Date.now() / 1000) + 3600;
+
+  /** The normalised shape the server serves, from a real account. */
+  function account(overrides = {}) {
+    return {
+      ok: true,
+      fetched_at: '2026-08-29T12:10:04+00:00',
+      windows: [
+        { key: 'session', label: '5-hour', utilization: 0.48, resets_at: soon() },
+        { key: 'weekly_all', label: 'Current week', utilization: 0.11, resets_at: soon() },
+        {
+          key: 'weekly_scoped:Fable',
+          label: 'Current week (Fable)',
+          utilization: 0,
+          resets_at: null,
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  /** The event record measured 2026-08-29: a window, a reset, no figure. */
+  function event(overrides = {}) {
+    return {
+      status: 'allowed',
+      rate_limit_type: 'five_hour',
+      resets_at: soon(),
+      overage_status: 'rejected',
+      overage_disabled_reason: 'org_level_disabled',
+      is_using_overage: false,
+      ...overrides,
+    };
+  }
+
+  function publishBoth(answer, usage = usageFixture()) {
+    const handler = vi.fn(() => answer);
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': vi.fn(() => ({
+        usage,
+        fetched_at: '2026-08-15T10:30:00Z',
+      })),
+      'ClaudeCodeService.get_account_usage': handler,
+    });
+    return handler;
+  }
+
+  async function show(answer, records = []) {
+    publishBoth(answer);
+    const el = mountTab();
+    await settle(el);
+    if (records.length) {
+      pushEvent('state-loaded', { rate_limits: records });
+      await settle(el);
+    }
+    return el;
+  }
+
+  it('draws a gauge per window the account has open', async () => {
+    const el = await show(account());
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(3);
+    expect(rendered.textContent).toContain('48%');
+    expect(rendered.textContent).toContain('11%');
+  });
+
+  it('names the per-model weekly window after its model', async () => {
+    // The row that cannot come from `RateLimitType`: the endpoint carries
+    // a display name, and a model shipped tomorrow arrives labelled.
+    const el = await show(account());
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('Current week (Fable)');
+  });
+
+  it('reads the figure as a fraction, not as a percent already', async () => {
+    // 0.48 is 48%. Rendering it as 0% (the "already a percent" mistake) is
+    // the plausible-looking wrong answer nobody would question.
+    const el = await show(account());
+    const pct = [...sectionFor(el, 'Rate limits').querySelectorAll('.pct')].map((n) =>
+      n.textContent.trim(),
+    );
+    expect(pct).toContain('48%');
+    expect(pct).not.toContain('0.48%');
+  });
+
+  it('shows a window that has not started counting, with no reset line', async () => {
+    const el = await show({
+      ...account(),
+      windows: [
+        {
+          key: 'weekly_scoped:Fable',
+          label: 'Current week (Fable)',
+          utilization: 0,
+          resets_at: null,
+        },
+      ],
+    });
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(1);
+    expect(rendered.textContent).toContain('0%');
+    expect(rendered.textContent).not.toContain('Resets');
+  });
+
+  it('ranks the most-constrained window first', async () => {
+    const el = await show(account());
+    const first = sectionFor(el, 'Rate limits').querySelector('.limit');
+    expect(first.textContent).toContain('5-hour');
+    expect(first.textContent).toContain('48%');
+  });
+
+  it('drops a window whose reset has passed', async () => {
+    const el = await show({
+      ...account(),
+      windows: [
+        { key: 'session', label: '5-hour', utilization: 0.48, resets_at: 1 },
+        { key: 'weekly_all', label: 'Current week', utilization: 0.11, resets_at: soon() },
+      ],
+    });
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+
+  it('does not draw the same window twice when both sources have it', async () => {
+    // The five-hour window arrives from both channels. A gauge above a
+    // "no figure" row for the same window is one window claiming to be two.
+    const el = await show(account(), [event()]);
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(3);
+    expect(rendered.textContent).not.toContain('no figure');
+  });
+
+  it('keeps the overage notice the account payload does not carry', async () => {
+    // `overageDisabledReason` is the engine channel's to report, and it
+    // survives the demotion because the gauges cannot say it.
+    const el = await show(account(), [event()]);
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Overage unavailable — org level disabled');
+  });
+
+  it('falls back to the engine records when the account read fails', async () => {
+    const el = await show({ ok: false, reason: 'expired', detail: 'Token expired.' }, [
+      event(),
+    ]);
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Account usage unavailable');
+    expect(text).toContain('Token expired.');
+    expect(text).toContain('no figure');
+  });
+
+  it('says why there are no figures even with nothing else to show', async () => {
+    // An empty section would read as "you have no limits". The reason is
+    // the one thing here a reader can act on.
+    const el = await show({
+      ok: false,
+      reason: 'redirected',
+      detail: '$ANTHROPIC_API_KEY is set, so turns bill to that key.',
+    });
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('ANTHROPIC_API_KEY');
+  });
+
+  it('marks a reading served from the last successful fetch', async () => {
+    const el = await show({ ...account(), stale: true, stale_detail: 'timed out' });
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Last successful reading');
+    expect(text).toContain('timed out');
+  });
+
+  it('shows the windows when the breakdown itself failed', async () => {
+    // **The state this section exists for.** A reader cut off by a weekly
+    // limit has no engine to ask, so the breakdown errors — and the
+    // windows are exactly what they opened the tab to see.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': vi.fn(() => ({
+        error: 'No engine session.',
+        reason: 'no-engine',
+      })),
+      'ClaudeCodeService.get_account_usage': vi.fn(() => account()),
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = el.shadowRoot.textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('48%');
+    expect(text).toContain('Current week (Fable)');
+    // And the breakdown's own error is still reported beside them.
+    expect(text).toContain('No engine session.');
+  });
+
+  it('survives a backend with no such method', async () => {
+    // An older server has no `get_account_usage`; `rpcCall` throws "method
+    // not found" and the panel must not lose the page over it.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [event()] });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('no figure');
+  });
+
+  it('asks for a fresh reading when Refresh is pressed, and not before', async () => {
+    const handler = publishBoth(account());
+    const el = mountTab();
+    await settle(el);
+    expect(handler).toHaveBeenCalledWith(false);
+
+    const refresh = [...el.shadowRoot.querySelectorAll('.tool-btn')].find((b) =>
+      b.textContent.includes('Refresh'),
+    );
+    refresh.click();
+    await settle(el);
+    expect(handler).toHaveBeenLastCalledWith(true);
   });
 });

@@ -50,7 +50,13 @@ logger = logging.getLogger(__name__)
 # Numeric constants (specs-reference/3-engine/session.md § Numeric constants)
 # ---------------------------------------------------------------------------
 
-# Tool card header: one line, enough to recognise the call.
+# A one-line rendering of a tool's input. No longer the *tool card's* header
+# — the browser builds that one now, from the ``input`` the card already
+# carries, because it wants repo-relative paths and the rule for naming a
+# file on screen lives there (``specs5/next.md`` § C3). What is left is the
+# permission layer's, which needs the same shape before any browser is
+# involved. Same number as the browser's ``TOOL_SUMMARY_CHARS``, by
+# coincidence rather than by contract: nothing renders both.
 TOOL_INPUT_SUMMARY_CHARS = 200
 
 # Tool result body: whichever limit is hit first. `truncated` and
@@ -746,6 +752,17 @@ class TurnTranslator:
 
     def _rate_limit(self, message: Any) -> list[Event]:
         info = getattr(message, "rate_limit_info", None)
+        # Logged whole, because the modelled fields have turned out not to be
+        # the whole story. A real record observed 2026-08-29 carried a window,
+        # a reset time and an overage rejection with **no `utilization`**,
+        # while the CLI's own `/usage` showed 37% for that same window — so
+        # the CLI has a figure this event does not carry, and `raw` is the
+        # only place a field we do not model could be hiding. One line at
+        # debug per transition, which is rare by construction.
+        #
+        # `specs5/5-webapp/viewers-hud.md` § The Rate-Limit Channel Is An
+        # Alarm, Not A Usage Panel.
+        logger.debug("Rate-limit record from the CLI: %r", getattr(info, "raw", None))
         return [
             Event(
                 "rateLimit",
@@ -759,6 +776,14 @@ class TurnTranslator:
                     "overage_resets_at": getattr(info, "overage_resets_at", None),
                     "overage_disabled_reason": getattr(
                         info, "overage_disabled_reason", None
+                    ),
+                    # Sent by the CLI and **not modelled by the SDK**, so it
+                    # is read off `raw` rather than the dataclass. Observed
+                    # 2026-08-29 in a real payload; worth carrying because
+                    # `overage_status` alone cannot tell "you have overage and
+                    # are not on it" from "you are on it right now".
+                    "is_using_overage": (getattr(info, "raw", None) or {}).get(
+                        "isUsingOverage"
                     ),
                     "raw": getattr(info, "raw", None) or {},
                 },
@@ -1117,7 +1142,10 @@ class TurnTranslator:
             "tool_use_id": tool_use_id,
             "name": name,
             "server": mcp_server_name(name),
-            "input_summary": summarise_tool_input(tool_input),
+            # No `input_summary`. The header's one-liner is rendered from
+            # `input` in the browser, where repo paths can be shortened
+            # (`specs5/next.md` § C3) — a second, pre-joined copy of the
+            # same dict would only be the version that could not be.
             "input": tool_input or {},
             "status": "pending",
             # When the call was made, ISO 8601 UTC. The only fact on a
@@ -1299,7 +1327,20 @@ def mcp_server_name(tool_name: str) -> str | None:
 
 
 def summarise_tool_input(tool_input: dict[str, Any] | None) -> str:
-    """One-line, length-capped rendering of a tool's input."""
+    """One-line, length-capped rendering of a tool's input.
+
+    The permission layer's, not the tool card's — ``summarise_request``
+    falls back to this for a dialog headline when the call is not a write,
+    an exec or a plan, and ``build_command_payload`` when an execution call
+    carries no ``command`` key. Both need a sentence before a browser is in
+    the picture, which is why this stays server-side.
+
+    The tool card header used to be built here too and is not any more
+    (``specs5/next.md`` § C3): that one wants repo-relative paths, the rule
+    for shortening them lives in the browser, and the card ships its whole
+    ``input`` regardless. Nothing renders both strings, so they are free to
+    differ — do not re-point the card at this function to save a copy.
+    """
     if not tool_input:
         return ""
     parts = []

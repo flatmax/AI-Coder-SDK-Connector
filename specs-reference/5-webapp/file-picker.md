@@ -12,7 +12,7 @@
 | `aic-dc-sort-asc` | `"1"` / `"0"` | `"1"` | Sort direction: 1 = ascending, 0 = descending |
 | `aic-dc-picker-width` | integer px (string) | `280` | Picker pane width within the Files tab |
 | `aic-dc-picker-collapsed` | `"true"` / `"false"` | `"false"` | Picker collapsed state |
-| `aic-dc-deny-read-scope` | `"ask"` / `"session"` / `"local"` | `"ask"` | **Not written or read by any code.** Belongs to the denial-scope prompt, which was specified and never built — see `specs5/5-webapp/file-picker.md` § Denial Scope Prompt. Every denial goes to `.claude/settings.local.json` unconditionally |
+| ~~`aic-dc-deny-read-scope`~~ | — | — | **Declined 2026-08-29 and will never exist.** Belonged to the denial-scope prompt, which is declined rather than deferred — `specs5/5-webapp/file-picker.md` § *Denial Scope Prompt — declined*, `specs5/next.md` § E. Every denial goes to `.claude/settings.local.json` unconditionally, which is now the whole design rather than the unbuilt half of one. The row stays struck through so a reader who meets the key in an old branch or an old spec knows it was decided against, not forgotten |
 
 Malformed values fall back to defaults. Storage errors (private-browsing quirks, quota) are swallowed silently.
 
@@ -147,14 +147,24 @@ The resulting set is dispatched whole on `exclusion-changed`, and the RPC replac
 picker owns with that set. Consequence worth knowing: a file created inside a denied directory afterwards
 is **not** denied, because there is no glob covering it.
 
-### The denial-scope prompt is not built
+### The denial-scope prompt is declined
 
-`specs5/5-webapp/file-picker.md` § Denial Scope Prompt describes a modal that asks where the rule should
-live before the first write. No such dialog exists, `aic-dc-deny-read-scope` is never read or written, and
-every denial goes straight to `.claude/settings.local.json`. What does reach the user is a
-`takes_effect` toast — the string comes from the RPC's return value, not from an assumption in the
-frontend — shown once per session on the first denial, plus a `restricted` warning toast when a non-local
-collaborator tries to deny (CC-15).
+**Decided 2026-08-29** — previously "not built". There is no dialog asking where a deny rule should live,
+`aic-dc-deny-read-scope` is never read or written and never will be, and every denial goes straight to
+`.claude/settings.local.json`. That is the design now, not a gap in one.
+
+The short version of why: both offered scopes wrote the same bytes to the same file, differing only in
+whether AIC⚡DC deleted the rule again at session end — and that cleanup needs a clean exit, which
+Windows never gets and no crash gets anywhere. A genuine in-memory session scope has no mechanism either,
+because **the CLI never routes `Read`, `Glob` or `Grep` through `can_use_tool`**, so our own permission
+callback cannot see the tool the rule is about. Full reasoning in
+`specs5/5-webapp/file-picker.md` § *Denial Scope Prompt — declined*; the decision is `specs5/next.md` § E.
+
+What does reach the user is a `takes_effect` toast — the string comes from the RPC's return value, not
+from an assumption in the frontend — shown once per session on the first denial, plus a `restricted`
+warning toast when a non-local collaborator tries to deny (CC-15). Those carry the disclosure the dialog
+was actually for: which file the rule went into, and that it applies from the CLI's next read of its
+settings sources.
 
 ### Deny rule cleanup on delete
 

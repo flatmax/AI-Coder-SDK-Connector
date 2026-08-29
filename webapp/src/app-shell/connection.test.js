@@ -22,7 +22,7 @@ import {
   afterEach, beforeEach, describe, expect, it, vi,
 } from 'vitest';
 import {
-  installAppShellTestSetup, mountShell, SharedRpc,
+  installAppShellTestSetup, mountShell, SharedRpc, tick,
 } from './test-helpers.js';
 
 describe('AppShell connection lifecycle', () => {
@@ -141,6 +141,34 @@ describe('AppShell connection lifecycle', () => {
       expect(shell.toasts.length).toBe(1);
       expect(shell.toasts[0].type).toBe('success');
       expect(shell.toasts[0].message).toBe('Reconnected');
+    });
+
+    it('tells a reconnected server what is open in the viewer', async () => {
+      // A reconnect usually means the server process restarted, and
+      // `_viewer_state` is in-memory — so the file the user is still
+      // looking at is one the new process has never heard of. Without
+      // the re-push the agent's framing goes quiet until the user
+      // happens to open a different file. See ./viewer-framing.js.
+      const shell = mountShell();
+      const setViewerState = vi.fn().mockResolvedValue({ status: 'ok' });
+      shell.call = { 'ClaudeCodeService.set_viewer_state': setViewerState };
+      shell.setupDone();
+      shell._reportedViewerPath = 'src/main.py';
+      shell.remoteDisconnected();
+      shell.setupDone();
+      await tick();
+      expect(setViewerState).toHaveBeenCalledWith('src/main.py');
+    });
+
+    it('sends no viewer state on reconnect with nothing open', async () => {
+      const shell = mountShell();
+      const setViewerState = vi.fn().mockResolvedValue({ status: 'ok' });
+      shell.call = { 'ClaudeCodeService.set_viewer_state': setViewerState };
+      shell.setupDone();
+      shell.remoteDisconnected();
+      shell.setupDone();
+      await tick();
+      expect(setViewerState).not.toHaveBeenCalled();
     });
   });
 

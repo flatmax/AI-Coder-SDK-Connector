@@ -64,6 +64,7 @@ import {
   syncSubagentTab,
 } from './subagent-tabs.js';
 import { findTabForRequest } from './tabs.js';
+import { formatResetTime, limitTypeLabel } from '../rate-limit.js';
 
 // ---------------------------------------------------------------
 // Turn outcome (LED row state)
@@ -562,9 +563,10 @@ export function onRateLimit(panel, event) {
   if (!data || typeof data !== 'object') return;
   const status = data.status;
   if (status !== 'allowed_warning' && status !== 'rejected') return;
-  const kind = typeof data.rate_limit_type === 'string' && data.rate_limit_type
-    ? `${data.rate_limit_type} limit`
-    : 'Rate limit';
+  // The window's name in the same words the HUD's section uses, so a toast
+  // and the section it sends the reader to do not name one limit two ways.
+  const named = limitTypeLabel(data.rate_limit_type);
+  const kind = named ? `${named} limit` : 'Rate limit';
   const resets = formatResetTime(data.resets_at);
   const when = resets ? ` — resets ${resets}` : '';
   if (status === 'rejected') {
@@ -572,19 +574,6 @@ export function onRateLimit(panel, event) {
   } else {
     panel._emitToast(`⏱️ Approaching the ${kind}${when}`, 'warning');
   }
-}
-
-/**
- * Unix seconds → a local wall-clock time.
- *
- * A clock time rather than a countdown: the toast does not tick, and "resets
- * in 47 minutes" is wrong the moment the user looks away.
- */
-export function formatResetTime(resetsAt) {
-  if (!Number.isFinite(resetsAt) || resetsAt <= 0) return '';
-  const date = new Date(resetsAt * 1000);
-  if (Number.isNaN(date.getTime())) return '';
-  return `at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
 }
 
 /**

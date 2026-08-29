@@ -73,6 +73,7 @@ import {
 import {
   fetchFileContent,
 } from './fetch.js';
+import { toRepoPath } from '../repo-path.js';
 import {
   attachPreviewScrollListener,
   compileTex,
@@ -277,6 +278,17 @@ export class DiffViewer extends LitElement {
       const fetched = await fetchFileContent(path);
       if (myGeneration !== this._openingGeneration) return;
       if (!fetched) return;
+      if (fetched.error) {
+        // Nothing was read, so there is no document to show.
+        // Leaving whatever was open in place is the honest
+        // outcome: the open failed, and replacing a real file
+        // with a blank one would be a second thing to explain.
+        this._emitToast(
+          `Could not open ${toRepoPath(path)}: ${fetched.error}`,
+          'error',
+        );
+        return;
+      }
       newFile = {
         path,
         original: fetched.original,
@@ -334,6 +346,18 @@ export class DiffViewer extends LitElement {
     const fetched = await fetchFileContent(path);
     if (myGeneration !== this._openingGeneration) return;
     if (!fetched) return;
+    if (fetched.error) {
+      // A refresh that cannot read the file keeps the buffer it
+      // already has. The content is stale from this moment on and
+      // the toast is what says so — blanking it would discard the
+      // last known-good copy of a file the user may still be
+      // reading, which is a worse answer than an out-of-date one.
+      this._emitToast(
+        `Could not refresh ${toRepoPath(path)}: ${fetched.error}`,
+        'error',
+      );
+      return;
+    }
     this._file = {
       path,
       original: fetched.original,
@@ -596,19 +620,33 @@ export class DiffViewer extends LitElement {
     this._closeExportMenu();
   }
 
+  /**
+   * Ask the shell for a toast.
+   *
+   * Same shape as the SVG viewer's and the Settings tab's: a
+   * `window` event named `aic-toast`. This viewer used to dispatch
+   * `show-toast` on itself instead — a name the shell has never
+   * listened for on a target it does not listen on — so its export
+   * and copy failures went nowhere for as long as they have
+   * existed. Found while wiring § C2's fetch failures, which need
+   * this channel to work before they can use it.
+   */
+  _emitToast(message, type = 'info') {
+    window.dispatchEvent(
+      new CustomEvent('aic-toast', {
+        detail: { message, type },
+        bubbles: false,
+      }),
+    );
+  }
+
   async _onExportPreviewAsHtml() {
     this._closeExportMenu();
     const result = await exportPreviewAsHtml(this);
     if (!result.ok) {
-      this.dispatchEvent(
-        new CustomEvent('show-toast', {
-          detail: {
-            message: `Export failed: ${result.error || 'unknown'}`,
-            type: 'error',
-          },
-          bubbles: true,
-          composed: true,
-        }),
+      this._emitToast(
+        `Export failed: ${result.error || 'unknown'}`,
+        'error',
       );
       return;
     }
@@ -617,41 +655,23 @@ export class DiffViewer extends LitElement {
       const n = result.unresolvedImages.length;
       message += ` (${n} unresolved image${n === 1 ? '' : 's'})`;
     }
-    this.dispatchEvent(
-      new CustomEvent('show-toast', {
-        detail: { message, type: 'success' },
-        bubbles: true,
-        composed: true,
-      }),
-    );
+    this._emitToast(message, 'success');
   }
 
   async _onCopyPreviewAsHtml() {
     this._closeExportMenu();
     const result = await copyPreviewAsHtml(this);
     if (!result.ok) {
-      this.dispatchEvent(
-        new CustomEvent('show-toast', {
-          detail: {
-            message: `Copy failed: ${result.error || 'unknown'}`,
-            type: 'error',
-          },
-          bubbles: true,
-          composed: true,
-        }),
+      this._emitToast(
+        `Copy failed: ${result.error || 'unknown'}`,
+        'error',
       );
       return;
     }
     const richNote = result.mode === 'rich' ? '' : ' (plain text)';
-    this.dispatchEvent(
-      new CustomEvent('show-toast', {
-        detail: {
-          message: `Copied preview as HTML${richNote}`,
-          type: 'success',
-        },
-        bubbles: true,
-        composed: true,
-      }),
+    this._emitToast(
+      `Copied preview as HTML${richNote}`,
+      'success',
     );
   }
 

@@ -359,6 +359,85 @@ class TestSchedule:
 # ---------------------------------------------------------------------------
 
 
+class TestEnrichmentPreference:
+    """``app.json``'s ``doc_index.keywords_enabled``, finally wired.
+
+    The key was parsed by ``ConfigManager.doc_index_config`` and read by
+    nothing, so enrichment ran whatever the file said. These pin the three
+    things the gate has to get right: that it stops the pass, that it is
+    read per pass rather than captured at construction, and that its
+    status word is not the one the frontend turns into an install hint.
+    """
+
+    async def test_the_preference_stops_the_pass(self, builder):
+        with_enricher(builder, FakeEnricher())
+        builder._enrichment_enabled = lambda: False
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "disabled"
+        assert builder.enriched is False
+
+    async def test_disabled_is_not_unavailable(self, builder):
+        """The words drive different browser behaviour.
+
+        ``unavailable`` raises a one-shot "install ``aic-dc[docs]``" toast.
+        Telling somebody how to install what they just switched off is the
+        one wrong answer, so the gate runs *before* the installed-ness
+        probe and answers with a word the frontend ignores.
+        """
+        with_enricher(builder, FakeEnricher(available=False))
+        builder._enrichment_enabled = lambda: False
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "disabled"
+
+    async def test_the_preference_is_read_per_pass(self, builder, doc_index):
+        """A reload of ``app.json`` has to reach a builder built at startup.
+
+        The builder is constructed once per process, so a boolean captured
+        at construction would make the Settings tab's switch an
+        app-restart field — and that tab has no disposition between "now"
+        and "next session" to describe it with.
+        """
+        with_enricher(builder, FakeEnricher())
+        doc_index.queue = []
+        wanted = [False]
+        builder._enrichment_enabled = lambda: wanted[0]
+
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "disabled"
+
+        wanted[0] = True
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "complete"
+
+    async def test_an_unreadable_preference_leaves_enrichment_on(
+        self, builder, doc_index, caplog
+    ):
+        """Fails open, and says so.
+
+        The alternative is that an unreadable ``app.json`` silently turns
+        off a feature nobody asked to turn off — a config error presenting
+        as a missing feature, which is the hardest kind to attribute.
+        """
+        with_enricher(builder, FakeEnricher())
+        doc_index.queue = []
+
+        def raises():
+            raise OSError("no config")
+
+        builder._enrichment_enabled = raises
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "complete"
+        assert "leaving enrichment on" in caplog.text
+
+    async def test_no_callable_means_on(self, builder, doc_index):
+        """Every caller that does not care about the preference is unaffected."""
+        with_enricher(builder, FakeEnricher())
+        doc_index.queue = []
+        assert builder._enrichment_enabled is None
+        await builder.run_enrichment()
+        assert builder.enrichment_status == "complete"
+
+
 class TestEnrichment:
     async def test_no_enricher_is_unavailable_not_a_failure(self, builder):
         await builder.run_enrichment()

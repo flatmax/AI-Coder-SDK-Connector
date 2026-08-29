@@ -129,6 +129,13 @@ The mechanism: incremental re-indexing is debounced on `PostToolUse`, and a pend
 flushed synchronously before any `aic-dc` index-reading tool returns. See
 [tool-surface.md § Snapshot discipline](tool-surface.md#snapshot-discipline-moves-to-tool-call-boundaries).
 
+**`Bash` is covered by the same flush, by a different route.** A shell command's tool input is a
+command line rather than a file list, so instead of attributing paths the hook sets a flag and the
+flush sweeps mtimes against the cache, queueing whatever moved. The blind spot that remains is a file
+the command *created*, which no cached mtime describes — see
+[`../2-indexing/symbol-index.md` § Freshness After a Shell Command](../2-indexing/symbol-index.md#freshness-after-a-shell-command)
+for the mechanism and the trade.
+
 ## Availability and Degradation
 
 - The server starts with the session. If it fails to start, the session continues without it and a
