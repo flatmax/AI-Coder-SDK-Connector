@@ -293,9 +293,14 @@ is dropped rather than reported as a row of zeroes, which would read as "answere
 
 ## Terminal HUD
 
-The server-side post-turn print survives in reduced form: model, per-model usage, cost or billing
-mode, context percentage, and duration. Tier tables, cache-block boxes, promotion/demotion logs, and
-the startup tier-distribution HUD are all deleted along with the tiering system they described.
+**Not built** (verified 2026-08-29). The intent below stands and the shape is in
+[`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Terminal HUD*, which owns it; queued as
+[`../next.md`](../next.md) § B6.
+
+The server-side post-turn print was to survive in reduced form: model, per-model usage, the turn's own
+cost or the reason it is unknown, context percentage, and duration. Tier tables, cache-block boxes,
+promotion/demotion logs, and the startup tier-distribution HUD are all deleted along with the tiering
+system they described.
 
 ## What Was Deleted
 

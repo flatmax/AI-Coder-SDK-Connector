@@ -3128,6 +3128,10 @@ None caused by this work; all three were spec claiming something the code never 
   key no code reads or writes. Every denial goes to `settings.local.json` unconditionally. Marked **Not
   built** rather than deleted: `specs-reference/3-engine/permissions.md` § There is no runtime rule API
   already explains what a `session` option would have to mean, and that is worth keeping.
+  *(**Declined 2026-08-29** — and the section cited here is why it took three phases: it reached the wall
+  from the SDK's side and stopped, where the remaining question was whether AIC⚡DC's own `can_use_tool`
+  could enforce a session rule. It cannot — the CLI never routes `Read` through it. See
+  `../5-webapp/file-picker.md` § Denial Scope Prompt — declined and `../next.md` § E.)*
 - **The reference doc's context-menu action IDs were invented.** It listed `deny-read`, `allow-read`,
   `deny-read-all`, `allow-read-all` and `doc-convert`; the code dispatches `exclude`, `include`,
   `exclude-all`, `include-all` and has no `doc-convert` row action at all. The IDs kept the old

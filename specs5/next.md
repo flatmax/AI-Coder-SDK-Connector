@@ -1,8 +1,8 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-29**, HEAD `d1c5ca1` — § C3's last commit,
-the most recent thing below recorded as landed. § B3's session-storage change is in the working tree
-above this line and is not in the SHA.
+**Status:** the implementation queue. Current as of **2026-08-29**, HEAD `442d48d` — C9's record, the
+most recent thing below marked as landed. The tree is clean at that SHA, so every claim here is about a
+committed state and nothing is owed to a working copy.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -94,9 +94,22 @@ own framing — "discoverability, not capability" — was true of one card and f
 entry had recorded `config.py` as *honouring* a key it only parses. **"Read the value" and "find its
 reader" are different checks, and only the second one closes this class of item.**
 
-**B3's session-storage row closed 2026-08-29**, which leaves § B holding one row and one question: the
-deny-read scope reset, and B4, which decides whether that row has anything to reset. Both are the same
-item seen from two ends, so **§ B is down to a design decision rather than a build**. **§ C emptied on
+**B3's session-storage row closed 2026-08-29**, which left § B holding one row and one question: the
+deny-read scope reset, and B4, which decided whether that row had anything to reset. Both were the same
+item seen from two ends, and **both closed together the same day when B4 was declined** — the answer was
+that the row had nothing to reset, because the prompt upstream of it could not be built honestly at all.
+That emptied [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built*, the
+second of the three rolling records above.
+
+**But § B did not empty, because clearing the inbox refilled it the same day.** The last entry in
+[`known-issues.md`](known-issues.md) was a stale reference twin; correcting it found two *adjacent*
+sections stale from the same cause, and then a whole surface — the terminal HUD — specified in four
+places with nothing printing it. So **§ B is one item, B6, and it arrived from the source least likely
+to be read as a queue.** Two of the three rolling records fed this file today and neither did it by
+holding an item: one emptied, and the other produced something larger than the entry that led to it.
+**The item found by fixing a documentation bug was bigger than the documentation bug** — which is the
+argument for reading the inbox before planning a sitting rather than only when something cites it.
+**§ C emptied on
 2026-08-28 and reopened the next day** with C9 — an auth error on a cold start that no persisted surface
 recorded, which is the third time this file has written down that a broadcast is not a record. C9's
 *record* landed the same day; C9 itself stays open, because the error it was reported for is still
@@ -338,7 +351,7 @@ the save-disposition/restart pair and the MCP controls landed:
 |---|---|
 | Thinking display toggle | ✅ *Built 2026-08-28.* Three-state select over `engine.json`'s `thinking_display`; the field joins the restart list. |
 | Doc enrichment toggle | ✅ *Built 2026-08-28* — **and its premise was false**, see below. |
-| Deny-read scope reset | Nothing anywhere reads or writes `aic-dc-deny-read-scope`. Depends on B4 below being decided first. |
+| ~~Deny-read scope reset~~ | ✅ *Closed 2026-08-29 — **declined**, not built.* B4 was decided against, so there is no remembered answer and nothing to reset. |
 | Session storage size | ✅ *Built 2026-08-29.* `get_session_storage` is the readable half of the measurement `_disk_warning` had a monopoly on; the figure renders on § *Session Controls* with a link to the history browser. |
 
 **The premise this item was written on was half wrong, and the wrong half was the whole job.** "The value
@@ -380,15 +393,77 @@ silence would leave a blank card with no account of why. What crosses to the bro
 browser, because a delete button sited where the transcript is not on screen is a second way to destroy
 one. `formatBytes` grew a GB tier rather than the tab growing a copy of it.
 
-**Not built, and it is B4's not this item's:** the deny-read scope reset.
+**Not built, and it was B4's not this item's:** the deny-read scope reset. *(B4 declined 2026-08-29; the
+row above closed with it.)*
 
-**B4 — The denial-scope prompt.** [`5-webapp/file-picker.md`](5-webapp/file-picker.md) specifies a
-modal asking whether a deny-read rule is session-scoped or written to `.claude/settings.local.json`,
-with an `aic-dc-deny-read-scope` localStorage key. Marked **Not built** there rather than deleted,
-because [`specs-reference/3-engine/permissions.md`](../specs-reference/3-engine/permissions.md)
-§ *There is no runtime rule API* already explains what a `session` option would have to mean — and
-that constraint is the reason this is a design decision and not a form. Every denial currently goes to
-`settings.local.json` unconditionally.
+**B4 — The denial-scope prompt.** ✅ *Declined 2026-08-29 — leaves this queue; § E holds the decision.*
+[`5-webapp/file-picker.md`](5-webapp/file-picker.md) § *Denial Scope Prompt — declined* carries the full
+reasoning and the two routes by which it could be reopened.
+
+**It was not a hard build; it was an unbuildable promise, and nothing said so for three phases.** The
+modal offered two scopes — session, or written to `.claude/settings.local.json` — and **both of them were
+the same write**: the same bytes, the same file, the same instant, because writing that file is the only
+way a read can be denied at all. All that differed was whether AIC⚡DC deleted the rule again at session
+end. So the dialog asked the user to pick a scope and handed them a choice of housekeeping.
+
+**Three findings closed it, and the third is the one worth carrying.** The cleanup needs a clean exit,
+which § C8 established is POSIX-only and which no crash gets on any platform — so "this session only"
+breaks its promise silently, leaving a struck-through file at next launch with nothing on screen to
+explain it. Making it survive a crash needs a persisted "remove these later" list beside a settings file
+the user and the CLI both edit, which is a second source of truth for one question — §§ C3, C7 and B1 all
+converged away from exactly that. And **the mechanism that would have made a session scope real does not
+exist**: an in-memory rule would need no file, and AIC⚡DC already owns a rule engine that could carry
+one — the `can_use_tool` callback — except that **the CLI never asks about `Read`, `Glob` or `Grep`**, so
+the callback never fires for the tool the rule is about (`permissions.py`, the `AIC_DC_MCP_SERVER` early
+return and its comment; `GATED_BY_DEFAULT["read"]` is `False`).
+
+**That third finding is why this sat open rather than being decided years ago, and it is a lesson about
+where a blocker gets recorded.** [`specs-reference/3-engine/permissions.md`](../specs-reference/3-engine/permissions.md)
+§ *There is no runtime rule API* had reached the same wall from the SDK side — it says in as many words
+that the deny gesture "happens outside any tool call, so there is no callback return value to attach a
+`session`-scoped rule to" — and then stopped, treating the file write as the fallback rather than as the
+only option. The remaining step was to ask whether our *own* callback could enforce it, and the answer
+was in a comment in `permissions.py` the whole time. **A constraint written from one side reads as a
+limitation; the same constraint checked from both sides is a decision.** Three phases of "not built"
+were three phases of nobody taking the second step.
+
+**And the dialog cost more than what it guarded**, which would have settled it even if a mechanism had
+existed. A deny is one shift-click, rendered visibly, undone by the same gesture with no prompt — the
+spec's own rule was that removing a denial never asks. A modal in front of a reversible, visible,
+one-gesture action is a confirmation dialog on an undo, and it would have been worst where it is most
+expensive: a directory or root deny expands to one rule per descendant file. **What the prompt was
+actually for already ships** — naming the destination file, and saying the rule is not instant — as the
+`takes_effect` toast and `set_denied_read_files`' `settings_file` return. The disclosure survives; only
+the choice went, because only one of its two answers was ever real.
+
+**B6 — The terminal HUD is specified in four places and printed by nothing.** Found 2026-08-29 while
+clearing [`known-issues.md`](known-issues.md)'s last entry, which named one stale section of one
+reference twin. [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Terminal HUD* specifies a
+server-side post-turn print — model, per-model usage, the turn's cost, context percentage, duration,
+terminal reason, files — [`3-engine/context-visibility.md`](3-engine/context-visibility.md) § *Terminal
+HUD* repeats the intent, the [reference twin](../specs-reference/5-webapp/viewers-hud.md) § *Terminal
+HUD format* gives the exact layout down to column alignment, and **both spec files carry it as an
+invariant**. Nothing in `src/aic_dc` prints it: no `Ctx:`, no `Cost:`, no post-turn summary log line at
+all (verified 2026-08-29). All four are now marked *Not built* rather than deleted, because the reasoning
+still holds and nobody has declined it — § E is where a decline would go.
+
+**This is § B5 and § C7's shape at the scale of a surface rather than a field.** Those were a serialised
+key with no writer and an advertised prompt input with no writer; this is a whole rendering with no
+producer, and it survived four phases because **an invariant is not a test** — two files assert that the
+HUD "prints after every completed turn" and nothing has ever checked. The three-way choice § B5 framed
+applies unchanged: write it or delete it. Writing it is the smaller job it looks like *only* if it reads
+`turn_cost_usd` / `turn_cost_basis`; the specs said "cost or billing mode", which is the pre-phase-6
+reading of a cumulative field, and a terminal line that answered differently from the browser would be a
+second definition of what a turn cost — the thing § C3 keeps finding and the thing
+§ *Cost Is Cumulative* exists to end. **The correction is already made in all three spec files**, so the
+build is a wire-up rather than a design.
+
+**What made this findable was fixing something else.** The stale § *Cost rendering* was the known issue;
+§ *Per-model row derivations* beside it was stale from the same cause and nobody had noticed, still
+specifying a cache-hit column and a context-window column that the HUD does not render and that
+§ *Per-Model Rows Are Not Summed* explicitly rules out. **A twin does not go stale one section at a
+time** — the phase that corrected the main file corrected it section by section, and the sections it
+did not visit in the twin are exactly the ones nothing pointed at.
 
 **B5 — `EngineHealth.mcp` is a field with no writer.** ✅ *Deleted 2026-08-28 — leaves this queue.*
 The choice was write it or delete it, and deleting won: the Context tab already called
@@ -642,6 +717,9 @@ elapsed seconds computed server-side so no two clocks have to agree. Details in
 [`5-webapp/shell.md`](5-webapp/shell.md) § *Layout*. The inbox is still where new defects land, so read
 it before planning a sitting rather than only when it is cited.
 
+*(It refilled and emptied again: a stale-reference-twin entry noticed 2026-08-28 was cleared 2026-08-29,
+and clearing it produced § B6. The advice above earned itself in one day.)*
+
 **C9 — An auth error on the first connect of a cold server, and no record that it happened.**
 *Its closeable half was built 2026-08-29 — see § Landed since.* **The item stays open**, because what
 landed makes the next occurrence legible and does not explain this one. The underlying error has still
@@ -756,6 +834,22 @@ decision that parked them.
   build or verification step stays unproven on a runner until a real PR carries it. When packaging work
   lands, run the build command locally with CI's exact flags, run the verification block by hand, and
   record the runner half as outstanding — that is the sanctioned substitute, not a dispatch.
+- **The file picker's denial-scope prompt — declined (2026-08-29).** Every deny-read rule goes to
+  `.claude/settings.local.json` unconditionally, with no dialog and no `aic-dc-deny-read-scope` key, and
+  that is the design rather than the unbuilt half of one. **The reason is not cost, it is that one of the
+  two options was not implementable as described:** a "this session only" rule writes the same file as
+  the other option and differs only by a cleanup at session end, which Windows never runs (§ C8) and
+  which no crash runs anywhere. The in-memory alternative is closed too — **the CLI does not route
+  `Read`, `Glob` or `Grep` through `can_use_tool`**, so AIC⚡DC's own permission callback never sees the
+  tool the rule would be about. The disclosure the dialog was really for already ships as the
+  `takes_effect` toast. Full reasoning in
+  [`5-webapp/file-picker.md`](5-webapp/file-picker.md) § *Denial Scope Prompt — declined*; the reference
+  twins and [`5-webapp/settings.md`](5-webapp/settings.md) carry the key and the reset card struck
+  through rather than deleted, so a reader who meets either in an old branch knows it was decided
+  against. **Reopening means one of two different features, not this one:** either the CLI grows a way to
+  gate reads, or the question is re-asked on the axis that has two honest answers — `.claude/settings.json`
+  committed and team-wide versus `.claude/settings.local.json` git-ignored and per-user. Nobody has asked
+  for the second.
 - **The collaboration admission UI — on pause (2026-08-27).** The backend is complete:
   [`4-features/collaboration.md`](4-features/collaboration.md) §§ *Pending State*, *Admission Toast*,
   *Connected Users Indicator*, *Collab Popover* specify the surface, `collab.py` holds the pending queue,

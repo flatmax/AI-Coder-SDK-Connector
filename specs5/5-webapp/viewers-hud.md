@@ -584,9 +584,18 @@ keeps its stack: being wrong here must cost a noisy log, never a silent one.
 
 ## Terminal HUD
 
-Printed server-side after each turn, in reduced form: model, per-model usage, cost or billing mode,
-context percentage, duration, and terminal reason. Printed for cancelled turns as well as completed
-ones — a cancelled turn still consumed tokens.
+**Not built** — verified 2026-08-29, and marked rather than deleted because the argument below still
+holds and nothing has declined it. Nothing in `src/aic_dc` prints a post-turn summary; the browser HUD
+is the only surface that reports a turn. Queued as [`../next.md`](../next.md) § B6.
+
+Printed server-side after each turn, in reduced form: model, per-model usage, the turn's cost or the
+reason it is unknown, context percentage, duration, and terminal reason. Printed for cancelled turns as
+well as completed ones — a cancelled turn still consumed tokens.
+
+**"Cost or billing mode" is how this read before phase 6 and it is wrong now.** The terminal line takes
+the same three-way answer the browser does — a figure, "nothing extra", or "cost unknown" with the
+reason — because a second definition of what a turn cost is exactly what § *Cost Is Cumulative* exists
+to prevent. An implementation reads `turn_cost_usd` / `turn_cost_basis`, never `total_cost_usd`.
 
 Deleted with the tiering system: the boxed cache-block table, per-tier token counts with entry-N
 thresholds, the tier-changes log, the mode-aware category table, and the one-shot startup
@@ -630,4 +639,5 @@ tier-distribution HUD.
   account, and the CLI only re-sends on a status change.
 - Every file named on the HUD follows the same rule as every file named anywhere else: repo-relative
   label, engine's path on the tooltip, unconverted path in the navigation event.
-- The terminal HUD prints after every completed turn, cancelled or not.
+- The terminal HUD prints after every completed turn, cancelled or not. *(Unmet: not built — § Terminal
+  HUD.)*

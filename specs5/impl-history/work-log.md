@@ -507,7 +507,15 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   2026-08-28 — see § Landed since**, and it needed a backend half nobody had looked for: the key had no
   reference anywhere in `src/aic_dc` either, beyond the line that parses it. This bullet had measured
   the browser side of a field that was dead on both.
-- **Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.
+- ~~**Deny-read scope reset** — no `aic-dc-deny-read-scope` key anywhere in the tree.~~ **Closed
+  2026-08-29 by declining the thing upstream of it**, not by building it. The card was to reset a
+  remembered answer to the file picker's denial-scope prompt; that prompt is decided against, so there is
+  no answer to remember and no preference to reset. Worth keeping as a shape: **this bullet measured the
+  absence of a key and could not have told you the feature behind it was unbuildable** — the same reading
+  error as the doc-enrichment bullet three lines up, which measured the browser side of a field that was
+  dead on both. Reasoning in [`../5-webapp/file-picker.md`](../5-webapp/file-picker.md) § *Denial Scope
+  Prompt — declined*; the decision is [`../next.md`](../next.md) § E. **This closes item (c) and this
+  list with it.**
 - **The permission chime's mute.** Added to this list by (a)'s arbitration rather than found in it: the
   dialog *reads* `aic-dc.permission-chime` and nothing writes it, so the mute is reachable only from a
   devtools console. It was a Settings preference card, which is why the gap read as "specified, not built"

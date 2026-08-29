@@ -87,42 +87,71 @@ composition model; the engine now supplies both the categories and their colours
 
 ### Per-model row derivations
 
-`model_usage` rows are rendered as-is with two computed columns:
+Rows come from **`turn_model_usage`** — this turn's counters — read by `modelUsageLines`
+(`webapp/src/turn-cost.js`). `model_usage` is the session's running total and is never a source for
+these rows; see `specs5/5-webapp/viewers-hud.md` § *Cost Is Cumulative, and the HUD Reports One Turn*.
 
-| Column | Formula | Suppressed when |
-|---|---|---|
-| Cache hit % | `cacheReadInputTokens / (inputTokens + cacheReadInputTokens) × 100` | Denominator is 0 → render `—` |
-| Context window | `contextWindow` from the row, formatted with thousands separators | Field absent |
+| Aspect | Value |
+|---|---|
+| Row label | `canonicalModel` when present, otherwise the map key. The key is the raw provider string, which on Bedrock or Vertex is an id like `us.anthropic.claude-opus-5-v1:0`. There is no `modelName` field |
+| Ordering | Total tokens descending |
+| Suppressed when | The entry's four counters total ≤ 0 |
+| Counter spelling | camelCase first, snake_case second — the wire schema uses the first, a replayed transcript the second. Missing reads as 0, negatives are ignored |
+| Rendered per row | `↑ prompt · ↓ output`, where `prompt` is `input + cacheCreation + cacheRead` |
+| In the tooltip only | The four counters apart, `input` being the uncached remainder rather than the prompt |
 
-Cache-hit colour thresholds are retained from the native engine (≥ 50% green, ≥ 20% amber, below that
-default text) but the metric is demoted from a header badge to a table column. It was headline-worthy
-only while AIC⚡DC was the thing doing the caching.
+**There is no cache-hit column and no context-window column.** Both were the native engine's, and the
+ratio is not computed anywhere: the two cache counters are reported and a reader who wants the rate can
+take it (`specs5/5-webapp/viewers-hud.md` § *Per-Model Rows Are Not Summed*). `↑` is the whole prompt
+because 300px does not hold three numbers beside a model name, and the sum is the honest one to show.
 
-**Rows are never summed.** No total row, no aggregate header figure. A turn that delegated to a cheaper
-model reports two rows and keeps two rows.
+**Rows are never summed** — no total row, and the section head's headline is `{n} models`, a count. A
+turn that delegated to a cheaper model reports two rows and keeps two rows. A one-model turn gets no
+headline, because the model name is already on the HUD's header.
 
 Deleted with the cache: `provider_cache_rate` and its precedence rule over a locally computed
-`cache_hit_rate` (there is no local computation to prefer against), and Cache ROI
+`cache_hit_rate` (there is no local computation to prefer against), Cache ROI
 (`(cache_read / cache_write − 1) × 100`), which answered "is our cache paying for itself" about a cache
-we no longer own.
+we no longer own, and the cache-hit colour bands that went with them.
 
 ### Cost rendering
 
-Driven by `total_cost_usd` on the `ResultMessage`, which is `null` under subscription billing.
+**Corrected in phase 6** against the CLI's wire schema; this section described the pre-phase-6 HUD until
+2026-08-29. Driven by **`turn_cost_basis` and `turn_cost_usd`** — the per-turn fields
+`aic_dc/claude_code/cost.py` computes as a difference against session state. `total_cost_usd` is the
+session's running total and is read for one tooltip and nothing else. Derivations in
+`webapp/src/turn-cost.js`; the reasoning is
+`specs5/5-webapp/viewers-hud.md` § *Cost Is Cumulative, and the HUD Reports One Turn*.
 
-| Condition | Row | Value | Tooltip |
+| `turn_cost_basis` | Row | Value | What the tooltip names |
 |---|---|---|---|
-| `total_cost_usd` is a positive number | Shown | `$0.0000` (4 decimals) | Absolute turn cost |
-| `total_cost_usd` is `0` and tokens were consumed | Shown | Billing-mode label, e.g. `subscription` | `This turn is billed under your plan, not per token.` |
-| `total_cost_usd` is `null` | Shown | Billing-mode label | Same |
-| `max_budget_usd` configured | Additional bar | `spent / max_budget_usd` with the gauge palette | Remaining budget in dollars |
+| `measured`, figure > 0 | Shown | The formatted cost | What the turn added, and the session total it moved to |
+| `measured`, figure 0 | Shown | `nothing extra` | That the estimate did not move — **explicitly not a claim about the billing plan** |
+| `reset` | Shown | `cost unknown` | The running total restarted mid-turn (a `/clear`, a resumed session); the next turn is priced normally |
+| `unpriced` | Shown | `cost unknown` | No usable figure; the spend is not lost — it lands on the next turn the engine prices |
+| Absent or unrecognised | **No row at all** | — | — |
+| `max_budget_usd` configured | Additional bar | `total_cost_usd / max_budget_usd` with the gauge palette | Remaining budget in dollars. **Not built** |
 
-**`$0.00` is never rendered.** A zero cost for a turn that plainly consumed tokens reads as a broken HUD
-and teaches users to ignore the figure (`specs5/plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap`).
+`measured` with no usable number behind it is downgraded to `unpriced`: a basis and a figure that
+contradict each other are resolved in favour of the figure. A negative cost is treated as absent — a bug
+upstream, not a refund.
 
-4-decimal precision is retained for the priced case: a turn whose subagents ran on a cheap model can cost
-fractions of a cent, and 2 decimals would round it to `$0.00` — the exact display this rule exists to
-prevent.
+| Rule | Value |
+|---|---|
+| Format | `n > 0.5 ? $n.toFixed(2) : $n.toFixed(4)` — the bundled `claude` binary's own format, so a figure here reads like the terminal's |
+| Absent row means | A browsed turn. Cost is not in the CLI's transcript, so it was never recorded — a different fact from "we lost track of it" |
+| Billing-mode label | **None.** No surface labels a cost with a billing mode |
+
+**`$0.00` is never rendered**, and neither is a billing-mode label. A zero cost for a turn that plainly
+consumed tokens reads as a broken HUD and teaches users to ignore the figure
+(`specs5/plan/risks.md#r-6--cost-becomes-invisible-instead-of-cheap`) — but the fix is naming the reason,
+not claiming a plan. Four decimals matter for the priced case: a turn whose subagents ran on a cheap
+model can cost fractions of a cent, and two decimals would round it to `$0.00`, the exact display this
+rule exists to prevent.
+
+**There is no null branch.** The schema types `total_cost_usd` as a plain number; every null in this
+codebase is one AIC⚡DC wrote itself, on a synthetic failure footer or a replayed turn.
+`credential_source` on the engine-health record is the only real billing-mode signal.
 
 The native engine's `priced_request_count` / `unpriced_request_count` split is gone. It existed because
 litellm's pricing table could lack an entry for a configured model; the CLI reports cost or reports
@@ -195,6 +224,11 @@ replaced it: `get_context_usage()` is fetched on state change only.
 
 ### Terminal HUD format
 
+**Not built** (verified 2026-08-29: nothing in `src/aic_dc` prints this, and no post-turn summary log
+line exists). Specified here and in `specs5/5-webapp/viewers-hud.md` § *Terminal HUD*,
+`specs5/3-engine/context-visibility.md` § *Terminal HUD*, and one invariant in each. Queued as
+`specs5/next.md` § B6.
+
 Printed server-side after each turn, cancelled or not:
 
 ```
@@ -207,8 +241,9 @@ Ctx:   118,204 / 200,000 (59%) · auto-compact at 160,000
 Files: src/auth/session.py, src/auth/tokens.py
 ```
 
-One `Usage:` line per `model_usage` entry, first line labelled, continuations aligned. `Cost:` prints the
-billing mode when `total_cost_usd` is null. `Files:` is omitted when the turn modified nothing.
+One `Usage:` line per `turn_model_usage` entry, first line labelled, continuations aligned. `Cost:`
+follows the browser's rule — the turn's own figure, or the reason it is unknown, and never a
+billing-mode label (§ *Cost rendering*). `Files:` is omitted when the turn modified nothing.
 
 Deleted: the boxed `╭─ Cache Blocks ─╮` table with per-tier `(entry_n+)` thresholds, the mode-aware
 category table with its "Symbol Map" / "Doc Map" label swap, the 📈/📉 tier-change log, and the one-shot

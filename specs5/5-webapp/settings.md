@@ -178,7 +178,7 @@ uniform.
 | Card | Backed by | Effect |
 |---|---|---|
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
-| Deny-read scope | `localStorage` `aic-dc-deny-read-scope` | The remembered answer to the file picker's denial-scope prompt, resettable to `ask`. **Not built** |
+| ~~Deny-read scope~~ | — | **Declined 2026-08-29 — this card will never exist.** It was to reset a remembered answer to the file picker's denial-scope prompt, and that prompt is now decided against rather than deferred, so there is no preference to reset. A reset control is downstream of a choice; when the choice went, the card went with it. [`file-picker.md`](file-picker.md) § *Denial Scope Prompt — declined*, [`../next.md`](../next.md) § E |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
 
 **The note under each control is the card.** Both fields were already editable in the textarea below —
