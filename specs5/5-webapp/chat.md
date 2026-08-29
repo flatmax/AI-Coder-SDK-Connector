@@ -638,6 +638,7 @@ the UI in two places that must be got right:
 | `load-diff-panel` | Outward (bubbles) | Load content in diff viewer left or right panel |
 | `view-subagents-requested` | Outward (bubbles, composed) | Carries `{agents: [{agent_id, label}], session_id}` to the chat panel's tab strip, which reads the transcript and opens a read-only tab |
 | `session-deleted` | Inward (`window`) | Re-dispatched by the shell from the `sessionDeleted` broadcast; drops the row, its search hits, its subagent listing, and the preview if that session was the one selected |
+| `open-history` | Inward (`window`) | Opens the browser on behalf of another surface. The only inward window event on the panel that does not come from the server: the Settings tab's session-storage figure argues for deleting sessions and links here, because deletion belongs beside the transcript being deleted rather than behind a settings button ([settings.md § Session Controls](settings.md)). It opens; it does not toggle — a second request from a surface that cannot see the browser must not close it |
 
 ## Invariants
 

@@ -12,10 +12,11 @@ than one that says so.
 
 > **Parts of this file are ahead of the build.** The tab renders a toolbar, a one-row info banner, the
 > model panel, a two-card grid, an inline editor, the per-field save disposition (§ Save Behavior) and
-> the restart control that applies what a save could not (§ Session Controls), and the retired-files
+> the restart control that applies what a save could not (§ Session Controls), the session-storage
+> figure beside it (§ Session Controls, built 2026-08-29), and the retired-files
 > note (§ Deleted cards, built 2026-08-28). What remains
-> specified-but-unbuilt is now only work that genuinely belongs *here*: three preference cards
-> (§ Preference Cards) and session-storage size (§ Session Controls). Each is
+> specified-but-unbuilt is now only one preference card — Deny-read scope
+> (§ Preference Cards), which waits on the prompt it would reset. It is
 > classified in
 > [`../impl-history/work-log.md` § The Settings tab spec describes a tab three times its size](../impl-history/work-log.md#the-settings-tab-spec-describes-a-tab-three-times-its-size)
 > under *(c) Neither side exists*.
@@ -239,7 +240,8 @@ other rule.
 
 ## Session Controls
 
-**Restart session is built; session storage is not.** They are what is left of this section after the
+**Both of these are built** (restart 2026-08-26, session storage 2026-08-29). They are what is left of
+this section after the
 things it described that live elsewhere were removed from it: engine health and MCP server status —
 including the reconnect and enable/disable controls — are the Context tab's, beside the connection state
 and token cost that motivate them. See [`viewers-hud.md` § Session Section](viewers-hud.md).
@@ -258,9 +260,21 @@ configures:
   [`../3-engine/session.md` § Restart is the only thing that applies an option](../3-engine/session.md#restart-is-the-only-thing-that-applies-an-option)
   for the mechanism and the two refusals
 - **Session storage** — the size of `.aic-dc/sessions/` and a link to the history browser for deletion.
-  Deletion happens there, next to what is being deleted, not behind a settings button. Nothing to call
-  yet: the backend measures the session directory only as a turn-time warning (`_disk_warning`), not as a
-  readable RPC
+  Deletion happens there, next to what is being deleted, not behind a settings button: a delete on this
+  tab would be a second way to destroy a transcript, sited where the thing destroyed is not on screen.
+  The link asks the chat panel to open the browser and minimizes the dialog on the way, the same as the
+  Context tab's file links, because the browser opens behind it. Read from
+  `ClaudeCodeService.get_session_storage`, which walks the directory the turn-time warning walks and is
+  deliberately **not** routed through `_disk_warning`: that one is latched to fire once per server
+  lifetime, so borrowing it would mean opening this tab silently spends a warning the user has not seen.
+  The reply is `{bytes, over_warning}` — the *verdict*, not the threshold, matching how the health banner
+  is handed a mirror-gap verdict rather than `history.mirror_gap_tolerance`; the number behind it is
+  user-editable (`history.session_dir_warning_bytes`) and a second copy of it in the browser is a second
+  answer waiting to disagree. Three renderings for three answers, and two of them are not sizes: a run
+  with no repo says it is not mirrored, and a failed walk says so instead of showing a zero. Nothing is
+  rendered before the first read lands. Re-read when the tab is revealed, which is what closes the loop —
+  the figure argues for a deletion, the deletion happens in another surface, and coming back here is when
+  the new number is worth a round trip
 
 ## Editing Flow
 

@@ -1,7 +1,8 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-28**, HEAD `837acaa` — § C2's commit, the
-last thing below recorded as landed. § C3's own commit sits above this line and is not in the SHA.
+**Status:** the implementation queue. Current as of **2026-08-29**, HEAD `d1c5ca1` — § C3's last commit,
+the most recent thing below recorded as landed. § B3's session-storage change is in the working tree
+above this line and is not in the SHA.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -93,7 +94,9 @@ own framing — "discoverability, not capability" — was true of one card and f
 entry had recorded `config.py` as *honouring* a key it only parses. **"Read the value" and "find its
 reader" are different checks, and only the second one closes this class of item.**
 
-§ B is down to B3's remaining rows and B4, and B4 is a design decision rather than a build. **§ C has
+**B3's session-storage row closed 2026-08-29**, which leaves § B holding one row and one question: the
+deny-read scope reset, and B4, which decides whether that row has anything to reset. Both are the same
+item seen from two ends, so **§ B is down to a design decision rather than a build**. **§ C has
 nothing left to build**, as of the entry three paragraphs down.
 
 **§ C2 closed 2026-08-28**, and it grew a finding on the way that the item could not have predicted: the
@@ -327,12 +330,12 @@ in that section and in the work-log's § *Landed since*.
 [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built* item (c), after
 the save-disposition/restart pair and the MCP controls landed:
 
-| Item | State at HEAD (verified 2026-08-27, amended 2026-08-28) |
+| Item | State at HEAD (verified 2026-08-27, amended 2026-08-29) |
 |---|---|
 | Thinking display toggle | ✅ *Built 2026-08-28.* Three-state select over `engine.json`'s `thinking_display`; the field joins the restart list. |
 | Doc enrichment toggle | ✅ *Built 2026-08-28* — **and its premise was false**, see below. |
 | Deny-read scope reset | Nothing anywhere reads or writes `aic-dc-deny-read-scope`. Depends on B4 below being decided first. |
-| Session storage size | **Nothing to call.** The backend measures the session directory only as a turn-time warning (`_disk_warning`), never as a readable RPC. |
+| Session storage size | ✅ *Built 2026-08-29.* `get_session_storage` is the readable half of the measurement `_disk_warning` had a monopoly on; the figure renders on § *Session Controls* with a link to the history browser. |
 
 **The premise this item was written on was half wrong, and the wrong half was the whole job.** "The value
 is already configurable, so what is being built is discoverability, not capability" held for
@@ -360,8 +363,20 @@ would silently discard the user's unsaved edits — the one fault this control c
 alone never could. Reasoning in [`5-webapp/settings.md`](5-webapp/settings.md) § *Preference Cards* and
 [`2-indexing/keyword-enrichment.md`](2-indexing/keyword-enrichment.md) § *Switching Enrichment Off*.
 
-**Not built, and it is B4's not this item's:** the deny-read scope reset. Session storage still has nothing
-to call.
+**The session-storage figure's whole design is one refusal: it does not reuse `_disk_warning`.** The
+measurement is the same directory walk against the same configured threshold, so borrowing the existing
+method looked like the obvious saving — and it would have meant that opening the Settings tab spends the
+once-per-server-lifetime latch on a user who has not seen the sentence. Two callers, one measurement, one
+latch, and **the latch belongs to the caller that interrupts rather than the one that was asked**. The two
+diverge on failure for the same reason: a walk the warning cannot complete is silent, because a size it
+could not read is not worth failing a completed turn over, whereas here the size *is* the answer and
+silence would leave a blank card with no account of why. What crosses to the browser is
+`{bytes, over_warning}` — the verdict, not `history.session_dir_warning_bytes`, following the rule
+`EngineHealth` set for the mirror gap. Deletion is not offered here at all; the card links to the history
+browser, because a delete button sited where the transcript is not on screen is a second way to destroy
+one. `formatBytes` grew a GB tier rather than the tab growing a copy of it.
+
+**Not built, and it is B4's not this item's:** the deny-read scope reset.
 
 **B4 — The denial-scope prompt.** [`5-webapp/file-picker.md`](5-webapp/file-picker.md) specifies a
 modal asking whether a deny-read rule is session-scoped or written to `.claude/settings.local.json`,

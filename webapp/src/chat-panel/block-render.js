@@ -256,11 +256,25 @@ export function formatInvokedAt(ms) {
   }
 }
 
+/**
+ * A byte count as a short string. The one owner of that rendering.
+ *
+ * Grew a GB tier when the Settings tab's session-storage figure started
+ * calling it: a truncated tool result is a few hundred KB and stops at MB,
+ * but `.aic-dc/sessions/` is warned about in gigabytes, and `1782.4 MB` is a
+ * number a reader has to divide before it means anything. Same 1024 base
+ * throughout, and the existing tiers' labels are left as they are — the
+ * engine's own warning sentence says GiB for the same arithmetic, and one
+ * function using two labelling conventions would be worse than the mismatch.
+ */
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return '';
   if (bytes < 1024) return `${Math.round(bytes)} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 export function formatTokens(count) {

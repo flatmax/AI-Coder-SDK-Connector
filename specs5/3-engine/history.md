@@ -334,6 +334,16 @@ The browser reads both carriers and shows it as a system-event card in the trans
 toast, for the reasons in [`../5-webapp/chat.md`](../5-webapp/chat.md) § Engine Event Routing: it is a
 sentence to read and act on, not a notification to acknowledge.
 
+The same measurement is also readable on demand, and it is a **separate method** rather than a second
+caller of the warning. The Settings tab's session-storage figure asks for the size whenever it is
+revealed; routing that through the one-shot would mean opening a tab silently spends the warning the user
+has not seen. Two callers, one measurement, one latch, and the latch belongs to the caller that
+interrupts rather than the one that was asked. The two also part company on failure: a walk the warning
+cannot complete is silent, because a size it could not read is not worth failing a completed turn over,
+whereas the readable one reports the failure, because there the size *is* the answer. What crosses to the
+browser is the size and a verdict, never the threshold — see
+[`../5-webapp/settings.md`](../5-webapp/settings.md) § Session Controls.
+
 ## Search
 
 Full-text search runs over the derived index, with a scan of the transcript as the fallback when the
@@ -375,4 +385,5 @@ read them.
 - Subagent transcripts are keyed by SDK agent ID; no positional index appears in any path or record.
 - No rendered row attributes to the user text the user did not write. A `user` entry carrying
   `origin.kind == "task-notification"` renders as a system note, and no session preview opens with one.
-- The disk-usage warning fires at most once per server lifetime and never blocks work.
+- The disk-usage warning fires at most once per server lifetime and never blocks work, and reading the
+  same size on demand never spends that one shot.

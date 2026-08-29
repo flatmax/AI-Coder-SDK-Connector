@@ -2226,6 +2226,10 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "history_load": ("sess-1",),
     "history_image": ("sess-1", "sess-1-u1", 0),
     "history_search": ("parser",),
+    # The size of that history, for the same reason: it is a figure about
+    # what a participant may already read, and the deletion it argues for
+    # is gated where deletion happens.
+    "get_session_storage": (),
     "list_subagent_transcripts": (),
     "get_subagent_transcript": ("a1",),
 }
@@ -2657,6 +2661,96 @@ class TestTheDiskWarning:
         assert await service._disk_warning() is None
         service._config.history_config = {"session_dir_warning_bytes": 4_000}
         assert await service._disk_warning() is not None
+
+
+class TestTheReadableSessionSize:
+    """The same measurement as the warning, asked for rather than announced.
+
+    ``get_session_storage`` walks the same directory against the same
+    threshold, and the whole point of it being a separate method is the
+    latch: a Settings tab that borrowed ``_disk_warning`` would spend the
+    one-shot on a user who had not seen it
+    (``specs5/5-webapp/settings.md`` § Session Controls).
+    """
+
+    @pytest.fixture
+    def over_threshold(self, service, monkeypatch):
+        from aic_dc.claude_code import service as service_mod
+
+        monkeypatch.setattr(
+            service.session_store,
+            "total_bytes",
+            lambda: service_mod.DISK_WARNING_BYTES + 1,
+        )
+        return service
+
+    async def test_a_small_directory_is_a_size_and_a_no(self, service, monkeypatch):
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 4_096)
+        assert await service.get_session_storage() == {
+            "bytes": 4_096,
+            "over_warning": False,
+        }
+
+    async def test_a_big_directory_is_a_size_and_a_yes(self, over_threshold):
+        result = await over_threshold.get_session_storage()
+        assert result["over_warning"] is True
+        assert result["bytes"] > 1024 * 1024 * 1024
+
+    async def test_the_browser_is_handed_the_verdict_not_the_threshold(
+        self, over_threshold
+    ):
+        """``EngineHealth``'s rule, applied to the one other number a tab
+        could be tempted to compare for itself: the configured limit stays
+        here, in the one place the user edits it."""
+        assert set(await over_threshold.get_session_storage()) == {
+            "bytes",
+            "over_warning",
+        }
+
+    async def test_reading_the_figure_does_not_spend_the_warning(self, over_threshold):
+        """The load-bearing one. Opening Settings measures the directory,
+        and the turn that ends afterwards still gets to say the sentence."""
+        await over_threshold.get_session_storage()
+        await over_threshold.get_session_storage()
+        assert over_threshold._disk_warned is False
+        assert await over_threshold._disk_warning() is not None
+
+    async def test_a_spent_warning_does_not_silence_the_figure(self, over_threshold):
+        """And the other direction: the latch is the warning's, not the
+        measurement's, so a card opened after the sentence still reads."""
+        assert await over_threshold._disk_warning() is not None
+        assert (await over_threshold.get_session_storage())["over_warning"] is True
+
+    async def test_the_threshold_comes_from_app_json(self, service, monkeypatch):
+        monkeypatch.setattr(service.session_store, "total_bytes", lambda: 5_000)
+        service._config.history_config = {"session_dir_warning_bytes": 4_000}
+        assert (await service.get_session_storage())["over_warning"] is True
+        service._config.history_config = {"session_dir_warning_bytes": 6_000}
+        assert (await service.get_session_storage())["over_warning"] is False
+
+    async def test_a_size_that_cannot_be_read_is_reported(self, service, monkeypatch):
+        """Where the warning swallows the failure, this one says it: the
+        size *is* the answer here, so silence would leave a blank card with
+        no account of why."""
+
+        def boom():
+            raise OSError("the filesystem went away")
+
+        monkeypatch.setattr(service.session_store, "total_bytes", boom)
+        result = await service.get_session_storage()
+        assert "the filesystem went away" in result["error"]
+        assert "bytes" not in result
+
+    async def test_without_a_store_there_is_nothing_to_measure(self, tmp_path, events):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        result = await svc.get_session_storage()
+        assert result["reason"] == "no_repo"
+        assert "bytes" not in result
 
 
 class TestTheMirrorGapTolerance:

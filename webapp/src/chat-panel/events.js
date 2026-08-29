@@ -38,6 +38,7 @@ import { hydrateImageRefs, imageRefKey, imageRefsOf } from '../image-refs.js';
 import { SPEECH_STATE_EVENT } from '../speech-player.js';
 import { compactionSummary } from './block-render.js';
 import { resetTurnBlocks } from './blocks.js';
+import { onOpenHistory } from './input.js';
 import {
   INITIAL_PERMISSION_MODE,
   onRoleChanged,
@@ -113,6 +114,11 @@ export function bindEventHandlers(panel) {
   panel._onRoleChanged = (e) => onRoleChanged(panel, e);
   panel._onSessionChanged = (e) => onSessionChanged(panel, e);
   panel._onStateLoaded = (e) => onStateLoaded(panel, e);
+  // Not an engine push. The Settings tab's session-storage figure argues for
+  // deleting old sessions and cannot offer the deletion itself — that lives
+  // in the history browser, which is this panel's modal. So the figure asks
+  // for it here rather than growing a second way to delete a transcript.
+  panel._onOpenHistoryRequest = () => onOpenHistory(panel);
   panel._onPostResponseComplete = (e) => onPostResponseComplete(panel, e);
   panel._onCompactionEvent = (e) => onCompactionEvent(panel, e);
   panel._onModeChanged = (e) => onModeChanged(panel, e);
@@ -299,6 +305,16 @@ export function resumeActiveStreams(panel, activeStreams) {
  *   commit-result — broadcast from background
  *     commit task; appends system event to
  *     conversation, flips _committing off.
+ *
+ *   open-history — the only entry here that is not
+ *     from the server. The Settings tab shows what
+ *     `.aic-dc/sessions/` costs and argues for
+ *     deleting old sessions; deletion lives in this
+ *     panel's history browser, so the figure asks
+ *     for the modal instead of growing a second
+ *     path to delete a transcript. Same size the
+ *     `post-response-complete` warning above is
+ *     about, asked for rather than pushed.
  */
 export function attachEventListeners(panel) {
   window.addEventListener('stream-chunk', panel._onStreamChunk);
@@ -347,6 +363,7 @@ export function attachEventListeners(panel) {
   // message list even though the backend already
   // has the prior conversation in its context.
   window.addEventListener('state-loaded', panel._onStateLoaded);
+  window.addEventListener('open-history', panel._onOpenHistoryRequest);
   window.addEventListener(
     'post-response-complete', panel._onPostResponseComplete,
   );
@@ -407,6 +424,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('role-changed', panel._onRoleChanged);
   window.removeEventListener('session-changed', panel._onSessionChanged);
   window.removeEventListener('state-loaded', panel._onStateLoaded);
+  window.removeEventListener('open-history', panel._onOpenHistoryRequest);
   window.removeEventListener(
     'post-response-complete', panel._onPostResponseComplete,
   );

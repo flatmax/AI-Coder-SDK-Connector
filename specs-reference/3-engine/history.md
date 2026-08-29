@@ -339,6 +339,7 @@ History — the whole set is renamed off the native engine's names, because none
 | `history_search` | `query: str, role?: str, limit?: int` | `list[{session_id, entry_uuid, role, content_preview, timestamp}]` |
 | `history_delete` | `session_id: str` | `{session_id, status: "deleted"}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts, its events and its index rows; the images in those entries go with them. `{error, reason: "session_live"}` for the session on screen |
 | `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
+| `get_session_storage` | — | `{bytes: int, over_warning: bool}`, or `{error: str}` for a walk that failed, or `{error: str, reason: "no_repo"}` for a run with no repo. The readable half of the disk-usage measurement; **not** a caller of the one-shot warning, and `over_warning` is the verdict rather than the threshold behind it |
 
 A pointer carries `(session_id, entry_uuid, block)` and no subpath, so `history_image` looks in the main
 transcript first and then in that session's subagent transcripts. Widening every pointer with a subpath

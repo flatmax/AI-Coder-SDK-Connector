@@ -1636,3 +1636,39 @@ describe('ChatPanel disk warning', () => {
     expect(p.messages).toEqual([]);
   });
 });
+// ---------------------------------------------------------------------------
+// Open-history
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel open-history request', () => {
+  it('opens the history browser for another surface', async () => {
+    // The one window event in the table that comes from a sibling panel
+    // rather than the server: the Settings tab's session-storage figure
+    // argues for a deletion and sends the user to where deleting happens.
+    const p = mountPanel();
+    await settle(p);
+    expect(p._historyOpen).toBe(false);
+    pushEvent('open-history');
+    await settle(p);
+    expect(p._historyOpen).toBe(true);
+  });
+
+  it('is the same open the toolbar button performs', async () => {
+    // Already-open stays open rather than toggling — a second click from a
+    // tab that cannot see the browser must not close it.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('open-history');
+    pushEvent('open-history');
+    await settle(p);
+    expect(p._historyOpen).toBe(true);
+  });
+
+  it('stops listening on disconnect', async () => {
+    const p = mountPanel();
+    await settle(p);
+    p.remove();
+    pushEvent('open-history');
+    expect(p._historyOpen).toBe(false);
+  });
+});

@@ -432,6 +432,17 @@ describe('formatBytes', () => {
     expect(formatBytes(1024 * 1024)).toBe('1.0 MB');
     expect(formatBytes(5.5 * 1024 * 1024)).toBe('5.5 MB');
   });
+
+  it('stops at gigabytes, for the session directory', () => {
+    // The tier the tool cards never needed: a truncated result stops in the
+    // hundreds of KB, but `.aic-dc/sessions/` is warned about in gigabytes
+    // and `1782.4 MB` is a number the reader has to divide first.
+    const gb = 1024 * 1024 * 1024;
+    expect(formatBytes(gb - 1)).toBe('1024.0 MB');
+    expect(formatBytes(gb)).toBe('1.0 GB');
+    expect(formatBytes(2.2 * gb)).toBe('2.2 GB');
+    expect(formatBytes(1500 * gb)).toBe('1500.0 GB');
+  });
 });
 
 describe('formatTokens', () => {

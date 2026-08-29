@@ -1525,6 +1525,132 @@ describe('aic-settings-tab session controls', () => {
   });
 });
 
+describe('aic-settings-tab session storage figure', () => {
+  /** The session controls, with `get_session_storage` answering `answer`. */
+  function publishStorageRpc(answer, onCall) {
+    return publishSaveRpc(null, {
+      'ClaudeCodeService.get_session_storage': () => {
+        onCall?.();
+        return answer;
+      },
+    });
+  }
+
+  function storageNote(el) {
+    return el.shadowRoot.querySelector('.storage-note');
+  }
+
+  it('reads the size and says where it is', async () => {
+    publishStorageRpc({ bytes: 2_411_724_800, over_warning: false });
+    const el = mountTab();
+    await settle(el);
+    expect(flat(storageNote(el)))
+      .toContain('Session storage: 2.2 GB in .aic-dc/sessions/.');
+    expect(storageNote(el).querySelector('.storage-warn')).toBeNull();
+  });
+
+  it('repeats the engine verdict rather than comparing a threshold', async () => {
+    // The reply carries no number to compare against, on purpose — the same
+    // reason the health banner is handed a mirror-gap verdict. A tab that
+    // grew its own limit would be a second copy of an editable setting.
+    publishStorageRpc({ bytes: 1_073_741_825, over_warning: true });
+    const el = mountTab();
+    await settle(el);
+    expect(flat(storageNote(el).querySelector('.storage-warn')))
+      .toBe('Past the size this repo asks to be warned at.');
+    expect(flat(storageNote(el))).toContain('Pasted images are stored');
+  });
+
+  it('renders nothing at all before the first read lands', async () => {
+    // A read that has not come back yet — the state every mount is in for a
+    // round trip. "0 B" here would be briefly wrong about the one thing the
+    // card exists to report, and an error line would be wrong too.
+    publishSaveRpc(null, {
+      'ClaudeCodeService.get_session_storage': () => new Promise(() => {}),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(storageNote(el)).toBeNull();
+    expect(flat(sessionControls(el))).not.toContain('Session storage');
+  });
+
+  it('says a run with no repo is not mirrored, not that it is empty', async () => {
+    publishStorageRpc({
+      error: 'No session history: this run has no repo directory',
+      reason: 'no_repo',
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(flat(storageNote(el))).toContain('not mirrored');
+    expect(flat(storageNote(el))).not.toContain('0 B');
+    expect(storageNote(el).querySelector('.storage-link')).toBeNull();
+  });
+
+  it('shows the reason a walk failed instead of a blank card', async () => {
+    publishStorageRpc({
+      error: 'Could not measure the session directory: no such file',
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(flat(storageNote(el))).toContain('no such file');
+  });
+
+  it('treats a thrown read as a reason, not an absence', async () => {
+    publishSaveRpc(null, {
+      'ClaudeCodeService.get_session_storage': () => {
+        throw new Error('the socket went away');
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(flat(storageNote(el))).toContain('the socket went away');
+  });
+
+  it('offers the history browser and no delete of its own', async () => {
+    const events = [];
+    const onOpen = () => events.push('open-history');
+    window.addEventListener('open-history', onOpen);
+    publishStorageRpc({ bytes: 5_000, over_warning: false });
+    const el = mountTab();
+    await settle(el);
+    const minimized = [];
+    el.addEventListener('request-dialog-minimize', (e) =>
+      minimized.push(e.composed),
+    );
+    const link = storageNote(el).querySelector('.storage-link');
+    expect(link.textContent.trim()).toBe('Browse history');
+    link.click();
+    await settle(el);
+    window.removeEventListener('open-history', onOpen);
+    // Both, and in that order: the browser opens behind the dialog, so a
+    // click that revealed nothing would read as a click that did nothing.
+    expect(events).toEqual(['open-history']);
+    expect(minimized).toEqual([true]);
+    // The route, not the deletion. Deletion stays where the transcript is.
+    expect(flat(storageNote(el))).not.toContain('Delete');
+  });
+
+  it('re-reads when the tab comes back, because deleting happens elsewhere',
+    async () => {
+      let reads = 0;
+      publishSaveRpc(null, {
+        'ClaudeCodeService.get_session_storage': () => {
+          reads += 1;
+          return reads === 1
+            ? { bytes: 2_147_483_648, over_warning: true }
+            : { bytes: 4_096, over_warning: false };
+        },
+      });
+      const el = mountTab();
+      await settle(el);
+      expect(flat(storageNote(el))).toContain('2.0 GB');
+      el.onTabVisible();
+      await settle(el);
+      expect(flat(storageNote(el))).toContain('4.0 KB');
+      expect(storageNote(el).querySelector('.storage-warn')).toBeNull();
+    });
+});
+
 describe('fieldList and joinFields', () => {
   it('reads one list out of a disposition', () => {
     const d = { changed: ['a', 'b'], live: [], next_session: ['a'] };

@@ -41,6 +41,10 @@
 // Governing spec: specs5/1-foundation/configuration.md
 
 import { LitElement, css, html } from 'lit';
+// The one owner of a byte count's rendering, which is why this reaches into
+// the chat panel's render module for it rather than keeping six lines here.
+// It grew a GB tier for this caller — see the note on the function.
+import { formatBytes } from './chat-panel/block-render.js';
 import { RpcMixin } from './rpc-mixin.js';
 import { readPreference, writePreference } from './settings-preferences.js';
 
@@ -335,6 +339,15 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _pendingFields: { type: Object, state: true },
     /** True while `restart_session` is in flight. */
     _restarting: { type: Boolean, state: true },
+    /**
+     * `get_session_storage`'s answer, or null before the first read.
+     *
+     * Held as the whole reply — `{bytes, over_warning}` or `{error, reason}` —
+     * because the three states this card renders are the three shapes the RPC
+     * can answer with, and flattening them into a number plus a flag would
+     * lose which of "not measured yet" and "nothing to measure" is true.
+     */
+    _storage: { type: Object, state: true },
     /**
      * True once the retired-files note has been dismissed for this exact
      * file list. Read from localStorage on load, so a dismissal survives
@@ -776,6 +789,33 @@ export class SettingsTab extends RpcMixin(LitElement) {
     .session-note strong {
       color: var(--text-primary, #c9d1d9);
     }
+    /* Its own line under the restart note, and a rule above it: the two
+     * sentences answer different questions, and a figure run on from the
+     * restart paragraph reads as a consequence of restarting. */
+    .storage-note {
+      margin-top: 0.6rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid rgba(240, 246, 252, 0.08);
+    }
+    .storage-warn {
+      color: var(--warning, #d29922);
+    }
+    /* A link, not a button, because it goes somewhere rather than doing
+     * something — but a real button element underneath it, since there is no
+     * URL to put in an anchor and an anchor with no href is not focusable.
+     * (No backticks in this block: it is all one template literal.) */
+    .storage-link {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--accent, #58a6ff);
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .storage-link:hover {
+      color: var(--text-primary, #c9d1d9);
+    }
 
     .editor-textarea {
       flex: 1;
@@ -817,6 +857,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._summary = null;
     this._pendingFields = new Set();
     this._restarting = false;
+    this._storage = null;
     this._retiredDismissed = false;
     this._modelFlash = false;
     this._editorFlash = false;
@@ -851,6 +892,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._loadInfo();
     this._loadModel();
     this._loadPreferences();
+    this._loadStorage();
   }
 
   /**
@@ -868,6 +910,12 @@ export class SettingsTab extends RpcMixin(LitElement) {
     // switch showing a value the file stopped holding is worse than the
     // round trip, because the next click writes the stale one back.
     this._loadPreferences();
+    // And the session directory grows with every turn, and shrinks when the
+    // user takes this card's own advice. Re-reading on reveal is what closes
+    // that loop: the figure argues for a deletion, the deletion happens in
+    // another surface, and coming back here is when the new number is worth
+    // a round trip. Nothing pushes the size, so nothing else would correct it.
+    this._loadStorage();
   }
 
   /**
@@ -1088,6 +1136,51 @@ export class SettingsTab extends RpcMixin(LitElement) {
     } catch (err) {
       console.warn('[settings] get_config_info failed', err);
     }
+  }
+
+  /**
+   * Read what `.aic-dc/sessions/` is using.
+   *
+   * The reply is stored whatever shape it has, errors included, because this
+   * is the one figure on the tab a user might come looking for: a card that
+   * silently showed nothing would leave "the transcripts are tiny" and "the
+   * walk failed" looking identical, which is the fault the RPC refuses to
+   * commit on its own side. A thrown call is treated the same way, since a
+   * disconnect mid-read is a reason and not an absence.
+   */
+  async _loadStorage() {
+    if (!this.rpcConnected) return;
+    try {
+      const res = await this.rpcExtract('ClaudeCodeService.get_session_storage');
+      this._storage =
+        res && typeof res === 'object'
+          ? res
+          : { error: 'The engine gave no answer for the session directory' };
+    } catch (err) {
+      this._storage = {
+        error: `Could not read the session directory: ${err?.message || err}`,
+      };
+    }
+  }
+
+  /**
+   * Ask the chat panel for its history browser.
+   *
+   * Deletion belongs next to what is being deleted, so this card offers the
+   * route and not the delete — one button here that opened a confirm would be
+   * a second way to destroy a transcript, sited where the thing destroyed is
+   * not on screen. The dialog minimizes on the way for the reason the Context
+   * tab's file links do: the browser opens behind it, and a click that reveals
+   * nothing is indistinguishable from a click that did nothing.
+   */
+  _browseHistory() {
+    window.dispatchEvent(new CustomEvent('open-history', { bubbles: false }));
+    this.dispatchEvent(
+      new CustomEvent('request-dialog-minimize', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   /** The retired files this install has, or `[]` — never null. */
@@ -1877,10 +1970,10 @@ export class SettingsTab extends RpcMixin(LitElement) {
    *
    * Always rendered, not only after a save that needs it: a user who edited
    * `engine.json` in another editor has the same problem and no save on this
-   * tab to hang the offer off. Session storage — the other half of
-   * `specs5/5-webapp/settings.md` § Session Controls — is not here, because the
-   * backend measures the session directory only as a turn-time warning and
-   * there is no RPC to read it.
+   * tab to hang the offer off. Session storage is the other half of
+   * `specs5/5-webapp/settings.md` § Session Controls, and is below the note
+   * rather than beside the button: it is a figure to read, not a control, and
+   * the only thing it can be acted on with is in another surface.
    */
   _renderSessionControls() {
     const readOnly = this._isHost === false;
@@ -1912,8 +2005,56 @@ export class SettingsTab extends RpcMixin(LitElement) {
             ? html`<strong>Waiting to apply:</strong> ${joinFields(waiting)}.`
             : ''}
         </p>
+        ${this._renderSessionStorage()}
       </div>
     `;
+  }
+
+  /**
+   * What the mirrored transcripts cost, and where to spend less.
+   *
+   * Three renderings for the three answers the RPC can give, and the point of
+   * keeping them apart is that two of them are not sizes. A run with no repo
+   * has no `.aic-dc/` to measure and says so; a failed directory walk says
+   * that instead of showing a zero. Nothing at all is rendered before the
+   * first read lands — a card that flashed "0 B" on the way to the real figure
+   * would be briefly wrong about the one thing it exists to report.
+   *
+   * `over_warning` arrives as the engine's verdict rather than a threshold to
+   * compare against here, matching how the health banner is handed a
+   * mirror-gap verdict. The number behind it is user-editable
+   * (`history.session_dir_warning_bytes`), and a second copy of it in the
+   * browser is a second answer waiting to disagree.
+   */
+  _renderSessionStorage() {
+    const storage = this._storage;
+    if (!storage) return '';
+    if (storage.error) {
+      return html`<p class="session-note storage-note">
+        <strong>Session storage:</strong> ${storage.reason === 'no_repo'
+          ? 'not mirrored — this run has no repo directory, so the CLI\'s own'
+            + ' transcript is the only copy.'
+          : storage.error}
+      </p>`;
+    }
+    const size = formatBytes(storage.bytes);
+    if (!size) return '';
+    return html`<p class="session-note storage-note">
+      <strong>Session storage:</strong> ${size} in
+      <code>.aic-dc/sessions/</code>.
+      ${storage.over_warning
+        ? html`<span class="storage-warn"
+            >Past the size this repo asks to be warned at.</span
+          >
+          Pasted images are stored in the transcript itself, so a few
+          image-heavy sessions usually account for most of it.`
+        : ''}
+      <button
+        class="storage-link"
+        @click=${this._browseHistory}
+        title="Open the history browser, where sessions are deleted"
+      >Browse history</button>
+    </p>`;
   }
 
   /**

@@ -514,8 +514,10 @@ was wrong. See § Landed since below: `aic-dc` *is* in the list, and it is the o
   on a tab that should never have held it. Now owned by
   [`../5-webapp/permission-dialog.md` § Attention](../5-webapp/permission-dialog.md), beside the thing
   that rings.
-- **Session storage size** — nothing to call. The backend measures the session directory only as a
-  turn-time warning (`_disk_warning`), not as a readable RPC.
+- ~~**Session storage size** — nothing to call. The backend measures the session directory only as a
+  turn-time warning (`_disk_warning`), not as a readable RPC.~~ **Built 2026-08-29 — see § Landed
+  since.** This bullet's "nothing to call" was accurate and still understated the item: the measurement
+  existed, and the reason it could not simply be exposed was the latch on it.
 - ~~**The retired-files note.** § Deleted cards argues for it at some length — a user who customised
   `system_extra.md` over months and finds the card gone "deserves to know why" — and then no note is
   rendered.~~ **Built 2026-08-28 — see § Landed since.** It was the cheapest item in this list and the
@@ -563,6 +565,41 @@ not obstruct a caller that does not exist. Both are careful prose by someone loo
 The classification tests work because they refuse to be read past, and that is the difference.
 
 ### Landed since
+
+- **The session directory became something you can ask about, not only something you get told**
+  — 2026-08-29, closing `next.md` § B3's last buildable row. Reasoning in
+  [`../5-webapp/settings.md`](../5-webapp/settings.md) § *Session Controls*.
+
+  **The saving that would have been the bug.** `_disk_warning` already walked `.aic-dc/sessions/` and
+  already compared it to the configured threshold, so routing the new read through it looked free. It is
+  latched — the first check over the threshold returns the sentence and every later one returns nothing,
+  whether it came from a turn ending or a browser's first paint — which means a Settings tab that borrowed
+  it would silently spend the user's one warning on a card they opened for an unrelated reason. **The
+  latch belongs to the caller that interrupts, not the caller that was asked.** Two callers, one
+  measurement, one latch, and the load-bearing test is the one asserting that reading the figure leaves
+  `_disk_warned` alone.
+
+  **The same divergence runs through the failure case, in the other direction.** A directory walk that
+  raises is swallowed by the warning, because a size it could not read is not worth failing a completed
+  turn over. Here the size *is* the answer, so the failure is reported: silence would leave a blank card
+  and no account of why, which is exactly the "the transcripts are tiny" / "the walk failed" ambiguity the
+  card exists to resolve.
+
+  **`over_warning` is the verdict, not the threshold** — `EngineHealth`'s rule for the mirror gap, applied
+  to the one other number a tab could have been tempted to compare for itself. The threshold is
+  user-editable (`history.session_dir_warning_bytes`), and a browser-side copy is a second answer waiting
+  to disagree with the first.
+
+  **Deletion is a link, not a button.** The card argues for deleting sessions and then sends the user to
+  where sessions are; a delete sited on a tab that cannot show the transcript would be a second route to
+  destroying one, with the thing destroyed off screen. The link opens the history browser via a window
+  event and minimizes the dialog on the way — the Context tab's file links already do both, for the same
+  reason: the browser opens *behind* the dialog, and a click that reveals nothing reads as a click that
+  did nothing. Nothing pushes the size, so the figure re-reads when the tab is revealed, which is what
+  closes the loop from figure to deletion and back.
+
+  Small, but the same shape as § C3 a day earlier: `formatBytes` grew a GB tier rather than the Settings
+  tab growing a private copy of a rendering that already had an owner.
 
 - **One rule answers "absolute engine path → repo path"** — 2026-08-28, closing `next.md` § C3 and
   [`../plan/README.md`](../plan/README.md) open item 3. Reasoning in

@@ -2480,6 +2480,49 @@ class ClaudeCodeService:
         )
         return {"session_id": session_id, "status": "deleted"}
 
+    async def get_session_storage(self) -> dict[str, Any]:
+        """How much disk ``.aic-dc/sessions/`` is using.
+
+        The readable half of a measurement that until now existed only as a
+        turn-time warning. ``_disk_warning`` walks the same directory and
+        compares it to the same threshold, and this method is deliberately
+        **not** routed through it: that one is latched to fire once per server
+        lifetime, so borrowing it would mean opening the Settings tab silently
+        spends the warning the user has not seen yet. Two callers, one
+        measurement, one latch — and the latch belongs to the caller that
+        interrupts rather than the one that was asked.
+
+        ``over_warning`` is the verdict, not the threshold, matching how
+        ``EngineHealth`` hands the browser a mirror-gap verdict rather than
+        ``history.mirror_gap_tolerance``. The comparison is configured here,
+        in one place, and a tab that re-derived it would be a second copy of a
+        number the user can edit.
+
+        Unrestricted, for ``history_list``'s reason: this is the size of the
+        history a read-only participant is already allowed to read, and the
+        deletion it argues for is gated where deletion happens.
+
+        A failed walk is reported rather than swallowed. ``_disk_warning``
+        swallows one because a size it could not read is not worth failing a
+        completed turn over; here the size *is* the answer, so silence would
+        leave the card showing nothing with no account of why.
+        """
+        if self.session_store is None:
+            return {
+                "error": "No session history: this run has no repo directory",
+                "reason": "no_repo",
+            }
+        try:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(None, self.session_store.total_bytes)
+        except Exception as exc:
+            logger.exception("Could not measure the session directory")
+            return {"error": f"Could not measure the session directory: {exc}"}
+        threshold = self._history_config().get(
+            "session_dir_warning_bytes", DISK_WARNING_BYTES
+        )
+        return {"bytes": int(total), "over_warning": int(total) >= int(threshold)}
+
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int
     ) -> dict[str, Any]:
