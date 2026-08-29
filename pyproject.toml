@@ -42,6 +42,21 @@ dependencies = [
     # `claude` on PATH; engine.json's cli_path overrides both
     # (specs5/6-deployment/build.md § The Engine Is Not Bundleable).
     "claude-agent-sdk>=0.2.136",
+    # Antigravity engine — the second SDK behind the engine seam, and the
+    # reason this project is called a *connector* (README § the seam is
+    # deliberate). A core dependency rather than an extra: the engine layer
+    # is meant to offer a choice of agent SDK, and an engine you have to
+    # opt into installing is not a choice a user can make at runtime.
+    #
+    # Deliberately unpinned, unlike every other floor here. The others were
+    # chosen after reading what the package offers; this one has not been
+    # read yet. The floor gets set in the same pass that writes
+    # `specs5/plan/antigravity-sdk-surface.md`, alongside the per-package
+    # accounting of what it pulls in — which matters more than usual here,
+    # because `claude-agent-sdk` already costs a ~295 MiB platform-tagged
+    # wheel and a second engine's footprint lands on top of it, in a
+    # dependency set that is now mandatory (`specs5/plan/risks.md` R-7).
+    "google-antigravity",
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     # Tree-sitter core plus grammars for supported languages.

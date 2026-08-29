@@ -1,0 +1,487 @@
+# Antigravity — Verified Surface
+
+Ground truth for the second engine, read directly from the installed wheel and the shipped binary
+rather than from documentation, blog posts or recollection. Verified **2026-08-30**.
+
+| What | Version | Where it was read |
+|---|---|---|
+| `google-antigravity` | **0.1.15** — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF | `~/.local/bin/agy` |
+| `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
+
+> **Do not re-derive this by guessing.** The SDK is at 0.1.15 and alpha; it will move faster than
+> `claude-agent-sdk` did. This file is a snapshot, not a contract. Re-read the installed package when
+> implementing, and see [§ The probe](#the-probe) for the half of it that should be machine-checked.
+
+**The trap, recorded because it will catch someone.** `import antigravity` succeeds on any CPython
+install — it is the XKCD easter egg in the standard library and it is not evidence of anything. The
+package that matters is `google.antigravity`. Check for that name specifically.
+
+---
+
+## There are two Antigravitys and they are not the same program
+
+This is the finding everything else depends on, so it comes first.
+
+**The Python SDK ships and spawns its own Go binary.** `google/antigravity/bin/localharness`,
+119,721,512 bytes, bundled inside the wheel. `Agent` starts it as a subprocess and speaks protobuf
+over a local WebSocket (`connections/local/local_connection.py:40`, `:303-342`;
+`connections/local/local_connection.py:674-723` resolves the binary path). It does **not** drive
+`agy`.
+
+**`agy` is a separate product.** `strings ~/.local/bin/agy | grep -c localharness` returns **0**. The
+two binaries differ by ~89 MB and share no such symbol. They have separate state directories —
+`~/.gemini/antigravity/` is the SDK's `DEFAULT_APP_DATA_DIR`
+(`connections/local/local_connection_config.py:35-37`), `~/.gemini/antigravity-cli/` is the CLI's.
+
+**They authenticate differently, and this is a procurement fact before it is an engineering one.**
+
+- The SDK accepts exactly two endpoint types. `GeminiAPIEndpoint.validate_endpoint()` raises unless
+  `api_key` or `$GEMINI_API_KEY` is set (`models.py:109-124`); `VertexEndpoint` needs
+  `(project, location)` or an Express-mode `api_key` (`models.py:127-167`). `build_models_proto`
+  raises `ValueError(f"Unrecognized endpoint type: …")` for anything else
+  (`connections/local/local_connection.py:200-201`), and `validate_endpoint()` is called on the
+  connect path (`:1241`), so this fails at session start rather than lazily.
+- A `grep -rn "oauth" --include="*.py"` over the whole package returns nothing outside tests.
+- `agy models` succeeded with no `GEMINI_API_KEY`, `GOOGLE_CLOUD_PROJECT` or
+  `GOOGLE_GENAI_USE_VERTEXAI` in the environment, so the CLI is OAuth-authenticated against the
+  owner's account.
+
+**The SDK therefore cannot borrow the CLI's login.** Using it requires a separately-provisioned,
+separately-billed Gemini API key or Vertex project. See [`decisions.md` AG-2](decisions.md#ag-2) and
+[`risks.md` AG-R-8](risks.md#ag-r-8).
+
+### What `agy models` returns
+
+Recorded because it is surprising and because it will be misread if it is discovered later without
+context:
+
+```
+gemini-3.7-flash-{high,medium,low}    gemini-3.1-pro-{high,low}
+gemini-3.6-flash-{high,medium,low}    claude-sonnet-4-6
+gemini-3.5-flash-{high,medium,low}    claude-opus-4-6-thinking
+                                      gpt-oss-120b-medium
+```
+
+`agy` routes to Claude models **through Google's account**. This is not Claude Code — no `claude`
+CLI, none of Claude Code's tools, no Anthropic billing — and surfacing it naively in a UI that also
+hosts a real Claude Code engine would make "which engine am I talking to" unanswerable.
+
+Note also that reasoning effort is baked into the *model name* here, where the SDK models it as a
+separate `ThinkingLevel` enum (`models.py:44-63`). The two Antigravity surfaces do not agree with
+each other on this.
+
+---
+
+## The `agy` stream-json protocol — measured
+
+Three live turns were run on 2026-08-30 against `gemini-3.7-flash-low` in a throwaway git repo under
+`/tmp`, at a total cost of ~42k input tokens. What follows is transcribed from the captures.
+
+The protocol is real and typed. The binary's own changelog calls it *"a strongly-typed NDJSON event
+stream … with a stable, closed-vocabulary `step_type` discriminator."* Across every probe the
+vocabulary was exactly:
+
+```
+events:      init | step_update | result
+step_types:  user_input | agent_response | tool
+```
+
+**The `init` frame** is the direct analogue of what
+[`../plan/sdk-surface.md` § The probe](../plan/sdk-surface.md#the-probe) reads from Claude's
+initialize handshake via `diff_server_info`:
+
+```json
+{"event":"init","conversation_id":"57f59897-…","init":{
+  "model":"gemini-3.7-flash-low",
+  "cwd":"/tmp/agy-probe",
+  "permission_mode":"request-review",
+  "tools":[ 57 names ]}}
+```
+
+The 57 tools include `generate_image`, `invoke_subagent`, `call_mcp_tool`, `ask_question`,
+`notebook_edit`, `run_command`, `write_to_file`, `multi_replace_file_content`, `list_permissions`,
+`ask_permission`, `ask_custom_permission`, and a 20-tool browser-automation suite.
+
+**Bidirectional mode works.** The input frame shape is *not* documented and took four attempts plus a
+`strings` dig to find — the error `stream input "user" message is missing the "message" field` is
+what gave it away:
+
+```json
+{"event":"user","message":{"role":"user","content":"…"}}
+```
+
+One turn per line, session held open across lines. `{"event":"user_message",…}` is rejected with
+`warning: ignoring unsupported stream input message event "user_message"`, and a frame with no
+`event` key fails the run with `stream input message is missing the "event" field`.
+
+**Flag-order quirk, recorded so nobody loses twenty minutes to it:** `--print` takes a value, so
+`agy -p --input-format stream-json` silently consumes `--input-format` as the prompt. The `=` form is
+required: `--print="" --input-format stream-json`.
+
+### Why `agy` is nonetheless not the engine
+
+Two measurements settle it. **Both were re-run against 1.1.22 on 2026-08-30** and one of them came
+back materially different from the first pass — see the correction under point 2, which matters
+because the original wording was broader than the evidence and would not survive a re-check.
+
+**1. There is no permission channel.** Forcing `run_command` under the default `request-review` mode:
+
+```
+step_update | tool | ACTIVE | run_command | {"CommandLine":"echo NEEDS_PERM_12345"}
+step_update | tool | DONE   | run_command | {"CommandLine":"echo NEEDS_PERM_12345"}   ← no output, no error
+result      | status: "CANCELED"                                                       ← exit code 0
+```
+
+stderr, and only stderr, explains it:
+
+```
+jetski: no output produced — a tool required the "command" permission that headless mode
+cannot prompt for, so it was auto-denied.
+```
+
+No request frame, no pause; the denial arrives already decided.
+
+**This got worse between passes, not better.** The first probe saw the step go to `ERROR` carrying a
+message. On 1.1.22 it goes to `DONE` with **no `error` key at all**, and the run reports
+`status: "CANCELED"` with **exit 0** — the 1.1.16 change *"Fixed print mode … treating benign tool
+execution errors and permission denials as fatal run failures with non-zero exit codes."* The
+consequence for a host is that **a permission denial is no longer representable in the stream**: it
+must be scraped from stderr, or guessed at from `CANCELED` plus a missing `output`. Two format
+strings in the binary confirm the behaviour is structural rather than a print-mode accident:
+
+```
+"%s required the %s %s that headless mode cannot prompt for, so %s auto-denied.
+ Add an allow-rule under permissions.allow in settings.json (e.g. %s)"
+
+"the %s tool(s) required approval that headless mode cannot prompt for, so they were auto-denied.
+ Settings allow-rules do not apply; re-run with --dangerously-skip-permissions to auto-approve
+ all tools."
+```
+
+The three available postures are **auto-deny, static allowlist, or blanket bypass**. AIC⚡DC's
+permission dialog — which [`../3-engine/permissions.md`](../3-engine/permissions.md) establishes as
+the only ask path, localhost-gated because it authorises arbitrary shell — has nowhere to attach.
+
+**2. Tool *content* is not on the stream. Tool *results* are — this file previously said otherwise
+and was wrong.**
+
+The earlier claim was "no result payload, no output, and no file content." The first two thirds of
+that are false and the correction is recorded here rather than quietly edited away, because anyone
+re-checking the old wording would find it untrue and might reopen a decision that is in fact sound.
+
+`tool_info.output` exists, and has since the release that *"Enriched the structured stream with a
+`tool_info` object for each tool call (canonical tool name, parameters, **and output**)."* The docs
+agree: *"`tool_info` holds `name`, `parameters`, `output`, and — when the tool fails — an `error`
+object."* Measured on 1.1.22, one turn, three tools:
+
+| tool | what `tool_info` actually carried |
+|---|---|
+| `run_command` | `"output": "MARKER_OUT\r\n"` — **full stdout** |
+| `view_file` | `"output": "2 lines, 18 bytes"` — **a summary, not the content** |
+| `write_to_file` | **no `output` key**; `parameters` = `{"TargetFile": …}` only |
+
+```json
+{"event":"step_update","step_update":{
+  "step_index":2,"state":"DONE","step_type":"tool","tool_name":"write_to_file",
+  "duration_seconds":0.005473458,
+  "tool_info":{"name":"write_to_file",
+               "parameters":{"TargetFile":"…/scratch/probe.txt"}}}}
+```
+
+**The narrower finding is the one that disqualifies, and it survives intact.** The bytes being
+written never appear on the wire — not in `parameters`, not in `output` — and file reads return a
+byte-count summary rather than content. You cannot render a diff from this. Command output *would*
+have filled a tool-result card; the diff viewer, which is the actual product, still has no data.
+
+Two further corrections from the same re-run:
+
+- **The frame shape is nested, not flat.** Every event is `{"event":"<name>","<name>":{…}}`. The flat
+  frames quoted in the first pass were not what 1.1.22 emits — a reader who parsed against them would
+  get `None` for every field and no error.
+- The `init` frame's `permission_mode` reads `request-review` by default and `always-proceed` under
+  `--dangerously-skip-permissions`.
+
+The Python SDK's `Step` model carries `content`, `thinking`, `content_delta`, `thinking_delta`, full
+`ToolCall` objects and per-step `usage_metadata` (`types.py:889-935`), and `PostToolCallHook` receives
+a `ToolResult` (`hooks/hooks.py:186`). The data exists there. It is not exposed here.
+
+### An unrelated hazard found by accident
+
+The probe asked for `probe.txt` in `/tmp/agy-probe`; the file was written to
+`~/.gemini/antigravity-cli/scratch/probe.txt` and the agent reported success with a `file://` link.
+The cause is `~/.gemini/antigravity-cli/settings.json`:
+
+```json
+{"model":"Gemini 3.7 Flash (Low)",
+ "trustedWorkspaces":["…/culvertHouse","…/remuneration.2026",
+                      "…/TLSSpeaker.ai","…/Property"]}
+```
+
+An untrusted cwd does not error — it **silently diverts writes to a scratch directory** while the
+agent believes it succeeded. For a product whose file tree and diff viewer are rooted at the repo,
+that presents as "the agent says it edited the file and the diff is empty."
+See [`risks.md` AG-R-3](risks.md#ag-r-3).
+
+**Unknown:** whether the Python SDK's `workspaces` field
+(`connections/local/local_connection_config.py:147`) is subject to the same trust list. It appears to
+be a separate mechanism — `workspace_only` policies are enforced at the platform layer
+(`hooks/policy.py:442`, `:541-543`) — but this was not confirmed.
+
+---
+
+## The Python SDK surface
+
+### Shape
+
+`Agent` is an async context manager over a `Conversation` over a `Connection`
+(`agent.py:34-218`). `AgentConfig` is a pydantic model with a `create_strategy` factory
+(`connections/connection.py:41-233`); `LocalAgentConfig` is the concrete one that runs
+`localharness`.
+
+| Layer | Class | File |
+|---|---|---|
+| 1 — convenience | `Agent`, `Agent.chat()` | `agent.py` |
+| 2 — session | `Conversation` — history, usage, cancel, resume | `conversation/conversation.py` |
+| 3 — transport | `Connection` / `ConnectionStrategy` | `connections/connection.py` |
+
+### What AIC⚡DC needs, and whether it is there
+
+Verified line by line. This is the table that says the engine is viable.
+
+| AIC⚡DC needs | Antigravity has | Verified at |
+|---|---|---|
+| Stream text / thinking / tool calls | `receive_chunks()` → `Thought` \| `Text` \| `ToolCall`; `receive_steps()` → `Step` | `conversation/conversation.py:122-177` |
+| Cancel mid-turn | `conversation.cancel()` → `halt_request` | `conversation/conversation.py:334-336`; `local_connection.py:549` |
+| Resume a session | `conversation_id` + `SessionContinuationMode.RESUME` + `save_dir`; history restored at handshake | `connection.py:65-68`, `:109-119`; `local_connection.py:356-358` |
+| Permission gate | `policy.ask_user(tool, handler=…)` — async, receives the full `ToolCall` | `hooks/policy.py:296-358`, `:568-583` |
+| Post-write re-index hook | `PostToolCallHook` | `hooks/hooks.py:186` |
+| Compaction notice | `StepType.COMPACTION`, `compaction_indices`, `OnCompactionHook` | `types.py:777`; `conversation.py:235-243`; `hooks/hooks.py:228` |
+| Subagent tabs | `SubagentConfig`; per-trajectory usage; `trajectory_id` / `parent_trajectory_id` / `depth` on every `Step` | `connection.py:71`; `conversation.py:300-308`; `types.py:889-935` |
+| Serve the indexes to the agent | `tools: list[Callable]` — plain in-process Python callables | `connection.py:57`; `local_connection.py:206-271` |
+| Budget cap | `BudgetConfig` + `StopReason.MAX_*_EXCEEDED` | `types.py:829-887` |
+| Per-turn usage | `Conversation.last_turn_usage` — a difference against turn-start | `conversation.py:310-318` |
+| Image generation | `BuiltinTools.GENERATE_IMAGE`; image model wired by default | `types.py:308`; `local_connection_config.py:303-317` |
+
+The tools row is a pleasant surprise worth calling out: Antigravity takes **plain Python callables**,
+so the symbol-index bridge is *simpler* here than under Claude Code — no MCP server at all. Its MCP
+support is stdio and streamable-HTTP only (`types.py:595`, `:613`, `:636`), so AIC⚡DC's in-process
+`create_sdk_mcp_server` bridge (`src/aic_dc/claude_code/mcp_server.py:607-609`) would not port. It
+does not need to. See [`decisions.md` AG-4](decisions.md#ag-4).
+
+### `BuiltinTools` — the whole set
+
+`types.py:278-330`. Thirteen values, with `read_only()` and `nondestructive()` classmethods that make
+a default posture cheap to express:
+
+```
+list_directory  search_directory  find_file      view_file        create_file
+edit_file       run_command       ask_question   start_subagent   generate_image
+search_web      read_url_content  finish
+```
+
+`read_only()` = `{list_directory, search_directory, find_file, view_file, read_url_content, finish}`.
+
+The default `AgentConfig.capabilities` is `read_only()` (`connection.py:52-56`), but
+`BaseLocalAgentConfig` overrides that to all-tools-with-`confirm_run_command`
+(`local_connection_config.py:134-139`). `Agent.__aenter__` **refuses to start** if write tools or MCP
+servers are enabled with no policy and no decide-hook (`agent.py:93-103`) — a good failure, and one
+that means the permission wiring cannot be forgotten.
+
+### `CapabilitiesConfig`
+
+`types.py:384-450`:
+
+```
+enable_subagents: bool = True          agent_behavior: AUTONOMOUS | INTERACTIVE
+enabled_tools / disabled_tools         compaction_threshold: int | None
+finish_tool_schema_json                max_subagent_depth / allowed_subagents
+run_command_config: {enable_daemons, timeout_seconds}
+```
+
+`AgentBehavior.INTERACTIVE` is the one to set: it *"enables features like slash commands and planning
+mode"* (`types.py:155-168`). `AUTONOMOUS` is the default and is the wrong posture for a UI with a
+human in it.
+
+### Permission fidelity — the gap, and the route around it
+
+`AskUserHandler = Callable[[types.ToolCall], bool | Awaitable[bool]]` (`hooks/policy.py:92-94`). It
+returns a **bool**.
+
+Claude's `PermissionResultAllow` carries `updated_input` and `updated_permissions`
+(`claude_agent_sdk/types.py:238-255`). So:
+
+| Capability | Claude | Antigravity `policy.ask_user` | Antigravity raw hook |
+|---|---|---|---|
+| approve / deny | ✅ | ✅ | ✅ |
+| deny with a reason the model reads | ✅ | canned string only | ✅ `HookResult.message` |
+| **amend the tool input before running** | ✅ `updated_input` | ❌ | ✅ `HookResult.modified_args` |
+| **persist a rule ("always allow")** | ✅ `updated_permissions` | ❌ | ❌ |
+
+`HookResult` is `{allow, message, modified_args}` (`types.py:943-957`). So dropping below `policy` to
+a raw `PreToolCallDecideHook` (`hooks/hooks.py:172`) recovers everything except rule persistence,
+which AIC⚡DC would have to own itself. See [`decisions.md` AG-5](decisions.md#ag-5).
+
+### The permission gate — measured, and it passes
+
+This was the load-bearing unknown and the phase-2 go/no-go. It is now settled by measurement, not
+inference. `specs5/plan-ag/probe_edit_args.py`, run 2026-08-30 against `gemini-3.6-flash` on a
+free-tier key, seeded a file and asked for an edit while a `PreToolCallDecideHook` logged the
+`ToolCall` and denied it.
+
+**`ToolCall.args` carries the proposed content, and more of it than the dialog needs.**
+
+`edit_file` hands over a complete diff hunk — old text, new text, and the line range — so the dialog
+does not even have to read the file from disk to render one:
+
+```json
+{"TargetFile":         "/tmp/ag-probe-2vafph2n/target.py",
+ "TargetContent":      "def add(a, b):\n    return a + b",
+ "ReplacementContent": "def add(a, b):\n    return a + b + 1",
+ "StartLine": 5, "EndLine": 7,
+ "Instruction": "Change return a + b to return a + b + 1 in the add function",
+ "AllowMultiple": false}
+```
+
+`create_file` hands over the whole new file:
+
+```json
+{"TargetFile":  "/tmp/ag-probe-2vafph2n/target.py",
+ "CodeContent": "def greet(name):\n    return \"Hello, \" + name\n\n\ndef add(a, b):\n    return a + b + 1\n",
+ "Overwrite":   true,
+ "Description": "Update target.py to return a + b + 1 in add function"}
+```
+
+Both populate `ToolCall.canonical_path`. This is strictly more than `agy` puts on its wire, and it is
+the fact that makes the second engine viable as master for writes.
+
+**The gate holds.** `HookResult(allow=False)` left the seeded file byte-identical on disk, and the
+denial reached the model as `"denied by pre-tool hook: <message>"` — a reason it reads and adapts to,
+which is what [AG-5](decisions.md#ag-5) chose the raw hook over `policy.ask_user` to get.
+
+**And it is not sufficient on its own — see [`risks.md` AG-R-11](risks.md#ag-r-11).** When the probe
+denied `edit_file` and `create_file`, the agent went for the shell instead, twice, with the same
+intent: `sed -i 's/return a + b/return a + b + 1/'` on the first run and an inline
+`python3 -c "…content.replace(…)…"` on the second. Gating the file tools is not a containment
+boundary. `run_command` has to be gated on the same seam, and only once it was did the file survive.
+
+### Usage and cost
+
+`UsageMetadata` (`types.py:700-771`) is tokens only:
+
+```
+prompt_token_count   cached_content_token_count   candidates_token_count
+thoughts_token_count total_token_count            service_tier
+```
+
+with `__add__` and `__sub__` defined, which is what makes `last_turn_usage` a clean difference.
+
+**There is no USD figure anywhere in the SDK, and none on `agy`'s wire either.** Claude's
+`ResultMessage.total_cost_usd` is what feeds `CostLedger` and the turn footer
+(`src/aic_dc/claude_code/cost.py`). `BudgetConfig` caps calls and tokens, never dollars.
+See [`decisions.md` AG-6](decisions.md#ag-6).
+
+**There is no context-window read-back.** `compaction_threshold` is a number you *set*
+(`types.py:436`), not a window you can query. Claude's `get_context_usage` — a pass-through of what
+`/context` prints, and the thing three webapp readers share via `webapp/src/context-usage.js` — has
+no counterpart. The Context tab has nothing to draw for this engine.
+
+**Measured floor, from the `agy` probe:** 13,873 input tokens to answer *"reply with exactly the word:
+ok"*. A large fixed system prompt rides on every turn, which makes `cached_content_token_count` the
+field worth surfacing.
+
+---
+
+## What does not translate
+
+### AIC⚡DC features with no Antigravity counterpart
+
+| Feature | Today | Status |
+|---|---|---|
+| Account rate-limit windows | `account_usage.py` — Anthropic `GET /api/oauth/usage` | **None.** Anthropic-specific REST endpoint. Hide per-engine. |
+| USD cost — turn footer, session cost, `max_budget_usd` | `cost.py` from `total_cost_usd` | **None.** Tokens only. |
+| Live context-window usage / compaction thresholds | `get_context_usage`, Context tab | **None.** `compaction_threshold` is write-only. |
+| Slash-command palette | `list_commands`, `SLASH_ROUTES` (`service.py:97-130`) | **Near-total loss.** `BuiltinSlashCommandName` has exactly one member: `PLAN` (`types.py:1455-1463`). |
+| "Always allow" / persisted rules | `updated_permissions` | **None.** AIC⚡DC would own persistence. |
+| Amend input before approving | `updated_input` | **Recoverable** via `HookResult.modified_args`, not via `policy.ask_user`. |
+| In-process MCP bridge | `create_sdk_mcp_server` | **Does not port**, and is **obsolete** — pass callables instead. |
+| Repo-local verbatim session mirror | `session_store.py` over the SDK's `SessionStore` protocol | **No protocol counterpart.** Antigravity owns an opaque `save_dir`. Rebuild as a step observer. |
+| Transcript history rendering | `history.py` over the CLI's transcript shape | **Needs a full sibling.** `Step` is flat with `trajectory_id`/`depth`, not nested content blocks. |
+| `RateLimitEvent`, `ConversationResetMessage`, `Task*Message` | `messages.py` dispatch | Claude-specific. Nearest equivalents: `StopReason.QUOTA_EXHAUSTED`, per-trajectory steps. |
+
+### Antigravity capabilities with no home in the current UI
+
+| Capability | Where | Note |
+|---|---|---|
+| **Image generation** | `types.py:308`; `local_connection_config.py:303-317` | The headline ask. On by default; writes to an `output_path` that `local_connection_config.py:63-65` already normalises. Lands partly in the existing file tree, but there is no "generated image" surface. |
+| **`ask_question` / structured interaction** | `types.py:285`, `:1010`; `hooks/hooks.py:216` | Agent-initiated multiple-choice with option IDs and multi-select. **No UI at all.** The permission dialog is the nearest thing and is a different shape. |
+| `response_schema` / structured output | `connection.py:69`; `Step.structured_output` | AIC⚡DC declined the Claude equivalent as "for programmatic callers". |
+| Audio and video input | `types.py:1443-1452`, `from_file()` | AIC⚡DC handles images only. |
+| Daemon commands | `RunCommandConfig.enable_daemons` (`types.py:170-186`) | "Start a dev server without blocking the turn." No counterpart concept. |
+| `triggers` | `connection.py:60`; `triggers/` | Out-of-band async messages into a live conversation. No AIC⚡DC concept. |
+| Multi-model routing in one session | `models: list[ModelTarget]` — text and image simultaneously | `get_model`/`set_model` assume one model per session. |
+
+---
+
+## The probe
+
+`../plan/sdk-surface.md` § *The probe* argues that a hand-written inventory drifts silently and that
+the fix is to diff the *installed* package against this repo's own syntax trees, bucketing every name
+as `handled` / `declined` / `pending` and failing the gate only on a name in **none** of the three.
+That argument applies here with more force, not less: this SDK is at **0.1.15 and alpha**, where
+`claude-agent-sdk` was at 0.2.137 and stable.
+
+`src/aic_dc/antigravity/surface.py` should therefore be built in phase 1, alongside the consultant
+and before any engine work — see [`decisions.md` AG-8](decisions.md#ag-8). The reflection targets
+differ from the Claude probe's because the SDK's shape differs:
+
+| Section | Read from |
+|---|---|
+| config fields | `pydantic` model fields on `LocalAgentConfig` / `AgentConfig` — **not** `dataclasses.fields` |
+| builtin tools | `types.BuiltinTools` enum members |
+| hook classes | subclasses of `InspectHook` / `DecideHook` / `TransformHook` in `hooks/hooks.py` |
+| step types | `types.StepType`, `StepSource`, `StepTarget`, `StepStatus`, `StopReason` |
+| policy builders | public callables in `hooks/policy.py` |
+| capabilities | `types.CapabilitiesConfig` fields |
+
+And the CLI half, which static reflection structurally cannot reach: **`agy`'s `init` frame is a
+free, machine-readable capability inventory** — model, cwd, permission mode, and the full tool list.
+One `agy models` call and one no-op `-p` turn produce it. That is the `diff_server_info` analogue,
+and it is worth wiring even though `agy` is not the engine.
+
+**Two things the probe will not be able to do**, stated here because a green gate invites the wrong
+inference. It reads *shape*, never semantics — every correction in this file that mattered
+(`agy` carrying no tool results; `ask_user` returning a bare bool) was a type-satisfied,
+behaviour-wrong case that no reflection would have caught. And nothing runs it on a schedule, so a
+`pip install --upgrade` with no commits after it leaves a window where the report is stale and does
+not say so.
+
+---
+
+## Verified, inferred, unknown
+
+Stated explicitly, because a stated unknown is more useful than a confident guess.
+
+**Verified by reading source or by measurement:** every file:line citation above; the credential
+wall; `agy`'s flag surface, model list, NDJSON schema in both directions, and its disqualifying
+omission of file content; the absence of USD cost, context-window read-back and OAuth in the SDK; the
+`trustedWorkspaces` diversion; `Agent.__aenter__`'s refusal to start without a policy; **that a
+`PreToolCallDecideHook` receives full edit content and that `allow=False` blocks the write**; **that
+denying only the file tools is routed around via `run_command`**.
+
+**Inferred:** that `localharness` and `agy` are separate programs — from the zero-match symbol probe
+and the size difference, which is strong but not proof.
+
+**Corrected on re-measurement (2026-08-30, `agy` 1.1.22):** `agy`'s stream *does* carry tool results
+in `tool_info.output`; the earlier "no result payload, no output" was wrong, and only the missing
+file content is disqualifying. The frame shape is nested, not flat. A headless permission denial is
+no longer visible in the stream at all — `DONE`, no `error`, `CANCELED`, exit 0.
+
+**Could not determine:** whether `agy` has any supported programmatic contract or is best-effort —
+the docs make **no stability or compatibility commitment** for `stream-json`, on a release cadence of
+roughly one per day; the stability of `Step` across 0.1.x; whether `localharness` can be pointed at
+OAuth credentials by a path not exposed through the Python SDK; whether the SDK's `workspaces` is
+subject to the CLI's `trustedWorkspaces` list; **whether a host driving `agy` as a subprocess breaches
+Antigravity's terms** — the clause *"Using third party software, tools, or services to access the
+Service … is a breach of this Agreement"* is broad, and asking `agy` itself produced an explicit
+"I don't know". Moot under [AG-2](decisions.md#ag-2), which does not drive `agy`.
