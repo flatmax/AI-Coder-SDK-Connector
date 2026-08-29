@@ -110,7 +110,14 @@ bigger than the documentation bug** — the argument for reading the inbox befor
 rather than only when something cites it. Both of the other rolling records emptied with it: the
 work-log's § *Specified but not yet built* closed on B4's decline, and the inbox closed on B6's finding.
 **So all three sources that feed this queue are empty, and §§ A–C hold nothing open but C9, whose exit
-criterion is an event.** What is left is § D. **§ C emptied on
+criterion is an event.** What is left is § D. **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
+not contain what the command's own reply said it did — **and that one arrived from a source none of the
+three rolling records covers: a user comparing this app against the CLI it wraps.** It is worth naming
+as a fourth source, because no audit in this file would have found it. A routed slash command tells the
+user what they are about to see, so the two halves were each internally consistent — the route table was
+right about where it pointed, the tab was right about what it drew, and nothing compared them. **The one
+class of defect that is only visible from the outside is the one where the app describes itself.**
+**§ C emptied on
 2026-08-28 and reopened the next day** with C9 — an auth error on a cold start that no persisted surface
 recorded, which is the third time this file has written down that a broadcast is not a record. C9's
 *record* landed the same day; C9 itself stays open, because the error it was reported for is still
@@ -741,6 +748,51 @@ it before planning a sitting rather than only when it is cited.
 
 *(It refilled and emptied again: a stale-reference-twin entry noticed 2026-08-28 was cleared 2026-08-29,
 and clearing it produced § B6. The advice above earned itself in one day.)*
+
+**C10 — `/usage` opened onto a tab that did not hold what its reply named.** ✅ *Built 2026-08-29 —
+leaves this queue.* Reported by a user against the CLI's own `/usage` panel: "I don't see that level of
+detail here". Reasoning in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) §§ *Session Usage Is The
+One Cumulative Reading* and *Rate Limits Are Several Windows, Not One*; shapes in the
+[reference twin](../specs-reference/5-webapp/viewers-hud.md); the account is in the work-log's
+§ *Landed since*.
+
+**The route was right and the tab was right, and that is why nothing caught it.** `/usage` is routed
+rather than forwarded, deliberately, and replies *"/usage is the Context tab's cost and per-model token
+breakdown here"* — onto a section that rendered context-*window* composition and neither of those. The
+cost and per-model figures existed and crossed the wire on every turn; they were drawn **only** in the
+HUD overlay, which auto-hides after 8.8 seconds and never appears for a session that has not run a turn.
+**This is § B5's shape with the promise made out loud** — a field with no reader is invisible until an
+audit; a routed command announces what it is about to show you, so the gap is discoverable only by doing
+what it says. An invariant covers it now: *a slash command routed to an AIC⚡DC surface names something
+that surface actually shows.*
+
+**The rate-limit half of this item was built on a false premise, and the user running it is what found
+that out — within the hour.** The reasoning was that each open window arrives as its own event and a
+single slot was discarding all but the last. Checked against `claude-agent-sdk` 0.2.137 only *after* the
+result was on screen: **`RateLimitEvent` carries exactly one `RateLimitInfo`, emitted on a status
+transition**, no client method queries usage or limits, and `utilization` was absent on the real record
+while the CLI showed 37% for that window. A record carrying `overage_status: rejected` and no
+utilisation is a *transition notice*, not a reading — so the channel says **that something changed**,
+never **where you stand**, and § B1's "Rate Limits Is A Gauge, Not A Second Alarm" is backwards. **This
+app cannot reproduce `/usage`**, and the specs say so now instead of implying otherwise.
+
+**The keying stays, on smaller grounds than it was built on**, and separating those is the point: two
+windows can still transition in one session, and the slot would have let the second overwrite the first
+— under a heading § B1 takes from the record's own type, so the display would stay self-consistent while
+describing something else. `windowIsOpen` remains the single client-side definition of "still open"
+(§ C3).
+
+**The lesson is § A2 (d)'s for the third time in this file: reasoning is what missed it.** The premise
+came from a spec table of `rate_limit_type` values and was never checked against the SDK dataclass that
+answers it in one line. Both of phase 7's inert checks were found the same way — by running the thing
+rather than reading about it.
+
+**Two refusals rather than approximations**, both stated on screen. No API-duration figure: the SDK
+documents cost and `modelUsage` as cumulative in a streaming-input session and says nothing either way
+about the duration fields, so summing them is wrong in one direction if they are cumulative and the
+other if a turn ends twice — silently, which is the failure `cost.py` exists to prevent next door. The
+session clock is AIC⚡DC's own instead. And the CLI's "total code changes" line is not reported at all,
+because nothing on the wire carries it.
 
 **C9 — An auth error on the first connect of a cold server, and no record that it happened.**
 *Its closeable half was built 2026-08-29 — see § Landed since.* **The item stays open**, because what

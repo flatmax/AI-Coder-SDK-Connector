@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from aic_dc.claude_code import sdk_surface
+from aic_dc.claude_code.account_usage import AccountUsage
 from aic_dc.claude_code.cost import UNPRICED
 from aic_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
 from aic_dc.claude_code.engine_log import DEFAULT_TAIL as DEFAULT_ENGINE_ERROR_TAIL
@@ -149,9 +150,19 @@ SLASH_ROUTES: dict[str, dict[str, Any]] = {
     # them cumulative over the session (`cost.py`), so the tab does not just
     # show them prettier — it stays true afterwards, and it is where the
     # per-model breakdown already lives.
+    # `/usage` names the rate-limit windows as well as the cost, because
+    # since 2026-08-29 the tab reads the *same endpoint the CLI's own
+    # `/usage` reads* (`account_usage.py`) and shows the five-hour window,
+    # the week, and the per-model weekly caps. The reply naming a surface
+    # that does not exist is the exact defect § Session Usage Is The One
+    # Cumulative Reading records; a surface that has grown and a reply that
+    # has not is the same defect, half-sized.
     "usage": {
         "target": "tab:context#usage",
-        "surface": "the Context tab's cost and per-model token breakdown",
+        "surface": (
+            "the Context tab's rate-limit windows, cost and per-model "
+            "token breakdown"
+        ),
         "palette": "Session cost and token usage, in the Context tab",
         "during_turn": True,
     },
@@ -466,6 +477,12 @@ class ClaudeCodeService:
         for sentence in self._degradations:
             self.session.health.note_degradation(sentence)
 
+        # The account's rate-limit windows, read from the CLI's own usage
+        # endpoint rather than from the engine. Held here because it is
+        # cached and because it belongs to the *account*, not to a session:
+        # it answers with no engine running, which is the point — a reader
+        # who has been rate-limited has no session to ask.
+        self._account_usage = AccountUsage()
         # Last-known viewer state, pushed by the browser on navigation.
         # Held on the service rather than passed per turn because a tool
         # call can ask for it mid-turn, long after the prompt was composed.
@@ -1059,6 +1076,15 @@ class ClaudeCodeService:
             # rather than per turn — so unlike `compaction` above, this is
             # usually the *only* way a browser learns the figure at all.
             "rate_limit": self.session.rate_limit,
+            # Every window the account has open, for the Context tab's Usage
+            # section. The singular field above stays, and is the newest of
+            # these rather than a different fact: the HUD shows the window
+            # that just transitioned, the tab shows all of them.
+            "rate_limits": self.session.rate_limits,
+            # The session's own totals — the one reading in this app where the
+            # engine's cumulative cost and per-model figures are the answer
+            # rather than the trap (`cost.py` § session_totals).
+            "session_usage": self.session.session_usage,
             "permission_mode": self.session.permission_mode,
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
@@ -1779,6 +1805,27 @@ class ClaudeCodeService:
         # here and no browser is involved: that is
         # ``Reindexer._relative`` (``hooks.py``), and it stays.
         return {"usage": usage, "fetched_at": _now()}
+
+    async def get_account_usage(self, force: bool = False) -> dict[str, Any]:
+        """The account's rate-limit windows, as the CLI's ``/usage`` sees them.
+
+        **Not a control request, and not the engine's answer.** Every other
+        method in this section asks the running CLI something; this one
+        reads ``api.anthropic.com`` directly, because the figures the
+        engine's ``RateLimitEvent`` channel carries are transition notices
+        rather than readings and the CLI builds its own panel the same way
+        (:mod:`aic_dc.claude_code.account_usage`). Two consequences worth
+        stating: it answers **with no session connected**, which matters
+        because a rate-limited reader has no engine to interrogate; and it
+        cannot fail the way a control request fails, so there is no
+        ``no-engine`` reason here.
+
+        Never raises. Every failure comes back as ``ok: false`` with a
+        named ``reason``, because this sits beside a breakdown that can
+        fail on its own and a thrown exception here would take that panel
+        down with it.
+        """
+        return await self._account_usage.snapshot(force=bool(force))
 
     async def get_mcp_status(self) -> dict[str, Any]:
         try:

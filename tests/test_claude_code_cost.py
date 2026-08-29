@@ -353,3 +353,81 @@ class TestTheIdentityBetweenTheTwoFigures:
         per_model = sum(row["costUSD"] for row in priced["turn_model_usage"].values())
         assert per_model == cents(priced["turn_cost_usd"])
 
+
+
+class TestSessionTotals:
+    """The one reading where the cumulative figures are the answer.
+
+    Everywhere else in this codebase a cumulative figure rendered as a turn's
+    is the bug this module exists to prevent. The Context tab's Usage section
+    asks "what has this session cost", which the engine's running totals
+    answer directly — so these are served under the engine's own field names
+    rather than renamed, because those names mean "cumulative" everywhere and
+    the one honest use of them should not be the one place they are disguised.
+    """
+
+    def test_a_session_with_no_priced_result_has_no_cost_rather_than_zero(self):
+        ledger = CostLedger()
+        totals = ledger.session_totals()
+        # `None`, not 0.0: a session that has run nothing has no estimate, and
+        # printing $0.0000 for it makes the same claim `turn_cost_basis`
+        # refuses to make.
+        assert totals["total_cost_usd"] is None
+        assert totals["model_usage"] is None
+
+    def test_the_total_is_the_running_one_not_the_last_turns(self):
+        ledger = CostLedger()
+        turn(ledger, 0.10)
+        turn(ledger, 0.35)
+        assert ledger.session_totals()["total_cost_usd"] == cents(0.35)
+
+    def test_the_rows_keep_the_fields_the_deltas_drop(self):
+        """`_snapshot` keeps only the counters, which is right for maths and
+        wrong for display: it loses `canonicalModel`, and a row labelled from
+        the map key reads `us.anthropic.claude-opus-5-v1:0`."""
+        ledger = CostLedger()
+        models = {"us.anthropic.claude-opus-5-v1:0": entry(0.10, input=100)}
+        models["us.anthropic.claude-opus-5-v1:0"]["canonicalModel"] = "claude-opus-5"
+        turn(ledger, 0.10, models)
+        rows = ledger.session_totals()["model_usage"]
+        assert rows["us.anthropic.claude-opus-5-v1:0"]["canonicalModel"] == "claude-opus-5"
+
+    def test_the_rows_are_cumulative_where_the_turn_rows_are_a_difference(self):
+        ledger = CostLedger()
+        turn(ledger, 0.10, {"opus": entry(0.10, input=100)})
+        priced = turn(ledger, 0.30, {"opus": entry(0.30, input=400)})
+        # The turn moved 300 input tokens; the session has seen 400.
+        assert priced["turn_model_usage"]["opus"]["inputTokens"] == 300
+        assert ledger.session_totals()["model_usage"]["opus"]["inputTokens"] == 400
+
+    def test_a_reset_moves_the_totals_down_with_the_engines_own_ledger(self):
+        """A `/clear` restarts the engine's ledger and this figure follows it.
+
+        The alternative — holding the pre-`/clear` figure — would report a
+        number nothing tracks any more, and would disagree with the CLI's own
+        `/usage` panel, which restarts too. What it costs is stated rather
+        than hidden: after a `/clear` this understates what the account was
+        actually billed, and the turn that straddled the reset is the one
+        whose cost is lost (`turn_cost_basis: reset`).
+
+        The rows move with it. Reporting the new total beside the old
+        per-model rows would be one figure from each side of the reset.
+        """
+        ledger = CostLedger()
+        turn(ledger, 0.50, {"opus": entry(0.50, input=100)})
+        assert turn(ledger, 0.01, {"opus": entry(0.01, input=3)})["turn_cost_basis"] == RESET
+        totals = ledger.session_totals()
+        assert totals["total_cost_usd"] == cents(0.01)
+        assert totals["model_usage"]["opus"]["inputTokens"] == 3
+
+    def test_a_reconnect_forgets_them_because_the_engine_did(self):
+        ledger = CostLedger()
+        turn(ledger, 0.50, {"opus": entry(0.50, input=100)})
+        ledger.reset()
+        assert ledger.session_totals() == {"total_cost_usd": None, "model_usage": None}
+
+    def test_an_unpriced_result_does_not_move_the_totals(self):
+        ledger = CostLedger()
+        turn(ledger, 0.20, {"opus": entry(0.20, input=100)})
+        turn(ledger, None)
+        assert ledger.session_totals()["total_cost_usd"] == cents(0.20)

@@ -89,6 +89,8 @@ verbatim from the old tab — the mechanism it protected changed, the bug it fix
 
 ### Usage Section
 
+- **Session** — what this conversation has cost so far: the running total, the per-model prompt and completion counters, and the wall time since the engine connected. **Added 2026-08-29** — see § *Session Usage Is The One Cumulative Reading* below for why it had been missing and why these are the fields it reads.
+- **Rate limits** — a gauge per window the account has open, most constrained first, each with its utilisation and reset time: the five-hour window, the current week, and a **per-model weekly cap named after its model**. Read from the same endpoint the CLI's own `/usage` reads (`account_usage.py`), not from the engine — so it answers **with no session connected**, which is the state a rate-limited reader is in. The engine's `RateLimitEvent` records are kept beside it for what that endpoint has no words for: a window refusing calls, and the state of overage. All 2026-08-29, in two passes: see § *The Rate-Limit Channel Is An Alarm, Not A Usage Panel* for what the event channel can and cannot say, and § *The Figures Were A REST Call Away* for where the numbers actually come from.
 - **Budget gauge** — `totalTokens` against `maxTokens`, coloured green / amber / red by percentage, with the **auto-compact threshold marked on the bar**. The mark is the point of the gauge: "68% full" does not answer "am I about to be compacted?", and a marked threshold does.
 - **Category bar** — one stacked proportional bar from `categories`, in the engine's own colours, with a legend below carrying label and token count per category. Only non-zero categories appear. Deferred categories are labelled as deferred rather than silently counted, because a deferred category is not occupying context right now.
 - **Message breakdown** — conversation composition from `messageBreakdown`.
@@ -96,6 +98,195 @@ verbatim from the old tab — the mechanism it protected changed, the bug it fix
 
 Categories are not expandable. The engine reports category totals, not per-item membership, and a
 disclosure triangle that opens onto nothing is worse than no triangle.
+
+### Session Usage Is The One Cumulative Reading
+
+**Added 2026-08-29, from a user comparing this tab against the CLI's own `/usage`.** The report was
+"I don't see that level of detail here", and the cause was a promise with nothing behind it.
+
+`/usage` never reaches the CLI: it is in `SLASH_ROUTES`, deliberately, and answers *"/usage is the
+Context tab's cost and per-model token breakdown here."* **That sentence named a surface that did not
+exist.** This section rendered context-*window* composition and nothing else — no cost, no per-model
+rows, no rate limits. The figures were on the wire the whole time and were drawn only in the per-turn
+HUD, which auto-hides after 8.8 seconds and never appears at all for a session that has not run a turn.
+So the command opened a tab that did not contain the thing its own reply had just named. **Same shape as
+§ B5 and § C7 in [`../next.md`](../next.md) — a field with no reader — except that here the promise is
+printed to the user in answer to the command**, which is the one variant of it that cannot be discovered
+by reading the code alone.
+
+**This block reads `total_cost_usd` and `model_usage` as the cumulative figures they are, and it is the
+only place in this app permitted to.** Everywhere else — the HUD, the turn footer, the terminal block —
+rendering them as a turn's is the exact bug § *Cost Is Cumulative* exists to prevent. The question this
+block asks is the one they answer directly, which is the case that section already anticipated for the
+budget bar. Three things keep the two readings from being confused: the heading is *Session*, the
+figures are served under the engine's own field names rather than `session_*` aliases (those names mean
+"cumulative" everywhere, and disguising them at the one honest use would be the worse trade), and
+`CostLedger.session_totals()` is a separate accessor from `price()` rather than a second interpretation
+of one.
+
+**Cost is absent rather than `$0.0000` before the first priced result**, on the same grounds as
+`turn_cost_basis`: a session that has run nothing has no estimate, and a zero is a claim about it.
+
+**A `/clear` moves the figure down**, because the engine restarts its ledger and this follows it. Holding
+the pre-`/clear` number would report something nothing tracks any more and would disagree with the CLI's
+own panel, which restarts too. The cost is stated rather than hidden: after a `/clear` the figure
+understates what the account was billed, and the turn that straddled the reset is the one whose cost is
+lost. The per-model rows move with it, because one figure from each side of a reset is worse than both
+from one side.
+
+**Wall duration is measured here; there is no API-time figure beside it.** The SDK documents
+`total_cost_usd` and `modelUsage` as cumulative in a streaming-input session and says **nothing either
+way** about `duration_ms` / `duration_api_ms`. Summing them would double-count if they are cumulative and
+undercount if a turn ends more than once, and neither error announces itself — which is the failure
+`cost.py` exists to prevent for its neighbour. So the session clock is AIC⚡DC's own monotonic one, from
+connect, and the absent API figure is stated on screen rather than approximated. The number is aged
+client-side from the snapshot's reading, because the server sends a *duration* and not an instant, and a
+figure rendered straight from a snapshot is frozen at the one moment it is certainly wrong about.
+
+**Not reported, and it is the CLI's alone:** total lines added and removed. Nothing in any payload
+carries it — `files_modified` names files, not diffs — so it would have to be computed from the mirror,
+which is a different feature.
+
+### The Rate-Limit Channel Is An Alarm, Not A Usage Panel
+
+**Written 2026-08-29 on a wrong premise, and corrected the same day by running it.** The claim here was
+that the CLI's `/usage` draws a gauge per open window because *each window arrives as its own
+`RateLimitEvent`*. **It does not.** Verified against `claude-agent-sdk` 0.2.137:
+
+- **`RateLimitEvent` carries exactly one `RateLimitInfo`** (`types.py`), emitted "whenever the rate
+  limit status **transitions**". One window, on a state change — not a periodic reading and not a set.
+- **No client method returns the panel.** `ClaudeSDKClient` exposes `connect`, `disconnect`, `query`,
+  `receive_messages`, `receive_response`, `interrupt`, `set_model`, `set_permission_mode`, `stop_task`,
+  `rewind_files`, `get_context_usage`, `get_server_info`, `get_mcp_status`, `reconnect_mcp_server` and
+  `toggle_mcp_server`. Nothing queries usage or limits. **The CLI builds `/usage` from a source the SDK
+  does not expose**, the same way § R-8 turned out to have the engine-resolution order backwards.
+- **`utilization` is not in the payload at all.** Measured 2026-08-29 by logging the raw dict the CLI
+  sends, after the inference above had already been written down and shipped. The **whole** record is
+  six fields:
+
+  ```
+  {'status': 'allowed', 'resetsAt': 1788006000, 'rateLimitType': 'five_hour',
+   'overageStatus': 'rejected', 'overageDisabledReason': 'org_level_disabled',
+   'isUsingOverage': False}
+  ```
+
+  No utilisation, no weekly window, and the one field the SDK does not model is `isUsingOverage`, a
+  boolean. The CLI's own panel showed **37%** and two further windows at that same moment. So the
+  figures are not merely unmapped — they are not sent.
+
+**That last record is the finding.** It is not a usage reading with a missing field; it is a *transition
+notice* about overage being refused, carrying the fields relevant to the transition. So this channel
+reports **that something changed**, not **where you stand** — and § *Rate Limits Is A Gauge, Not A
+Second Alarm* has it exactly backwards. It can only be an alarm. A percentage is what it happens to
+carry when the transition was about a percentage.
+
+**What this app can therefore show is bounded, and the bound is stated rather than worked around:** the
+last transition per window, with a figure only if one came.
+
+**A record with no utilisation renders as "no figure", greyed, with no bar** — and getting that wrong is
+the defect this section exists to prevent, because the first cut shipped it. The colour came from
+`_pctColor(pct ?? 0)`, so an absent utilisation fell into the **healthy green band**, above a 0%-wide
+track. It read as "0% used, you're fine": a confident answer painted over no answer. **§ B5's rule, one
+surface over — an empty list does not say "no servers", it says "no answer"** — and it was caught by a
+user looking at a screenshot, not by the thirteen tests written alongside it, because every one of them
+supplied a utilisation. There are eight more now built from the real payload above.
+
+The window and its reset time *are* known and are still shown, with a sentence saying the percentage is
+not in the event. A fabricated figure beside them would be the `$0.00` mistake in another currency.
+
+**An overage rejection is not a failure and is no longer worded as one.** In the measured record
+`status` is `allowed` — the five-hour window is fine — while `overageStatus` is `rejected`, which the
+SDK's own docstring glosses as why overage is *unavailable*. It means pay-as-you-go is switched off at
+the organisation, so the window is a hard ceiling rather than a warning. `isUsingOverage` is carried too,
+because `overage_status` alone cannot tell "you have overage and are not on it" from "you are on it now".
+
+**The keying survives the correction, on smaller grounds than it was built on.** `_rate_limits` is keyed
+by `rate_limit_type` rather than held in one slot. That no longer promises three gauges — the CLI sends
+one window at a time — but it is still right: two windows *can* transition in one session, and the one
+slot would have let the second overwrite the first. The failure that would have caused is worth keeping
+in view, because § B1's HUD takes its heading from the record's own type: a five-hour reading would
+become a seven-day reading **under a heading that changed with it**, staying self-consistent while
+describing something else. An untyped record keeps a slot under a placeholder key, because the enum is
+the CLI's to extend.
+
+**Reopening this means the SDK growing a usage query**, not more work on this channel. Until then the
+honest gap is that AIC⚡DC cannot reproduce `/usage`, and the tab says what it has rather than implying
+it has the panel.
+
+### The Figures Were A REST Call Away — `account_usage.py`
+
+**Superseded the same day, 2026-08-29, by a user pointing at a screenshot: "even worse and no weekly +
+fable reporting".** Everything above about the *event channel* is still true and still governs
+`_rateLimits`. What was wrong was the closing inference — that the figures were unreachable until the
+SDK grew a query. The premise behind it was that the CLI builds `/usage` from a source the SDK does not
+expose. It does not build it from any SDK source at all: **the CLI makes its own REST call**, and so can
+we.
+
+Read out of the shipped binary (`@anthropic-ai/claude-code` 2.x), its `fetchUtilization` is
+`GET /api/oauth/usage` on `api.anthropic.com`, authenticated with the OAuth token in
+`~/.claude/.credentials.json`, and the panel is drawn from the response. `aic_dc/claude_code/account_usage.py`
+makes the same call, served to the browser as `ClaudeCodeService.get_account_usage`. Measured against a
+real account, it returns the three windows the user was missing: the five-hour session window, the week
+across all models, and a **per-model weekly cap named after its model**.
+
+**The per-model window is why an enum could never have carried this.** It arrives in the response's
+`limits[]` array as a `weekly_scoped` entry whose `scope.model.display_name` is the model's name —
+"Fable" — not as a member of `RateLimitType`. The label is *read from the payload*, so a model released
+after this build ships arrives already named. `limits[]` is what the CLI's own panel renders and is
+therefore what `normalise` reads; the flat `five_hour` / `seven_day` keys beside it are a fallback for
+an older response shape, never a second source to merge, because merging them draws the five-hour window
+twice.
+
+**The same two field names mean different things on the two channels, and this is the trap the
+conversion exists for.** On `RateLimitEvent`, `utilization` is a fraction 0.0–1.0 and `resets_at` is
+Unix seconds. On this endpoint, `utilization` is a **percent 0–100** and `resets_at` is an **ISO 8601
+string**. A record from one rendered by a reader expecting the other shows 4800% and a reset in 1970 —
+or, far worse, 0.48%, which is a plausible figure nobody would question. `normalise` converts on the
+server into the event channel's convention, so `rate-limit.js` keeps **one** definition of what a window
+record is and the browser cannot pick the wrong one ([`../next.md`](../next.md) § C3).
+
+**Nothing is written and the refresh token is never used.** The CLI refreshes its own token on a 401 and
+rewrites the credential file; doing that from here would rotate the token out from under the CLI's copy
+and could lock the user out of their own editor — a far worse outcome than a missing gauge. An expired
+token is reported as a reason, not repaired, which costs nothing in practice because AIC⚡DC *spawns*
+the CLI and a turn is what keeps the file fresh.
+
+**A redirected engine is never asked.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, an API
+key, or a base-URL override in the environment, turns bill somewhere this endpoint knows nothing about
+(`../plan/risks.md` R-9). Answering with subscription windows there would be a **real figure about a
+different account** — the most dangerous wrong answer available, because nothing about it looks broken.
+`health.credential_redirect()` is the gate, and the reader is told which variable did it.
+
+**Every failure is a named reason with a sentence, and the sentence is the feature.** An expired login, a
+refused token, a redirected engine and a dropped packet are four different things for the reader to do,
+and "unavailable" sends three of those readers to the wrong place. A failed read after a good one serves
+the **last good reading marked stale** rather than emptying the section, because a section that empties
+itself reads as "you have no limits".
+
+**The event records are demoted, not dropped.** With account windows on screen, `_rateLimits` renders
+only what the endpoint has no words for: a window actively refusing calls, and `overage_status` /
+`is_using_overage`. Crucially the *headline* goes with the demotion — the first cut kept the gauge
+markup and drew "5-hour — no figure" directly beneath the 5-hour gauge reading 48%, one window claiming
+to be two with the grey non-answer contradicting the real number above it. With no account reading
+available they become gauges again, unchanged, because a transition notice is still the best thing on
+the page.
+
+**The section renders above the no-breakdown branches**, which is the other half of the fix. It is the
+one part of this tab that does not come from the engine, and a reader cut off by a weekly limit **has no
+engine to ask** — so the breakdown errors, and previously the windows vanished at precisely the moment
+they were the reason for opening the tab.
+
+**The HUD's reading is unchanged**, and the split is the point. It shows the *newest arrival*, because
+its section exists to report a transition and the window that just transitioned is the one worth
+interrupting for whatever its utilisation says. The tab shows **all** of them, ranked most-constrained
+first, because a list has room to rank and a gauge does not, and the window nearest its ceiling is the
+one a reader who opened `/usage` came to find. One store, two readings — not two sources.
+
+**Expiry stays the browser's question, in both surfaces and in one function.** `windowIsOpen` is called
+by the HUD, the chat toast and now this tab; the server still serves every record raw. A server-side
+test would be a second definition of "still open" that could only come to disagree with the first
+([`../next.md`](../next.md) § C3), and the tab's whole purpose is to be read hours after the record
+arrived — which is exactly when a stale window would still be on screen.
 
 ### Session Section
 
@@ -649,7 +840,14 @@ tier-distribution HUD.
   request rather than the polled one. Anything not demonstrably the SDK's deadline keeps its stack.
 - The HUD never appears for an empty turn. An errored turn that carries real usage is not an empty turn.
 - No surface reads `total_cost_usd` or `model_usage` as this turn's; those are the session's running
-  totals and only ever appear labelled as such.
+  totals and only ever appear labelled as such. The Context tab's Session block is the one surface that
+  reads them at all, under a heading that says which they are.
+- Every rate-limit window the CLI reports is kept as its own record. No window's record can overwrite
+  another's, and no surface renders a figure from one window under another's name.
+- No surface invents a utilisation for a record that carries none. `—` is the answer, beside the window
+  and reset time that *are* known.
+- No surface claims to show the CLI's `/usage` figures. The SDK does not expose them.
+- A slash command routed to an AIC⚡DC surface names something that surface actually shows.
 - A turn whose cost cannot be established is never rendered as `$0.00`, and never as a claim about the
   billing plan; the reason is named instead.
 - A turn that genuinely cost nothing extra renders differently from one whose cost is unknown.

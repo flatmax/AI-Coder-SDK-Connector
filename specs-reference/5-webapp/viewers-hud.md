@@ -157,10 +157,74 @@ The native engine's `priced_request_count` / `unpriced_request_count` split is g
 litellm's pricing table could lack an entry for a configured model; the CLI reports cost or reports
 nothing, with no third "we could not price this" state.
 
+### Session usage
+
+`get_current_state().session_usage`, and the Context tab's Session block. **The one reading of the
+engine's cumulative figures this app permits** — see `specs5/5-webapp/viewers-hud.md`
+§ *Session Usage Is The One Cumulative Reading*.
+
+| Key | Source | `None` when |
+|---|---|---|
+| `total_cost_usd` | `CostLedger._total` — the last result's running total, verbatim | No result has been priced. **Not defaulted to 0.0**: a session that ran nothing has no estimate |
+| `model_usage` | the last result's `model_usage` **as reported**, keeping `canonicalModel` and the rest | Same |
+| `duration_seconds` | AIC⚡DC's own monotonic clock, from connect | The engine has never connected |
+
+| Rule | Value |
+|---|---|
+| Field names | The engine's own, not `session_*` aliases — those names mean "cumulative" everywhere, and the one honest use of them should not be the one place they are renamed |
+| Reset behaviour | A `/clear` moves cost **and** rows down together, following the engine's ledger. One figure from each side of a reset is worse than both from one side |
+| Reconnect | Cleared, with the ledger. Both describe what this engine process did |
+| API duration | **Not reported.** The SDK does not say whether `duration_api_ms` is per-turn or cumulative in a streaming-input session; the absence is stated on screen rather than approximated |
+| Lines added/removed | **Not available.** The CLI's `/usage` computes it; no payload carries it |
+| Client-side ageing | The browser stamps arrival and adds elapsed time, because the server sends a duration and not an instant |
+
 ### Rate-limit record
 
 Field shapes are the SDK's `RateLimitInfo`, passed through unchanged by
-`aic_dc/claude_code/messages.py::_rate_limit` and held on the session as `rate_limit`.
+`aic_dc/claude_code/messages.py::_rate_limit`, held on the session **keyed by `rate_limit_type`**
+(`_rate_limits`) and served two ways.
+
+| Reader | Field | Which records | Why |
+|---|---|---|---|
+| Usage HUD | `rate_limit` | The newest **arrival** | The section reports a *transition*, and the window that just transitioned is the one worth interrupting for |
+| Context tab | `rate_limits` | All open windows, most-constrained first | A list has room to rank; the window nearest its ceiling is what a reader who typed `/usage` came for |
+
+**One slot until 2026-08-29.** Keying it fixes a real overwrite — two windows can transition in one
+session, and the HUD's heading comes from the record's own type, so the display would have stayed
+self-consistent while describing a different window. An untyped record is kept under the key `_untyped`
+rather than dropped; the enum is the CLI's to extend.
+
+**What this does *not* do is reproduce the CLI's `/usage` panel**, and the keying was originally built
+on the belief that it would. Verified against `claude-agent-sdk` 0.2.137:
+
+| Claim | Reality |
+|---|---|
+| One event per open window | **No.** `RateLimitEvent` carries one `RateLimitInfo`, emitted on a status *transition* |
+| An SDK call returns the panel | **No.** None of the client's 15 methods queries usage or limits |
+| `utilization` is always present | **No.** Not in the payload at all — measured, below |
+
+**The measured payload** (2026-08-29, logged from the CLI; the whole record, not an excerpt):
+
+```
+{'status': 'allowed', 'resetsAt': 1788006000, 'rateLimitType': 'five_hour',
+ 'overageStatus': 'rejected', 'overageDisabledReason': 'org_level_disabled',
+ 'isUsingOverage': False}
+```
+
+Six fields, no utilisation, one window. `isUsingOverage` is the only field the SDK does not model; it is
+read off `raw` and carried, because `overage_status` alone cannot separate "have overage, not on it"
+from "on it now". The CLI's panel showed 37% and two further windows at that moment.
+
+| Record state | Figure | Bar | Colour |
+|---|---|---|---|
+| `utilization` present | `{n}%` | Drawn to `n%` | Gauge bands |
+| `status: rejected` | `reached` | Drawn | `#f85149` at any figure |
+| No `utilization` | `no figure` | **None** | Muted |
+
+**The no-utilisation row is the one that was wrong on first ship.** `_pctColor(pct ?? 0)` put an absent
+figure in the healthy green band over a 0%-wide track, which reads as "0% used". Rendering "no answer"
+as a confident answer is `EngineHealth.mcp`'s defect on another surface. Reasoning in
+`specs5/5-webapp/viewers-hud.md` § *The Rate-Limit Channel Is An Alarm, Not A Usage Panel*.
 
 | Field | Type | Note |
 |---|---|---|

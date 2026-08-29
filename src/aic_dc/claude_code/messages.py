@@ -752,6 +752,17 @@ class TurnTranslator:
 
     def _rate_limit(self, message: Any) -> list[Event]:
         info = getattr(message, "rate_limit_info", None)
+        # Logged whole, because the modelled fields have turned out not to be
+        # the whole story. A real record observed 2026-08-29 carried a window,
+        # a reset time and an overage rejection with **no `utilization`**,
+        # while the CLI's own `/usage` showed 37% for that same window — so
+        # the CLI has a figure this event does not carry, and `raw` is the
+        # only place a field we do not model could be hiding. One line at
+        # debug per transition, which is rare by construction.
+        #
+        # `specs5/5-webapp/viewers-hud.md` § The Rate-Limit Channel Is An
+        # Alarm, Not A Usage Panel.
+        logger.debug("Rate-limit record from the CLI: %r", getattr(info, "raw", None))
         return [
             Event(
                 "rateLimit",
@@ -765,6 +776,14 @@ class TurnTranslator:
                     "overage_resets_at": getattr(info, "overage_resets_at", None),
                     "overage_disabled_reason": getattr(
                         info, "overage_disabled_reason", None
+                    ),
+                    # Sent by the CLI and **not modelled by the SDK**, so it
+                    # is read off `raw` rather than the dataclass. Observed
+                    # 2026-08-29 in a real payload; worth carrying because
+                    # `overage_status` alone cannot tell "you have overage and
+                    # are not on it" from "you are on it right now".
+                    "is_using_overage": (getattr(info, "raw", None) or {}).get(
+                        "isUsingOverage"
                     ),
                     "raw": getattr(info, "raw", None) or {},
                 },

@@ -2049,6 +2049,53 @@ class TestRateLimitState:
         self.fold(engine, self.record(resets_at=1))
         assert engine.rate_limit["resets_at"] == 1
 
+    async def test_a_second_window_does_not_overwrite_the_first(self, engine):
+        """The defect this keying fixes.
+
+        An account has several windows open at once — the CLI's own `/usage`
+        draws a gauge for each — and each arrives as its own record. With one
+        slot the seven-day event replaced the five-hour one, so the browser
+        could only ever show whichever transitioned last, and a five-hour
+        figure silently became a seven-day figure under the same heading.
+        """
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+
+        kinds = {r["rate_limit_type"]: r["utilization"] for r in engine.rate_limits}
+        assert kinds == {"five_hour": 0.82, "seven_day": 0.09}
+
+    async def test_a_newer_record_for_one_window_replaces_only_that_window(self, engine):
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+        self.fold(engine, self.record(utilization=0.95))
+
+        kinds = {r["rate_limit_type"]: r["utilization"] for r in engine.rate_limits}
+        assert kinds == {"five_hour": 0.95, "seven_day": 0.09}
+
+    async def test_the_singular_reading_is_the_newest_arrival(self, engine):
+        """What the HUD shows, and it is unchanged by the keying.
+
+        Recency rather than "the most constrained": the HUD's section reports
+        a *transition*, and the window that just transitioned is the one worth
+        interrupting for whatever its utilisation says.
+        """
+        self.fold(engine, self.record(utilization=0.95))
+        self.fold(engine, self.record(rate_limit_type="seven_day", utilization=0.09))
+        assert engine.rate_limit["rate_limit_type"] == "seven_day"
+
+    async def test_an_untyped_record_is_kept_rather_than_dropped(self, engine):
+        """The enum is the CLI's to extend, so an unknown shape still counts."""
+        self.fold(engine, self.record(rate_limit_type=None, utilization=0.4))
+        assert [r["utilization"] for r in engine.rate_limits] == [0.4]
+        assert engine.rate_limit["utilization"] == 0.4
+
+    async def test_a_model_scoped_weekly_window_is_its_own_row(self, engine):
+        """`Current week (Fable)` in the CLI's panel — a third open window."""
+        self.fold(engine, self.record())
+        self.fold(engine, self.record(rate_limit_type="seven_day"))
+        self.fold(engine, self.record(rate_limit_type="seven_day_opus"))
+        assert len(engine.rate_limits) == 3
+
 
 # ---------------------------------------------------------------------------
 # Compaction survives a reload

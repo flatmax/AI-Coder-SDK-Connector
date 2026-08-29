@@ -388,13 +388,36 @@ class EngineSession:
         # because this is only ever read as a duration and a wall clock that
         # steps backwards would produce a negative one.
         self._compacting_since: float | None = None
-        # The last rate-limit record the CLI sent, or None. Held rather than
+        # Rate-limit records, **keyed by `rate_limit_type`**. Held rather than
         # only forwarded, for the reason the SDK's own docstring gives: the
         # event fires when the status *transitions*, not per turn, so a
         # browser that reloads an hour into a five-hour window would have
         # nothing to show until the next transition — which may be the
         # rejection this figure exists to give warning of.
-        self._rate_limit: dict[str, Any] | None = None
+        #
+        # **Keyed rather than a single slot, which is what it was until
+        # 2026-08-29.** An account has several windows open at once — the CLI's
+        # own `/usage` panel draws a gauge for the five-hour window, one for
+        # the week across all models, and one per model with its own weekly
+        # cap — and each arrives as its own `RateLimitInfo` with its own
+        # `rate_limit_type`. One slot meant the newest event overwrote a
+        # different window's record, so the browser could only ever show
+        # whichever window happened to transition last, and a five-hour figure
+        # would silently become a seven-day one under the same section. An
+        # untyped record still gets a slot, under a placeholder key, because
+        # dropping it would lose the only figure a future CLI might send.
+        self._rate_limits: dict[str, dict[str, Any]] = {}
+        # Insertion order is not arrival order once a key is overwritten, so
+        # the most recent arrival is tracked separately for the readers that
+        # want one record rather than all of them.
+        self._rate_limit_latest: str | None = None
+        # When this session's engine connected, on a monotonic clock. The wall
+        # duration `/usage` reports is measured here rather than summed from
+        # the CLI's `duration_ms`, because the SDK does not say whether that
+        # field is per-turn or cumulative in a streaming-input session and
+        # reading it the wrong way makes the figure silently wrong — which is
+        # the exact failure `cost.py` exists to prevent for its neighbour.
+        self._connected_since: float | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -474,8 +497,55 @@ class EngineSession:
         (``specs5/next.md`` § C3). ``resets_at`` is a wall-clock instant that
         the browser already renders against its own clock, and minutes of skew
         do not matter to a five-hour window.
+
+        **The most recent arrival, now that several are kept.** This is the
+        HUD's reading, which shows one window and always has; the Context tab
+        takes :attr:`rate_limits` and draws all of them. Recency rather than
+        "the most constrained" on purpose — the HUD's section exists to report
+        a *transition*, and the window that just transitioned is the one worth
+        interrupting for, whatever its utilisation says.
         """
-        return dict(self._rate_limit) if self._rate_limit is not None else None
+        if self._rate_limit_latest is None:
+            return None
+        record = self._rate_limits.get(self._rate_limit_latest)
+        return dict(record) if record is not None else None
+
+    @property
+    def rate_limits(self) -> list[dict[str, Any]]:
+        """Every rate-limit window the CLI has reported, newest arrival last.
+
+        An account has several open at once and each is its own record; see
+        the note beside ``_rate_limits``. Served raw, like the singular
+        reading: **whether a window has since reset is the browser's
+        question**, and answering it here as well would be a second definition
+        of "still open" that could only come to disagree with the first
+        (``specs5/next.md`` § C3). ``rate-limit.js``'s ``windowIsOpen`` is the
+        one definition, and both surfaces call it.
+        """
+        return [dict(record) for record in self._rate_limits.values()]
+
+    @property
+    def session_duration_seconds(self) -> float | None:
+        """Wall time since this session's engine connected, or ``None``.
+
+        AIC⚡DC's own monotonic clock rather than a sum of the CLI's
+        ``duration_ms``. The SDK documents ``total_cost_usd`` and
+        ``modelUsage`` as cumulative in a streaming-input session and says
+        nothing either way about the duration fields — so summing them would
+        double-count if they are cumulative and undercount if a turn ends more
+        than once, and neither error announces itself. A clock we own answers
+        the question the panel actually asks and cannot be wrong about which
+        kind of number it holds.
+
+        This is why no *API* duration is reported beside it: there is no
+        second clock here that measures time inside the engine, and
+        ``duration_api_ms`` carries the same unresolved question. Stated
+        rather than approximated — ``specs5/5-webapp/viewers-hud.md``
+        § *Session Usage*.
+        """
+        if self._connected_since is None:
+            return None
+        return max(0.0, time.monotonic() - self._connected_since)
 
     @property
     def permission_mode(self) -> str:
@@ -626,6 +696,11 @@ class EngineSession:
             # "resumed sessions start fresh". Carrying our baseline across a
             # connect would price the new session's first turn as a refund.
             self._cost.reset()
+            # The wall clock `/usage` reports restarts with the ledger it sits
+            # beside, and for the same reason: both describe what this engine
+            # process has done, and a duration carried across a reconnect
+            # would be measured against a total that was not.
+            self._connected_since = time.monotonic()
             # A resume with a store materialises a temp CLAUDE_CONFIG_DIR
             # that only disconnect() cleans up, and the exit path reaches
             # disconnect() on a 2s budget at best (next.md § C8) and not at
@@ -857,7 +932,15 @@ class EngineSession:
             # already chose which of its fields to name.
             payload = event.payload
             if isinstance(payload, dict):
-                self._rate_limit = dict(payload)
+                # Keyed by window, so a seven-day record cannot overwrite the
+                # five-hour one the account also has open. An untyped record
+                # still gets a slot rather than being dropped: the enum is the
+                # CLI's to extend, and a figure under a placeholder key is
+                # more use than no figure.
+                kind = payload.get("rate_limit_type")
+                key = kind if isinstance(kind, str) and kind else "_untyped"
+                self._rate_limits[key] = dict(payload)
+                self._rate_limit_latest = key
             return event
         if event.name == "compactionEvent":
             # Held, not just forwarded, so a browser that reloads during the
@@ -1064,6 +1147,23 @@ class EngineSession:
                 emit, Event("engineHealth", self.health.to_dict(), turn_scoped=False)
             )
         return result
+
+    @property
+    def session_usage(self) -> dict[str, Any]:
+        """What this session has spent, for the surface that asks that question.
+
+        The Context tab's Usage section and the CLI's own ``/usage`` panel ask
+        "what has this session cost", which is the one question the engine's
+        cumulative figures answer directly — see
+        :meth:`~aic_dc.claude_code.cost.CostLedger.session_totals` for why they
+        keep the engine's own field names here rather than being renamed.
+        ``duration_seconds`` is ours; there is no API-time twin, and
+        :attr:`session_duration_seconds` says why.
+        """
+        return {
+            **self._cost.session_totals(),
+            "duration_seconds": self.session_duration_seconds,
+        }
 
     def _price_turn(self, result: dict[str, Any]) -> dict[str, Any]:
         """Add this turn's own cost and per-model usage to a result payload.

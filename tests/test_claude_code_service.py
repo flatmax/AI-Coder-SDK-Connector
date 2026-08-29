@@ -98,6 +98,17 @@ class FakeSession:
         # `None` the way the real property reports "the CLI has never sent a
         # rate limit", which is every session that has not been near one.
         self.rate_limit = None
+        # Every window the account has open, which the real session keys by
+        # `rate_limit_type`. Empty rather than None: the property returns a
+        # list, and a session that has heard nothing has heard nothing about
+        # zero windows rather than about an unknown number of them.
+        self.rate_limits = []
+        # No priced result and no connect, so no cost and no clock.
+        self.session_usage = {
+            "total_cost_usd": None,
+            "model_usage": None,
+            "duration_seconds": None,
+        }
         self.permission_mode = "default"
         self.model = None
         self.config = EngineConfig()
@@ -353,6 +364,26 @@ def events():
     return Recorder()
 
 
+class FakeAccountUsage:
+    """The account reader, stubbed — **no test may reach the network**.
+
+    ``get_account_usage`` is the one RPC on this service that talks to
+    something other than the engine: it reads ``api.anthropic.com`` for the
+    rate-limit windows the CLI's own ``/usage`` shows. The collaboration
+    suite below *calls every read-only method* to prove a participant is
+    not refused, so without this stub that sweep would fire a real HTTPS
+    request with the developer's OAuth token — slow, offline-fragile, and
+    a test asserting on somebody's actual weekly usage.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    async def snapshot(self, *, force=False):
+        self.calls.append(force)
+        return {"ok": True, "windows": [], "fetched_at": "2026-08-29T00:00:00+00:00"}
+
+
 @pytest.fixture
 def service(tmp_path, events):
     """A service on a fake engine, with no CLI anywhere in sight."""
@@ -362,6 +393,7 @@ def service(tmp_path, events):
         engine_config=EngineConfig(),
     )
     svc.session = FakeSession()
+    svc._account_usage = FakeAccountUsage()
     return svc
 
 
@@ -1825,6 +1857,8 @@ class TestState:
         assert set(state) == {
             "messages",
             "denied_read_files",
+            "rate_limits",
+            "session_usage",
             "session_id",
             "repo_name",
             "repo_root",
@@ -2041,6 +2075,27 @@ class TestLiveControls:
         answer = await service.get_context_usage()
         assert answer["usage"] == {"total_tokens": 1000}
         assert answer["fetched_at"].startswith("20")
+
+    async def test_account_usage_answers_with_no_engine(self, service):
+        """**Not a control request.**
+
+        Every other read in this section asks the running CLI something and
+        fails with ``no-engine`` when there is none. The account's
+        rate-limit windows come from Anthropic directly, which is the whole
+        point: the reader who has been cut off by a weekly limit has no
+        session to interrogate, and that is exactly when they come looking
+        for the figure.
+        """
+        service.session.control_error = EngineNotReadyError("not connected")
+        answer = await service.get_account_usage()
+        assert answer["ok"] is True
+        assert service.session.control_calls == []
+
+    async def test_account_usage_passes_a_forced_read_through(self, service):
+        """Refresh means refresh — the cache is bypassed, not consulted."""
+        await service.get_account_usage()
+        await service.get_account_usage(True)
+        assert service._account_usage.calls == [False, True]
 
     async def test_context_usage_on_a_cold_engine_reports_the_reason(self, service):
         service.session.control_error = EngineNotReadyError("not connected")
@@ -2370,6 +2425,14 @@ READ_ONLY_METHODS: dict[str, tuple] = {
     "get_current_state": (),
     "get_denied_read_files": (),
     "get_context_usage": (),
+    # The host's rate-limit windows. Account data rather than session data,
+    # so it is worth stating why a participant may read it: the engine's
+    # `rateLimit` events are **already broadcast to every client**, and a
+    # window that has stopped the session is the reason the session has
+    # stopped. Gating the reading while pushing the alarm would leave a
+    # participant knowing something is wrong and unable to see what.
+    # Nothing here is a credential; it is percentages and reset times.
+    "get_account_usage": (),
     "get_mcp_status": (),
     "get_server_info": (),
     # The model in force, and the menu. Reading it is not the same as

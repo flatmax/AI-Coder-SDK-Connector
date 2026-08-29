@@ -26,6 +26,7 @@ from aic_dc.claude_code.health import (
     _ENDPOINT_VARS,
     _GATEWAY_VARS,
     _credential_base,
+    credential_redirect,
     detect_credentials,
 )
 
@@ -359,3 +360,47 @@ class TestNoDeclaredAndEmptyFields:
         declared = {f.name for f in dataclasses.fields(EngineHealth)}
         computed = {"mirror_gaps_escalated"}
         assert set(payload) <= declared | computed
+
+
+class TestCredentialRedirect:
+    """Whether the account's own usage windows describe this engine's turns.
+
+    Split out of ``detect_credentials`` for
+    :mod:`aic_dc.claude_code.account_usage`, which reads the subscription's
+    rate-limit windows from Anthropic directly. On a machine pointed at
+    Bedrock, Vertex or an API key those windows are a **real figure about a
+    different account** — the most dangerous kind of wrong answer, because
+    nothing about it looks broken (``specs5/plan/risks.md`` R-9).
+    """
+
+    def test_a_plain_subscription_login_is_not_a_redirect(self, config_dir):
+        login(config_dir)
+        assert credential_redirect() is None
+
+    def test_bedrock_names_the_variable_that_did_it(self, monkeypatch, config_dir):
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        answer = credential_redirect()
+        assert "CLAUDE_CODE_USE_BEDROCK" in answer
+        assert "Amazon Bedrock" in answer
+
+    def test_vertex_names_its_provider(self, monkeypatch, config_dir):
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        assert "Google Vertex AI" in credential_redirect()
+
+    @pytest.mark.parametrize("var", _API_KEY_VARS)
+    def test_an_api_key_redirects_the_billing(self, monkeypatch, config_dir, var):
+        """The variable, never the value — this sentence is rendered in a tab."""
+        monkeypatch.setenv(var, "sk-ant-secret")
+        answer = credential_redirect()
+        assert f"${var}" in answer
+        assert "secret" not in answer
+
+    @pytest.mark.parametrize("var", _ENDPOINT_VARS)
+    def test_an_endpoint_override_redirects(self, monkeypatch, config_dir, var):
+        monkeypatch.setenv(var, "https://proxy.internal")
+        assert f"${var}" in credential_redirect()
+
+    def test_a_falsy_gateway_flag_is_not_a_gateway(self, monkeypatch, config_dir):
+        """``CLAUDE_CODE_USE_BEDROCK=0`` is a switch turned off, not a redirect."""
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "0")
+        assert credential_redirect() is None

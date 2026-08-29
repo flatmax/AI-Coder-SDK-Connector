@@ -3279,3 +3279,529 @@ describe('ContextUsageTab engine failures', () => {
     expect(errors).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Session usage and rate limits — what `/usage` opens onto
+// ---------------------------------------------------------------------------
+
+/**
+ * The command routes here (`service.py` SLASH_ROUTES) and its reply promises
+ * "the Context tab's cost and per-model token breakdown". Until 2026-08-29
+ * the tab rendered context-window composition and neither of those, so the
+ * reply named a surface that did not exist — the figures were on the wire the
+ * whole time and drawn only in the per-turn HUD, which auto-hides after 8.8
+ * seconds and never appears for a session that has not run a turn.
+ */
+describe('ContextUsageTab session usage', () => {
+  it('renders nothing before the first priced result', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    // Absent rather than "$0.0000", which is a claim about a session that has
+    // not spent anything yet.
+    expect(sectionFor(el, 'Session')).toBeUndefined();
+  });
+
+  it('reads the cumulative figures, which no other surface may', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 3.21,
+        duration_seconds: 42,
+        model_usage: {
+          'claude-opus-4-6': {
+            inputTokens: 12481,
+            outputTokens: 1208,
+            cacheReadInputTokens: 41502,
+            cacheCreationInputTokens: 0,
+          },
+        },
+      },
+    });
+    await settle(el);
+
+    expect(heading(el, 'Session')).toContain('$3.21 so far');
+    expect(rows(el, 'Session')).toEqual([['claude-opus-4-6', '54.0K', '1.2K']]);
+  });
+
+  it('prefers the canonical model name over the provider key', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 0.5,
+        model_usage: {
+          'us.anthropic.claude-opus-5-v1:0': {
+            inputTokens: 10,
+            canonicalModel: 'claude-opus-5',
+          },
+        },
+      },
+    });
+    await settle(el);
+    expect(rows(el, 'Session')[0][0]).toBe('claude-opus-5');
+  });
+
+  it('follows the session total up as turns land, without a fetch', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { total_cost_usd: 1.0 } });
+    await settle(el);
+    pushEvent('stream-complete', { total_cost_usd: 2.5, model_usage: {} });
+    await settle(el);
+    expect(heading(el, 'Session')).toContain('$2.50');
+  });
+
+  it('keeps the last good figures when a turn reports none', async () => {
+    // A synthetic failure footer writes null into both, and a session does
+    // not stop having cost what it cost because one turn died.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { total_cost_usd: 1.75 } });
+    await settle(el);
+    pushEvent('stream-complete', { total_cost_usd: null, model_usage: null });
+    await settle(el);
+    expect(heading(el, 'Session')).toContain('$1.75');
+  });
+
+  it('says why there is no API-time figure rather than omitting one', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { duration_seconds: 42 } });
+    await settle(el);
+    const note = sectionFor(el, 'Session').textContent.replace(/\s+/g, ' ');
+    expect(note).toContain('42s since the engine connected');
+    expect(note).toContain('per-turn or cumulative');
+  });
+});
+
+describe('ContextUsageTab rate limits', () => {
+  function limit(overrides = {}) {
+    return {
+      status: 'allowed_warning',
+      rate_limit_type: 'five_hour',
+      resets_at: Math.floor(Date.now() / 1000) + 3600,
+      utilization: 0.24,
+      overage_status: null,
+      ...overrides,
+    };
+  }
+
+  it('draws every open window, not just the newest', async () => {
+    // The defect the backend keying fixes: an account has three windows open
+    // and the CLI reports each separately.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [
+        limit(),
+        limit({ rate_limit_type: 'seven_day', utilization: 0.09 }),
+        limit({ rate_limit_type: 'seven_day_opus', utilization: 0 }),
+      ],
+    });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(3);
+    expect(heading(el, 'Rate limits')).toContain('3 open windows');
+  });
+
+  it('merges a live push into the window it belongs to', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit(), limit({ rate_limit_type: 'seven_day', utilization: 0.09 })],
+    });
+    await settle(el);
+    pushEvent('rate-limit', { data: limit({ utilization: 0.95 }) });
+    await settle(el);
+
+    // Still two windows — a list that appended would draw five_hour twice,
+    // at two utilisations, both claiming to be current.
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(2);
+    expect(rendered.textContent).toContain('95%');
+    expect(rendered.textContent).not.toContain('24%');
+  });
+
+  it('drops a window whose reset has passed', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit({ resets_at: 1 }), limit({ rate_limit_type: 'seven_day' })],
+    });
+    await settle(el);
+    // Expiry is the browser's question and `windowIsOpen` is its one answer,
+    // shared with the HUD and the toast.
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+
+  it('renders nothing when every window has closed', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [limit({ resets_at: 1 })] });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits')).toBeUndefined();
+  });
+
+  it('ranks the most constrained window first', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [
+        limit({ rate_limit_type: 'seven_day', utilization: 0.09 }),
+        limit({ utilization: 0.88 }),
+      ],
+    });
+    await settle(el);
+    const first = sectionFor(el, 'Rate limits').querySelector('.limit');
+    expect(first.textContent).toContain('88%');
+  });
+
+  it('reads a rejection as reached at whatever the figure says', async () => {
+    // An overage cut-off can refuse at a utilisation the bands call healthy.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      rate_limits: [limit({ status: 'rejected', utilization: 0.4 })],
+    });
+    await settle(el);
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.textContent).toContain('reached');
+    expect(rendered.querySelector('.pct').getAttribute('style')).toContain('#f85149');
+  });
+
+  it('a snapshot carrying nothing leaves a known window alone', async () => {
+    // A reconnect re-delivers the snapshot, and a backend older than the
+    // field sends nothing — neither is evidence the limit went away.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [limit()] });
+    await settle(el);
+    pushEvent('state-loaded', {});
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+});
+
+/**
+ * The bug a screenshot caught that 13 tests did not.
+ *
+ * `utilization` is absent from real records — the CLI's whole
+ * `rate_limit_event` payload is six fields and that is not one of them — so
+ * the first cut fell through to `_pctColor(pct ?? 0)` and painted "we were
+ * not told" in the healthy green band, above a 0%-wide bar. It read as "0%
+ * used, you're fine". An empty list does not say "no servers", it says "no
+ * answer"; the same rule, one surface over.
+ */
+describe('ContextUsageTab rate limits without a figure', () => {
+  // The exact payload observed on a real account, 2026-08-29.
+  function real(overrides = {}) {
+    return {
+      status: 'allowed',
+      resets_at: Math.floor(Date.now() / 1000) + 3600,
+      rate_limit_type: 'five_hour',
+      overage_status: 'rejected',
+      overage_disabled_reason: 'org_level_disabled',
+      is_using_overage: false,
+      utilization: undefined,
+      ...overrides,
+    };
+  }
+
+  async function show(records) {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: records });
+    await settle(el);
+    return sectionFor(el, 'Rate limits');
+  }
+
+  it('never paints an unknown utilisation in the healthy band', async () => {
+    const rendered = await show([real()]);
+    const style = rendered.querySelector('.pct').getAttribute('style');
+    // Green is a claim about a number we do not have.
+    expect(style).not.toContain('#7ee787');
+    expect(style).toContain('muted');
+  });
+
+  it('draws no bar at all rather than an empty one', async () => {
+    // A 0%-wide track under a window heading reads as "0% used".
+    const rendered = await show([real()]);
+    expect(rendered.querySelector('.bar')).toBeNull();
+  });
+
+  it('says there is no figure rather than showing a dash', async () => {
+    const rendered = await show([real()]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('no figure');
+  });
+
+  it('still reports what it does know', async () => {
+    const rendered = await show([real()]);
+    expect(rendered.textContent).toContain('Resets');
+    expect(rendered.textContent).toContain('5-hour');
+  });
+
+  it('explains that the CLI did not send the percentage', async () => {
+    const text = (await show([real()])).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('not in the event it sends us');
+  });
+
+  it('reads a refused overage as unavailable, not as a failure', async () => {
+    // `status` is `allowed` here: the window is fine and pay-as-you-go is
+    // switched off at the org. The SDK's own docstring calls this field "why
+    // overage is *unavailable*".
+    const text = (await show([real()])).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Overage unavailable — org level disabled');
+    expect(text).toContain('hard ceiling');
+  });
+
+  it('still bars and colours a window that does carry a figure', async () => {
+    const rendered = await show([real({ utilization: 0.37 })]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('37%');
+    expect(rendered.querySelector('.bar-seg').getAttribute('style')).toContain('37%');
+  });
+
+  it('a rejection is still red with no figure behind it', async () => {
+    const rendered = await show([real({ status: 'rejected' })]);
+    expect(rendered.querySelector('.pct').textContent.trim()).toBe('reached');
+    expect(rendered.querySelector('.pct').getAttribute('style')).toContain('#f85149');
+  });
+});
+
+/**
+ * The windows the CLI's own `/usage` draws.
+ *
+ * The section above documents what the *engine's* channel can say, which
+ * is "something changed" and — measured on a real account — no percentage
+ * at all. These tests cover the second source: `get_account_usage`, which
+ * reads the endpoint the CLI itself reads and comes back with the figures.
+ *
+ * The two sources disagree about units on the wire (percent vs fraction,
+ * ISO vs Unix seconds); the server converts, so everything below is in
+ * this file's one convention. That is the property worth pinning — a
+ * regression there renders 48% as 4800% or, far worse, as 0.48%.
+ */
+describe('ContextUsageTab account rate limits', () => {
+  const soon = () => Math.floor(Date.now() / 1000) + 3600;
+
+  /** The normalised shape the server serves, from a real account. */
+  function account(overrides = {}) {
+    return {
+      ok: true,
+      fetched_at: '2026-08-29T12:10:04+00:00',
+      windows: [
+        { key: 'session', label: '5-hour', utilization: 0.48, resets_at: soon() },
+        { key: 'weekly_all', label: 'Current week', utilization: 0.11, resets_at: soon() },
+        {
+          key: 'weekly_scoped:Fable',
+          label: 'Current week (Fable)',
+          utilization: 0,
+          resets_at: null,
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  /** The event record measured 2026-08-29: a window, a reset, no figure. */
+  function event(overrides = {}) {
+    return {
+      status: 'allowed',
+      rate_limit_type: 'five_hour',
+      resets_at: soon(),
+      overage_status: 'rejected',
+      overage_disabled_reason: 'org_level_disabled',
+      is_using_overage: false,
+      ...overrides,
+    };
+  }
+
+  function publishBoth(answer, usage = usageFixture()) {
+    const handler = vi.fn(() => answer);
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': vi.fn(() => ({
+        usage,
+        fetched_at: '2026-08-15T10:30:00Z',
+      })),
+      'ClaudeCodeService.get_account_usage': handler,
+    });
+    return handler;
+  }
+
+  async function show(answer, records = []) {
+    publishBoth(answer);
+    const el = mountTab();
+    await settle(el);
+    if (records.length) {
+      pushEvent('state-loaded', { rate_limits: records });
+      await settle(el);
+    }
+    return el;
+  }
+
+  it('draws a gauge per window the account has open', async () => {
+    const el = await show(account());
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(3);
+    expect(rendered.textContent).toContain('48%');
+    expect(rendered.textContent).toContain('11%');
+  });
+
+  it('names the per-model weekly window after its model', async () => {
+    // The row that cannot come from `RateLimitType`: the endpoint carries
+    // a display name, and a model shipped tomorrow arrives labelled.
+    const el = await show(account());
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('Current week (Fable)');
+  });
+
+  it('reads the figure as a fraction, not as a percent already', async () => {
+    // 0.48 is 48%. Rendering it as 0% (the "already a percent" mistake) is
+    // the plausible-looking wrong answer nobody would question.
+    const el = await show(account());
+    const pct = [...sectionFor(el, 'Rate limits').querySelectorAll('.pct')].map((n) =>
+      n.textContent.trim(),
+    );
+    expect(pct).toContain('48%');
+    expect(pct).not.toContain('0.48%');
+  });
+
+  it('shows a window that has not started counting, with no reset line', async () => {
+    const el = await show({
+      ...account(),
+      windows: [
+        {
+          key: 'weekly_scoped:Fable',
+          label: 'Current week (Fable)',
+          utilization: 0,
+          resets_at: null,
+        },
+      ],
+    });
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(1);
+    expect(rendered.textContent).toContain('0%');
+    expect(rendered.textContent).not.toContain('Resets');
+  });
+
+  it('ranks the most-constrained window first', async () => {
+    const el = await show(account());
+    const first = sectionFor(el, 'Rate limits').querySelector('.limit');
+    expect(first.textContent).toContain('5-hour');
+    expect(first.textContent).toContain('48%');
+  });
+
+  it('drops a window whose reset has passed', async () => {
+    const el = await show({
+      ...account(),
+      windows: [
+        { key: 'session', label: '5-hour', utilization: 0.48, resets_at: 1 },
+        { key: 'weekly_all', label: 'Current week', utilization: 0.11, resets_at: soon() },
+      ],
+    });
+    expect(sectionFor(el, 'Rate limits').querySelectorAll('.limit')).toHaveLength(1);
+  });
+
+  it('does not draw the same window twice when both sources have it', async () => {
+    // The five-hour window arrives from both channels. A gauge above a
+    // "no figure" row for the same window is one window claiming to be two.
+    const el = await show(account(), [event()]);
+    const rendered = sectionFor(el, 'Rate limits');
+    expect(rendered.querySelectorAll('.limit')).toHaveLength(3);
+    expect(rendered.textContent).not.toContain('no figure');
+  });
+
+  it('keeps the overage notice the account payload does not carry', async () => {
+    // `overageDisabledReason` is the engine channel's to report, and it
+    // survives the demotion because the gauges cannot say it.
+    const el = await show(account(), [event()]);
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Overage unavailable — org level disabled');
+  });
+
+  it('falls back to the engine records when the account read fails', async () => {
+    const el = await show({ ok: false, reason: 'expired', detail: 'Token expired.' }, [
+      event(),
+    ]);
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Account usage unavailable');
+    expect(text).toContain('Token expired.');
+    expect(text).toContain('no figure');
+  });
+
+  it('says why there are no figures even with nothing else to show', async () => {
+    // An empty section would read as "you have no limits". The reason is
+    // the one thing here a reader can act on.
+    const el = await show({
+      ok: false,
+      reason: 'redirected',
+      detail: '$ANTHROPIC_API_KEY is set, so turns bill to that key.',
+    });
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('ANTHROPIC_API_KEY');
+  });
+
+  it('marks a reading served from the last successful fetch', async () => {
+    const el = await show({ ...account(), stale: true, stale_detail: 'timed out' });
+    const text = sectionFor(el, 'Rate limits').textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('Last successful reading');
+    expect(text).toContain('timed out');
+  });
+
+  it('shows the windows when the breakdown itself failed', async () => {
+    // **The state this section exists for.** A reader cut off by a weekly
+    // limit has no engine to ask, so the breakdown errors — and the
+    // windows are exactly what they opened the tab to see.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': vi.fn(() => ({
+        error: 'No engine session.',
+        reason: 'no-engine',
+      })),
+      'ClaudeCodeService.get_account_usage': vi.fn(() => account()),
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = el.shadowRoot.textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('48%');
+    expect(text).toContain('Current week (Fable)');
+    // And the breakdown's own error is still reported beside them.
+    expect(text).toContain('No engine session.');
+  });
+
+  it('survives a backend with no such method', async () => {
+    // An older server has no `get_account_usage`; `rpcCall` throws "method
+    // not found" and the panel must not lose the page over it.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { rate_limits: [event()] });
+    await settle(el);
+    expect(sectionFor(el, 'Rate limits').textContent).toContain('no figure');
+  });
+
+  it('asks for a fresh reading when Refresh is pressed, and not before', async () => {
+    const handler = publishBoth(account());
+    const el = mountTab();
+    await settle(el);
+    expect(handler).toHaveBeenCalledWith(false);
+
+    const refresh = [...el.shadowRoot.querySelectorAll('.tool-btn')].find((b) =>
+      b.textContent.includes('Refresh'),
+    );
+    refresh.click();
+    await settle(el);
+    expect(handler).toHaveBeenLastCalledWith(true);
+  });
+});
