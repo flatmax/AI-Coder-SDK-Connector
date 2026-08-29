@@ -224,26 +224,43 @@ replaced it: `get_context_usage()` is fetched on state change only.
 
 ### Terminal HUD format
 
-**Not built** (verified 2026-08-29: nothing in `src/aic_dc` prints this, and no post-turn summary log
-line exists). Specified here and in `specs5/5-webapp/viewers-hud.md` § *Terminal HUD*,
-`specs5/3-engine/context-visibility.md` § *Terminal HUD*, and one invariant in each. Queued as
-`specs5/next.md` § B6.
-
-Printed server-side after each turn, cancelled or not:
+**Built 2026-08-29** — `aic_dc/claude_code/turn_hud.py`, emitted as one `logger.info` record from
+`ClaudeCodeService._post_response`. Printed server-side after each turn, cancelled or not, and after a
+turn with nothing in it. The sample below is real output, not a sketch:
 
 ```
 Model: claude-opus-4-6
 Turn:  8.4s · 3 turns · completed · 2 permission prompts
-Usage: claude-opus-4-6      12,481 in / 1,208 out · cache 41,502 r / 0 w · 78% hit
-       claude-haiku-4-5      3,004 in /   612 out · cache      0 r / 0 w ·  0% hit
-Cost:  $0.1842
+Usage: claude-opus-4-6   12,481 in / 1,208 out · cache 41,502 r / 0 w ·  77% hit
+       claude-haiku-4-5   3,004 in /   612 out · cache      0 r / 0 w ·   0% hit
+Cost:  $0.1842 this turn · $3.21 session total
 Ctx:   118,204 / 200,000 (59%) · auto-compact at 160,000
 Files: src/auth/session.py, src/auth/tokens.py
 ```
 
-One `Usage:` line per `turn_model_usage` entry, first line labelled, continuations aligned. `Cost:`
-follows the browser's rule — the turn's own figure, or the reason it is unknown, and never a
-billing-mode label (§ *Cost rendering*). `Files:` is omitted when the turn modified nothing.
+| Row | Source | Absent when |
+|---|---|---|
+| `Model` | the busiest `turn_model_usage` row's `canonicalModel`, else its key | No per-model counters |
+| `Turn` | `duration_ms`, `num_turns`, `cancelled` / `terminal_reason` / `is_error`, `permission_prompts` | Never — this row is the block |
+| `Usage` | one line per `turn_model_usage` entry, busiest first, first labelled and continuations aligned | No per-model counters |
+| `Cost` | `turn_cost_basis` + `turn_cost_usd`; `total_cost_usd` appears only labelled `session total` | Basis absent or unrecognised (a browsed turn) |
+| `Ctx` | the `get_context_usage()` response the same post-turn pass fetched | The engine could not answer |
+| `Files` | `files_modified`, repo-relative | The turn modified nothing |
+
+| Rule | Value |
+|---|---|
+| Model column | Padded to the longest name, capped at 28 chars; an over-long name keeps its **tail** behind a `…`, since the distinguishing part of `us.anthropic.claude-opus-5-v1:0` is the end |
+| Counter columns | Right-aligned across the whole block, so two models' figures compare down the column |
+| Cache hit % | `cacheRead / (input + cacheRead)`, rounded; `—` when the denominator is 0. **Computed here and not in the browser** — a width difference, not a disagreement |
+| Path naming | Repo-relative; a path outside the root prints absolute, `build_diff_payload`'s rule |
+| `Files` ceiling | 8 paths, then `, and N more` |
+| Extra `Turn` clauses | `not mirrored` when `mirror_gap`; `revised after background work` when `continuation` |
+| Failure | Swallowed at `debug`. A summary of successful work never fails the turn it summarises |
+
+`Cost:` follows the browser's rule exactly — the turn's own figure, "nothing extra", or "cost unknown"
+with the reason, and never a billing-mode label (§ *Cost rendering*). Building this is what forced that
+section's correction: the spec had said this line prints "cost or billing mode", which is the
+pre-phase-6 reading of a cumulative field.
 
 Deleted: the boxed `╭─ Cache Blocks ─╮` table with per-tier `(entry_n+)` thresholds, the mode-aware
 category table with its "Symbol Map" / "Doc Map" label swap, the 📈/📉 tier-change log, and the one-shot

@@ -293,12 +293,12 @@ is dropped rather than reported as a row of zeroes, which would read as "answere
 
 ## Terminal HUD
 
-**Not built** (verified 2026-08-29). The intent below stands and the shape is in
-[`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Terminal HUD*, which owns it; queued as
-[`../next.md`](../next.md) § B6.
+**Built 2026-08-29** — `aic_dc/claude_code/turn_hud.py`, printed from the post-turn pass that already
+fetches the context figure. [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Terminal HUD*
+owns the reasoning and the three places it differs from the browser HUD.
 
-The server-side post-turn print was to survive in reduced form: model, per-model usage, the turn's own
-cost or the reason it is unknown, context percentage, and duration. Tier tables, cache-block boxes,
+The server-side post-turn print survives in reduced form: model, per-model usage, the turn's own cost or
+the reason it is unknown, context percentage, and duration. Tier tables, cache-block boxes,
 promotion/demotion logs, and the startup tier-distribution HUD are all deleted along with the tiering
 system they described.
 
@@ -312,9 +312,16 @@ the uncached synthetic tier · the tier-content fuzzy filter and sort toggle · 
 cache hit rate as a headline metric.
 
 Cache hit rate deserves a note: the engine still caches, and the per-model usage still reports
-`cacheReadInputTokens` and `cacheCreationInputTokens`, so the ratio is derivable and is shown in the
-per-model rows. What is gone is its status as *the* headline number, because it was headline-worthy
-only when AIC⚡DC was the thing doing the caching.
+`cacheReadInputTokens` and `cacheCreationInputTokens`, so the ratio is derivable. What is gone is its
+status as *the* headline number, because it was headline-worthy only when AIC⚡DC was the thing doing
+the caching.
+
+**Corrected 2026-08-29, by building the surface that made it checkable.** This paragraph used to end
+"and is shown in the per-model rows", which was true of neither surface at the time and is now true of
+exactly one: the **terminal** HUD computes the ratio, and the browser's rows report the two counters and
+leave the division to the reader, because 300px does not hold it beside a model name. That is a width
+difference and not a disagreement — see [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md)
+§ *Terminal HUD*.
 
 ## Invariants
 

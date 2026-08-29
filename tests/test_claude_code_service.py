@@ -1501,6 +1501,37 @@ class TestEventDispatch:
         assert payload["context_usage"] == {"total_tokens": 1000}
         assert payload["disk_warning"] is None
 
+    async def test_the_turn_prints_a_terminal_hud_beside_the_browser_event(
+        self, service, caplog
+    ):
+        """`next.md` § B6: two spec files assert this and nothing checked.
+
+        The wiring is the part worth pinning rather than the formatting —
+        `turn_hud.py` has its own tests. What can only break here is the
+        footer never reaching the post-turn pass that holds the context
+        figure, which is the one thing the two halves of the block need.
+        """
+        with caplog.at_level(logging.INFO, logger="aic_dc.claude_code.turn_hud"):
+            await send(service)
+        blocks = [r.getMessage() for r in caplog.records if "Turn summary" in r.getMessage()]
+        assert len(blocks) == 1
+        assert "Turn:" in blocks[0]
+
+    async def test_a_stale_footer_is_never_printed_under_a_later_turns_context(
+        self, service, caplog
+    ):
+        """The footer slot is popped, not left for the next post-turn pass.
+
+        `_post_response` runs a second time when background work ends, and
+        without the pop that run would reprint the first result's figures
+        beside the second's context usage — two turns' facts in one block.
+        """
+        with caplog.at_level(logging.INFO, logger="aic_dc.claude_code.turn_hud"):
+            await send(service)
+            await service._post_response(REQUEST_ID)
+        blocks = [r.getMessage() for r in caplog.records if "Turn summary" in r.getMessage()]
+        assert len(blocks) == 1
+
     async def test_background_work_ending_runs_the_housekeeping_again(
         self, service, events
     ):

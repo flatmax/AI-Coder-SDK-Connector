@@ -86,6 +86,7 @@ from aic_dc.claude_code.session import (
     ViewerFraming,
 )
 from aic_dc.claude_code.session_store import DISK_WARNING_BYTES, RepoSessionStore
+from aic_dc.claude_code.turn_hud import log_turn_hud
 
 logger = logging.getLogger(__name__)
 
@@ -495,6 +496,15 @@ class ClaudeCodeService:
         # fine should not be told again every turn — that is how a warning
         # worth reading becomes one nobody reads.
         self._disk_warned = False
+
+        # The turn footer the terminal HUD prints, held between the
+        # `streamComplete` that carries it and the `_post_response` that has
+        # the context figure to print beside it. One slot rather than a map
+        # keyed by request: turns are sequential, and a map would grow for
+        # every turn whose post-response never ran. The request ID travels
+        # with it so a stale footer cannot be printed under a later turn's
+        # context usage.
+        self._turn_footer: tuple[str, dict[str, Any]] | None = None
 
         self.review = ReviewMode(
             repo=repo,
@@ -1313,6 +1323,17 @@ class ClaudeCodeService:
             except Exception as exc:
                 # A failed refetch is a stale tab, not a failed turn.
                 logger.debug("Could not refresh context usage: %s", exc)
+
+        # The terminal HUD, printed here rather than at `streamComplete`
+        # because this is the first point that holds both halves of it: the
+        # turn's footer and the context figure fetched above. Popped, so a
+        # second `_post_response` for the same turn — the background-subagent
+        # path below — prints only if a revised footer arrived with it.
+        footer = self._turn_footer
+        if footer is not None and footer[0] == request_id:
+            self._turn_footer = None
+            log_turn_hud(footer[1], context_usage, self._repo_root)
+
         await self._dispatch(
             Event(
                 "postResponseComplete",
@@ -3032,6 +3053,11 @@ class ClaudeCodeService:
         if event.name == "subagentEvent":
             await self._sweep_ended_subagent(event.payload)
         elif event.name == "streamComplete" and request_id:
+            # Stashed before the background check, because that check can run
+            # `_post_response` synchronously from here and the footer has to
+            # be there when it does.
+            if isinstance(event.payload, dict):
+                self._turn_footer = (request_id, event.payload)
             await self._post_response_for_background(event.payload, request_id)
 
     async def _post_response_for_background(

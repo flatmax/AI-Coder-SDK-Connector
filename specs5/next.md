@@ -101,15 +101,16 @@ that the row had nothing to reset, because the prompt upstream of it could not b
 That emptied [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built*, the
 second of the three rolling records above.
 
-**But § B did not empty, because clearing the inbox refilled it the same day.** The last entry in
+**§ B briefly refilled and then emptied, all on 2026-08-29.** The last entry in
 [`known-issues.md`](known-issues.md) was a stale reference twin; correcting it found two *adjacent*
 sections stale from the same cause, and then a whole surface — the terminal HUD — specified in four
-places with nothing printing it. So **§ B is one item, B6, and it arrived from the source least likely
-to be read as a queue.** Two of the three rolling records fed this file today and neither did it by
-holding an item: one emptied, and the other produced something larger than the entry that led to it.
-**The item found by fixing a documentation bug was bigger than the documentation bug** — which is the
-argument for reading the inbox before planning a sitting rather than only when something cites it.
-**§ C emptied on
+places with nothing printing it. That became B6, and **B6 was built the same day it was found**, which
+is the shortest an item has ever been in this file. **The item found by fixing a documentation bug was
+bigger than the documentation bug** — the argument for reading the inbox before planning a sitting
+rather than only when something cites it. Both of the other rolling records emptied with it: the
+work-log's § *Specified but not yet built* closed on B4's decline, and the inbox closed on B6's finding.
+**So all three sources that feed this queue are empty, and §§ A–C hold nothing open but C9, whose exit
+criterion is an event.** What is left is § D. **§ C emptied on
 2026-08-28 and reopened the next day** with C9 — an auth error on a cold start that no persisted surface
 recorded, which is the third time this file has written down that a broadcast is not a record. C9's
 *record* landed the same day; C9 itself stays open, because the error it was reported for is still
@@ -436,7 +437,31 @@ actually for already ships** — naming the destination file, and saying the rul
 `takes_effect` toast and `set_denied_read_files`' `settings_file` return. The disclosure survives; only
 the choice went, because only one of its two answers was ever real.
 
-**B6 — The terminal HUD is specified in four places and printed by nothing.** Found 2026-08-29 while
+**B6 — The terminal HUD is specified in four places and printed by nothing.** ✅ *Built 2026-08-29 —
+leaves this queue, the same day it joined it.* `aic_dc/claude_code/turn_hud.py`, printed as one log
+record from `_post_response`, which is the first point holding both halves of the block: the turn's
+priced footer and the context figure that pass already fetches. All four sites are corrected from *Not
+built* to built, the two invariants now hold, and 29 tests pin it — **which is the point, since what let
+this sit for four phases was that an invariant is not a test.**
+
+**Building it forced two corrections that reading could not have found.** The specs said this line
+prints "cost or billing mode" — the pre-phase-6 reading of `total_cost_usd`, from when it was believed
+to be per-turn and null under a subscription. Shipping that would have created a second definition of
+what a turn cost, on a surface the browser cannot contradict in view of the user. And
+[`3-engine/context-visibility.md`](3-engine/context-visibility.md) claimed the cache hit rate "is shown
+in the per-model rows", which was true of **neither** surface and is now true of exactly one: the
+terminal computes it, the browser reports the counters, and 300px is the whole reason. **A spec sentence
+about two surfaces is checkable only when both exist** — that one had been false since phase 6 and
+nothing could have caught it while one of the two was missing.
+
+**Three deliberate differences from the browser HUD**, each because a terminal is a log rather than an
+overlay: an empty turn still prints (a missing record reads as a missed turn, where a missing overlay
+reads as nothing at all); the hit rate is computed; and a continuation says `revised after background
+work`, because a terminal cannot replace a line it has already printed the way the browser replaces its
+reading. Recorded in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Terminal HUD* so they read
+as decisions rather than as drift between two surfaces.
+
+*(Original entry, kept for the finding:)* Found 2026-08-29 while
 clearing [`known-issues.md`](known-issues.md)'s last entry, which named one stale section of one
 reference twin. [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *Terminal HUD* specifies a
 server-side post-turn print — model, per-model usage, the turn's cost, context percentage, duration,
@@ -444,19 +469,16 @@ terminal reason, files — [`3-engine/context-visibility.md`](3-engine/context-v
 HUD* repeats the intent, the [reference twin](../specs-reference/5-webapp/viewers-hud.md) § *Terminal
 HUD format* gives the exact layout down to column alignment, and **both spec files carry it as an
 invariant**. Nothing in `src/aic_dc` prints it: no `Ctx:`, no `Cost:`, no post-turn summary log line at
-all (verified 2026-08-29). All four are now marked *Not built* rather than deleted, because the reasoning
-still holds and nobody has declined it — § E is where a decline would go.
+all (verified 2026-08-29). All four were marked *Not built* rather than deleted, because the reasoning
+held and nobody had declined it — and then it was built the same day.
 
 **This is § B5 and § C7's shape at the scale of a surface rather than a field.** Those were a serialised
 key with no writer and an advertised prompt input with no writer; this is a whole rendering with no
 producer, and it survived four phases because **an invariant is not a test** — two files assert that the
-HUD "prints after every completed turn" and nothing has ever checked. The three-way choice § B5 framed
-applies unchanged: write it or delete it. Writing it is the smaller job it looks like *only* if it reads
-`turn_cost_usd` / `turn_cost_basis`; the specs said "cost or billing mode", which is the pre-phase-6
-reading of a cumulative field, and a terminal line that answered differently from the browser would be a
-second definition of what a turn cost — the thing § C3 keeps finding and the thing
-§ *Cost Is Cumulative* exists to end. **The correction is already made in all three spec files**, so the
-build is a wire-up rather than a design.
+HUD "prints after every completed turn" and nothing had ever checked. The choice § B5 framed applied
+unchanged: write it or delete it, and **writing won**, for the reason B5's own choice went the other
+way. B5 deleted `EngineHealth.mcp` because a better answer already existed elsewhere; here nothing else
+answers, since the browser HUD is precisely the surface that is absent when this one is needed.
 
 **What made this findable was fixing something else.** The stale § *Cost rendering* was the known issue;
 § *Per-model row derivations* beside it was stale from the same cause and nobody had noticed, still

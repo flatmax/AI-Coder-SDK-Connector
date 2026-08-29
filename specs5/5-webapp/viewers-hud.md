@@ -584,18 +584,45 @@ keeps its stack: being wrong here must cost a noisy log, never a silent one.
 
 ## Terminal HUD
 
-**Not built** — verified 2026-08-29, and marked rather than deleted because the argument below still
-holds and nothing has declined it. Nothing in `src/aic_dc` prints a post-turn summary; the browser HUD
-is the only surface that reports a turn. Queued as [`../next.md`](../next.md) § B6.
+**Built 2026-08-29** (`aic_dc/claude_code/turn_hud.py`), after four phases in which two spec files
+asserted it as an invariant and nothing printed it. Printed server-side after each turn, in reduced
+form: model, per-model usage, the turn's cost or the reason it is unknown, context percentage, duration,
+and terminal reason. Printed for cancelled turns as well as completed ones — a cancelled turn still
+consumed tokens. The exact layout is in the [reference twin](../../specs-reference/5-webapp/viewers-hud.md)
+§ *Terminal HUD format*.
 
-Printed server-side after each turn, in reduced form: model, per-model usage, the turn's cost or the
-reason it is unknown, context percentage, duration, and terminal reason. Printed for cancelled turns as
-well as completed ones — a cancelled turn still consumed tokens.
+**"Cost or billing mode" is how this section read before phase 6, and building it is what forced the
+correction.** The terminal line takes the same three-way answer the browser does — a figure, "nothing
+extra", or "cost unknown" with the reason — because a second definition of what a turn cost is exactly
+what § *Cost Is Cumulative* exists to prevent. It reads `turn_cost_usd` / `turn_cost_basis` /
+`turn_model_usage` and never `total_cost_usd` or `model_usage`, and the one place the session's running
+total appears it is labelled as such on the same line. Had this been built when it was specified it
+would have shipped the pre-phase-6 reading and become a second surface to correct.
 
-**"Cost or billing mode" is how this read before phase 6 and it is wrong now.** The terminal line takes
-the same three-way answer the browser does — a figure, "nothing extra", or "cost unknown" with the
-reason — because a second definition of what a turn cost is exactly what § *Cost Is Cumulative* exists
-to prevent. An implementation reads `turn_cost_usd` / `turn_cost_basis`, never `total_cost_usd`.
+**Why the terminal at all, when the browser says the same thing:** it is the only surface that survives
+the browser. A turn that ends with nothing connected reports to nobody otherwise, and the operator
+watching the process start — which is how § C9's auth failure was noticed — has no other view of the
+engine.
+
+**Three places it deliberately differs from the browser HUD**, each because a terminal is a log rather
+than an overlay:
+
+- **An empty turn still prints.** The browser HUD must earn its interruption and so never appears for a
+  turn with nothing in it; a log entry saying a turn happened and cost nothing is a record, and its
+  absence would read as the server having missed the turn.
+- **The cache hit rate is computed here and not there.** The browser reports the two counters and lets
+  the reader do the division, because in 300px there is no room for it beside a model name
+  (§ *Per-Model Rows Are Not Summed*). A terminal line has the width. This is the one figure the two
+  surfaces do not share, and it is a layout difference rather than a disagreement.
+- **A revised block says it is a revision.** A turn with a background subagent reaches both surfaces
+  twice; the browser replaces its reading, and a terminal cannot replace a line it has already printed,
+  so the second block's `Turn:` row carries `revised after background work` rather than reading as a
+  second turn.
+
+Printed as **one log record rather than one per line**, so nothing the engine logs concurrently can
+interleave with it — a HUD split down the middle is worse than no HUD. Every failure inside it is
+swallowed at `debug`: this is a summary of work that already succeeded, and no formatting bug is worth
+turning a completed turn into an error.
 
 Deleted with the tiering system: the boxed cache-block table, per-tier token counts with entry-N
 thresholds, the tier-changes log, the mode-aware category table, and the one-shot startup
@@ -639,5 +666,7 @@ tier-distribution HUD.
   account, and the CLI only re-sends on a status change.
 - Every file named on the HUD follows the same rule as every file named anywhere else: repo-relative
   label, engine's path on the tooltip, unconverted path in the navigation event.
-- The terminal HUD prints after every completed turn, cancelled or not. *(Unmet: not built — § Terminal
-  HUD.)*
+- The terminal HUD prints after every completed turn, cancelled or not — including a turn with nothing
+  in it, which is where it parts company with the browser HUD's own invariant two lines above.
+- The terminal HUD and the browser HUD read the same cost fields and give the same three-way answer.
+  Neither surface derives a turn's cost from `total_cost_usd`.

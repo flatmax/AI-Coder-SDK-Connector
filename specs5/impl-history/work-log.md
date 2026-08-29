@@ -574,6 +574,64 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **The terminal HUD** — 2026-08-29, closing `next.md` § B6 the day it opened.
+  `aic_dc/claude_code/turn_hud.py` prints one log record per turn from
+  `ClaudeCodeService._post_response`, which is the first point that holds both halves of the block: the
+  turn's priced footer, stashed off the `streamComplete` that carried it, and the context figure that
+  pass already fetches. Reasoning in
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Terminal HUD*; the layout, the column
+  rules and the six-row source table are in the
+  [reference twin](../../specs-reference/5-webapp/viewers-hud.md) § *Terminal HUD format*.
+
+  **It was specified in four places and printed by nothing, for four phases.** Two spec files describe
+  it, a reference twin gave the exact column alignment, and **both spec files assert it as an
+  invariant** — "the terminal HUD prints after every completed turn". Nothing checked. That is the whole
+  explanation for how it survived: **an invariant is not a test**, and the 29 tests that now pin it are
+  the actual fix for the class of problem, not the printing.
+
+  **How it was found is the part worth keeping.** Not by planning — by clearing the last entry in
+  `known-issues.md`, which named one stale section of one reference twin. Correcting that section found
+  the section *beside* it stale from the same cause, and reading far enough to check the third found a
+  whole surface with no producer. **A twin does not go stale one section at a time:** the phase that
+  corrected the main file did it section by section, and the twin sections nothing pointed at are
+  exactly the ones nobody revisited.
+
+  **Building it forced two corrections that no amount of reading would have produced.** The specs said
+  this line prints "cost or billing mode" — the pre-phase-6 reading of `total_cost_usd`, from when it
+  was believed to be per-turn and null under a subscription. Shipping it as written would have put a
+  second definition of what a turn cost on a surface the browser cannot be seen contradicting. And
+  `context-visibility.md` claimed the cache hit rate "is shown in the per-model rows", which was true of
+  **neither** surface; it is now true of exactly one, because the terminal has the width the browser's
+  300px does not. **A sentence about two surfaces cannot be checked while one of them is missing** —
+  that one had been false since phase 6 with nothing able to catch it.
+
+  **Three deliberate divergences from the browser HUD**, each because a terminal is a log rather than an
+  overlay, and each recorded so it reads as a decision rather than as drift: an empty turn still prints
+  (a missing log record reads as a missed turn; a missing overlay reads as nothing); the hit rate is
+  computed rather than left to the reader; and a background-subagent continuation says `revised after
+  background work`, because a terminal cannot replace a line it has already printed the way the browser
+  replaces its reading. One `logger.info` record rather than one per line, so nothing can interleave
+  with the block; every failure inside it swallowed at `debug`, because a summary of successful work
+  must never fail the turn it summarises.
+
+  **Path naming needed an exemption argued rather than assumed.** § C3 converged absolute-to-repo naming
+  onto the browser, and this is a server-side naming of a file for a human. It is the exemption C3
+  itself names — some surfaces "have to exist before there is a browser to ask" — and a terminal line
+  never has one, so it follows `build_diff_payload`'s existing rule (relative to the root, absolute when
+  outside it) rather than becoming a fourth mechanism.
+
+- **The denial-scope prompt, declined** — 2026-08-29, closing `next.md` § B4 and the last row of this
+  file's § *Specified but not yet built*. Reasoning in
+  [`../5-webapp/file-picker.md`](../5-webapp/file-picker.md) § *Denial Scope Prompt — declined*; the
+  decision is `next.md` § E. Both offered scopes wrote the same bytes to the same file and differed only
+  by a cleanup at session end that Windows never runs and no crash runs anywhere; the in-memory
+  alternative is closed because **the CLI does not route `Read`, `Glob` or `Grep` through
+  `can_use_tool`**, so our own permission callback never sees the tool the rule would be about. The
+  lesson is about where a blocker gets written down: `specs-reference/3-engine/permissions.md`
+  § *There is no runtime rule API* had reached the same wall from the SDK's side and stopped, treating
+  the file write as a fallback rather than as the only option. **A constraint written from one side
+  reads as a limitation; the same constraint checked from both sides is a decision.**
+
 - **A failed engine start now leaves something behind** — 2026-08-29, closing the buildable half of
   `next.md` § C9. Reasoning in [`../3-engine/session.md`](../3-engine/session.md) § *A failed start is
   recorded, not only announced*; schema in the
