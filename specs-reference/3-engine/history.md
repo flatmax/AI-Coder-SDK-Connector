@@ -184,6 +184,44 @@ There is no `image_refs` field, no `images` count, no `files`, and no `turn_id`:
 transcript entry that carried them, the framing's selected-file list is part of the user message the
 engine received, and the request ID replaced `turn_id`.
 
+### Engine error log (`engine-errors.jsonl`) record schema
+
+One record per line, UTF-8, append-only. Separate from `events.jsonl` because that file drops a record
+with no `session_id` — every record there is rendered inside a session's transcript — and the failure
+this file exists for is a connect that never produced a session. Reasoning:
+[`../../specs5/3-engine/session.md`](../../specs5/3-engine/session.md) § *A failed start is recorded,
+not only announced*.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `id` | string | ✓ | `{epoch_ms}-{uuid8}`, the same shape the events log uses |
+| `timestamp` | string | ✓ | ISO 8601 UTC, microsecond precision |
+| `kind` | string | ✓ | Discriminator: `startup_failed` |
+| `message` | string | ✓ | The engine's own error text, verbatim |
+| `session_id` | string \| null | ✓ | **Present and null** when the failure had no session, which is the normal case. Unlike the events log's optional `request_id`, absence is not how "none" is spelled here: a reader must be able to tell "no session" from "field not written" without knowing which file it is reading |
+| `credential_source` | string | — | From `EngineHealth`. Omitted when unknown |
+| `cli_path` | string | — | The binary that was resolved, if one was |
+| `cli_version` | string | — | |
+| `cli_stderr` | list[string] | — | The CLI's own last words, copied from the health ring at write time rather than referenced |
+
+The three health fields are copied rather than the whole `EngineHealth` dict being stored: most of it is
+unchanging across records (the SDK version, the mirror-gap tolerance) and would make every line mostly
+boilerplate, while these four are what differ between a working start and a failed one. For an
+authentication failure `credential_source` **is** the diagnosis and no other surface retains it once the
+process exits.
+
+One discriminator today. `kind` is a closed set rather than free text for `event`'s reason — a typo'd
+discriminator writes a record no reader can render, which looks like the failure never happened — and it
+stays a set because the distinction it will need is already visible: a CLI that cannot be resolved and a
+CLI that resolves and then refuses to authenticate are one `EngineStartupError` to the caller and two
+different things to a reader.
+
+Records are never deduplicated, never capped and never rewritten. Forty identical lines are a relaunch
+loop, and that is the fact worth seeing. `get_engine_errors(limit)` returns a bounded tail — 20 by
+default, newest last — sliced after parsing, so a corrupt line costs one record rather than silently
+shortening the answer. It replies `{errors: [...]}` rather than a bare list because "no failures" and
+"could not read the file" are opposite conclusions that a bare list renders identically.
+
 ### Derived index (`index/`) layout
 
 Rebuildable from `sessions/` in full, so its format is **not** an interop boundary and may change
@@ -340,6 +378,7 @@ History — the whole set is renamed off the native engine's names, because none
 | `history_delete` | `session_id: str` | `{session_id, status: "deleted"}` — localhost-only. Deletes the transcript, its summary sidecar, its subagent transcripts, its events and its index rows; the images in those entries go with them. `{error, reason: "session_live"}` for the session on screen |
 | `history_image` | `session_id: str, entry_uuid: str, block: int` | `{data_uri: str}` or `{error: str}` — how a thumbnail or lightbox fetches bytes that no broadcast carried |
 | `get_session_storage` | — | `{bytes: int, over_warning: bool}`, or `{error: str}` for a walk that failed, or `{error: str, reason: "no_repo"}` for a run with no repo. The readable half of the disk-usage measurement; **not** a caller of the one-shot warning, and `over_warning` is the verdict rather than the threshold behind it |
+| `get_engine_errors` | `limit?: int` | `{errors: list[EngineErrorRecord]}` (below), or `{error: str}`, or `{error: str, reason: "no_repo"}`. Recent engine failures read off `engine-errors.jsonl`, newest last, defaulting to the last 20 |
 
 A pointer carries `(session_id, entry_uuid, block)` and no subpath, so `history_image` looks in the main
 transcript first and then in that session's subagent transcripts. Widening every pointer with a subpath

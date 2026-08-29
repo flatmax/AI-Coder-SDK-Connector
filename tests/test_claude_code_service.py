@@ -649,6 +649,153 @@ class TestLazyConnect:
         assert service.get_engine_health()["last_error"] == "broken pipe"
 
 
+class TestTheEngineErrorRecord:
+    """A failed start has to survive the process it happened in.
+
+    Before this, the four things ``connect_engine`` did on failure were all
+    ephemeral — a log line to whatever terminal launched the server, a
+    broadcast to whichever browsers were listening, a health record in
+    memory, and a return value with one caller. An authentication error on a
+    cold start therefore left nothing at all
+    (``specs5/next.md`` § C9; ``specs5/3-engine/session.md``).
+    """
+
+    @pytest.fixture
+    def failing(self, service):
+        service.session.connect_error = EngineStartupError(
+            "Could not start a Claude Code session: invalid API key"
+        )
+        service.session.health.credential_source = "ANTHROPIC_API_KEY"
+        service.session.health.note_cli_stderr("error: not authenticated")
+        return service
+
+    async def test_a_failed_start_is_written_to_disk(self, failing):
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["kind"] == "startup_failed"
+        assert "invalid API key" in record["message"]
+
+    async def test_the_record_survives_the_service_that_wrote_it(
+        self, failing, tmp_path, events
+    ):
+        """The point of the file. A second service over the same repo reads
+        what the first one's failure said, which is what a user who closed
+        the terminal has to be able to do."""
+        await failing.connect_engine()
+        reader = ClaudeCodeService(
+            FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
+        )
+        reader.session = FakeSession()
+        assert "invalid API key" in (await reader.get_engine_errors())["errors"][0][
+            "message"
+        ]
+
+    async def test_it_carries_the_credentials_that_explain_an_auth_failure(
+        self, failing
+    ):
+        """The diagnosis, and the one fact no live surface keeps once the
+        process is gone."""
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["credential_source"] == "ANTHROPIC_API_KEY"
+        assert record["cli_stderr"] == ["error: not authenticated"]
+
+    async def test_it_is_recorded_with_no_session_at_all(self, failing):
+        """The case ``events.jsonl`` structurally cannot hold: a connect that
+        fails on auth is a failure with no session, which is why this is a
+        second file rather than a seventh event type."""
+        assert failing.session.session_id is None
+        await failing.connect_engine()
+        (record,) = await failing.engine_log.load()
+        assert record["session_id"] is None
+
+    async def test_the_operational_log_is_left_alone(self, failing):
+        """Two files, two questions. An engine failure is not something the
+        user did in a session, and a record of it in the transcript would be
+        rendered against a conversation it did not belong to."""
+        await failing.connect_engine()
+        assert await failing.events_log.load() == []
+
+    async def test_a_successful_connect_records_nothing(self, service):
+        await service.connect_engine()
+        assert await service.engine_log.load() == []
+
+    async def test_every_attempt_is_recorded(self, failing):
+        """Not deduplicated: three records is a relaunch loop, and one
+        record would hide that it repeated."""
+        for _ in range(3):
+            failing.session.ready = False
+            await failing.connect_engine()
+        assert len(await failing.engine_log.load()) == 3
+
+    async def test_a_recorder_that_throws_never_replaces_the_engines_error(
+        self, failing
+    ):
+        """This runs on a path that is already failing. A disk error here
+        would be reported in place of the reason the engine did not start."""
+
+        class Exploding:
+            async def append(self, *args, **kwargs):
+                raise OSError("the filesystem went away")
+
+        failing.engine_log = Exploding()
+        answer = await failing.connect_engine()
+        assert answer["reason"] == "startup_failed"
+        assert "invalid API key" in answer["error"]
+
+    async def test_a_run_with_no_repo_records_nothing_and_still_answers(
+        self, events, tmp_path
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        svc.session.connect_error = EngineStartupError("claude not found")
+        assert svc.engine_log is None
+        answer = await svc.connect_engine()
+        assert answer == {"error": "claude not found", "reason": "startup_failed"}
+
+    async def test_the_reader_says_why_it_has_nothing_without_a_repo(
+        self, events, tmp_path
+    ):
+        svc = ClaudeCodeService(
+            SimpleNamespace(repo_root=tmp_path, config_dir=None, aic_dc_dir=None),
+            event_callback=events,
+            engine_config=EngineConfig(),
+        )
+        svc.session = FakeSession()
+        answer = await svc.get_engine_errors()
+        assert answer["reason"] == "no_repo"
+        assert "errors" not in answer
+
+    async def test_the_reader_answers_a_dict_not_a_bare_list(self, service):
+        """"No failures" and "could not read the file" render identically as
+        a bare list, which is the fault the history reads' error handling
+        exists to correct — applied here at the point of writing."""
+        assert await service.get_engine_errors() == {"errors": []}
+
+    async def test_a_read_that_fails_says_so(self, service):
+        class Exploding:
+            async def load(self, limit=None):
+                raise OSError("the filesystem went away")
+
+        service.engine_log = Exploding()
+        answer = await service.get_engine_errors()
+        assert "the filesystem went away" in answer["error"]
+        assert "errors" not in answer
+
+    async def test_the_reader_returns_a_bounded_tail_by_default(self, failing):
+        from aic_dc.claude_code.engine_log import DEFAULT_TAIL
+
+        for _ in range(DEFAULT_TAIL + 3):
+            failing.session.ready = False
+            await failing.connect_engine()
+        assert len((await failing.get_engine_errors())["errors"]) == DEFAULT_TAIL
+        assert len((await failing.get_engine_errors(2))["errors"]) == 2
+
+
 # ---------------------------------------------------------------------------
 # Slash commands
 # ---------------------------------------------------------------------------
@@ -2184,6 +2331,11 @@ GATED_METHODS: dict[str, tuple] = {
 # (``specs5/4-features/collaboration.md`` § Read-Only).
 READ_ONLY_METHODS: dict[str, tuple] = {
     "get_engine_health": (),
+    # Why the engine would not start. The same facts about the same engine
+    # as the line above — resolved binary, credential source — and a
+    # participant watching a session that will not start is entitled to the
+    # reason rather than to a spinner.
+    "get_engine_errors": (),
     "get_current_state": (),
     "get_denied_read_files": (),
     "get_context_usage": (),

@@ -96,8 +96,12 @@ reader" are different checks, and only the second one closes this class of item.
 
 **B3's session-storage row closed 2026-08-29**, which leaves § B holding one row and one question: the
 deny-read scope reset, and B4, which decides whether that row has anything to reset. Both are the same
-item seen from two ends, so **§ B is down to a design decision rather than a build**. **§ C has
-nothing left to build**, as of the entry three paragraphs down.
+item seen from two ends, so **§ B is down to a design decision rather than a build**. **§ C emptied on
+2026-08-28 and reopened the next day** with C9 — an auth error on a cold start that no persisted surface
+recorded, which is the third time this file has written down that a broadcast is not a record. C9's
+*record* landed the same day; C9 itself stays open, because the error it was reported for is still
+unexplained and only its next occurrence can explain it. **That is the one item in this file whose exit
+criterion is an event rather than a commit.**
 
 **§ C2 closed 2026-08-28**, and it grew a finding on the way that the item could not have predicted: the
 toast channel its fix needed **had never worked**. The diff viewer's four dispatches named an event the
@@ -637,6 +641,55 @@ compaction divider phase 2 shipped client-side only, and the same fix: a broadca
 elapsed seconds computed server-side so no two clocks have to agree. Details in
 [`5-webapp/shell.md`](5-webapp/shell.md) § *Layout*. The inbox is still where new defects land, so read
 it before planning a sitting rather than only when it is cited.
+
+**C9 — An auth error on the first connect of a cold server, and no record that it happened.**
+*Its closeable half was built 2026-08-29 — see § Landed since.* **The item stays open**, because what
+landed makes the next occurrence legible and does not explain this one. The underlying error has still
+never been reproduced, and by design nothing here tried to: an intermittent auth failure at connect may
+never be provoked on demand, and the entry below argued that a fix waiting for a reproduction waits
+forever. What exists now is `.aic-dc/engine-errors.jsonl` — the record whose absence is the rest of this
+entry. **The exit criterion is the next occurrence, not a test**: when it happens again there will be a
+timestamped line naming the credential source, the resolved binary and the CLI's own stderr, and that
+line is what would close this.
+
+Reported 2026-08-29: starting the server from a fresh terminal produced an authentication error, once,
+and the reporter could not say how to reproduce it. **The item is not the error. The item is that the
+error left nothing behind**, which is both why it cannot be reproduced from here and the part that is
+fixable without ever reproducing it.
+
+**What was searched, so the next reader does not repeat it.** `.aic-dc/events.jsonl` holds three records
+for that day — a `session_switch`, a `permission_mode` and a `commit` — and nothing resembling an auth
+failure anywhere in the file. The cold-start session mirrored at 07:29:50Z records a clean turn. The
+CLI's own transcripts under `~/.claude/projects/` have one extra file for the day, the commit-message
+query, and it is clean too. **Every persisted surface this repo owns was checked and none of them had
+it.**
+
+**They could not have had it, and that is the finding.** `connect_engine`'s `EngineStartupError` path
+does four things: sets `_connect_error`, calls `logger.error`, broadcasts an `engineHealth` event, and
+returns `{error, reason: "startup_failed"}`. Three of the four are ephemeral — the log line goes to the
+server's terminal, the broadcast reaches whichever browsers happen to be listening, and the return value
+is consumed by one caller. **`_record_event` is never called on this path**, and neither is it beside any
+of the five places in `session.py` that set `health.last_error` to something. The CLI's stderr is the
+same shape: a log line plus an in-memory ring on the health record. **This is § C6's lesson a third time — a broadcast is
+not a record** — and the previous two (the compaction indicator, the rate-limit window) were both closed
+by giving the thing a home on disk or on the state snapshot.
+
+**The pre-session case is the one the record is structurally unable to hold**, which is why this was not
+simply "add a `_record_event` call". That helper is documented as silent when there is no session yet,
+because a record with no session has no transcript to appear in — and a connect that fails on auth is
+*exactly* a failure with no session. So the fix had to decide where a failure that precedes every
+session belongs, and "the current session's events" was not an available answer. That was a design
+question about `EventsLog`, not a missing line, and it was answered with a second file.
+
+**Two things worth checking before designing anything.** The first is now answered: the failure path
+that produces "could not start" is `EngineStartupError`, raised from `resolve_cli`, the options build,
+or the connect handshake, and caught in `connect_engine` — that is the path the record was wired into.
+An API-level rejection on the *first turn* is a different path with a different owner (`_fail_turn`,
+which has a session and reaches the browser as a `streamComplete`), and is deliberately not recorded
+here. **Which of the two the reported error actually was is still unknown**, and is the one thing the
+next occurrence will settle. The second question — whether `health.last_error` survived on the state
+snapshot long enough for a browser reload to show it — decides whether this was "invisible after a
+restart" or "invisible immediately", and remains unexamined.
 
 ---
 

@@ -342,6 +342,7 @@ repo's `.gitignore`:
 |---|---|
 | `sessions/` | The engine's own transcripts, mirrored via the SDK `SessionStore`, plus summary sidecars and per-subagent transcripts. The one transcript: the engine resumes from it and the history browser reads it |
 | `events.jsonl` | AIC⚡DC's own operational events — commit, reset, review entry and exit, preset switch, permission-mode change. No message content |
+| `engine-errors.jsonl` | Why the engine would not start. A separate file because a failed connect has no session, and every record in `events.jsonl` is rendered inside one |
 | `index/` | Derived search / summary / request-ID index. Rebuildable from `sessions/`; safe to delete |
 | `doc_cache/` | Keyword-enriched outline cache sidecars |
 | `tex_preview/` | Transient TeX compilation workspace |

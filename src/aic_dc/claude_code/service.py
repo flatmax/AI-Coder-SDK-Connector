@@ -56,6 +56,7 @@ from typing import Any
 from aic_dc.claude_code import sdk_surface
 from aic_dc.claude_code.cost import UNPRICED
 from aic_dc.claude_code.engine_config import PERMISSION_MODES, EngineConfig
+from aic_dc.claude_code.engine_log import DEFAULT_TAIL as DEFAULT_ENGINE_ERROR_TAIL
 from aic_dc.claude_code.events_log import (
     permission_mode_content,
     review_end_content,
@@ -386,6 +387,11 @@ class ClaudeCodeService:
         # startup path. `None` without a repo, where there is nowhere to
         # write and nothing to browse.
         self.events_log = self._build_events_log()
+        # The failures that happen before any session exists to hold them.
+        # A separate file rather than a second event type, because the log
+        # above drops a record with no session by design and a connect that
+        # fails on authentication has none (`specs5/next.md` § C9).
+        self.engine_log = self._build_engine_log()
         # Derived from the store, so it is built with it and `None` for the
         # same reason: nothing to derive from without a repo.
         self.history_index = self._build_history_index()
@@ -551,6 +557,21 @@ class ClaudeCodeService:
 
         return EventsLog(Path(aic_dc_dir) / "events.jsonl")
 
+    def _build_engine_log(self) -> Any:
+        """``.aic-dc/engine-errors.jsonl``, or ``None`` without a repo.
+
+        Built beside the events log and `None` on the same condition, but
+        for a different loss: without a repo there is nowhere to write, and
+        a run with no repo is also the one run whose engine failure has no
+        project to be diagnosed against.
+        """
+        aic_dc_dir = getattr(self._config, "aic_dc_dir", None)
+        if aic_dc_dir is None:
+            return None
+        from aic_dc.claude_code.engine_log import EngineLog
+
+        return EngineLog(Path(aic_dc_dir) / "engine-errors.jsonl")
+
     def _build_history_index(self) -> Any:
         """``.aic-dc/index/<project_key>.json``, or ``None`` without a store.
 
@@ -609,6 +630,36 @@ class ClaudeCodeService:
             )
         except Exception:
             logger.exception("Could not record a %r event", event)
+
+    async def _record_engine_failure(self, kind: str, message: str) -> None:
+        """Append one engine failure to ``.aic-dc/engine-errors.jsonl``.
+
+        Every failure path here is a no-op on purpose, and more emphatically
+        than :meth:`_record_event`'s: this is called from a path that is
+        already failing, so an exception raised out of the recorder would
+        replace the engine's own error with a disk error in the message the
+        user reads. The engine's error is the one worth keeping.
+
+        The health snapshot travels with the record because the fields that
+        diagnose a startup failure — which binary was resolved, which
+        credentials it would have used, what the CLI said on stderr — are in
+        memory at this moment and nowhere else afterwards.
+
+        Unlike an operational event, a missing session is not a reason to
+        drop this. It is the expected case: the failure being recorded is
+        the reason there is no session.
+        """
+        if self.engine_log is None:
+            return
+        try:
+            await self.engine_log.append(
+                kind,
+                message=message,
+                health=self.session.health.to_dict(),
+                session_id=self.session.session_id,
+            )
+        except Exception:
+            logger.exception("Could not record a %r engine failure", kind)
 
     def _session_project_key(self) -> str:
         """The store's project key for this repo.
@@ -800,6 +851,14 @@ class ClaudeCodeService:
             except EngineStartupError as exc:
                 self._connect_error = str(exc)
                 logger.error("Claude Code engine failed to start: %s", exc)
+                # Before the broadcast, so the durable record exists even if
+                # the process dies between the two. The other three things
+                # this path does are all ephemeral — a log line to a
+                # terminal nobody may be reading, a broadcast to whichever
+                # browsers happen to be listening, and a return value with
+                # one caller — which is how § C9's auth error came to leave
+                # no trace at all.
+                await self._record_engine_failure("startup_failed", str(exc))
                 await self._broadcast(
                     Event("engineHealth", self.session.health.to_dict(), turn_scoped=False)
                 )
@@ -2522,6 +2581,41 @@ class ClaudeCodeService:
             "session_dir_warning_bytes", DISK_WARNING_BYTES
         )
         return {"bytes": int(total), "over_warning": int(total) >= int(threshold)}
+
+    async def get_engine_errors(self, limit: int | None = None) -> dict[str, Any]:
+        """Recent engine failures, newest last.
+
+        The readable end of ``.aic-dc/engine-errors.jsonl``. A failed start
+        already reaches a listening browser as an ``engineHealth``
+        broadcast; this answers the question that broadcast cannot, which is
+        what happened *before* this browser — or this server — existed
+        (``specs5/next.md`` § C9).
+
+        Wrapped in a dict rather than answering a bare list, unlike
+        ``history_list``. The two failure modes here are "no failures" and
+        "could not read the file", and a bare list renders them
+        identically — which is the fault the history reads' own error
+        handling exists to avoid, applied at the point of writing rather
+        than after the fact.
+
+        Unrestricted, for ``get_engine_health``'s reason: it reports the
+        same facts about the same engine — the resolved binary, the
+        credential source — and a participant watching a session that will
+        not start is entitled to the reason.
+        """
+        if self.engine_log is None:
+            return {
+                "error": "No engine error log: this run has no repo directory",
+                "reason": "no_repo",
+            }
+        try:
+            records = await self.engine_log.load(
+                DEFAULT_ENGINE_ERROR_TAIL if limit is None else int(limit)
+            )
+        except Exception as exc:
+            logger.exception("Could not read the engine error log")
+            return {"error": f"Could not read the engine error log: {exc}"}
+        return {"errors": records}
 
     async def history_image(
         self, session_id: str, entry_uuid: str, block: int

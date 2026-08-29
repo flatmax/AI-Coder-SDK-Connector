@@ -3090,3 +3090,192 @@ describe('ContextUsageTab footer', () => {
     expect(notes.some((t) => t.includes('Read from the engine'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Recorded engine failures
+// ---------------------------------------------------------------------------
+
+describe('ContextUsageTab engine failures', () => {
+  const HEALTH = {
+    connected: false,
+    cli_path: '/opt/aic-dc/bundled/claude',
+    cli_version: '2.1.4',
+    cli_source: 'bundled',
+    sdk_version: '0.9.1',
+    credential_source: 'ANTHROPIC_API_KEY',
+    mirror_gaps: 0,
+  };
+
+  const FAILURE = {
+    id: '1787987700500-abc',
+    timestamp: '2026-08-29T07:15:00.500000+00:00',
+    kind: 'startup_failed',
+    message: 'Could not start a Claude Code session: invalid API key',
+    session_id: null,
+    credential_source: 'ANTHROPIC_API_KEY',
+    cli_path: '/opt/aic-dc/bundled/claude',
+    cli_version: '2.1.4',
+    cli_stderr: ['error: not authenticated', 'run `claude login`'],
+  };
+
+  async function openWith(reply, { health = HEALTH } = {}) {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => health,
+      'ClaudeCodeService.get_engine_errors': () => reply,
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+    await settle(el);
+    return el;
+  }
+
+  function text(el) {
+    return el.shadowRoot.textContent.replace(/\s+/g, ' ');
+  }
+
+  /**
+   * One recorded failure's own text, *not* the whole shadow root.
+   *
+   * Scoped deliberately. The live health table above renders a credential
+   * source too, so a whole-panel assertion for one passes whether or not
+   * the record carries its own — which is the fact that matters here,
+   * because the record is what survives the process.
+   */
+  function failureText(el, index = 0) {
+    const blocks = el.shadowRoot.querySelectorAll('.engine-error');
+    return blocks[index]?.textContent.replace(/\s+/g, ' ') ?? '';
+  }
+
+  it('reports a recorded failure with the credentials that explain it', async () => {
+    const el = await openWith({ errors: [FAILURE] });
+    expect(text(el)).toContain('Engine failures');
+    // The diagnosis for an auth error, and the one fact no live surface
+    // keeps once the process that failed is gone — read off the record
+    // itself, not off the running engine's table above it.
+    expect(failureText(el)).toContain('invalid API key');
+    expect(failureText(el)).toContain('ANTHROPIC_API_KEY');
+    expect(failureText(el)).toContain('/opt/aic-dc/bundled/claude (2.1.4)');
+  });
+
+  it('reports the record’s credentials, not the live engine’s', async () => {
+    // The two differ exactly when it matters: the failure happened under
+    // one credential source and the server has since been pointed at
+    // another. Reading the live one would report the wrong diagnosis with
+    // full confidence.
+    const el = await openWith({
+      errors: [{ ...FAILURE, credential_source: 'subscription login' }],
+      health: { ...HEALTH, credential_source: 'ANTHROPIC_API_KEY' },
+    });
+    expect(failureText(el)).toContain('subscription login');
+    expect(failureText(el)).not.toContain('ANTHROPIC_API_KEY');
+  });
+
+  it("shows the CLI's own last words", async () => {
+    const el = await openWith({ errors: [FAILURE] });
+    const dump = el.shadowRoot.querySelector('pre.stderr');
+    expect(dump.textContent).toContain('error: not authenticated');
+    expect(dump.textContent).toContain('run `claude login`');
+  });
+
+  it('renders even when no engine health has ever arrived', async () => {
+    // The case the record exists for. An engine that never started has no
+    // health, so nesting this inside the health branch would have hidden
+    // the failure in exactly the situation it was written for.
+    const el = await openWith({ errors: [FAILURE] }, { health: null });
+    expect(text(el)).toContain('No engine health has arrived yet');
+    expect(text(el)).toContain('invalid API key');
+  });
+
+  it('says nothing at all when the engine has never failed', async () => {
+    const el = await openWith({ errors: [] });
+    expect(text(el)).not.toContain('Engine failures');
+    expect(el.shadowRoot.querySelector('.engine-error')).toBeNull();
+  });
+
+  it('distinguishes a failed read from an empty file', async () => {
+    // The whole reason the RPC answers a dict rather than a bare list: a
+    // swallowed read error would render as "the engine has never failed".
+    const el = await openWith({ error: 'Could not read the engine error log' });
+    expect(text(el)).toContain('Could not read the engine error log');
+    expect(text(el)).not.toContain('Engine failures');
+  });
+
+  it('says a repoless run records none, rather than showing an error', async () => {
+    const el = await openWith({
+      error: 'No engine error log: this run has no repo directory',
+      reason: 'no_repo',
+    });
+    expect(text(el)).toContain('not recorded for a run with no repo');
+  });
+
+  it('does not swallow a thrown read', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => HEALTH,
+      'ClaudeCodeService.get_engine_errors': () => {
+        throw new Error('the socket went away');
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(text(el)).toContain('the socket went away');
+  });
+
+  it('lists several failures, because a repeat is the fact worth seeing', async () => {
+    const el = await openWith({
+      errors: [
+        { ...FAILURE, id: 'a', message: 'first attempt' },
+        { ...FAILURE, id: 'b', message: 'second attempt' },
+        { ...FAILURE, id: 'c', message: 'third attempt' },
+      ],
+    });
+    expect(el.shadowRoot.querySelectorAll('.engine-error')).toHaveLength(3);
+    expect(text(el)).toContain('third attempt');
+  });
+
+  it('survives a record carrying nothing but a message', async () => {
+    const el = await openWith({
+      errors: [{ kind: 'startup_failed', message: 'bare' }],
+    });
+    expect(text(el)).toContain('bare');
+    expect(el.shadowRoot.querySelector('pre.stderr')).toBeNull();
+  });
+
+  it('shows an unparseable timestamp verbatim rather than dropping it', async () => {
+    const el = await openWith({
+      errors: [{ ...FAILURE, timestamp: 'the other day' }],
+    });
+    expect(text(el)).toContain('the other day');
+  });
+
+  it('is not asked for until Debug is opened', async () => {
+    const errors = vi.fn(() => ({ errors: [] }));
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        usage: usageFixture(),
+        fetched_at: '2026-08-15T10:30:00Z',
+      }),
+      'ClaudeCodeService.get_server_info': () => ({ version: '2.1.4' }),
+      'ClaudeCodeService.get_engine_health': () => HEALTH,
+      'ClaudeCodeService.get_engine_errors': errors,
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(errors).not.toHaveBeenCalled();
+    await showSection(el, 'Debug');
+    await settle(el);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+});

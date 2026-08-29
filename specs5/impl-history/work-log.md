@@ -566,6 +566,58 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A failed engine start now leaves something behind** — 2026-08-29, closing the buildable half of
+  `next.md` § C9. Reasoning in [`../3-engine/session.md`](../3-engine/session.md) § *A failed start is
+  recorded, not only announced*; schema in the
+  [reference twin](../../specs-reference/3-engine/history.md) § *Engine error log*; the browser half in
+  [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *Debug Section*.
+
+  **The bug report could not be investigated, and that was the finding.** A user saw an authentication
+  error starting the server from a cold terminal, once, and could not reproduce it. Every persisted
+  surface this repo owns was searched — `events.jsonl` held three unrelated records for the day, the
+  mirrored transcripts were clean, so were the CLI's own under `~/.claude/projects/`. **None of them
+  could have held it.** `connect_engine`'s failure path does four things and all four are ephemeral: a
+  `last_error` in memory, a log line to whatever terminal launched the server, a broadcast to whichever
+  browsers happen to be listening, and a return value with one caller. The terminal scrollback was the
+  only copy.
+
+  **This is the third time the same sentence has closed an item — a broadcast is not a record** (§ C6's
+  compaction indicator, § B1's rate-limit window). The two before it were fixed by giving the thing a
+  home on the state snapshot; this one needed a file, because the state snapshot dies with the process
+  and the process is what failed.
+
+  **The design question was where a pre-session failure belongs**, and it is why this was not a one-line
+  `_record_event` call. That helper drops a record with no session on purpose — every record in
+  `events.jsonl` is rendered inside a session's transcript, and one written under a placeholder ID would
+  appear in somebody else's history. **A connect that fails on authentication is exactly a failure with
+  no session, because the failure is why there is no session.** So it got its own file,
+  `.aic-dc/engine-errors.jsonl`, where `session_id` is present-and-null rather than absent: a reader has
+  to be able to tell "no session" from "field not written" without knowing which file it is reading.
+
+  **What a record carries was chosen for one job.** Not the message alone but the credential source, the
+  resolved binary and the CLI's own stderr tail — because for an auth failure the credential source *is*
+  the diagnosis, and it is the one fact no live surface keeps once the process exits. The browser reads
+  the record's copy rather than the running engine's, which matters exactly when it differs: a server
+  since pointed at other credentials would otherwise report the wrong diagnosis with full confidence.
+  The stderr tail is copied rather than referenced, because the health ring keeps mutating.
+
+  **Two placement decisions were caught by breaking them deliberately.** The failure list renders
+  *outside* the health branch in the Debug section — an engine that never started has no health record,
+  so nesting it would have hidden the report in the one case it exists for. And its fetch is the only
+  one on that tab that is *not* quiet on failure: health has a second source in the `engineHealth` push
+  and can afford a swallowed read, while nothing pushes this, so a swallowed error would render as "the
+  engine has never failed". That is also why the RPC answers `{errors: [...]}` rather than a bare list.
+
+  **A test that asserted the right thing about the wrong element** turned up in the same negative pass.
+  The credential-source assertion read the whole shadow root, where the live health table renders a
+  credential row of its own — so it passed with the record's own row deleted. Scoped to `.engine-error`
+  and paired with a test where the two sources disagree, which is the only arrangement that pins it.
+
+  **The item stays open.** What landed makes the *next* occurrence legible; it does not explain the one
+  that was reported, and nothing here tried to reproduce it — an intermittent failure at connect may
+  never be provoked on demand. C9's exit criterion is now an event rather than a commit, which makes it
+  the only item in `next.md` shaped that way.
+
 - **The session directory became something you can ask about, not only something you get told**
   — 2026-08-29, closing `next.md` § B3's last buildable row. Reasoning in
   [`../5-webapp/settings.md`](../5-webapp/settings.md) § *Session Controls*.

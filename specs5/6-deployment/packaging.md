@@ -152,6 +152,7 @@ state intact rather than a directory of records it cannot parse.
 |---|---|---|
 | `sessions/` | Engine transcripts written through our `SessionStore`, plus per-session `subagents/`. The browsable archive and the resume source, one file per session | Append-only; a failed append surfaces as a health banner, never a silent gap. Deleted per session from the history browser — which deletes that session's images with it |
 | `events.jsonl` | AIC⚡DC's own operational events, keyed by session and request ID | Append-only; never rewritten |
+| `engine-errors.jsonl` | Why the engine would not start — message, credential source, resolved binary, CLI stderr tail. Written where `events.jsonl` structurally cannot: a failed connect has no session | Append-only; never rewritten, never capped. Absent on a healthy install |
 | `index/` | Derived search and summary index | Built from `sessions/`; deletable, rebuilt on next start |
 | `doc_cache/` | Disk-persisted document outline cache (keyword-enriched) | Auto-managed by the doc index cache |
 | `tex_preview/` | Transient working dir for TeX compilation | Cleaned up on next compilation and on startup |
@@ -169,7 +170,7 @@ key derivation: [`../../specs-reference/3-engine/history.md`](../../specs-refere
 ### Creation and Gitignore
 
 - Working directory created on first run (idempotent)
-- Subdirectories (`sessions/`, `index/`, `doc_cache/`) created by their respective subsystems with exist-ok semantics; `events.jsonl` is created by its first append
+- Subdirectories (`sessions/`, `index/`, `doc_cache/`) created by their respective subsystems with exist-ok semantics; `events.jsonl` and `engine-errors.jsonl` are each created by their first append
 - Gitignore entry added — if the working directory is not already ignored, an entry is appended to the repo's gitignore; duplicate entries avoided
 - All operations are idempotent — safe to re-run on subsequent startups
 

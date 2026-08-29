@@ -214,6 +214,22 @@ it back on the next visit like the other two. It diagnoses the engine, not the c
   the binary resolution is AIC⚡DC's, recorded in `claude_code/health.py`, and the engine's own reply
   knows nothing about it. Health arrives pushed on `engineHealth` and a pushed record wins over the
   fetched one, because `mirror_gaps` moves during a turn.
+- **Engine failures** from `get_engine_errors()`, read off `.aic-dc/engine-errors.jsonl` on the way into
+  the section. The one thing here that outlives the process it describes: everything else in the Engine
+  block is what the *running* engine resolved, and this is why an earlier one did not run. Each record
+  shows its own credential source and binary rather than the message alone, because for the failure it
+  was built after — an authentication error on a cold start — the credential source *is* the diagnosis,
+  and it must be the record's rather than the live engine's: those differ exactly when it matters, which
+  is when the server has since been pointed somewhere else. The CLI's own stderr goes underneath,
+  preformatted, for the reason the health banner shows it. Rendered **outside** the health branch, not
+  within it: an engine that never started has no health record, and "never started" is precisely when
+  this is worth reading. Silent when the file is empty, because an engine that has never failed is the
+  ordinary case and a heading over nothing is noise — but a read that *failed* says so, which is why the
+  RPC answers a dict rather than a bare list and why this fetch, alone among the ones on this tab, is
+  not quiet on failure. Health has a second source in the `engineHealth` push and can afford a swallowed
+  fetch; nothing pushes this, so a swallowed error would render as "the engine has never failed". The
+  reasoning for the file is [`../3-engine/session.md`](../3-engine/session.md) § *A failed start is
+  recorded, not only announced*.
 - **The initialize reply** from `get_server_info()`, summarised by key and then printed verbatim. By
   key, because this repo has not read a schema for its shape and naming unverified fields is the exact
   mistake § *Verified field shapes* records. One control request, on the way into the section and not

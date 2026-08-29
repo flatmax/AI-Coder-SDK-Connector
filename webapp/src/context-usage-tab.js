@@ -147,6 +147,25 @@ function _fmtTokens(n) {
 }
 
 /**
+ * A recorded failure's ISO timestamp, in the reader's own time.
+ *
+ * Absolute rather than relative ("3 hours ago"), which is the opposite of
+ * how the history browser stamps a session. The question here is not how
+ * long ago it happened but whether it lines up with something the user
+ * remembers doing — opening a terminal, a laptop waking, a token expiring —
+ * and a relative stamp cannot be matched against a memory of a clock.
+ *
+ * Unparseable text is shown verbatim rather than swallowed: it came out of
+ * a file, and a reader who can see the raw string can tell a corrupt record
+ * from a missing one.
+ */
+function _engineErrorTime(iso) {
+  if (!iso) return '—';
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime()) ? String(iso) : when.toLocaleString();
+}
+
+/**
  * How many hook events the Debug section keeps.
  *
  * A ring buffer rather than the session's whole traffic: the `PostToolUse`
@@ -562,7 +581,36 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
      * sections under it off screen makes the Debug section unreadable in
      * the one situation it exists for.
      */
-    pre.json {
+    h4 {
+      margin: 0.8rem 0 0.3rem;
+      font-size: 0.8125rem;
+      color: var(--text-primary, #e6edf3);
+    }
+    /**
+     * One recorded engine failure. Ruled off on the left rather than
+     * boxed, because several of these stack and a run of boxes reads as a
+     * list of unrelated things when it is usually one fault repeating.
+     */
+    .engine-error {
+      margin: 0 0 0.6rem;
+      padding-left: 0.6rem;
+      border-left: 2px solid rgba(248, 81, 73, 0.4);
+    }
+    .engine-error p.error {
+      margin: 0 0 0.3rem;
+    }
+    /**
+     * The stderr dump shares this rule rather than getting its own: it is
+     * the same decision — a raw payload capped in height so it cannot push
+     * the sections under it off screen — applied to text that happens not
+     * to be JSON. Two rules would be one rule that could drift.
+     *
+     * (No backticks anywhere in this block: the whole of the styles is one
+     * template literal, and a stray backtick in a comment ends it. The
+     * failure is a parse error hundreds of lines away with no line number.)
+     */
+    pre.json,
+    pre.stderr {
       margin: 0;
       max-height: 16rem;
       overflow: auto;
@@ -628,6 +676,16 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     this._healthSeq = 0;
     /** `get_server_info()`'s reply, fetched when Debug is first opened. */
     this._serverInfo = null;
+    /**
+     * Recent engine failures, or null before the first read.
+     *
+     * The one thing in this section that outlives the process it describes.
+     * Everything else here is what the *running* engine resolved; this is
+     * why an earlier one did not run, read back off disk, which is the only
+     * way a failure the user has already closed the terminal on can still
+     * be diagnosed.
+     */
+    this._engineErrors = null;
     this._debugError = '';
     this._debugLoading = false;
 
@@ -1009,18 +1067,22 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // newest thing we have.
     const seq = this._healthSeq;
     try {
-      const [health, info] = await Promise.all([
+      const [health, info, errors] = await Promise.all([
         this._fetchEngineHealth(),
         withRpcTimeout(
           this.rpcExtract('ClaudeCodeService.get_server_info'),
           _FETCH_TIMEOUT_MS,
           'get_server_info',
         ),
+        this._fetchEngineErrors(),
       ]);
       // So: a fetch that answers nothing, *and* one that answers late,
       // both leave whatever arrived pushed in place. `mirror_gaps` moves
       // during a turn, and this fetch is seconds wide.
       if (health && this._healthSeq === seq) this._health = health;
+      // No sequence guard, unlike health: nothing pushes this, so a late
+      // answer cannot be older than what is already here.
+      this._engineErrors = errors;
       if (info && info.error) {
         this._debugError = String(info.error);
       } else {
@@ -1056,6 +1118,34 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
       // Deliberately quiet — see above.
     }
     return null;
+  }
+
+  /**
+   * Why earlier engines would not start.
+   *
+   * Not quiet on failure, unlike `_fetchEngineHealth` above, and the
+   * difference is that this read has no second source. Health arrives
+   * pushed as well as fetched, so a failed fetch costs nothing; nothing
+   * pushes this file, so a swallowed error would render as "no failures
+   * recorded" — which is the one sentence here that must not be produced
+   * by a read that did not happen.
+   *
+   * @returns {Promise<{errors?: object[], error?: string}>}
+   */
+  async _fetchEngineErrors() {
+    try {
+      const res = await withRpcTimeout(
+        this.rpcExtract('ClaudeCodeService.get_engine_errors'),
+        _FETCH_TIMEOUT_MS,
+        'get_engine_errors',
+      );
+      if (res && typeof res === 'object') return res;
+      return { error: 'The engine gave no answer for its error log.' };
+    } catch (err) {
+      return {
+        error: `Could not read the engine error log: ${err?.message || err}`,
+      };
+    }
   }
 
   _goBackToChat() {
@@ -2283,7 +2373,85 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
               whenever it changes, so this fills in as soon as the engine
               reports.
             </p>`}
+        ${this._renderEngineErrors()}
       </section>
+    `;
+  }
+
+  /**
+   * Engine failures recorded on disk, newest last.
+   *
+   * Outside the health branch above on purpose. Health is what the
+   * *running* engine resolved, so an engine that never started has none —
+   * and "never started" is precisely when the reader needs this. Nesting
+   * it would have hidden the record in the only case it exists for.
+   *
+   * Each row carries the credential source and the resolved binary rather
+   * than the message alone, because for the failure this was built after —
+   * an authentication error on a cold start — which credentials were
+   * resolved *is* the diagnosis, and it is the one fact no live surface
+   * keeps once the process is gone. The CLI's own stderr goes underneath,
+   * preformatted, for the reason the health banner shows it: on a failed
+   * connect it is the only account from the thing that actually failed.
+   *
+   * Silence when the file is empty and has been read, because an engine
+   * that has never failed is the ordinary case and a heading over nothing
+   * is noise. A read that *failed* says so instead — that distinction is
+   * the whole reason the RPC answers a dict rather than a bare list.
+   */
+  _renderEngineErrors() {
+    const state = this._engineErrors;
+    if (!state) return '';
+    if (state.error) {
+      return html`<p class="warn">
+        ${state.reason === 'no_repo'
+          ? 'Engine failures are not recorded for a run with no repo directory.'
+          : state.error}
+      </p>`;
+    }
+    const errors = Array.isArray(state.errors) ? state.errors : [];
+    if (errors.length === 0) return '';
+    return html`
+      <h4>Engine failures</h4>
+      <p class="note">
+        Read from <code>.aic-dc/engine-errors.jsonl</code>. These outlive the
+        server that wrote them, which is the point: a failed start is
+        otherwise only a broadcast to whoever was watching.
+      </p>
+      ${errors.map(
+        (e) => html`
+          <div class="engine-error">
+            <p class="error">${e.message || 'The engine failed to start.'}</p>
+            <table>
+              <tbody>
+                <tr>
+                  <td>When</td>
+                  <td class="path">${_engineErrorTime(e.timestamp)}</td>
+                </tr>
+                ${e.credential_source
+                  ? html`<tr>
+                      <td>Credentials</td>
+                      <td class="path">${e.credential_source}</td>
+                    </tr>`
+                  : ''}
+                ${e.cli_path
+                  ? html`<tr>
+                      <td>Binary</td>
+                      <td class="path">
+                        ${e.cli_path}${e.cli_version
+                          ? ` (${e.cli_version})`
+                          : ''}
+                      </td>
+                    </tr>`
+                  : ''}
+              </tbody>
+            </table>
+            ${Array.isArray(e.cli_stderr) && e.cli_stderr.length
+              ? html`<pre class="stderr">${e.cli_stderr.join('\n')}</pre>`
+              : ''}
+          </div>
+        `,
+      )}
     `;
   }
 
