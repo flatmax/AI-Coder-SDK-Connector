@@ -477,6 +477,31 @@ in `tool_info.output`; the earlier "no result payload, no output" was wrong, and
 file content is disqualifying. The frame shape is nested, not flat. A headless permission denial is
 no longer visible in the stream at all — `DONE`, no `error`, `CANCELED`, exit 0.
 
+**Closed in phase 1: whether `localharness` can be pointed at OAuth credentials by a path not
+exposed through the Python SDK.** Phase 0 flagged this as worth one look before buying a key, because
+if it were possible AG-R-8 would change shape entirely. It is not, and the answer is sharper than a
+bare no. The harness's own wire protocol offers exactly four auth shapes
+(`proto/localharness_pb2.ModelConfig`): `GeminiAPIEndpoint{base_url, http_headers, api_key, options}`,
+`VertexEndpoint{base_url, http_headers, project, location, options, api_key}`,
+`GemmaEndpoint{base_url}`, and `CustomEndpoint{backend_type, config_json}`. **There is no OAuth field
+anywhere**, and `agy`'s token lives in `~/.gemini/antigravity-cli/` in a format nothing in the SDK
+reads.
+
+But `base_url` and `http_headers` are on both real endpoints, and `validate_endpoint()` returns early
+when `base_url` is set — *"External API, validation is done by the external API"* (`models.py:115-118`).
+So on that path **no `GEMINI_API_KEY` is required at all**, and the harness can be pointed at any
+proxy carrying any credential in a header. AG-R-8 therefore stands, but its shape is now precise: the
+wall is that AIC⚡DC has no supported way to *mint or refresh* an Antigravity OAuth token, not that
+there is no way to present one. A user who already has a token-bearing proxy has a route this
+directory does not otherwise offer.
+
+**Correction to phase 0's reading of the policy default.** `LocalAgentConfig` does not default
+`policies` to empty. It defaults to `policy.confirm_run_command()` — deny `run_command`, **approve
+everything else** — so a config that simply omits `policies` is running blanket approval for every
+other tool. This is recorded here rather than only in the code because it inverts the natural reading
+of `Agent.__aenter__`'s safety check: that check fires on *write tools with no policy*, and the
+default guarantees there is always a policy. See [AG-5](decisions.md#ag-5).
+
 **Could not determine:** whether `agy` has any supported programmatic contract or is best-effort —
 the docs make **no stability or compatibility commitment** for `stream-json`, on a release cadence of
 roughly one per day; the stability of `Step` across 0.1.x; whether `localharness` can be pointed at

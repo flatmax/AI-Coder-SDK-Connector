@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1210" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <title>AIC⚡DC Intended Architecture — second engine and web pull</title>
+  <desc>The intended architecture after adding Google Antigravity as a second agent backend beside Claude Code, and a Web Pull feature. One Python process exposes jrpc-oo over WebSocket to a Lit browser client. An engine router mounts both adapters under one RPC namespace and publishes a capability descriptor so surfaces with no counterpart are hidden rather than stubbed. Exactly one engine is master per session; the other is reachable as a one-shot consultant. The Claude adapter owns an external claude CLI subprocess authenticated by OAuth; the Antigravity adapter owns a bundled localharness subprocess authenticated by a Gemini API key. The agy CLI is shown rejected. Web Pull lands fetched content in the working tree, which re-indexes.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#444"/>
+    </marker>
+    <marker id="arrow-new" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2185b"/>
+    </marker>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#888"/>
+    </marker>
+
+    <linearGradient id="g-foundation" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e3f2fd"/><stop offset="100%" stop-color="#bbdefb"/>
+    </linearGradient>
+    <linearGradient id="g-indexing" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e8f5e9"/><stop offset="100%" stop-color="#c8e6c9"/>
+    </linearGradient>
+    <linearGradient id="g-engine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff3e0"/><stop offset="100%" stop-color="#ffe0b2"/>
+    </linearGradient>
+    <linearGradient id="g-external" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#efebe9"/><stop offset="100%" stop-color="#d7ccc8"/>
+    </linearGradient>
+    <linearGradient id="g-features" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fce4ec"/><stop offset="100%" stop-color="#f8bbd0"/>
+    </linearGradient>
+    <linearGradient id="g-webapp" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ede7f6"/><stop offset="100%" stop-color="#d1c4e9"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .layer-title  { font-size: 15px; font-weight: 700; fill: #222; }
+    .layer-sub    { font-size: 11px; fill: #555; }
+    .comp         { fill: #fff; stroke: #555; stroke-width: 1; }
+    .comp-new     { fill: #fff; stroke: #c2185b; stroke-width: 2; }
+    .comp-label   { font-size: 12px; fill: #111; font-weight: 600; }
+    .comp-sub     { font-size: 10px; fill: #444; }
+    .comp-note    { font-size: 10px; fill: #c2185b; font-weight: 600; }
+    .layer-box    { stroke: #666; stroke-width: 1.2; }
+    .ext-box      { stroke: #5d4037; stroke-width: 1.4; stroke-dasharray: 6 4; }
+    .rejected     { fill: #f5f5f5; stroke: #9e9e9e; stroke-width: 1.4; stroke-dasharray: 5 4; }
+    .rej-label    { font-size: 12px; fill: #757575; font-weight: 600; }
+    .rej-sub      { font-size: 10px; fill: #9e9e9e; }
+    .edge         { stroke: #444; stroke-width: 1.4; fill: none; }
+    .edge-new     { stroke: #c2185b; stroke-width: 1.8; fill: none; }
+    .edge-light   { stroke: #888; stroke-width: 1; fill: none; stroke-dasharray: 4 3; }
+    .edge-label   { font-size: 10px; fill: #444; }
+    .edge-label-n { font-size: 10px; fill: #c2185b; font-weight: 600; }
+    .badge        { fill: #c2185b; }
+    .badge-text   { font-size: 8px; fill: #fff; font-weight: 700; letter-spacing: 0.5px; }
+    .title        { font-size: 22px; font-weight: 800; fill: #111; }
+    .subtitle     { font-size: 12px; fill: #555; }
+    .legend-text  { font-size: 11px; fill: #333; }
+    .mono         { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  </style>
+
+  <rect x="0" y="0" width="1280" height="1210" fill="#ffffff"/>
+
+  <text class="title" x="40" y="34">AIC⚡DC — Intended Architecture</text>
+  <text class="subtitle" x="40" y="53">Second agent backend (Google Antigravity) beside Claude Code · Web Pull · one RPC namespace · capability descriptor</text>
+  <text class="subtitle" x="40" y="69">Pink outline and <tspan class="comp-note">NEW</tspan> badge mark what this plan adds. Everything else exists today. Decision IDs refer to <tspan class="mono">specs5/plan-ag/decisions.md</tspan>.</text>
+
+  <!-- ══════════ LAYER 5 — WEBAPP ══════════ -->
+  <rect class="layer-box" x="40" y="86" width="1200" height="152" rx="8" fill="url(#g-webapp)"/>
+  <text class="layer-title" x="56" y="108">Layer 5 — Webapp (Lit, browser)</text>
+  <text class="layer-sub" x="56" y="124">One set of call sites. Per-engine differences resolved through the capability descriptor, never through an engine-name branch (AG-R-4).</text>
+
+  <rect class="comp" x="56" y="134" width="182" height="92" rx="5"/>
+  <text class="comp-label" x="66" y="153">App Shell</text>
+  <text class="comp-sub" x="66" y="170">WebSocket owner</text>
+  <text class="comp-sub" x="66" y="184">startup overlay · toasts</text>
+  <text class="comp-sub" x="66" y="198">usage HUD</text>
+  <text class="comp-note" x="66" y="216">+ engine selector</text>
+
+  <rect class="comp" x="253" y="134" width="182" height="92" rx="5"/>
+  <text class="comp-label" x="263" y="153">Chat Panel</text>
+  <text class="comp-sub" x="263" y="170">streamed blocks</text>
+  <text class="comp-sub" x="263" y="184">tool cards · thinking</text>
+  <text class="comp-sub" x="263" y="198">subagents · images</text>
+  <text class="comp-note" x="263" y="216">+ 2nd step taxonomy</text>
+
+  <rect class="comp-new" x="450" y="134" width="182" height="92" rx="5"/>
+  <rect class="badge" x="592" y="140" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="598" y="150">NEW</text>
+  <text class="comp-label" x="460" y="153">Permission Dialog</text>
+  <text class="comp-sub" x="460" y="170">Monaco diff · allow/deny</text>
+  <text class="comp-sub" x="460" y="184">localhost only</text>
+  <text class="comp-note" x="460" y="200">gates ALL mutating</text>
+  <text class="comp-note" x="460" y="214">tools, incl. run_command</text>
+
+  <rect class="comp" x="647" y="134" width="182" height="92" rx="5"/>
+  <text class="comp-label" x="657" y="153">Files · Diff Viewer</text>
+  <text class="comp-sub" x="657" y="170">git status tree</text>
+  <text class="comp-sub" x="657" y="184">Monaco · MD/TeX · LSP</text>
+  <text class="comp-sub" x="657" y="198">SVG viewer/editor</text>
+  <text class="comp-sub" x="657" y="212">engine-agnostic today</text>
+
+  <rect class="comp" x="844" y="134" width="182" height="92" rx="5"/>
+  <text class="comp-label" x="854" y="153">Context Tab</text>
+  <text class="comp-sub" x="854" y="170">usage · categories</text>
+  <text class="comp-sub" x="854" y="184">session inventory</text>
+  <text class="comp-note" x="854" y="202">no Antigravity source:</text>
+  <text class="comp-note" x="854" y="216">hidden, not stubbed (AG-9)</text>
+
+  <rect class="comp-new" x="1041" y="134" width="183" height="92" rx="5"/>
+  <rect class="badge" x="1184" y="140" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="1190" y="150">NEW</text>
+  <text class="comp-label" x="1051" y="153">Generated Images</text>
+  <text class="comp-sub" x="1051" y="170">Antigravity-only surface</text>
+  <text class="comp-sub" x="1051" y="184">generate_image output</text>
+  <text class="comp-sub" x="1051" y="198">lands in working tree</text>
+  <text class="comp-sub" x="1051" y="212">the headline capability</text>
+
+  <!-- ══════════ LAYER 4 — FEATURES ══════════ -->
+  <rect class="layer-box" x="40" y="254" width="1200" height="122" rx="8" fill="url(#g-features)"/>
+  <text class="layer-title" x="56" y="276">Layer 4 — Features (server-side, engine-agnostic)</text>
+  <text class="layer-sub" x="56" y="292">Features consume the router, not an engine. Anything landing bytes in the working tree triggers incremental re-index.</text>
+
+  <rect class="comp" x="56" y="302" width="220" height="62" rx="5"/>
+  <text class="comp-label" x="66" y="321">Doc Convert</text>
+  <text class="comp-sub" x="66" y="338">markitdown · PyMuPDF</text>
+  <text class="comp-sub" x="66" y="352">LibreOffice · pptx</text>
+
+  <rect class="comp-new" x="293" y="302" width="220" height="62" rx="5"/>
+  <rect class="badge" x="473" y="308" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="479" y="318">NEW</text>
+  <text class="comp-label" x="303" y="321">Web Pull</text>
+  <text class="comp-sub" x="303" y="338">fetch URL to markdown</text>
+  <text class="comp-sub" x="303" y="352">+ assets, into the repo</text>
+
+  <rect class="comp" x="530" y="302" width="220" height="62" rx="5"/>
+  <text class="comp-label" x="540" y="321">Code Review</text>
+  <text class="comp-sub" x="540" y="338">review_state</text>
+  <text class="comp-sub" x="540" y="352">diff annotations</text>
+
+  <rect class="comp" x="767" y="302" width="220" height="62" rx="5"/>
+  <text class="comp-label" x="777" y="321">Collaboration</text>
+  <text class="comp-sub" x="777" y="338">multi-client</text>
+  <text class="comp-sub" x="777" y="352">already engine-agnostic</text>
+
+  <rect class="comp" x="1004" y="302" width="220" height="62" rx="5"/>
+  <text class="comp-label" x="1014" y="321">Image Persistence</text>
+  <text class="comp-sub" x="1014" y="338">paste · refs · store</text>
+  <text class="comp-sub" x="1014" y="352">receives generate_image</text>
+
+  <!-- ══════════ LAYER 3 — ENGINE ══════════ -->
+  <rect class="layer-box" x="40" y="392" width="1200" height="292" rx="8" fill="url(#g-engine)"/>
+  <text class="layer-title" x="56" y="414">Layer 3 — Engine</text>
+  <text class="layer-sub" x="56" y="430">Exactly one engine is master per session (AG-1). The other is reachable as a one-shot consultant (AG-7).</text>
+
+  <rect class="comp-new" x="56" y="440" width="1168" height="54" rx="5"/>
+  <rect class="badge" x="1184" y="446" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="1190" y="456">NEW</text>
+  <text class="comp-label" x="66" y="460">Engine Router — one RPC namespace + capability descriptor (AG-3, AG-9)</text>
+  <text class="comp-sub" x="66" y="477">Both adapters mount under the same namespace, so the browser's 43 call sites across 59 files do not fork. The descriptor declares which</text>
+  <text class="comp-sub" x="66" y="489">surfaces each engine can feed; a surface with no counterpart is hidden rather than filled with a synthesised value.</text>
+
+  <!-- Claude adapter -->
+  <rect class="comp" x="56" y="508" width="556" height="164" rx="5"/>
+  <text class="comp-label" x="66" y="528">Claude adapter — <tspan class="mono">claude_code/</tspan> (exists)</text>
+  <rect class="comp" x="68" y="538" width="532" height="34" rx="4"/>
+  <text class="comp-sub" x="78" y="552">ClaudeCodeService</text>
+  <text class="comp-sub" x="78" y="565">chat · cancel · resume · fork · model · budget</text>
+  <rect class="comp" x="68" y="578" width="532" height="34" rx="4"/>
+  <text class="comp-sub" x="78" y="592">Message Pump</text>
+  <text class="comp-sub" x="78" y="605">SDK taxonomy to server-push events · drains to ResultMessage</text>
+  <rect class="comp" x="68" y="618" width="532" height="44" rx="4"/>
+  <text class="comp-sub" x="78" y="632">Permissions <tspan class="mono">can_use_tool</tspan> · Hooks · SessionStore mirror</text>
+  <text class="comp-sub" x="78" y="645">updated_input · updated_permissions · USD cost</text>
+  <text class="comp-sub" x="78" y="658">full transcript history</text>
+
+  <!-- Antigravity adapter -->
+  <rect class="comp-new" x="668" y="508" width="556" height="164" rx="5"/>
+  <rect class="badge" x="1184" y="514" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="1190" y="524">NEW</text>
+  <text class="comp-label" x="678" y="528">Antigravity adapter — <tspan class="mono">antigravity/</tspan></text>
+  <rect class="comp" x="680" y="538" width="532" height="34" rx="4"/>
+  <text class="comp-sub" x="690" y="552">AntigravityService</text>
+  <text class="comp-sub" x="690" y="565">chat · cancel · resume by conversation_id · multi-model</text>
+  <rect class="comp" x="680" y="578" width="532" height="34" rx="4"/>
+  <text class="comp-sub" x="690" y="592">Step pump</text>
+  <text class="comp-sub" x="690" y="605">Step to Event · flat, trajectory_id + depth · tokens only</text>
+  <rect class="comp-new" x="680" y="618" width="532" height="44" rx="4"/>
+  <text class="comp-sub" x="690" y="632"><tspan class="mono">PreToolCallDecideHook</tspan> — measured, carries the diff</text>
+  <text class="comp-sub" x="690" y="645">edit_file: TargetContent + ReplacementContent + line range</text>
+  <text class="comp-note" x="690" y="658">seam covers run_command too (AG-R-11)</text>
+
+  <!-- consultant link -->
+  <path class="edge-new" d="M 612 590 L 668 590" marker-end="url(#arrow-new)" marker-start="url(#arrow-new)"/>
+  <text class="edge-label-n" x="614" y="583">consultant</text>
+  <text class="edge-label-n" x="620" y="606">AG-7</text>
+
+  <!-- ══════════ EXTERNAL PROCESSES ══════════ -->
+  <rect class="ext-box" x="40" y="700" width="1200" height="178" rx="8" fill="url(#g-external)"/>
+  <text class="layer-title" x="56" y="722">External processes — owned by an SDK, not by AIC⚡DC</text>
+  <text class="layer-sub" x="56" y="738">Each keeps its own context window, prompt cache, compaction and credentials. The two credential paths are separate and separately billed (AG-R-8).</text>
+
+  <rect class="comp" x="56" y="748" width="368" height="116" rx="5"/>
+  <text class="comp-label" x="66" y="768"><tspan class="mono">claude</tspan> CLI — subprocess</text>
+  <text class="comp-sub" x="66" y="785">Read · Edit · Write · Bash · Grep · Glob</text>
+  <text class="comp-sub" x="66" y="799">Task · TodoWrite</text>
+  <text class="comp-sub" x="66" y="813">WebFetch · WebSearch</text>
+  <text class="comp-sub" x="66" y="833">to Anthropic API</text>
+  <text class="comp-sub" x="66" y="850">auth: OAuth subscription</text>
+
+  <rect class="comp-new" x="456" y="748" width="368" height="116" rx="5"/>
+  <rect class="badge" x="784" y="754" width="32" height="13" rx="3"/>
+  <text class="badge-text" x="790" y="764">NEW</text>
+  <text class="comp-label" x="466" y="768"><tspan class="mono">localharness</tspan> — bundled, 120 MB</text>
+  <text class="comp-sub" x="466" y="785">create_file · edit_file · run_command · view_file</text>
+  <text class="comp-sub" x="466" y="799">generate_image · start_subagent · ask_question</text>
+  <text class="comp-note" x="466" y="813">search_web · read_url_content</text>
+  <text class="comp-sub" x="466" y="833">to Gemini API · protobuf over local WebSocket</text>
+  <text class="comp-sub" x="466" y="850">auth: API key or Vertex — no OAuth path at 0.1.15</text>
+
+  <rect class="rejected" x="856" y="748" width="368" height="116" rx="5"/>
+  <text class="rej-label" x="866" y="768"><tspan class="mono">agy</tspan> CLI 1.1.22 — REJECTED (AG-2)</text>
+  <text class="rej-sub" x="866" y="785">Already OAuth-authenticated, and has the 20-tool</text>
+  <text class="rej-sub" x="866" y="799">browser suite the SDK does not expose.</text>
+  <text class="rej-sub" x="866" y="817">Disqualified: headless mode cannot prompt for</text>
+  <text class="rej-sub" x="866" y="831">permission, and its stream omits file content,</text>
+  <text class="rej-sub" x="866" y="845">so no diff can be rendered. Not drawn as a</text>
+  <text class="rej-sub" x="866" y="859">dependency because nothing depends on it.</text>
+
+  <!-- ══════════ LAYER 2 — INDEXING ══════════ -->
+  <rect class="layer-box" x="40" y="894" width="1200" height="112" rx="8" fill="url(#g-indexing)"/>
+  <text class="layer-title" x="56" y="916">Layer 2 — Indexing</text>
+  <text class="layer-sub" x="56" y="932">Reaches Antigravity as plain Python callables, not through MCP (AG-4) — simpler here than the in-process MCP bridge the Claude adapter needs.</text>
+
+  <rect class="comp" x="56" y="942" width="220" height="52" rx="5"/>
+  <text class="comp-label" x="66" y="961">Symbol Index</text>
+  <text class="comp-sub" x="66" y="978">tree-sitter · compact map</text>
+
+  <rect class="comp" x="293" y="942" width="220" height="52" rx="5"/>
+  <text class="comp-label" x="303" y="961">Document Index</text>
+  <text class="comp-sub" x="303" y="978">markdown · SVG · outlines</text>
+
+  <rect class="comp" x="530" y="942" width="220" height="52" rx="5"/>
+  <text class="comp-label" x="540" y="961">Keyword Enrichment</text>
+  <text class="comp-sub" x="540" y="978">KeyBERT · TF-IDF fallback</text>
+
+  <rect class="comp" x="767" y="942" width="220" height="52" rx="5"/>
+  <text class="comp-label" x="777" y="961">Reference Graphs</text>
+  <text class="comp-sub" x="777" y="978">code refs · doc section refs</text>
+
+  <rect class="comp" x="1004" y="942" width="220" height="52" rx="5"/>
+  <text class="comp-label" x="1014" y="961">Import Resolver</text>
+  <text class="comp-sub" x="1014" y="978">py · js/ts · c/c++</text>
+
+  <!-- ══════════ LAYER 1 — FOUNDATION ══════════ -->
+  <rect class="layer-box" x="40" y="1022" width="1200" height="96" rx="8" fill="url(#g-foundation)"/>
+  <text class="layer-title" x="56" y="1044">Layer 1 — Foundation</text>
+  <text class="layer-sub" x="56" y="1060">Unchanged by this plan. One repo root, one working tree, one master writing to it (AG-10).</text>
+
+  <rect class="comp" x="56" y="1068" width="280" height="38" rx="5"/>
+  <text class="comp-label" x="66" y="1085">Configuration · Settings</text>
+  <text class="comp-sub" x="66" y="1099">bundled + user · hot reload · whitelist</text>
+
+  <rect class="comp" x="352" y="1068" width="280" height="38" rx="5"/>
+  <text class="comp-label" x="362" y="1085">Repository</text>
+  <text class="comp-sub" x="362" y="1099">git · per-path write lock</text>
+
+  <rect class="comp" x="648" y="1068" width="280" height="38" rx="5"/>
+  <text class="comp-label" x="658" y="1085">RPC Transport (jrpc-oo)</text>
+  <text class="comp-sub" x="658" y="1099">WebSocket · bidirectional · services</text>
+
+  <rect class="comp" x="944" y="1068" width="280" height="38" rx="5"/>
+  <text class="comp-label" x="954" y="1085">Logging + CLI</text>
+  <text class="comp-sub" x="954" y="1099">structured stderr · argparse</text>
+
+  <!-- ══════════ EDGES ══════════ -->
+  <!-- webapp to features/engine -->
+  <path class="edge" d="M 640 238 L 640 254" marker-end="url(#arrow)"/>
+  <text class="edge-label" x="648" y="250">browser to server RPC</text>
+
+  <!-- features to engine -->
+  <path class="edge" d="M 640 376 L 640 392" marker-end="url(#arrow)"/>
+
+  <!-- Web Pull lands content, re-index -->
+  <path class="edge-new" d="M 403 364 L 403 378 L 30 378 L 30 968 L 56 968" marker-end="url(#arrow-new)"/>
+  <text class="edge-label-n" x="16" y="790" transform="rotate(-90 16 790)">Web Pull output re-indexes</text>
+
+  <!-- adapters to processes -->
+  <path class="edge" d="M 240 672 L 240 700" marker-end="url(#arrow)"/>
+  <text class="edge-label" x="248" y="694" font-size="9">stdio · owned by SDK client</text>
+
+  <path class="edge-new" d="M 640 672 L 640 700" marker-end="url(#arrow-new)"/>
+  <text class="edge-label-n" x="648" y="694" font-size="9">local WebSocket · protobuf</text>
+
+  <!-- indexing to engine as callables -->
+  <path class="edge-light" d="M 1250 968 L 1264 968 L 1264 590 L 1224 590" marker-end="url(#arrow-light)"/>
+  <text class="edge-label" x="1258" y="790" transform="rotate(-90 1258 790)">indexes as tools</text>
+
+  <!-- ══════════ LEGEND ══════════ -->
+  <rect x="40" y="1134" width="1200" height="56" rx="6" fill="#fafafa" stroke="#ccc"/>
+  <text class="legend-text" x="56" y="1154" font-weight="700">Legend</text>
+
+  <rect class="comp-new" x="120" y="1144" width="22" height="12" rx="3"/>
+  <text class="legend-text" x="150" y="1154">added by this plan</text>
+
+  <rect class="comp" x="284" y="1144" width="22" height="12" rx="3"/>
+  <text class="legend-text" x="314" y="1154">exists today</text>
+
+  <rect class="rejected" x="414" y="1144" width="22" height="12" rx="3"/>
+  <text class="legend-text" x="444" y="1154">evaluated and rejected</text>
+
+  <path class="edge" d="M 596 1150 L 636 1150" marker-end="url(#arrow)"/>
+  <text class="legend-text" x="644" y="1154">dependency / call direction</text>
+
+  <path class="edge-light" d="M 816 1150 L 856 1150" marker-end="url(#arrow-light)"/>
+  <text class="legend-text" x="864" y="1154">tools exposed to the engine</text>
+
+  <text class="legend-text" x="56" y="1177">The two engines never share a credential, a context window, or a working-tree write. Concurrent masters on one tree is explicitly out of scope (AG-R-7). Verified 2026-08-30 against <tspan class="mono">google-antigravity</tspan> 0.1.15 and <tspan class="mono">agy</tspan> 1.1.22.</text>
+</svg>

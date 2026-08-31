@@ -155,6 +155,37 @@ refusal, and lets the edit through anyway: a manufactured record of consent, and
 same standing as the file tools, and `policy.allow_all()` is a probe-only posture that must never
 reach a shipped path. See [`risks.md` AG-R-11](risks.md#ag-r-11).
 
+**Narrowed in phase 1 (user): the decline is of the policy DSL *as the permission gate*, not of
+every `Policy` object.** The original wording — "declined wholesale" — was written before anything
+had to construct a config, and it does not survive contact with `Agent.__aenter__`, which refuses to
+start when a write tool is enabled with no policy *and* no decide hook (`agent.py:93-103`). The
+consultant enables exactly one write tool, has no dialog, no user in the loop and nothing to amend,
+so it carries `policy.deny_all()` plus one `policy.allow()` per enabled tool. That is a capability
+restriction, not a permission decision, and it gives away nothing AG-5 was protecting.
+
+What stays declined is unchanged and is the whole of the argument: `ask_user` (a bare `bool`, so no
+message to the model and no `modified_args`), `safe_defaults` and `confirm_run_command` (both built
+on it), `enforce`, and `allow_all` — which remains probe-only and must never ship.
+`tests/test_antigravity_surface.py::TestBindingDecisions` is what holds that line.
+
+**And the reason the allowlist is set on *every* call, not only where a write tool is enabled:
+leaving `policies` unset is not "no policy".** `LocalAgentConfig` defaults it to
+`policy.confirm_run_command()` — deny `run_command`, **approve everything else**. That is the
+blanket-bypass posture this decision says must never reach a shipped path, arriving as a default
+nobody chose. Restricting `enabled_tools` makes it inert, which is exactly the layered assumption
+that stops being true the first time somebody adds a tool. Measured in phase 1 and pinned by
+`test_the_sdk_default_really_is_approve_all`, so a release that fixes the default turns that test red
+rather than leaving this paragraph outliving its reason.
+
+**A consultant tool that writes does not go on the ungated MCP server.**
+`permissions.can_use_tool` early-returns an allow — no dialog, no broadcast — for anything matching
+`mcp__aic-dc__*`, because `../3-engine/permissions.md` puts the index tools in the read-only row.
+`generate_image` writes a file and `second_opinion` bills a separate provider, so they mount under
+`aic-dc-antigravity` instead and reach the dialog by the ordinary `mcp` classification. Adding two
+tools to the existing server would have been one line shorter and would have routed a file write
+around the permission dialog silently — the tool would work, the file would appear, and nothing would
+look wrong.
+
 **The existing invariant carries over unchanged.** `../3-engine/permissions.md`'s three load-bearing
 properties — one ask path, every request resolves exactly once, localhost-only — are engine-agnostic
 and are not re-derived for Antigravity. Only the callback's shape changes.
@@ -268,3 +299,48 @@ diagnosable only by reading someone else's settings file.
 
 **Consequence:** workspace containment is a startup health check, not an assumption. It belongs
 beside the existing CLI-version gate in the engine's health module, and it must fail visibly.
+
+---
+
+## AG-11 — The Gemini key lives in a file AIC⚡DC owns, not in `engine.json`
+
+The API key is read from **`<user config dir>/gemini-api-key`** — `~/.config/aic-dc/gemini-api-key`
+on Linux, and whatever `_user_config_dir()` (`config.py:176-195`) resolves to elsewhere. One line,
+mode `0600`, and `credentials.resolve()` refuses a file that is group- or world-readable rather than
+using it. Resolution order is: explicit `api_key=` argument, then `$GEMINI_API_KEY`, then this file,
+then Vertex/ADC. The key is passed to the SDK as `LocalAgentConfig(api_key=...)`; it is **never**
+written into `os.environ`.
+
+**Why a file at all:** measured against the installed wheel, `google-antigravity` 0.1.15 reads
+credentials from **environment variables only** — `GEMINI_API_KEY` (`models.py:119`),
+`GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` (`models.py:145-147`), and
+`GOOGLE_GENAI_USE_VERTEXAI` / `GOOGLE_GENAI_USE_ENTERPRISE`
+(`local_connection_config.py:257-258`). There is no dotenv dependency, no settings-file read, and
+nothing that opens `~/.gemini/`. So there is no vendor-standard location to adopt for the Gemini API
+path; the choice is between requiring a shell export before every launch and owning a file. A
+long-lived desktop app that is started from a launcher, not a shell, cannot rely on the export.
+
+**Why not `engine.json`:** `Settings.get_config_content` is deliberately *not* localhost-restricted
+— read methods are always allowed, only writes and reloads check the caller
+(`settings.py:31-33`). A key in a whitelisted config file is a key any collaborator on a shared
+session can read. A separate file, absent from `CONFIG_TYPES`, cannot be fetched over the RPC
+boundary at all.
+
+**The one genuine filesystem standard, and where it applies:** Vertex **standard** mode carries no
+secret in our config. `google-genai` delegates to `google.auth.default()`
+(`_api_client.py:226-227`), which reads Application Default Credentials from
+`$GOOGLE_APPLICATION_CREDENTIALS` or `~/.config/gcloud/application_default_credentials.json`. That
+path is supported and documented, and it is the right answer for anyone already on GCP — but it
+needs a project and a region set, and it bills a cloud project rather than an AI Studio key, so it
+is an alternative rather than the default. Unverified, and worth a probe before phase 3 relies on
+it: whether the `localharness` binary resolves ADC itself. It does inherit our environment — a
+`None` env is passed straight through to the child (`local_connection.py:1298`) — so
+`$GOOGLE_APPLICATION_CREDENTIALS` at least reaches it.
+
+**Consequence:** the read-only contract in `credentials.py` holds — the module reads the file,
+reports `source` as the path, and still never sets an environment variable and never logs a secret.
+`Credentials.report()` continues to omit the key, so the browser learns *where* the credential came
+from and never what it is. `~/.gemini/.env` may be read as a convenience source for users who
+already keep a key there for `gemini-cli`; if it is, it is parsed by us, because the SDK will not.
+None of this changes [AG-R-8](risks.md#ag-r-8): a key is still mandatory, an `agy` login still
+cannot supply it, and the file merely stops the user having to re-export it every session.

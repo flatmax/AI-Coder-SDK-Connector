@@ -88,9 +88,11 @@ Carried forward verbatim so none of them has to be rediscovered:
 - Whether the SDK's `workspaces` is subject to the CLI's `trustedWorkspaces` list.
 - Whether `agy` has any supported programmatic contract, or whether `stream-json` is best-effort.
 - How stable `Step` is across 0.1.x.
-- Whether `localharness` can be pointed at OAuth credentials by some path not exposed through the
-  Python SDK. If it can, [AG-R-8](risks.md#ag-r-8) changes shape entirely — so it is worth one look
-  before phase 1 buys a key.
+- ~~Whether `localharness` can be pointed at OAuth credentials by some path not exposed through the
+  Python SDK.~~ **Closed in phase 1: no.** The harness's wire protocol has no OAuth field in any of
+  its four endpoint shapes. [AG-R-8](risks.md#ag-r-8) stands, with its shape made precise — the wall
+  is minting a token, not presenting one, since `base_url` + `http_headers` bypass the key check
+  entirely. See [`sdk-surface.md` § Verified, inferred, unknown](sdk-surface.md#verified-inferred-unknown).
 
 ---
 

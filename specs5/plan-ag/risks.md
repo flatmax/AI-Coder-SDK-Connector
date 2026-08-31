@@ -218,6 +218,12 @@ question to be answered with a real key and a real bill before any engine work i
 Credential resolution reports its *source* in engine health, the way `detect_credentials()` does for
 Claude, and predicts nothing it has not looked at.
 
+Once a key exists, [AG-11](decisions.md#ag-11) is where it lives — a `0600` file in the user config
+directory, because the SDK reads credentials from environment variables only and an app started from
+a desktop launcher has no export to inherit. That does not lower this risk: a key is still mandatory
+and still separately billed. It removes the second-order failure only — being authenticated in one
+shell and not in the next — which would otherwise look exactly like this risk and be diagnosed as it.
+
 **Tripwire:** an engine start that fails at `validate_endpoint()`. It already raises on the connect
 path (`local_connection.py:1241`), so the requirement is that it is caught and reported as a
 credential degradation in the health banner rather than as an engine crash.
