@@ -116,6 +116,22 @@ class ConsultationError(RuntimeError):
 
 
 @dataclasses.dataclass(frozen=True)
+class _Turn:
+    """One drained consultation.
+
+    Values rather than the SDK's ``ChatResponse``, because that object is
+    a live cursor over a stream and is worthless once its connection has
+    closed. Draining into this inside the ``async with`` is what stops a
+    caller from accidentally reading a dead stream — see :meth:`
+    Consultant._chat`, where doing exactly that hung until killed.
+    """
+
+    text: str
+    chunks: list[Any]
+    stop_reason: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ImageResult:
     """Where an image landed, verified rather than reported.
 
@@ -198,18 +214,12 @@ class Consultant:
             raise ConsultationError("A second opinion needs a question to answer.")
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
-        response = await self._chat(
-            prompt,
-            model=self._text_model,
-            builtin_tools=(),
-        )
-        answer = (await response.text()).strip()
-        if not answer:
+        turn = await self._chat(prompt, model=self._text_model, builtin_tools=())
+        if not turn.text:
             raise ConsultationError(
-                "Antigravity returned an empty answer "
-                f"(stop reason: {getattr(response.stop_reason, 'name', 'unknown')})."
+                f"Antigravity returned an empty answer (stop reason: {turn.stop_reason})."
             )
-        return answer
+        return turn.text
 
     async def generate_image(
         self,
@@ -241,15 +251,12 @@ class Consultant:
             f"Write it inside {self._repo_root} and report the absolute path."
         )
 
-        response = await self._chat(
+        turn = await self._chat(
             " ".join(instruction),
             model=self._image_model,
             builtin_tools=("GENERATE_IMAGE",),
         )
-        # Drain first: usage, stop reason and the buffered chunks are all
-        # only complete once the stream has been consumed.
-        summary = (await response.text()).strip()
-        return self._verify_image(await response.resolve(), summary)
+        return self._verify_image(turn.chunks, turn.text)
 
     # ------------------------------------------------------------------
     # The single SDK call site
@@ -261,8 +268,19 @@ class Consultant:
         *,
         model: str,
         builtin_tools: tuple[str, ...],
-    ) -> Any:
-        """Start a harness, send one prompt, return its response.
+    ) -> _Turn:
+        """Start a harness, send one prompt, drain the answer, shut down.
+
+        **Drained inside the ``async with``, which is not optional.**
+        ``agent.chat()`` returns a lazy ``ChatResponse`` — a cursor over a
+        stream that has not been pulled yet — so nothing has happened when
+        it returns. An earlier version of this method handed that object
+        back and let the callers await ``.text()`` on it, which read the
+        stream *after* ``Agent.__aexit__`` had torn the connection down.
+        It hung until killed, and the timeout below did not fire because
+        the timeout covered starting the agent rather than the model work.
+        Returning a :class:`_Turn` of already-drained values is what makes
+        the context manager's scope mean what it looks like it means.
 
         The whole SDK surface this module touches, in one function, so the
         AG-R-9 boundary is checkable by reading twenty lines rather than
@@ -284,6 +302,7 @@ class Consultant:
         enabled = [types.BuiltinTools.FINISH]
         enabled += [getattr(types.BuiltinTools, name) for name in builtin_tools]
 
+        logger.debug("Antigravity consultation starting on %s", model)
         config = LocalAgentConfig(
             model=model,
             # AG-10: one root, and only one. The SDK would default to
@@ -307,12 +326,38 @@ class Consultant:
         try:
             async with asyncio.timeout(self._timeout):
                 async with Agent(config) as agent:
-                    return await agent.chat(prompt)
+                    response = await agent.chat(prompt)
+                    # Both drains, here, before the harness goes away.
+                    text = (await response.text()).strip()
+                    chunks = await response.resolve()
+                    return _Turn(
+                        text=text,
+                        chunks=chunks,
+                        stop_reason=getattr(
+                            response.stop_reason, "name", "unknown"
+                        ),
+                    )
         except TimeoutError as exc:
             raise ConsultationError(
                 f"Antigravity did not answer within {self._timeout:.0f}s. "
                 "The consultation was abandoned; nothing was written."
             ) from exc
+        except (
+            types.AntigravityConnectionError,
+            types.AntigravityExecutionError,
+            types.AntigravityValidationError,
+        ) as exc:
+            # The SDK's four error types share no base class, so they are
+            # named. AntigravityCancelledError is deliberately absent: it
+            # derives from asyncio.CancelledError, which is a
+            # BaseException, and swallowing it would turn a cancelled turn
+            # into a stuck one.
+            #
+            # Wrapped rather than propagated because the only caller is an
+            # MCP tool handler whose contract is "every failure comes back
+            # as prose the model can act on". An unwrapped SDK error
+            # escapes it and reaches the model as a stack trace.
+            raise ConsultationError(_explain(exc)) from exc
 
     # ------------------------------------------------------------------
     # AG-R-3: believe the filesystem, not the tool
@@ -369,6 +414,39 @@ class Consultant:
             contained=True,
             summary=summary,
         )
+
+
+#: How much of an SDK error to keep. Quota failures arrive as the same
+#: paragraph repeated three or four times with an embedded Go map dump,
+#: several kilobytes of it, and the useful part is the first sentence.
+_MAX_ERROR_CHARS = 400
+
+
+def _explain(exc: Exception) -> str:
+    """An SDK error as one line a model can act on.
+
+    Quota gets its own branch, and the distinction it draws is the one the
+    provider's own message obscures. A 429 saying *"retry in 57s"* while
+    also saying **``limit: 0``** is not a throttle — the free tier's
+    allowance for that model is zero and no amount of waiting changes it.
+    Reporting it as "try again shortly" produces an agent that retries
+    forever, which is the failure this function exists to prevent.
+    """
+    text = " ".join(str(exc).split())
+    if "429" in text or "RESOURCE_EXHAUSTED" in text:
+        if "limit: 0" in text:
+            return (
+                "Google refused the call: this API key's plan has no quota "
+                "for that model at all (limit: 0), so retrying will not "
+                "help. It needs a billing account linked to the project. "
+                f"Google said: {text[:_MAX_ERROR_CHARS]}"
+            )
+        return (
+            "Google rate-limited the call. An agent turn is many model "
+            "calls, so the free tier's per-minute allowance is reached "
+            f"mid-turn. Retry shortly. Google said: {text[:_MAX_ERROR_CHARS]}"
+        )
+    return f"Antigravity failed: {text[:_MAX_ERROR_CHARS]}"
 
 
 def _first_output_path(chunks: list[Any]) -> str:

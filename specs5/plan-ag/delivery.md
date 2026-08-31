@@ -164,3 +164,96 @@ the first line of the engine adapter rather than retrofitted.
 
 `probe_edit_args.py` needs a real key and hits the network, so it is a spike and not a test. Its
 assertions should be lifted into the phase-1 probe as the AG-R-1 and AG-R-11 tripwires.
+
+---
+
+## Phase 1 — Consultant and probe (2026-08-31)
+
+**Exit criterion:** *"The agent generates an image from a Claude Code turn and it lands in the repo
+where the file tree and viewer find it. The probe's `unclassified` bucket is empty by declaration. A
+sentinel write lands at its expected absolute path ([AG-R-3](risks.md#ag-r-3))."*
+
+**Met except the image, which is blocked on billing rather than on code.** Every Gemini image model
+returns `limit: 0` on a free-tier key — see § *The image wall* below. The two criteria that ask
+questions about *this* build are both met and were measured live.
+
+### What landed
+
+| File | Role |
+|---|---|
+| `src/aic_dc/antigravity/surface.py` | The AG-8 probe. Six sections, 96 names, `diff_agy_init` as the CLI half |
+| `src/aic_dc/antigravity/credentials.py` | AG-R-8 resolution, reporting its source; secret redacted in `repr` and absent from `report()` |
+| `src/aic_dc/antigravity/consultant.py` | AG-7's one-shot `async with Agent(...)`, with AG-R-3 verification |
+| `src/aic_dc/antigravity/bridge.py` | The two tools, on their **own** MCP server |
+| `tests/test_antigravity_{surface,credentials,consultant,bridge}.py` | 145 tests, offline — no key, no harness, no network |
+| `probe_consultant.py` | The live spike. Three checks, runnable, costs money |
+
+### Live verification
+
+`gemini-3.7-flash` on a free-tier key, 2026-08-31.
+
+- **`second_opinion` answered.** AG-R-8 turned from a wall into a bill. One 503 "high demand" arrived
+  mid-run and the SDK retried through it without the caller seeing anything, which is worth knowing
+  before `retry_config` is tuned: the default already retries.
+- **AG-R-3 is settled — the SDK honours `workspaces`.** Measured on the same machine whose
+  `trustedWorkspaces` diverted `agy` in phase 0. Downgraded rather than retired; the reasoning is in
+  [`risks.md`](risks.md#ag-r-3).
+- **The probe's `unclassified` bucket is empty**, and `tests/test_antigravity_surface.py` is what
+  keeps it that way.
+
+### The image wall
+
+`generate_image` could not be verified. All six image models the API lists for this key —
+`gemini-2.5-flash-image`, `gemini-3-pro-image{,-preview}`, `gemini-3.1-flash-image{,-preview}`,
+`gemini-3.1-flash-lite-image` — return HTTP 429 with **`limit: 0`** on the free tier. That is not a
+throttle: the plan's allowance is zero and no wait changes it. Image generation needs a billing
+account linked to the project.
+
+Recorded as a phase-1 result rather than a defect because it sharpens
+[AG-R-8](risks.md#ag-r-8): the credential wall is not one wall. A free key buys the text consultant;
+**the capability [AG-1](decisions.md#ag-1) names as the reason for a second engine costs money.**
+Google's own 429 says *"Please retry in 57s"* while also saying `limit: 0`, so an agent trusting that
+message retries forever — which is why `_explain` distinguishes the two and says so.
+
+### Three bugs the gates caught, and one they did not
+
+- **The probe was too generous and said so.** It collected keyword names from every call and reported
+  the `tools` config field — AG-4's route for the symbol index — as built, because `bridge.py` passes
+  `tools=` to *Claude's* `create_sdk_mcp_server`. Two SDKs in one package means a bare keyword is not
+  evidence about either; the readers are now scoped to the config constructors.
+- **`policies` unset is not "no policy".** `LocalAgentConfig` defaults it to blanket approval. See
+  [AG-5](decisions.md#ag-5), which is amended, and the test that pins the SDK's default so a release
+  fixing it goes red.
+- **The consultant tools do not go on the `aic-dc` MCP server.** `can_use_tool` early-returns an
+  allow for `mcp__aic-dc__*`. A file-writing `generate_image` there would have routed a write around
+  the permission dialog silently.
+- **The one the tests missed: a lazy stream drained after teardown.** `agent.chat()` returns a cursor
+  over a stream nothing has pulled, so `await response.text()` outside the `async with` read a dead
+  connection and hung until killed — and the `asyncio.timeout` did not fire, because it wrapped
+  *starting* the agent rather than the model work. Every mocked test passed, because the fake
+  response answered whenever asked. The fake now dies with its agent; that, plus a timeout test that
+  puts the slow part in `text()`, is the regression.
+
+### What was deliberately left out
+
+- **No engine, no session, no step pump.** Phase 3. The AG-R-9 boundary is enforced as a test that
+  reads this module's own syntax tree for `receive_steps`, `cancel`, `conversation_id` and hook
+  registrations, so the tripwire fails the build rather than being noticed in review.
+- **No RPC surface and no UI.** The probe's report is shaped like the Claude one so a tab can render
+  both (AG-3), but nothing serves it yet.
+- **No `ConsultantBridge` wired into the running engine.** The tools are built and tested; nothing
+  constructs one in `service.py`.
+
+### What phase 3 has to do first
+
+1. **Decide whether image generation is bought.** [AG-1](decisions.md#ag-1)'s worked example is
+   behind a billing account. If it is not bought, the disjoint-capability argument for a second
+   engine rests on the other two reasons and the README should say so.
+2. **Move `NEVER_SET_CONFIG` into `options.py`** when one exists. `surface._declined_config` already
+   prefers that module, so the move is a cut-and-paste and the refusal ends up beside the code doing
+   the refusing.
+3. **Gate `run_command` from the adapter's first line.** Unchanged from phase 2, and now with
+   AG-5's amended reading: the static allowlist is for one-shot calls with no user in the loop, and
+   the master engine's gate is still the raw `PreToolCallDecideHook`.
+4. **Do not extend the consultant.** `_chat` is one function on purpose. Phase 3 writes against
+   `Conversation` directly.

@@ -93,15 +93,27 @@ the existing CLI-version gate ([`decisions.md` AG-10](decisions.md#ag-10)). The 
 root is a workspace the engine will actually write to, and reports a degradation into the health
 banner if it is not.
 
-**Unknown, and part of what phase 2 must settle:** whether the Python SDK's `workspaces`
-(`local_connection_config.py:147`) is subject to the same trust list. It appears to be a separate
-mechanism — `workspace_only` policies are enforced at the platform layer (`hooks/policy.py:442`,
-`:541-543`) — but this was not confirmed, and assuming the SDK is exempt is exactly the assumption
-this risk exists to prevent.
+**Settled in phase 1 (2026-08-31): the SDK is not subject to the trust list.** The tripwire below was
+run — `probe_consultant.py` § *AG-R-3: workspace containment* — on the same machine whose
+`trustedWorkspaces` diverted `agy`. A `create_file` turn with `workspaces=[repo_root]` wrote
+`aic-dc-sentinel.txt` and it was found by `stat` **at the expected absolute path** in this repository,
+not under `~/.gemini/`. The two mechanisms are separate, as the `hooks/policy.py` reading suggested
+but did not confirm.
 
-**Tripwire:** a phase-1 smoke test that has the engine write a sentinel file into the repo root and
-asserts it appears **at the expected absolute path**, not merely that the tool reported success. A
-test that trusts the tool's own report cannot catch this.
+**The risk is downgraded, not retired. Severity: medium. Likelihood: low.** What was measured is that
+the SDK honours `workspaces` on *one* machine, on 0.1.15, for `create_file`. The failure mode — a
+write reported as successful that the file tree cannot see — remains undiagnosable from the symptom,
+and the product it was measured in ships roughly daily. AG-10's startup health check stands for that
+reason: it costs one `stat` and it is the difference between a bug report saying "the agent lied"
+and one naming a settings file.
+
+**Note for whoever reads this next:** the check deliberately does not use `generate_image`. Every
+Gemini image model returns `limit: 0` on a free-tier key, so folding containment into the image call
+made a settled question look blocked on billing. Containment is a question about `workspaces`, and
+the cheapest tool that asks it is the right one.
+
+**Tripwire:** the sentinel write, at the expected absolute path, asserted by `stat` rather than by
+the tool's own report. A test that trusts the report cannot catch this.
 
 ---
 

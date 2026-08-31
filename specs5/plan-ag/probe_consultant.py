@@ -37,8 +37,8 @@ Usage
 -----
 ::
 
-    export GEMINI_API_KEY=...          # aistudio.google.com/apikey
-    .venv/bin/python specs5/plan-ag/probe_consultant.py
+    export GEMINI_API_KEY=...          # or the AG-11 key file
+    .venv/bin/python specs5/plan-ag/probe_consultant.py --repo .
 
 The free tier throttles at 5 RPM and an agent turn is many model calls,
 so a 429 mid-run is a rate limit rather than a failure of the code —
@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -143,7 +142,16 @@ async def check_image_and_sentinel(consultant: Consultant, repo: Path) -> bool:
     sentinel.write_text("written by probe_consultant.py\n", encoding="utf-8")
     print(f"  workspace: {repo}")
     print(f"  sentinel:  {sentinel}")
+    try:
+        return await _image_check(consultant, repo, sentinel)
+    finally:
+        # `--repo .` points this at a real checkout, and a probe that
+        # leaves a stray file behind on the failure path shows up as a
+        # dirty tree in somebody else's commit.
+        sentinel.unlink(missing_ok=True)
 
+
+async def _image_check(consultant: Consultant, repo: Path, sentinel: Path) -> bool:
     try:
         result = await consultant.generate_image(
             "A simple flat-colour icon of a lightning bolt on a dark background.",
@@ -175,6 +183,73 @@ async def check_image_and_sentinel(consultant: Consultant, repo: Path) -> bool:
     return True
 
 
+async def check_workspace_containment(repo: Path) -> bool:
+    """AG-R-3 on its own, without the image model.
+
+    Phase 1's exit criterion asks for a sentinel write landing at its
+    expected absolute path. That was originally folded into the image
+    check, and the image models are all ``limit: 0`` on a free-tier key —
+    so the criterion would have been blocked on *billing* rather than on
+    the question it is actually asking, which is whether the SDK's
+    ``workspaces`` is honoured or is subject to the CLI's
+    ``trustedWorkspaces`` list the way ``agy`` was.
+
+    ``create_file`` on the free text model asks exactly that question and
+    costs one turn. The config is built here rather than through
+    :class:`Consultant` on purpose: writing a file is not a consultant
+    capability, and adding a method for a probe is how AG-R-9's boundary
+    erodes.
+    """
+    from google.antigravity import Agent, LocalAgentConfig, types
+    from google.antigravity.hooks import policy
+
+    from aic_dc.antigravity.consultant import DEFAULT_TEXT_MODEL
+
+    print("\n== 3. AG-R-3: workspace containment ==")
+    target = repo / SENTINEL_NAME
+    target.unlink(missing_ok=True)
+    print(f"  workspace: {repo}")
+    print(f"  expecting: {target}")
+
+    enabled = [types.BuiltinTools.FINISH, types.BuiltinTools.CREATE_FILE]
+    config = LocalAgentConfig(
+        model=DEFAULT_TEXT_MODEL,
+        workspaces=[str(repo)],
+        capabilities=types.CapabilitiesConfig(enabled_tools=enabled),
+        policies=[policy.deny_all(), *(policy.allow(t.value) for t in enabled)],
+        **resolve_credentials().config_kwargs(),
+    )
+    try:
+        async with asyncio.timeout(180):
+            async with Agent(config) as agent:
+                response = await agent.chat(
+                    f"Create a file named {SENTINEL_NAME} containing exactly the "
+                    "line: sentinel. Then finish."
+                )
+                said = (await response.text()).strip()
+    except Exception as exc:  # noqa: BLE001 - a spike; the error is the result
+        # Type included: the SDK raises several errors with empty messages,
+        # and "FAIL" with a blank line says nothing at all.
+        detail = " ".join(str(exc).split()) or "<no message>"
+        print(f"  {FAIL} {type(exc).__name__}: {detail[:300]}")
+        return False
+
+    print(f"  model said: {said[:120]}")
+    # The whole point: stat the absolute path rather than believe the
+    # tool. `agy` reported success for a file it had put under ~/.gemini/.
+    if target.is_file():
+        print(f"  {PASS} the write landed at the expected absolute path")
+        print("        workspaces is honoured; trustedWorkspaces does not divert it")
+        target.unlink(missing_ok=True)
+        return True
+
+    print(f"  {FAIL} nothing at {target} — the write was diverted (AG-R-3 lives)")
+    strays = sorted(Path.home().glob(f".gemini/**/{SENTINEL_NAME}"))
+    for stray in strays[:5]:
+        print(f"        found instead at: {stray}")
+    return False
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -186,7 +261,7 @@ async def main() -> int:
         "--repo",
         default="",
         help="workspace to write into (default: a fresh temp directory). "
-        "Point it at this repo to see the image land where the file tree is.",
+        "Point it at this repo to see the write land where the file tree is.",
     )
     args = parser.parse_args()
 
@@ -202,9 +277,13 @@ async def main() -> int:
 
         ok = await check_second_opinion(consultant) and ok
         if args.skip_image:
-            print(f"\n== 2/3. generate_image ==\n  {SKIP} --skip-image")
+            print(f"\n== 2. generate_image ==\n  {SKIP} --skip-image")
         else:
             ok = await check_image_and_sentinel(consultant, repo) and ok
+        # Run last and always: it is the one criterion that does not need
+        # the image model, and it is the phase-0 unknown worth closing
+        # even when billing blocks everything above it.
+        ok = await check_workspace_containment(repo) and ok
 
     print(f"\n== Verdict ==\n  {PASS if ok else FAIL}")
     if ok:
@@ -213,8 +292,8 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    if not os.environ.get("GEMINI_API_KEY"):
-        print("GEMINI_API_KEY is not set. The SDK has no OAuth path at 0.1.15,")
-        print("so the agy login cannot be borrowed (AG-R-8). Get a free key at")
-        print("https://aistudio.google.com/apikey and export it.")
+    # Deliberately not an ``$GEMINI_API_KEY`` check. AG-11 added key files
+    # the SDK itself never reads, so the environment variable is one
+    # source of several and testing it directly would report a working
+    # setup as broken. `report_credentials` asks the resolver.
     raise SystemExit(asyncio.run(main()))

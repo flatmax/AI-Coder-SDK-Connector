@@ -59,11 +59,22 @@ class FakeResponse:
         self._text = text
         self._chunks = chunks or []
         self.stop_reason = type("Stop", (), {"name": "UNSPECIFIED"})()
+        #: Set by :class:`FakeAgent` on teardown. Reading after that point
+        #: is the bug, so it raises rather than answering.
+        self.closed = False
+
+    def _check(self) -> None:
+        if self.closed:
+            raise RuntimeError(
+                "the stream was read after Agent.__aexit__ — this is the hang"
+            )
 
     async def text(self) -> str:
+        self._check()
         return self._text
 
     async def resolve(self) -> list:
+        self._check()
         return self._chunks
 
 
@@ -72,6 +83,12 @@ class FakeAgent:
 
     ``configs`` is a class attribute so a test can read what the
     consultant built without threading a fixture through the call.
+
+    ``__aexit__`` **closes the responses it handed out**, which is not
+    decoration. The real ``ChatResponse`` is a lazy cursor over a stream
+    that dies with the connection, and a fake that stayed readable after
+    teardown let a hang-until-killed bug through every test in this file.
+    See :class:`TestTheStreamIsDrainedBeforeTeardown`.
     """
 
     configs: list = []
@@ -79,16 +96,23 @@ class FakeAgent:
 
     def __init__(self, config):
         FakeAgent.configs.append(config)
+        self._handed_out: list[FakeResponse] = []
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
+        for response in self._handed_out:
+            response.closed = True
         return False
 
     async def chat(self, prompt):
         FakeAgent.prompts.append(prompt)
-        return FakeAgent.responses.pop(0) if FakeAgent.responses else FakeResponse("ok")
+        response = (
+            FakeAgent.responses.pop(0) if FakeAgent.responses else FakeResponse("ok")
+        )
+        self._handed_out.append(response)
+        return response
 
 
 FakeAgent.prompts = []
@@ -193,6 +217,64 @@ class TestTheBoundaryHolds:
             and node.func.id == "Agent"
         ]
         assert len(calls) == 1
+
+
+class TestTheStreamIsDrainedBeforeTeardown:
+    """Regression: the first live run hung until killed.
+
+    ``agent.chat()`` returns a *lazy* ``ChatResponse`` — a cursor over a
+    stream nothing has pulled yet — so when it returns, no model work has
+    happened. The first version of ``_chat`` handed that object back and
+    let its callers ``await response.text()`` on it, which read the stream
+    after ``Agent.__aexit__`` had torn the connection down.
+
+    Every test in this file passed, because the fake response was a plain
+    object that answered whenever it was asked. The fake now dies with its
+    agent, which is what makes these assertions mean anything.
+
+    The timeout did not save it either: it wrapped starting the agent, and
+    the model work had been moved outside. That is the second assertion.
+    """
+
+    @pytest.mark.asyncio
+    async def test_second_opinion_drains_inside_the_context_manager(
+        self, consultant, fake_agent
+    ):
+        fake_agent.responses = [FakeResponse("an answer")]
+        assert await consultant.second_opinion("Well?") == "an answer"
+
+    @pytest.mark.asyncio
+    async def test_generate_image_drains_inside_the_context_manager(
+        self, consultant, fake_agent, repo
+    ):
+        (repo / "a.png").write_bytes(b"\x89PNG")
+        fake_agent.responses = [
+            FakeResponse("done", [ImageChunk(str(repo / "a.png"))])
+        ]
+        assert (await consultant.generate_image("a duck")).path == "a.png"
+
+    @pytest.mark.asyncio
+    async def test_the_timeout_covers_the_model_work_not_just_the_startup(
+        self, repo, fake_agent, monkeypatch
+    ):
+        """A timeout around ``Agent(...)`` alone bounds nothing.
+
+        Starting a harness is fast; waiting for a model is what hangs. So
+        the slow part is put in ``text()`` here — where the real work is —
+        and the consultation must still give up.
+        """
+
+        class SlowResponse(FakeResponse):
+            async def text(self):
+                import asyncio
+
+                await asyncio.sleep(10)
+                return "too late"
+
+        fake_agent.responses = [SlowResponse()]
+        target = Consultant(repo, credentials=KEYED, timeout_seconds=0.05)
+        with pytest.raises(ConsultationError, match="did not answer within"):
+            await target.second_opinion("Well?")
 
 
 # ----------------------------------------------------------------------
@@ -444,6 +526,107 @@ class TestImageWriteIsVerified:
         ]
         with pytest.raises(ConsultationError, match="no image file"):
             await consultant.generate_image("a duck")
+
+
+class TestSdkErrorsBecomeProse:
+    """Found live: a 429 escaped as a raw traceback.
+
+    The four SDK error types share no base class, so an unnamed one
+    propagates straight through ``_chat``, past ``ConsultantBridge``'s
+    ``except``, and reaches the calling model as a stack trace — which is
+    exactly what the bridge's contract says must not happen.
+    """
+
+    @pytest.fixture
+    def raising_agent(self, monkeypatch, fake_agent):
+        def _raise(exc):
+            async def chat(self, prompt):
+                raise exc
+
+            monkeypatch.setattr(FakeAgent, "chat", chat)
+
+        return _raise
+
+    @pytest.mark.asyncio
+    async def test_an_execution_error_becomes_a_consultation_error(
+        self, consultant, raising_agent
+    ):
+        from google.antigravity import types
+
+        raising_agent(types.AntigravityExecutionError("model unreachable"))
+        with pytest.raises(ConsultationError, match="model unreachable"):
+            await consultant.second_opinion("Well?")
+
+    @pytest.mark.asyncio
+    async def test_a_connection_error_becomes_a_consultation_error(
+        self, consultant, raising_agent
+    ):
+        from google.antigravity import types
+
+        raising_agent(types.AntigravityConnectionError("harness died"))
+        with pytest.raises(ConsultationError):
+            await consultant.second_opinion("Well?")
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_not_swallowed(self, consultant, raising_agent):
+        """``AntigravityCancelledError`` derives from ``CancelledError``.
+
+        Catching it would turn a cancelled turn into a stuck one, which is
+        why it is absent from the ``except`` clause rather than overlooked.
+        """
+        import asyncio
+
+        from google.antigravity import types
+
+        raising_agent(types.AntigravityCancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await consultant.second_opinion("Well?")
+
+    def test_a_zero_quota_does_not_advise_a_retry(self):
+        """The finding the live run produced.
+
+        Google's own message says *"Please retry in 57s"* while also
+        saying ``limit: 0``. It is not a throttle: the plan's allowance
+        for that model is zero, and an agent told to retry will do it
+        forever.
+        """
+        from google.antigravity import types
+
+        from aic_dc.antigravity.consultant import _explain
+
+        message = _explain(
+            types.AntigravityExecutionError(
+                "Error 429 RESOURCE_EXHAUSTED ... limit: 0, model: "
+                "gemini-3.1-flash-lite-image ... Please retry in 57.2s."
+            )
+        )
+        assert "retrying will not help" in message
+        assert "billing account" in message
+
+    def test_a_real_throttle_does_advise_a_retry(self):
+        """The other 429, which a wait genuinely fixes."""
+        from google.antigravity import types
+
+        from aic_dc.antigravity.consultant import _explain
+
+        message = _explain(
+            types.AntigravityExecutionError("Error 429: quota exceeded, retry in 20s")
+        )
+        assert "Retry shortly" in message
+        assert "will not help" not in message
+
+    def test_the_repeated_quota_blob_is_truncated(self):
+        """Several kilobytes of the same paragraph plus a Go map dump.
+
+        Untruncated it would be the whole tool result, pushing the actual
+        conversation out of the model's view.
+        """
+        from google.antigravity import types
+
+        from aic_dc.antigravity.consultant import _explain
+
+        message = _explain(types.AntigravityExecutionError("boom " * 5000))
+        assert len(message) < 600
 
 
 # ----------------------------------------------------------------------
