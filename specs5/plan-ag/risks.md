@@ -216,8 +216,18 @@ config is built from `BuiltinTools.read_only()` so it structurally cannot write.
 **Severity: high. Likelihood: certain — verified.**
 
 The Python SDK accepts only `GeminiAPIEndpoint` or `VertexEndpoint`
-(`connections/local/local_connection.py:200-201`) and contains no OAuth code. It cannot reuse the
-`agy` login, which is what the owner already has.
+(`connections/local/local_connection.py:200-201`). It cannot reuse the `agy` login, which is what
+the owner already has.
+
+**The reason is a backend split, established by measurement on 2026-08-31 and recorded in full at
+[`decisions.md` AG-2](decisions.md#ag-2).** `agy` authenticates with the `auth/aicode` scope against
+`cloudcode-pa.googleapis.com`, the Code Assist surface where a consumer AI Pro subscription's coding
+quota lives; the SDK can only address the AI Studio and Vertex endpoints. This risk was previously
+stated as "the SDK contains no OAuth code", which is true but is an argument from absence and
+understates it — there is also no *endpoint* to point a token at. Two corollaries worth stating here
+because they are what people actually try: signing in to ADC with the subscription's Google account
+proves identity and transfers no entitlement, and a bare `LocalAgentConfig()` is not "auth-less" —
+it raises `AntigravityValidationError` before the binary is spawned.
 
 **Why it bites:** this looks like an engineering question and is a procurement one. It gates
 everything past phase 1, and discovering it late means an engine adapter that cannot be run. It also

@@ -76,6 +76,26 @@ The Python SDK's `Step` carries content, thinking, deltas, full tool calls and p
 path that would have inherited the owner's existing login, and it is closed. This is a procurement
 gate on everything past phase 1.
 
+**Why it is closed, measured 2026-08-31 — a backend split, not a missing auth format.** This was
+originally argued from absence ("the SDK contains no OAuth code"), which is true and is the weaker
+claim: it invites the reasonable-sounding rebuttal that a token could simply be passed some other
+way. It cannot, and the reason is that `agy` and the SDK talk to *different services*.
+
+`agy`'s OAuth requests the scope `https://www.googleapis.com/auth/aicode` and calls
+**`cloudcode-pa.googleapis.com`** — the Code Assist backend, which is the surface authorised to
+consume a consumer Google AI Pro/Ultra subscription's coding quota. `localharness`'s
+`ModelConfig` offers exactly four endpoints — `gemini_api_endpoint`, `vertex_endpoint`,
+`gemma_endpoint`, `custom_endpoint` — and the Python SDK constructs only two of them: `models.py`
+defines `GeminiAPIEndpoint` and `VertexEndpoint` and no others. There is no Code Assist endpoint to
+address and no field on any of the four to carry an `aicode` token. So **no credential format would
+have bridged this.** The subscription and the SDK are on opposite sides of a backend boundary.
+
+**The corollary is the one that costs money and is easy to get wrong:** signing in to Application
+Default Credentials with the same Google account that holds the subscription does *not* transfer the
+entitlement. ADC establishes **identity**; Vertex then bills whichever **project** is named, and it
+needs its own billing account. Neither Google AI Pro nor AI Ultra includes API access at all. Being
+the same human, logged in to the same account, is not a payment path.
+
 **`agy` is not discarded.** Its `init` frame is a free, machine-readable capability inventory and is
 wired into the probe ([AG-8](#ag-8)). What it cannot be is the thing running the turn.
 
@@ -332,10 +352,20 @@ secret in our config. `google-genai` delegates to `google.auth.default()`
 `$GOOGLE_APPLICATION_CREDENTIALS` or `~/.config/gcloud/application_default_credentials.json`. That
 path is supported and documented, and it is the right answer for anyone already on GCP — but it
 needs a project and a region set, and it bills a cloud project rather than an AI Studio key, so it
-is an alternative rather than the default. Unverified, and worth a probe before phase 3 relies on
-it: whether the `localharness` binary resolves ADC itself. It does inherit our environment — a
-`None` env is passed straight through to the child (`local_connection.py:1298`) — so
-`$GOOGLE_APPLICATION_CREDENTIALS` at least reaches it.
+is an alternative rather than the default.
+
+**Verified 2026-08-31: the binary resolves ADC itself.** A `LocalAgentConfig(vertex=True,
+project=…, location=…)` with a deliberately nonexistent project passes Python validation, spawns
+`localharness`, and fails from the *Go* side with `failed to configure default GCP credentials for
+Vertex AI: failed to find default credentials`. That is Go's `FindDefaultCredentials`, so the
+binary carries its own ADC resolution (`golang/oauth2/google`,
+`application_default_credentials.json` and `GOOGLE_APPLICATION_CREDENTIALS` are all in its
+strings). Phase 3 may rely on it. Two consequences follow. First, on the ADC path **no credential
+passes through our Python at all** — nothing for `credentials.py` to hold, redact or leak, which is
+the one axis on which Vertex beats the key file outright. Second, Python-side validation for Vertex
+only checks that `project` and `location` are *set*, never that they work
+(`models.py:148-168`), so `resolve()` cannot verify an ADC setup up front; it can look for the
+credentials file and must otherwise let the Go error through.
 
 **Consequence:** the read-only contract in `credentials.py` holds — the module reads the file,
 reports `source` as the path, and still never sets an environment variable and never logs a secret.
@@ -344,3 +374,59 @@ from and never what it is. `~/.gemini/.env` may be read as a convenience source 
 already keep a key there for `gemini-cli`; if it is, it is parsed by us, because the SDK will not.
 None of this changes [AG-R-8](risks.md#ag-r-8): a key is still mandatory, an `agy` login still
 cannot supply it, and the file merely stops the user having to re-export it every session.
+
+---
+
+## AG-12 — The free AI Studio tier is chosen, not defaulted into **(user)**
+
+Phase 1 runs on a **free-tier** Google AI Studio key, resolved by [AG-11](#ag-11)'s file. This is a
+deliberate choice with two known, non-monetary costs, recorded here so that neither is later
+discovered and mistaken for a defect.
+
+**Why it matters:** "free tier" and "zero cost" are not the same sentence, and AG-11 reads as though
+price were the only axis. It is not.
+
+1. **The free tier trains on what it is sent.** On the free Gemini API tier Google may use prompts
+   and responses to improve its products, and human reviewers may see them. On *any* paid tier —
+   AI Studio pay-as-you-go or Vertex — that stops, under a data processing addendum. This is not
+   abstract for this feature: the consultant's entire job is to be handed source code
+   ([AG-7](#ag-7)). The free tier is the correct choice for a repo the owner would publish anyway,
+   and the wrong one the first time it is pointed at something else.
+2. **Image generation does not work on it.** Every Gemini image model reports `limit: 0` on a
+   free-tier key, which is why phase 1's exit criteria stand at two of three
+   ([`README.md`](README.md) phase 1). Image generation is the capability [AG-1](#ag-1) names as the
+   reason for hosting a second engine at all, so the free tier defers the headline feature rather
+   than delivering it. `second_opinion` is unaffected and works end-to-end — verified 2026-08-31,
+   a live `Consultant.second_opinion` turn returning text on this key.
+
+**Consequence — two explicit upgrade triggers, either of which ends this decision.** Billing must be
+enabled on the AI Studio project *before* the consultant is pointed at anything the owner would not
+publish, and *before* `generate_image` is expected to work. Neither is a code change:
+`credentials.py` resolves a paid key by the identical path, and nothing in the resolution order,
+the key file or `Credentials.report()` moves.
+
+**The warning is a conditional, because the tier is not detectable locally.** `resolve()` attaches a
+data-terms warning to every Gemini API key it returns, and it must be phrased as *"this engine
+cannot tell which tier this key is on; if the project has no billing account, then…"* rather than as
+a claim. The tier is a property of the key's Cloud project and is readable only over the network,
+which this module does not touch — asserting a tier would be precisely the guess
+[AG-R-8](risks.md#ag-r-8) records the Claude side getting wrong about login state. Vertex is
+excluded outright: both its modes are paid surfaces under a data processing addendum, so the
+condition cannot hold.
+
+**And it is closable, because a warning that cannot be closed is one that gets ignored.** A line
+reading `billing=enabled` in the key file silences it. That grammar is not arbitrary: `_scan` treats
+any `name=value` whose name is not `GEMINI_API_KEY` as not-a-key, so the directive is inert to the
+key scan by construction, where a bare word would have been read as the credential itself. A file
+whose permissions disqualify its key cannot supply the acknowledgement either — taking a waiver from
+a file we refuse to take a secret from would trust the one part of it we had already decided not to.
+
+**What was rejected, and why it is worth knowing it was considered.** Vertex via ADC carries the
+same data protection as a paid AI Studio key and is the only path on which no secret passes through
+our Python at all ([AG-11](#ag-11)). It was declined for phase 1 because it requires a
+billing-enabled GCP project and more setup for an identical result on the one axis that mattered
+here. If the data terms ever force an upgrade, ADC and a paid key become near-equivalent and the
+choice should be re-made on its merits rather than inherited from this decision.
+
+**What is *not* a reason to prefer any of these:** the owner's Google AI Pro subscription. It funds
+none of them — see [AG-2](#ag-2).

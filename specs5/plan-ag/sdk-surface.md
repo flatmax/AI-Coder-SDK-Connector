@@ -467,7 +467,9 @@ wall; `agy`'s flag surface, model list, NDJSON schema in both directions, and it
 omission of file content; the absence of USD cost, context-window read-back and OAuth in the SDK; the
 `trustedWorkspaces` diversion; `Agent.__aenter__`'s refusal to start without a policy; **that a
 `PreToolCallDecideHook` receives full edit content and that `allow=False` blocks the write**; **that
-denying only the file tools is routed around via `run_command`**.
+denying only the file tools is routed around via `run_command`**; **that `agy` and the SDK address
+different backends**; **that `localharness` resolves ADC itself**; **that a bare `LocalAgentConfig()`
+is not "auth-less"**; **that `Consultant.second_opinion` completes end-to-end on a free-tier key**.
 
 **Inferred:** that `localharness` and `agy` are separate programs — from the zero-match symbol probe
 and the size difference, which is strong but not proof.
@@ -495,6 +497,34 @@ wall is that AIC⚡DC has no supported way to *mint or refresh* an Antigravity O
 there is no way to present one. A user who already has a token-bearing proxy has a route this
 directory does not otherwise offer.
 
+**Sharpened 2026-08-31 — the wall is a backend boundary, and there is nothing behind it to present a
+token *to*.** The paragraph above is right that no OAuth field exists; what it does not say is that
+even a minted token would have no service to call. `agy` requests the scope
+`https://www.googleapis.com/auth/aicode` and calls **`cloudcode-pa.googleapis.com`** — the Code
+Assist backend, and the surface authorised to spend a consumer AI Pro/Ultra subscription's coding
+quota. Of the four wire endpoints, none addresses it: the Python SDK constructs `GeminiAPIEndpoint`
+and `VertexEndpoint` only (`models.py` defines no other `ModelEndpoint` subclass), `GemmaEndpoint`
+takes a bare `base_url`, and `CustomEndpoint{backend_type, config_json}` is unreachable from Python
+while the bundled Go client rejects unknown backends outright (`Unsupported backend: %v`). So the
+subscription is not merely unreadable — it is on the far side of a service boundary the SDK cannot
+cross. See [AG-2](decisions.md#ag-2).
+
+**Closed 2026-08-31: `localharness` resolves Application Default Credentials itself.** AG-11 flagged
+this as unverified and worth a probe before phase 3. `LocalAgentConfig(vertex=True, project=…,
+location=…)` with a nonexistent project clears Python validation, spawns the binary, and fails from
+Go with `failed to configure default GCP credentials for Vertex AI: failed to find default
+credentials` — that is `FindDefaultCredentials`, and `golang/oauth2/google`,
+`application_default_credentials.json` and `GOOGLE_APPLICATION_CREDENTIALS` are all in the binary's
+strings. Vertex standard mode is therefore a real OAuth path, and the only one on which no secret
+passes through AIC⚡DC's Python at all. It authenticates identity and not entitlement: the bill lands
+on the named project regardless of which account performed the login.
+
+**Measured while closing the above: a bare `LocalAgentConfig()` is not "auth-less".** It builds a
+`GeminiAPIEndpoint`, whose validator raises `AntigravityValidationError: A Gemini API key is
+required` from `local_connection.py:1241` — *before* the 119 MB binary is spawned, and regardless of
+any `agy` login on the machine. Recorded because the opposite is a plausible and widely repeated
+reading of "the SDK uses your local credentials", and it is falsifiable in under a minute.
+
 **Correction to phase 0's reading of the policy default.** `LocalAgentConfig` does not default
 `policies` to empty. It defaults to `policy.confirm_run_command()` — deny `run_command`, **approve
 everything else** — so a config that simply omits `policies` is running blanket approval for every
@@ -504,8 +534,7 @@ default guarantees there is always a policy. See [AG-5](decisions.md#ag-5).
 
 **Could not determine:** whether `agy` has any supported programmatic contract or is best-effort —
 the docs make **no stability or compatibility commitment** for `stream-json`, on a release cadence of
-roughly one per day; the stability of `Step` across 0.1.x; whether `localharness` can be pointed at
-OAuth credentials by a path not exposed through the Python SDK; whether the SDK's `workspaces` is
+roughly one per day; the stability of `Step` across 0.1.x; whether the SDK's `workspaces` is
 subject to the CLI's `trustedWorkspaces` list; **whether a host driving `agy` as a subprocess breaches
 Antigravity's terms** — the clause *"Using third party software, tools, or services to access the
 Service … is a breach of this Agreement"* is broad, and asking `agy` itself produced an explicit

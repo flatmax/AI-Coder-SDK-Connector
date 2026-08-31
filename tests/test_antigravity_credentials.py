@@ -440,3 +440,106 @@ class TestCredentialsValue:
     def test_unknown_mode_yields_no_kwargs(self):
         """Defensive: an unrecognised mode must not build a broken config."""
         assert Credentials(mode="something-new", source="?").config_kwargs() == {}
+
+
+def data_terms(result):
+    """The AG-12 warning, or None. Matched on a phrase no other carries."""
+    return next((w for w in result.warnings if "billing tier" in w), None)
+
+
+class TestFreeTierDataTerms:
+    """AG-12: the free tier trains on what it is sent, and we cannot detect it.
+
+    The tier is a property of the key's Cloud project and is only readable
+    over the network, which this module does not do. So the contract under
+    test is not "warn about free-tier keys" — that would be the guess
+    AG-R-8 records the Claude side getting wrong — but *state the
+    condition, and let the user close it*.
+    """
+
+    def test_an_unacknowledged_key_carries_the_warning(self, bare_home):
+        assert data_terms(resolve({API_KEY_VAR: KEY}, home=bare_home)) is not None
+
+    def test_the_warning_states_the_condition_rather_than_asserting_a_tier(
+        self, bare_home
+    ):
+        """It must not claim to know something it did not look at."""
+        warning = data_terms(resolve({API_KEY_VAR: KEY}, home=bare_home))
+        assert "cannot tell" in warning
+        assert "If the key's project has no billing account" in warning
+
+    def test_the_warning_names_the_file_that_closes_it(self, bare_home):
+        """Where to put the acknowledgement is the next question asked."""
+        warning = data_terms(resolve({API_KEY_VAR: KEY}, home=bare_home))
+        assert str(creds.key_file({}, bare_home)) in warning
+        assert f"{creds.BILLING_DIRECTIVE}={creds.BILLING_ENABLED_VALUES[0]}" in warning
+
+    def test_the_directive_silences_it(self, bare_home):
+        stored(bare_home, f"{KEY}\n{creds.BILLING_DIRECTIVE}=enabled")
+        result = resolve({}, home=bare_home)
+        assert data_terms(result) is None
+        assert result.api_key == KEY
+
+    def test_the_directive_is_never_mistaken_for_a_key(self, bare_home):
+        """The regression that would leak a directive into the SDK as a key.
+
+        ``_scan`` returns the first bare line, so a directive written
+        without ``=`` would be read as the credential. The grammar is
+        chosen to make that impossible; this pins it.
+        """
+        stored(bare_home, f"{creds.BILLING_DIRECTIVE}=enabled\n{KEY}")
+        assert resolve({}, home=bare_home).api_key == KEY
+
+    def test_the_directive_alone_is_not_a_credential(self, bare_home):
+        stored(bare_home, f"{creds.BILLING_DIRECTIVE}=enabled")
+        result = resolve({}, home=bare_home)
+        assert result.mode == NONE
+
+    def test_an_unrecognised_value_is_not_an_acknowledgement(self, bare_home):
+        stored(bare_home, f"{KEY}\n{creds.BILLING_DIRECTIVE}=probably")
+        assert data_terms(resolve({}, home=bare_home)) is not None
+
+    def test_the_acknowledgement_survives_the_environment_winning(self, bare_home):
+        """It is a statement about the account, not about today's launch."""
+        stored(bare_home, f"{KEY}\n{creds.BILLING_DIRECTIVE}=enabled")
+        result = resolve({API_KEY_VAR: "from-env"}, home=bare_home)
+        assert result.api_key == "from-env"
+        assert data_terms(result) is None
+
+    def test_a_refused_file_cannot_acknowledge(self, bare_home):
+        """A file we will not take a key from is not one we take a waiver from."""
+        stored(bare_home, f"{KEY}\n{creds.BILLING_DIRECTIVE}=enabled", mode=0o644)
+        assert data_terms(resolve({API_KEY_VAR: "from-env"}, home=bare_home))
+
+    def test_the_dotenv_can_acknowledge_too(self, bare_home):
+        dotenv(bare_home, f"{API_KEY_VAR}={KEY}\n{creds.BILLING_DIRECTIVE}=enabled\n")
+        assert data_terms(resolve({}, home=bare_home)) is None
+
+    def test_the_argument_overrides_the_lookup_in_both_directions(self, bare_home):
+        stored(bare_home, KEY)
+        assert data_terms(resolve({}, home=bare_home, billing_enabled=True)) is None
+        stored(bare_home, f"{KEY}\n{creds.BILLING_DIRECTIVE}=enabled")
+        assert data_terms(resolve({}, home=bare_home, billing_enabled=False))
+
+    def test_vertex_standard_mode_never_carries_it(self, bare_home):
+        """Both Vertex modes are paid surfaces, so the condition cannot hold."""
+        env = {
+            VERTEX_FLAG_VARS[0]: "true",
+            PROJECT_VAR: "a-project",
+            LOCATION_VAR: "us-central1",
+        }
+        assert data_terms(resolve(env, home=bare_home)) is None
+
+    def test_vertex_express_mode_never_carries_it(self, bare_home):
+        env = {VERTEX_FLAG_VARS[0]: "true", API_KEY_VAR: KEY}
+        result = resolve(env, home=bare_home)
+        assert result.mode == VERTEX
+        assert data_terms(result) is None
+
+    def test_no_credential_does_not_warn_about_one(self, bare_home):
+        """The warning is about a key in use, not about the absence of one."""
+        assert data_terms(resolve({}, home=bare_home)) is None
+
+    def test_the_warning_carries_no_secret(self, bare_home):
+        warning = data_terms(resolve({API_KEY_VAR: KEY}, home=bare_home))
+        assert KEY not in warning

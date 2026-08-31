@@ -22,7 +22,7 @@ This directory. No code changes; `src/` and `webapp/` are untouched.
 |---|---|
 | `README.md` | Purpose, phases, ordering constraints, reading order |
 | `sdk-surface.md` | Both Antigravity products read first-hand, with raw protocol captures |
-| `decisions.md` | `AG-1` … `AG-10` |
+| `decisions.md` | `AG-1` … `AG-12` |
 | `risks.md` | `AG-R-1` … `AG-R-10`, each with a tripwire |
 | `delivery.md` | This file |
 
