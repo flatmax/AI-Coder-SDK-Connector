@@ -178,6 +178,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **4. Chat on the second engine** ◑ | The chat panel renders the Antigravity stream — text, thinking, tool cards, results. The permission dialog lands against the phase-2 mechanism. | A user holds a full working conversation, including edits, entirely through Antigravity, with every write approved through the dialog. **The gate and the adapter both landed (2026-09-01):** `permissions.py` drives the *shared* `PermissionBroker` — one ask path, one queue, one localhost rule across both engines — and `service.py` implements the 31 methods the router mounts, sharing the symbol index, `ReviewMode` and `commit.py` rather than copying them. Still missing: nothing constructs it (no per-session engine choice), and no live turn has run through it. |
 | **5. History and sessions** | Resume by `conversation_id`; a repo-local mirror rebuilt as a step observer rather than as a store implementation, since there is no `SessionStore` protocol to implement. | Restarting the server resumes the previous Antigravity conversation with context intact, and the history browser renders it. |
 | **6. Capability descriptor** ◑ | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). **The data landed early (2026-09-01)** — `src/aic_dc/capabilities.py`, 13 surfaces, distinguishing `absent` (no source data, ever) from `unbuilt` (a to-do). Nothing reads it yet: the router must publish it and the panels must hide on it. |
+| **6b. The consultation as an agent tab** | [AG-13](decisions.md#ag-13). The consultant streams `Conversation.receive_steps()` through the existing `StepTranslator`, tagging every event with a minted consultation id, and emits `subagentEvent` so the tab strip picks it up. Stop wired to `Conversation.cancel()`. Cost hidden via the descriptor. | A `second_opinion` call from a Claude turn opens its own tab, fills with thinking and text as Google produces them, can be stopped mid-flight, and shows tokens with no USD figure. **No webapp change** — if one is needed, the id contract has been got wrong. |
 | **7. Packaging** | `google-antigravity` as an optional extra, not a base dependency — a second bundled binary on top of the ~295 MB CLI ([AG-R-10](risks.md#ag-r-10)). | A base install is a one-engine install with no broken UI, and its size has not moved. |
 
 ## Ordering constraints that are not obvious
@@ -193,6 +194,12 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
   the second-engine decision is committed to, and it forces the credential question to be answered
   with a real bill. What survives into phase 3 is narrow and known: config construction, credential
   resolution, the probe. [AG-R-9](risks.md#ag-r-9) is the boundary it must not cross.
+- **Phase 6b after the descriptor, not before it.** The consultation tab is the descriptor's first
+  real consumer: it must hide its cost panel because [AG-6](decisions.md#ag-6) says this engine
+  reports no USD, and doing that by an engine-name check in the webapp is precisely what
+  [AG-R-4](risks.md#ag-r-4) forbids. Built before the descriptor was readable from the browser, it
+  would have grown exactly that branch.
+
 - **The capability descriptor late, but specified early.** It cannot be built until there are two
   engines to describe, but every phase from 3 onward must record which surfaces it could not serve —
   otherwise phase 6 is an archaeology exercise. **Discharged on 2026-09-01**, immediately after

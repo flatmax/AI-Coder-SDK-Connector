@@ -273,6 +273,36 @@ naming: config construction, credential resolution, and the probe.
 **Tripwire:** `receive_steps`, `cancel`, `conversation_id` or a hook registration appearing in the
 consultant module. Any of them means the boundary has moved.
 
+### Amended 2026-09-01 — the boundary is redrawn, not crossed
+
+[AG-13](decisions.md#ag-13) makes the consultant stream, which the mitigation above forbids. That is
+a deliberate reversal and it needs the reasoning restated, because "the risk register said no and we
+did it anyway" is exactly how a register stops being read.
+
+**The risk was never "the consultant streams".** It was the consultant *inventing* session machinery
+**ahead of** the engine, and the engine then inheriting a shape built for one turn with no resume, no
+permissions and no history. The danger was entirely in the **direction of dependency**: a phase-1
+convenience wrapper growing into the thing phase 3 was supposed to design properly.
+
+Phase 3 has since designed it properly. `AntigravitySession`, `StepTranslator` and the permission
+gate exist, are tested offline, and were written against `Conversation` directly exactly as this
+entry demanded. The consultant now **consumes** them. Nothing about the engine's shape is being
+decided by the consultant's needs, because the engine's shape was already decided — which is the
+condition this risk was protecting, and it has been met rather than waived.
+
+**The new tripwire, replacing the old one:** a *second implementation* of session machinery in
+`consultant.py` or `bridge.py` — its own step loop, its own event vocabulary, its own translator, its
+own permission handling. Importing and calling `StepTranslator` is reuse and is the point; writing a
+second one beside it means the boundary has moved after all.
+
+The old tripwire is kept as a test in `tests/test_antigravity_consultant.py`, narrowed to the names
+that still stand for re-implementation rather than for use. **`cancel` is now expected** — AG-13's
+tab offers ⏹ Stop, and `Conversation.cancel()` is what makes it real rather than decorative.
+
+**What is still forbidden, and is the part of AG-7 that does not change:** the consultant does not
+grow resume, history, a session store, or a master's RPC surface. It is one question and one answer,
+streamed. A consultation that could be resumed is a session, and a session belongs to the engine.
+
 ---
 
 ## AG-R-10 — A second bundled binary

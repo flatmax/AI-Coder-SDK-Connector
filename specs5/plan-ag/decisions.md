@@ -258,6 +258,14 @@ It stays a one-shot `async with Agent(...)` call. Streaming, resume and permissi
 the engine phase, and adding them here would produce an adapter designed around the consultant's
 needs. See [`risks.md` AG-R-9](risks.md#ag-r-9).
 
+**Amended by [AG-13](#ag-13), 2026-09-01: the consultation streams.** The paragraph above holds for
+everything except streaming, and only because the condition it was protecting has since been met.
+The engine phase is done — `AntigravitySession` and `StepTranslator` exist and were written against
+`Conversation` directly — so the consultant now *consumes* that machinery instead of pre-empting it.
+The direction of dependency is the whole of the difference; [AG-R-9](risks.md#ag-r-9) carries the
+argument and the redrawn tripwire. **Resume, history and a session store remain forbidden here**: a
+consultation that could be resumed is a session, and a session belongs to the engine.
+
 ---
 
 ## AG-8 — The surface probe is built in phase 1, not later
@@ -430,3 +438,76 @@ choice should be re-made on its merits rather than inherited from this decision.
 
 **What is *not* a reason to prefer any of these:** the owner's Google AI Pro subscription. It funds
 none of them — see [AG-2](#ag-2).
+
+---
+
+## AG-13 — A consultation is a subagent, and it gets a tab **(user)**
+
+An Antigravity consultation started from a Claude turn renders as its **own agent tab**, streaming
+live, using the subagent machinery that already exists — not as a single tool card that sits there
+until the answer arrives.
+
+**Why it matters:** a consultation is a second agent doing minutes of work inside a turn the user is
+also reading, which is the *exact* situation `specs5/5-webapp/subagent-browser.md` was written for.
+Today it renders as one `mcp__aic-dc-antigravity__second_opinion` card with the answer as its tool
+result, so a 30-second call is 30 seconds of a spinner with nothing to read and no way to tell a slow
+model from a hung one. The information exists — Antigravity streams thinking and text deltas — and it
+is being thrown away at the bridge.
+
+**The webapp needs no changes, and that is the finding that makes this cheap.**
+`webapp/src/chat-panel/subagent-tabs.js` joins purely on identifiers: a `subagentEvent` carrying
+`tool_use_id`, and content blocks carrying `agent_id` equal to it. There is no `Task`-specific or
+Claude-specific gate anywhere in it; `subagent_type` is read only to label the tab. So a consultation
+that emits those two things gets a tab, a status LED and a mirrored row in Main for free.
+
+### The identity, and why it is minted rather than borrowed
+
+**An in-process MCP tool handler receives only its own `args` dict** — no `tool_use_id`, no context
+object (`claude_agent_sdk.tool`, verified 2026-09-01). So the consultation *cannot* learn the id of
+the tool card that invoked it.
+
+The consultation therefore **mints its own id** and emits its `subagentEvent` under that. The
+alternative — correlating against the most recent `mcp__aic-dc-antigravity__*` tool card in the pump
+— is a race for no gain, and the failure mode is attaching a consultation's output to the wrong card,
+which is worse than not attaching it at all.
+
+**The cost is real and accepted:** the row will not nest *inside* the tool card that spawned it, the
+way a `Task` subagent's does. It appears as its own row and its own tab. If the SDK ever passes a
+tool-use id to in-process handlers, this becomes a two-line change and the nesting comes back.
+
+### The contract, read off the webapp on 2026-09-01
+
+Written down because "no webapp change" is only true if the server gets these exactly right, and
+each was verified against the code rather than assumed:
+
+| Requirement | Where it is enforced |
+|---|---|
+| `subagentEvent` is **turn-scoped** and its request id must match the *live* Main tab | `onSubagentEvent` → `liveOwner(panel, requestId)`; a mismatch is silently dropped |
+| The event needs an identity — `task_id`, `agent_id` or `tool_use_id` | `streaming.js:599-601`, which falls back through all three |
+| Blocks carry `agent_id` **equal to that same id** | `subagent-tabs.js:204` — `row.tool_use_id` is what picks the blocks to mirror |
+| `terminal: true` on the last event, or the tab streams forever | `state.streaming = !row.terminal` |
+| `subagent_type` / `description` are **labels only** | `subagentTabLabel`; absent is fine, it falls back to the id |
+
+The consultation runs inside a live Claude turn, so the request-id requirement is satisfied by
+construction — but it is the one that fails silently if the bridge is ever called outside a turn.
+
+### What the tab may and may not offer
+
+- **Read-only, like every subagent tab.** There is no channel into a running consultation, so the
+  input surface is dropped. That is already the webapp's behaviour and needs nothing new.
+- **Stoppable.** `Conversation.cancel()` exists, so the ⏹ affordance is real rather than decorative.
+  It maps onto `stop_task`, which is why that method is in the `subagent_tabs` surface.
+- **No cost figure.** [AG-6](#ag-6) — Antigravity reports tokens and no USD, so the tab hides its
+  cost display rather than drawing a zero. This is the first real consumer of the capability
+  descriptor ([AG-3](#ag-3), [AG-9](#ag-9)), and it is a good one: the surface is genuinely absent
+  rather than merely unbuilt.
+
+### Consequence: the consultant streams, which AG-7 forbade
+
+This reverses part of [AG-7](#ag-7)'s "it stays a one-shot `async with Agent(...)`", and that
+reversal is deliberate rather than drift. See [AG-R-9](risks.md#ag-r-9), whose boundary is redrawn
+rather than crossed: the risk was the consultant *inventing* session machinery **ahead of** the
+engine and so shaping the engine around a one-shot call. Phase 3 has since built that machinery, and
+the consultant now **consumes** it — `Conversation.receive_steps()` through the existing
+`StepTranslator` — rather than growing its own. The direction of dependency is the whole difference,
+and the tripwire changes to match.
