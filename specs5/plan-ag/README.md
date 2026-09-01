@@ -150,7 +150,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **3. Engine spike** ◑ | `src/aic_dc/antigravity/{options,steps,session}.py` — session lifecycle, options assembly, and the `Step` → `Event` pump. **Not registered:** there is no engine registry to register with, and inventing one against no second caller is phase 4's problem. | `probe_session.py` sends a prompt and prints the streamed step taxonomy, failing if no tool call and result arrive. **Built and asserted, not yet run live (2026-09-01)** — the offline half is 94 tests and the three SDK facts the pump is built on were read off the wheel. Three findings in [`sdk-surface.md` § The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes); the write seam gained `start_subagent`. |
 | **4. Chat on the second engine** ◑ | The chat panel renders the Antigravity stream — text, thinking, tool cards, results. The permission dialog lands against the phase-2 mechanism. | A user holds a full working conversation, including edits, entirely through Antigravity, with every write approved through the dialog. **The gate landed (2026-09-01):** `permissions.py` drives the *shared* `PermissionBroker`, so there is one ask path, one queue and one localhost rule across both engines. Still missing: nothing constructs it (no engine router), and no live turn has driven a real dialog. |
 | **5. History and sessions** | Resume by `conversation_id`; a repo-local mirror rebuilt as a step observer rather than as a store implementation, since there is no `SessionStore` protocol to implement. | Restarting the server resumes the previous Antigravity conversation with context intact, and the history browser renders it. |
-| **6. Capability descriptor** | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). |
+| **6. Capability descriptor** ◑ | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). **The data landed early (2026-09-01)** — `src/aic_dc/capabilities.py`, 13 surfaces, distinguishing `absent` (no source data, ever) from `unbuilt` (a to-do). Nothing reads it yet: the router must publish it and the panels must hide on it. |
 | **7. Packaging** | `google-antigravity` as an optional extra, not a base dependency — a second bundled binary on top of the ~295 MB CLI ([AG-R-10](risks.md#ag-r-10)). | A base install is a one-engine install with no broken UI, and its size has not moved. |
 
 ## Ordering constraints that are not obvious
@@ -168,7 +168,9 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
   resolution, the probe. [AG-R-9](risks.md#ag-r-9) is the boundary it must not cross.
 - **The capability descriptor late, but specified early.** It cannot be built until there are two
   engines to describe, but every phase from 3 onward must record which surfaces it could not serve —
-  otherwise phase 6 is an archaeology exercise.
+  otherwise phase 6 is an archaeology exercise. **Discharged on 2026-09-01**, immediately after
+  phases 3 and 4 produced the list: `src/aic_dc/capabilities.py` holds it, and its `unbuilt` bucket
+  is the to-do list as data rather than as memory.
 
 ## Reading order for this directory
 

@@ -481,3 +481,76 @@ engine-name leak [AG-R-4](risks.md#ag-r-4) exists to prevent.
    re-index, both engine-agnostic jobs. Still pending in the probe.
 4. **No live turn has been run through the gate.** `probe_edit_args.py` measured the raw hook in
    phase 2; nothing has yet driven a real dialog from a real Antigravity turn.
+
+---
+
+## Phase 6 — Capability descriptor (data landed early, 2026-09-01)
+
+**Exit criterion:** *"No surface renders an empty or synthesised value for a fact its engine cannot
+report; no webapp branch keys off an engine name string."* Not met — nothing renders from it yet.
+What landed is the descriptor itself, ahead of its phase and deliberately.
+
+### Why it is here and not at the end
+
+The README's own ordering constraint asks for exactly this: *"The capability descriptor late, but
+specified early. It cannot be built until there are two engines to describe, but every phase from 3
+onward must record which surfaces it could not serve — otherwise phase 6 is an archaeology
+exercise."* There are now two engines to describe, and phases 3 and 4 have just finished producing
+the list of things the second one cannot do. Writing it down now is the difference between recording
+a decision and reconstructing one.
+
+| File | Role |
+|---|---|
+| `src/aic_dc/capabilities.py` | The descriptor. Thirteen surfaces, both engines, engine-agnostic module |
+| `tests/test_capabilities.py` | 23 tests, including one that reads `sdk-surface.md` as the source of truth |
+
+### The distinction the table is built around
+
+**`ABSENT` is not `UNBUILT`.** Both hide the surface and the browser cannot tell them apart — why
+there is no data is not the browser's business. The difference is for us:
+
+- `ABSENT` — no source data exists and none will. USD cost on Antigravity, because there is no dollar
+  figure anywhere on the SDK or on `agy`'s wire (AG-6). A decision.
+- `UNBUILT` — the data exists and nothing reads it. Antigravity's transcript history: `Step` carries
+  everything needed and no renderer has been written. A to-do.
+
+Collapsing them would have made the table cheaper to write and thrown away the only thing that makes
+phase 6 tractable. `unbuilt_surfaces()` is the resulting to-do list, and it is data rather than
+memory: `agent_questions`, `mcp_server_inventory`, `session_mirror`, `subagent_tabs`,
+`transcript_history`.
+
+### Two rules about what is *not* in the table
+
+- **A surface neither engine serves has no row.** AG-9: dead code should be deleted rather than
+  described. That cuts five real SDK capabilities — structured output, audio and video input, daemon
+  commands, `triggers`, multi-model routing — which have no AIC⚡DC surface at either end. A row for
+  them would make the table read as coverage of a UI that does not exist.
+- **A surface both engines serve has no row either.** An entry that is always `supported` is a
+  browser branch never taken, and a table of them rots unnoticed because nothing reads it. The one
+  exception is `amend_tool_input`, which earns its row by carrying an argument rather than a
+  decision: it is the capability AG-5 chose the raw hook over `policy.ask_user` to keep, and deleting
+  the row would delete the reason. A test pins the exception at exactly one.
+
+The permission dialog deliberately has **no** row, and a test asserts it never gains one: AG-5 makes
+it a requirement of the second engine rather than a feature of it, and a descriptor entry would imply
+an engine could ship without one.
+
+### An unanswered question is loud
+
+`supports()` raises `UnknownSurfaceError` on a key it does not know, rather than returning `False`.
+This is AG-9's own lesson one layer up: returning `False` for a typo hides a panel and looks exactly
+like a deliberate hiding. The near-miss is realistic — the real key is `context_window_usage` and
+`context_usage` is what the existing Claude method is called — so the test uses that one.
+
+### AG-R-4, enforced structurally
+
+The descriptor carries no engine identity: no `engine`, `name` or `adapter` field at any level, and
+both engines' payloads are asserted to have identical shape so a call site cannot be written against
+one of them. The check is on the *fields*, not on the prose — a first draft grepped the payload for
+the word "antigravity" and failed on its own explanatory notes, which is forbidding the documentation
+rather than the branch.
+
+### What phase 6 still has to do
+
+Nothing reads this yet. The router has to publish it, the Context tab and HUD have to hide on it, and
+`test_capabilities.py` should grow a webapp-side counterpart when there is one.
