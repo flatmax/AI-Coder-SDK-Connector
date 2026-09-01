@@ -365,6 +365,67 @@ intent: `sed -i 's/return a + b/return a + b + 1/'` on the first run and an inli
 `python3 -c "…content.replace(…)…"` on the second. Gating the file tools is not a containment
 boundary. `run_command` has to be gated on the same seam, and only once it was did the file survive.
 
+### The step stream — read in phase 3, and it is not shaped like Claude's
+
+Building the pump turned up three things that reading the type stubs did not, all of them read
+first-hand off `localharness_pb2.StepUpdate` and pinned by tests in `tests/test_antigravity_steps.py`.
+
+**1. A builtin tool's arguments and its result are the same sub-message.** This is the one that
+changes code. Claude sends a `tool_use` block and later a separate `tool_result` block carrying its
+own id. Antigravity sends the *same* typed sub-message twice — once at `StepStatus.ACTIVE` with the
+input fields populated, and again at `DONE` with the output fields filled in beside them — and
+`LocalConnectionStep.from_dict` copies the whole thing into `ToolCall.args` both times
+(`connections/local/event_processor.py:250-308`).
+
+| Tool | Input fields | Output fields, on the `DONE` frame |
+|---|---|---|
+| `run_command` | `command_line`, `working_dir` | `exit_code`, `combined_output` |
+| `list_directory` | `directory_path` | `results` |
+| `find_file` | `directory_path`, `query` | `output` |
+| `search_directory` | `directory_path`, `query` | `num_results` |
+| `read_url_content` | `url` | `title`, `summary`, `content_path` |
+| `search_web` | `query`, `domain` | `summary` |
+| `generate_image` | `prompt`, `image_name`, `aspect_ratio` | `image_paths`, `output_path` |
+| `view_file` | `file_path`, `start_line`, `end_line` | `content_offset` |
+| `create_file` | `file_path`, `contents` | — |
+| `edit_file` | `file_path`, `diff_block` | — |
+
+A pump that forwarded `args` as the tool input renders a card whose "input" grows a command's entire
+stdout when it completes, and emits no result at all. `steps.TOOL_RESULT_FIELDS` is the split, and
+`test_no_tool_sub_message_has_an_unclassified_field` fails on a release that adds a field to either
+side rather than letting it leak onto a card.
+
+**2. `view_file` does not carry the file, and the step stream is not the hook.** Its sub-message is
+`{file_path, start_line, end_line, content_offset}` — no content, which is the same gap that
+disqualified `agy` (AG-2), surviving into the SDK's own stream. It does **not** re-open that
+decision, and the reason is a distinction nothing before phase 3 had noticed: **the two paths have
+different shapes for the same call.**
+
+| | Step stream | Permission hook |
+|---|---|---|
+| Source | `StepUpdate.edit_file`, a typed proto sub-message | `PreToolArgs.arguments_json`, free-form JSON from Go |
+| `edit_file` carries | `file_path`, `diff_block` | `TargetFile`, `TargetContent`, `ReplacementContent`, `StartLine`, `EndLine`, `Instruction` |
+| Spelling | snake_case | CamelCase |
+
+So the diff the dialog renders comes from the hook, which phase 2 measured carrying old text, new
+text and a line range. Phase 4 must read it from there; nothing should be built as though the stream
+could serve it.
+
+**3. `BuiltinTools.nondestructive()` is not a write boundary.** It returns everything except
+`run_command` — it classifies `create_file`, `edit_file` and `generate_image` as nondestructive.
+That is defensible for *"will this hurt the machine"* and exactly backwards for *"will this change
+the working tree"*, which is the question the permission dialog exists to ask. An adapter that
+adopted it as its write seam would enable the two tools AG-5 was written for.
+`options.MUTATING_TOOLS` is therefore ours — `create_file`, `edit_file`, `run_command`,
+`generate_image`, `start_subagent` — and `test_the_sdk_calls_our_write_tools_nondestructive` pins the
+disagreement so a release that fixes the SDK's classifier is a red test rather than a silent
+ungating. `read_only()` *is* adopted, because the asymmetry is the safe one: a new read-only tool
+should arrive with an SDK bump, and a new write tool must not.
+
+`start_subagent` is in that set for a reason worth stating: a subagent inherits the tool set, so a
+gate that stopped at the top-level trajectory is bypassed by asking a child to do the write. It is
+the same shape of hole as AG-R-11's `run_command`, one level down.
+
 ### Usage and cost
 
 `UsageMetadata` (`types.py:700-771`) is tokens only:

@@ -88,19 +88,18 @@ HOOK_BASES = ("InspectHook", "DecideHook", "TransformHook")
 
 #: Config fields we will not set, each with a standing reason.
 #:
-#: Deliberately short. A refusal here is a claim that setting the field
-#: would be *wrong*, not that nobody has got to it — those live in
-#: :data:`PENDING_CONFIG` with an argument attached.
+#: **Moved to** :data:`aic_dc.antigravity.options.NEVER_SET` **in phase 3**,
+#: which is where it was always headed: the refusal now sits beside the
+#: code doing the refusing, the same ownership
+#: ``claude_code.options.NEVER_SET`` has.
 #:
-#: This table moves to ``options.py`` when phase 3 builds one, so the
-#: refusal sits beside the code doing the refusing; :func:`_declined_config`
-#: already prefers that module when it exists.
-NEVER_SET_CONFIG: dict[str, str] = {
-    "response_schema":"forces the model's output into a JSON schema. A "
-    "host-level feature for programmatic callers; AIC-DC renders prose and "
-    "tool calls to a human, and a turn that can only answer in a schema "
-    "cannot hold a conversation.",
-}
+#: This name is kept as the fallback :func:`_declined_config` reads when
+#: ``options`` cannot be imported, and only for that. It is deliberately
+#: *empty* rather than a stale copy — a duplicated table is the version
+#: that silently disagrees with the real one, and an empty fallback fails
+#: the ``unclassified`` gate loudly, which is the correct outcome if the
+#: options module ever stops importing.
+NEVER_SET_CONFIG: dict[str, str] = {}
 
 #: Config fields nobody has wired yet, each with what it would buy — so
 #: triage after an SDK bump starts from an argument rather than a name.
@@ -117,11 +116,6 @@ PENDING_CONFIG: dict[str, str] = {
     "debug_config": "the SDK's debug sink. logging_setup owns AIC-DC's "
     "logging; worth wiring once there is somewhere to route it, which is "
     "the analogue of the Claude engine's engine-errors.jsonl.",
-    "env": "environment for the spawned localharness process. Nothing "
-    "needs it until the binary needs a proxy or a non-default endpoint.",
-    "hooks": "where the AG-5 permission gate registers. Phase 4 sets it, "
-    "and the shape is already measured rather than assumed — see "
-    "sdk-surface.md § The permission gate.",
     "mcp_servers":"stdio and streamable-HTTP MCP servers. AG-4 routes "
     "AIC-DC's own indexes through `tools` as plain callables instead, so "
     "nothing needs this today; user-configured servers have no Antigravity "
@@ -146,9 +140,6 @@ PENDING_CONFIG: dict[str, str] = {
     "system_instructions": "SystemInstructions / TemplatedSystemInstructions "
     "— the analogue of the Claude system prompt, and where AIC-DC would "
     "tell the agent about its own tools.",
-    "tools": "plain Python callables, schema-derived from their signatures. "
-    "AG-4's route for the symbol and document indexes, and simpler here "
-    "than the Claude path: no server, no transport, no lifecycle.",
     "triggers": "out-of-band wakeups — `every`, `on_file_change`. Listed "
     "in sdk-surface.md § Antigravity capabilities with no home in the "
     "current UI; it needs a UI before it needs a config field.",
@@ -220,13 +211,6 @@ BUILTIN_TOOLS: dict[str, tuple[str, str]] = {
 #: The abstract bases in :data:`HOOK_BASES` are excluded: they are how the
 #: subclasses are found, not events in their own right.
 HOOK_CLASSES: dict[str, tuple[str, str]] = {
-    "PreToolCallDecideHook": (
-        PENDING,
-        "AG-5's permission seam, and the one hook that is a requirement "
-        "rather than a feature. Measured and passing: it receives the full "
-        "proposed edit and allow=False leaves the file byte-identical. "
-        "Phase 4 attaches the dialog to it",
-    ),
     "PostToolCallHook": (
         PENDING,
         "receives a ToolResult. The analogue of the Claude engine's "
@@ -284,55 +268,71 @@ HOOK_CLASSES: dict[str, tuple[str, str]] = {
 #: a 0.1.x release adding a step type is exactly the drift this file
 #: exists to catch, and it would otherwise arrive as a step the chat
 #: silently drops.
+#:
+#: **This section declares rather than derives, and the reason is worth
+#: knowing before trusting it.** :func:`referenced_enum_members` finds
+#: ``StepType.TOOL_CALL`` written as an attribute. The pump does not write
+#: it that way: ``steps.py`` compares on ``.name`` against string literals,
+#: because ``Step``'s enums are ``str``-valued and an alpha SDK that turned
+#: one into a plain string would otherwise mis-dispatch silently. That
+#: defensiveness is right and it costs the derived signal, so phase 3 set
+#: these rows by hand — with
+#: ``test_every_step_member_is_named_in_the_pump`` reading ``steps.py`` for
+#: each member's name as the cross-check the syntax tree cannot give.
+#:
+#: ``StopReason`` members stay pending: the pump forwards the reason
+#: verbatim onto ``streamComplete``, but nothing renders the difference
+#: between a budget cap and an ordinary stop yet, and that rendering is
+#: what these notes are arguing for.
 STEP_MEMBERS: dict[str, tuple[str, str]] = {
-    "StepType.TEXT_RESPONSE": (PENDING, "assistant prose; the chat's main body"),
-    "StepType.THINKING": (PENDING, "reasoning, with its own delta channel"),
-    "StepType.TOOL_CALL": (PENDING, "a tool card, and the permission gate's subject"),
-    "StepType.SYSTEM_MESSAGE": (PENDING, "a systemEvent in the transcript"),
-    "StepType.COMPACTION": (PENDING, "the compaction boundary, after the fact"),
-    "StepType.FINISH": (PENDING, "the loop's terminator; ends the turn"),
+    "StepType.TEXT_RESPONSE": (HANDLED, "assistant prose; the chat's main body"),
+    "StepType.THINKING": (HANDLED, "reasoning, with its own delta channel"),
+    "StepType.TOOL_CALL": (HANDLED, "a tool card, and the permission gate's subject"),
+    "StepType.SYSTEM_MESSAGE": (HANDLED, "a systemEvent in the transcript"),
+    "StepType.COMPACTION": (HANDLED, "the compaction boundary, after the fact"),
+    "StepType.FINISH": (HANDLED, "the loop's terminator; ends the turn"),
     "StepType.UNKNOWN": (
-        PENDING,
+        HANDLED,
         "the forward-compatibility escape hatch, and the most important "
         "member here: on an alpha SDK it is how a step type this wheel "
         "does not know arrives. It must render as an unknown card, never "
         "be dropped",
     ),
     "StepSource.MODEL": (
-        PENDING,
+        HANDLED,
         "the agent speaking; the only source whose text is the assistant's "
         "own prose rather than an echo or a harness notice",
     ),
-    "StepSource.USER": (PENDING, "our own prompt, echoed back into the stream"),
-    "StepSource.SYSTEM": (PENDING, "the harness speaking, not the model"),
-    "StepSource.UNKNOWN": (PENDING, "unrecognised source; render, do not drop"),
-    "StepTarget.USER": (PENDING, "addressed to the human — the chat renders it"),
+    "StepSource.USER": (HANDLED, "our own prompt, echoed back into the stream"),
+    "StepSource.SYSTEM": (HANDLED, "the harness speaking, not the model"),
+    "StepSource.UNKNOWN": (HANDLED, "unrecognised source; render, do not drop"),
+    "StepTarget.USER": (HANDLED, "addressed to the human — the chat renders it"),
     "StepTarget.ENVIRONMENT": (
-        PENDING,
+        HANDLED,
         "addressed to the tools rather than the reader. The distinction "
         "the transcript needs to avoid showing the user machine chatter",
     ),
-    "StepTarget.UNSPECIFIED": (PENDING, "no stated target; treat as user-facing"),
-    "StepTarget.UNKNOWN": (PENDING, "unrecognised target; render, do not drop"),
-    "StepStatus.ACTIVE": (PENDING, "in flight; the step is still streaming deltas"),
-    "StepStatus.DONE": (PENDING, "complete. Bounds a turn together with is_complete_response"),
+    "StepTarget.UNSPECIFIED": (HANDLED, "no stated target; treat as user-facing"),
+    "StepTarget.UNKNOWN": (HANDLED, "unrecognised target; render, do not drop"),
+    "StepStatus.ACTIVE": (HANDLED, "in flight; the step is still streaming deltas"),
+    "StepStatus.DONE": (HANDLED, "complete. Bounds a turn together with is_complete_response"),
     "StepStatus.WAITING_FOR_USER": (
-        PENDING,
+        HANDLED,
         "the agent is blocked on us — a permission decision or an "
         "ask_question. The state the UI must not render as a hang",
     ),
     "StepStatus.ERROR": (
-        PENDING,
+        HANDLED,
         "failed, with Step.error carrying why. The tool card renders that "
         "text; a pump that only checked DONE would show a silent stall",
     ),
     "StepStatus.CANCELED": (
-        PENDING,
+        HANDLED,
         "cancelled, including by our own mid-turn cancel. Worth naming "
         "because agy reports a *permission denial* this way with no error "
         "key at all, and the SDK must not be assumed to differ",
     ),
-    "StepStatus.UNKNOWN": (PENDING, "unrecognised status; render, do not drop"),
+    "StepStatus.UNKNOWN": (HANDLED, "unrecognised status; render, do not drop"),
     "StopReason.UNSPECIFIED": (
         PENDING,
         "the turn ended on its own terms, without a BudgetConfig cap firing "
@@ -457,12 +457,6 @@ CAPABILITY_FIELDS: dict[str, tuple[str, str]] = {
         PENDING,
         "bounds subagent recursion. Cheap insurance the day subagents are "
         "enabled, and meaningless before then — so it moves with them",
-    ),
-    "agent_behavior": (
-        PENDING,
-        "AUTONOMOUS or INTERACTIVE. AIC-DC is interactive by construction, "
-        "so this is a default worth pinning explicitly once the adapter "
-        "exists rather than inheriting",
     ),
     "run_command_config": (
         PENDING,

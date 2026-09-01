@@ -336,17 +336,24 @@ class TestCoverageIsDerived:
     somebody is busy building an engine.
     """
 
-    def test_phase_1s_coverage_is_exactly_what_phase_1_built(self):
+    def test_coverage_is_exactly_what_has_been_built(self):
         """AG-8: the gate fails on untriaged, never on unimplemented.
 
-        This assertion is *meant* to move, and has twice already. Writing
-        ``credentials.py`` turned four config rows handled;
+        This assertion is *meant* to move, and has three times now.
+        Writing ``credentials.py`` turned four config rows handled;
         ``consultant.py`` turned four more plus two policy builders and
-        ``enabled_tools``. Each time the gate named the newly-stale
-        arguments rather than leaving the report claiming nobody had got
-        to them. When phase 3 lands an options assembly and a step pump it
-        will fire again — a better record of the transition than a comment
-        claiming it happened.
+        ``enabled_tools``; phase 3's ``options.py`` added ``hooks`` and
+        ``tools`` and pinned ``agent_behavior``, and its ``steps.py``
+        turned the whole step taxonomy over. Each time the gate named the
+        newly-stale arguments rather than leaving the report claiming
+        nobody had got to them — a better record of each transition than a
+        comment claiming it happened.
+
+        The step rows are the one section that is *declared* rather than
+        derived, because the pump compares enum members on ``.name``
+        against string literals and the syntax tree cannot see that. Its
+        cross-check is
+        ``test_antigravity_steps.py::TestEveryStepMemberIsNamedInThePump``.
         """
         report = surface_report()
         handled = {
@@ -357,44 +364,85 @@ class TestCoverageIsDerived:
             if any(e["status"] == HANDLED for e in body["entries"])
         }
         assert handled == {
-            # credentials.py resolves these four; consultant.py passes the
-            # other four when it builds a one-shot LocalAgentConfig.
+            # credentials.py resolves four; consultant.py passes four more
+            # for a one-shot config; options.py adds `hooks` (where AG-5's
+            # gate attaches) and `tools` (AG-4's index callables).
             "config": [
                 "api_key",
                 "capabilities",
+                "hooks",
                 "location",
                 "model",
                 "policies",
                 "project",
+                "tools",
                 "vertex",
                 "workspaces",
             ],
-            # The minimal static allowlist, and nothing else.
+            # The minimal static allowlist, and nothing else. AG-5's gate
+            # is the raw decide hook, which is the row below.
             "policy": ["allow", "deny_all"],
-            "capabilities": ["enabled_tools"],
+            # permissions.py subclasses it in `as_hook`. The one hook that
+            # is a requirement rather than a feature.
+            "hooks": ["PreToolCallDecideHook"],
+            "capabilities": ["agent_behavior", "enabled_tools"],
+            # The whole step taxonomy, less StopReason — the pump forwards
+            # a stop reason verbatim but nothing renders the difference
+            # between a budget cap and an ordinary stop yet.
+            "steps": sorted(
+                name
+                for name, (status, _note) in surface.STEP_MEMBERS.items()
+                if status == HANDLED
+            ),
         }, (
-            f"Coverage has moved: {handled}. If that is phase 3 arriving, "
-            "update this and check the per-section assertions still say "
-            "what they should."
+            f"Coverage has moved: {handled}. If that is a later phase "
+            "arriving, update this and check the per-section assertions "
+            "still say what they should."
         )
-        for section in ("tools", "hooks", "steps"):
-            assert section not in handled, (
-                f"{section} reads as handled, but no engine exists yet — "
-                "there is no permission gate and no step pump to handle it."
-            )
+        assert "steps" in handled and not any(
+            name.startswith("StopReason.") for name in handled["steps"]
+        ), "a StopReason row reads as handled but nothing renders one yet"
+        assert "tools" not in handled, (
+            "the tools section reads as handled, but a tool is handled when "
+            "the chat card and the gate both know about it, and there is no "
+            "per-tool card table yet."
+        )
 
-    def test_the_consultant_passes_no_index_callables_yet(self):
-        """``tools`` is the AG-4 route, and the consultant does not use it.
+    def test_the_index_route_is_wired_and_the_mcp_one_is_not(self):
+        """AG-4: ``tools`` is the route in, and ``mcp_servers`` is not.
 
-        Worth pinning because the derived reader is deliberately generous:
-        it collects keyword names from *every* call, so an unrelated
-        ``tools=`` argument anywhere in the package would report AG-4's
-        route as built. The consultant's own parameter is named
-        ``builtin_tools`` for exactly this reason.
+        ``tools`` read as pending through phase 1 and turned handled when
+        ``options.py`` wired it. That the *reader* can tell the difference
+        is the thing worth pinning: it is deliberately scoped to the
+        config constructors, because an earlier draft collected keyword
+        names from every call in the package and reported AG-4's route as
+        built on the strength of ``bridge.py`` passing ``tools=`` to
+        *Claude's* ``create_sdk_mcp_server``. Two SDKs in one package
+        means a bare keyword is not evidence about either.
+
+        ``mcp_servers`` stays pending on its merits: Antigravity's MCP
+        support is stdio and streamable-HTTP only, and AG-4 routes the
+        indexes through callables instead precisely so nothing needs it.
         """
         by_name = {e["name"]: e["status"] for e in config_report()["entries"]}
-        assert by_name["tools"] == PENDING
+        assert by_name["tools"] == HANDLED
         assert by_name["mcp_servers"] == PENDING
+
+    def test_the_consultants_builtin_tools_do_not_read_as_the_config_field(self):
+        """The near-miss the scoping exists to prevent, still checked.
+
+        ``consultant.py``'s own parameter is named ``builtin_tools`` rather
+        than ``tools`` for this reason. If it is ever renamed, ``tools``
+        would read as handled from the consultant alone — true today by
+        accident rather than because AG-4's route was built.
+        """
+        from pathlib import Path
+
+        from aic_dc.antigravity import consultant
+
+        source = Path(consultant.__file__).read_text(encoding="utf-8")
+        assert "builtin_tools" in source
+        assert "\n        tools=" not in source
 
     def test_a_passed_keyword_reads_as_handled(self, monkeypatch):
         """A check that cannot fail is decoration.
@@ -419,13 +467,26 @@ class TestCoverageIsDerived:
         assert by_name["PostToolCallHook"] == PENDING, "one hook, not the section"
 
     def test_enum_coverage_does_not_leak_between_enums(self, monkeypatch):
-        """Reading ``StepSource.USER`` must not cover ``StepTarget.USER``."""
+        """Reading one enum's member must not cover another's namesake.
+
+        Phase 3 declared the ``Step*`` rows handled in the table, which
+        would make this pass for the wrong reason — the table, not the
+        reader. So it is asserted on ``StopReason``, the one step-section
+        enum still pending, against a ``StepStatus`` member spelled the
+        same way. Both are ``UNSPECIFIED``/``UNKNOWN``-adjacent names of
+        the kind a qualified reader is easiest to get wrong on.
+        """
         monkeypatch.setattr(
-            surface, "referenced_enum_members", lambda: frozenset({"StepSource.USER"})
+            surface,
+            "referenced_enum_members",
+            lambda: frozenset({"StopReason.UNSPECIFIED"}),
+        )
+        monkeypatch.setitem(
+            surface.STEP_MEMBERS, "StepStatus.UNSPECIFIED", (PENDING, "a fake row")
         )
         by_name = {e["name"]: e["status"] for e in step_report()["entries"]}
-        assert by_name["StepSource.USER"] == HANDLED
-        assert by_name["StepTarget.USER"] == PENDING
+        assert by_name["StopReason.UNSPECIFIED"] == HANDLED
+        assert by_name.get("StepStatus.UNSPECIFIED", PENDING) == PENDING
 
     def test_qualified_reads_match_either_import_style(self, monkeypatch, tmp_path):
         """``StepType.THINKING`` and ``types.StepType.THINKING`` both count.

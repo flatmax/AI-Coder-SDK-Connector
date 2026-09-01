@@ -257,3 +257,227 @@ message retries forever — which is why `_explain` distinguishes the two and sa
    the master engine's gate is still the raw `PreToolCallDecideHook`.
 4. **Do not extend the consultant.** `_chat` is one function on purpose. Phase 3 writes against
    `Conversation` directly.
+
+---
+
+## Phase 3 — Engine spike (2026-09-01)
+
+**Exit criterion:** *"A CLI-side smoke test sends a prompt and prints the streamed step taxonomy,
+including a tool call and its result."*
+
+**The code and the probe are built; the live run has not been made.** `probe_session.py` exists,
+asserts the criterion and is runnable, and it has not been pointed at the network — the owner has not
+yet decided whether to spend free-tier quota on it. Everything that does not need a key is done and
+measured: the pump's behaviour is pinned by 46 offline tests, and the three SDK facts it is built on
+were read off the wheel rather than inferred. Nothing here is blocked on the live run; it is the
+demonstration, not the evidence.
+
+### What landed
+
+| File | Role |
+|---|---|
+| `src/aic_dc/antigravity/options.py` | Config assembly and the AG-5 write seam. `NEVER_SET` moved here from `surface.py` |
+| `src/aic_dc/antigravity/steps.py` | The `Step` → `Event` pump. Emits only names the Claude pump emits |
+| `src/aic_dc/antigravity/session.py` | Lifecycle: `Agent` for the lifetime, `agent.conversation` for the turn |
+| `tests/test_antigravity_{options,steps,session}.py` | 94 tests, offline — no key, no harness, no network |
+| `specs5/plan-ag/probe_session.py` | The live spike. Read-only, costs money, not yet run |
+
+`sdk-surface.md` gained [§ The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes)
+with the three measurements below. `surface.py`'s tables moved where phase 3 made them stale.
+
+### The three findings the pump is shaped by
+
+All three came from reading `localharness_pb2.StepUpdate` while building, and none was visible in the
+type stubs the earlier phases read.
+
+1. **A builtin tool's arguments and its result are the same sub-message.** `run_command` goes out as
+   `{command_line, working_dir}` and comes back as the same dict with `exit_code` and
+   `combined_output` added; the SDK copies the whole thing into `ToolCall.args` on both frames. A
+   pump that forwarded `args` would render a card whose *input* grew a command's entire stdout on
+   completion and would never emit a result. `TOOL_RESULT_FIELDS` is the split, and a test checks it
+   against the proto field by field so a release that adds an output field goes red.
+2. **The step stream and the permission hook have different shapes for the same call.** The stream
+   carries the typed `{file_path, diff_block}`; the hook carries free-form JSON with `TargetContent`
+   and `ReplacementContent`, which is what phase 2 measured. `view_file` on the stream carries no
+   content at all. This does not re-open AG-2 — it says where phase 4 reads the diff from, and it is
+   not the stream.
+3. **`BuiltinTools.nondestructive()` is not a write boundary.** It excludes only `run_command`,
+   classifying `create_file`, `edit_file` and `generate_image` as nondestructive. An adapter adopting
+   it as its seam would enable exactly the tools AG-5 exists for. `MUTATING_TOOLS` is ours; the SDK's
+   `read_only()` *is* adopted, because a new read-only tool arriving free is safe and a new write
+   tool arriving free is not.
+
+### The posture, which is enforced rather than documented
+
+A session with **no decide hook enables no mutating tool at all** — not gated-then-denied, absent
+from `enabled_tools`. There is no flag that overrides it, because a flag is what somebody sets while
+debugging and forgets. Asking for a write tool without a hook is a `ValueError` at config assembly,
+ahead of the SDK's own refusal (`agent.py:93-103`), which fires on *policy absent* and would be
+satisfied by a stray `policy.allow_all()`.
+
+`start_subagent` joined the seam during the work: a subagent inherits the tool set, so a gate that
+stopped at the top-level trajectory is bypassed by asking a child to do the write. Same hole as
+AG-R-11's `run_command`, one level down, and it was not in any earlier phase's list.
+
+### Four bugs the gates caught
+
+Three of the four were caught by tests written in the same sitting as the code they broke, which is
+the argument for writing the gate first rather than the feature first.
+
+- **A read-only session raised instead of running.** `write_tools` defaulted to all of
+  `MUTATING_TOOLS` and *then* rejected the absence of a hook, so the ordinary phase-3 posture — no
+  hook, no writes — was a `ValueError`. The default is now "everything the hook can gate", which
+  with no hook is nothing.
+- **`StepSource.UNKNOWN` was being dropped.** The pump filtered on `source != "MODEL"`, which
+  discards an unrecognised source; `surface.STEP_MEMBERS` says *"render, do not drop"*, and on an
+  alpha SDK that member is how a source this wheel does not know arrives. Now `PROSE_SOURCES`
+  includes it, written as a positive set so every member is accounted for by name.
+- **Every turn would have ended with a card reading "finish".** `finish` is a real `BuiltinTool` and
+  arrives as a real tool call. It is the loop's terminator, not work the agent did, and it is now
+  suppressed.
+- **The vocabulary gate passed for the wrong reason at first.** Its first draft matched
+  `Event("name")` by regex against the Claude pump, which misses `streamChunk` and `thinkingChunk` —
+  that pump builds those two in a conditional and passes the result as a variable, so the two events
+  most likely to drift were the two the check could not see.
+
+### What was deliberately left out
+
+- **No RPC registration and no UI.** The phase says "registered but not wired"; on reading, there is
+  no engine registry to register *with* — `service.py` constructs the Claude session directly. Adding
+  one is phase 4's problem, when there is a second thing to route to, and inventing it here would be
+  a seam designed against no second caller.
+- **No permission hook.** Phase 4. `options.py` wires the `hooks` config field and the session takes
+  a `decide_hook`; what does not exist is an implementation.
+- **No resume, no mirror, no `conversation_id`.** Phase 5. The session deliberately does not read it,
+  so the field stays pending in the probe rather than reading as handled on the strength of a
+  property nobody calls.
+- **No `StopReason` rendering.** The pump forwards the reason verbatim onto `streamComplete` and
+  nothing renders the difference between a budget cap and an ordinary stop. Those rows stay pending
+  in `STEP_MEMBERS` for that reason.
+
+### A note on the drift gate
+
+The step section is the one place in `surface.py` that **declares** coverage rather than deriving it.
+`referenced_enum_members` finds `StepType.TOOL_CALL` written as an attribute, and the pump does not
+write it that way: it compares on `.name` against string literals, because `Step`'s enums are
+`str`-valued and a release turning one into a plain string would otherwise mis-dispatch silently.
+That defensiveness is right and it costs the derived signal, so the rows are set by hand with
+`test_every_step_member_is_named_in_the_pump` reading `steps.py` for each member's name as the
+cross-check the syntax tree cannot give. Worth knowing before trusting that section the way the other
+five can be trusted.
+
+### What phase 4 has to do first
+
+1. **Read the diff from the hook, not the stream.** Finding 2 above. The stream's `edit_file` carries
+   `diff_block` and no old text; the hook carries `TargetContent` + `ReplacementContent` + a line
+   range. A dialog built against the stream cannot render what phase 2 proved was available.
+2. **Decide where the engine seam lives.** There is no registry today. Whatever phase 4 builds is the
+   thing AG-3's capability descriptor hangs off in phase 6, so it is worth designing once rather than
+   growing.
+3. **Own "always allow" locally.** `updated_permissions` has no counterpart at any layer (AG-5). A
+   rule store consulted by the hook before it opens a dialog is AIC⚡DC's to build.
+4. **Fill in the `tools` section of the probe.** It is the one section still entirely pending, and it
+   becomes derivable the moment the gate has a per-tool table to read.
+
+### The live run, and what happens when the free tier says no
+
+`probe_session.py` is read-only by construction — no decide hook, so no mutating tool is enabled —
+which makes it safe to point at a real repository. It **does not retry**: the SDK's own
+`retry_config` already retries a 429 or a 503 invisibly (measured in phase 1), so a failure that
+reaches the probe has been retried through already, and a loop on top would burn the same quota to no
+effect. It distinguishes the two refusals instead, because Google's message does not: `limit: 0`
+means the plan's allowance is zero and no wait changes it, while a plain 429 means wait a minute. The
+free tier's 5 RPM against a turn that is many model calls makes the second outcome ordinary rather
+than exceptional.
+
+---
+
+## Phase 4 — Chat on the second engine (in progress, 2026-09-01)
+
+**Exit criterion:** *"A user holds a full working conversation, including edits, entirely through
+Antigravity, with every write approved through the dialog."* Not met — this entry records the first
+tranche, the permission gate, which is the half AG-5 calls non-negotiable.
+
+### What landed
+
+| File | Role |
+|---|---|
+| `src/aic_dc/antigravity/permissions.py` | The AG-5 gate. A `PreToolCallDecideHook` driving the **shared** `PermissionBroker` |
+| `tests/test_antigravity_permissions.py` | 32 tests, offline — no key, no harness, no network |
+
+### The design decision, which was the whole of the work
+
+**There is one ask path, and this module does not own it.** `permissions.md`'s three load-bearing
+properties — one ask path, every request resolves exactly once, localhost-only — are engine-agnostic,
+so the gate calls `PermissionBroker.can_use_tool`, the same method the Claude engine calls, and
+converts the answer. It owns no queue, no countdown, no presence check and no broadcast, and
+`test_this_module_owns_no_second_broker` reads its own source to keep it that way.
+
+A second broker would have been the easier thing to write and would have produced two places a
+request could be lost, two countdowns for one dialog to render, and two implementations of the
+localhost check that decides whether a remote collaborator can approve a write.
+
+Exactly two facts are per-engine, and they are why `_AntigravityBroker` overrides one method:
+
+- **Classification.** `classify_tool` knows Claude's names; asked about `edit_file` it returns its
+  most-cautious fallback, `exec` — right as a default, wrong as an answer, because the dialog would
+  show a shell-command card for a file edit and no diff at all.
+- **Argument spelling.** The hook's arguments arrive as CamelCase JSON from the Go side
+  (`TargetFile`, `TargetContent`, `ReplacementContent`) while the existing payload builders read
+  Claude's `file_path` / `old_string` / `new_string`. `normalise_args` is that translation, and it
+  **adds** aliases rather than substituting them, so the dialog still shows the engine's own words
+  beside the diff and a stale alias degrades to "no diff, full input shown" rather than to an empty
+  dialog.
+
+It is a *field* rename and not a *tool* rename: the payload keeps saying `edit_file`. Telling the
+user their agent called `Edit` would be a lie about which engine is running, and the kind of
+engine-name leak [AG-R-4](risks.md#ag-r-4) exists to prevent.
+
+### Three things the work turned up
+
+- **The gate has to subclass, and the package must not import the SDK at module scope.**
+  `HookRunner.register_hook` registers by `isinstance` and raises `ValueError` on anything else
+  (`hooks/hook_runner.py:148-153`), so the object handed to the config must be a real
+  `PreToolCallDecideHook`. Defining that subclass needs the SDK imported, which the package refuses
+  to do at import time (AG-R-10). Resolved with a factory: the logic lives in an SDK-free class and
+  `as_hook()` builds the subclass lazily, so every test runs offline and only registration needs a
+  wheel.
+- **"Always allow" is closed at the right end.** Antigravity has no `updated_permissions` at any
+  layer, so a rule cannot be persisted. Rather than accepting an always-allow and dropping the rule,
+  the payload offers **no** `suggested_rules` at all, so the broker's own normalisation has nothing
+  to bind one to and degrades it to allow-once, saying so. An offer the engine cannot keep is worse
+  than no offer, because the user believes they will not be asked again. A warning guards the path
+  that should now be unreachable.
+- **`start_subagent` would have been ungated.** Its natural class is `delegate`, matching Claude's
+  `Task`, and `GATED_BY_DEFAULT["delegate"]` is `False` — correct there, because the child's own
+  calls are gated individually as they happen. The flag is forced true for everything in
+  `MUTATING_TOOLS` anyway: the class shapes the dialog's *wording*, this decides whether a dialog can
+  be presented as routine, and the two must not be able to disagree. `ALWAYS_ASK` is
+  `options.MUTATING_TOOLS` itself rather than a copy, so the module that turns the tools on and the
+  module that gates them cannot drift.
+
+### A bug the tests caught, and one they caused
+
+- **The test helper hung the suite.** `PermissionBroker.resolve` is `async` and takes `resolved_by=`;
+  the first draft called it synchronously with `caller=`. Nothing resolved, and because a connected
+  localhost client means *no deadline* by design, the request waited forever rather than failing.
+  The helper now wraps the call in `asyncio.timeout` — the failure mode without one is a hang, which
+  is right in production and useless in a test.
+- **An assertion claimed the wrong mechanism.** The always-allow test asserted a warning fired, and
+  it did not: the degradation happens earlier and more robustly, in the broker, because no rule is
+  offered. The test now asserts the offer is absent, which is the property that makes the
+  degradation honest rather than a silent discard.
+
+### What is still missing before the exit criterion is met
+
+1. **Nothing constructs the gate.** It takes the same callbacks the Claude session gives its broker,
+   and no engine router exists to supply them. That is the next piece, and the architecture diagram
+   settles its shape: a router mounting both adapters under one RPC namespace with a capability
+   descriptor ([AG-3](decisions.md#ag-3), [AG-9](decisions.md#ag-9)).
+2. **The chat panel has not been pointed at the second taxonomy.** The pump emits only event names
+   the Claude pump already emits, so the browser needs no new handlers — but that claim is asserted
+   against the Claude pump's source, not against a rendered conversation.
+3. **`PostToolCallHook` is unwired.** It is the trigger for broadcasting a write and queueing the
+   re-index, both engine-agnostic jobs. Still pending in the probe.
+4. **No live turn has been run through the gate.** `probe_edit_args.py` measured the raw hook in
+   phase 2; nothing has yet driven a real dialog from a real Antigravity turn.

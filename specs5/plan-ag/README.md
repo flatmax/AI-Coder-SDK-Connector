@@ -1,6 +1,6 @@
 # Second Engine — Google Antigravity alongside Claude Code
 
-**Status:** Assessment complete and the permission gate passed; no engine code written. This
+**Status:** Phases 0–2 done; the consultant ships and the engine spike streams a turn. This
 directory is the plan of record for adding Google's Antigravity SDK as a second agent backend beside
 the existing Claude Code engine.
 
@@ -9,16 +9,25 @@ directory is a *different piece of work* and does not extend it: its decisions a
 are `AG-R-n`, and where it needs a fact about the existing engine it cites the code rather than
 restating that directory's reasoning.
 
-## Where we are (2026-08-30)
+## Where we are (2026-09-01)
 
-**Phases 0 and 2 are done; phase 1 has not started.** The surface of both Antigravity products was
-read first-hand — the installed `google-antigravity` 0.1.15 wheel, and the `agy` 1.1.22 binary — and
-live turns were run against both to measure what reflection could not see. **Phase 2 was taken out of
-order**, ahead of phase 1, because it was the gate everything else was contingent on and it turned out
-to be cheap. The results are in [`sdk-surface.md`](sdk-surface.md); the choices they force are in
-[`decisions.md`](decisions.md); what each phase actually did is in [`delivery.md`](delivery.md).
+**Phases 0, 1 and 2 are done; phase 3's code is built, and phase 4's permission gate has landed.
+Neither of the last two has been run against the network.** The
+surface of both Antigravity products was read first-hand — the installed `google-antigravity` 0.1.15
+wheel, and the `agy` 1.1.22 binary — and live turns were run against both to measure what reflection
+could not see. **Phase 2 was taken out of order**, ahead of phase 1, because it was the gate
+everything else was contingent on and it turned out to be cheap. The results are in
+[`sdk-surface.md`](sdk-surface.md); the choices they force are in [`decisions.md`](decisions.md);
+what each phase actually did is in [`delivery.md`](delivery.md).
 
-Five findings determine the shape of everything below.
+Two things are outstanding and neither is a code problem. **Image generation is unfunded** — every
+Gemini image model reports `limit: 0` on a free-tier key, so AG-1's worked example is behind a
+billing account on the key's Cloud project ([AG-12](decisions.md#ag-12)). And **phase 3's smoke test
+has not been run against the network**, because doing so spends free-tier quota that a rate limit
+makes non-trivial to spend well.
+
+Seven findings determine the shape of everything below. The first five are phases 0–2; the last two
+are what building the pump turned up.
 
 **There are two Antigravitys and they are not the same program.** The Python SDK bundles and spawns
 its own 119 MB Go binary; the `agy` CLI is a separate 208 MB product that shares no symbols with it.
@@ -61,6 +70,24 @@ Antigravity surface, and no context-window read-back at all. The turn footer, th
 Antigravity offers image generation, agent-initiated structured questions, audio and video input,
 daemon commands and out-of-band triggers, none of which has a home in the current UI.
 
+**A tool's arguments and its result are the same object, and the stream is not the hook.** Claude
+sends a `tool_use` block and later a separate `tool_result`. Antigravity sends the *same* typed
+sub-message twice — at `ACTIVE` with the inputs, at `DONE` with the outputs filled in beside them —
+so a pump that forwards `ToolCall.args` renders a card whose "input" grows a command's entire stdout
+on completion, and emits no result at all. Worse for phase 4: the step stream's `edit_file` carries
+`{file_path, diff_block}` while the *hook* carries `TargetContent` + `ReplacementContent` + a line
+range, and `view_file` on the stream carries no content at all. **The diff the dialog renders comes
+from the hook.** Details and the full field table in
+[`sdk-surface.md` § The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes).
+
+**The SDK's own `nondestructive()` is not a write boundary.** It excludes only `run_command`,
+classifying `create_file`, `edit_file` and `generate_image` as nondestructive — defensible for "will
+this hurt the machine", exactly backwards for "will this change the working tree". An adapter
+adopting it would enable the two tools AG-5 exists for. `options.MUTATING_TOOLS` is therefore ours,
+and it gained `start_subagent` during phase 3: a subagent inherits the tool set, so a gate that stops
+at the top-level trajectory is bypassed by asking a child to do the write. Same hole as AG-R-11's
+`run_command`, one level down.
+
 Read [`sdk-surface.md`](sdk-surface.md) before touching anything. Read
 [`decisions.md`](decisions.md) before reading the specs; they assume it.
 
@@ -84,6 +111,14 @@ Three reasons, in order of weight:
 1. **Disjoint capability.** Google offers image generation; Anthropic does not. That is not a
    preference between models, it is a thing one engine can do and the other cannot, and the
    consultant pattern makes it reachable without either engine giving up its own strengths.
+
+   **Specified and built, but unverified and currently unfunded.** `generate_image` is implemented
+   and tested offline; it has never returned an image, because every Gemini image model reports
+   `limit: 0` on the free-tier key. That is not a throttle — the plan's allowance is zero, and no
+   wait changes it. The fix is not a different key: the tier is a property of the key's Cloud
+   project, so enabling billing on that project moves the *same key* to a paid tier and nothing in
+   `credentials.py`, the resolution order or the key file moves ([AG-12](decisions.md#ag-12)). Until
+   that happens, the argument for a second engine rests on reasons 2 and 3, which are both delivered.
 2. **A second opinion is worth something.** Two independent agents disagreeing about a diff is
    information. One agent asked twice is not.
 3. **Not being one vendor deep.** The engine layer's whole design is that AIC⚡DC renders an agent
@@ -112,8 +147,8 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **0. Assessment** ✅ | This directory. Both surfaces read first-hand; three live `agy` turns. No code changes. | `sdk-surface.md` records the verified surface with file:line citations and raw captures; `decisions.md` records the choices it forces; unknowns are stated as unknowns. |
 | **1. Consultant and probe** ◑ | Antigravity as a one-shot tool under Claude Code — `generate_image` and `second_opinion`, on their **own** MCP server rather than the ungated `aic-dc` one ([AG-5](decisions.md#ag-5)). Credential resolution reporting its source, from the environment or the stored key file ([AG-11](decisions.md#ag-11)). `src/aic_dc/antigravity/surface.py` and its gate ([AG-8](decisions.md#ag-8)). | The agent generates an image from a Claude Code turn and it lands in the repo where the file tree and viewer find it. The probe's `unclassified` bucket is empty by declaration. A sentinel write lands at its expected absolute path ([AG-R-3](risks.md#ag-r-3)). **Two of three met (2026-08-31); the image is blocked on billing, not on code — every Gemini image model is `limit: 0` on a free-tier key, which is a known and accepted cost of [AG-12](decisions.md#ag-12) rather than an open defect. AG-R-3 settled: `workspaces` is honoured.** |
 | **2. Permission gate** ✅ | `probe_edit_args.py` — a `PreToolCallDecideHook` logging its `ToolCall` and denying. Run out of order, ahead of phase 1, because everything downstream is contingent on it. | **Met — go.** The hook carries full edit content and `allow=False` blocks the write. [AG-R-1](risks.md#ag-r-1) retired; [AG-R-11](risks.md#ag-r-11) raised. `trustedWorkspaces` remains unsettled and moves to phase 1. |
-| **3. Engine spike** | `src/aic_dc/antigravity/` — session lifecycle, options assembly, and the `Step` → `Event` pump. Registered but not wired to the UI. | A CLI-side smoke test sends a prompt and prints the streamed step taxonomy, including a tool call and its result. |
-| **4. Chat on the second engine** | The chat panel renders the Antigravity stream — text, thinking, tool cards, results. The permission dialog lands against the phase-2 mechanism. | A user holds a full working conversation, including edits, entirely through Antigravity, with every write approved through the dialog. |
+| **3. Engine spike** ◑ | `src/aic_dc/antigravity/{options,steps,session}.py` — session lifecycle, options assembly, and the `Step` → `Event` pump. **Not registered:** there is no engine registry to register with, and inventing one against no second caller is phase 4's problem. | `probe_session.py` sends a prompt and prints the streamed step taxonomy, failing if no tool call and result arrive. **Built and asserted, not yet run live (2026-09-01)** — the offline half is 94 tests and the three SDK facts the pump is built on were read off the wheel. Three findings in [`sdk-surface.md` § The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes); the write seam gained `start_subagent`. |
+| **4. Chat on the second engine** ◑ | The chat panel renders the Antigravity stream — text, thinking, tool cards, results. The permission dialog lands against the phase-2 mechanism. | A user holds a full working conversation, including edits, entirely through Antigravity, with every write approved through the dialog. **The gate landed (2026-09-01):** `permissions.py` drives the *shared* `PermissionBroker`, so there is one ask path, one queue and one localhost rule across both engines. Still missing: nothing constructs it (no engine router), and no live turn has driven a real dialog. |
 | **5. History and sessions** | Resume by `conversation_id`; a repo-local mirror rebuilt as a step observer rather than as a store implementation, since there is no `SessionStore` protocol to implement. | Restarting the server resumes the previous Antigravity conversation with context intact, and the history browser renders it. |
 | **6. Capability descriptor** | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). |
 | **7. Packaging** | `google-antigravity` as an optional extra, not a base dependency — a second bundled binary on top of the ~295 MB CLI ([AG-R-10](risks.md#ag-r-10)). | A base install is a one-engine install with no broken UI, and its size has not moved. |

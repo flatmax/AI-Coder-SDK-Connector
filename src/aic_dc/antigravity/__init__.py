@@ -32,6 +32,21 @@ Public surface:
 - :class:`ConsultantBridge` — those two as MCP tools for a Claude Code
   turn, under their **own** server name so they reach the permission
   dialog rather than inheriting the index tools' ungated allow.
+- :class:`AntigravitySession` — the phase-3 engine spike: one harness,
+  one conversation, and a turn pumped from ``receive_steps()``. Not
+  registered with the RPC service and not reachable from the webapp.
+- :class:`StepTranslator` — the ``Step`` → ``Event`` pump. Emits the
+  *same* event names as the Claude pump, because AG-3 puts both engines
+  under one RPC namespace and a second vocabulary would fork 43 methods
+  across 59 webapp files.
+- :mod:`~aic_dc.antigravity.options` — config assembly, and the write
+  seam. ``MUTATING_TOOLS`` is AG-5's boundary; a session with no decide
+  hook enables none of them.
+- :class:`AntigravityPermissionGate` — the AG-5 gate. A
+  ``PreToolCallDecideHook`` that drives the **shared**
+  ``PermissionBroker``, so there is one ask path, one queue and one
+  localhost rule across both engines. Pass its ``as_hook()`` to the
+  config, not the gate itself.
 
 Import design note: nothing here imports ``google.antigravity`` at module
 scope. The SDK spawns a bundled ~119 MB Go binary, and these modules must
@@ -54,6 +69,13 @@ from aic_dc.antigravity.credentials import (
     key_file,
 )
 from aic_dc.antigravity.credentials import resolve as resolve_credentials
+from aic_dc.antigravity.permissions import AntigravityPermissionGate
+from aic_dc.antigravity.session import (
+    AntigravitySession,
+    SessionNotStartedError,
+    TurnInProgressError,
+)
+from aic_dc.antigravity.steps import StepTranslator
 from aic_dc.antigravity.surface import (
     DECLINED,
     HANDLED,
@@ -66,12 +88,17 @@ __all__ = [
     "DECLINED",
     "HANDLED",
     "PENDING",
+    "AntigravityPermissionGate",
+    "AntigravitySession",
     "Consultant",
     "ConsultantBridge",
     "ConsultationError",
     "Credentials",
     "ImageResult",
     "MissingCredentialsError",
+    "SessionNotStartedError",
+    "StepTranslator",
+    "TurnInProgressError",
     "diff_agy_init",
     "key_file",
     "resolve_credentials",
