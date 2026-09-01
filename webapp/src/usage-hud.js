@@ -60,6 +60,12 @@ import { LitElement, css, html, nothing } from 'lit';
 import { RpcMixin } from './rpc-mixin.js';
 import { withRpcTimeout } from './rpc.js';
 import {
+  SURFACE,
+  loadCapabilities,
+  resetCapabilities,
+  supports,
+} from './engine-capabilities.js';
+import {
   bandColor as _contextColor,
   categoryColor,
   compactionLimit,
@@ -559,6 +565,21 @@ export class UsageHud extends RpcMixin(LitElement) {
       if (this._visible) this.setAttribute('visible', '');
       else this.removeAttribute('visible');
     }
+    if (changed.has('rpcConnected')) {
+      if (this.rpcConnected) {
+        // Read the descriptor once the socket is up. The re-render is
+        // needed because `supports()` is synchronous and answers "yes"
+        // until the real answer lands: a panel that should be hidden is
+        // briefly drawn, and nothing tells Lit that changed. Deliberate —
+        // see engine-capabilities.js for why the loading default is
+        // "supported" rather than "hidden".
+        loadCapabilities(this).then(() => this.requestUpdate());
+      } else {
+        // The engine behind a reconnect need not be the one that went
+        // away, and a stale descriptor hides the wrong panels.
+        resetCapabilities();
+      }
+    }
   }
 
   // ---------------------------------------------------------------
@@ -738,6 +759,15 @@ export class UsageHud extends RpcMixin(LitElement) {
     if (this._fetchInFlight) return;
     if (!this.rpcConnected) return;
     if (this._engineGone) return;
+    // AG-9: an engine that cannot report a context window gets no bar at
+    // all, rather than a 0% one. The difference is that a bar is a
+    // measurement and its absence is an absence, and a measurement is
+    // believed. Checked by capability, never by engine name (AG-R-4).
+    //
+    // This also stops a poll the server would refuse: the router raises
+    // `UnsupportedOnThisEngine` for a method whose surface is hidden, so
+    // without this the HUD would retry a guaranteed error every tick.
+    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
     this._fetchInFlight = true;
     try {
       // Bounded: a reply dropped by a reconnecting socket would
@@ -916,6 +946,14 @@ export class UsageHud extends RpcMixin(LitElement) {
   }
 
   _renderContext() {
+    // Ahead of everything, because "this engine has no such measurement"
+    // outranks any state of a measurement it does not take. AG-9: hidden,
+    // not drawn empty — `nothing` rather than a 0% bar or a "no data"
+    // note, because a placeholder where a bar used to be still reads as a
+    // reading. The section *header* goes with it too: `_section` is called
+    // at the end of this method, so returning early removes the collapsible
+    // head as well as its body, leaving no empty "Context" row behind.
+    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return nothing;
     // Ahead of both the error and the numbers, because it outranks them.
     // The last good breakdown would otherwise sit here looking current
     // while describing a window no engine holds any more — the same

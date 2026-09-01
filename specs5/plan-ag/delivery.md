@@ -874,3 +874,78 @@ Antigravity consultant mounted as aic-dc-antigravity
 cannot be, because every Gemini image model reports `limit: 0` on a free-tier key — the tool will
 mount, the agent can call it, and Google will refuse it with the message `_explain` turns into
 "retrying will not help; it needs a billing account" ([AG-12](decisions.md#ag-12)).
+
+---
+
+## Phase 6 — the webapp reads the descriptor (2026-09-01)
+
+The half phase 6 was missing: the data landed early, and nothing read it. Now something does, and
+[6b](README.md#phases) is unblocked.
+
+| File | Role |
+|---|---|
+| `webapp/src/engine-capabilities.js` | The browser-side store. Fetch once, answer `supports(key)` synchronously |
+| `webapp/src/engine-capabilities.test.js` | 17 tests |
+| `webapp/src/usage-hud.js` | First consumer: the Context section hides when the engine has no window |
+
+### The default before the answer arrives, which is the whole design
+
+`supports()` answers **true** while the descriptor is loading. That is chosen rather than fallen
+into, and it is the decision the rest of the module hangs off:
+
+- Answering `false` would hide every panel for the width of one RPC round trip **on the shipped
+  engine** — a visible regression in the common case, bought for tidiness in the rare one.
+- Answering `true` renders a panel that may then hide. Every reader already tolerates absent data,
+  because they were written for an engine that had not connected yet, so the cost is a panel that
+  empties rather than one that breaks.
+
+The same reasoning makes a failed fetch a no-op: the descriptor is *how a panel learns to hide*, so
+failing to read it must not hide anything. And it is safe in the direction that matters, because the
+router raises `UnsupportedOnThisEngine` rather than returning a plausible empty value — a fetch that
+slips through during load fails loudly instead of drawing a synthesised zero.
+
+An unknown key also reads as supported, which is the **opposite** of the server's rule and
+deliberately so. There, an unknown key is a programming error worth raising on. Here it is most
+likely a webapp built against a newer server, and hiding a panel over version skew is worse than
+showing one whose data may be empty.
+
+### AG-R-4, enforced by having nothing to branch on
+
+Surface keys are a frozen `SURFACE` constant rather than free strings, so a typo is a broken import
+at build time instead of a silently hidden panel at run time — a misspelled free string would read as
+"unknown key" and therefore as supported, which is the silent failure.
+
+The tests assert the payload carries no `engine`/`name`/`adapter` field at any level. The rule is
+only as good as the shape that enforces it, and the shape is checked.
+
+### The first consumer, and what "hidden" means in practice
+
+`usage-hud.js` returns `nothing` from `_renderContext()` when `context_window_usage` is unsupported —
+not a 0% bar, not a "no data" note. A placeholder where a bar used to be still reads as a reading,
+and a number on screen is believed. Because `_section()` is called at the *end* of that method, the
+collapsible **head** disappears with the body, so there is no empty "Context" row left behind. A test
+asserts exactly that, because it is the kind of thing an early return gets subtly wrong.
+
+It also stops the poll: without the guard the HUD would retry a method the router is guaranteed to
+refuse, once per tick.
+
+### Two tests that caught real drift
+
+- **`test_rpc_surface.py` failed the moment the browser called
+  `get_engine_capabilities`.** It audits browser call sites against the mounted server surface, and
+  it was still describing `ClaudeCodeService` — but `main.py` mounts the *router*. Fixed by reading
+  `ROUTER_OWNED`, so a method added to the router joins the audit in the same commit. The router's
+  *delegates* need nothing: they carry the adapter's names, which is what makes the wrapping
+  invisible to 43 existing call sites.
+- **`list_engines` had no caller**, and the same file refuses an RPC that is in neither table. It is
+  now `DORMANT` with the reason: AG-1's engine selector does not exist. Worth distinguishing from its
+  sibling — `get_engine_capabilities` is what a component asks to decide whether to render;
+  `list_engines` names the engine, which is the thing AG-R-4 forbids a render path from branching on.
+  Its only legitimate readers are a human-facing selector and diagnostics.
+
+### What phase 6 still has to do
+
+`usd_cost` and `account_rate_limits` have descriptor entries and no consumer yet — the turn footer,
+the session cost and the rate-limit panel still render unconditionally. They are the same shape of
+change as the Context section and were left out of this tranche deliberately, to keep the first
+consumer small enough to be obviously correct.
