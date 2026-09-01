@@ -805,7 +805,66 @@ class ClaudeCodeService:
                 "will fall back to Glob, Grep and Read, which answer "
                 "repo-wide questions less well."
             )
+        mcp_servers = self._add_consultant(mcp_servers)
         return hooks, mcp_servers
+
+    def _add_consultant(self, mcp_servers: Any) -> Any:
+        """Mount the Antigravity consultant beside the repo tools (AG-7).
+
+        This is the user story the second engine exists for and the first
+        one it delivers: Claude stays master, and can ask Google's model
+        for a second opinion or for an image — a capability Anthropic does
+        not offer — without either engine giving up its own strengths.
+
+        **Its own server name, and that is AG-5 rather than tidiness.**
+        ``permissions.can_use_tool`` early-returns an allow, with no dialog
+        and no broadcast, for anything matching ``mcp__aic-dc__*``, because
+        the index tools are read-only. ``generate_image`` writes a file and
+        ``second_opinion`` bills a separate provider, so mounting them
+        there would route a file write around the permission dialog
+        *silently* — the tool would work, the file would appear, and
+        nothing would look wrong. Under ``aic-dc-antigravity`` they reach
+        the dialog by the ordinary ``mcp`` classification.
+
+        **Absent when there is no credential, rather than present and
+        broken.** AG-R-8 makes a missing key the most likely first
+        experience of this engine, and two tools that always answer "no
+        credentials" cost context on every turn and buy nothing — AG-9's
+        "hidden rather than stubbed" applied to a tool definition. That is
+        also why this is not recorded as a degradation: an unconfigured
+        optional engine is not a fault in this one.
+        """
+        try:
+            from aic_dc.antigravity import Consultant, ConsultantBridge
+            from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
+
+            consultant = Consultant(self._repo_root)
+            bridge = ConsultantBridge(consultant)
+            if not bridge.available:
+                logger.info(
+                    "Antigravity consultant not mounted: no Gemini API key or "
+                    "Vertex project. Set one to offer second opinions and "
+                    "image generation from a Claude turn (AG-R-8)."
+                )
+                return mcp_servers
+            servers = dict(mcp_servers or {})
+            servers[AG_SERVER_NAME] = bridge.build_server()
+            logger.info(
+                "Antigravity consultant mounted as %s (credential from %s)",
+                AG_SERVER_NAME,
+                consultant.credentials.source,
+            )
+            return servers
+        except Exception as exc:
+            # Never fatal. The consultant is an addition to this engine,
+            # not a part of it, and a session that starts without it is
+            # strictly better than one that refuses to start with it.
+            logger.warning(
+                "The Antigravity consultant did not mount; this session has "
+                "no second opinion and no image generation: %s",
+                exc,
+            )
+            return mcp_servers
 
     def _live_symbol_index(self) -> Any:
         """The symbol index the bridge and the re-index should read.

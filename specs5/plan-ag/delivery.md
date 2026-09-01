@@ -807,3 +807,70 @@ a transport bug.
   gap rather than pretended away.
 - **`get_current_state` carries no cost key at all**, which is AG-6 working as intended and will look
   like a missing field until the webapp reads the descriptor.
+
+---
+
+## The consultant, wired (2026-09-01)
+
+Phase 1 built `ConsultantBridge` and ended with *"nothing constructs one in `service.py`"*. This is
+that line. It is one method, and it is the point at which the second engine becomes **usable rather
+than merely present**: with a Gemini key on the machine, a Claude turn can now call
+`second_opinion` and `generate_image`.
+
+That is AG-1's user story arriving in the order AG-7 chose for it — Claude stays master, and reaches
+Google's model for a capability Anthropic does not have, without either engine giving up its own
+strengths. It needs no engine selector, no per-session master choice and no UI work, which is exactly
+why phase 1 put it first.
+
+### Where it mounts, and why not one line earlier
+
+`ClaudeCodeService._add_consultant`, called from `_build_bridge_wiring` beside the index tools. It
+mounts under **`aic-dc-antigravity`**, not `aic-dc`, and that is AG-5 rather than tidiness:
+`permissions.can_use_tool` early-returns an allow — no dialog, no broadcast — for anything matching
+`mcp__aic-dc__*`, because the index tools are read-only. `generate_image` writes a file. Mounting it
+on the ungated server would have routed a file write around the permission dialog *silently*: the
+tool would work, the file would appear, and nothing would look wrong.
+
+`tests/test_consultant_wiring.py` asserts the name against `permissions.AIC_DC_MCP_SERVER` directly
+rather than against a literal, so a rename on either side fails there instead of quietly re-opening
+the hole. That check already existed for the bridge; the mount point is a second place to get it
+wrong, so it is made twice.
+
+### Absent, not broken, without a credential
+
+No Gemini key means the server is **not registered at all** — AG-9's "hidden rather than stubbed"
+applied to a tool definition, since two tools that always answer "no credentials" cost context on
+every turn and buy nothing. AG-R-8 makes that the most likely first experience of this engine, so it
+is the ordinary path rather than the edge case.
+
+It is deliberately **not** recorded in `_degradations`. That banner is for things *this* engine lost;
+listing a second engine nobody configured would make every default install look broken.
+
+A consultant that fails to construct for any other reason is caught and logged, never fatal: the
+consultant is an addition to this engine, not a part of it, and a session that starts without it is
+strictly better than one that refuses to start with it.
+
+### Two existing tests that had to change, and the reason is worth keeping
+
+`TestBridgeWiring` pinned `list(session._mcp_servers) == ["aic-dc"]`. Both it and its sibling started
+failing — **because this machine has a key**. That is a worse problem than the failure: those
+assertions had become dependent on whether the machine running the suite happened to have a Gemini
+credential, which is a test that passes or fails for reasons unrelated to the code.
+
+Fixed by pinning the consultant *off* for that class with a fixture, since those tests are about the
+index bridge. The consultant's own behaviour is covered in its own file, where the credential state
+is controlled rather than inherited.
+
+### Verified live
+
+A real `aic-dc --no-browser` startup logs:
+
+```
+Antigravity consultant mounted as aic-dc-antigravity
+(credential from Gemini API key from ~/.config/aic-dc/gemini-api-key)
+```
+
+`second_opinion` was verified end-to-end against a live key in phase 1. `generate_image` still
+cannot be, because every Gemini image model reports `limit: 0` on a free-tier key — the tool will
+mount, the agent can call it, and Google will refuse it with the message `_explain` turns into
+"retrying will not help; it needs a billing account" ([AG-12](decisions.md#ag-12)).

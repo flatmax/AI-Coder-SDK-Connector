@@ -2577,7 +2577,21 @@ class TestBridgeWiring:
     """
 
     @pytest.fixture
-    def wired(self, tmp_path, events):
+    def no_consultant(self, monkeypatch):
+        """Pin the Antigravity consultant off for this class.
+
+        These tests are about the *index* bridge. The consultant mounts
+        beside it when a Gemini credential exists (AG-7), which makes the
+        server list depend on whether the machine running the suite has
+        one — so it is disabled here rather than asserted around.
+        ``tests/test_consultant_wiring.py`` is what covers it.
+        """
+        monkeypatch.setattr(
+            ClaudeCodeService, "_add_consultant", lambda self, servers: servers
+        )
+
+    @pytest.fixture
+    def wired(self, tmp_path, events, no_consultant):
         """A service with its real session object, so the wiring is visible."""
         return ClaudeCodeService(
             FakeConfig(tmp_path), event_callback=events, engine_config=EngineConfig()
@@ -2601,7 +2615,7 @@ class TestBridgeWiring:
         assert wired.mcp_bridge._flush == wired.reindexer.flush
 
     def test_a_bridge_that_will_not_build_still_leaves_a_session(
-        self, tmp_path, events, monkeypatch, caplog
+        self, tmp_path, events, monkeypatch, caplog, no_consultant
     ):
         """Without the bridge the agent loses two tools and keeps every
         built-in; refusing to construct would trade that for a dead editor."""
