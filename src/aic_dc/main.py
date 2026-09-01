@@ -1069,10 +1069,32 @@ async def run(
             remote_timeout=120,
         )
 
+    # The engine router (AG-3). Both engines mount under one RPC
+    # namespace, so the browser's 43 call sites across 59 files do not
+    # fork; what tells the webapp which surfaces have data is the
+    # capability descriptor the router publishes, never the engine's
+    # name (AG-R-4).
+    #
+    # It routes to one engine today, because the Antigravity adapter
+    # does not implement this 48-method surface yet — it has a session,
+    # a step pump and a permission gate. What the router buys now is
+    # that the *seam exists* and the descriptor is reachable, and it is
+    # behaviour-preserving while it waits: it exposes exactly the
+    # method names the adapter exposes, generated from them rather than
+    # listed, and every call reaches the same object it reached before.
+    #
+    # `name=RPC_NAME` rather than the default class-name namespace,
+    # even though the generated class is *called* ClaudeCodeService: the
+    # namespace is what 59 webapp files assume, and it should be stated
+    # here rather than inherited from a name that could be refactored.
+    from aic_dc import capabilities
+    from aic_dc.engine_router import RPC_NAME, build_router
+    engine_router = build_router(claude_code_service, engine=capabilities.CLAUDE)
+
     server.add_service(repo)
     server.add_service(settings)
     server.add_service(doc_convert)
-    server.add_service(claude_code_service)
+    server.add_service(engine_router, name=RPC_NAME)
 
     # Wire the post-write callback — every successful file
     # write/create/rename on Repo triggers the doc builder's
@@ -1095,9 +1117,10 @@ async def run(
     # Wire the event callback now that the server is up.
     # It dispatches to AcApp.{event_name}(...) on all connected
     # browsers. jrpc-oo injects get_call() onto instances
-    # registered via add_class, so claude_code_service.get_call()
-    # is available after server.add_service(claude_code_service)
-    # above.
+    # registered via add_class, so the proxy lands on the **router**,
+    # which is the object that was registered — not on the service
+    # behind it. Reading it off the service would find nothing and
+    # every server-push event would be dropped with a warning.
     def _make_real_callback() -> Any:
         async def _cb(event_name: str, *args: Any) -> None:
             # Try both get_call() (method form) and .call
@@ -1105,9 +1128,9 @@ async def run(
             # varies by version.
             call = None
             try:
-                call = claude_code_service.get_call()
+                call = engine_router.get_call()
             except AttributeError:
-                call = getattr(claude_code_service, "call", None)
+                call = getattr(engine_router, "call", None)
             if call is None:
                 logger.warning(
                     "Event callback: no call proxy available for %s",
@@ -1139,14 +1162,14 @@ async def run(
     event_callback_ref[0] = _make_real_callback()
     logger.info(
         "Event callback wired (service=%s)",
-        type(claude_code_service).__name__,
+        type(engine_router).__name__,
     )
     # Log what jrpc-oo has injected so we can diagnose which
     # form of the call proxy is available.
     logger.info(
-        "claude_code_service attributes: get_call=%s call=%s",
-        hasattr(claude_code_service, "get_call"),
-        hasattr(claude_code_service, "call"),
+        "engine_router attributes: get_call=%s call=%s",
+        hasattr(engine_router, "get_call"),
+        hasattr(engine_router, "call"),
     )
 
     # Step 7: Open browser

@@ -11,8 +11,9 @@ restating that directory's reasoning.
 
 ## Where we are (2026-09-01)
 
-**Phases 0, 1 and 2 are done; phase 3's code is built, and phase 4's permission gate has landed.
-Neither of the last two has been run against the network.** The
+**Phases 0, 1 and 2 are done; phase 3's code is built, phase 4's permission gate has landed, and the
+engine router is wired into startup.** Neither the engine spike nor the gate has been run against the
+network. The
 surface of both Antigravity products was read first-hand — the installed `google-antigravity` 0.1.15
 wheel, and the `agy` 1.1.22 binary — and live turns were run against both to measure what reflection
 could not see. **Phase 2 was taken out of order**, ahead of phase 1, because it was the gate
@@ -46,6 +47,16 @@ can be rendered from it. (Re-measured at 1.1.22, this is narrower than first rec
 *results* are present in `tool_info.output`; only file content is missing. The correction is marked
 in `sdk-surface.md`. It does not change the decision: the diff is the product, and the diff is what
 is absent.)
+
+**The seam is a router, and it mounts under the existing namespace.**
+`src/aic_dc/engine_router.py` is registered in place of `ClaudeCodeService` as of 2026-09-01, under
+the *same* RPC name, with its 48 delegating methods **generated** from the adapter's rather than
+hand-written — jrpc-oo reads a service's method list off the class, so a `__getattr__` forwarder
+would have exposed nothing at all, and a hand-written list drifts silently into methods that work in
+Python and 404 on the wire. It routes to one engine today and says so through `list_engines`. The
+change it nearly shipped with is recorded in [`delivery.md`](delivery.md): jrpc-oo injects the
+server-push call proxy onto the *registered* instance, so reading it off the service behind the
+router would have dropped every streamed chunk and every permission dialog behind one warning.
 
 **The Python SDK's core is a genuinely good fit** — better than expected. Streaming deltas, mid-turn
 cancel, resume by `conversation_id`, an async permission hook that receives the full tool call,

@@ -552,5 +552,94 @@ rather than the branch.
 
 ### What phase 6 still has to do
 
-Nothing reads this yet. The router has to publish it, the Context tab and HUD have to hide on it, and
+The router publishes it as of the entry below. The Context tab and HUD have to hide on it, and
 `test_capabilities.py` should grow a webapp-side counterpart when there is one.
+
+---
+
+## The engine router (2026-09-01)
+
+Not a numbered phase. [AG-3](decisions.md#ag-3)'s seam, which phases 3 and 4 both ended by naming as
+the thing they were blocked on: the permission gate had nothing to construct it and the capability
+descriptor had nobody to publish it.
+
+| File | Role |
+|---|---|
+| `src/aic_dc/engine_router.py` | The router. Generates its delegates; owns the descriptor |
+| `tests/test_engine_router.py` | 22 tests, including registration against the real `RpcServer` |
+| `src/aic_dc/main.py` | Registers the router instead of the service, and reads the call proxy off it |
+
+### The method list is generated, and that is not a flourish
+
+jrpc-oo finds a service's methods with `inspect.getmembers(cls, predicate=inspect.isfunction)` on the
+**class** (`jrpc_oo/ExposeClass.py:37-41`). A `__getattr__` that forwarded everything would therefore
+expose *nothing*: the handshake sends a method list, and a name that is not on the class is not in
+it. That ruled out the obvious implementation before it was written.
+
+The alternative to generation is 48 hand-written delegates, and its failure mode is specific: a
+method added to the adapter and forgotten here **works in Python and 404s over RPC**, so nothing
+catches it until somebody clicks the button. Generating them from `_public_methods(master)` — the
+same call jrpc-oo makes, deliberately, rather than a `dir()` filter that happens to agree today —
+makes the router's surface unable to drift from the adapter's.
+
+Two details that are load-bearing rather than tidy:
+
+- **Async and sync delegates are generated separately.** The adapter has both — `shutdown` is a
+  coroutine, `get_server_info` is not — and one wrapper that returned a coroutine for a synchronous
+  method would change its contract for every in-process caller, not only the RPC one.
+- **`functools.wraps` copies the adapter's signature and docstring.** jrpc-oo inspects the exposed
+  callables, and a wall of identical `(*args, **kwargs)` stubs would erase the surface's
+  self-description for anything that reads it.
+
+### It routes to one engine, and says so
+
+The Antigravity adapter does not implement the 48-method surface — it has a session, a step pump and
+a permission gate, and no `chat_streaming`, `history_list` or `get_model` — so there is nothing to
+switch to yet. `list_engines()` reports `mountable: ["claude"]` rather than implying otherwise.
+
+That is the reason this lands now rather than with a second master: the router is
+**behaviour-preserving**, and the claim is cheap to test. It exposes exactly the method names the
+adapter exposes, every call reaches the same object it reached before, and the switch — when the
+adapter is ready — is a change to one constructor rather than to a working system.
+
+### The bug this would have shipped with
+
+**jrpc-oo injects `get_call()` onto the *registered* instance.** That is now the router, not the
+service behind it. `main.py` read the call proxy off `claude_code_service`, and left unchanged it
+would have found nothing and dropped **every server-push event** — every streamed chunk, every
+permission dialog — behind one `logger.warning`. The chat would have looked hung rather than broken.
+
+Caught by reading the wiring rather than by a test, and then confirmed live: a real startup logs
+`engine_router attributes: get_call=True call=False`. `test_the_call_proxy_is_read_off_the_router`
+reads `main.py` to hold it, because the failure is a one-line mistake with a silent symptom and a
+startup test would need a git repo, ports and a browser.
+
+### Verified live
+
+A real `aic-dc --no-browser` startup in a throwaway repo: server up on its port, `Event callback
+wired (service=ClaudeCodeService)` — the generated class carries the namespace name — no tracebacks,
+initialization complete. The only warnings are `no remote method AcApp.startupProgress`, which is the
+absent browser and is what `--no-browser` means.
+
+Separately, registration through the real `RpcServer`: **50 methods, all under
+`ClaudeCodeService.*`**, the adapter's 48 plus `get_engine_capabilities` and `list_engines`. Asserted
+in the suite rather than only observed, because the generated-class trick is exactly the kind of
+thing that satisfies `inspect` and then does not survive contact with the transport.
+
+### The router is the authority, not the engine
+
+`get_engine_capabilities` is answered from `aic_dc.capabilities`, never by asking an adapter, and
+`build_router` **raises** if the adapter has a method of that name rather than letting the delegate
+win. An engine cannot be the authority on what it cannot do: that is the question the descriptor
+exists to answer, and asking the engine would reintroduce exactly the "no answer looks like no data"
+failure AG-9 is written against.
+
+### What is still not done
+
+- **No webapp reads the descriptor.** `get_engine_capabilities` is reachable over RPC and nothing
+  calls it. Per-engine hiding across the Context tab, HUD and settings is the rest of phase 6.
+- **No engine selector.** `list_engines` exists for one, and there is no UI.
+- **Antigravity is not mountable.** The adapter needs the 48-method surface, or the router needs to
+  learn that a method with no counterpart should fail as "unsupported on this engine" rather than as
+  a missing attribute. That choice is phase 4's remaining work and it should be made against
+  `capabilities.py` rather than invented.
