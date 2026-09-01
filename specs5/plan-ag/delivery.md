@@ -639,7 +639,81 @@ failure AG-9 is written against.
 - **No webapp reads the descriptor.** `get_engine_capabilities` is reachable over RPC and nothing
   calls it. Per-engine hiding across the Context tab, HUD and settings is the rest of phase 6.
 - **No engine selector.** `list_engines` exists for one, and there is no UI.
-- **Antigravity is not mountable.** The adapter needs the 48-method surface, or the router needs to
-  learn that a method with no counterpart should fail as "unsupported on this engine" rather than as
-  a missing attribute. That choice is phase 4's remaining work and it should be made against
-  `capabilities.py` rather than invented.
+- **Antigravity is not mountable.** Resolved in the entry below.
+
+---
+
+## Partial-surface routing (2026-09-01)
+
+The open question the router entry ended on — whether a method with no counterpart should fail as
+"unsupported on this engine" or whether the adapter must grow the full 48-method surface — turned out
+not to need a new decision. [AG-9](decisions.md#ag-9) already answers it: *a surface with no
+counterpart is absent from the UI, driven by the capability descriptor.* So the descriptor decides
+which methods are meaningful, and the router refuses the rest.
+
+### The mapping, and which way its default points
+
+`RPC_SURFACES` maps 15 RPC methods onto the six hideable surfaces they serve — `get_context_usage` to
+`context_window_usage`, the five `history_*` methods to `transcript_history`, and so on. It is the
+bridge between `capabilities.py`, which is about panels, and the RPC surface, which is about methods.
+
+**A method absent from that table is core, and every engine must implement it.** That default is
+deliberate and it is the safe direction: forgetting to map a new method makes it *required*, which
+fails loudly at startup on an engine that lacks it. The opposite default would silently make it
+optional and let an engine mount with a hole in it.
+
+### Refused, not missing
+
+An unsupported method is still **generated and still on the wire** — it raises
+`UnsupportedOnThisEngine` when called. Omitting it would take the name out of jrpc-oo's handshake and
+the browser would get a transport-level "no such method", which is indistinguishable from a version
+mismatch or a broken build. The method is there; it declines, and it names the surface and points at
+`get_engine_capabilities()`.
+
+That is AG-9 restated one layer down. An empty list does not say "no servers", it says "no answer" —
+and a *missing* method does not say "this engine has no such thing" either.
+
+### The mounting guard
+
+`build_router(..., require_full_surface=True)` — the default, and what `main.py` uses — refuses to
+build if the adapter cannot serve the core surface, and **the error message is the to-do list**:
+every missing method by name. Without it, a half-mounted engine fails at *click* time, one button at
+a time, with an `AttributeError` that reads as a crash rather than as an engine that was never ready.
+
+The required set is computed per engine, so an adapter that omits `history_list` mounts on
+Antigravity — where transcript history is unbuilt and the panel is hidden — and does **not** mount on
+Claude, where the panel is real. A test asserts exactly that asymmetry, and another asserts
+`main.py` never waives the requirement.
+
+### Behaviour-preserving, still
+
+Every surface in `RPC_SURFACES` is supported on Claude, so the router generates **no refusals at
+all** for the shipped engine. That is asserted as a property rather than left as an observation: the
+change must not take a working surface away from the engine that has one to accommodate an engine
+that does not. Verified live again — a real `--no-browser` startup with the guard active reaches
+`Initialization complete` with no tracebacks and nothing refused.
+
+### One source of truth
+
+The refusal set is derived from the descriptor at build time rather than kept as a second list. A
+hand-kept list is the thing that drifts from `capabilities.py`, and the failure is silent in both
+directions: a panel hidden while its method works, or a method refused while its panel renders.
+`test_the_refusal_set_matches_the_descriptor` walks the mapping and checks each one against
+`capabilities.supports`.
+
+### What is still not done
+
+- **No webapp reads the descriptor.** Unchanged; this is the rest of phase 6.
+- **There is still no Antigravity adapter.** What exists now is the shape of the hole:
+  `build_router(adapter, engine=ANTIGRAVITY)` names every method it must implement. That list is
+  phase 4's remaining work, and it is now data rather than a design question.
+
+  **It is 33 methods**, down from 48 — the descriptor makes 15 of them optional on this engine. Not
+  evenly weighted: `chat_streaming`, `cancel_streaming`, `resolve_permission`, `get_current_state`,
+  `new_session` and `connect_engine` are the conversation, and phases 3 and 4 already built what sits
+  behind them. Several others are engine-agnostic work the adapter only has to forward — the four
+  `lsp_*` methods, `navigate_file`, `set_viewer_state`, `commit_all`, `get_commit_graph`,
+  `reset_to_head` and the four `*_review` methods touch the repo and the indexes rather than the
+  engine, and a second adapter should delegate to the same objects rather than reimplement them.
+  That split is worth making explicitly before writing the adapter, because doing it method by method
+  is how the second engine ends up with its own copy of the file tree.

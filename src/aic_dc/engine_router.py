@@ -71,6 +71,55 @@ logger = logging.getLogger(__name__)
 #: should ever name it.
 RPC_NAME = "ClaudeCodeService"
 
+#: Which RPC method belongs to which hideable surface.
+#:
+#: The bridge between :mod:`aic_dc.capabilities`, which is about *panels*,
+#: and the RPC surface, which is about *methods*. A method listed here is
+#: only meaningful on an engine whose descriptor supports its surface;
+#: on any other engine the router refuses it with
+#: :class:`UnsupportedOnThisEngine` rather than delegating.
+#:
+#: **A method absent from this table is core**, and every engine must
+#: implement it. That default is the safe direction: forgetting to map a
+#: new method makes it *required* — a loud failure at startup on an engine
+#: that lacks it — where the opposite default would silently make it
+#: optional and let an engine mount with a hole in it.
+#:
+#: This is derived from AG-9 rather than invented. The webapp should not
+#: be calling these at all on an engine that cannot feed them, because the
+#: panel is hidden; the refusal is what happens when it does anyway, and
+#: it has to be a stated "this engine has no such thing" rather than an
+#: ``AttributeError`` that reads as a crash.
+RPC_SURFACES: dict[str, str] = {
+    "get_account_usage": "account_rate_limits",
+    "get_context_usage": "context_window_usage",
+    "list_commands": "slash_commands",
+    "get_mcp_status": "mcp_server_inventory",
+    "reconnect_mcp_server": "mcp_server_inventory",
+    "toggle_mcp_server": "mcp_server_inventory",
+    "get_session_storage": "session_mirror",
+    "resume_session": "session_mirror",
+    "history_delete": "transcript_history",
+    "history_image": "transcript_history",
+    "history_list": "transcript_history",
+    "history_load": "transcript_history",
+    "history_search": "transcript_history",
+    "get_subagent_transcript": "subagent_tabs",
+    "list_subagent_transcripts": "subagent_tabs",
+}
+
+
+class UnsupportedOnThisEngine(RuntimeError):
+    """An RPC method was called for a surface this engine cannot feed.
+
+    Raised rather than returning an empty value, and that is the whole
+    point of AG-9 restated at the RPC layer: an empty list does not say
+    "no servers", it says "no answer". A caller that reaches here has
+    ignored the capability descriptor, and the honest response is to say
+    so rather than to synthesise a plausible-looking nothing.
+    """
+
+
 #: Methods the router serves itself rather than delegating.
 #:
 #: Named here so :func:`build_router` refuses to generate a delegate that
@@ -188,7 +237,74 @@ def _delegate(name: str) -> Any:
     return _sync_delegate, _async_delegate
 
 
-def build_router(master: Any, *, engine: str = capabilities.CLAUDE) -> Any:
+def _refusal(name: str, surface: str, engine: str) -> Any:
+    """A method that exists on the wire and says why it has no answer.
+
+    Generated rather than omitted, because *omitting* it would take the
+    name out of the handshake's method list and the browser would get a
+    transport-level "no such method" — indistinguishable from a version
+    mismatch or a broken build. The method is there; it declines.
+    """
+
+    def _declines(self: Any, *args: Any, **kwargs: Any) -> Any:
+        raise UnsupportedOnThisEngine(
+            f"{name} serves the {surface!r} surface, which the {engine} "
+            f"engine cannot feed. get_engine_capabilities() reports it as "
+            f"unsupported and the panel should be hidden rather than "
+            f"calling this."
+        )
+
+    _declines.__name__ = name
+    _declines.__doc__ = (
+        f"Unsupported on this engine: {surface}. See "
+        f"get_engine_capabilities()."
+    )
+    return _declines
+
+
+def _missing_core_methods(master: Any, engine: str) -> list[str]:
+    """Core methods this adapter does not implement.
+
+    Core is *everything not in* :data:`RPC_SURFACES`, so a method nobody
+    mapped counts as required. An engine missing one cannot be mounted:
+    the browser would call it and get an attribute error at click time,
+    which is the failure this converts into a refusal to start.
+    """
+    have = set(_public_methods(master))
+    want = {
+        name
+        for name in _public_methods_of_reference()
+        if name not in RPC_SURFACES
+        or capabilities.supports(engine, RPC_SURFACES[name])
+    }
+    return sorted(want - have)
+
+
+def _public_methods_of_reference() -> list[str]:
+    """The RPC surface the webapp expects, read off the Claude adapter.
+
+    The reference is the shipped engine rather than a hand-kept list,
+    for the same reason the delegates are generated: a second copy of the
+    method names is a second thing to forget. Imported lazily because
+    ``service.py`` is heavy and nothing else here needs it.
+    """
+    from aic_dc.claude_code import ClaudeCodeService
+
+    return sorted(
+        name
+        for name, _ in inspect.getmembers(
+            ClaudeCodeService, predicate=inspect.isfunction
+        )
+        if not name.startswith("_")
+    )
+
+
+def build_router(
+    master: Any,
+    *,
+    engine: str = capabilities.CLAUDE,
+    require_full_surface: bool = True,
+) -> Any:
     """A router exposing ``master``'s whole surface, plus its own.
 
     Parameters
@@ -201,6 +317,12 @@ def build_router(master: Any, *, engine: str = capabilities.CLAUDE) -> Any:
         against :data:`capabilities.ENGINES` rather than accepted as a
         free string, because an engine nothing can describe cannot be
         hidden correctly.
+    require_full_surface:
+        Refuse to build if the adapter is missing a core method — one that
+        no capability marks optional. On by default, and the reason is
+        that a half-mounted engine fails at *click* time, one button at a
+        time, with an ``AttributeError`` that reads as a crash. Turning it
+        off is for tests that route to a stub.
 
     Returns
     -------
@@ -209,12 +331,31 @@ def build_router(master: Any, *, engine: str = capabilities.CLAUDE) -> Any:
     but the class *identity* is what jrpc-oo keys its method list off, and
     sharing one between two routers in one process — which the tests do —
     would make the second registration silently reuse the first's surface.
+
+    Raises
+    ------
+    ValueError
+        If the adapter shadows a router method, or — with
+        ``require_full_surface`` — if it cannot serve the core surface.
+        The second message *is* the to-do list for mounting that engine.
     """
+    if engine not in capabilities.ENGINES:
+        # Checked before anything is generated so the message is about the
+        # engine rather than about a surface lookup failing downstream.
+        raise ValueError(
+            f"{engine!r} is not a known engine. Add it to "
+            f"capabilities.ENGINES with a column in the descriptor first."
+        )
+
     delegates: dict[str, Any] = {}
     collisions = []
     for name in _public_methods(master):
         if name in ROUTER_OWNED:
             collisions.append(name)
+            continue
+        surface = RPC_SURFACES.get(name)
+        if surface is not None and not capabilities.supports(engine, surface):
+            delegates[name] = _refusal(name, surface, engine)
             continue
         sync, asynchronous = _delegate(name)
         original = getattr(type(master), name)
@@ -230,6 +371,25 @@ def build_router(master: Any, *, engine: str = capabilities.CLAUDE) -> Any:
             f"the engine cannot do, and a delegate here would make the "
             f"engine the authority on itself."
         )
+
+    if require_full_surface:
+        missing = _missing_core_methods(master, engine)
+        if missing:
+            raise ValueError(
+                f"The {engine} adapter cannot be mounted: it is missing "
+                f"{len(missing)} method(s) the webapp calls — "
+                f"{', '.join(missing)}. Implement them, or — where a method "
+                f"belongs to a surface this engine genuinely cannot feed — "
+                f"map it in RPC_SURFACES so the router refuses it instead."
+            )
+
+    # Refusals for surfaces this engine cannot feed, where the adapter did
+    # not define the method at all. Without this the name would be absent
+    # from the handshake and the browser would see "no such method",
+    # which is indistinguishable from a broken build.
+    for name, surface in RPC_SURFACES.items():
+        if name not in delegates and not capabilities.supports(engine, surface):
+            delegates[name] = _refusal(name, surface, engine)
 
     cls = type(RPC_NAME, (EngineRouterBase,), delegates)
     return cls(master, engine=engine)

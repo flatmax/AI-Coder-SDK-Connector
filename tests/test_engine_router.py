@@ -62,6 +62,18 @@ class FakeAdapter:
         return "no"
 
 
+def stub_router(adapter, **kw):
+    """A router over a stub, with the full-surface requirement waived.
+
+    The requirement is on by default and should be: a half-mounted engine
+    fails at click time, one button at a time. These fakes are four
+    methods, so every test that is *about* delegation rather than about
+    mounting opts out explicitly — and ``TestItRefusesAPartialEngine``
+    is what covers the default.
+    """
+    return build_router(adapter, require_full_surface=False, **kw)
+
+
 def exposed(obj) -> set[str]:
     """The method names jrpc-oo would advertise, read the way it reads them."""
     cls = obj if inspect.isclass(obj) else type(obj)
@@ -110,34 +122,34 @@ class TestItExposesTheWholeSurface:
         assert exposed(router) - exposed(ClaudeCodeService) == set(ROUTER_OWNED)
 
     def test_private_methods_are_not_exposed(self):
-        assert "_private" not in exposed(build_router(FakeAdapter()))
+        assert "_private" not in exposed(stub_router(FakeAdapter()))
 
     def test_the_namespace_is_the_one_the_webapp_assumes(self):
         """AG-3: there is no second namespace and no AntigravityService.*"""
         assert RPC_NAME == "ClaudeCodeService"
-        assert type(build_router(FakeAdapter())).__name__ == RPC_NAME
+        assert type(stub_router(FakeAdapter())).__name__ == RPC_NAME
 
 
 class TestCallsReachTheAdapter:
     def test_a_sync_call_is_forwarded(self):
         adapter = FakeAdapter()
-        assert build_router(adapter).get_model() == "a-model"
+        assert stub_router(adapter).get_model() == "a-model"
         assert adapter.calls == ["get_model"]
 
     def test_arguments_are_forwarded_positionally_and_by_keyword(self):
         adapter = FakeAdapter()
-        build_router(adapter).set_model("m", extra=7)
+        stub_router(adapter).set_model("m", extra=7)
         assert adapter.calls == [("set_model", "m", 7)]
 
     def test_an_async_call_is_awaited(self):
         adapter = FakeAdapter()
-        assert asyncio.run(build_router(adapter).shutdown()) == "stopped"
+        assert asyncio.run(stub_router(adapter).shutdown()) == "stopped"
         assert adapter.calls == ["shutdown"]
 
     def test_async_methods_stay_async_and_sync_stay_sync(self):
         """A wrapper that made everything a coroutine would change the
         contract for every in-process caller, not just the RPC one."""
-        router = type(build_router(FakeAdapter()))
+        router = type(stub_router(FakeAdapter()))
         assert inspect.iscoroutinefunction(router.chat_streaming)
         assert inspect.iscoroutinefunction(router.shutdown)
         assert not inspect.iscoroutinefunction(router.get_model)
@@ -145,7 +157,7 @@ class TestCallsReachTheAdapter:
     def test_the_delegate_keeps_the_adapters_signature(self):
         """jrpc-oo inspects the exposed callables; identical
         ``(*args, **kwargs)`` stubs would erase the surface."""
-        router = type(build_router(FakeAdapter()))
+        router = type(stub_router(FakeAdapter()))
         assert list(inspect.signature(router.set_model).parameters) == [
             "self",
             "name",
@@ -157,7 +169,7 @@ class TestCallsReachTheAdapter:
             def thing(self):
                 """The adapter's own words."""
 
-        router = type(build_router(Documented()))
+        router = type(stub_router(Documented()))
         assert router.thing.__doc__ == "The adapter's own words."
 
 
@@ -168,12 +180,12 @@ class TestCallsReachTheAdapter:
 
 class TestTheRouterOwnsTheDescriptor:
     def test_it_publishes_the_capability_descriptor(self):
-        router = build_router(FakeAdapter(), engine=CLAUDE)
+        router = stub_router(FakeAdapter(), engine=CLAUDE)
         assert router.get_engine_capabilities() == capabilities.descriptor(CLAUDE)
 
     def test_the_descriptor_follows_the_engine(self):
-        claude = build_router(FakeAdapter(), engine=CLAUDE)
-        antigravity = build_router(FakeAdapter(), engine=ANTIGRAVITY)
+        claude = stub_router(FakeAdapter(), engine=CLAUDE)
+        antigravity = stub_router(FakeAdapter(), engine=ANTIGRAVITY)
         assert claude.get_engine_capabilities()["usd_cost"]["supported"]
         assert not antigravity.get_engine_capabilities()["usd_cost"]["supported"]
 
@@ -198,7 +210,7 @@ class TestTheRouterOwnsTheDescriptor:
 
     def test_list_engines_reports_what_is_mountable(self):
         """Honest about the second engine not being routable yet."""
-        router = build_router(FakeAdapter(), engine=CLAUDE)
+        router = stub_router(FakeAdapter(), engine=CLAUDE)
         listing = router.list_engines()
         assert listing["active"] == CLAUDE
         assert set(listing["available"]) == set(capabilities.ENGINES)
@@ -213,16 +225,163 @@ class TestClassIdentity:
         do — would make the second registration silently reuse the
         first's surface.
         """
-        assert type(build_router(FakeAdapter())) is not type(
-            build_router(FakeAdapter())
+        assert type(stub_router(FakeAdapter())) is not type(
+            stub_router(FakeAdapter())
         )
 
     def test_routers_are_the_base_class(self):
-        assert isinstance(build_router(FakeAdapter()), EngineRouterBase)
+        assert isinstance(stub_router(FakeAdapter()), EngineRouterBase)
 
     def test_the_base_exposes_only_what_it_owns(self):
         """A stray public method on the base becomes an RPC method."""
         assert exposed(EngineRouterBase) == set(ROUTER_OWNED)
+
+
+class TestUnsupportedSurfacesAreRefusedNotMissing:
+    """AG-9 at the RPC layer.
+
+    The webapp should not be calling these at all on an engine that
+    cannot feed them — the panel is hidden. This is what happens when it
+    does anyway, and the shape of the answer matters: a *stated* refusal,
+    not an empty list (which reads as "no servers" rather than "no
+    answer") and not a missing method (which reads as a version mismatch
+    or a broken build).
+    """
+
+    def antigravity_router(self):
+        return build_router(
+            FakeAdapter(), engine=ANTIGRAVITY, require_full_surface=False
+        )
+
+    def test_the_method_still_exists_on_the_wire(self):
+        """Omitting it would give the browser a transport-level 404."""
+        assert "get_context_usage" in exposed(self.antigravity_router())
+
+    def test_calling_it_says_which_surface_and_why(self):
+        from aic_dc.engine_router import UnsupportedOnThisEngine
+
+        with pytest.raises(UnsupportedOnThisEngine) as exc:
+            self.antigravity_router().get_context_usage()
+        assert "context_window_usage" in str(exc.value)
+        assert "get_engine_capabilities" in str(exc.value)
+
+    def test_a_supported_surface_still_delegates(self):
+        adapter = FakeAdapter()
+        build_router(
+            adapter, engine=ANTIGRAVITY, require_full_surface=False
+        ).get_model()
+        assert adapter.calls == ["get_model"]
+
+    def test_claude_refuses_nothing(self):
+        """The behaviour-preserving claim, stated as a property.
+
+        Every surface in the table is supported on Claude today, so the
+        router must generate no refusals at all — otherwise this change
+        would have broken a working engine to accommodate an unbuilt one.
+        """
+        from aic_dc.engine_router import RPC_SURFACES
+
+        for name, surface in RPC_SURFACES.items():
+            assert capabilities.supports(CLAUDE, surface), (
+                f"{name} would be refused on Claude. The router must not "
+                "take a working surface away from the shipped engine."
+            )
+
+    def test_the_refusal_set_matches_the_descriptor(self):
+        """One source of truth, not two.
+
+        A second hand-kept list of unsupported methods is the thing that
+        disagrees with the descriptor, and then the panel is hidden while
+        the method works or the reverse.
+        """
+        from aic_dc.engine_router import RPC_SURFACES, UnsupportedOnThisEngine
+
+        router_obj = self.antigravity_router()
+        for name, surface in RPC_SURFACES.items():
+            method = getattr(router_obj, name)
+            if capabilities.supports(ANTIGRAVITY, surface):
+                continue
+            with pytest.raises(UnsupportedOnThisEngine):
+                method()
+
+    def test_every_mapped_method_is_a_real_rpc_method(self):
+        """A typo here would refuse nothing and hide nothing."""
+        from aic_dc.claude_code import ClaudeCodeService
+        from aic_dc.engine_router import RPC_SURFACES
+
+        unknown = set(RPC_SURFACES) - exposed(ClaudeCodeService)
+        assert not unknown, f"{sorted(unknown)} are not RPC methods"
+
+    def test_every_mapped_surface_is_a_real_surface(self):
+        from aic_dc.engine_router import RPC_SURFACES
+
+        for name, surface in RPC_SURFACES.items():
+            assert capabilities.supports(CLAUDE, surface) in (True, False), (
+                f"{name} maps to {surface!r}, which is not a declared surface"
+            )
+
+
+class TestItRefusesAPartialEngine:
+    """A half-mounted engine fails one button at a time; this fails once.
+
+    Without the guard the browser calls a method the adapter does not
+    have and gets an ``AttributeError`` at click time, which reads as a
+    crash rather than as an engine that was never ready.
+    """
+
+    def test_a_stub_adapter_cannot_be_mounted(self):
+        with pytest.raises(ValueError, match="cannot be mounted"):
+            build_router(FakeAdapter(), engine=CLAUDE)
+
+    def test_the_error_is_the_to_do_list(self):
+        with pytest.raises(ValueError) as exc:
+            build_router(FakeAdapter(), engine=CLAUDE)
+        # Names the caller has to implement, not just a count.
+        assert "history_list" in str(exc.value)
+        assert "get_current_state" in str(exc.value)
+
+    def test_the_full_surface_mounts(self):
+        from aic_dc.claude_code import ClaudeCodeService
+
+        stand_in = type(
+            "StandIn",
+            (),
+            {name: (lambda self, *a, **k: None) for name in exposed(ClaudeCodeService)},
+        )
+        assert build_router(stand_in(), engine=CLAUDE) is not None
+
+    def test_an_engine_only_needs_the_surfaces_it_supports(self):
+        """The point of the mapping: unsupported methods are not required.
+
+        An adapter that omits ``history_list`` mounts on Antigravity —
+        where transcript history is unbuilt and the panel is hidden — and
+        does not mount on Claude, where the panel is real.
+        """
+        from aic_dc.claude_code import ClaudeCodeService
+        from aic_dc.engine_router import RPC_SURFACES
+
+        optional = {
+            name
+            for name, surface in RPC_SURFACES.items()
+            if not capabilities.supports(ANTIGRAVITY, surface)
+        }
+        assert optional, "no surface is unsupported on Antigravity"
+        names = exposed(ClaudeCodeService) - optional
+        stand_in = type(
+            "StandIn", (), {name: (lambda self, *a, **k: None) for name in names}
+        )
+        build_router(stand_in(), engine=ANTIGRAVITY)  # mounts
+        with pytest.raises(ValueError, match="cannot be mounted"):
+            build_router(stand_in(), engine=CLAUDE)
+
+    def test_startup_requires_the_full_surface(self):
+        """main.py must not quietly waive it."""
+        from pathlib import Path
+
+        from aic_dc import main
+
+        source = Path(main.__file__).read_text(encoding="utf-8")
+        assert "require_full_surface=False" not in source
 
 
 class TestItRegistersWithTheRealTransport:

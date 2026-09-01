@@ -58,6 +58,14 @@ change it nearly shipped with is recorded in [`delivery.md`](delivery.md): jrpc-
 server-push call proxy onto the *registered* instance, so reading it off the service behind the
 router would have dropped every streamed chunk and every permission dialog behind one warning.
 
+The router also answers a question that looked like an open design fork and was not: a method whose
+surface the running engine cannot feed is **refused, not missing**. It stays on the wire and raises
+`UnsupportedOnThisEngine`, because omitting it would give the browser a transport-level "no such
+method" — indistinguishable from a broken build. That is [AG-9](decisions.md#ag-9) one layer down,
+and `RPC_SURFACES` derives the refusals from the descriptor rather than from a second list that could
+disagree with it. The practical effect: the Antigravity adapter needs **33** of the 48 methods, not
+all of them, and `build_router(adapter, engine=ANTIGRAVITY)` prints exactly which.
+
 **The Python SDK's core is a genuinely good fit** — better than expected. Streaming deltas, mid-turn
 cancel, resume by `conversation_id`, an async permission hook that receives the full tool call,
 post-tool-call hooks, compaction steps, subagents with per-trajectory usage, and — the pleasant
