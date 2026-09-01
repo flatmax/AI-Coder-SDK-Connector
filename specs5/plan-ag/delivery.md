@@ -717,3 +717,93 @@ directions: a panel hidden while its method works, or a method refused while its
   engine, and a second adapter should delegate to the same objects rather than reimplement them.
   That split is worth making explicitly before writing the adapter, because doing it method by method
   is how the second engine ends up with its own copy of the file tree.
+
+---
+
+## Phase 4 — The Antigravity adapter (2026-09-01)
+
+`src/aic_dc/antigravity/service.py`. The thing the router refused to mount, and now mounts.
+
+| File | Role |
+|---|---|
+| `src/aic_dc/antigravity/service.py` | `AntigravityService` — 31 methods behind the shared RPC surface |
+| `tests/test_antigravity_service.py` | 42 tests, offline. Nothing starts a harness |
+
+### Thirty-one, not forty-eight, and the two that moved
+
+Writing the adapter forced two methods to be classified that the first pass had left as core:
+
+- **`rewind_files`** has no Antigravity counterpart at any layer — it is the Claude SDK's own
+  checkpointing, and there is no checkpoint, no restore and nothing to build one from. A new
+  `file_checkpointing` surface, `ABSENT`, with the note that git already covers most of what it would
+  undo.
+- **`stop_task`** kills one subagent, so it belongs to `subagent_tabs`, which is already `UNBUILT`
+  here.
+
+Both were found by asking what an honest implementation would look like and finding the answer was
+"a stub that lies". Adding them to the descriptor is the alternative the descriptor exists to
+provide, and it took the required surface from 33 to 31.
+
+**No method here returns an empty dict to satisfy the router.**
+`test_it_implements_no_method_the_descriptor_hides` asserts the converse too: a method the descriptor
+hides must *not* be implemented, so the two tables cannot drift into a state where the panel is
+hidden while the method works.
+
+### Sharing, done by holding the same objects
+
+A third of the surface is repository and index work that is not engine-specific, and the failure mode
+named in the previous entry — the second engine growing its own file tree — is avoided by reusing the
+same modules rather than by extracting a mixin out of a 148 KB `service.py`:
+
+- `symbol_index` is **injected**: the one instance `main.py` built, not a second index over the same
+  tree. The four `lsp_*` methods return `None`/`[]` before it exists, which Monaco reads as "no
+  answer here" — the same contract the Claude adapter has.
+- `review` is a real `ReviewMode`, constructed with *this* engine's `set_permission_mode`. Its
+  collaborators are injectable precisely so a second engine can own its posture while sharing the git
+  arrangement, which is what made this a one-line reuse rather than a refactor.
+- `commit_all` and `reset_to_head` call `claude_code.commit` directly. That module takes the service
+  as its argument and reads `_check_localhost_only`, `_repo`, `review`, `_committing`, `_turn_tasks`
+  and `_broadcast` off it — so this class provides exactly that contract, and a test names the six
+  attributes so a rename there fails here rather than at the first commit somebody tries.
+
+Importing `claude_code.review` and `claude_code.commit` from the Antigravity package reads oddly. It
+is the same trade AG-3 makes about the class name: those modules are engine-agnostic in everything
+but their package, moving them is mechanical and can happen later, and copying them is what drifts.
+
+### Declining rather than pretending, in the two places a stub was easiest
+
+- **`connect_engine(resume=…)` refuses.** Resume by `conversation_id` is phase 5. Starting a *fresh*
+  session when the caller asked to resume one is the wrong kind of success — it returns a working
+  session that has lost the context that was the point of the request.
+- **`chat_streaming(images=…)` refuses.** The SDK accepts image input, so this is unbuilt rather than
+  impossible; a turn that silently dropped an attached screenshot would answer the wrong question
+  convincingly.
+
+### The postures it does not offer
+
+`PERMISSION_MODES` is `("default", "plan")`. `acceptEdits` and `bypassPermissions` are **absent by
+construction**, and that is AG-5 rather than an omission: the dialog is a requirement of this engine,
+not a feature of it, and a posture that skips it is the blanket bypass that decision says must never
+reach a shipped path. Asking for either returns an `unsupported` error naming the reason.
+
+`resolve_permission` forwards to the gate's **shared** broker, so it answers the same queue, with the
+same first-one-wins rule, that the Claude adapter's does. One ask path across two engines.
+
+### A test that would have caught a whole class of mistake
+
+`test_async_ness_matches_the_claude_adapter` walks every method both adapters define and asserts they
+agree about being coroutines. A method that was `async` on one engine and not the other would satisfy
+the router's surface check, register fine, and then break the browser's call in a way that looks like
+a transport bug.
+
+### What is still not done
+
+- **Nothing constructs it.** `main.py` builds the Claude adapter and routes to it. Choosing the
+  master per session (AG-1) needs a setting and a startup path, and neither exists.
+- **No live turn.** Every test here is offline; the harness has never been started through this
+  class.
+- **Engine errors are in memory.** The Claude engine writes `engine-errors.jsonl`; this holds a list,
+  because a second on-disk log wants a path convention and there is no reader for one. Recorded as a
+  gap rather than pretended away.
+- **`get_current_state` carries no cost key at all**, which is AG-6 working as intended and will look
+  like a missing field until the webapp reads the descriptor.

@@ -106,6 +106,8 @@ RPC_SURFACES: dict[str, str] = {
     "history_search": "transcript_history",
     "get_subagent_transcript": "subagent_tabs",
     "list_subagent_transcripts": "subagent_tabs",
+    "stop_task": "subagent_tabs",
+    "rewind_files": "file_checkpointing",
 }
 
 

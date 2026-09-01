@@ -228,6 +228,17 @@ SURFACES: tuple[Surface, ...] = (
         "it yet, so the tool stays disabled rather than half-rendered.",
     ),
     Surface(
+        key="file_checkpointing",
+        title="Undo an agent's file changes back to a message",
+        claude=SUPPORTED,
+        antigravity=ABSENT,
+        note="``rewind_files`` is the Claude SDK's own checkpointing, and "
+        "Antigravity has no counterpart at any layer — no checkpoint, no "
+        "restore, nothing to build one from. Git already covers most of "
+        "what it would undo, which is why this is absent rather than a "
+        "gap worth filling.",
+    ),
+    Surface(
         key="image_generation",
         title="Generated images",
         claude=ABSENT,
