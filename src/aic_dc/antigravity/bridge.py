@@ -61,6 +61,32 @@ logger = logging.getLogger(__name__)
 #: ungates, and these two tools must reach the dialog.
 SERVER_NAME = "aic-dc-antigravity"
 
+#: How often a running consultation says it is still running.
+#:
+#: Two live browser consultations on 2026-09-02 showed a spinner and
+#: nothing else for the full timeout, because Google had accepted the
+#: request and never answered. The tab could not distinguish that from a
+#: fast model thinking hard, and neither could the person watching it.
+#:
+#: A heartbeat is the smallest honest fix: it claims nothing about
+#: progress — there is none to report, the harness is blocked on a socket
+#: — and only says how long the wait has been. That is exactly the
+#: distinction the UI was missing, and it is deliberately *not* dressed up
+#: as progress, because a bar that moves while nothing happens is worse
+#: than a number that grows.
+#:
+#: **It says two different things, and the difference is diagnostic.**
+#: Google confirmed (2026-09-02) that free-tier requests are queued behind
+#: paid traffic rather than refused, and that *"the capacity queueing
+#: occurs at the routing layer before a model is allocated … the entire
+#: wait time is absorbed into your Time to First Token"*. So a
+#: consultation that has produced no step yet is queued, and one that has
+#: is merely thinking — two states with the same spinner and completely
+#: different meanings. Before the first step the heartbeat names the
+#: queue, because "your free tier is waiting behind paying customers" is
+#: something a reader can act on and "still working" is not.
+HEARTBEAT_SECONDS = 20.0
+
 
 def _text(body: str) -> dict[str, Any]:
     """One text block, the shape every handler returns."""
@@ -157,7 +183,9 @@ class ConsultantBridge:
         except Exception:  # noqa: BLE001 - a dead client is not a failed call
             logger.exception("Could not announce the consultation")
 
-    def _observer(self, agent_id: str, translator: Any) -> Any:
+    def _observer(
+        self, agent_id: str, translator: Any, progress: dict | None = None
+    ) -> Any:
         """Feed each step through the shared pump, tagged with our id.
 
         The translator is ``steps.StepTranslator`` — imported, not
@@ -167,6 +195,8 @@ class ConsultantBridge:
         """
 
         def observe(step: Any) -> None:
+            if progress is not None:
+                progress["steps"] += 1
             request_id = self._turn()
             if self._emit is None or request_id is None:
                 return
@@ -223,15 +253,26 @@ class ConsultantBridge:
         translator = StepTranslator(self._turn() or "", agent_id=agent_id)
         await self._announce(agent_id, label)
         status = "failed"
+        # Mutable, shared with the heartbeat: it is the only way the
+        # heartbeat can tell a queued consultation from a working one, and
+        # that distinction is the whole of what it has to say.
+        progress = {"steps": 0}
+        heartbeat = asyncio.ensure_future(self._heartbeat(agent_id, progress))
         try:
-            yield self._observer(agent_id, translator)
-        except BaseException:
+            yield self._observer(agent_id, translator, progress)
+        except BaseException as exc:
+            # The reason, into the tab. Until now a failed consultation
+            # settled red and said nothing about why; the explanation went
+            # to the model as tool text, which the user does not read.
+            await self._push_reason(agent_id, exc)
             # Including cancellation: a consultation the user stopped did
             # not complete, and saying so is the point of the ⏹ button.
+            raise
             raise
         else:
             status = "completed"
         finally:
+            heartbeat.cancel()
             # Drain what the observer scheduled before saying the tab is
             # done, or the terminal event can arrive ahead of the text it
             # is meant to be terminating.
@@ -244,6 +285,61 @@ class ConsultantBridge:
                 terminal=True,
                 usage=translator.turn_usage() or None,
             )
+
+    async def _heartbeat(self, agent_id: str, progress: dict | None = None) -> None:
+        """Say how long the wait has been, until cancelled.
+
+        Cancelled in the ``finally`` of :meth:`_tab`, so it cannot outlive
+        the consultation it is reporting on. ``CancelledError`` is allowed
+        to propagate — swallowing it is how a "harmless" background task
+        becomes one that never stops.
+        """
+        waited = 0.0
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            waited += HEARTBEAT_SECONDS
+            request_id = self._turn()
+            if self._emit is None or request_id is None:
+                return
+            started = bool(progress and progress.get("steps"))
+            message = (
+                f"Antigravity is working — {waited:.0f}s so far."
+                if started
+                else (
+                    f"Waiting for Google to start — {waited:.0f}s so far, and "
+                    "nothing has arrived yet. On a free-tier key requests are "
+                    "queued behind paid traffic rather than refused, and the "
+                    "whole wait lands before the first token."
+                )
+            )
+            await self._push(
+                Event(
+                    "systemEvent",
+                    {
+                        "subtype": "engine_notice",
+                        "data": {"message": message},
+                        "agent_id": agent_id,
+                    },
+                ),
+                request_id,
+            )
+
+    async def _push_reason(self, agent_id: str, exc: BaseException) -> None:
+        """The failure's own words, into the tab that is about to go red."""
+        request_id = self._turn()
+        if self._emit is None or request_id is None:
+            return
+        await self._push(
+            Event(
+                "systemEvent",
+                {
+                    "subtype": "engine_error",
+                    "data": {"message": " ".join(str(exc).split())[:600]},
+                    "agent_id": agent_id,
+                },
+            ),
+            request_id,
+        )
 
     async def cancel(self) -> bool:
         """Stop a running consultation. AG-13's ⏹, and it is real.

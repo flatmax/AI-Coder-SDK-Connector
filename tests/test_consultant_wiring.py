@@ -229,3 +229,76 @@ class TestTheTabWiring:
         """
         servers, bridge = mount(monkeypatch, available=True, want_bridge=True)
         assert callable(bridge.request_id)
+
+
+class TestStopReachesTheConsultation:
+    """AG-13's ⏹, wired end to end.
+
+    The tab offers Stop on every subagent row, and a consultation is a
+    subagent row like any other — so the click arrives at ``stop_task``.
+    But a consultation is not a CLI task and the CLI has never heard of
+    its id, so without this routing the button was decorative: it would
+    have asked the CLI to stop something it does not know about.
+    """
+
+    class Bridge:
+        def __init__(self, stopped=True):
+            self._stopped = stopped
+            self.cancels = 0
+
+        async def cancel(self):
+            self.cancels += 1
+            return self._stopped
+
+    def service_with_bridge(self, stopped=True):
+        service = Service()
+        service._collab = None
+        service.consultant_bridge = self.Bridge(stopped)
+        return service
+
+    def test_a_consultation_id_reaches_the_bridge(self):
+        import asyncio
+
+        service = self.service_with_bridge()
+        result = asyncio.run(service.stop_task("consultation-abc-1"))
+        assert service.consultant_bridge.cancels == 1
+        assert result["status"] == "stopping"
+
+    def test_stopping_one_that_is_not_running_says_so(self):
+        """Rather than claiming to have stopped something."""
+        import asyncio
+
+        service = self.service_with_bridge(stopped=False)
+        assert asyncio.run(service.stop_task("consultation-abc-1"))["status"] == (
+            "not_running"
+        )
+
+    def test_a_cli_task_id_does_not_reach_the_bridge(self):
+        """The routing is by id shape; a real subagent must still work."""
+        import asyncio
+
+        service = self.service_with_bridge()
+
+        class Session:
+            def __init__(self):
+                self.stopped = []
+
+            async def stop_task(self, task_id):
+                self.stopped.append(task_id)
+
+        service.session = Session()
+        asyncio.run(service.stop_task("toolu_01ABC"))
+        assert service.consultant_bridge.cancels == 0
+        assert service.session.stopped == ["toolu_01ABC"]
+
+    def test_the_prefix_matches_what_the_bridge_mints(self):
+        """Two constants that must agree, checked rather than assumed."""
+        from pathlib import Path
+
+        from aic_dc.antigravity import bridge as bridge_module
+        from aic_dc.claude_code import service as service_module
+
+        minted = Path(bridge_module.__file__).read_text(encoding="utf-8")
+        routed = Path(service_module.__file__).read_text(encoding="utf-8")
+        assert 'f"consultation-{id(self):x}-{self._counter}"' in minted
+        assert 'startswith("consultation-")' in routed

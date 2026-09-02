@@ -96,17 +96,75 @@ logger = logging.getLogger(__name__)
 #: The text model a consultation runs on. Pinned rather than inherited:
 #: the SDK's own default moves between 0.1.x releases, and a second
 #: opinion whose model changed under us is not a second opinion.
-DEFAULT_TEXT_MODEL = "gemini-3.7-flash"
+#:
+#: **Lowered from ``gemini-3.7-flash`` on 2026-09-02, and the reason is a
+#: measurement rather than a preference.** Two live consultations timed
+#: out at 180s having produced nothing. Timing a *trivial* five-token
+#: prompt straight at the REST API with this free-tier key, bypassing the
+#: harness entirely, found a latency ladder by model recency:
+#:
+#: =====================  =========  =========
+#: model                  run 1      run 2
+#: =====================  =========  =========
+#: ``gemini-3.7-flash``   30.9 s     timed out at 70 s
+#: ``gemini-3.6-flash``   3.1 s      22.7 s
+#: ``gemini-3.5-flash``   —          3.9 s
+#: =====================  =========  =========
+#:
+#: An agent turn is many model calls, so a per-call latency of 30 s makes
+#: any consultation exceed any sane timeout. The newest models appear to
+#: be queued hard on a free key — which is a coherent way for a provider
+#: to ration capacity, and is invisible as a rate limit because it arrives
+#: as *slowness* rather than as a 429.
+#:
+#: **This is a free-tier default, not a judgement about the models.** The
+#: point of a second opinion is an independent and capable one, so a paid
+#: key should raise this — see AG-12, whose upgrade triggers this now
+#: joins. It is a constructor argument precisely so that is one line.
+DEFAULT_TEXT_MODEL = "gemini-3.5-flash"
 
 #: The image model. A separate ``ModelTarget`` with ``ModelType.IMAGE``,
 #: which is how ``generate_image`` picks a model distinct from the one
 #: holding the conversation.
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 
-#: How long a single consultation may take before it is abandoned. A
-#: consultant that hangs blocks the Claude Code turn that called it, and
-#: the caller has no cancel path by construction.
-DEFAULT_TIMEOUT_SECONDS = 180.0
+#: How long a single consultation may take before it is abandoned.
+#:
+#: Lowered from 180s on 2026-09-02, after two live browser runs sat at the
+#: full 180 and returned nothing — the harness had sent its request and
+#: Google never answered. Three minutes of a spinner is a long time to say
+#: nothing, and the *cost* of waiting longer is asymmetric: a consultation
+#: that needs more than two minutes is already a bad second opinion,
+#: while every extra second of a hung one is spent blocking the Claude
+#: turn that asked.
+#:
+#: The number is not the real fix and is not pretending to be. Silence was
+#: the problem rather than duration, which is what
+#: :data:`HEARTBEAT_SECONDS` and the stderr tail below are for.
+#:
+#: **Confirmed by Google, 2026-09-02**, who put the free-tier figure at
+#: *"60–90 seconds just to survive the queue"*. 120 is deliberately above
+#: that: their number is what a request needs to *clear* the queue, so
+#: timing out at it would abandon calls that were about to succeed. The
+#: margin is the difference between a timeout that means "this failed" and
+#: one that means "we gave up early".
+DEFAULT_TIMEOUT_SECONDS = 120.0
+
+#: How many of the harness's own stderr lines to attach to a failure.
+#:
+#: The SDK drains the harness's stderr on a daemon thread into a bounded
+#: deque and logs each line at INFO on the *root* logger
+#: (``local_connection.py:477-494``). That is where the diagnosis lived on
+#: 2026-09-02 — ``Post ".../streamGenerateContent": context canceled``,
+#: meaning the request had been in flight the whole timeout — and it
+#: reached only the server log, so the person watching the tab saw a
+#: spinner and nothing else.
+#:
+#: Read off the connection rather than captured with a logging handler: a
+#: handler would be global, would fire on a thread that is not the event
+#: loop, and would pick up every other engine's lines too. The deque is
+#: already there, already bounded, and reading it needs no threading.
+STDERR_TAIL_LINES = 6
 
 
 class ConsultationError(RuntimeError):
@@ -188,6 +246,9 @@ class Consultant:
         #: The live conversation, while a consultation is running. Held so
         #: :meth:`cancel` has something to halt (AG-13).
         self._conversation: Any = None
+        #: The last connection, kept after teardown so a failure can still
+        #: be explained with the harness's own stderr.
+        self._last_connection: Any = None
 
     @property
     def credentials(self) -> Credentials:
@@ -304,6 +365,12 @@ class Consultant:
         """
         conversation = agent.conversation
         self._conversation = conversation
+        # Kept past the `finally` below on purpose. `_chat`'s except
+        # handlers run *after* it, so reading stderr off `_conversation`
+        # would always find None and the diagnosis would silently be
+        # empty — the failure this whole tail exists to prevent, one
+        # layer up.
+        self._last_connection = getattr(conversation, "connection", None)
         steps: list[Any] = []
         try:
             await conversation.send(prompt)
@@ -320,6 +387,36 @@ class Consultant:
             stop_reason=_name(stop_reason_of(conversation)),
             usage=turn_usage_of(conversation),
         )
+
+    def _stderr_tail(self) -> str:
+        """The harness's own last words, for a failure that needs them.
+
+        Empty string when there is nothing to add, so callers can
+        concatenate unconditionally. Read defensively through the whole
+        attribute path: this is private SDK surface reached from a failure
+        handler, and a diagnostic that raises while explaining a failure
+        replaces a useful message with a useless one.
+        """
+        try:
+            lines = list(self._connection_stderr())[-STDERR_TAIL_LINES:]
+        except Exception:  # noqa: BLE001 - a missing diagnosis is not a failure
+            logger.debug("Could not read the harness stderr", exc_info=True)
+            return ""
+        if not lines:
+            return ""
+        return "\n\nThe Antigravity harness last said:\n" + "\n".join(lines)
+
+    def _connection_stderr(self) -> Any:
+        """The harness's stderr deque, live connection or last one.
+
+        The live conversation first — a failure raised mid-turn still has
+        one — and the retained connection second, for the timeout and SDK
+        error paths, which run after the agent's context manager has
+        closed and cleared it.
+        """
+        live = getattr(self._conversation, "connection", None)
+        connection = live if live is not None else self._last_connection
+        return getattr(connection, "_stderr_lines", ()) or ()
 
     async def cancel(self) -> bool:
         """Halt a running consultation. Safe when there is none.
@@ -409,6 +506,7 @@ class Consultant:
             raise ConsultationError(
                 f"Antigravity did not answer within {self._timeout:.0f}s. "
                 "The consultation was abandoned; nothing was written."
+                + self._stderr_tail()
             ) from exc
         except (
             types.AntigravityConnectionError,
@@ -425,7 +523,7 @@ class Consultant:
             # MCP tool handler whose contract is "every failure comes back
             # as prose the model can act on". An unwrapped SDK error
             # escapes it and reaches the model as a stack trace.
-            raise ConsultationError(_explain(exc)) from exc
+            raise ConsultationError(_explain(exc) + self._stderr_tail()) from exc
 
     # ------------------------------------------------------------------
     # AG-R-3: believe the filesystem, not the tool

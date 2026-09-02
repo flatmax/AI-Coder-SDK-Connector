@@ -1397,3 +1397,153 @@ Three consequences worth carrying:
 - **⏹ Stop is wired to the bridge but not to `stop_task`.** `ConsultantBridge.cancel()` exists and
   reaches `Conversation.cancel()`; nothing routes the RPC to it yet.
 - **`usage` rides on the terminal event** and nothing renders it. Tokens only, per AG-6.
+
+---
+
+## Making a stalled consultation legible (2026-09-02)
+
+Three changes, all of them consequences of the browser run above rather than of the plan. The
+consultation worked; what failed was every part of *saying so* when it did not.
+
+### 1. The failure carries the harness's own words
+
+The diagnosis on 2026-09-02 — `Post ".../streamGenerateContent": context canceled`, meaning the
+request had been in flight the whole timeout and Google never answered — was in the harness's stderr,
+which the SDK logs at INFO on the **root** logger and nowhere else. Finding it took a `grep` of the
+server log. Nobody using the app could have.
+
+`Consultant._stderr_tail()` now appends the last six lines to a timeout or an SDK error. Read off
+`Conversation.connection._stderr_lines`, the bounded deque the SDK already fills, rather than
+captured with a logging handler: a handler would be global, would fire on a thread that is not the
+event loop, and would pick up every other engine's lines.
+
+**The ordering here was a bug in the first draft and is the reason there is a test for it.**
+`_chat`'s except handlers run *after* `_drive`'s `finally` has cleared the live conversation, so a
+tail read from that attribute would always have been empty — the feature would have been a silent
+no-op, which is the exact failure it exists to prevent, one layer up. The connection is now retained
+past teardown for diagnostics.
+
+### 2. Silence is reported while it is happening
+
+A heartbeat `systemEvent` every 20s into the consultation's tab, saying only how long the wait has
+been. Deliberately **not** dressed up as progress: the harness is blocked on a socket and there is no
+progress to report, and a bar that moves while nothing happens is worse than a number that grows.
+Cancelled in the `finally`, with a test that it stops — a background task outliving the thing it
+reports on is how "harmless" tasks accumulate.
+
+The failure's reason now also goes **into the tab**, attributed to the consultation. Until now it
+went to the *model*, as the tool's text result, which the person watching the tab does not read: the
+row went red and said nothing.
+
+### 3. `DEFAULT_TIMEOUT_SECONDS`: 180 → 120
+
+Two live runs sat at the full 180 and returned nothing. The number is not the real fix and does not
+pretend to be — silence was the problem rather than duration — but the cost is asymmetric: a
+consultation needing more than two minutes is already a bad second opinion, while every extra second
+of a hung one blocks the Claude turn that asked.
+
+### 4. ⏹ Stop is no longer decorative
+
+A consultation is a subagent row, so its Stop click arrives at `stop_task` — where the CLI has never
+heard of the id. `ClaudeCodeService.stop_task` now routes ids prefixed `consultation-` to
+`ConsultantBridge.cancel()`, which reaches `Conversation.cancel()`.
+
+Routed by the id's shape rather than by asking the CLI and falling back on its error, because an
+unknown id is not a failure the CLI reports cleanly. A test pins the minting site and the routing
+site against each other, since they are two constants that must agree and live in different packages.
+
+### What this does not fix
+
+The provider hanging. If Google accepts a request and never answers, the consultation still waits out
+its timeout — it just now says so every 20s, ends 60s sooner, and explains itself with the harness's
+own stderr when it gives up.
+
+---
+
+## The hangs were the model, not the code (2026-09-02)
+
+The two 180s timeouts in the browser run were blamed, reasonably, on "the Antigravity side isn't
+responding". That was right and not specific enough. Measuring it took three minutes and changes a
+pinned default.
+
+### The measurement
+
+A trivial five-token prompt — *"Reply with the single word: ok"* — sent **straight at
+`generativelanguage.googleapis.com`** with this free-tier key, bypassing the harness, the SDK and our
+code entirely:
+
+| model | run 1 | run 2 |
+|---|---|---|
+| `gemini-3.7-flash` | 30.9 s | **timed out at 70 s** |
+| `gemini-3.6-flash` | 3.1 s | 22.7 s |
+| `gemini-3.5-flash` | — | 3.9 s |
+
+A latency ladder by model recency. `gemini-3.7-flash` — what `DEFAULT_TEXT_MODEL` was pinned to since
+phase 1 — is effectively unusable on a free key, and an agent turn is many model calls, so *any*
+timeout would have been exceeded.
+
+**It arrives as slowness, not as a 429**, which is why nothing in the stack reported it. The SDK's
+`retry_config` has nothing to retry; the harness's stderr says only `context canceled`, which is our
+own timeout; and `_explain`'s quota branch never fires. A provider rationing capacity by queueing is
+invisible to every mechanism built to notice rationing.
+
+### What changed
+
+`DEFAULT_TEXT_MODEL`: `gemini-3.7-flash` → `gemini-3.5-flash`, with the table above in the docstring
+so the next reader gets the evidence rather than a bare constant. `scripts/probe_consultation_tab.py`
+then passed all six contract checks on the first run, streaming 11 chunks — the same probe that had
+been passing intermittently for days.
+
+**This is a free-tier default, not a judgement about the models.** The point of a second opinion is an
+independent and *capable* one, and pinning an older model to make it respond is a real cost. It joins
+[AG-12](decisions.md#ag-12)'s list of things a paid key should revisit, and it is a constructor
+argument so that revisiting is one line.
+
+### Why this took a browser to find
+
+Every probe run before today either passed or failed for a reason that looked like weather — a 503, a
+"high demand" notice. The pattern only became visible with two consecutive 180s timeouts on different
+questions, which is what a human watching a UI noticed and a passing test suite could not. The
+measurement that settled it deliberately used **neither** our code nor the SDK: when the question is
+"is it us or them", the answer has to come from a path that contains neither.
+
+### Confirmed by Google (2026-09-02)
+
+The measurement above was put to Google and the behaviour is intended, which turns a guess into a
+constraint the design can rest on. Their answer, in the parts that change something:
+
+- **Free tier is best-effort and queues rather than refuses.** *"When backend capacity is highly
+  utilized, rather than rejecting requests with a `429 RESOURCE_EXHAUSTED` error, Google queues Free
+  Tier requests behind paid traffic."* Newer models carry heavier traffic, which is the ladder
+  exactly.
+- **There is no availability signal to query.** *"The `models.list` endpoint only verifies
+  authorization, not current network load."* Worth recording because it is the endpoint anyone would
+  reach for: this key lists `gemini-3.7-flash` and cannot practically use it.
+- **60–90 s is their own free-tier guidance**, *"just to survive the queue"* — and they add that *"an
+  agent waiting a full minute per turn is practically unusable for interactive work."* Our 120 s sits
+  deliberately above their figure: that number is what a request needs to *clear* the queue, so
+  timing out at it would abandon calls that were about to succeed.
+- **The whole wait is time-to-first-token.** *"The capacity queueing occurs at the routing layer
+  before a model is allocated … Once your request finally clears the queue, the tokens will stream out
+  at their normal rate."*
+- **Billing removes the queueing**, not merely the rate ceiling, and restores fail-fast `429`s.
+
+### The one that changed code
+
+The TTFT detail is the actionable one. A consultation with **no step yet** is queued; one that has
+started is merely thinking. Same spinner, opposite meanings — and only the first is something a
+reader can act on. So the heartbeat now says which:
+
+> Waiting for Google to start — 40s so far, and nothing has arrived yet. On a free-tier key requests
+> are queued behind paid traffic rather than refused, and the whole wait lands before the first token.
+
+and switches to a plain *"Antigravity is working"* once a step arrives. Saying "queued" after the
+first token would be the wrong kind of wrong: it would blame the provider for a model taking its time.
+
+### What it means for AG-12
+
+The billing case is now stronger than the two costs [AG-12](decisions.md#ag-12) records, and stronger
+on the vendor's own account: the free tier does not merely defer image generation and train on
+prompts, it makes an interactive agent *"practically unusable"* — Google's phrase — and it does so
+invisibly, because queueing looks like nothing at all. Lowering the model pin buys usability today; it
+does not buy back the capability, and a paid key should raise it again.

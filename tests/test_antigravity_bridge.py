@@ -22,6 +22,8 @@ cannot act on a stack trace.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from aic_dc.antigravity.bridge import SERVER_NAME, ConsultantBridge
@@ -57,6 +59,15 @@ class FakeConsultant:
         if self._raises:
             raise self._raises
         return self._image
+
+
+def _step(text):
+    """A minimal Step the pump will translate into a chunk."""
+    return type("S", (), {
+        "id": "t:1", "type": "TEXT_RESPONSE", "source": "MODEL",
+        "target": "USER", "status": "ACTIVE", "content": text,
+        "content_delta": text, "depth": 0,
+    })()
 
 
 def body(result) -> str:
@@ -389,3 +400,134 @@ class TestTheConsultationGetsATab:
             )
             await bridge.second_opinion("Well?")
             assert self.events(seen, "subagentEvent")[-1].payload["status"] in known
+
+    @pytest.mark.asyncio
+    async def test_a_failure_says_why_in_the_tab(self):
+        """Red is not a reason.
+
+        Before this the explanation went to the *model*, as the tool's
+        text result, which the person watching the tab never reads. The
+        tab settled red and said nothing.
+        """
+        bridge, seen = self.bridge_with_emit(
+            FakeConsultant(raises=ConsultationError("did not answer within 120s"))
+        )
+        await bridge.second_opinion("Well?")
+        notices = [
+            e.payload for e in self.events(seen, "systemEvent")
+            if e.payload.get("subtype") == "engine_error"
+        ]
+        assert notices, "the tab was given no reason for the failure"
+        assert "120s" in notices[0]["data"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_the_reason_is_attributed_to_the_consultation(self):
+        """Or it renders in Main, where it reads as the master failing."""
+        bridge, seen = self.bridge_with_emit(
+            FakeConsultant(raises=ConsultationError("boom"))
+        )
+        await bridge.second_opinion("Well?")
+        row = self.events(seen, "subagentEvent")[0].payload
+        notice = next(
+            e.payload for e in self.events(seen, "systemEvent")
+            if e.payload.get("subtype") == "engine_error"
+        )
+        assert notice["agent_id"] == row["agent_id"]
+
+    @pytest.mark.asyncio
+    async def test_the_heartbeat_reports_waiting_and_then_stops(self, monkeypatch):
+        """Silence was the problem; a growing number is the smallest fix.
+
+        The heartbeat must also *stop* — a background task that outlives
+        the consultation it reports on is how "harmless" tasks accumulate.
+        """
+        import aic_dc.antigravity.bridge as mod
+
+        monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
+
+        class Slow(FakeConsultant):
+            async def second_opinion(self, question, context="", observer=None):
+                await asyncio.sleep(0.05)
+                return "late"
+
+        bridge, seen = self.bridge_with_emit(Slow(answer="late"))
+        await bridge.second_opinion("Well?")
+        beats = [
+            e.payload for e in self.events(seen, "systemEvent")
+            if "so far" in str(e.payload.get("data", {}).get("message", ""))
+        ]
+        assert beats, "no heartbeat while the consultation was running"
+        before = len(beats)
+        await asyncio.sleep(0.05)
+        after = len([
+            e for e in self.events(seen, "systemEvent")
+            if "so far" in str(e.payload.get("data", {}).get("message", ""))
+        ])
+        assert after == before, "the heartbeat outlived its consultation"
+
+    def test_the_timeout_default_is_not_three_minutes(self):
+        """The number that produced two silent 180s waits."""
+        from aic_dc.antigravity.consultant import DEFAULT_TIMEOUT_SECONDS
+
+        assert DEFAULT_TIMEOUT_SECONDS < 180
+
+    @pytest.mark.asyncio
+    async def test_the_heartbeat_names_the_queue_before_the_first_step(
+        self, monkeypatch
+    ):
+        """Google confirmed the whole wait lands before the first token.
+
+        So "no step yet" means *queued behind paid traffic*, which is
+        something a reader can act on, and it is a different state from a
+        model that is thinking. Same spinner, opposite meanings.
+        """
+        import aic_dc.antigravity.bridge as mod
+
+        monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
+
+        class Stalled(FakeConsultant):
+            async def second_opinion(self, question, context="", observer=None):
+                await asyncio.sleep(0.05)  # never calls the observer
+                return "late"
+
+        bridge, seen = self.bridge_with_emit(Stalled(answer="late"))
+        await bridge.second_opinion("Well?")
+        messages = [
+            str(e.payload.get("data", {}).get("message", ""))
+            for e in self.events(seen, "systemEvent")
+        ]
+        assert any("queued behind paid traffic" in m for m in messages), (
+            "a stalled consultation did not say it was queued"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_heartbeat_stops_naming_the_queue_once_it_starts(
+        self, monkeypatch
+    ):
+        """Once a step has arrived the request has cleared the queue.
+
+        Still saying "queued" then would be wrong, and the wrong kind of
+        wrong: it would blame the provider for a model that is simply
+        taking its time.
+        """
+        import aic_dc.antigravity.bridge as mod
+
+        monkeypatch.setattr(mod, "HEARTBEAT_SECONDS", 0.01)
+
+        class Streaming(FakeConsultant):
+            async def second_opinion(self, question, context="", observer=None):
+                if observer:
+                    observer(_step("hello"))
+                await asyncio.sleep(0.05)
+                return "done"
+
+        bridge, seen = self.bridge_with_emit(Streaming(answer="done"))
+        await bridge.second_opinion("Well?")
+        messages = [
+            str(e.payload.get("data", {}).get("message", ""))
+            for e in self.events(seen, "systemEvent")
+        ]
+        beats = [m for m in messages if "so far" in m]
+        assert beats, "no heartbeat at all"
+        assert not any("queued behind paid traffic" in m for m in beats)
+        assert any("Antigravity is working" in m for m in beats)

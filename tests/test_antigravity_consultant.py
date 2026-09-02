@@ -770,3 +770,77 @@ class TestModelPinning:
         text_model, image_model = (c.model for c in fake_agent.configs)
         assert text_model != image_model
         assert "image" in image_model
+
+
+class TestAFailureCarriesTheHarnessesOwnWords:
+    """The diagnosis reaches the caller, not just the server log.
+
+    On 2026-09-02 two live consultations sat at the full timeout and
+    returned nothing. The reason — ``Post ".../streamGenerateContent":
+    context canceled``, meaning the request had been in flight the whole
+    time and Google never answered — was in the harness's stderr, which
+    the SDK logs at INFO on the *root* logger and nowhere else. The person
+    watching the tab saw a spinner.
+
+    The ordering here is the part worth testing rather than the string:
+    ``_chat``'s except handlers run *after* ``_drive``'s ``finally`` has
+    cleared the live conversation, so a tail read from that attribute
+    would always be empty and the whole feature would be a silent no-op.
+    """
+
+    def connection_with(self, lines):
+        return type("Conn", (), {"_stderr_lines": list(lines)})()
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_names_what_the_harness_said(self, repo, fake_agent):
+        class Slow(FakeConversation):
+            @property
+            def connection(self):
+                return type(
+                    "C", (), {"_stderr_lines": ["Post ...: context canceled"]}
+                )()
+
+            async def receive_steps(self):
+                import asyncio
+
+                await asyncio.sleep(10)
+                yield  # pragma: no cover
+
+        fake_agent.responses = [Slow()]
+        target = Consultant(repo, credentials=KEYED, timeout_seconds=0.05)
+        with pytest.raises(ConsultationError) as exc:
+            await target.second_opinion("Well?")
+        assert "context canceled" in str(exc.value), (
+            "the timeout message carries no harness stderr — the tail is "
+            "read after _drive cleared the conversation, so it found None"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_consultation_with_no_stderr_says_nothing_extra(
+        self, consultant, fake_agent
+    ):
+        """An empty deque must not append a dangling header."""
+        assert consultant._stderr_tail() == ""
+
+    @pytest.mark.asyncio
+    async def test_only_the_tail_is_quoted(self, consultant):
+        """The deque holds 100 lines; a tool result is not a log file."""
+        from aic_dc.antigravity.consultant import STDERR_TAIL_LINES
+
+        consultant._last_connection = self.connection_with(
+            [f"line-{i}" for i in range(40)]
+        )
+        tail = consultant._stderr_tail()
+        assert "line-39" in tail and "line-0" not in tail
+        assert tail.count("line-") == STDERR_TAIL_LINES
+
+    def test_a_broken_diagnostic_does_not_replace_the_failure(self, consultant):
+        """A tail that raises while explaining a failure is worse than none."""
+
+        class Exploding:
+            @property
+            def _stderr_lines(self):
+                raise RuntimeError("gone")
+
+        consultant._last_connection = Exploding()
+        assert consultant._stderr_tail() == ""

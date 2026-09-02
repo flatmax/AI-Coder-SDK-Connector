@@ -433,6 +433,26 @@ price were the only axis. It is not.
    than delivering it. `second_opinion` is unaffected and works end-to-end — verified 2026-08-31,
    a live `Consultant.second_opinion` turn returning text on this key.
 
+**A third cost, measured 2026-09-02: the newest models are queued to the point of unusability.** A
+five-token prompt sent straight at the REST API on this key took 30.9 s then timed out at 70 s on
+`gemini-3.7-flash`, while `gemini-3.5-flash` answered in 3.9 s. An agent turn is many model calls, so
+the consultant's pinned model had to be lowered to keep the feature working at all
+([`delivery.md`](delivery.md) § The hangs were the model). This is worth recording beside the other
+two because it is the least visible: it arrives as *slowness*, never as a 429, so no quota check, no
+retry policy and no error branch reports it. A paid key should raise the pin back.
+
+**Google confirmed this is intended, 2026-09-02.** The free tier is best-effort: *"rather than
+rejecting requests with a `429 RESOURCE_EXHAUSTED` error, Google queues Free Tier requests behind
+paid traffic"*, the wait lands entirely before the first token, and `models.list` reports
+authorization rather than availability — so a key can list a model it cannot practically use. Their
+own guidance is a 60–90 s client timeout *"just to survive the queue"*, with the observation that
+*"an agent waiting a full minute per turn is practically unusable for interactive work"*. Billing
+removes the queueing rather than merely raising the ceiling, and restores fail-fast errors.
+
+That makes the upgrade case stronger than the two costs below, and on the vendor's own account: the
+free tier does not only defer image generation and train on prompts, it makes an interactive agent
+unusable in a way nothing in the stack can report.
+
 **Consequence — two explicit upgrade triggers, either of which ends this decision.** Billing must be
 enabled on the AI Studio project *before* the consultant is pointed at anything the owner would not
 publish, and *before* `generate_image` is expected to work. Neither is a code change:

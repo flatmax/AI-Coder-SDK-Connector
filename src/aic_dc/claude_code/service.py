@@ -1827,6 +1827,22 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+
+        # An Antigravity consultation is a subagent row like any other, so
+        # its ⏹ arrives here — but it is not a CLI task and the CLI has
+        # never heard of its id. Routed by the id's own shape rather than
+        # by asking the CLI first and falling back on an error, because a
+        # `stop_task` for an unknown id is not a *failure* the CLI reports
+        # cleanly, and AG-13's button has to be real rather than decorative
+        # (it maps to the `subagent_tabs` surface for exactly this reason).
+        bridge = getattr(self, "consultant_bridge", None)
+        if bridge is not None and str(task_id).startswith("consultation-"):
+            stopped = await bridge.cancel()
+            return {
+                "status": "stopping" if stopped else "not_running",
+                "task_id": task_id,
+            }
+
         try:
             await self.session.stop_task(task_id)
         except (EngineNotReadyError, SessionLostError) as exc:
