@@ -644,6 +644,14 @@ async def _heavy_init(
         # the duplication the adapter was written to avoid, and an engine
         # that never received one answers every hover with "no answer"
         # after a switch, silently.
+        # Imported here rather than read from `main()`'s scope: this runs
+        # in `_heavy_init`, a different function, and the name was not
+        # bound in it — a `NameError` that took the *whole* deferred init
+        # down, so no adapter got an index and every hover answered "no
+        # answer" for the life of the session. It logged one traceback at
+        # startup and looked like a slow index otherwise.
+        from aic_dc import capabilities
+
         for name, adapter in (
             (capabilities.CLAUDE, claude_code_service),
             *sorted((other_engines or {}).items()),
@@ -925,7 +933,6 @@ async def run(
     if dev or preview:
         # Vite dev/preview server
         import subprocess
-        import shutil
 
         node_modules = repo_path.parent / "webapp" / "node_modules"
         # Try finding webapp relative to the package

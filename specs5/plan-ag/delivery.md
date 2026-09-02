@@ -1237,3 +1237,83 @@ reason that is now correctly silent.
 each `seq` printing a longer prefix of the same sentence. That is right: `blocks.js:107` documents
 "content is cumulative" and the browser replaces by `block_id`. Checked because the probe made it
 look like duplication, and worth recording so the next reader does not re-open it.
+
+---
+
+## Phase 6b — the consultation as an agent tab (2026-09-02)
+
+[AG-13](decisions.md#ag-13), and the tier-2 shape rather than the cheap one: the consultation
+**streams** into its own tab instead of filling in at the end.
+
+**No webapp change**, which was the exit criterion and is the thing worth checking first. The tab
+strip joins on identifiers alone, so the whole feature is server-side.
+
+### What the consultant became, and why that is not AG-R-9 firing
+
+`_chat` no longer calls `agent.chat()`. It drives `conversation.send()` + `receive_steps()` and hands
+each step to an optional observer, which the bridge feeds to the **existing** `StepTranslator`.
+
+That reverses AG-7's "it stays a one-shot `async with Agent(...)`", and the amendment argues it out:
+the risk was the consultant *inventing* session machinery **ahead of** the engine, so the engine
+inherits a shape built for one turn. Phase 3 built that machinery properly, against `Conversation`
+directly, and the consultant now consumes it. The direction of dependency was the whole of the risk.
+
+`chat()` is still not called, and that is the other half: it returns a lazy cursor whose read after
+`Agent.__aexit__` hung until killed in phase 1.
+
+**The tripwire in `tests/test_antigravity_consultant.py` was rewritten to match the redrawn risk**,
+not deleted. `receive_steps` and `cancel` are now expected; what is forbidden is a *second
+implementation* — the test asserts `consultant.py` defines no `StepTranslator`, `Event`, `_Block` or
+`translate` of its own, and that it reaches the stop reason and usage through the shared readers
+rather than the SDK's private attributes.
+
+To make that reuse real, `stop_reason_of` and `turn_usage_of` were lifted out of
+`AntigravitySession` into module-level functions taking a conversation. Both were spelled wrongly
+once already (phase 3's live run); a second copy would be a second place to get them wrong, found the
+same way — live, months later.
+
+### The identity, minted rather than borrowed
+
+An in-process MCP tool handler receives **only its own `args` dict** — no `tool_use_id`, no context
+object. So a consultation cannot learn the id of the tool card that invoked it, and the bridge mints
+its own. Correlating against the most recent `mcp__aic-dc-antigravity__*` card in the pump would be a
+race whose failure mode is attaching output to the *wrong* card.
+
+Accepted cost: the row does not nest inside its spawning card the way a `Task` subagent's does.
+
+### Settling, which is the part that would have been forgotten
+
+`_tab` is an async context manager, and the terminal `subagentEvent` is in its `finally`. The webapp
+sets `state.streaming = !row.terminal`, so a consultation that raised without one leaves a tab
+spinning for the rest of the session — and a refusal, a timeout and a cancel all take that path. It
+also drains the observer's scheduled pushes first, or the terminal event can overtake the text it is
+meant to be terminating.
+
+Two tests cover the failure directly: one for the ordinary end, one where the consultation raises.
+
+### A latent bug found while writing it
+
+`_first_output_path` read `chunk.result.output_path` — the `ChatResponse.resolve()` shape. It now
+receives `Step` objects, where the path is a *tool-call argument*. Every test passed either way,
+because the fakes carried the old shape; only a real image would have shown it. Both shapes are now
+tried, which is the same class of near-miss phase 3's live run found three of.
+
+### And one real bug in committed code, found by running the app
+
+`_heavy_init` referenced `capabilities` without importing it into its own scope — the name is bound
+in `main()`, a different function. **The whole deferred initialisation died on a `NameError`**, so no
+adapter ever received the symbol index and every hover, definition and reference answered "no answer"
+for the life of the session.
+
+It was invisible in the way that matters: one traceback at startup, and thereafter it reads as a slow
+or empty index rather than as a crash. No unit test touched the attachment loop, because it is
+startup plumbing. `tests/test_main_symbol_index_attach.py` is the regression — checked structurally,
+since reproducing it needs the real deferred path — and it fails on the pre-fix tree, which was
+verified rather than assumed.
+
+### What is left
+
+- **No live run.** Every test here is offline. The tab has never been driven by a real Gemini turn.
+- **⏹ Stop is wired to the bridge but not to `stop_task`.** `ConsultantBridge.cancel()` exists and
+  reaches `Conversation.cancel()`; nothing routes the RPC to it yet.
+- **`usage` rides on the terminal event** and nothing renders it. Tokens only, per AG-6.

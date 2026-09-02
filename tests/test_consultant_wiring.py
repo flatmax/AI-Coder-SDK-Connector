@@ -46,7 +46,8 @@ class Service(ClaudeCodeService):
         self._repo_root = Path(repo_root)
 
 
-def mount(monkeypatch, *, available: bool, existing=None, explode=False):
+def mount(monkeypatch, *, available: bool, existing=None, explode=False,
+          want_bridge=False):
     """Run the mount with the credential state a test asks for."""
 
     class FakeConsultant:
@@ -58,8 +59,13 @@ def mount(monkeypatch, *, available: bool, existing=None, explode=False):
             )()
 
     class FakeBridge:
-        def __init__(self, consultant):
+        def __init__(self, consultant, *, emit=None, request_id=None):
             self._c = consultant
+            # Recorded rather than ignored: AG-13's tab needs both, and a
+            # double that accepted them without noticing would let the
+            # wiring rot silently.
+            self.emit = emit
+            self.request_id = request_id
 
         @property
         def available(self):
@@ -72,7 +78,11 @@ def mount(monkeypatch, *, available: bool, existing=None, explode=False):
 
     monkeypatch.setattr(ag, "Consultant", FakeConsultant)
     monkeypatch.setattr(ag, "ConsultantBridge", FakeBridge)
-    return Service()._add_consultant(existing)
+    service = Service()
+    servers = service._add_consultant(existing)
+    if want_bridge:
+        return servers, service.consultant_bridge
+    return servers
 
 
 # ----------------------------------------------------------------------
@@ -194,3 +204,28 @@ class TestItIsActuallyWired:
             pytest.skip("no Gemini credential on this machine")
         servers = Service(tmp_path)._add_consultant(None)
         assert AG_SERVER_NAME in servers
+
+
+class TestTheTabWiring:
+    """AG-13: the bridge is given what it needs to open an agent tab.
+
+    Both halves matter and both fail silently if absent. Without ``emit``
+    the consultation streams nowhere; without a *live* ``request_id`` the
+    browser drops every ``subagentEvent``, because ``onSubagentEvent``
+    resolves the owner tab by request id and returns early when it cannot.
+    """
+
+    def test_the_bridge_is_handed_an_emit(self, monkeypatch):
+        servers, bridge = mount(monkeypatch, available=True, want_bridge=True)
+        assert bridge.emit is not None
+
+    def test_the_request_id_is_read_late_not_captured_early(self, monkeypatch):
+        """A callable, not a value.
+
+        The bridge is built once when the session is constructed and the
+        turn it must attribute to changes on every prompt. Capturing an id
+        at construction would attach every consultation for the life of
+        the session to the first turn — or, before any turn, to ``None``.
+        """
+        servers, bridge = mount(monkeypatch, available=True, want_bridge=True)
+        assert callable(bridge.request_id)

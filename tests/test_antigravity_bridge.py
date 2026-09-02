@@ -38,15 +38,22 @@ class FakeConsultant:
         self._raises = raises
         self.available = available
         self.calls: list[tuple] = []
+        #: The observer each call was handed. ``None`` when nothing is
+        #: listening, which is the ordinary case with no browser attached.
+        self.observers: list = []
 
-    async def second_opinion(self, question, context=""):
+    async def second_opinion(self, question, context="", observer=None):
         self.calls.append(("second_opinion", question, context))
+        self.observers.append(observer)
         if self._raises:
             raise self._raises
         return self._answer
 
-    async def generate_image(self, prompt, output_name="", aspect_ratio=""):
+    async def generate_image(
+        self, prompt, output_name="", aspect_ratio="", observer=None
+    ):
         self.calls.append(("generate_image", prompt, output_name, aspect_ratio))
+        self.observers.append(observer)
         if self._raises:
             raise self._raises
         return self._image
@@ -216,3 +223,124 @@ class TestGenerateImage:
         result = await ConsultantBridge(fake).generate_image("a duck")
         assert "could not be generated" in body(result)
         assert "outside the repository" in body(result)
+
+
+# ----------------------------------------------------------------------
+# AG-13 — the consultation as its own agent tab
+# ----------------------------------------------------------------------
+
+
+class TestTheConsultationGetsATab:
+    """The contract read off ``subagent-tabs.js``, asserted from this side.
+
+    The webapp needs no change for this to work, and that claim is only
+    true if the server gets four things exactly right: a turn-scoped
+    event, an identity, blocks carrying the *same* identity as their
+    ``agent_id``, and a terminal event. Each is checked here, because each
+    fails silently — a mismatch drops the event and the tab simply never
+    appears.
+    """
+
+    def bridge_with_emit(self, consultant=None, request_id="req-1"):
+        seen = []
+
+        async def emit(event, rid):
+            seen.append((event, rid))
+
+        return (
+            ConsultantBridge(
+                consultant or FakeConsultant(answer="ok"),
+                emit=emit,
+                request_id=lambda: request_id,
+            ),
+            seen,
+        )
+
+    def events(self, seen, name):
+        return [e for e, _ in seen if e.name == name]
+
+    @pytest.mark.asyncio
+    async def test_a_consultation_announces_itself(self):
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        rows = self.events(seen, "subagentEvent")
+        assert rows, "no subagentEvent — the tab strip never hears about it"
+        assert rows[0].payload["subagent_type"] == "Antigravity"
+
+    @pytest.mark.asyncio
+    async def test_the_event_is_turn_scoped_to_the_live_request(self):
+        """``onSubagentEvent`` drops anything whose owner tab is not live."""
+        bridge, seen = self.bridge_with_emit(request_id="req-42")
+        await bridge.second_opinion("Well?")
+        assert all(rid == "req-42" for _, rid in seen)
+
+    @pytest.mark.asyncio
+    async def test_it_settles_so_the_tab_stops_streaming(self):
+        """``state.streaming = !row.terminal`` — without this it spins."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        rows = self.events(seen, "subagentEvent")
+        assert rows[-1].payload["terminal"] is True
+        assert rows[-1].payload["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_it_settles_even_when_the_consultation_fails(self):
+        """A refusal must not leave a tab spinning for the session."""
+        bridge, seen = self.bridge_with_emit(
+            FakeConsultant(raises=ConsultationError("no quota"))
+        )
+        await bridge.second_opinion("Well?")
+        assert self.events(seen, "subagentEvent")[-1].payload["terminal"] is True
+
+    @pytest.mark.asyncio
+    async def test_one_identity_joins_the_row_to_its_blocks(self):
+        """``row.tool_use_id`` is what picks the blocks to mirror."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        row = self.events(seen, "subagentEvent")[0].payload
+        assert row["tool_use_id"] == row["agent_id"] == row["task_id"]
+
+    @pytest.mark.asyncio
+    async def test_each_consultation_gets_its_own_identity(self):
+        """Two in one turn are two tabs, not one that overwrites itself."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("First?")
+        await bridge.second_opinion("Second?")
+        ids = {e.payload["agent_id"] for e in self.events(seen, "subagentEvent")}
+        assert len(ids) == 2
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_emitted_with_no_live_turn(self):
+        """The bridge outlives any one turn; a tab needs one to attach to."""
+        bridge, seen = self.bridge_with_emit(request_id=None)
+        await bridge.second_opinion("Well?")
+        assert seen == []
+
+    @pytest.mark.asyncio
+    async def test_the_consultant_is_given_an_observer(self):
+        """Which is what makes it stream rather than answer all at once."""
+        consultant = FakeConsultant(answer="ok")
+        bridge, _ = self.bridge_with_emit(consultant)
+        await bridge.second_opinion("Well?")
+        assert consultant.observers[-1] is not None
+
+    @pytest.mark.asyncio
+    async def test_no_observer_when_nothing_is_listening(self):
+        """No browser, no cost: the consultation runs exactly as before."""
+        consultant = FakeConsultant(answer="ok")
+        await ConsultantBridge(consultant).second_opinion("Well?")
+        assert consultant.observers[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_stop_reaches_the_consultation(self):
+        """AG-13's ⏹ is real, not decorative."""
+        consultant = FakeConsultant(answer="ok")
+        consultant.cancelled = False
+
+        async def cancel():
+            consultant.cancelled = True
+            return True
+
+        consultant.cancel = cancel
+        assert await ConsultantBridge(consultant).cancel() is True
+        assert consultant.cancelled

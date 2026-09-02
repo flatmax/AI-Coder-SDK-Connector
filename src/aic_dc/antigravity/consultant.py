@@ -88,6 +88,8 @@ from typing import Any
 
 from aic_dc.antigravity.credentials import Credentials
 from aic_dc.antigravity.credentials import resolve as resolve_credentials
+from aic_dc.antigravity.session import stop_reason_of, turn_usage_of
+from aic_dc.antigravity.steps import _name
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +131,9 @@ class _Turn:
     text: str
     chunks: list[Any]
     stop_reason: str
+    #: ``Conversation.last_turn_usage`` — tokens, never a cost (AG-6).
+    #: No step carries it, which phase 3's live run found the hard way.
+    usage: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,6 +185,9 @@ class Consultant:
         self._text_model = text_model
         self._image_model = image_model
         self._timeout = timeout_seconds
+        #: The live conversation, while a consultation is running. Held so
+        #: :meth:`cancel` has something to halt (AG-13).
+        self._conversation: Any = None
 
     @property
     def credentials(self) -> Credentials:
@@ -201,7 +209,9 @@ class Consultant:
     # Consultations
     # ------------------------------------------------------------------
 
-    async def second_opinion(self, question: str, context: str = "") -> str:
+    async def second_opinion(
+        self, question: str, context: str = "", observer: Any = None
+    ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
         No tools, no workspace, no file access — the ``context`` argument
@@ -214,7 +224,9 @@ class Consultant:
             raise ConsultationError("A second opinion needs a question to answer.")
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
-        turn = await self._chat(prompt, model=self._text_model, builtin_tools=())
+        turn = await self._chat(
+            prompt, model=self._text_model, builtin_tools=(), observer=observer
+        )
         if not turn.text:
             raise ConsultationError(
                 f"Antigravity returned an empty answer (stop reason: {turn.stop_reason})."
@@ -226,6 +238,7 @@ class Consultant:
         prompt: str,
         output_name: str = "",
         aspect_ratio: str = "",
+        observer: Any = None,
     ) -> ImageResult:
         """Generate an image into the repository, and verify where it went.
 
@@ -255,6 +268,7 @@ class Consultant:
             " ".join(instruction),
             model=self._image_model,
             builtin_tools=("GENERATE_IMAGE",),
+            observer=observer,
         )
         return self._verify_image(turn.chunks, turn.text)
 
@@ -262,12 +276,76 @@ class Consultant:
     # The single SDK call site
     # ------------------------------------------------------------------
 
+    async def _drive(
+        self, agent: Any, prompt: str, observer: Any = None
+    ) -> _Turn:
+        """Send one prompt and drain its steps, inside the agent's lifetime.
+
+        **Streaming, which AG-7 originally forbade and AG-13 reversed.**
+        The reversal is narrow and the reasoning is in
+        ``risks.md`` AG-R-9: the risk was the consultant *inventing*
+        session machinery ahead of the engine and so shaping the engine
+        around a one-shot call. Phase 3 built that machinery properly, so
+        this now *consumes* it — ``receive_steps()``, and the caller's
+        observer feeding the existing ``StepTranslator``. There is no
+        second translator and no second event vocabulary here, which is
+        what the redrawn tripwire watches for.
+
+        ``chat()`` is still not called, and that is the other half of the
+        boundary. It returns a lazy ``ChatResponse`` — a cursor over a
+        stream nothing has pulled — and reading one after
+        ``Agent.__aexit__`` hung until killed in phase 1. Driving the
+        conversation directly keeps the work inside the lifetime that owns
+        the connection.
+
+        The conversation is held for the duration so :meth:`cancel` has
+        something to halt, and dropped in ``finally`` so a stopped
+        consultation cannot be stopped twice.
+        """
+        conversation = agent.conversation
+        self._conversation = conversation
+        steps: list[Any] = []
+        try:
+            await conversation.send(prompt)
+            async for step in conversation.receive_steps():
+                steps.append(step)
+                if observer is not None:
+                    observer(step)
+        finally:
+            self._conversation = None
+
+        return _Turn(
+            text=(conversation.last_response or "").strip(),
+            chunks=steps,
+            stop_reason=_name(stop_reason_of(conversation)),
+            usage=turn_usage_of(conversation),
+        )
+
+    async def cancel(self) -> bool:
+        """Halt a running consultation. Safe when there is none.
+
+        AG-13's ⏹ Stop. The subagent tab offers one on every row, and
+        without this it would be decorative — which is worse than absent,
+        because a button that does nothing reads as a hung engine rather
+        than as a missing feature.
+        """
+        conversation = self._conversation
+        if conversation is None:
+            return False
+        try:
+            await conversation.cancel()
+        except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
+            logger.exception("Cancelling the consultation failed")
+            return False
+        return True
+
     async def _chat(
         self,
         prompt: str,
         *,
         model: str,
         builtin_tools: tuple[str, ...],
+        observer: Any = None,
     ) -> _Turn:
         """Start a harness, send one prompt, drain the answer, shut down.
 
@@ -326,17 +404,7 @@ class Consultant:
         try:
             async with asyncio.timeout(self._timeout):
                 async with Agent(config) as agent:
-                    response = await agent.chat(prompt)
-                    # Both drains, here, before the harness goes away.
-                    text = (await response.text()).strip()
-                    chunks = await response.resolve()
-                    return _Turn(
-                        text=text,
-                        chunks=chunks,
-                        stop_reason=getattr(
-                            response.stop_reason, "name", "unknown"
-                        ),
-                    )
+                    return await self._drive(agent, prompt, observer)
         except TimeoutError as exc:
             raise ConsultationError(
                 f"Antigravity did not answer within {self._timeout:.0f}s. "
@@ -450,17 +518,35 @@ def _explain(exc: Exception) -> str:
 
 
 def _first_output_path(chunks: list[Any]) -> str:
-    """The ``output_path`` from a ``GenerateImageResult``, or ``""``.
+    """Where ``generate_image`` says it wrote, or ``""``.
 
     Read by attribute rather than by type, and defensively: this is an
-    alpha SDK, ``resolve()`` returns a union of three chunk kinds, and the
-    result object is a pydantic model the harness fills in. A shape that
-    moved should read as "no image" — which raises a clear error — rather
-    than as an ``AttributeError`` from inside a tool call.
+    alpha SDK and the result object is a pydantic model the harness fills
+    in. A shape that moved should read as "no image" — which raises a
+    clear error — rather than as an ``AttributeError`` from inside a tool
+    call.
+
+    **Two shapes, because AG-13 changed what is passed here.** Until the
+    consultation streamed, this read ``ChatResponse.resolve()`` chunks,
+    where the path hangs off ``chunk.result.output_path``. It now receives
+    ``Step`` objects, where it is a *tool-call argument*:
+    ``StepUpdate.generate_image`` carries ``prompt`` and ``output_path`` in
+    one sub-message, and the SDK copies the whole thing into
+    ``ToolCall.args`` (``sdk-surface.md`` § The step stream).
+
+    Both are tried, chunk shape first. Not defensiveness for its own sake:
+    dropping the old one would have been a silent regression of exactly
+    the kind phase 3's live run found three of — the tests pass either
+    way, and only a real image would have shown it.
     """
     for chunk in chunks:
         result = getattr(chunk, "result", None)
         path = getattr(result, "output_path", None)
         if isinstance(path, str) and path:
             return path
+        for call in getattr(chunk, "tool_calls", None) or []:
+            args = getattr(call, "args", None) or {}
+            path = args.get("output_path") if isinstance(args, dict) else None
+            if isinstance(path, str) and path:
+                return path
     return ""

@@ -839,7 +839,19 @@ class ClaudeCodeService:
             from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
 
             consultant = Consultant(self._repo_root)
-            bridge = ConsultantBridge(consultant)
+            # AG-13: the consultation streams into its own agent tab. The
+            # bridge needs two things from the session to do that — a way
+            # to push, and the id of the turn the tab belongs to.
+            # ``subagentEvent`` is turn-scoped, and the browser drops one
+            # whose request id does not match a live Main tab, so reading
+            # the id *at emit time* rather than at construction is what
+            # makes the tab attach to the turn that actually asked.
+            bridge = ConsultantBridge(
+                consultant,
+                emit=self._dispatch,
+                request_id=lambda: self.session.active_request_id,
+            )
+            self.consultant_bridge = bridge
             if not bridge.available:
                 logger.info(
                     "Antigravity consultant not mounted: no Gemini API key or "

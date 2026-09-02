@@ -43,11 +43,15 @@ on the ungated server.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from typing import Any
 
 from aic_dc.antigravity.consultant import Consultant, ConsultationError
 from aic_dc.antigravity.credentials import MissingCredentialsError
+from aic_dc.antigravity.steps import StepTranslator
+from aic_dc.claude_code.messages import Event
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +78,159 @@ class ConsultantBridge:
     or to tell the user.
     """
 
-    def __init__(self, consultant: Consultant) -> None:
+    def __init__(
+        self,
+        consultant: Consultant,
+        *,
+        emit: Any = None,
+        request_id: Any = None,
+    ) -> None:
         self._consultant = consultant
+        self._emit = emit
+        self._request_id = request_id
+        self._counter = 0
+        self._tasks: set[Any] = set()
+
+    # ------------------------------------------------------------------
+    # AG-13 — the consultation as its own agent tab
+    # ------------------------------------------------------------------
+
+    def _new_agent_id(self) -> str:
+        """A fresh identity for one consultation.
+
+        **Minted, not borrowed, and the reason is a measured limitation.**
+        An in-process MCP tool handler receives only its own ``args``
+        dict — no ``tool_use_id``, no context object
+        (``claude_agent_sdk.tool``, verified 2026-09-01) — so a
+        consultation cannot learn the id of the tool card that invoked it.
+        Correlating against the most recent
+        ``mcp__aic-dc-antigravity__*`` card in the pump would be a race
+        whose failure mode is attaching output to the *wrong* card, which
+        is worse than not attaching it.
+
+        The cost, accepted in AG-13: the row does not nest inside its
+        spawning tool card the way a ``Task`` subagent's does. It gets its
+        own row and its own tab.
+        """
+        self._counter += 1
+        return f"consultation-{id(self):x}-{self._counter}"
+
+    def _turn(self) -> str | None:
+        """The request id the tab must be attributed to.
+
+        ``subagentEvent`` is turn-scoped, and ``onSubagentEvent`` drops any
+        event whose request id does not match a *live* Main tab. That is
+        satisfied by construction here — a consultation only runs inside a
+        Claude turn — and it is the requirement that fails silently if the
+        bridge is ever driven from outside one.
+        """
+        source = self._request_id
+        try:
+            return source() if callable(source) else source
+        except Exception:  # noqa: BLE001 - no tab is better than no answer
+            logger.exception("Could not read the active request id")
+            return None
+
+    async def _announce(self, agent_id: str, label: str, **fields: Any) -> None:
+        """One ``subagentEvent``, in the shape the tab strip already reads.
+
+        No new event name and no webapp change: ``subagent-tabs.js`` joins
+        on identifiers alone, and ``subagent_type``/``description`` are
+        labels. ``terminal`` is what stops the tab streaming forever.
+        """
+        request_id = self._turn()
+        if self._emit is None or request_id is None:
+            return
+        payload = {
+            "task_id": agent_id,
+            "agent_id": agent_id,
+            "tool_use_id": agent_id,
+            "description": label,
+            "task_type": "consultation",
+            "subagent_type": "Antigravity",
+            "status": "running",
+            "terminal": False,
+            **fields,
+        }
+        try:
+            await self._emit(Event("subagentEvent", payload), request_id)
+        except Exception:  # noqa: BLE001 - a dead client is not a failed call
+            logger.exception("Could not announce the consultation")
+
+    def _observer(self, agent_id: str, translator: Any) -> Any:
+        """Feed each step through the shared pump, tagged with our id.
+
+        The translator is ``steps.StepTranslator`` — imported, not
+        reimplemented, which is AG-R-9's redrawn tripwire. Its
+        ``agent_id`` makes every block it produces carry that scope, and
+        that is the whole of what puts the text in the tab.
+        """
+
+        def observe(step: Any) -> None:
+            request_id = self._turn()
+            if self._emit is None or request_id is None:
+                return
+            for event in translator.translate(step):
+                # Fire-and-forget: an observer is called from inside the
+                # step loop and must not block it, and a dropped chunk
+                # costs a frame of text rather than the consultation.
+                task = asyncio.ensure_future(self._push(event, request_id))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
+        return observe
+
+    async def _push(self, event: Any, request_id: str) -> None:
+        try:
+            await self._emit(event, request_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Dropping consultation event %s", event.name)
+
+    @contextlib.asynccontextmanager
+    async def _tab(self, label: str) -> Any:
+        """Open a tab for one consultation, and settle it however it ends.
+
+        A context manager because the *settling* is the part that must not
+        be forgotten: ``state.streaming = !row.terminal`` in the webapp, so
+        a consultation that raised without a terminal event leaves a tab
+        spinning for the rest of the session. ``finally`` is the only
+        placement that survives a refusal, a timeout and a cancel alike.
+
+        Yields the observer to hand to the consultant, or ``None`` when
+        there is nothing to emit to — which keeps the whole feature off
+        the critical path of a session with no browser attached.
+        """
+        if self._emit is None or self._turn() is None:
+            yield None
+            return
+
+        agent_id = self._new_agent_id()
+        translator = StepTranslator(self._turn() or "", agent_id=agent_id)
+        await self._announce(agent_id, label)
+        try:
+            yield self._observer(agent_id, translator)
+        finally:
+            # Drain what the observer scheduled before saying the tab is
+            # done, or the terminal event can arrive ahead of the text it
+            # is meant to be terminating.
+            if self._tasks:
+                await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            await self._announce(
+                agent_id,
+                label,
+                status="completed",
+                terminal=True,
+                usage=translator.turn_usage() or None,
+            )
+
+    async def cancel(self) -> bool:
+        """Stop a running consultation. AG-13's ⏹, and it is real.
+
+        Reached from ``stop_task``, which is why that method belongs to
+        the ``subagent_tabs`` surface. A button that did nothing would
+        read as a hung engine rather than as a missing feature.
+        """
+        return await self._consultant.cancel()
 
     @property
     def available(self) -> bool:
@@ -101,10 +256,13 @@ class ConsultantBridge:
         judgement between two models that are supposed to disagree in
         front of the user.
         """
-        try:
-            answer = await self._consultant.second_opinion(question, context)
-        except (ConsultationError, MissingCredentialsError) as exc:
-            return _text(f"The second opinion could not be obtained: {exc}")
+        async with self._tab("Second opinion") as observer:
+            try:
+                answer = await self._consultant.second_opinion(
+                    question, context, observer=observer
+                )
+            except (ConsultationError, MissingCredentialsError) as exc:
+                return _text(f"The second opinion could not be obtained: {exc}")
         return _text(
             "A second opinion from Google Antigravity (a different model, "
             "reasoning independently — treat it as evidence, not as a "
@@ -123,12 +281,16 @@ class ConsultantBridge:
         filesystem (AG-R-3), so it is directly usable in a markdown or
         HTML reference — which is the only reason the agent asked.
         """
-        try:
-            result = await self._consultant.generate_image(
-                prompt, output_name=output_name, aspect_ratio=aspect_ratio
-            )
-        except (ConsultationError, MissingCredentialsError) as exc:
-            return _text(f"The image could not be generated: {exc}")
+        async with self._tab("Generate image") as observer:
+            try:
+                result = await self._consultant.generate_image(
+                    prompt,
+                    output_name=output_name,
+                    aspect_ratio=aspect_ratio,
+                    observer=observer,
+                )
+            except (ConsultationError, MissingCredentialsError) as exc:
+                return _text(f"The image could not be generated: {exc}")
         return _text(
             f"Image written to {result.path} ({result.bytes_written:,} bytes). "
             "The path is repo-relative and verified on disk; the file tree "

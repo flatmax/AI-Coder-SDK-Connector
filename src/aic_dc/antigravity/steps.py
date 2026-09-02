@@ -276,10 +276,21 @@ class StepTranslator:
         *,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        agent_id: str | None = None,
     ) -> None:
         self.request_id = request_id
         self._clock = clock
         self._wall_clock = wall_clock
+        # When set, *every* block and card this translator produces is
+        # attributed to that agent rather than to the main thread.
+        #
+        # This is how a consultation gets its own tab (AG-13): the whole
+        # turn belongs to one agent, so there is no per-step scope to
+        # derive — `_scope` reads `depth`, and a consultation's own steps
+        # are all at depth 0 because it *is* the top of its own
+        # trajectory. Nested trajectories inside it still nest, because
+        # `_scope` still wins where it has an answer.
+        self._agent_id = agent_id or None
         self._blocks: dict[str, _Block] = {}
         self._tools: dict[str, _ToolCall] = {}
         self._block_counter = 0
@@ -319,7 +330,9 @@ class StepTranslator:
 
     def _translate(self, step: Any) -> list[Event]:
         events: list[Event] = []
-        scope = _scope(step)
+        # A nested trajectory keeps its own identity; everything else in a
+        # scoped translator belongs to the agent that owns the whole turn.
+        scope = _scope(step) or self._agent_id
 
         self._absorb_usage(step)
 
