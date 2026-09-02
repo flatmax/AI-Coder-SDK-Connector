@@ -2,16 +2,19 @@
 
 AIC⚡DC is a browser UI over AI coding-agent SDKs. It runs as a terminal application in a git repository, opens a browser, and gives the agent a workspace a terminal cannot: a Monaco diff viewer over everything it touches, a git-status file tree, an SVG editor, permission dialogs that render the actual diff before you approve it, and live visibility into what the turn cost.
 
-**Claude Code is the only backend today.** The name says *connector* because the seam is deliberate — the engine layer talks to an agent SDK, not to a model provider — but there is exactly one implementation of that seam right now, the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) driving a local `claude` CLI. Support for other SDKs (antigravity and friends) is the direction, not a shipped feature.
+**Claude Code is the engine that works end to end.** The name says *connector* because the seam is deliberate — the engine layer talks to an agent SDK, not to a model provider — and there is now a second implementation of that seam in the tree: Google's [Antigravity SDK](https://pypi.org/project/google-antigravity/), **partially built**. What you can use today is Antigravity as a *consultant* from inside a Claude turn. Running a whole conversation on it is wired up but has never had a live turn through it. See [Engines](#engines) for exactly what is landed and what is not.
 
-**AIC⚡DC never calls an LLM.** There is no code path from this process to a model provider, no API key it reads, and no token it counts. The `claude` CLI owns credentials, billing, and the whole agent loop. AIC⚡DC never writes provider credentials into the process environment — if it appeared to inject them it would silently redirect billing away from the account you authenticated.
+**AIC⚡DC counts no tokens and prices nothing.** Every number it renders was measured by an engine and handed over; there is no token counter and no price table in this codebase. Which credentials it touches depends on the engine:
+
+- **Claude Code** — none. The `claude` CLI owns credentials, billing, and the whole agent loop, and AIC⚡DC never writes provider credentials into the process environment. If it appeared to inject them it would silently redirect billing away from the account you authenticated.
+- **Antigravity** — a Gemini API key, which AIC⚡DC does read (from `$GEMINI_API_KEY` or `~/.config/aic-dc/gemini-api-key`) and pass to the SDK's config object. It is never written into the process environment either, never logged, and never crosses the RPC boundary — the browser is told the key's *source*, never its value. With no key the engine and its consultant tools are absent rather than broken.
 
 ---
 ## Division of Labour
 
 The single most useful thing to understand about this project is what it does *not* do.
 
-| Owned by Claude Code | Owned by AIC⚡DC |
+| Owned by the engine | Owned by AIC⚡DC |
 |---|---|
 | The conversation and the context window | The Monaco diff viewer, with LSP, over every file the agent touched |
 | Prompt caching and cache breakpoints | The git-status file tree, search, and 2-D navigation grid |
@@ -24,15 +27,58 @@ The single most useful thing to understand about this project is what it does *n
 The last row is the one piece of genuine intelligence AIC⚡DC contributes. Everything else it owns is presentation over state the agent already produced.
 
 ---
+## Engines
+
+AIC⚡DC drives an agent SDK, and there are two of them in this tree. Exactly one is **master** per session — the engine the chat panel talks to — and the other is reachable as a **consultant**: a one-shot call for a second opinion, or for a capability the master lacks.
+
+| | Claude Code | Google Antigravity |
+|---|---|---|
+| SDK | [claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-python) driving the local `claude` CLI | [google-antigravity](https://pypi.org/project/google-antigravity/) driving its own bundled `localharness` binary |
+| Credentials | the CLI's, whatever you authenticated it with | a Gemini API key, or a Vertex project |
+| As master | **complete** | **built, never run live** |
+| As consultant | not built — nothing calls back into Claude from an Antigravity turn | **works today** |
+
+Both mount under the *same* RPC namespace through `engine_router.py`, so the browser's call sites do not fork on which engine is running. A method the running engine cannot feed stays on the wire and **refuses** — it does not disappear, because a missing method is indistinguishable from a broken build. 31 of the router's 48 methods are engine-generic; the other 17 are the ones Antigravity refuses.
+
+### What Antigravity can and cannot do
+
+`capabilities.py` holds a descriptor of 14 surfaces per engine, and the webapp asks it — never an engine name — before rendering anything. Twelve surfaces are hidden on Antigravity, and the descriptor distinguishes the two reasons:
+
+- **Absent — no source data, ever.** USD cost of any kind (there is no dollar figure anywhere on the SDK, so the turn footer's cost, the session total and `max_budget_usd` all have nothing to render), live context-window usage and the auto-compact threshold, account rate-limit windows, mid-turn rate-limit notices, the slash-command palette, "always allow" permission rules that outlive the call, and file checkpointing.
+- **Unbuilt — a to-do, not a wall.** The repo-local session mirror and the history browser (phase 5), subagent tabs, agent-initiated structured questions, and the MCP server inventory.
+
+In the other direction, **image generation** is absent on Claude and supported on Antigravity. That asymmetry is the whole argument for a second engine.
+
+### Status, honestly
+
+Landed and usable:
+
+- **The consultant.** With a Gemini key present, an ordinary Claude turn gains two tools on their own MCP server — `mcp__aic-dc-antigravity__second_opinion` and `mcp__aic-dc-antigravity__generate_image`. They mount separately from the ungated `aic-dc` index server precisely so both go through the permission dialog.
+- **The engine router, the capability descriptor, and per-engine hiding** across the Usage HUD, the Context tab, the Settings tab and the chat panel's action bar.
+- **The Antigravity adapter itself** — session lifecycle, the `Step` → event pump, options assembly, and a permission gate that drives the *same* `PermissionBroker` as Claude Code, so there is one ask path and one queue across both engines. The gate covers **every mutating tool including `run_command` and `start_subagent`**, because a probe showed the agent, refused an `edit_file`, reaching for `sed -i` to make the same change by other means.
+- **Choosing the master per session** — `app.json`'s `engines.master` names the engine that starts, and the Settings tab can switch it mid-run.
+
+Not landed:
+
+- **No live Antigravity turn has ever run through the chat panel.** The adapter has ~350 offline tests behind it and one live SDK session from a probe script; a real conversation through the browser is not yet a thing that has happened. That probe is worth its own line, because it found three bugs no offline test could see — an empty turn usage, a stop reason that was always blank, and an `UNSPECIFIED` that would have put a red badge on every clean turn — all three traceable to a fake that answered to a method name the real SDK does not have.
+- **No history or resume on Antigravity** — its own store, rebuilt as a step observer, is phase 5.
+- **A consultation is opaque while it runs.** `second_opinion` returns one answer when it is finished; it does not yet open its own tab, stream Google's thinking as it arrives, or offer a stop button. That is phase 6b, and it is deliberately after the descriptor, because the tab has to hide its cost panel by *asking* rather than by checking for the string `antigravity`.
+- **Image generation has never returned an image.** Every Gemini image model reports `limit: 0` on a free-tier key. That is not a throttle and no wait fixes it; the tier is a property of the key's Cloud project, so enabling billing on that project moves the same key to a paid tier and nothing in the credential path changes.
+- **`google-antigravity` is still a base dependency, not an optional extra**, so it costs a second bundled binary in every install. Making it an extra is phase 7.
+
+The plan of record, phase by phase, is [`specs5/plan-ag/`](specs5/plan-ag/) — start at [`decisions.md`](specs5/plan-ag/decisions.md).
+
+---
 ## Features
 
 - **A real editor beside the agent.** Monaco side-by-side diff over the working tree, with hover, go-to-definition, references, and completions backed by the local symbol index — plus markdown preview, TeX preview, and cross-file markdown link navigation.
 - **Permission dialogs that show the change.** An `Edit` or `Write` request renders as a line-and-word-level diff before you approve it, not as raw JSON. Six permission modes, from `default` through `plan` and `acceptEdits` to `bypassPermissions` (which is never the default and warns explicitly). Requests resolve against **localhost clients only**.
 - **Tree-sitter symbol index** for Python, JavaScript, TypeScript/TSX, C, C++, and MATLAB, with cross-file reference graphs — exposed to the agent through an in-process MCP server and to the editor as LSP-style language features.
 - **Document index** for markdown and SVG: heading outlines, containment-aware SVG structure, a cross-reference graph between documents, and optional KeyBERT keyword enrichment.
-- **Six read-only MCP tools** on the `aic-dc` server — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state`, `ui_state`. The agent can ask what the repo's shape is and what the user is currently looking at.
+- **Six read-only MCP tools** on the `aic-dc` server — `symbol_map`, `file_symbols`, `find_references`, `doc_outline`, `review_state`, `ui_state`. The agent can ask what the repo's shape is and what the user is currently looking at. Those six are ungated, because reading cannot hurt you; the two consultant tools sit on a **separate** `aic-dc-antigravity` server for exactly that reason — they spend someone's quota and one of them writes a file, so they go through the permission dialog.
 - **Tool cards** for every call the agent makes: input summary, status, duration, files modified (clickable through to the diff), and a marker on anything that went through a permission prompt. `TodoWrite` renders as one live checklist rather than fifteen snapshots.
-- **Honest cost and context accounting.** A Usage HUD and Context tab render only what the engine measured — per-turn cost when it is priced, nothing when it is not (a subscription turn is never shown as `$0.00`), a context gauge with the auto-compact threshold marked on the bar, and a live token counter that steps as each assistant message lands.
+- **Honest cost and context accounting.** A Usage HUD and Context tab render only what the engine measured — per-turn cost when it is priced, nothing when it is not (a subscription turn is never shown as `$0.00`), a context gauge with the auto-compact threshold marked on the bar, and a live token counter that steps as each assistant message lands. On an engine that reports no dollars at all, the cost *figure* disappears while the row that would hold it stays.
+- **A second engine, half-built.** Google Antigravity sits behind the same RPC namespace as Claude Code, reachable today as a consultant — ask Claude for a second opinion and it reaches Google's model, through the permission dialog. A capability descriptor tells the browser which surfaces each engine can feed, so nothing renders an empty or synthesised value. See [Engines](#engines).
 - **Visual SVG editor** — click-to-select, drag-to-move, resize handles, path endpoint and control-point editing, inline text edit, marquee multi-selection, copy / paste / duplicate, undo, copy-as-PNG, and a full-width presentation mode (F11).
 - **File picker** with git status badges, diff stats, sort modes, context menus for every row type, inline rename / duplicate / new-file / new-directory, `@`-filter from the chat input, branch badge with detached-HEAD detection, keyboard navigation, and shift+click to **deny the agent read access** to a path.
 - **Code review mode** — pick a commit in a live git graph, soft-reset the branch, and work through the change with reverse diffs in context. The current review state is visible to the agent through `review_state`.
@@ -57,7 +103,8 @@ The last row is the one piece of genuine intelligence AIC⚡DC contributes. Ever
 - **Never print a number you did not measure.** Cost with no basis renders as absent, not as zero. A cache counter that was never reported is omitted, not printed as `0`. AIC⚡DC counts no tokens of its own.
 - **Git is a first-class citizen.** The file picker shows git status and diff stats natively, commit messages are generated from the diff, and code review runs through soft-reset rather than side branches.
 - **Local is the default.** The backend binds to loopback; LAN access requires an explicit `--collab`. All persistent state lives in the repo's `.aic-dc/` directory. No cloud sync, no telemetry.
-- **Degrade, do not fail.** Keyword enrichment, document conversion, LibreOffice, make4ht, individual tree-sitter grammars, and even the `aic-dc` MCP server can all be absent, and the rest of the app carries on. The `claude` CLI is the one hard prerequisite.
+- **Degrade, do not fail.** Keyword enrichment, document conversion, LibreOffice, make4ht, individual tree-sitter grammars, the second engine and its Gemini credential, and even the `aic-dc` MCP server can all be absent, and the rest of the app carries on. The `claude` CLI is the one hard prerequisite.
+- **Hide what an engine cannot report; never synthesise it.** A surface with no source data on the running engine disappears rather than rendering a blank or a plausible zero — and the browser decides by asking a capability descriptor, never by checking an engine's name, so a third engine costs a descriptor row rather than a sweep through the webapp.
 
 ---
 ## Architecture
@@ -73,19 +120,26 @@ A single Python process runs an asyncio loop with two listeners: a static HTTP s
  │          ├── DocConvert    ├──▶ MCP server "aic-dc"  (6 tools)   │
  │          ├── Settings      │            │                        │
  │          └── Collab        │            ▼                        │
- │                            └──▶  ClaudeCodeService               │
- │                                    │  permissions · hooks        │
- │                                    │  history · cost · review    │
- │                                    ▼                             │
- │                              ClaudeSDKClient                     │
- │                                    │                             │
- │                 ▼  jrpc-oo/WS      ▼  stdio subprocess           │
- └─────────────────┬──────────────────┬─────────────────────────────┘
-                   │                  │
-                   │            ┌─────┴──────┐
-                   │            │ claude CLI │ ◀── owns credentials,
-                   │            └────────────┘     context, tool loop
-                   ▼
+ │                            └──▶  EngineRouter  ── capabilities   │
+ │                                  │  one master, N mounted        │
+ │                        ┌─────────┴─────────┐                     │
+ │                        ▼                   ▼                     │
+ │               ClaudeCodeService    AntigravityService            │
+ │                 permissions ·        (built, unproven)           │
+ │                 hooks · history ·      │  shared PermissionBroker│
+ │                 cost · review          │  step pump · no history │
+ │                        │               │                         │
+ │                        ▼               ▼                         │
+ │                 ClaudeSDKClient    antigravity.Agent             │
+ │                        │               │                         │
+ │      ▼  jrpc-oo/WS     ▼  stdio        ▼  bundled Go binary      │
+ └──────┬─────────────────┬───────────────┬─────────────────────────┘
+        │                 │               │
+        │          ┌──────┴─────┐   ┌─────┴────────┐
+        │          │ claude CLI │   │ localharness │ ◀── Gemini key
+        │          └────────────┘   └──────────────┘     or Vertex
+        │            ▲ owns credentials, context, tool loop
+        ▼
  ┌──────────────────────────────────────────────────────────────────┐
  │                       Browser webapp (Lit)                       │
  │                                                                  │
@@ -108,6 +162,8 @@ A single Python process runs an asyncio loop with two listeners: a static HTTP s
 
 Startup is split in two so the browser gets feedback immediately. Phase 1 (under a second) validates the git repository, picks ports, **resolves the `claude` binary and reads its version and credential source**, starts the webapp and WebSocket servers, and opens the browser onto a startup overlay. No SDK client and no symbol index yet — and nothing in phase 1 writes `os.environ`. Phase 2 runs as a background task, building the symbol index and wiring it into the MCP bridge with progress pushed to the overlay.
 
+Every mountable engine is constructed during startup, not the master alone — an engine that is not master still has to exist for the consultant to reach it. Antigravity mounts only if a Gemini credential resolves; if none does, the session logs why and carries on as a one-engine build. `app.json`'s `engines.master` picks which one the chat panel starts on, and a master that failed to mount falls back to Claude rather than to nothing.
+
 There is no transcript-loading step and no eager resume. Showing the conversation is a disk read; resuming is a `claude` subprocess, and most launches are someone opening AIC⚡DC to read a diff.
 
 See [specs5/0-overview/architecture.md](specs5/0-overview/architecture.md) for the full picture.
@@ -124,6 +180,17 @@ See [specs5/0-overview/architecture.md](specs5/0-overview/architecture.md) for t
 | A git repository | AIC⚡DC refuses to start outside one, and explains how to fix it in the browser. |
 | Node.js ≥ 20 | Only for webapp development (`--dev` / `--preview` / `npm run build`). |
 | [uv](https://docs.astral.sh/uv/) | Recommended for Python dependency management. |
+| A **Gemini API key** | Optional — only for the Antigravity engine and its consultant tools. Without one they are absent and nothing else changes. |
+
+To enable Antigravity, put a Gemini API key where the engine looks for it. The order is `$GEMINI_API_KEY` first, then the key file:
+
+```
+mkdir -p ~/.config/aic-dc
+printf '%s\n' 'YOUR_KEY' > ~/.config/aic-dc/gemini-api-key
+chmod 600 ~/.config/aic-dc/gemini-api-key
+```
+
+A Vertex AI project works too — set `GOOGLE_GENAI_USE_VERTEXAI=true` with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, and the engine routes through Vertex instead of the key. A project set *without* the flag is inert, and looks for all the world like configuration that is in effect — so it raises a warning naming the variable that is doing nothing, rather than being silently ignored. The Context tab's Debug section names the source that was found, never the secret.
 
 ### From source
 
@@ -190,7 +257,7 @@ On first run AIC⚡DC creates a per-repo working directory at `.aic-dc/` and a u
 
 ### There is no provider configuration
 
-This is the biggest change from earlier versions of this project, and it is worth stating flatly: **there is no `llm.json`, no provider list, no API-key field, and no system prompt for AIC⚡DC to own.**
+This is the biggest change from earlier versions of this project, and it is worth stating flatly: **there is no `llm.json`, no provider list, no API-key field, and no system prompt for AIC⚡DC to own.** The Antigravity key is the one narrow exception, and it is a bare file rather than a config surface: nothing in the Settings tab writes it, and no RPC ever returns it.
 
 - Credentials belong to the `claude` CLI. Authenticate it however you normally would; AIC⚡DC reports which credential source it found (in the Context tab's Debug section) and otherwise stays out of the way.
 - Agent instructions come from `CLAUDE.md` and `.claude/` in your repository, read by the CLI. Editing them is editing the agent's behaviour.
@@ -201,7 +268,7 @@ This is the biggest change from earlier versions of this project, and it is wort
 | File | Purpose | Hot-reload |
 |---|---|---|
 | `engine.json` | Engine overrides — model, effort, permission mode, budget cap, CLI path | `model` and `permission_mode` apply to the live session; the rest take effect on the next session |
-| `app.json` | Document conversion, document index, and history settings | Yes |
+| `app.json` | Document conversion, document index, history, and which engine is master | Yes |
 | `snippets.json` | Quick-insert prompt buttons, grouped `code` / `review` / `doc` | On next open |
 | `commit.md` | Commit-message generation prompt | Re-read per use |
 
@@ -231,6 +298,7 @@ The permission-mode and effort value sets are read from the SDK's own type alias
 | `doc_convert` | `enabled`, `extensions`, `max_source_size_mb` |
 | `doc_index` | `keyword_model`, `keywords_enabled`, `keywords_top_n`, `keywords_ngram_range`, `keywords_min_section_chars`, `keywords_min_score`, `keywords_diversity`, `keywords_tfidf_fallback_chars`, `keywords_max_doc_freq` |
 | `history` | `session_dir_warning_bytes`, `mirror_gap_tolerance` |
+| `engines` | `master` — `claude` (default) or `antigravity`. Also switchable mid-run from the Settings tab; a name that did not mount falls back to `claude` |
 
 Full field reference: [specs5/1-foundation/configuration.md](specs5/1-foundation/configuration.md).
 
@@ -381,6 +449,7 @@ cd webapp && npm run build
 | Package | Purpose |
 |---|---|
 | [claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-python) | The agent engine — session, tools, permissions, compaction, MCP |
+| [google-antigravity](https://pypi.org/project/google-antigravity/) | The second agent engine — partial; see [Engines](#engines). Currently a base dependency rather than an extra, which is a known cost |
 | [jrpc-oo](https://github.com/flatmax/jrpc-oo) | Bidirectional JSON-RPC 2.0 over WebSocket |
 | [tree-sitter](https://tree-sitter.github.io/) | AST parsing for Python, JS, TS/TSX, C, C++, MATLAB |
 | [mcp](https://modelcontextprotocol.io/) | In-process MCP server (pulled in by the SDK) |
@@ -390,7 +459,7 @@ cd webapp && npm run build
 | [openpyxl](https://openpyxl.readthedocs.io/) (extra) | Excel with colour clustering |
 | [KeyBERT](https://maartengr.github.io/KeyBERT/) + [sentence-transformers](https://www.sbert.net/) (extras) | Keyword enrichment |
 
-The `claude` CLI is a Node application and is **not** installed by any of these — it is resolved at startup.
+The `claude` CLI is a Node application and is **not** installed by any of these — it is resolved at startup. Antigravity is the other way round: its `localharness` binary ships inside the wheel and is spawned from there, which is why `google-antigravity` becoming an optional extra is on the list.
 
 **Frontend**
 
@@ -427,6 +496,8 @@ AI-Coder-SDK-Connector/
 │   ├── rpc.py                       # jrpc-oo server transport
 │   ├── settings.py                  # config read / write / reload RPC
 │   ├── collab.py                    # multi-browser admission + restrictions
+│   ├── engine_router.py             # one RPC namespace over N engines
+│   ├── capabilities.py              # per-engine surface descriptor
 │   ├── logging_setup.py             # structured stderr logging
 │   ├── base_cache.py                # mtime-keyed cache base
 │   ├── base_formatter.py            # compact-map formatter base
@@ -449,6 +520,16 @@ AI-Coder-SDK-Connector/
 │   │   ├── health.py               #   claude binary resolution + version
 │   │   ├── sdk_surface.py          #   which SDK features this build wired up
 │   │   └── resume_cleanup.py       #   stale-session hygiene
+│   ├── antigravity/                 # the second engine (partial)
+│   │   ├── service.py              #   the 31 methods the router mounts
+│   │   ├── session.py              #   Agent / Conversation lifecycle
+│   │   ├── steps.py                #   Step → UI event pump
+│   │   ├── options.py              #   LocalAgentConfig assembly
+│   │   ├── permissions.py          #   PreToolCallDecideHook → shared broker
+│   │   ├── credentials.py          #   Gemini key / Vertex resolution
+│   │   ├── consultant.py           #   second_opinion, generate_image
+│   │   ├── bridge.py               #   the "aic-dc-antigravity" MCP server
+│   │   └── surface.py              #   SDK inventory probe
 │   ├── repo/                        # git operations, file I/O, search
 │   │   ├── tree.py  files.py  diffs.py  search.py  staging.py
 │   │   ├── branches.py  commits.py  commit_graph.py  review.py
@@ -485,6 +566,7 @@ AI-Coder-SDK-Connector/
 │       ├── context-usage-tab.js     # Usage / Session / Debug sections
 │       ├── usage-hud.js  turn-cost.js
 │       ├── sdk-surface-tab.js       # SDK feature probe
+│       ├── engine-capabilities.js   # browser half of the descriptor
 │       ├── settings-tab.js  doc-convert-tab.js
 │       ├── slash-palette.js  slash-commands.js
 │       ├── history-browser.js  input-history.js  message-search.js
@@ -517,6 +599,7 @@ The behaviour of every feature above is specified in [`specs5/`](specs5/), which
 | [`5-webapp/`](specs5/5-webapp/) | Every panel, viewer, dialog, and overlay |
 | [`6-deployment/`](specs5/6-deployment/) | Startup, build, packaging |
 | [`plan/`](specs5/plan/) | Conversion decisions, risks, delivery, SDK surface |
+| [`plan-ag/`](specs5/plan-ag/) | The second engine — Antigravity's verified surface, its `AG-n` decisions, risks, and phase-by-phase delivery |
 | [`impl-history/`](specs5/impl-history/) | Layer-by-layer implementation log |
 
 ---
