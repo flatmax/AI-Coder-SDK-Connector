@@ -574,6 +574,20 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **A weekly reset time with no date read as today** — 2026-09-02, from a user pointing at a screenshot
+  of the entry below's own output: three windows, two of them weekly, all three saying *"Resets at
+  04:00 AM"*. Reasoning in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *A Reset Time
+  With No Date Reads As Today*.
+
+  `formatResetTime` was written when the five-hour window was the only window, and for that window a
+  bare clock time is the right answer. The account read added two seven-day windows to the same
+  renderer without revisiting its sentence, and beside a weekly cap "at 04:00 AM" is not thin — it is
+  **read as the wrong answer**, naming the next 4am when the real wait is days. A missing figure
+  announces itself; this one did not. The day is now appended whenever the reset falls on a local date
+  other than today's, tested on the same-day, several-days-out and exactly-a-week-out cases. One
+  function, so the HUD, the Context tab and the chat toast changed together — which is what
+  centralising the wording was for.
+
 - **The rate-limit figures were a REST call away, and the "cannot" above was wrong** — 2026-08-29, same
   day, from the same user pointing at a screenshot of what the entry below had just shipped: *"even worse
   and no weekly + fable reporting"*. Reasoning in

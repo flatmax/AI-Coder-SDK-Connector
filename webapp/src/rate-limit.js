@@ -32,18 +32,39 @@
 //   overage_disabled_reason  why overage is unavailable when it is
 
 /**
- * Unix seconds → a local wall-clock time.
+ * Unix seconds → a local wall-clock time, dated when it is not today.
  *
  * A clock time rather than a countdown: nothing here ticks, and "resets in
  * 47 minutes" is wrong the moment the user looks away.
  *
+ * **Why the day is part of the sentence.** The windows this labels are not
+ * all short. A five-hour window resets today or, at worst, tomorrow morning,
+ * and a bare "at 04:00 AM" reads correctly there. A seven-day window resets
+ * up to a week out, and the same bare sentence reads as *this coming*
+ * 04:00 AM — the reader plans around a wait of hours when the real wait is
+ * days. So the day is appended whenever the reset falls on a local date
+ * other than today's, and omitted when it does not, because "at 04:00 AM
+ * today" is noise the short windows would carry on every render.
+ *
+ * The weekday is spelled alongside the date rather than instead of it: a
+ * seven-day window can reset exactly a week out, where a weekday alone names
+ * today.
+ *
  * Lived in chat-panel/streaming.js until the HUD needed the same sentence.
  */
-export function formatResetTime(resetsAt) {
+export function formatResetTime(resetsAt, now = Date.now()) {
   if (!Number.isFinite(resetsAt) || resetsAt <= 0) return '';
   const date = new Date(resetsAt * 1000);
   if (Number.isNaN(date.getTime())) return '';
-  return `at ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const today = new Date(now);
+  const sameDay = Number.isFinite(now)
+    && date.getFullYear() === today.getFullYear()
+    && date.getMonth() === today.getMonth()
+    && date.getDate() === today.getDate();
+  if (sameDay) return `at ${time}`;
+  const day = date.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+  return `at ${time} on ${day}`;
 }
 
 /**

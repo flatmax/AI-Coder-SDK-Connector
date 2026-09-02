@@ -67,7 +67,39 @@ describe('formatResetTime', () => {
     const at = Date.UTC(2026, 7, 28, 12, 30) / 1000;
     const expected = new Date(at * 1000)
       .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    expect(formatResetTime(at)).toBe(`at ${expected}`);
+    expect(formatResetTime(at, at * 1000)).toBe(`at ${expected}`);
+  });
+
+  it('leaves the day off a reset that lands today', () => {
+    // A five-hour window mostly resets today, and "at 04:00 AM today" is
+    // noise on every render of the common case.
+    const at = Date.UTC(2026, 7, 28, 12, 30) / 1000;
+    // An hour earlier the same local day, whatever the zone: the reset is
+    // read against the browser's own clock.
+    const now = new Date(at * 1000);
+    now.setHours(now.getHours() - 1, 0, 0, 0);
+    expect(formatResetTime(at, now.getTime())).not.toMatch(/ on /);
+  });
+
+  it('dates a reset that is not today', () => {
+    // The complaint this exists for: a seven-day window resets up to a week
+    // out, and a bare "at 04:00 AM" reads as *this coming* 04:00 AM — hours
+    // of waiting where the truth is days.
+    const now = new Date(Date.UTC(2026, 7, 28, 12, 30));
+    const later = new Date(now.getTime());
+    later.setDate(later.getDate() + 5);
+    const day = later
+      .toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+    const time = later.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    expect(formatResetTime(later.getTime() / 1000, now.getTime()))
+      .toBe(`at ${time} on ${day}`);
+  });
+
+  it('dates a reset a full week out, where the weekday alone would say today', () => {
+    const now = new Date(Date.UTC(2026, 7, 28, 12, 30));
+    const later = new Date(now.getTime());
+    later.setDate(later.getDate() + 7);
+    expect(formatResetTime(later.getTime() / 1000, now.getTime())).toMatch(/ on .*\d/);
   });
 
   it('says nothing rather than something wrong', () => {

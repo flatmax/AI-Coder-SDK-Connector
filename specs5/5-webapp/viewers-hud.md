@@ -288,6 +288,33 @@ test would be a second definition of "still open" that could only come to disagr
 ([`../next.md`](../next.md) § C3), and the tab's whole purpose is to be read hours after the record
 arrived — which is exactly when a stale window would still be on screen.
 
+### A Reset Time With No Date Reads As Today — `formatResetTime`
+
+**Found 2026-09-02, again by a user pointing at a screenshot: three windows, two of them weekly, and
+every one of them saying only "Resets at 04:00 AM".** The sentence was written when the five-hour window
+was the only window there was, and for that window a bare clock time is right: it resets today, or at
+worst tomorrow morning, and the reader's next question is *when today*. The account read
+([§ The Figures Were A REST Call Away](#the-figures-were-a-rest-call-away--account_usagepy)) added two
+seven-day windows to the same renderer, and there the same sentence is not merely thin — **it is read as
+a different answer than the one intended.** "Resets at 04:00 AM" beside a weekly cap says *this coming*
+04:00 AM. A reader budgeting the rest of their afternoon around a wait of hours is actually five days
+out. That is the `$0.00` failure mode in a third currency: not a missing figure, which announces itself,
+but a confident one that is wrong.
+
+So the day is appended **when, and only when, the reset falls on a local date other than today's**:
+`at 04:00 AM` unchanged for the common short-window case, `at 04:00 AM on Thu 4 Sep` otherwise. The
+condition is a date comparison rather than a window-type test, because the type is the wrong predicate —
+a five-hour window opened at 11pm resets tomorrow and deserves the date just as much, and a weekly window
+in its last hours does not.
+
+**The weekday is spelled alongside the date, not instead of it.** "Resets Thursday" is the tempting
+short form and it is ambiguous on exactly the window this was written for: a seven-day cap can reset
+seven days out, where the weekday alone names today.
+
+One function, so all three readers change together — the HUD's section, this tab's gauges, and the chat
+panel's toast — for the same reason the wording was centralised in the first place. The time still leads
+the string, so nothing that reads "Resets at …" as a prefix breaks.
+
 ### Session Section
 
 What this session is made of and what each part costs. This is the section that answers the question
@@ -545,7 +572,7 @@ on one profile — or a downgrade — do not each clear the other's preferences.
 | This turn | This turn's cost or why there is none, duration, engine-internal turn count, terminal reason, permission-prompt count |
 | Per-model usage | One row per entry in `turn_model_usage`: the model, then `↑ prompt · ↓ output`. `↑` is the **whole** prompt — the uncached part and the cached part added together — because three input-side counters do not fit in 300px beside a model name, and their sum is the one figure that is not misleading on its own (see [chat.md § The Token Split](chat.md#the-token-split)). The tooltip carries all four counters unrounded. Per-row cost and context window belong to the Context tab; this row exists to answer whether a turn's tokens were prompt or completion, which the cost line alone cannot |
 | Context | `totalTokens` / `maxTokens` with the auto-compact mark |
-| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play. Overage on its own line when the record mentions it |
+| Rate limits | Limit type, utilisation, and reset time when a rate-limit event is in play — the time dated when it does not fall today, since a bare clock time beside a weekly window reads as *this coming* 04:00 AM. Overage on its own line when the record mentions it |
 | Files modified | The turn's `files_modified`, each clickable to the diff viewer |
 
 `Files modified` is new to the HUD and earns its place: the single most useful thing to know
@@ -846,6 +873,8 @@ tier-distribution HUD.
   another's, and no surface renders a figure from one window under another's name.
 - No surface invents a utilisation for a record that carries none. `—` is the answer, beside the window
   and reset time that *are* known.
+- No surface states a reset time that falls on another day without naming that day. A bare clock time is
+  reserved for a reset that lands today, where it cannot be read as anything else.
 - No surface claims to show the CLI's `/usage` figures. The SDK does not expose them.
 - A slash command routed to an AIC⚡DC surface names something that surface actually shows.
 - A turn whose cost cannot be established is never rendered as `$0.00`, and never as a claim about the
