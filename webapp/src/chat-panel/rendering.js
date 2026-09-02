@@ -72,6 +72,7 @@ import { renderEditCard } from '../edit-block-render.js';
 import { findFileMentions } from '../file-mentions.js';
 import { imageRefKey, imageRefsOf } from '../image-refs.js';
 import { renderMarkdown } from '../markdown.js';
+import { SURFACE, supports } from '../engine-capabilities.js';
 import { toRepoPath } from '../repo-path.js';
 import {
   compactionSummary,
@@ -262,15 +263,17 @@ export function render(panel) {
                 >
                   ✨
                 </button>
-                <button
-                  class="action-button history-button"
-                  ?disabled=${!panel.rpcConnected}
-                  @click=${() => onOpenHistory(panel)}
-                  aria-label="Open history browser"
-                  title="Browse past sessions"
-                >
-                  📜
-                </button>
+                ${supports(SURFACE.TRANSCRIPT_HISTORY)
+                  ? html`<button
+                      class="action-button history-button"
+                      ?disabled=${!panel.rpcConnected}
+                      @click=${() => onOpenHistory(panel)}
+                      aria-label="Open history browser"
+                      title="Browse past sessions"
+                    >
+                      📜
+                    </button>`
+                  : ''}
               </div>
             `}
       </div>

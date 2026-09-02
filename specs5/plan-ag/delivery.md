@@ -1094,3 +1094,68 @@ find out:
   cannot read it. The cheapest fix is a store root per engine, which makes a foreign record
   unreachable by construction rather than by a check; it belongs with phase 5's mirror, where the
   storage layout is being decided anyway.
+
+---
+
+## Phase 6 — the rest of the consumers (2026-09-02)
+
+The list the entry above left, closed. Everything here was reachable the moment `switch_engine`
+landed: five surfaces the descriptor describes and nothing in the browser asked about, on an engine
+where all five are `UNBUILT` or `ABSENT`.
+
+| Surface | Where it now hides |
+|---|---|
+| `session_mirror` | `settings-tab.js` — the session-storage card, and the read behind it |
+| `transcript_history` | `chat-panel/rendering.js` — the 📜 button; `history-browser.js` guards the load |
+| `slash_commands` | `chat-panel/input.js` — `ensureSlashCommands` returns `[]` |
+| `mcp_server_inventory` | `context-usage-tab.js` — `_fetchMcpStatus` returns `null` |
+| `account_rate_limits` + `rate_limit_events` | `context-usage-tab.js` — the whole Rate limits section |
+| `usd_cost` | `usage-hud.js` turn footer, `context-usage-tab.js` session cost |
+
+### Three granularities, and choosing between them is the work
+
+The Context section set the precedent — hide the whole thing — but applying that everywhere would
+have hidden measurements the engine does take:
+
+- **The whole section**, for Rate limits. It has two sources and nothing left when both are absent,
+  and a "Rate limits" heading over nothing reads as *you have none* — a claim, where the truth is an
+  absence.
+- **The entry point**, for history. The 📜 button goes rather than the dialog being taught to explain
+  itself: a browser that opens to say it has nothing is a click that can only disappoint. The
+  browser's own load is guarded too, because a slash command, a link, or a switch made while the
+  dialog was already open all reach it another way.
+- **The figure, not its row**, for cost. This is [AG-6](decisions.md#ag-6) at the granularity that
+  matters: usage is reported in tokens and no USD is invented, so the turn's tool-call count and
+  duration — and the session's per-model token rows — are as true as ever. Hiding them alongside the
+  price would take three measurements away to hide the one that was never taken. `turn-cost.js`'s
+  "cost unknown" rendering is the wrong instrument here too: *unknown* is a failure to establish a
+  price, and this engine quotes none by design.
+
+### The load side matters as much as the render side
+
+Every gate is in two places, and the second is not tidiness. The router **raises**
+`UnsupportedOnThisEngine` rather than answering emptily, so an ungated fetch is a guaranteed error —
+once per refresh for the Context tab, once per *keystroke* for the slash palette, which retries on
+every `/`. `ensureSlashCommands` returning `[]` early also keeps the palette's own "nothing matched"
+rendering in charge, which was already the right answer.
+
+### One thing that had to be walked back
+
+The Context tab's first cut **awaited** `loadCapabilities` before its refresh, to avoid spending two
+round trips on calls that would be refused. It broke 187 tests, and the reason is the reason not to
+do it: the descriptor was now in front of the breakdown, which is the thing that tab exists for.
+Reverted to the HUD's shape — fire it, re-render when it lands — so the first refresh may spend those
+two calls once and the panels go away afterwards. The loading default is "supported" precisely so
+this trade is available.
+
+### What is still not done
+
+- **No live turn**, unchanged, and now the only thing between phases 1, 3, 4 and their exit criteria.
+- **`agent_questions`, `subagent_tabs`, `persisted_permission_rules`, `amend_tool_input`,
+  `file_checkpointing` and `image_generation` have no consumer yet.** Not an oversight and not the
+  same shape as the six above: each is either a surface with no UI on *either* engine
+  (`agent_questions`, `image_generation` — see `sdk-surface.md` § *Antigravity capabilities with no
+  home in the current UI*) or one whose only caller is already behind a control the descriptor does
+  not reach. They need a home before they need a gate.
+- **Resume across engines** — unchanged, still unreachable, still phase 5's to close with a per-engine
+  store root.

@@ -24,6 +24,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import './context-usage-tab.js';
 import { SharedRpc } from './rpc.js';
 import { resetRepoRoot, setRepoRoot } from './repo-path.js';
+import {
+  resetCapabilities,
+  setCapabilities,
+} from './engine-capabilities.js';
 
 const _mounted = [];
 
@@ -3803,5 +3807,145 @@ describe('ContextUsageTab account rate limits', () => {
     refresh.click();
     await settle(el);
     expect(handler).toHaveBeenLastCalledWith(true);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// AG-9 — a surface the engine cannot feed is hidden, not drawn empty
+// ---------------------------------------------------------------------------
+//
+// Three surfaces meet on this tab, and they hide at different
+// granularities on purpose. The rate-limit section goes entirely,
+// because it has nothing left once both its sources are absent. The
+// session cost loses its *figure* and keeps its token rows, because
+// AG-6 is that this engine reports usage in tokens and invents no USD —
+// so the rows are as true as ever and hiding them would take a
+// measurement away to hide one that was never taken.
+
+describe('ContextUsageTab capability hiding', () => {
+  const NO_LIMITS = {
+    account_rate_limits: { supported: false, status: 'absent', note: '' },
+    rate_limit_events: { supported: false, status: 'absent', note: '' },
+  };
+  const NO_USD = {
+    usd_cost: { supported: false, status: 'absent', note: '' },
+  };
+  const NO_MCP = {
+    mcp_server_inventory: { supported: false, status: 'unbuilt', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  async function withCaps(caps, publish) {
+    resetCapabilities();
+    if (caps) setCapabilities(caps);
+    const handles = publish();
+    const el = mountTab();
+    await settle(el);
+    return { el, handles };
+  }
+
+  it('hides the whole rate-limit section when neither source exists', async () => {
+    // A "Rate limits" heading over nothing reads as "you have none",
+    // which is a claim rather than an absence.
+    const { el } = await withCaps(NO_LIMITS, () =>
+      publishFakeRpc({
+        'ClaudeCodeService.get_context_usage': () => ({
+          usage: usageFixture(),
+          fetched_at: '2026-08-15T10:30:00Z',
+        }),
+        'ClaudeCodeService.get_account_usage': () => ({
+          ok: true,
+          windows: [
+            { key: 'weekly_all', label: 'Current week', utilization: 0.5,
+              resets_at: Math.floor(Date.now() / 1000) + 86400 },
+          ],
+        }),
+      }),
+    );
+    expect(sectionFor(el, 'Rate limits')).toBeFalsy();
+  });
+
+  it('draws it when the engine feeds either source', async () => {
+    const { el } = await withCaps(null, () =>
+      publishFakeRpc({
+        'ClaudeCodeService.get_context_usage': () => ({
+          usage: usageFixture(),
+          fetched_at: '2026-08-15T10:30:00Z',
+        }),
+        'ClaudeCodeService.get_account_usage': () => ({
+          ok: true,
+          windows: [
+            { key: 'weekly_all', label: 'Current week', utilization: 0.5,
+              resets_at: Math.floor(Date.now() / 1000) + 86400 },
+          ],
+        }),
+      }),
+    );
+    expect(sectionFor(el, 'Rate limits')).toBeTruthy();
+  });
+
+  it('does not call get_account_usage on an engine without windows', async () => {
+    // The router raises rather than answering, so an ungated poll is a
+    // guaranteed error on every refresh.
+    const account = vi.fn(() => ({ ok: true, windows: [] }));
+    const { el } = await withCaps(NO_LIMITS, () =>
+      publishFakeRpc({
+        'ClaudeCodeService.get_context_usage': () => ({
+          usage: usageFixture(),
+          fetched_at: '2026-08-15T10:30:00Z',
+        }),
+        'ClaudeCodeService.get_account_usage': account,
+      }),
+    );
+    expect(el).toBeTruthy();
+    expect(account).not.toHaveBeenCalled();
+  });
+
+  it('does not call get_mcp_status on an engine with no inventory', async () => {
+    const status = vi.fn(() => ({ mcpServers: [] }));
+    await withCaps(NO_MCP, () =>
+      publishFakeRpc({
+        'ClaudeCodeService.get_context_usage': () => ({
+          usage: usageFixture(),
+          fetched_at: '2026-08-15T10:30:00Z',
+        }),
+        'ClaudeCodeService.get_mcp_status': status,
+      }),
+    );
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('drops the session cost figure but keeps the token rows', async () => {
+    // AG-6, at the granularity that matters: no USD is invented, and the
+    // per-model figures are not collateral.
+    const { el } = await withCaps(NO_USD, () => publishUsage(usageFixture()));
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 3.21,
+        duration_seconds: 42,
+        model_usage: {
+          'claude-opus-5': { inputTokens: 12481, outputTokens: 1208 },
+        },
+      },
+    });
+    await settle(el);
+    expect(heading(el, 'Session')).not.toContain('$');
+    expect(rows(el, 'Session')).toEqual([['claude-opus-5', '12.5K', '1.2K']]);
+  });
+
+  it('keeps the cost figure on an engine that quotes one', async () => {
+    const { el } = await withCaps(null, () => publishUsage(usageFixture()));
+    pushEvent('state-loaded', {
+      session_usage: {
+        total_cost_usd: 3.21,
+        model_usage: {
+          'claude-opus-5': { inputTokens: 12481, outputTokens: 1208 },
+        },
+      },
+    });
+    await settle(el);
+    expect(heading(el, 'Session')).toContain('$3.21 so far');
   });
 });

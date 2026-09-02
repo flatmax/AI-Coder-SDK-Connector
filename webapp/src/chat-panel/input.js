@@ -60,6 +60,7 @@ import {
 } from '../slash-commands.js';
 import { isSpeechSynthesisSupported } from '../speech-synthesis.js';
 import { speechPlayer } from '../speech-player.js';
+import { SURFACE, supports } from '../engine-capabilities.js';
 
 // localStorage key for the in-progress textarea
 // draft. Persisted on every input event so a
@@ -683,6 +684,12 @@ function slashListIsStale(panel) {
  * gets it replaced. A true failure is not cached, only stamped.
  */
 async function ensureSlashCommands(panel) {
+  // An engine that advertises no commands has an empty menu, not a
+  // failed one. Returning `[]` here rather than letting the RPC be
+  // refused keeps the palette's own "nothing matched" path in charge,
+  // which is already the right rendering — and stops a per-keystroke
+  // retry against a method the router is guaranteed to decline.
+  if (!supports(SURFACE.SLASH_COMMANDS)) return [];
   if (Array.isArray(panel._slashCommands) && !slashListIsStale(panel)) {
     return panel._slashCommands;
   }

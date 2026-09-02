@@ -46,6 +46,11 @@ import { LitElement, css, html } from 'lit';
 // It grew a GB tier for this caller — see the note on the function.
 import { formatBytes } from './chat-panel/block-render.js';
 import { RpcMixin } from './rpc-mixin.js';
+import {
+  SURFACE,
+  loadCapabilities,
+  supports,
+} from './engine-capabilities.js';
 import { readPreference, writePreference } from './settings-preferences.js';
 
 /**
@@ -909,11 +914,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
+    // The descriptor first, and awaited before the reads that depend on
+    // it. `supports()` answers "yes" until the real answer lands — the
+    // right default, since hiding every panel for one round trip on the
+    // shipped engine is the worse trade — but a fetch fired before it
+    // lands is a call the router may refuse, and the re-render is what
+    // takes the panel away once it has.
+    loadCapabilities(this).then(() => {
+      this.requestUpdate();
+      this._loadStorage();
+    });
     this._loadInfo();
     this._loadModel();
     this._loadEngines();
     this._loadPreferences();
-    this._loadStorage();
   }
 
   /**
@@ -1171,6 +1185,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   async _loadStorage() {
     if (!this.rpcConnected) return;
+    // The mirror is one engine's, not the product's: an engine that keeps
+    // its transcripts somewhere this app does not own has no directory to
+    // measure, and the router refuses the method rather than answering
+    // zero. Asked by capability, never by engine name (AG-R-4).
+    if (!supports(SURFACE.SESSION_MIRROR)) return;
     try {
       const res = await this.rpcExtract('ClaudeCodeService.get_session_storage');
       this._storage =
@@ -2203,6 +2222,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * browser is a second answer waiting to disagree.
    */
   _renderSessionStorage() {
+    // Ahead of the answer, because "this engine keeps no mirror here"
+    // outranks any state of a figure it never produces. Hidden rather
+    // than shown as "0 B" or "not mirrored": both of those are claims
+    // about a directory, and a number on screen is believed (AG-9).
+    if (!supports(SURFACE.SESSION_MIRROR)) return '';
     const storage = this._storage;
     if (!storage) return '';
     if (storage.error) {

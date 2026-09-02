@@ -1091,7 +1091,14 @@ export class UsageHud extends RpcMixin(LitElement) {
   _renderTurn() {
     const turn = this._turn;
     if (!turn) return '';
-    const cost = turn.cost;
+    // The row stays; the price leaves. AG-6: this engine reports usage in
+    // tokens and no USD is invented for it, so the tool-call count and the
+    // duration beside the figure are as true as ever — hiding the whole
+    // row would take three measurements away to hide the one that was
+    // never taken. `turn-cost.js`'s "cost unknown" rendering is the wrong
+    // instrument here too: unknown is a failure to establish a price, and
+    // this engine quotes none by design.
+    const cost = supports(SURFACE.USD_COST) ? turn.cost : null;
     const bits = [];
     if (turn.toolCalls) {
       bits.push(`${turn.toolCalls} tool ${turn.toolCalls === 1 ? 'call' : 'calls'}`);

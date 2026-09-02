@@ -96,6 +96,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { RpcMixin } from './rpc-mixin.js';
 import { withRpcTimeout } from './rpc.js';
+import { SURFACE, supports } from './engine-capabilities.js';
 import { renderMarkdown } from './markdown.js';
 import { normalizeMessageContent } from './image-utils.js';
 import {
@@ -1096,6 +1097,17 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
 
   async _loadSessions() {
     if (!this.rpcConnected) return;
+    // The 📜 button is hidden on an engine with no transcript history, so
+    // reaching here means another route opened this — a slash command, a
+    // link, a switch while the dialog was already up. Refuse the read
+    // rather than let the router's `UnsupportedOnThisEngine` land in the
+    // error banner, where it would read as a broken history rather than
+    // as an engine that keeps none.
+    if (!supports(SURFACE.TRANSCRIPT_HISTORY)) {
+      this._sessions = [];
+      this._listError = '';
+      return;
+    }
     this._loadingSessions = true;
     this._listError = '';
     try {

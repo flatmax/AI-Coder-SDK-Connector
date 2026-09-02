@@ -574,6 +574,27 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **Phase 6 closed: seven surfaces now hide on the descriptor** — 2026-09-02. Reasoning in
+  [`../plan-ag/delivery.md`](../plan-ag/delivery.md#phase-6--the-rest-of-the-consumers-2026-09-02).
+
+  These were reachable the moment `switch_engine` landed, and would have been five panels calling
+  methods the router refuses. The work was **choosing the granularity**, not writing the guards: the
+  Context section's precedent is "hide the whole thing", and applying it everywhere would have hidden
+  measurements the engine does take. Rate limits hides entirely (two sources, nothing left when both
+  are absent). History hides at the *entry point* — the 📜 button, not the dialog, because a browser
+  that opens to explain it has nothing is a click that can only disappoint. Cost hides the *figure
+  and not its row*, which is AG-6 at the granularity that matters: the tool-call count, the duration
+  and the per-model token rows beside the price are as true as ever.
+
+  Every gate is in two places, and the load side is not tidiness — the router raises rather than
+  answering emptily, so an ungated fetch is a guaranteed error once per refresh, or once per
+  *keystroke* for the slash palette.
+
+  **One thing was walked back.** The Context tab first `await`ed the descriptor before its refresh, to
+  save two round trips that would be refused. It broke 187 tests, and the breakage was the argument:
+  the descriptor was now in front of the breakdown, which is what that tab is for. The loading
+  default is "supported" precisely so the cheaper trade is available.
+
 - **AG-1's per-session engine choice landed, and it was one constructor argument** — 2026-09-01.
   Reasoning in [`../plan-ag/delivery.md`](../plan-ag/delivery.md#ag-1--one-master-per-session-chosen-per-session-2026-09-01).
 

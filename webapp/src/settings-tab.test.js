@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import './settings-tab.js';
 import { fieldLineRange, fieldList, joinFields } from './settings-tab.js';
 import { SharedRpc } from './rpc.js';
+import {
+  resetCapabilities,
+  setCapabilities,
+} from './engine-capabilities.js';
 
 // -----------------------------------------------------------
 // Test harness
@@ -2043,5 +2047,52 @@ describe('aic-settings-tab engine panel', () => {
     select.dispatchEvent(new Event('change'));
     await settle(el);
     expect(calls).toEqual([]);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// AG-9 — the session-storage card is one engine's mirror, not the product's
+// ---------------------------------------------------------------------------
+
+describe('aic-settings-tab session storage hiding', () => {
+  const NO_MIRROR = {
+    session_mirror: { supported: false, status: 'unbuilt', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  async function withCaps(caps) {
+    resetCapabilities();
+    if (caps) setCapabilities(caps);
+    const storage = vi.fn(() => ({ bytes: 4096, over_warning: false }));
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+      'ClaudeCodeService.get_session_storage': storage,
+      'ClaudeCodeService.get_engine_capabilities': () => caps || {},
+    });
+    const el = mountTab();
+    await settle(el);
+    return { el, storage };
+  }
+
+  it('hides the card on an engine that keeps no mirror here', async () => {
+    // Not "0 B" and not "not mirrored": both are claims about a
+    // directory, and a number on screen is believed.
+    const { el } = await withCaps(NO_MIRROR);
+    expect(el.shadowRoot.querySelector('.storage-note')).toBeNull();
+  });
+
+  it('does not read a directory the router would refuse to measure', async () => {
+    const { storage } = await withCaps(NO_MIRROR);
+    expect(storage).not.toHaveBeenCalled();
+  });
+
+  it('draws it on an engine that does mirror', async () => {
+    const { el } = await withCaps({
+      session_mirror: { supported: true, status: 'supported', note: '' },
+    });
+    expect(el.shadowRoot.querySelector('.storage-note')).toBeTruthy();
   });
 });
