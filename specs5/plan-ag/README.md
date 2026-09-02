@@ -9,31 +9,39 @@ directory is a *different piece of work* and does not extend it: its decisions a
 are `AG-R-n`, and where it needs a fact about the existing engine it cites the code rather than
 restating that directory's reasoning.
 
-## Where we are (2026-09-01)
+## Where we are (2026-09-02)
 
-**Phases 0, 1 and 2 are done; phase 3's code is built, phase 4's permission gate has landed, and the
-engine router is wired into startup.** Neither the engine spike nor the gate has been run against the
-network. The
-surface of both Antigravity products was read first-hand — the installed `google-antigravity` 0.1.15
-wheel, and the `agy` 1.1.22 binary — and live turns were run against both to measure what reflection
-could not see. **Phase 2 was taken out of order**, ahead of phase 1, because it was the gate
-everything else was contingent on and it turned out to be cheap. The results are in
-[`sdk-surface.md`](sdk-surface.md); the choices they force are in [`decisions.md`](decisions.md);
-what each phase actually did is in [`delivery.md`](delivery.md).
+**Phases 0–4 and 6 are done or substantially done; phase 5 has not started.** Phase 3's engine spike
+and phase 6b's streaming consultation have both been **run against the network** and passed; the
+permission gate has not, because driving it needs a browser answering a dialog. The engine router is
+wired into startup, the master engine is chosen per session, and the webapp hides surfaces the
+running engine cannot feed. The surface of both Antigravity products was read first-hand — the
+installed `google-antigravity` 0.1.15 wheel, and the `agy` 1.1.22 binary. **Phase 2 was taken out of
+order**, ahead of phase 1, because it was the gate everything else was contingent on and it turned
+out to be cheap. The results are in [`sdk-surface.md`](sdk-surface.md); the choices they force are in
+[`decisions.md`](decisions.md); what each phase actually did is in [`delivery.md`](delivery.md).
 
-**What you can use today.** The consultant is wired into the running server as of 2026-09-01: with a
-Gemini key in `~/.config/aic-dc/gemini-api-key`, an ordinary Claude turn can call
-`mcp__aic-dc-antigravity__second_opinion` and `mcp__aic-dc-antigravity__generate_image`. Ask Claude
-for a second opinion and it reaches Google's model; both calls go through the permission dialog,
-because they mount on their own server rather than the ungated index one. With no key the tools are
-absent rather than broken. Everything else below is still infrastructure: the second engine cannot
-yet be *master*, because nothing chooses one per session.
+**What you can use today.** With a Gemini key in `~/.config/aic-dc/gemini-api-key`, an ordinary
+Claude turn can call `mcp__aic-dc-antigravity__second_opinion` and
+`mcp__aic-dc-antigravity__generate_image`. Ask Claude for a second opinion and it reaches Google's
+model; both calls go through the permission dialog, because they mount on their own server rather
+than the ungated index one. Since 6b the consultation **streams into its own agent tab** as Google
+produces it, rather than sitting behind one tool card until the answer lands. With no key the tools
+are absent rather than broken.
+
+Antigravity can now also be selected as **master** for a session, but that path is far less exercised
+than the consultant: its adapter is complete and mounts, and no live turn has been driven through it
+end to end from the browser.
 
 Two things are outstanding and neither is a code problem. **Image generation is unfunded** — every
 Gemini image model reports `limit: 0` on a free-tier key, so AG-1's worked example is behind a
-billing account on the key's Cloud project ([AG-12](decisions.md#ag-12)). And **phase 3's smoke test
-has not been run against the network**, because doing so spends free-tier quota that a rate limit
-makes non-trivial to spend well.
+billing account on the key's Cloud project ([AG-12](decisions.md#ag-12)). And **nobody has watched
+the browser draw a consultation tab**: the server half of 6b is verified live, the rendering is not.
+
+**Probes live in `scripts/`, not here.** This directory is the plan of record and holds Markdown
+only. The four live-verification spikes — `probe_edit_args.py`, `probe_consultant.py`,
+`probe_session.py`, `probe_consultation_tab.py` — sit beside the project's other smoke tests, and
+each phase's entry in [`delivery.md`](delivery.md) cites the one that settled it.
 
 Seven findings determine the shape of everything below. The first five are phases 0–2; the last two
 are what building the pump turned up.
@@ -149,8 +157,17 @@ Three reasons, in order of weight:
 2. **A second opinion is worth something.** Two independent agents disagreeing about a diff is
    information. One agent asked twice is not.
 3. **Not being one vendor deep.** The engine layer's whole design is that AIC⚡DC renders an agent
-   session rather than constructing one. That claim has never been tested against a second SDK, and
+   session rather than constructing one. That claim had never been tested against a second SDK, and
    an abstraction validated by one implementation is a naming convention.
+
+   **Tested now, and it mostly held — with the exceptions being the valuable part.** The permission
+   broker, `ReviewMode` and `commit.py` all took a second engine with no change, because their
+   collaborators were already injectable. What did *not* survive contact: the RPC surface needed a
+   router with generated delegates rather than a shared base class; the event vocabulary needed a
+   capability descriptor to say what a second engine cannot feed; and the transcript, history and
+   cost layers turned out to be shaped around the Claude CLI's message types rather than around
+   "an agent session". Two of those three are now built. The third is phase 5, and it is the honest
+   measure of how far the abstraction actually reached.
 
 ## What AIC⚡DC still contributes
 
@@ -173,12 +190,12 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 |---|---|---|
 | **0. Assessment** ✅ | This directory. Both surfaces read first-hand; three live `agy` turns. No code changes. | `sdk-surface.md` records the verified surface with file:line citations and raw captures; `decisions.md` records the choices it forces; unknowns are stated as unknowns. |
 | **1. Consultant and probe** ◑ **(live)** | Antigravity as a one-shot tool under Claude Code — `generate_image` and `second_opinion`, on their **own** MCP server rather than the ungated `aic-dc` one ([AG-5](decisions.md#ag-5)). Credential resolution reporting its source, from the environment or the stored key file ([AG-11](decisions.md#ag-11)). `src/aic_dc/antigravity/surface.py` and its gate ([AG-8](decisions.md#ag-8)). | The agent generates an image from a Claude Code turn and it lands in the repo where the file tree and viewer find it. The probe's `unclassified` bucket is empty by declaration. A sentinel write lands at its expected absolute path ([AG-R-3](risks.md#ag-r-3)). **Two of three met (2026-08-31); the image is blocked on billing, not on code — every Gemini image model is `limit: 0` on a free-tier key, which is a known and accepted cost of [AG-12](decisions.md#ag-12) rather than an open defect. AG-R-3 settled: `workspaces` is honoured.** |
-| **2. Permission gate** ✅ | `probe_edit_args.py` — a `PreToolCallDecideHook` logging its `ToolCall` and denying. Run out of order, ahead of phase 1, because everything downstream is contingent on it. | **Met — go.** The hook carries full edit content and `allow=False` blocks the write. [AG-R-1](risks.md#ag-r-1) retired; [AG-R-11](risks.md#ag-r-11) raised. `trustedWorkspaces` remains unsettled and moves to phase 1. |
-| **3. Engine spike** ✅ | `src/aic_dc/antigravity/{options,steps,session}.py` — session lifecycle, options assembly, and the `Step` → `Event` pump. **Not registered:** there is no engine registry to register with, and inventing one against no second caller is phase 4's problem. | `probe_session.py` sends a prompt and prints the streamed step taxonomy, failing if no tool call and result arrive. **Met, 2026-09-02.** A real `localharness` session, a `list_directory` call and its result, `PASS` on the first run. The offline half is 94 tests, and the live run found **three bugs none of them could see** — an empty `turnUsage`, a stop reason that was always blank, and (once that was fixed) an `UNSPECIFIED` that would have put a red badge on every clean turn. All three traced to one cause: `FakeConversation` answered to `stop_reason`, a name the real SDK does not have. See [`delivery.md`](delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02). Three earlier findings in [`sdk-surface.md` § The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes); the write seam gained `start_subagent`. |
+| **2. Permission gate** ✅ | `scripts/probe_edit_args.py` — a `PreToolCallDecideHook` logging its `ToolCall` and denying. Run out of order, ahead of phase 1, because everything downstream is contingent on it. | **Met — go.** The hook carries full edit content and `allow=False` blocks the write. [AG-R-1](risks.md#ag-r-1) retired; [AG-R-11](risks.md#ag-r-11) raised. `trustedWorkspaces` remains unsettled and moves to phase 1. |
+| **3. Engine spike** ✅ | `src/aic_dc/antigravity/{options,steps,session}.py` — session lifecycle, options assembly, and the `Step` → `Event` pump. **Not registered:** there is no engine registry to register with, and inventing one against no second caller is phase 4's problem. | `scripts/probe_session.py` sends a prompt and prints the streamed step taxonomy, failing if no tool call and result arrive. **Met, 2026-09-02.** A real `localharness` session, a `list_directory` call and its result, `PASS` on the first run. The offline half is 94 tests, and the live run found **three bugs none of them could see** — an empty `turnUsage`, a stop reason that was always blank, and (once that was fixed) an `UNSPECIFIED` that would have put a red badge on every clean turn. All three traced to one cause: `FakeConversation` answered to `stop_reason`, a name the real SDK does not have. See [`delivery.md`](delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02). Three earlier findings in [`sdk-surface.md` § The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes); the write seam gained `start_subagent`. |
 | **4. Chat on the second engine** ◑ | The chat panel renders the Antigravity stream — text, thinking, tool cards, results. The permission dialog lands against the phase-2 mechanism. | A user holds a full working conversation, including edits, entirely through Antigravity, with every write approved through the dialog. **The gate and the adapter both landed (2026-09-01):** `permissions.py` drives the *shared* `PermissionBroker` — one ask path, one queue, one localhost rule across both engines — and `service.py` implements the 31 methods the router mounts, sharing the symbol index, `ReviewMode` and `commit.py` rather than copying them. **AG-1's per-session choice landed the same day** — `main.py` constructs both adapters, `app.json`'s `engines.master` names the one that starts, and `switch_engine` changes it mid-run; see [`delivery.md` § AG-1](delivery.md#ag-1--one-master-per-session-chosen-per-session-2026-09-01). Still missing: **no live turn has run through it**, which is now the whole of the gap. |
 | **5. History and sessions** | Resume by `conversation_id`; a repo-local mirror rebuilt as a step observer rather than as a store implementation, since there is no `SessionStore` protocol to implement. **Its own store root**, so that a record written by one engine cannot be handed to the other ([AG-1](decisions.md#ag-1)). | Restarting the server resumes the previous Antigravity conversation with context intact, and the history browser renders it. |
 | **6. Capability descriptor** ✅ | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). **Met, 2026-09-02.** `src/aic_dc/capabilities.py` holds 13 surfaces, distinguishing `absent` (no source data, ever) from `unbuilt` (a to-do); the router publishes it, `engine-capabilities.js` answers `supports()` synchronously, and seven surfaces hide on it across the HUD, the Context tab, the settings tab and the chat panel's action bar. Cost hides at the *figure*, not the row ([AG-6](decisions.md#ag-6)). Six surfaces still have no consumer, because they have no UI on either engine yet — see [`delivery.md`](delivery.md#phase-6--the-rest-of-the-consumers-2026-09-02). |
-| **6b. The consultation as an agent tab** ◑ | [AG-13](decisions.md#ag-13). The consultant streams `Conversation.receive_steps()` through the existing `StepTranslator`, tagging every event with a minted consultation id, and emits `subagentEvent` so the tab strip picks it up. Stop wired to `Conversation.cancel()`. Cost hidden via the descriptor. | A `second_opinion` call from a Claude turn opens its own tab, fills with thinking and text as Google produces them, can be stopped mid-flight, and shows tokens with no USD figure. **No webapp change** — if one is needed, the id contract has been got wrong. **Built 2026-09-02 and met offline**: the consultant streams, the bridge mints an id and settles the tab in a `finally`, and no webapp file changed. Not yet driven by a live turn, and ⏹ Stop reaches the bridge but no RPC routes to it. |
+| **6b. The consultation as an agent tab** ◑ | [AG-13](decisions.md#ag-13). The consultant streams `Conversation.receive_steps()` through the existing `StepTranslator`, tagging every event with a minted consultation id, and emits `subagentEvent` so the tab strip picks it up. Stop wired to `Conversation.cancel()`. Cost hidden via the descriptor. | A `second_opinion` call from a Claude turn opens its own tab, fills with thinking and text as Google produces them, can be stopped mid-flight, and shows tokens with no USD figure. **No webapp change** — if one is needed, the id contract has been got wrong. **Met live 2026-09-02**: `scripts/probe_consultation_tab.py` drives a real Gemini consultation and all six contract checks pass — 13 chunks streamed progressively, each carrying the consultation id, terminal event last. No webapp file changed. Outstanding: the browser has not been watched drawing the tab, and ⏹ Stop reaches the bridge but no RPC routes to it. |
 | **7. Packaging** | `google-antigravity` as an optional extra, not a base dependency — a second bundled binary on top of the ~295 MB CLI ([AG-R-10](risks.md#ag-r-10)). | A base install is a one-engine install with no broken UI, and its size has not moved. |
 
 ## Ordering constraints that are not obvious

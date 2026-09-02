@@ -20,7 +20,7 @@ measurement raised **`AG-R-11`**, which is live, critical, and was not predicted
 > `edit_file` carries `TargetContent`, `ReplacementContent` and a line range; `create_file` carries
 > `CodeContent`. `allow=False` leaves the file byte-identical on disk. Captures and the probe command
 > are in [`sdk-surface.md` § The permission gate — measured, and it passes](sdk-surface.md#the-permission-gate--measured-and-it-passes);
-> the probe is `probe_edit_args.py`. **None of the fallbacks below were needed.** The tripwire stands
+> the probe is `scripts/probe_edit_args.py`. **None of the fallbacks below were needed.** The tripwire stands
 > and should be kept — it is now a regression test, not a gate.
 >
 > The measurement did expose a different failure of the same mechanism, which is live and unmitigated:
@@ -94,7 +94,7 @@ root is a workspace the engine will actually write to, and reports a degradation
 banner if it is not.
 
 **Settled in phase 1 (2026-08-31): the SDK is not subject to the trust list.** The tripwire below was
-run — `probe_consultant.py` § *AG-R-3: workspace containment* — on the same machine whose
+run — `scripts/probe_consultant.py` § *AG-R-3: workspace containment* — on the same machine whose
 `trustedWorkspaces` diverted `agy`. A `create_file` turn with `workspaces=[repo_root]` wrote
 `aic-dc-sentinel.txt` and it was found by `stat` **at the expected absolute path** in this repository,
 not under `~/.gemini/`. The two mechanisms are separate, as the `hooks/policy.py` reading suggested
@@ -331,7 +331,7 @@ default dependency set — which is a `pyproject.toml` edit nobody reviews as a 
 **Severity: critical. Likelihood: observed — it happened on both probe runs, unprompted.**
 
 Gating `create_file` and `edit_file` does not stop the agent from making the edit. It stops it from
-making the edit *that way*. When [`probe_edit_args.py`](probe_edit_args.py) denied both file tools,
+making the edit *that way*. When [`scripts/probe_edit_args.py`](probe_edit_args.py) denied both file tools,
 `gemini-3.6-flash` immediately reached for `run_command` with the same intent — `sed -i` on the first
 run, an inline `python3 -c "…content.replace(…)…"` on the second. Neither was suggested by the
 prompt. Only once `run_command` was denied on the same seam did the seeded file survive the turn.

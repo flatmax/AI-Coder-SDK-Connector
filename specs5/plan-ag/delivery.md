@@ -109,7 +109,7 @@ it turned out to be cheap. `src/` and `webapp/` remain untouched.
 
 | File | Role |
 |---|---|
-| `probe_edit_args.py` | The phase-2 spike. Seeds a file, requests an edit, logs every `ToolCall` at `pre_tool_call_decide`, denies all mutating tools, then asserts the file's bytes are unchanged and prints a verdict. |
+| `scripts/probe_edit_args.py` | The phase-2 spike. Seeds a file, requests an edit, logs every `ToolCall` at `pre_tool_call_decide`, denies all mutating tools, then asserts the file's bytes are unchanged and prints a verdict. |
 
 `sdk-surface.md`, `decisions.md` and `risks.md` were amended with the measurements; the amendments
 are marked as corrections rather than silently applied.
@@ -162,7 +162,7 @@ Nothing is blocked. Phase 1 proceeds as written, with two amendments now settled
 the permission hook's shape is known, and `run_command` must be gated alongside the file tools from
 the first line of the engine adapter rather than retrofitted.
 
-`probe_edit_args.py` needs a real key and hits the network, so it is a spike and not a test. Its
+`scripts/probe_edit_args.py` needs a real key and hits the network, so it is a spike and not a test. Its
 assertions should be lifted into the phase-1 probe as the AG-R-1 and AG-R-11 tripwires.
 
 ---
@@ -186,7 +186,7 @@ questions about *this* build are both met and were measured live.
 | `src/aic_dc/antigravity/consultant.py` | AG-7's one-shot `async with Agent(...)`, with AG-R-3 verification |
 | `src/aic_dc/antigravity/bridge.py` | The two tools, on their **own** MCP server |
 | `tests/test_antigravity_{surface,credentials,consultant,bridge}.py` | 145 tests, offline — no key, no harness, no network |
-| `probe_consultant.py` | The live spike. Three checks, runnable, costs money |
+| `scripts/probe_consultant.py` | The live spike. Three checks, runnable, costs money |
 
 ### Live verification
 
@@ -265,7 +265,7 @@ message retries forever — which is why `_explain` distinguishes the two and sa
 **Exit criterion:** *"A CLI-side smoke test sends a prompt and prints the streamed step taxonomy,
 including a tool call and its result."*
 
-**The code and the probe are built; the live run has not been made.** `probe_session.py` exists,
+**The code and the probe are built; the live run has not been made.** `scripts/probe_session.py` exists,
 asserts the criterion and is runnable, and it has not been pointed at the network — the owner has not
 yet decided whether to spend free-tier quota on it. Everything that does not need a key is done and
 measured: the pump's behaviour is pinned by 46 offline tests, and the three SDK facts it is built on
@@ -280,7 +280,7 @@ demonstration, not the evidence.
 | `src/aic_dc/antigravity/steps.py` | The `Step` → `Event` pump. Emits only names the Claude pump emits |
 | `src/aic_dc/antigravity/session.py` | Lifecycle: `Agent` for the lifetime, `agent.conversation` for the turn |
 | `tests/test_antigravity_{options,steps,session}.py` | 94 tests, offline — no key, no harness, no network |
-| `specs5/plan-ag/probe_session.py` | The live spike. Read-only, costs money, not yet run |
+| `scripts/probe_session.py` | The live spike. Read-only, costs money, not yet run |
 
 `sdk-surface.md` gained [§ The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes)
 with the three measurements below. `surface.py`'s tables moved where phase 3 made them stale.
@@ -381,7 +381,7 @@ five can be trusted.
 
 ### The live run, and what happens when the free tier says no
 
-`probe_session.py` is read-only by construction — no decide hook, so no mutating tool is enabled —
+`scripts/probe_session.py` is read-only by construction — no decide hook, so no mutating tool is enabled —
 which makes it safe to point at a real repository. It **does not retry**: the SDK's own
 `retry_config` already retries a 429 or a 503 invisibly (measured in phase 1), so a failure that
 reaches the probe has been retried through already, and a loop on top would burn the same quota to no
@@ -479,7 +479,7 @@ engine-name leak [AG-R-4](risks.md#ag-r-4) exists to prevent.
    against the Claude pump's source, not against a rendered conversation.
 3. **`PostToolCallHook` is unwired.** It is the trigger for broadcasting a write and queueing the
    re-index, both engine-agnostic jobs. Still pending in the probe.
-4. **No live turn has been run through the gate.** `probe_edit_args.py` measured the raw hook in
+4. **No live turn has been run through the gate.** `scripts/probe_edit_args.py` measured the raw hook in
    phase 2; nothing has yet driven a real dialog from a real Antigravity turn.
 
 ---
@@ -1164,7 +1164,7 @@ this trade is available.
 
 ## Phase 3 — the live run, and the three bugs it found (2026-09-02)
 
-`probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
+`scripts/probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
 the first run**: a real `localharness` session, a `list_directory` tool call, its result in the same
 sub-message as the arguments, and a `PASS`. The taxonomy printed exactly as phase 3 predicted —
 `TEXT_RESPONSE`/`USER` echo, four `TOOL_CALL` frames going `ACTIVE`→`DONE`, then `TEXT_RESPONSE`
@@ -1311,9 +1311,32 @@ startup plumbing. `tests/test_main_symbol_index_attach.py` is the regression —
 since reproducing it needs the real deferred path — and it fails on the pre-fix tree, which was
 verified rather than assumed.
 
+### The live run (2026-09-02, same day)
+
+`scripts/probe_consultation_tab.py` drives a real `second_opinion` through the real bridge with a recording
+emit, and checks the five-point contract read off `subagent-tabs.js`. **All six checks pass**: 13
+chunks arrived progressively, every one carrying the consultation id, turn-scoped to the live
+request, with the terminal event last.
+
+Two things the run taught that the offline tests could not.
+
+**The first attempt 503'd, and that was the more useful result.** Google returned *"this model is
+currently experiencing high demand"* mid-turn. The consultation failed — and the **terminal event
+still fired**, because it is in a `finally`. That is the tab-spins-forever failure mode, exercised
+live and against a real provider fault rather than a mocked raise. It is the single thing about 6b
+most likely to have been got wrong, and it was right.
+
+**The probe's own check was too narrow**, and the 503 is what exposed it: it counted only
+`streamChunk` and reported "the answer did not stream" on a turn that had streamed two
+*thinking* chunks before the provider gave up. Thinking renders in the tab exactly as prose does, so
+the check now counts both. A green run would never have shown this — it took a turn that produced
+thinking and no answer, which is exactly what a transient provider error produces.
+
 ### What is left
 
-- **No live run.** Every test here is offline. The tab has never been driven by a real Gemini turn.
+- **The browser has not drawn the tab.** The contract is verified end to end on the server; that the
+  webapp renders it needs a real session with a browser attached and a Claude turn calling the tool.
+  It is the one part of 6b a script cannot stand in for.
 - **⏹ Stop is wired to the bridge but not to `stop_task`.** `ConsultantBridge.cancel()` exists and
   reaches `Conversation.cancel()`; nothing routes the RPC to it yet.
 - **`usage` rides on the terminal event** and nothing renders it. Tokens only, per AG-6.

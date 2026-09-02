@@ -38,7 +38,7 @@ Usage
 ::
 
     export GEMINI_API_KEY=...          # or the AG-11 key file
-    .venv/bin/python specs5/plan-ag/probe_consultant.py --repo .
+    .venv/bin/python scripts/probe_consultant.py --repo .
 
 The free tier throttles at 5 RPM and an agent turn is many model calls,
 so a 429 mid-run is a rate limit rather than a failure of the code —
@@ -56,7 +56,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aic_dc.antigravity import (  # noqa: E402
     Consultant,

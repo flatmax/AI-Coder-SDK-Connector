@@ -325,7 +325,7 @@ which AIC⚡DC would have to own itself. See [`decisions.md` AG-5](decisions.md#
 ### The permission gate — measured, and it passes
 
 This was the load-bearing unknown and the phase-2 go/no-go. It is now settled by measurement, not
-inference. `specs5/plan-ag/probe_edit_args.py`, run 2026-08-30 against `gemini-3.6-flash` on a
+inference. `scripts/probe_edit_args.py`, run 2026-08-30 against `gemini-3.6-flash` on a
 free-tier key, seeded a file and asked for an edit while a `PreToolCallDecideHook` logged the
 `ToolCall` and denied it.
 
