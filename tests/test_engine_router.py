@@ -257,11 +257,21 @@ class TestUnsupportedSurfacesAreRefusedNotMissing:
         """Omitting it would give the browser a transport-level 404."""
         assert "get_context_usage" in exposed(self.antigravity_router())
 
-    def test_calling_it_says_which_surface_and_why(self):
+    async def test_calling_it_says_which_surface_and_why(self):
+        """Awaited, because a refused method keeps its async-ness.
+
+        It did not always. While the master was fixed at build time a
+        refusal could be a plain function whatever it replaced, and this
+        called it synchronously. With a switchable master the check moved
+        inside the delegate, so an async method refuses on the await —
+        which is what the wire does anyway (``ExposeClass`` inspects the
+        *result* and awaits a coroutine), and which keeps the surface's
+        shape from changing under a switch.
+        """
         from aic_dc.engine_router import UnsupportedOnThisEngine
 
         with pytest.raises(UnsupportedOnThisEngine) as exc:
-            self.antigravity_router().get_context_usage()
+            await self.antigravity_router().get_context_usage()
         assert "context_window_usage" in str(exc.value)
         assert "get_engine_capabilities" in str(exc.value)
 
@@ -287,7 +297,7 @@ class TestUnsupportedSurfacesAreRefusedNotMissing:
                 "take a working surface away from the shipped engine."
             )
 
-    def test_the_refusal_set_matches_the_descriptor(self):
+    async def test_the_refusal_set_matches_the_descriptor(self):
         """One source of truth, not two.
 
         A second hand-kept list of unsupported methods is the thing that
@@ -302,7 +312,9 @@ class TestUnsupportedSurfacesAreRefusedNotMissing:
             if capabilities.supports(ANTIGRAVITY, surface):
                 continue
             with pytest.raises(UnsupportedOnThisEngine):
-                method()
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
 
     def test_every_mapped_method_is_a_real_rpc_method(self):
         """A typo here would refuse nothing and hide nothing."""
@@ -457,3 +469,253 @@ class TestStartupUsesTheRouter:
         source = self.source()
         assert "engine_router.get_call()" in source
         assert "claude_code_service.get_call()" not in source
+
+
+# ----------------------------------------------------------------------
+# AG-1: one master per session, chosen per session
+# ----------------------------------------------------------------------
+
+
+class SwitchableAdapter(FakeAdapter):
+    """A fake that can be asked whether it is busy, and can be stopped."""
+
+    def __init__(self, busy=False):
+        super().__init__()
+        self.session = type("S", (), {"streaming_active": busy})()
+        self._turn_tasks = set()
+        self._collab = None
+
+    async def get_context_usage(self):
+        # A surface method, so it delegates on Claude and refuses on
+        # Antigravity — which is the pair this fake exists to show.
+        self.calls.append("get_context_usage")
+        return {"total_tokens": 1}
+
+    def _check_localhost_only(self):
+        return None
+
+
+class Recorder:
+    """The event callback, remembering what the router announced."""
+
+    def __init__(self, fail=False):
+        self.events = []
+        self.fail = fail
+
+    async def __call__(self, name, *args):
+        self.events.append((name, args))
+        if self.fail:
+            raise RuntimeError("no browser")
+
+    def names(self):
+        return [name for name, _ in self.events]
+
+    def payload(self, name):
+        for got, args in self.events:
+            if got == name:
+                return args[0]
+        return None
+
+
+def switchable(**kw):
+    """A two-engine router over stubs, master Claude."""
+    claude = SwitchableAdapter(**kw.pop("claude_kwargs", {}))
+    antigravity = SwitchableAdapter(**kw.pop("antigravity_kwargs", {}))
+    router = build_router(
+        claude,
+        engine=CLAUDE,
+        alternates={ANTIGRAVITY: antigravity},
+        require_full_surface=False,
+        **kw,
+    )
+    return router, claude, antigravity
+
+
+class TestTheMasterCanChange:
+    async def test_it_forwards_to_the_new_master(self):
+        router, claude, antigravity = switchable()
+        router.get_model()
+        await router.switch_engine(ANTIGRAVITY)
+        router.get_model()
+        assert claude.calls == ["get_model", "shutdown"]
+        assert antigravity.calls == ["get_model"]
+
+    async def test_the_descriptor_follows_the_switch(self):
+        """The whole point of the event, and the thing a stale one breaks."""
+        router, _, _ = switchable()
+        assert router.get_engine_capabilities()["context_window_usage"][
+            "supported"
+        ] is True
+        await router.switch_engine(ANTIGRAVITY)
+        assert router.get_engine_capabilities()["context_window_usage"][
+            "supported"
+        ] is False
+
+    async def test_a_surface_refuses_after_the_switch_and_not_before(self):
+        """The reason the capability check moved to call time.
+
+        A delegate that decided when it was generated would keep answering
+        for the engine mounted at startup — the browser would go on
+        calling a method the descriptor now says is hidden, and get an
+        answer.
+        """
+        from aic_dc.engine_router import UnsupportedOnThisEngine
+
+        router, claude, _ = switchable()
+        await router.get_context_usage()
+        assert "get_context_usage" in claude.calls
+        await router.switch_engine(ANTIGRAVITY)
+        with pytest.raises(UnsupportedOnThisEngine):
+            await router.get_context_usage()
+
+    async def test_the_wire_surface_does_not_move(self):
+        """jrpc-oo sends the method list once. It cannot be renegotiated.
+
+        If this ever fails, a switch stops being a field assignment and
+        becomes a re-registration plus a browser reconnect.
+        """
+        router, _, _ = switchable()
+        before = exposed(router)
+        await router.switch_engine(ANTIGRAVITY)
+        assert exposed(router) == before
+
+    async def test_it_stops_the_outgoing_engine(self):
+        router, claude, _ = switchable()
+        await router.switch_engine(ANTIGRAVITY)
+        assert "shutdown" in claude.calls
+
+    async def test_it_refuses_mid_turn(self):
+        """The same rule new_session has: cancel first, or lose the tail."""
+        router, claude, antigravity = switchable(
+            claude_kwargs={"busy": True},
+        )
+        answer = await router.switch_engine(ANTIGRAVITY)
+        assert answer["reason"] == "turn_active"
+        assert "shutdown" not in claude.calls
+        assert router.list_engines()["active"] == CLAUDE
+
+    async def test_it_refuses_an_engine_that_is_not_mounted(self):
+        """A missing credential, said as a missing credential.
+
+        Not a typo and not a crash: the engine is real, this install just
+        cannot run it, and the message has to distinguish the two because
+        only one of them is the user's to fix.
+        """
+        router = build_router(
+            SwitchableAdapter(), engine=CLAUDE, require_full_surface=False
+        )
+        answer = await router.switch_engine(ANTIGRAVITY)
+        assert answer["reason"] == "not_mountable"
+        assert router.list_engines()["active"] == CLAUDE
+
+    async def test_switching_to_the_master_is_not_an_error(self):
+        """A second window may have got there first."""
+        router, claude, _ = switchable()
+        answer = await router.switch_engine(CLAUDE)
+        assert answer["changed"] is False
+        assert "shutdown" not in claude.calls
+
+    async def test_an_unknown_engine_is_refused_by_name(self):
+        router, _, _ = switchable()
+        answer = await router.switch_engine("gpt")
+        assert answer["reason"] == "unknown_engine"
+
+    async def test_mountable_reports_what_is_actually_mounted(self):
+        """`available` and `mountable` are different questions.
+
+        The selector needs both: an engine this build knows about but
+        cannot run here is offered disabled with the reason, and dropping
+        it would make a missing key look like a build without the engine.
+        """
+        router, _, _ = switchable()
+        assert router.list_engines()["mountable"] == sorted([CLAUDE, ANTIGRAVITY])
+        solo = build_router(
+            SwitchableAdapter(), engine=CLAUDE, require_full_surface=False
+        )
+        assert solo.list_engines()["mountable"] == [CLAUDE]
+
+
+class TestTheSwitchIsAnnounced:
+    async def test_it_carries_the_descriptor_not_only_the_name(self):
+        """Fetching it separately opens a window of wrong panels."""
+        recorder = Recorder()
+        router, _, _ = switchable(event_callback=recorder)
+        await router.switch_engine(ANTIGRAVITY)
+        payload = recorder.payload("engineChanged")
+        assert payload["engine"] == ANTIGRAVITY
+        assert payload["previous"] == CLAUDE
+        assert payload["capabilities"]["context_window_usage"]["supported"] is False
+
+    async def test_it_clears_the_transcript_through_the_existing_event(self):
+        """One clearing path, not two that can disagree.
+
+        `sessionChanged` with an empty message list is what every client
+        already resets on; a switch is a session boundary because the two
+        transcript formats do not translate.
+        """
+        recorder = Recorder()
+        router, _, _ = switchable(event_callback=recorder)
+        await router.switch_engine(ANTIGRAVITY)
+        assert recorder.names() == ["engineChanged", "sessionChanged"], (
+            "The descriptor must be in place before anything re-renders on "
+            "the clear, or the panel draws the surface the switch hid."
+        )
+        assert recorder.payload("sessionChanged")["messages"] == []
+
+    async def test_a_failed_announcement_does_not_undo_the_switch(self):
+        """The engine *has* changed. Saying otherwise is the worse lie."""
+        recorder = Recorder(fail=True)
+        router, _, _ = switchable(event_callback=recorder)
+        answer = await router.switch_engine(ANTIGRAVITY)
+        assert answer["changed"] is True
+        assert router.list_engines()["active"] == ANTIGRAVITY
+
+    async def test_a_router_with_no_callback_switches_silently(self):
+        router, _, _ = switchable()
+        answer = await router.switch_engine(ANTIGRAVITY)
+        assert answer["changed"] is True
+
+
+class TestEveryMountedEngineIsValidatedUpFront:
+    def test_a_broken_alternate_refuses_at_build_time(self):
+        """Not at switch time, when the working engine is already down.
+
+        A switch that discovered a half-implemented adapter would have
+        torn down the engine that worked before finding out, leaving the
+        user on nothing.
+        """
+        from aic_dc.claude_code import ClaudeCodeService
+
+        whole = type(
+            "Whole",
+            (),
+            {name: (lambda self, *a, **k: None) for name in exposed(ClaudeCodeService)},
+        )
+        with pytest.raises(ValueError) as exc:
+            build_router(
+                whole(),
+                engine=CLAUDE,
+                alternates={ANTIGRAVITY: FakeAdapter()},
+            )
+        assert "antigravity adapter cannot be mounted" in str(exc.value)
+
+    def test_the_real_adapters_both_mount(self):
+        """The measurement the whole design rests on.
+
+        Claude 48 public methods, Antigravity 31, and the 17-method
+        difference is exactly RPC_SURFACES — so the wire surface is the
+        same whichever is master, and a switch never renegotiates it.
+        """
+        from aic_dc.antigravity.service import AntigravityService
+        from aic_dc.claude_code import ClaudeCodeService
+
+        claude_names = exposed(ClaudeCodeService)
+        ag_names = exposed(AntigravityService)
+        assert not (ag_names - claude_names), (
+            "Antigravity exposes a method Claude does not. The union is "
+            "still generated, but the neat 48 = 31 + 17 identity below no "
+            "longer holds and the surface table needs revisiting."
+        )
+        from aic_dc.engine_router import RPC_SURFACES
+
+        assert claude_names - ag_names == set(RPC_SURFACES)

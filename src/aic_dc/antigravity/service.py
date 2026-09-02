@@ -158,6 +158,27 @@ class AntigravityService:
             restricted=self._check_localhost_only,
         )
 
+    def _attach_symbol_index(self, symbol_index: Any) -> None:
+        """Hand over the built symbol index. Called once, from startup.
+
+        The same name and the same underscore as the Claude adapter's,
+        and both matter. The name is what lets ``main.py``'s deferred init
+        hand the *one* index to every mounted adapter in a loop rather
+        than naming each engine — which is how the second engine would
+        otherwise end up either without an index or with its own copy of
+        one. The underscore keeps it off the RPC surface: ``add_service``
+        publishes every public method, and a browser calling this with a
+        JSON value would replace the index with something that has no
+        ``lsp_get_hover``.
+
+        There is no ``_mark_symbol_index_ready`` counterpart. That flag
+        feeds the Claude adapter's symbol-map surface, which this engine
+        does not serve; adding a field nothing reads would be the stub
+        this class is written to avoid.
+        """
+        self.symbol_index = symbol_index
+        self.review.symbol_index = symbol_index
+
     # ------------------------------------------------------------------
     # Engine lifecycle
     # ------------------------------------------------------------------

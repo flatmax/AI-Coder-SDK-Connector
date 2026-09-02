@@ -207,6 +207,46 @@ describe('AppShell events and toasts', () => {
       window.removeEventListener('model-changed', listener);
     });
 
+    it('engineChanged installs the descriptor before it dispatches', async () => {
+      // The ordering *is* the test. Every listener downstream decides what
+      // to render by asking `supports()`, so a panel that re-rendered on
+      // this event while the store still held the outgoing engine's
+      // answers would draw exactly the surface the switch was meant to
+      // hide. Asserted by reading the store from inside the listener,
+      // because a check after the fact cannot tell the two orders apart.
+      const { supports, resetCapabilities, SURFACE } =
+        await import('../engine-capabilities.js');
+      const shell = mountShell();
+      const seen = [];
+      const listener = () => seen.push(supports(SURFACE.CONTEXT_WINDOW_USAGE));
+      window.addEventListener('engine-changed', listener);
+      expect(shell.engineChanged({
+        engine: 'antigravity',
+        previous: 'claude',
+        capabilities: {
+          context_window_usage: { supported: false, status: 'absent' },
+        },
+      })).toBe(true);
+      expect(seen).toEqual([false]);
+      window.removeEventListener('engine-changed', listener);
+      resetCapabilities();
+    });
+
+    it('engineChanged without a descriptor still tells every window', async () => {
+      // The name and the capabilities are separate concerns and the event
+      // must not become all-or-nothing: a payload that lost its descriptor
+      // is a stale panel, where a dropped event is a selector naming an
+      // engine that is no longer answering.
+      const { resetCapabilities } = await import('../engine-capabilities.js');
+      const shell = mountShell();
+      const listener = vi.fn();
+      window.addEventListener('engine-changed', listener);
+      expect(shell.engineChanged({ engine: 'claude' })).toBe(true);
+      expect(listener.mock.calls[0][0].detail.engine).toBe('claude');
+      window.removeEventListener('engine-changed', listener);
+      resetCapabilities();
+    });
+
     it('sessionDeleted dispatches window event with the session id', () => {
       // Reaches the client that asked for the delete as well as the
       // ones that did not: a session list still offering the row is a

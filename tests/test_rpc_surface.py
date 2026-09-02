@@ -144,15 +144,6 @@ INTERNAL_ONLY: dict[str, str] = {
 # ``self._executor.shutdown(wait=False)`` is not this method.
 
 DORMANT: dict[str, str] = {
-    # AG-1's engine selector does not exist: exactly one engine is
-    # mountable per session and nothing yet chooses one, so there is
-    # nothing for a picker to pick. Deliberately *not* the other half of
-    # the descriptor — `get_engine_capabilities` is what a component asks
-    # to decide whether to render, and it has a caller
-    # (`engine-capabilities.js`). This one names the engine, which is the
-    # thing AG-R-4 forbids a render path from branching on; its only
-    # legitimate readers are a human-facing selector and diagnostics.
-    "ClaudeCodeService.list_engines": "no engine selector yet (plan-ag AG-1)",
     # § E — the collaboration admission UI is on pause. The browser
     # receives the pushes and re-dispatches them as window events nothing
     # listens to, so no click ever reaches these and every request after

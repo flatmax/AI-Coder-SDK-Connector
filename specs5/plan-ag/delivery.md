@@ -949,3 +949,148 @@ refuse, once per tick.
 the session cost and the rate-limit panel still render unconditionally. They are the same shape of
 change as the Context section and were left out of this tranche deliberately, to keep the first
 consumer small enough to be obviously correct.
+
+---
+
+## AG-1 — one master per session, chosen per session (2026-09-01)
+
+The thing three phases were blocked on. Phase 4's exit criterion, the adapter's *What is still not
+done* and the router's all named the same missing piece in the same words — **nothing constructs it** —
+and it was one constructor argument away, as the router's own docstring predicted.
+
+| File | Role |
+|---|---|
+| `src/aic_dc/engine_router.py` | Mutable master; call-time refusals; `switch_engine` |
+| `src/aic_dc/main.py` | Constructs both adapters, mounts the one `app.json` names |
+| `src/aic_dc/config.py` | `master_engine`, from `app.json`'s `engines.master` |
+| `src/aic_dc/antigravity/service.py` | `_attach_symbol_index`, so the shared index reaches both |
+| `webapp/src/settings-tab.js` | The selector — `list_engines`, `switch_engine` |
+| `webapp/src/app-shell/index.js` | `engineChanged`: descriptor first, then dispatch |
+| `tests/test_engine_router.py` | 50 tests, 16 of them about switching |
+| `webapp/src/settings-tab.test.js` | 7 tests on the panel |
+
+### The measurement the design rests on
+
+Before writing anything, both adapters were mounted and their surfaces compared. The result is what
+made this small, and it is a coincidence worth keeping under test rather than a property that was
+designed for:
+
+* Claude exposes **48** public methods, Antigravity **31**, and Antigravity exposes **nothing Claude
+  does not**.
+* The 17-method difference is **exactly** `RPC_SURFACES`. Not approximately — every method one engine
+  has and the other lacks was already mapped to a hideable surface.
+* `_missing_core_methods(AntigravityService, ANTIGRAVITY)` was already `[]`. The adapter mounted the
+  day it landed; nothing had asked it to.
+
+So the set of names on the wire is the same whichever engine is master: 48 delegates plus the
+router's own. That matters more than it looks. **jrpc-oo sends its method list once, at the
+handshake** (`ExposeClass.py:37-41`), and cannot renegotiate it. A router whose surface moved with the
+master would have to re-register the service and reconnect every browser in order to switch. This one
+does not, so a switch is a field assignment. `test_the_wire_surface_does_not_move` and
+`test_the_real_adapters_both_mount` are what stop that identity from quietly breaking.
+
+### The one structural change: refusals moved to call time
+
+The first cut baked the decision into the generated method — a name was either a delegate or a
+refusal, decided when the router was built. With a master that can change, a delegate generated for
+the engine mounted at startup would go on answering for it after the swap: the descriptor would say
+the panel is hidden and the method would still return data. So `_delegate` now reads `self._engine`
+on every call.
+
+The visible cost is that a refused *async* method refuses on the `await` rather than on the call.
+Over the wire that is the same thing — `ExposeClass` inspects the **result** and awaits a coroutine —
+and it buys the property that matters more: the shape of the surface no longer changes under a
+switch. Two tests were updated to await, with the reason recorded in them.
+
+### A switch is a session boundary, and it cannot be anything else
+
+Not a policy choice. [`sdk-surface.md` § What does not translate](sdk-surface.md#what-does-not-translate)
+settles it: the mirror has **no protocol counterpart** — Antigravity owns an opaque `save_dir` — and
+history rendering **needs a full sibling**, because `Step` is flat with `trajectory_id`/`depth` rather
+than nested content blocks. These are two transcripts, not one in two dialects, so no version of this
+carries a conversation across.
+
+What follows from that, and is implemented:
+
+- The outgoing engine is **stopped**; the incoming one connects lazily on the next turn, with no
+  resume, which is what makes it a new session. Switching back is a new session too.
+- **Nothing on disk is touched.** Each engine keeps its own mirror, and the conversation you leave
+  stays listed and loadable.
+- The clear is broadcast as **`sessionChanged` with an empty message list** — the event every client
+  already resets on, the one `new_session` sends. Teaching the chat panel a second way to be reset
+  would be two clearing paths that can disagree.
+- It is refused mid-turn, matching `new_session`: the user can cancel first, and pulling the engine
+  out from under a live turn loses its tail. The busy check reads `streaming_active` *and*
+  `_turn_tasks`, because the adapters answer in different vocabularies and a background commit is not
+  a chat turn but would still lose its tail.
+
+### Ordering, in the one place it is load-bearing
+
+`engineChanged` carries the **descriptor**, not just the name, and the browser installs it *before*
+re-dispatching. Every listener downstream decides what to render by asking `supports()`, so a panel
+that re-rendered while the store still held the outgoing engine's answers would draw exactly the
+surface the switch was meant to hide. `sessionChanged` follows, for the same reason.
+`engineChanged installs the descriptor before it dispatches` asserts it by reading the store from
+inside the listener — a check after the fact cannot tell the two orders apart.
+
+A failed announcement does **not** undo the switch. The engine has changed; a window that missed the
+event is stale, which is recoverable, where raising would leave the router switched and the caller
+told it failed.
+
+### Where the choice lives, and why not in `engine.json`
+
+`app.json`'s new `engines.master`, despite the other file's name. Every key in `engine.json` is a
+*Claude session option* — model, effort, permission mode — read by `claude_code.engine_config`. Which
+engine is master is a fact about the application, and putting it in one engine's option file would
+make the second engine's existence conditional on the first's config.
+
+It does not break `reload_app_config`'s promise that nothing in `app.json` reaches the engine's
+session options: it is read at startup and at an explicit switch, never mid-session. An unknown name
+falls back to Claude with a warning — a typo should cost the user the second engine, not the ability
+to start the application.
+
+### Absent, not broken, without a credential
+
+Both adapters are constructed cold at startup, which is free: neither connects until asked, so the
+second engine costs no subprocess and no harness. Without a Gemini key Antigravity is simply not in
+`list_engines().mountable`, and `switch_engine` refuses it **by that reason** — a missing credential
+said as a missing credential, distinguishable from a typo, because only one of the two is the user's
+to fix. `mountable` was already in `list_engines`'s payload and hardcoded to `[self._engine]`; it now
+answers honestly.
+
+Every mounted adapter is validated at **build** time, not at switch time. A switch that discovered a
+half-implemented adapter would already have torn down the working one, leaving the user on nothing.
+
+### Three single-service assumptions in `main.py`, found by looking
+
+None of these would have failed a test, and all three fail only *after* a switch — the worst time to
+find out:
+
+- **The symbol index** went to one adapter. The other would have answered every hover with "no
+  answer", silently, and `AntigravityService` gained an `_attach_symbol_index` with the Claude
+  adapter's exact name so startup can hand the *one* index to every adapter in a loop.
+- **`_collab`** was set on one adapter. The localhost gate reads it, so the other would have failed
+  open or closed depending on its default.
+- **Teardown** shut one engine down. The other's pending permission dialog would have been left live
+  forever — which is the one effect of `shutdown` that survives process death and the reason
+  `_shut_the_engine_down` exists at all.
+
+### What is still not done
+
+- **No live turn.** Unchanged, and still the thing phases 1, 3 and 4 are waiting on. What has changed
+  is that there is now a way to *reach* the second engine from the UI, which is what a live turn
+  needs.
+- **The descriptor has four unwired consumers, and the switch makes them reachable.**
+  `transcript_history`, `session_mirror`, `slash_commands` and `mcp_server_inventory` are all
+  `UNBUILT` on Antigravity, and nothing in the browser gates on them — so the history browser, the
+  session-storage card, the slash-command menu and the MCP panel will call methods the router
+  refuses. It is loud rather than wrong (`UnsupportedOnThisEngine`, never a synthesised empty), which
+  is the safe direction, but it is four panels that should be hidden. Same shape as the Context
+  section; this is the rest of phase 6.
+- **Resume across engines is unguarded, and unreachable.** `resume_session` hands a transcript to
+  whatever engine is master, and nothing records which engine wrote a session. It cannot be reached
+  today — `session_mirror` and `transcript_history` are both refused on Antigravity — but it becomes
+  live the moment phase 5 lands, and the failure would be Claude-format JSONL handed to an SDK that
+  cannot read it. The cheapest fix is a store root per engine, which makes a foreign record
+  unreachable by construction rather than by a check; it belongs with phase 5's mirror, where the
+  storage layout is being decided anyway.

@@ -67,14 +67,34 @@ def test_engine_defaults_survive_the_loader() -> None:
 
 
 def test_app_config_has_only_the_live_sections() -> None:
-    """app.json is the two indexes, the history thresholds, and nothing else.
+    """app.json is the two indexes, the history thresholds, the engine
+    choice, and nothing else.
 
     Five sections went with the native engine — ``url_cache``,
     ``history_compaction``, ``agents``, ``reasoning`` and
     ``cache_tiering``. A section nothing reads is a knob that lies:
     the user edits it, the app accepts the edit, and nothing changes.
     """
-    assert set(_load_json("app.json")) == {"doc_convert", "doc_index", "history"}
+    assert set(_load_json("app.json")) == {
+        "doc_convert",
+        "doc_index",
+        "history",
+        "engines",
+    }
+
+
+def test_engines_section_names_a_real_engine() -> None:
+    """The shipped master must be an engine the descriptor describes.
+
+    Not a style check: `master_engine` falls back to Claude for an
+    unknown name, so a typo shipped here would be silent — the app would
+    start on Claude and the setting would look like it worked.
+    """
+    from aic_dc import capabilities
+
+    cfg = _load_json("app.json")["engines"]
+    assert set(cfg) == {"master"}
+    assert cfg["master"] in capabilities.ENGINES
 
 
 def test_history_section_fields() -> None:

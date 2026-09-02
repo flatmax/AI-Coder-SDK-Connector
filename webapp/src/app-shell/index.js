@@ -24,6 +24,7 @@ import { LitElement, html, css } from 'lit';
 import { JRPCClient } from '@flatmax/jrpc-oo/dist/bundle.js';
 
 import { SharedRpc } from '../rpc.js';
+import { setCapabilities } from '../engine-capabilities.js';
 import '../files-tab/index.js';
 import '../diff-viewer/index.js';
 import '../svg-viewer.js';
@@ -1185,6 +1186,33 @@ export class AppShell extends JRPCClient {
    */
   modelChanged(data) {
     window.dispatchEvent(new CustomEvent('model-changed', {
+      detail: data,
+    }));
+    return true;
+  }
+
+  /**
+   * The master engine changed — in this window or another one.
+   *
+   * The capability descriptor is replaced *before* the event is
+   * re-dispatched, and the order is the point: every listener downstream
+   * decides what to render by asking `supports()`, so a panel that
+   * re-rendered on this event while the store still held the old
+   * engine's answers would draw exactly the surface the switch was
+   * meant to hide. The payload carries the descriptor for the same
+   * reason — fetching it separately opens a window in which this window
+   * knows the engine changed and not what it can do.
+   *
+   * This is also a session boundary: the two engines' transcripts do not
+   * translate, so the conversation on screen belongs to the engine that
+   * just went away. The chat panel clears on it rather than leaving a
+   * transcript the new engine has never seen and cannot continue.
+   */
+  engineChanged(data) {
+    if (data && typeof data === 'object' && data.capabilities) {
+      setCapabilities(data.capabilities);
+    }
+    window.dispatchEvent(new CustomEvent('engine-changed', {
       detail: data,
     }));
     return true;

@@ -574,6 +574,30 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **AG-1's per-session engine choice landed, and it was one constructor argument** — 2026-09-01.
+  Reasoning in [`../plan-ag/delivery.md`](../plan-ag/delivery.md#ag-1--one-master-per-session-chosen-per-session-2026-09-01).
+
+  Three phases (1, 3 and 4) had been blocked on the same sentence — *nothing constructs it* — and
+  measuring before building is what made it small. Both adapters mount on the router already;
+  `_missing_core_methods` for Antigravity was `[]` the day the adapter landed and nothing had asked
+  it. Claude has 48 public methods, Antigravity 31, Antigravity has none Claude lacks, and the
+  17-method difference is *exactly* `RPC_SURFACES` — so the names on the wire do not depend on which
+  engine is master. That is what makes a switch a field assignment: jrpc-oo sends its method list
+  once at the handshake and cannot renegotiate it, so a surface that moved with the master would
+  cost a re-registration and a browser reconnect.
+
+  **The one structural change** was moving the capability refusal from build time into the delegate,
+  because a delegate generated for the engine mounted at startup keeps answering for it after a
+  swap. **The one design question the plan had not answered** was what a switch does to history, and
+  the specs settle it rather than leave it to taste: the two transcript formats do not translate, so
+  a switch is a session boundary, and it reuses `sessionChanged` — the event every client already
+  clears on — rather than teaching the browser a second way to be reset. Recorded in
+  [`../plan-ag/decisions.md` AG-1](../plan-ag/decisions.md#ag-1).
+
+  Three single-service assumptions in `main.py` turned up by looking rather than by failing: the
+  symbol index, `_collab`, and teardown each reached one adapter. All three fail only *after* a
+  switch.
+
 - **A weekly reset time with no date read as today** — 2026-09-02, from a user pointing at a screenshot
   of the entry below's own output: three windows, two of them weekly, all three saying *"Resets at
   04:00 AM"*. Reasoning in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *A Reset Time

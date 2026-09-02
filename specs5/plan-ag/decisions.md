@@ -31,6 +31,32 @@ the price of the capability, not an oversight. [AG-9](#ag-9) is what keeps it fr
 concurrently. See [`risks.md` AG-R-7](risks.md#ag-r-7) — that is a different feature with an
 architectural blocker, and nothing here should be built in a way that assumes it is coming.
 
+### What "per session" turned out to mean (2026-09-01)
+
+Built, and the question the wording left open had to be answered: a *session* here is the server's
+one conversation, not a browser tab. `new_session`'s own docstring says so — it "discards the context
+every client is looking at" — so the master is a property of that conversation, and every window
+agrees about it or none do.
+
+**A switch is therefore a session boundary, and that is forced rather than chosen.** The two engines'
+transcripts do not translate ([`sdk-surface.md` § What does not
+translate](sdk-surface.md#what-does-not-translate): no `SessionStore` counterpart, an opaque
+`save_dir`, and a flat `Step` where the CLI has nested content blocks), so no version of a switch
+carries the current conversation across. The outgoing engine is stopped and the incoming one starts
+blank. Nothing is deleted — each engine keeps its own mirror, and the conversation left behind stays
+loadable.
+
+**Switching models is a different thing entirely, and stays one.** `set_model` changes the model
+mid-session with the transcript intact, because within one engine the CLI rebuilds its own context.
+The model is not a history boundary; the engine is. Anything that ends up treating the two the same
+way has misread this.
+
+**The consequence for phase 5:** a session record does not say which engine wrote it, and
+`resume_session` hands a transcript to whatever engine is master. Unreachable today — both history
+surfaces are refused on Antigravity — but live the moment the second mirror exists. The mirror should
+therefore get **its own store root**, so a foreign record is unreachable by construction rather than
+by a check somebody has to remember to write.
+
 ---
 
 ## AG-2 — The Python SDK is the engine; `agy` is not
