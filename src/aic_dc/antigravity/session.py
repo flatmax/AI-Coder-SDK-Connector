@@ -326,6 +326,7 @@ class AntigravitySession:
             self._turn_active = False
 
         translator.note_stop_reason(self._stop_reason())
+        translator.note_turn_usage(self._turn_usage())
         for event in translator.stream_complete():
             yield event
 
@@ -353,13 +354,48 @@ class AntigravitySession:
         attribute path to it is not part of a documented contract. A turn
         that ended for an unreportable reason is a missing label, not a
         failed turn.
+
+        **The underscored names are first because they are the ones that
+        exist.** The public-looking ``stop_reason`` was the only name
+        tried until 2026-09-02, when a live turn reported an empty reason:
+        the SDK spells it ``_last_turn_stop_reason``, on the conversation
+        as a property delegating to the connection
+        (``conversation.py:326-328``), and its own ``Response.stop_reason``
+        reads it through that private path too (``types.py:1262``). The
+        public name is kept in the list after them, because a later SDK
+        promoting it is the change this should survive rather than break
+        on.
         """
         conversation = self._conversation
-        for owner in (conversation, getattr(conversation, "_connection", None)):
-            reason = getattr(owner, "stop_reason", None)
-            if reason is not None:
-                return reason
+        owners = (conversation, getattr(conversation, "_connection", None))
+        for name in ("_last_turn_stop_reason", "stop_reason"):
+            for owner in owners:
+                if owner is None:
+                    continue
+                reason = getattr(owner, name, None)
+                if reason is not None:
+                    return reason
         return None
+
+    def _turn_usage(self) -> Any:
+        """The turn's tokens, as the conversation's own difference.
+
+        ``last_turn_usage`` is ``cumulative_usage - turn_start_usage``
+        (``conversation.py:311-319``), which is the only place the figure
+        exists: no step carries it. Measured live on 2026-09-02, reading
+        the steps alone produced an empty ``turnUsage`` on a turn that had
+        really billed tokens — and tokens are what AG-6 has this engine
+        report in place of a cost, so the descriptor promised a figure the
+        engine never sent.
+
+        Guarded like :meth:`_stop_reason`: a usage read that raises must
+        not take down a turn whose output is already rendered.
+        """
+        try:
+            return getattr(self._conversation, "last_turn_usage", None)
+        except Exception:  # noqa: BLE001 - a missing figure is not a failed turn
+            logger.exception("Reading the turn's usage failed")
+            return None
 
 
 async def _emit(emit: Callable[[Event], Awaitable[None]], event: Event) -> None:

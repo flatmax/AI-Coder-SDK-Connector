@@ -1159,3 +1159,81 @@ this trade is available.
   not reach. They need a home before they need a gate.
 - **Resume across engines** — unchanged, still unreachable, still phase 5's to close with a per-engine
   store root.
+
+---
+
+## Phase 3 — the live run, and the three bugs it found (2026-09-02)
+
+`probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
+the first run**: a real `localharness` session, a `list_directory` tool call, its result in the same
+sub-message as the arguments, and a `PASS`. The taxonomy printed exactly as phase 3 predicted —
+`TEXT_RESPONSE`/`USER` echo, four `TOOL_CALL` frames going `ACTIVE`→`DONE`, then `TEXT_RESPONSE`
+frames to `DONE`.
+
+**And then three bugs, none of which any offline test could see.** All three were invisible for the
+same reason, which is the finding worth keeping: the fakes described a friendlier SDK than the real
+one.
+
+### 1. The turn reported no tokens at all
+
+`turnUsage` came back `{'turn_model_usage': {}}` on a turn that had really billed 8,435 tokens. Under
+[AG-6](decisions.md#ag-6) tokens are the whole of what this engine reports **in place of** a cost, so
+the descriptor was promising a figure the engine never sent — and the browser, correctly, would have
+hidden it forever.
+
+The pump read `Step.usage_metadata`. That field exists and is documented — *"token usage for this
+specific step's model invocation, or None"* (`types.py:914`) — and was **`None` on all ten steps**.
+The figure lives on `Conversation.last_turn_usage`, which the SDK computes as
+`cumulative_usage - turn_start_usage` (`conversation.py:311-319`) and which no step carries. Fixed by
+having the session hand it to the translator at turn close, symmetrically with `note_stop_reason`,
+because both live on the conversation and neither is reachable from inside `translate`.
+
+Note the near-miss: `sdk-surface.md` **cited the right field all along** — *"`Conversation.last_turn_usage`
+— a difference against turn-start"* — and the pump reached for a plausible-looking one on the object it
+already had.
+
+### 2. The stop reason was always empty
+
+`_stop_reason()` looked for a public `stop_reason` on the conversation and on its `_connection`.
+Neither has one. The SDK spells it `_last_turn_stop_reason` — a property on `Conversation` delegating
+to the connection (`conversation.py:326-328`) — and the SDK's own `Response.stop_reason` reads it
+through that private path (`types.py:1262`). The underscored names now come first, with the public
+one kept after them so a later SDK promoting it is a non-event.
+
+### 3. Fixing #2 exposed a third: `UNSPECIFIED` would have been a red badge
+
+With the reason read correctly, a clean turn reports `UNSPECIFIED` — the SDK's *"default value; normal
+completion or unspecified stop reason"* (`types.py:866`). Forwarded as-is it would have been worse
+than the empty string it replaced: the browser sends an **unmapped** reason to the card *header* with
+`severity: 'error'` (`block-render.js:87-91`), deliberately, because an unrecognised reason is more
+likely to matter than not. Every normal turn would have carried a red badge reading "UNSPECIFIED" — a
+label that says nothing, in the place reserved for labels that say something is wrong.
+
+Translated to `""` in `note_stop_reason`, which the browser already reads as "the engine named no
+reason". A filter with a whitelist would have been the wrong shape; this is one named constant with
+the SDK's own docstring as its justification, and `MAX_*_EXCEEDED` and `QUOTA_EXHAUSTED` still get
+through — which is the point of AG-6 offering `BudgetConfig` in place of a dollar cap.
+
+### The thing that made all three invisible
+
+`FakeConversation` set `self.stop_reason = None` — **a name the real `Conversation` does not have**.
+Every offline test passed against a double that answered to an attribute the SDK never exposed, and a
+double that cannot fail the way the real object fails is not standing in for it.
+
+So the fake now carries the SDK's spellings, and
+`test_the_fake_matches_the_sdks_shape` asserts the two agree: it reads `Conversation` off the
+installed SDK and requires both names on the real class *and* on the fake, skipping where the SDK is
+absent so the offline suite stays runnable without it. That is the same instinct as
+[§ The probe](sdk-surface.md#the-probe) applied one layer down — the inventory keeps the *surface*
+honest, and this keeps the *doubles* honest.
+
+Both new figures verified live on a second run: `prompt_token_count: 8229`,
+`candidates_token_count: 106`, `thoughts_token_count: 100`, `total_token_count: 8435`, and a stop
+reason that is now correctly silent.
+
+### One thing checked and found already correct
+
+`streamChunk` carries the **whole accumulated block**, not a delta — visible in the probe's output as
+each `seq` printing a longer prefix of the same sentence. That is right: `blocks.js:107` documents
+"content is cumulative" and the browser replaces by `block_id`. Checked because the probe made it
+look like duplication, and worth recording so the next reader does not re-open it.
