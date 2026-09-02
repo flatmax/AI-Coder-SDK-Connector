@@ -23,6 +23,10 @@ import { SharedRpc } from './rpc.js';
 import { resetRepoRoot, setRepoRoot } from './repo-path.js';
 import { UsageHud } from './usage-hud.js';
 import { PERMISSION_DIALOG_STYLES } from './permission-dialog/styles.js';
+import {
+  resetCapabilities,
+  setCapabilities,
+} from './engine-capabilities.js';
 
 /**
  * The permission dialog's own z-index, read from its stylesheet rather than
@@ -2015,5 +2019,65 @@ describe('UsageHud geometry', () => {
     const chip = rule('.file-chip');
     expect(chip).toContain('max-width: 100%');
     expect(chip).toContain('text-overflow: ellipsis');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AG-9 — a surface the engine cannot feed is hidden, not drawn empty
+// ---------------------------------------------------------------------------
+
+describe('UsageHud capability hiding', () => {
+  async function show(caps) {
+    resetCapabilities();
+    if (caps) setCapabilities(caps);
+    publishUsage(usageFixture());
+    const el = mountHud();
+    await settle(el);
+    pushComplete(resultFixture());
+    await settle(el);
+    return el;
+  }
+
+  const HAS_WINDOW = {
+    context_window_usage: { supported: true, status: 'supported', note: '' },
+  };
+  const NO_WINDOW = {
+    context_window_usage: { supported: false, status: 'absent', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  it('draws the Context section on an engine that reports a window', async () => {
+    expect(contextRow(await show(HAS_WINDOW))).toBeTruthy();
+  });
+
+  it('hides it entirely on an engine that cannot', async () => {
+    // Not a 0% bar and not a "no data" note: a placeholder where a bar used
+    // to be still reads as a reading, and a number on screen is believed.
+    expect(contextRow(await show(NO_WINDOW))).toBeFalsy();
+  });
+
+  it('hides the head as well as the body, leaving no empty section', async () => {
+    const el = await show(NO_WINDOW);
+    const heads = [...el.shadowRoot.querySelectorAll('.sec-head')].map((h) =>
+      h.querySelector('.sec-name')?.textContent.trim(),
+    );
+    expect(heads).not.toContain('Context');
+  });
+
+  it('does not poll a method the router would refuse', async () => {
+    // The router raises UnsupportedOnThisEngine for a hidden surface, so
+    // without the guard the HUD would retry a guaranteed error every tick.
+    const el = await show(NO_WINDOW);
+    const spy = vi.spyOn(el, 'rpcExtract');
+    await el._fetchContext();
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('still draws it before the descriptor has loaded', async () => {
+    // The loading default is "supported" so the shipped engine never
+    // flickers — see engine-capabilities.js.
+    expect(contextRow(await show(null))).toBeTruthy();
   });
 });

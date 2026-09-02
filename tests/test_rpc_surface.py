@@ -144,6 +144,15 @@ INTERNAL_ONLY: dict[str, str] = {
 # ``self._executor.shutdown(wait=False)`` is not this method.
 
 DORMANT: dict[str, str] = {
+    # AG-1's engine selector does not exist: exactly one engine is
+    # mountable per session and nothing yet chooses one, so there is
+    # nothing for a picker to pick. Deliberately *not* the other half of
+    # the descriptor — `get_engine_capabilities` is what a component asks
+    # to decide whether to render, and it has a caller
+    # (`engine-capabilities.js`). This one names the engine, which is the
+    # thing AG-R-4 forbids a render path from branching on; its only
+    # legitimate readers are a human-facing selector and diagnostics.
+    "ClaudeCodeService.list_engines": "no engine selector yet (plan-ag AG-1)",
     # § E — the collaboration admission UI is on pause. The browser
     # receives the pushes and re-dispatches them as window events nothing
     # listens to, so no click ever reaches these and every request after
@@ -228,13 +237,29 @@ def _project_root() -> Path:
 
 
 def _exposed() -> set[str]:
-    """The RPC surface, by the rule ``ExposeClass`` applies."""
-    return {
+    """The RPC surface, by the rule ``ExposeClass`` applies.
+
+    ``ClaudeCodeService`` is no longer mounted directly: ``main.py`` wraps
+    it in an :mod:`aic_dc.engine_router` router and registers *that* under
+    the same namespace (AG-3), so the browser can reach the router's own
+    methods as well as the adapter's. Read from ``ROUTER_OWNED`` rather
+    than listed here, so a method added to the router is exposed to this
+    audit in the same commit that adds it.
+
+    The router's *delegates* need no special handling — they are generated
+    from the adapter's public methods and carry the same names, which is
+    what makes the wrapping invisible to every existing call site.
+    """
+    from aic_dc.engine_router import ROUTER_OWNED, RPC_NAME
+
+    names = {
         f"{cls.__name__}.{name}"
         for cls in REGISTERED
         for name in dir(cls)
         if not name.startswith("_") and callable(getattr(cls, name, None))
     }
+    names |= {f"{RPC_NAME}.{name}" for name in ROUTER_OWNED}
+    return names
 
 
 def _browser_calls() -> dict[str, list[str]]:

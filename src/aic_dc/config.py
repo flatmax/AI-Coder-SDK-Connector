@@ -33,6 +33,7 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -173,7 +174,9 @@ def _bundled_config_dir() -> Path:
     return Path(__file__).parent / "config"
 
 
-def _user_config_dir() -> Path:
+def _user_config_dir(
+    env: Mapping[str, str] | None = None, home: Path | None = None
+) -> Path:
     """Platform-appropriate user config directory.
 
     Per specs4/6-deployment/packaging.md:
@@ -184,21 +187,28 @@ def _user_config_dir() -> Path:
 
     ``AIC_DC_CONFIG_HOME`` environment variable overrides everything —
     tests use it to redirect to tmp paths without monkeypatching.
+
+    ``env`` and ``home`` are injectable so a caller that must resolve a
+    config path hermetically — :mod:`aic_dc.antigravity.credentials`,
+    which resolves a secret and may not read the developer's own shell —
+    gets this platform rule rather than a second copy of it.
     """
-    override = os.environ.get("AIC_DC_CONFIG_HOME")
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else home
+    override = env.get("AIC_DC_CONFIG_HOME")
     if override:
         return Path(override)
     if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA")
+        appdata = env.get("APPDATA")
         if appdata:
             return Path(appdata) / "aic-dc"
-        return Path.home() / "AppData" / "Roaming" / "aic-dc"
+        return home / "AppData" / "Roaming" / "aic-dc"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "aic-dc"
-    xdg = os.environ.get("XDG_CONFIG_HOME")
+        return home / "Library" / "Application Support" / "aic-dc"
+    xdg = env.get("XDG_CONFIG_HOME")
     if xdg:
         return Path(xdg) / "aic-dc"
-    return Path.home() / ".config" / "aic-dc"
+    return home / ".config" / "aic-dc"
 
 
 def _bundled_version() -> str:
