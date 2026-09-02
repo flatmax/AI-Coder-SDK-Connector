@@ -1332,8 +1332,65 @@ most likely to have been got wrong, and it was right.
 the check now counts both. A green run would never have shown this — it took a turn that produced
 thinking and no answer, which is exactly what a transient provider error produces.
 
+### The browser run (2026-09-02) — the tab draws, and it found a real bug
+
+Driven through Chrome against a live `--preview` server in a scratch repo. Three things were
+confirmed and one was wrong.
+
+**Confirmed.** The permission dialog fires for `mcp__aic-dc-antigravity__second_opinion` — AG-5's
+whole reason for the second server name, seen working rather than argued. The tab appears in the
+strip labelled *"Antigravity — Second opinion"*, carries the ⏹ Stop affordance and the read-only
+note, mirrors a row into Main, and settles. No webapp file was changed to make any of that happen,
+which was 6b's exit criterion.
+
+**Wrong: a failed consultation settled as a green `completed`.** `_tab` announced the terminal event
+from a `finally` with a hard-coded status, so a consultation that timed out after 180s reported
+success. The webapp maps `completed` straight to a green LED (`subagent-tabs.js` `_TERMINAL_LED`), so
+the row read as a clean result for a call that returned nothing. That is the manufactured-success
+shape AG-5 and AG-R-3 are both written against, arriving in the one place nobody had looked.
+
+Fixed with `try/except/else`: `completed` is now *earned* by the body not raising, and the handlers
+catch **outside** the `async with` so the failure propagates through the manager. `failed` was then
+observed live, red LED and all.
+
+**Note what the existing tests did not catch.** All 26 bridge tests passed against the broken
+version, because every one of them asserted `terminal` was true and none asserted *what the status
+said*. The three new tests close that, and the fix was verified by reverting it alone — with the
+tests kept — and watching the new one fail.
+
+### The finding that has nothing to do with our code
+
+**Both browser consultations timed out at 180s, while the standalone probe answered in seconds.** The
+harness stderr says why:
+
+```
+received model response error: doRequest: error sending request:
+Post ".../gemini-3.7-flash:streamGenerateContent?alt=sse": context canceled
+```
+
+`context canceled` is our own timeout cutting a request that had been in flight the whole 180s. The
+harness started, authenticated and sent; Google never answered. The same model returned 503 *"this
+model is currently experiencing high demand"* twice during the probe runs an hour earlier, so the
+likeliest reading is provider-side unavailability rather than anything about the query — which is
+also what the master engine concluded unprompted after the second failure.
+
+Three consequences worth carrying:
+
+- **A hung provider is indistinguishable from a hung engine, for 180s.** The tab shows a spinner and
+  nothing else for three minutes. `DEFAULT_TIMEOUT_SECONDS = 180` was chosen when a consultation was
+  a blocking tool call with no UI; now that it has a visible tab, that is a long time to say nothing.
+- **The harness's stderr is where the diagnosis was**, and it reaches only the server log. Routing it
+  into the tab as a `systemEvent` would have made this self-diagnosing.
+- **Neither probe could have found it.** Both run the consultant on a bare event loop; the failure
+  needs a real provider having a bad afternoon. That is not a gap in the probes so much as a reminder
+  of what they are for.
+
 ### What is left
 
+- **A successful consultation has not been watched streaming into the tab.** Both live attempts
+  failed provider-side, so the chunk-by-chunk rendering is verified only by
+  `scripts/probe_consultation_tab.py` (13 chunks, all carrying the consultation id) and not by eye.
+  The tab was *correct* to be empty both times — there was nothing to draw.
 - **The browser has not drawn the tab.** The contract is verified end to end on the server; that the
   webapp renders it needs a real session with a browser attached and a Claude turn calling the tool.
   It is the one part of 6b a script cannot stand in for.

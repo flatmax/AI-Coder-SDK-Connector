@@ -344,3 +344,48 @@ class TestTheConsultationGetsATab:
         consultant.cancel = cancel
         assert await ConsultantBridge(consultant).cancel() is True
         assert consultant.cancelled
+
+    @pytest.mark.asyncio
+    async def test_a_failed_consultation_settles_as_failed_not_completed(self):
+        """The bug the first live browser run found.
+
+        The status goes straight to a colour: ``subagent-tabs.js`` maps
+        ``completed`` to a **green** LED and ``failed`` to red. An earlier
+        version announced ``completed`` unconditionally from a ``finally``,
+        so a consultation that timed out after 180s — Google never
+        answered — settled green. A failure rendered as a success is worth
+        less than a spinner, and it is the manufactured-consent shape AG-5
+        and AG-R-3 are both written against.
+
+        Note the 26 tests that already existed all passed against the
+        broken version: every one of them asserted ``terminal`` was true,
+        and none asserted *what* the status said.
+        """
+        bridge, seen = self.bridge_with_emit(
+            FakeConsultant(raises=ConsultationError("timed out after 180s"))
+        )
+        await bridge.second_opinion("Well?")
+        last = self.events(seen, "subagentEvent")[-1].payload
+        assert last["terminal"] is True
+        assert last["status"] == "failed", (
+            "a failed consultation reported itself completed, which the "
+            "webapp renders as a green LED"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_successful_consultation_still_settles_as_completed(self):
+        """The other half — `failed` must not become the blanket answer."""
+        bridge, seen = self.bridge_with_emit()
+        await bridge.second_opinion("Well?")
+        assert self.events(seen, "subagentEvent")[-1].payload["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_the_status_is_one_the_webapp_has_a_colour_for(self):
+        """An unrecognised status lands on amber, which says nothing."""
+        known = {"completed", "failed", "stopped", "killed"}
+        for raises in (None, ConsultationError("no")):
+            bridge, seen = self.bridge_with_emit(
+                FakeConsultant(answer="ok", raises=raises)
+            )
+            await bridge.second_opinion("Well?")
+            assert self.events(seen, "subagentEvent")[-1].payload["status"] in known

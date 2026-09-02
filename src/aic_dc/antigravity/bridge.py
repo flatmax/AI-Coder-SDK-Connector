@@ -199,6 +199,21 @@ class ConsultantBridge:
         Yields the observer to hand to the consultant, or ``None`` when
         there is nothing to emit to — which keeps the whole feature off
         the critical path of a session with no browser attached.
+
+        **The status is earned, not assumed.** An earlier version reported
+        ``completed`` unconditionally from the ``finally``, and the first
+        live run through the browser showed what that costs: Google never
+        answered, the consultation timed out after 180s, and the row
+        settled to a **green** "completed" LED — because the webapp maps
+        that status straight to green (``subagent-tabs.js`` ``_TERMINAL_LED``).
+        A failure rendered as a success is the one outcome worth more than
+        a spinner, and it is exactly the manufactured-consent shape AG-5
+        and AG-R-3 are both written against.
+
+        So the caller must let the exception propagate *through* this
+        manager rather than catching it inside: ``else`` is what earns
+        ``completed``, and a ``return`` from inside the ``with`` block
+        would look like success here no matter what it returned.
         """
         if self._emit is None or self._turn() is None:
             yield None
@@ -207,8 +222,15 @@ class ConsultantBridge:
         agent_id = self._new_agent_id()
         translator = StepTranslator(self._turn() or "", agent_id=agent_id)
         await self._announce(agent_id, label)
+        status = "failed"
         try:
             yield self._observer(agent_id, translator)
+        except BaseException:
+            # Including cancellation: a consultation the user stopped did
+            # not complete, and saying so is the point of the ⏹ button.
+            raise
+        else:
+            status = "completed"
         finally:
             # Drain what the observer scheduled before saying the tab is
             # done, or the terminal event can arrive ahead of the text it
@@ -218,7 +240,7 @@ class ConsultantBridge:
             await self._announce(
                 agent_id,
                 label,
-                status="completed",
+                status=status,
                 terminal=True,
                 usage=translator.turn_usage() or None,
             )
@@ -256,13 +278,16 @@ class ConsultantBridge:
         judgement between two models that are supposed to disagree in
         front of the user.
         """
-        async with self._tab("Second opinion") as observer:
-            try:
+        try:
+            # The catch is *outside* the tab, so a failure propagates
+            # through it and settles the row as failed rather than as a
+            # green "completed". See `_tab`.
+            async with self._tab("Second opinion") as observer:
                 answer = await self._consultant.second_opinion(
                     question, context, observer=observer
                 )
-            except (ConsultationError, MissingCredentialsError) as exc:
-                return _text(f"The second opinion could not be obtained: {exc}")
+        except (ConsultationError, MissingCredentialsError) as exc:
+            return _text(f"The second opinion could not be obtained: {exc}")
         return _text(
             "A second opinion from Google Antigravity (a different model, "
             "reasoning independently — treat it as evidence, not as a "
@@ -281,16 +306,17 @@ class ConsultantBridge:
         filesystem (AG-R-3), so it is directly usable in a markdown or
         HTML reference — which is the only reason the agent asked.
         """
-        async with self._tab("Generate image") as observer:
-            try:
+        try:
+            # Outside the tab, for the same reason as second_opinion.
+            async with self._tab("Generate image") as observer:
                 result = await self._consultant.generate_image(
                     prompt,
                     output_name=output_name,
                     aspect_ratio=aspect_ratio,
                     observer=observer,
                 )
-            except (ConsultationError, MissingCredentialsError) as exc:
-                return _text(f"The image could not be generated: {exc}")
+        except (ConsultationError, MissingCredentialsError) as exc:
+            return _text(f"The image could not be generated: {exc}")
         return _text(
             f"Image written to {result.path} ({result.bytes_written:,} bytes). "
             "The path is repo-relative and verified on disk; the file tree "
