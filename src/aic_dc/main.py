@@ -250,6 +250,7 @@ def _install_exit_handlers(
     loop: asyncio.AbstractEventLoop,
     service: Any,
     teardown: Callable[..., None],
+    others: tuple[Any, ...] = (),
 ) -> None:
     """Route SIGINT/SIGTERM through the grace period, then ``teardown``.
 
@@ -272,7 +273,15 @@ def _install_exit_handlers(
     exiting = False
 
     async def graceful_then_exit() -> None:
+        # The master first, then every other mounted engine. `others` is
+        # normally cold — an engine nobody switched to never connected —
+        # and shutting a cold adapter down is a no-op, so the cost of
+        # being thorough here is nil and the cost of not being is a
+        # pending permission dialog on the engine the user switched away
+        # from, left live forever.
         await _shut_the_engine_down(service)
+        for other in others:
+            await _shut_the_engine_down(other)
         teardown()
 
     def on_signal() -> None:
@@ -599,6 +608,7 @@ async def _heavy_init(
     repo: Any,
     config: Any,
     event_callback: Any,
+    other_engines: dict[str, Any] | None = None,
 ) -> None:
     """Phase 2 — heavy initialization as a background task.
 
@@ -629,10 +639,23 @@ async def _heavy_init(
     await _send_progress(event_callback, "session_restore",
                          "Completing initialization...", 30)
     if symbol_index is not None:
-        try:
-            claude_code_service._attach_symbol_index(symbol_index)
-        except Exception as exc:
-            logger.warning("Attaching the symbol index failed: %s", exc)
+        # Handed to *every* mounted adapter, and it is the one instance —
+        # a second engine building its own index over the same tree is
+        # the duplication the adapter was written to avoid, and an engine
+        # that never received one answers every hover with "no answer"
+        # after a switch, silently.
+        for name, adapter in (
+            (capabilities.CLAUDE, claude_code_service),
+            *sorted((other_engines or {}).items()),
+        ):
+            try:
+                adapter._attach_symbol_index(symbol_index)
+            except Exception as exc:
+                logger.warning(
+                    "Attaching the symbol index to the %s engine failed: %s",
+                    name,
+                    exc,
+                )
 
     # Step 3: Index repository in batches
     if symbol_index is not None and repo is not None:
@@ -1047,6 +1070,55 @@ async def run(
         config, repo=repo, event_callback=event_callback,
     )
 
+    # The second engine, constructed cold beside the first (AG-1).
+    #
+    # Both adapters exist for the whole run and neither costs anything
+    # until it is asked to connect: the same lazy-connect bargain above,
+    # which is what makes mounting two engines free rather than doubling
+    # startup. What is *not* free is a switch that discovers a broken
+    # adapter after tearing down the working one, so both are validated at
+    # build time by the router rather than at switch time.
+    #
+    # Absent rather than broken without a credential, matching how the
+    # consultant mounts: no Gemini key means Antigravity is not in
+    # `list_engines().mountable` and `switch_engine` refuses it with that
+    # reason. It does not mean a failed startup, and it does not mean a
+    # selector offering an engine that cannot answer.
+    from aic_dc import capabilities
+
+    engines: dict[str, Any] = {}
+    try:
+        from aic_dc.antigravity.credentials import resolve as resolve_credentials
+        from aic_dc.antigravity.service import AntigravityService
+
+        antigravity_credentials = resolve_credentials()
+        if antigravity_credentials.available:
+            engines[capabilities.ANTIGRAVITY] = AntigravityService(
+                config,
+                repo=repo,
+                event_callback=event_callback,
+                credentials=antigravity_credentials,
+            )
+            logger.info(
+                "Antigravity engine mounted (credential from %s)",
+                antigravity_credentials.source,
+            )
+        else:
+            logger.info(
+                "Antigravity engine not mounted: %s",
+                antigravity_credentials.source or "no Gemini API key",
+            )
+    except ImportError as exc:
+        # The SDK is an optional extra (AG-R-10). A base install is a
+        # one-engine install, and saying so once at startup beats a
+        # selector that offers an engine the install does not have.
+        logger.info("Antigravity engine not available: %s", exc)
+    except Exception:
+        logger.exception(
+            "The Antigravity engine did not mount; this session is "
+            "Claude-only. Nothing else is affected."
+        )
+
     # Step 6: Register services with RPC server and start
     if collab:
         from aic_dc.collab import Collab, CollabServer
@@ -1062,6 +1134,13 @@ async def run(
         settings._collab = collab_instance
         doc_convert._collab = collab_instance
         claude_code_service._collab = collab_instance
+        # Every mounted engine, not only the one that starts as master.
+        # The localhost gate reads `_collab` to decide whether a caller is
+        # the host, so an adapter that missed this wiring would fail open
+        # or fail closed depending on its default — and would do it only
+        # after a switch, which is the worst time to find out.
+        for _adapter in engines.values():
+            _adapter._collab = collab_instance
     else:
         server = RpcServer(
             port=server_port,
@@ -1075,21 +1154,43 @@ async def run(
     # capability descriptor the router publishes, never the engine's
     # name (AG-R-4).
     #
-    # It routes to one engine today, because the Antigravity adapter
-    # does not implement this 48-method surface yet — it has a session,
-    # a step pump and a permission gate. What the router buys now is
-    # that the *seam exists* and the descriptor is reachable, and it is
-    # behaviour-preserving while it waits: it exposes exactly the
-    # method names the adapter exposes, generated from them rather than
-    # listed, and every call reaches the same object it reached before.
+    # Every mountable adapter goes in; which one is master is
+    # `app.json`'s `engines.master`, and it can change afterwards through
+    # `switch_engine` (AG-1). The set of method names on the wire does
+    # not depend on that choice, which is what lets a switch happen
+    # without re-registering the service or reconnecting the browser.
+    #
+    # A master that is not mountable falls back to Claude rather than
+    # failing to start: the user asked for an engine this install cannot
+    # provide — a missing key or a missing extra — and the recoverable
+    # answer is the shipped engine plus a warning.
     #
     # `name=RPC_NAME` rather than the default class-name namespace,
     # even though the generated class is *called* ClaudeCodeService: the
     # namespace is what 59 webapp files assume, and it should be stated
     # here rather than inherited from a name that could be refactored.
-    from aic_dc import capabilities
     from aic_dc.engine_router import RPC_NAME, build_router
-    engine_router = build_router(claude_code_service, engine=capabilities.CLAUDE)
+
+    adapters = {capabilities.CLAUDE: claude_code_service, **engines}
+    master_engine = config.master_engine
+    if master_engine not in adapters:
+        logger.warning(
+            "app.json asks for the %s engine, which is not mountable here. "
+            "Starting on %s; switch_engine() will say why.",
+            master_engine,
+            capabilities.CLAUDE,
+        )
+        master_engine = capabilities.CLAUDE
+    engine_router = build_router(
+        adapters[master_engine],
+        engine=master_engine,
+        alternates={
+            name: adapter
+            for name, adapter in adapters.items()
+            if name != master_engine
+        },
+        event_callback=event_callback,
+    )
 
     server.add_service(repo)
     server.add_service(settings)
@@ -1182,7 +1283,10 @@ async def run(
 
     # Launch Phase 2 as a background task
     asyncio.ensure_future(
-        _heavy_init(claude_code_service, repo, config, event_callback)
+        _heavy_init(
+            claude_code_service, repo, config, event_callback,
+            other_engines=engines,
+        )
     )
 
     # Keep the server running. On Ctrl-C / SIGTERM we exit
@@ -1222,7 +1326,10 @@ async def run(
         os._exit(0)
 
     _install_exit_handlers(
-        asyncio.get_running_loop(), claude_code_service, _tear_down_and_exit
+        asyncio.get_running_loop(),
+        claude_code_service,
+        _tear_down_and_exit,
+        tuple(engines.values()),
     )
 
     await asyncio.Event().wait()

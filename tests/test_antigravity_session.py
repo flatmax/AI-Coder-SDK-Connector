@@ -79,11 +79,19 @@ class FakeConversation:
     catch it.
     """
 
-    def __init__(self, steps=(), *, alive=None):
+    def __init__(self, steps=(), *, alive=None, stop_reason=None, usage=None):
         self.steps = list(steps)
         self.sent: list[str] = []
         self.cancels = 0
-        self.stop_reason = None
+        # The SDK's own spelling, underscore and all. This fake said
+        # `stop_reason` until 2026-09-02 — a name the real Conversation
+        # does not have — so every offline test passed while a live turn
+        # reported no reason at all. A fake that invents a friendlier
+        # shape than the thing it stands in for cannot fail the way the
+        # real one does; `test_the_fake_matches_the_sdks_shape` is what
+        # now holds it to that.
+        self._last_turn_stop_reason = stop_reason
+        self.last_turn_usage = usage
         self._alive = alive
 
     async def send(self, prompt):
@@ -386,3 +394,144 @@ class TestTheBoundaryFromTheEngineSide:
     def test_the_consultant_is_not_imported(self):
         source = Path(inspect.getfile(session_module)).read_text(encoding="utf-8")
         assert "from aic_dc.antigravity.consultant" not in source
+
+
+# ----------------------------------------------------------------------
+# What the live probe found, 2026-09-02
+# ----------------------------------------------------------------------
+
+
+class FakeUsage:
+    """``UsageMetadata``'s fields, by the names the SDK gives them."""
+
+    def __init__(self, prompt=0, cached=0, candidates=0, thoughts=0, total=0):
+        self.prompt_token_count = prompt
+        self.cached_content_token_count = cached
+        self.candidates_token_count = candidates
+        self.thoughts_token_count = thoughts
+        self.total_token_count = total
+
+
+async def _drain(session, translator=None):
+    from aic_dc.antigravity.steps import StepTranslator
+
+    translator = translator or StepTranslator("smoke")
+    return [
+        event
+        async for event in session.stream_turn("hi", translator=translator)
+    ]
+
+
+class TestTheTurnsFiguresComeFromTheConversation:
+    """Both were empty on the first live turn, and neither test caught it.
+
+    ``Step.usage_metadata`` is documented as per-step and was ``None`` on
+    all ten steps of a turn that really billed tokens; the figure lives on
+    ``Conversation.last_turn_usage``, which the SDK computes as a diff.
+    The stop reason lives at ``_last_turn_stop_reason``. Neither is
+    reachable from inside ``translate``, so the session hands both over at
+    turn close.
+    """
+
+    async def test_turn_usage_comes_from_the_conversation(self):
+        conversation = FakeConversation(
+            [FakeStep()],
+            usage=FakeUsage(prompt=13873, cached=13000, candidates=42, total=13915),
+        )
+        events = await _drain(started_session(conversation))
+        usage = next(e for e in events if e.name == "turnUsage")
+        assert usage.payload["turn_model_usage"] == {
+            "prompt_token_count": 13873,
+            "cached_content_token_count": 13000,
+            "candidates_token_count": 42,
+            "thoughts_token_count": 0,
+            "total_token_count": 13915,
+        }
+
+    async def test_an_empty_conversation_usage_leaves_the_key_absent(self):
+        """AG-9: an absent figure is not a zero.
+
+        The SDK returns ``None`` for a turn whose total came to zero, and
+        a `{}` here is what lets the browser hide the figure rather than
+        render a measurement nobody took.
+        """
+        events = await _drain(started_session(FakeConversation([FakeStep()])))
+        usage = next(e for e in events if e.name == "turnUsage")
+        assert usage.payload["turn_model_usage"] == {}
+
+    async def test_the_stop_reason_is_read_from_the_private_name(self):
+        conversation = FakeConversation([FakeStep()], stop_reason="MAX_TURNS_EXCEEDED")
+        events = await _drain(started_session(conversation))
+        done = next(e for e in events if e.name == "streamComplete")
+        assert done.payload["stop_reason"] == "MAX_TURNS_EXCEEDED"
+
+    async def test_a_normal_turn_names_no_terminal_reason(self):
+        """`UNSPECIFIED` is the SDK's word for "nothing to report".
+
+        Forwarding it would stamp a red header badge reading
+        "UNSPECIFIED" on every clean turn: the browser sends an unmapped
+        reason to the header with `severity: 'error'`, deliberately, so an
+        engine that always says something must only say it when there is
+        something to say.
+        """
+        conversation = FakeConversation([FakeStep()], stop_reason="UNSPECIFIED")
+        events = await _drain(started_session(conversation))
+        done = next(e for e in events if e.name == "streamComplete")
+        assert done.payload["stop_reason"] == ""
+
+    async def test_a_real_stop_reason_still_gets_through(self):
+        """The filter must not swallow the ones that matter.
+
+        `MAX_*_EXCEEDED` naming which cap fired is why AG-6 offers
+        `BudgetConfig` in place of a dollar cap.
+        """
+        conversation = FakeConversation(
+            [FakeStep()], stop_reason="QUOTA_EXHAUSTED"
+        )
+        events = await _drain(started_session(conversation))
+        done = next(e for e in events if e.name == "streamComplete")
+        assert done.payload["stop_reason"] == "QUOTA_EXHAUSTED"
+
+    async def test_a_usage_read_that_raises_does_not_fail_the_turn(self):
+        """The output is already rendered; a missing figure is not a fault."""
+
+        conversation = FakeConversation([FakeStep()])
+        # Patched on the instance's type after construction: a property on
+        # the subclass would explode in `__init__` instead, which is a
+        # different failure from the one under test.
+        type(conversation).last_turn_usage = property(
+            lambda self: (_ for _ in ()).throw(
+                RuntimeError("private surface moved")
+            )
+        )
+        try:
+            events = await _drain(started_session(conversation))
+        finally:
+            del type(conversation).last_turn_usage
+        assert any(e.name == "streamComplete" for e in events)
+
+    def test_the_fake_matches_the_sdks_shape(self):
+        """The fake may not invent a friendlier surface than the SDK's.
+
+        This is the test that would have caught both bugs, and it is the
+        general form of the lesson: an offline double that answers to a
+        name the real object does not have cannot fail the way the real
+        one does. Skipped where the SDK is not installed, because the
+        offline suite must stay runnable without it.
+        """
+        conversation = pytest.importorskip(
+            "google.antigravity.conversation.conversation"
+        )
+        real = conversation.Conversation
+        for name in ("_last_turn_stop_reason", "last_turn_usage"):
+            assert hasattr(real, name), (
+                f"The SDK no longer has Conversation.{name}. The session "
+                f"reads it at turn close; find where it moved to rather "
+                f"than letting the figure go quietly empty."
+            )
+            assert hasattr(FakeConversation(), name), (
+                f"FakeConversation is missing {name}, which the real one "
+                f"has — the offline suite would pass while a live turn "
+                f"reports nothing."
+            )
+

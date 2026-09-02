@@ -26,7 +26,12 @@
 //
 // The `/` palette button and search bar were never gated and still are not.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import {
+  resetCapabilities,
+  setCapabilities,
+} from '../engine-capabilities.js';
 
 import {
   mountPanel,
@@ -204,6 +209,45 @@ describe('ChatPanel action bar — what it carries', () => {
       expect(
         panel.shadowRoot.querySelector('.slash-palette-button'),
       ).toBeTruthy();
+    });
+  });
+
+  // AG-9 — the 📜 button is hidden on an engine that keeps no transcript
+  // history. Hidden at the entry point rather than inside the dialog: a
+  // browser that opens to explain it has nothing to show is a click that
+  // can only disappoint, and the button is the honest place to say no.
+
+  describe('controls gated on the engine', () => {
+    afterEach(() => resetCapabilities());
+
+    it('hides the history button on an engine with no transcripts', async () => {
+      resetCapabilities();
+      setCapabilities({
+        transcript_history: { supported: false, status: 'unbuilt', note: '' },
+      });
+      const panel = mountPanel();
+      await settle(panel);
+      expect(panel.shadowRoot.querySelector('.history-button')).toBeFalsy();
+    });
+
+    it('keeps the new-session button, which every engine has', async () => {
+      // Starting a fresh conversation is not a capability — it is what
+      // every engine does. Taking it away with the history button would
+      // be hiding a working control because a neighbouring one is gone.
+      resetCapabilities();
+      setCapabilities({
+        transcript_history: { supported: false, status: 'unbuilt', note: '' },
+      });
+      const panel = mountPanel();
+      await settle(panel);
+      expect(panel.shadowRoot.querySelector('.new-session-button')).toBeTruthy();
+    });
+
+    it('draws it before the descriptor lands, and on an engine that has it', async () => {
+      resetCapabilities();
+      const panel = mountPanel();
+      await settle(panel);
+      expect(panel.shadowRoot.querySelector('.history-button')).toBeTruthy();
     });
   });
 });

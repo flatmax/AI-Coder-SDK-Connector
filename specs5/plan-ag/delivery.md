@@ -949,3 +949,291 @@ refuse, once per tick.
 the session cost and the rate-limit panel still render unconditionally. They are the same shape of
 change as the Context section and were left out of this tranche deliberately, to keep the first
 consumer small enough to be obviously correct.
+
+---
+
+## AG-1 — one master per session, chosen per session (2026-09-01)
+
+The thing three phases were blocked on. Phase 4's exit criterion, the adapter's *What is still not
+done* and the router's all named the same missing piece in the same words — **nothing constructs it** —
+and it was one constructor argument away, as the router's own docstring predicted.
+
+| File | Role |
+|---|---|
+| `src/aic_dc/engine_router.py` | Mutable master; call-time refusals; `switch_engine` |
+| `src/aic_dc/main.py` | Constructs both adapters, mounts the one `app.json` names |
+| `src/aic_dc/config.py` | `master_engine`, from `app.json`'s `engines.master` |
+| `src/aic_dc/antigravity/service.py` | `_attach_symbol_index`, so the shared index reaches both |
+| `webapp/src/settings-tab.js` | The selector — `list_engines`, `switch_engine` |
+| `webapp/src/app-shell/index.js` | `engineChanged`: descriptor first, then dispatch |
+| `tests/test_engine_router.py` | 50 tests, 16 of them about switching |
+| `webapp/src/settings-tab.test.js` | 7 tests on the panel |
+
+### The measurement the design rests on
+
+Before writing anything, both adapters were mounted and their surfaces compared. The result is what
+made this small, and it is a coincidence worth keeping under test rather than a property that was
+designed for:
+
+* Claude exposes **48** public methods, Antigravity **31**, and Antigravity exposes **nothing Claude
+  does not**.
+* The 17-method difference is **exactly** `RPC_SURFACES`. Not approximately — every method one engine
+  has and the other lacks was already mapped to a hideable surface.
+* `_missing_core_methods(AntigravityService, ANTIGRAVITY)` was already `[]`. The adapter mounted the
+  day it landed; nothing had asked it to.
+
+So the set of names on the wire is the same whichever engine is master: 48 delegates plus the
+router's own. That matters more than it looks. **jrpc-oo sends its method list once, at the
+handshake** (`ExposeClass.py:37-41`), and cannot renegotiate it. A router whose surface moved with the
+master would have to re-register the service and reconnect every browser in order to switch. This one
+does not, so a switch is a field assignment. `test_the_wire_surface_does_not_move` and
+`test_the_real_adapters_both_mount` are what stop that identity from quietly breaking.
+
+### The one structural change: refusals moved to call time
+
+The first cut baked the decision into the generated method — a name was either a delegate or a
+refusal, decided when the router was built. With a master that can change, a delegate generated for
+the engine mounted at startup would go on answering for it after the swap: the descriptor would say
+the panel is hidden and the method would still return data. So `_delegate` now reads `self._engine`
+on every call.
+
+The visible cost is that a refused *async* method refuses on the `await` rather than on the call.
+Over the wire that is the same thing — `ExposeClass` inspects the **result** and awaits a coroutine —
+and it buys the property that matters more: the shape of the surface no longer changes under a
+switch. Two tests were updated to await, with the reason recorded in them.
+
+### A switch is a session boundary, and it cannot be anything else
+
+Not a policy choice. [`sdk-surface.md` § What does not translate](sdk-surface.md#what-does-not-translate)
+settles it: the mirror has **no protocol counterpart** — Antigravity owns an opaque `save_dir` — and
+history rendering **needs a full sibling**, because `Step` is flat with `trajectory_id`/`depth` rather
+than nested content blocks. These are two transcripts, not one in two dialects, so no version of this
+carries a conversation across.
+
+What follows from that, and is implemented:
+
+- The outgoing engine is **stopped**; the incoming one connects lazily on the next turn, with no
+  resume, which is what makes it a new session. Switching back is a new session too.
+- **Nothing on disk is touched.** Each engine keeps its own mirror, and the conversation you leave
+  stays listed and loadable.
+- The clear is broadcast as **`sessionChanged` with an empty message list** — the event every client
+  already resets on, the one `new_session` sends. Teaching the chat panel a second way to be reset
+  would be two clearing paths that can disagree.
+- It is refused mid-turn, matching `new_session`: the user can cancel first, and pulling the engine
+  out from under a live turn loses its tail. The busy check reads `streaming_active` *and*
+  `_turn_tasks`, because the adapters answer in different vocabularies and a background commit is not
+  a chat turn but would still lose its tail.
+
+### Ordering, in the one place it is load-bearing
+
+`engineChanged` carries the **descriptor**, not just the name, and the browser installs it *before*
+re-dispatching. Every listener downstream decides what to render by asking `supports()`, so a panel
+that re-rendered while the store still held the outgoing engine's answers would draw exactly the
+surface the switch was meant to hide. `sessionChanged` follows, for the same reason.
+`engineChanged installs the descriptor before it dispatches` asserts it by reading the store from
+inside the listener — a check after the fact cannot tell the two orders apart.
+
+A failed announcement does **not** undo the switch. The engine has changed; a window that missed the
+event is stale, which is recoverable, where raising would leave the router switched and the caller
+told it failed.
+
+### Where the choice lives, and why not in `engine.json`
+
+`app.json`'s new `engines.master`, despite the other file's name. Every key in `engine.json` is a
+*Claude session option* — model, effort, permission mode — read by `claude_code.engine_config`. Which
+engine is master is a fact about the application, and putting it in one engine's option file would
+make the second engine's existence conditional on the first's config.
+
+It does not break `reload_app_config`'s promise that nothing in `app.json` reaches the engine's
+session options: it is read at startup and at an explicit switch, never mid-session. An unknown name
+falls back to Claude with a warning — a typo should cost the user the second engine, not the ability
+to start the application.
+
+### Absent, not broken, without a credential
+
+Both adapters are constructed cold at startup, which is free: neither connects until asked, so the
+second engine costs no subprocess and no harness. Without a Gemini key Antigravity is simply not in
+`list_engines().mountable`, and `switch_engine` refuses it **by that reason** — a missing credential
+said as a missing credential, distinguishable from a typo, because only one of the two is the user's
+to fix. `mountable` was already in `list_engines`'s payload and hardcoded to `[self._engine]`; it now
+answers honestly.
+
+Every mounted adapter is validated at **build** time, not at switch time. A switch that discovered a
+half-implemented adapter would already have torn down the working one, leaving the user on nothing.
+
+### Three single-service assumptions in `main.py`, found by looking
+
+None of these would have failed a test, and all three fail only *after* a switch — the worst time to
+find out:
+
+- **The symbol index** went to one adapter. The other would have answered every hover with "no
+  answer", silently, and `AntigravityService` gained an `_attach_symbol_index` with the Claude
+  adapter's exact name so startup can hand the *one* index to every adapter in a loop.
+- **`_collab`** was set on one adapter. The localhost gate reads it, so the other would have failed
+  open or closed depending on its default.
+- **Teardown** shut one engine down. The other's pending permission dialog would have been left live
+  forever — which is the one effect of `shutdown` that survives process death and the reason
+  `_shut_the_engine_down` exists at all.
+
+### What is still not done
+
+- **No live turn.** Unchanged, and still the thing phases 1, 3 and 4 are waiting on. What has changed
+  is that there is now a way to *reach* the second engine from the UI, which is what a live turn
+  needs.
+- **The descriptor has four unwired consumers, and the switch makes them reachable.**
+  `transcript_history`, `session_mirror`, `slash_commands` and `mcp_server_inventory` are all
+  `UNBUILT` on Antigravity, and nothing in the browser gates on them — so the history browser, the
+  session-storage card, the slash-command menu and the MCP panel will call methods the router
+  refuses. It is loud rather than wrong (`UnsupportedOnThisEngine`, never a synthesised empty), which
+  is the safe direction, but it is four panels that should be hidden. Same shape as the Context
+  section; this is the rest of phase 6.
+- **Resume across engines is unguarded, and unreachable.** `resume_session` hands a transcript to
+  whatever engine is master, and nothing records which engine wrote a session. It cannot be reached
+  today — `session_mirror` and `transcript_history` are both refused on Antigravity — but it becomes
+  live the moment phase 5 lands, and the failure would be Claude-format JSONL handed to an SDK that
+  cannot read it. The cheapest fix is a store root per engine, which makes a foreign record
+  unreachable by construction rather than by a check; it belongs with phase 5's mirror, where the
+  storage layout is being decided anyway.
+
+---
+
+## Phase 6 — the rest of the consumers (2026-09-02)
+
+The list the entry above left, closed. Everything here was reachable the moment `switch_engine`
+landed: five surfaces the descriptor describes and nothing in the browser asked about, on an engine
+where all five are `UNBUILT` or `ABSENT`.
+
+| Surface | Where it now hides |
+|---|---|
+| `session_mirror` | `settings-tab.js` — the session-storage card, and the read behind it |
+| `transcript_history` | `chat-panel/rendering.js` — the 📜 button; `history-browser.js` guards the load |
+| `slash_commands` | `chat-panel/input.js` — `ensureSlashCommands` returns `[]` |
+| `mcp_server_inventory` | `context-usage-tab.js` — `_fetchMcpStatus` returns `null` |
+| `account_rate_limits` + `rate_limit_events` | `context-usage-tab.js` — the whole Rate limits section |
+| `usd_cost` | `usage-hud.js` turn footer, `context-usage-tab.js` session cost |
+
+### Three granularities, and choosing between them is the work
+
+The Context section set the precedent — hide the whole thing — but applying that everywhere would
+have hidden measurements the engine does take:
+
+- **The whole section**, for Rate limits. It has two sources and nothing left when both are absent,
+  and a "Rate limits" heading over nothing reads as *you have none* — a claim, where the truth is an
+  absence.
+- **The entry point**, for history. The 📜 button goes rather than the dialog being taught to explain
+  itself: a browser that opens to say it has nothing is a click that can only disappoint. The
+  browser's own load is guarded too, because a slash command, a link, or a switch made while the
+  dialog was already open all reach it another way.
+- **The figure, not its row**, for cost. This is [AG-6](decisions.md#ag-6) at the granularity that
+  matters: usage is reported in tokens and no USD is invented, so the turn's tool-call count and
+  duration — and the session's per-model token rows — are as true as ever. Hiding them alongside the
+  price would take three measurements away to hide the one that was never taken. `turn-cost.js`'s
+  "cost unknown" rendering is the wrong instrument here too: *unknown* is a failure to establish a
+  price, and this engine quotes none by design.
+
+### The load side matters as much as the render side
+
+Every gate is in two places, and the second is not tidiness. The router **raises**
+`UnsupportedOnThisEngine` rather than answering emptily, so an ungated fetch is a guaranteed error —
+once per refresh for the Context tab, once per *keystroke* for the slash palette, which retries on
+every `/`. `ensureSlashCommands` returning `[]` early also keeps the palette's own "nothing matched"
+rendering in charge, which was already the right answer.
+
+### One thing that had to be walked back
+
+The Context tab's first cut **awaited** `loadCapabilities` before its refresh, to avoid spending two
+round trips on calls that would be refused. It broke 187 tests, and the reason is the reason not to
+do it: the descriptor was now in front of the breakdown, which is the thing that tab exists for.
+Reverted to the HUD's shape — fire it, re-render when it lands — so the first refresh may spend those
+two calls once and the panels go away afterwards. The loading default is "supported" precisely so
+this trade is available.
+
+### What is still not done
+
+- **No live turn**, unchanged, and now the only thing between phases 1, 3, 4 and their exit criteria.
+- **`agent_questions`, `subagent_tabs`, `persisted_permission_rules`, `amend_tool_input`,
+  `file_checkpointing` and `image_generation` have no consumer yet.** Not an oversight and not the
+  same shape as the six above: each is either a surface with no UI on *either* engine
+  (`agent_questions`, `image_generation` — see `sdk-surface.md` § *Antigravity capabilities with no
+  home in the current UI*) or one whose only caller is already behind a control the descriptor does
+  not reach. They need a home before they need a gate.
+- **Resume across engines** — unchanged, still unreachable, still phase 5's to close with a per-engine
+  store root.
+
+---
+
+## Phase 3 — the live run, and the three bugs it found (2026-09-02)
+
+`probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
+the first run**: a real `localharness` session, a `list_directory` tool call, its result in the same
+sub-message as the arguments, and a `PASS`. The taxonomy printed exactly as phase 3 predicted —
+`TEXT_RESPONSE`/`USER` echo, four `TOOL_CALL` frames going `ACTIVE`→`DONE`, then `TEXT_RESPONSE`
+frames to `DONE`.
+
+**And then three bugs, none of which any offline test could see.** All three were invisible for the
+same reason, which is the finding worth keeping: the fakes described a friendlier SDK than the real
+one.
+
+### 1. The turn reported no tokens at all
+
+`turnUsage` came back `{'turn_model_usage': {}}` on a turn that had really billed 8,435 tokens. Under
+[AG-6](decisions.md#ag-6) tokens are the whole of what this engine reports **in place of** a cost, so
+the descriptor was promising a figure the engine never sent — and the browser, correctly, would have
+hidden it forever.
+
+The pump read `Step.usage_metadata`. That field exists and is documented — *"token usage for this
+specific step's model invocation, or None"* (`types.py:914`) — and was **`None` on all ten steps**.
+The figure lives on `Conversation.last_turn_usage`, which the SDK computes as
+`cumulative_usage - turn_start_usage` (`conversation.py:311-319`) and which no step carries. Fixed by
+having the session hand it to the translator at turn close, symmetrically with `note_stop_reason`,
+because both live on the conversation and neither is reachable from inside `translate`.
+
+Note the near-miss: `sdk-surface.md` **cited the right field all along** — *"`Conversation.last_turn_usage`
+— a difference against turn-start"* — and the pump reached for a plausible-looking one on the object it
+already had.
+
+### 2. The stop reason was always empty
+
+`_stop_reason()` looked for a public `stop_reason` on the conversation and on its `_connection`.
+Neither has one. The SDK spells it `_last_turn_stop_reason` — a property on `Conversation` delegating
+to the connection (`conversation.py:326-328`) — and the SDK's own `Response.stop_reason` reads it
+through that private path (`types.py:1262`). The underscored names now come first, with the public
+one kept after them so a later SDK promoting it is a non-event.
+
+### 3. Fixing #2 exposed a third: `UNSPECIFIED` would have been a red badge
+
+With the reason read correctly, a clean turn reports `UNSPECIFIED` — the SDK's *"default value; normal
+completion or unspecified stop reason"* (`types.py:866`). Forwarded as-is it would have been worse
+than the empty string it replaced: the browser sends an **unmapped** reason to the card *header* with
+`severity: 'error'` (`block-render.js:87-91`), deliberately, because an unrecognised reason is more
+likely to matter than not. Every normal turn would have carried a red badge reading "UNSPECIFIED" — a
+label that says nothing, in the place reserved for labels that say something is wrong.
+
+Translated to `""` in `note_stop_reason`, which the browser already reads as "the engine named no
+reason". A filter with a whitelist would have been the wrong shape; this is one named constant with
+the SDK's own docstring as its justification, and `MAX_*_EXCEEDED` and `QUOTA_EXHAUSTED` still get
+through — which is the point of AG-6 offering `BudgetConfig` in place of a dollar cap.
+
+### The thing that made all three invisible
+
+`FakeConversation` set `self.stop_reason = None` — **a name the real `Conversation` does not have**.
+Every offline test passed against a double that answered to an attribute the SDK never exposed, and a
+double that cannot fail the way the real object fails is not standing in for it.
+
+So the fake now carries the SDK's spellings, and
+`test_the_fake_matches_the_sdks_shape` asserts the two agree: it reads `Conversation` off the
+installed SDK and requires both names on the real class *and* on the fake, skipping where the SDK is
+absent so the offline suite stays runnable without it. That is the same instinct as
+[§ The probe](sdk-surface.md#the-probe) applied one layer down — the inventory keeps the *surface*
+honest, and this keeps the *doubles* honest.
+
+Both new figures verified live on a second run: `prompt_token_count: 8229`,
+`candidates_token_count: 106`, `thoughts_token_count: 100`, `total_token_count: 8435`, and a stop
+reason that is now correctly silent.
+
+### One thing checked and found already correct
+
+`streamChunk` carries the **whole accumulated block**, not a delta — visible in the probe's output as
+each `seq` printing a longer prefix of the same sentence. That is right: `blocks.js:107` documents
+"content is cumulative" and the browser replaces by `block_id`. Checked because the probe made it
+look like duplication, and worth recording so the next reader does not re-open it.

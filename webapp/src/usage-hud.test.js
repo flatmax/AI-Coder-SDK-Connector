@@ -2080,4 +2080,37 @@ describe('UsageHud capability hiding', () => {
     // flickers — see engine-capabilities.js.
     expect(contextRow(await show(null))).toBeTruthy();
   });
+
+  // AG-6 — usage in tokens, and no USD invented for an engine that
+  // quotes none. The row is not collateral: the tool-call count and the
+  // duration beside the price are measurements this engine does take.
+
+  const NO_USD = {
+    usd_cost: { supported: false, status: 'absent', note: '' },
+  };
+
+  function turnRow(el) {
+    return [...el.shadowRoot.querySelectorAll('.row')].find((r) =>
+      r.querySelector('.label')?.textContent.trim() === 'This turn',
+    );
+  }
+
+  it('drops the turn price on an engine that quotes none', async () => {
+    const row = turnRow(await show(NO_USD));
+    expect(row).toBeTruthy();
+    expect(row.textContent).not.toContain('$');
+  });
+
+  it('keeps the rest of the turn row, which is not collateral', async () => {
+    // "cost unknown" is the wrong instrument here too: unknown is a
+    // failure to establish a price, and this engine quotes none by
+    // design.
+    const row = turnRow(await show(NO_USD));
+    expect(row.textContent).not.toContain('unknown');
+    expect(row.textContent).toMatch(/tool call|s\b/);
+  });
+
+  it('keeps the price on an engine that does quote one', async () => {
+    expect(turnRow(await show(HAS_WINDOW)).textContent).toContain('$');
+  });
 });

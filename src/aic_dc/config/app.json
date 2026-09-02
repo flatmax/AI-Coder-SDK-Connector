@@ -18,5 +18,8 @@
   "history": {
     "session_dir_warning_bytes": 1073741824,
     "mirror_gap_tolerance": 3
+  },
+  "engines": {
+    "master": "claude"
   }
 }

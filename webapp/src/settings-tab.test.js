@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import './settings-tab.js';
 import { fieldLineRange, fieldList, joinFields } from './settings-tab.js';
 import { SharedRpc } from './rpc.js';
+import {
+  resetCapabilities,
+  setCapabilities,
+} from './engine-capabilities.js';
 
 // -----------------------------------------------------------
 // Test harness
@@ -35,6 +39,15 @@ const _MODEL_DEFAULTS = {
     models: [],
   }),
   'Collab.get_collab_role': () => ({ is_localhost: true }),
+  // Same reason as `get_model` above: `onRpcReady` reads the engine list
+  // unconditionally. One mountable engine, which is the shipped shape and
+  // renders no panel — so a test that does not care about engines is not
+  // given one to trip over.
+  'ClaudeCodeService.list_engines': () => ({
+    active: 'claude',
+    available: ['claude', 'antigravity'],
+    mountable: ['claude'],
+  }),
 };
 
 function publishFakeRpc(methods) {
@@ -1858,5 +1871,228 @@ describe('aic-settings-tab retired-files note', () => {
     const position = root.querySelector('.retired-note')
       .compareDocumentPosition(root.querySelector('.card-grid'));
     expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+// -----------------------------------------------------------
+// Engine panel — AG-1's per-session master
+// -----------------------------------------------------------
+//
+// The one control on this tab that ends the conversation. The two
+// engines keep their transcripts in formats that do not translate
+// (specs5/plan-ag/sdk-surface.md § What does not translate), so a
+// switch is a session boundary and cannot be anything else — which
+// is why the note under the control is asserted here rather than
+// treated as copy.
+//
+// `list_engines` is the one RPC a component may read an engine name
+// from. AG-R-4 forbids a *render path* from branching on the name;
+// a human choosing which engine answers is the other case, and this
+// panel is it. Nothing here switches on the value — it is rendered
+// as text and sent back as a choice.
+
+function publishEngineListRpc(engines, extra = {}) {
+  publishFakeRpc({
+    'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+    'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+    'ClaudeCodeService.list_engines': () => engines,
+    ...extra,
+  });
+}
+
+function enginePanel(el) {
+  return [...el.shadowRoot.querySelectorAll('.model-panel')]
+    .find((p) => p.getAttribute('aria-label') === 'Engine') || null;
+}
+
+function engineSelect(el) {
+  return enginePanel(el)?.querySelector('.model-select') || null;
+}
+
+const TWO_ENGINES = {
+  active: 'claude',
+  available: ['claude', 'antigravity'],
+  mountable: ['antigravity', 'claude'],
+};
+
+describe('aic-settings-tab engine panel', () => {
+  it('is absent when only one engine is mountable', async () => {
+    // A selector with one option is a control that cannot do
+    // anything. On the overwhelmingly common single-engine install
+    // it would be a permanent question about a feature that install
+    // does not have.
+    publishEngineListRpc({
+      active: 'claude',
+      available: ['claude', 'antigravity'],
+      mountable: ['claude'],
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(enginePanel(el)).toBeNull();
+  });
+
+  it('is absent before list_engines answers', async () => {
+    // Not an empty selector. A control that cannot say what it would
+    // switch to is worse than no control.
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(enginePanel(el)).toBeNull();
+  });
+
+  it('offers every mountable engine and marks the master', async () => {
+    publishEngineListRpc(TWO_ENGINES);
+    const el = mountTab();
+    await settle(el);
+    expect(engineSelect(el).value).toBe('claude');
+    expect([...engineSelect(el).options].map((o) => o.value))
+      .toEqual(['claude', 'antigravity']);
+  });
+
+  it('offers a known-but-unmounted engine disabled, rather than hiding it', async () => {
+    // `available` and `mountable` are different questions. Dropping
+    // the row would make a missing credential look like a build that
+    // never had the engine — and only one of those is the user's to
+    // fix.
+    publishEngineListRpc({
+      active: 'antigravity',
+      available: ['claude', 'antigravity', 'future'],
+      mountable: ['antigravity', 'claude'],
+    });
+    const el = mountTab();
+    await settle(el);
+    const absent = [...engineSelect(el).options].find((o) => o.value === 'future');
+    expect(absent).toBeTruthy();
+    expect(absent.disabled).toBe(true);
+    expect(absent.textContent).toContain('not mounted');
+  });
+
+  it('warns that switching starts a new session', async () => {
+    // The sentence is the feature. A user who reads "switch" as
+    // "switch and continue" loses a conversation they thought they
+    // were keeping.
+    publishEngineListRpc(TWO_ENGINES);
+    const el = mountTab();
+    await settle(el);
+    const note = enginePanel(el).textContent.replace(/\s+/g, ' ');
+    expect(note).toContain('starts a new session');
+    expect(note).toContain('history browser');
+  });
+
+  it('sends the choice and lets the broadcast be the answer', async () => {
+    // The select's own value is a request. `_engines.active` is
+    // written from the `engineChanged` broadcast and nowhere else, so
+    // that one writer answers every window the same way.
+    const calls = [];
+    publishEngineListRpc(TWO_ENGINES, {
+      'ClaudeCodeService.switch_engine': (name) => {
+        calls.push(name);
+        return { engine: name, previous: 'claude', changed: true };
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = engineSelect(el);
+    select.value = 'antigravity';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(calls).toEqual(['antigravity']);
+    // Not flipped by the reply — still showing the master until the
+    // broadcast says otherwise.
+    expect(engineSelect(el).value).toBe('claude');
+
+    window.dispatchEvent(new CustomEvent('engine-changed', {
+      detail: { engine: 'antigravity', previous: 'claude' },
+    }));
+    await settle(el);
+    expect(engineSelect(el).value).toBe('antigravity');
+  });
+
+  it('shows the refusal rather than snapping back silently', async () => {
+    // `switch_engine` declines for reasons the user can act on — a
+    // turn is still running, that engine has no credential here — and
+    // a control that reverted without a word is indistinguishable
+    // from one that is broken.
+    publishEngineListRpc(TWO_ENGINES, {
+      'ClaudeCodeService.switch_engine': () => ({
+        error: 'A turn is still running',
+        reason: 'turn_active',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = engineSelect(el);
+    select.value = 'antigravity';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(enginePanel(el).textContent).toContain('A turn is still running');
+    expect(engineSelect(el).value).toBe('claude');
+  });
+
+  it('does not call the RPC for the engine already in force', async () => {
+    const calls = [];
+    publishEngineListRpc(TWO_ENGINES, {
+      'ClaudeCodeService.switch_engine': (name) => {
+        calls.push(name);
+        return { engine: name, changed: false };
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = engineSelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(calls).toEqual([]);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// AG-9 — the session-storage card is one engine's mirror, not the product's
+// ---------------------------------------------------------------------------
+
+describe('aic-settings-tab session storage hiding', () => {
+  const NO_MIRROR = {
+    session_mirror: { supported: false, status: 'unbuilt', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  async function withCaps(caps) {
+    resetCapabilities();
+    if (caps) setCapabilities(caps);
+    const storage = vi.fn(() => ({ bytes: 4096, over_warning: false }));
+    publishFakeRpc({
+      'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
+      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
+      'ClaudeCodeService.get_session_storage': storage,
+      'ClaudeCodeService.get_engine_capabilities': () => caps || {},
+    });
+    const el = mountTab();
+    await settle(el);
+    return { el, storage };
+  }
+
+  it('hides the card on an engine that keeps no mirror here', async () => {
+    // Not "0 B" and not "not mirrored": both are claims about a
+    // directory, and a number on screen is believed.
+    const { el } = await withCaps(NO_MIRROR);
+    expect(el.shadowRoot.querySelector('.storage-note')).toBeNull();
+  });
+
+  it('does not read a directory the router would refuse to measure', async () => {
+    const { storage } = await withCaps(NO_MIRROR);
+    expect(storage).not.toHaveBeenCalled();
+  });
+
+  it('draws it on an engine that does mirror', async () => {
+    const { el } = await withCaps({
+      session_mirror: { supported: true, status: 'supported', note: '' },
+    });
+    expect(el.shadowRoot.querySelector('.storage-note')).toBeTruthy();
   });
 });

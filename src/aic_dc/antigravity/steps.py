@@ -617,7 +617,45 @@ class StepTranslator:
         ]
 
     def _absorb_usage(self, step: Any) -> None:
-        """Accumulate ``UsageMetadata`` across the turn.
+        """Accumulate ``UsageMetadata`` from a step that carries one.
+
+        Kept, but it is not where the turn's figures come from — see
+        :meth:`note_turn_usage`. ``Step.usage_metadata`` is documented as
+        "token usage for this specific step's model invocation, or None"
+        (SDK ``types.py:914``), and **measured live on 2026-09-02 it was
+        ``None`` on all ten steps of a turn that really did call a tool
+        and really did bill tokens**. So this path contributes nothing on
+        the current SDK and is left in place only because a step that does
+        carry usage should not have it dropped.
+        """
+        self._absorb_usage_metadata(getattr(step, "usage_metadata", None))
+
+    def note_turn_usage(self, usage: Any) -> None:
+        """Record the turn's tokens, from the conversation's own diff.
+
+        **The turn's figures come from here, not from the steps.** The SDK
+        computes them as ``cumulative_usage - turn_start_usage``
+        (``conversation.py:311-319``) and hands the difference over as
+        ``Conversation.last_turn_usage``; nothing puts that number on a
+        step. Reading only the steps produced an empty ``turnUsage`` on
+        every turn — which under AG-6 is the whole of what this engine
+        reports in place of a cost, so the browser had a descriptor
+        promising tokens and an engine delivering ``{}``.
+
+        Set by the session at turn close, exactly as
+        :meth:`note_stop_reason` is and for the same reason: both live on
+        the conversation rather than on any step, so the pump cannot reach
+        them from inside ``translate``.
+
+        ``None`` is a real answer and leaves the counters alone. The SDK
+        returns it for a turn whose total came to zero, and an absent key
+        is what lets the browser hide the figure per AG-9 — where a zero
+        would have been a measurement.
+        """
+        self._absorb_usage_metadata(usage)
+
+    def _absorb_usage_metadata(self, usage: Any) -> None:
+        """Fold one ``UsageMetadata`` into the turn's counters.
 
         Tokens only, and no dollar figure is derived from them (AG-6):
         there is no USD anywhere on either Antigravity surface, and the
@@ -630,7 +668,6 @@ class StepTranslator:
         floor is 13,873 input tokens to answer "reply with exactly the
         word: ok", so the cache-hit fraction is the number worth reading.
         """
-        usage = getattr(step, "usage_metadata", None)
         if usage is None:
             return
         for name in (
@@ -647,6 +684,14 @@ class StepTranslator:
                 # counters, so adding them would multiply the turn.
                 self._usage[name] = value
 
+    #: The stop reason that means nothing happened worth naming.
+    #:
+    #: The SDK's own words for it: *"Default value; normal completion or
+    #: unspecified stop reason"* (``types.py:866``). Every clean turn ends
+    #: on it, which makes it the opposite of a terminal reason — it is the
+    #: absence of one.
+    _NO_STOP_REASON = "UNSPECIFIED"
+
     def note_stop_reason(self, reason: Any) -> None:
         """Record why the turn ended, for :meth:`stream_complete`.
 
@@ -654,8 +699,24 @@ class StepTranslator:
         step, because ``StopReason`` lives on the trajectory state update.
         ``MAX_*_EXCEEDED`` naming which budget cap fired is the whole
         reason AG-6 offers ``BudgetConfig`` in place of a dollar cap.
+
+        **``UNSPECIFIED`` is reported as no reason at all**, and that is a
+        translation rather than a filter. The browser's badge table sends
+        an unmapped reason to the *header* with ``severity: 'error'``
+        (``block-render.js:87-91``) — deliberately, because a reason this
+        build has never seen is more likely to matter than not. Forwarding
+        the SDK's word for "nothing to report" would therefore stamp a red
+        badge reading "UNSPECIFIED" on every normal turn: a label that
+        says nothing, in the place reserved for labels that say something
+        is wrong. An empty string is what the browser already reads as
+        "the engine named no reason", which is exactly the fact.
+
+        Found by the live probe on 2026-09-02, after fixing the bug that
+        was hiding it: the reason had been empty for the wrong reason,
+        and reading it correctly is what surfaced this one.
         """
-        self._stop_reason = _name(reason)
+        name = _name(reason)
+        self._stop_reason = "" if name == self._NO_STOP_REASON else name
 
     def turn_usage(self) -> dict[str, int]:
         """The turn's token counters, as the SDK reported them."""

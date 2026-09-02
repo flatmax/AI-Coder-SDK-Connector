@@ -7,7 +7,12 @@
 // part that needs a panel: when the list is fetched, when it
 // is cached, and what selecting an entry does to the composer.
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  resetCapabilities,
+  setCapabilities,
+} from '../engine-capabilities.js';
 
 import { applySlashRoute, openSlashPalette } from './input.js';
 import { mountPanel, publishFakeRpc, settle } from './test-helpers.js';
@@ -673,3 +678,54 @@ describe('ChatPanel slash palette button', () => {
     expect(p.shadowRoot.querySelector('.input-textarea').value).toBe('/');
   });
 });
+
+// ---------------------------------------------------------------------------
+// AG-9 — an engine that advertises no commands has an empty menu
+// ---------------------------------------------------------------------------
+
+describe('ChatPanel slash palette on an engine with no commands', () => {
+  const NO_COMMANDS = {
+    slash_commands: { supported: false, status: 'absent', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  it('does not call a method the router would refuse', async () => {
+    // An empty menu, not a failed one — and without the guard this
+    // retries per keystroke against a guaranteed error.
+    resetCapabilities();
+    setCapabilities(NO_COMMANDS);
+    const list = vi.fn(async () => ({ commands: FULL }));
+    publishFakeRpc({ 'ClaudeCodeService.list_commands': list });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('leaves the palette with nothing to offer rather than an error', async () => {
+    resetCapabilities();
+    setCapabilities(NO_COMMANDS);
+    publishFakeRpc({
+      'ClaudeCodeService.list_commands': async () => ({ commands: FULL }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(palette(p)?.filtered ?? []).toEqual([]);
+  });
+
+  it('still fetches on an engine that advertises commands', async () => {
+    resetCapabilities();
+    const list = vi.fn(async () => ({ commands: FULL }));
+    publishFakeRpc({ 'ClaudeCodeService.list_commands': list });
+    const p = mountPanel();
+    await settle(p);
+    type(p, '/');
+    await landFetch(p);
+    expect(list).toHaveBeenCalled();
+  });
+});
+

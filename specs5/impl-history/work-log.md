@@ -574,6 +574,73 @@ The classification tests work because they refuse to be read past, and that is t
 
 ### Landed since
 
+- **Phase 3's probe ran for the first time and found three bugs** — 2026-09-02. Reasoning in
+  [`../plan-ag/delivery.md`](../plan-ag/delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02).
+
+  The exit criterion passed on the first run. Then: `turnUsage` was empty on a turn that had billed
+  8,435 tokens, because the pump read `Step.usage_metadata` (`None` on all ten steps) instead of
+  `Conversation.last_turn_usage`, which the SDK computes as a diff and no step carries. Under AG-6
+  tokens are what this engine reports *in place of* a cost, so the descriptor was promising a figure
+  the engine never sent. `sdk-surface.md` had cited the right field all along; the pump reached for a
+  plausible-looking one on the object it already had.
+
+  Second: `_stop_reason()` looked for a public `stop_reason` that does not exist — the SDK spells it
+  `_last_turn_stop_reason`. Third, and only visible once the second was fixed: a clean turn reports
+  `UNSPECIFIED`, and the browser sends an *unmapped* reason to the card header with
+  `severity: 'error'`, so every normal turn would have carried a red badge reading "UNSPECIFIED".
+
+  **All three had one cause.** `FakeConversation` set `self.stop_reason = None` — a name the real
+  `Conversation` does not have. A double that cannot fail the way the real object fails is not
+  standing in for it, and 94 offline tests passed against one. The fake now carries the SDK's
+  spellings and a test holds the two together by reading the installed SDK. That is the probe's own
+  instinct applied one layer down: the inventory keeps the *surface* honest, this keeps the *doubles*
+  honest.
+
+- **Phase 6 closed: seven surfaces now hide on the descriptor** — 2026-09-02. Reasoning in
+  [`../plan-ag/delivery.md`](../plan-ag/delivery.md#phase-6--the-rest-of-the-consumers-2026-09-02).
+
+  These were reachable the moment `switch_engine` landed, and would have been five panels calling
+  methods the router refuses. The work was **choosing the granularity**, not writing the guards: the
+  Context section's precedent is "hide the whole thing", and applying it everywhere would have hidden
+  measurements the engine does take. Rate limits hides entirely (two sources, nothing left when both
+  are absent). History hides at the *entry point* — the 📜 button, not the dialog, because a browser
+  that opens to explain it has nothing is a click that can only disappoint. Cost hides the *figure
+  and not its row*, which is AG-6 at the granularity that matters: the tool-call count, the duration
+  and the per-model token rows beside the price are as true as ever.
+
+  Every gate is in two places, and the load side is not tidiness — the router raises rather than
+  answering emptily, so an ungated fetch is a guaranteed error once per refresh, or once per
+  *keystroke* for the slash palette.
+
+  **One thing was walked back.** The Context tab first `await`ed the descriptor before its refresh, to
+  save two round trips that would be refused. It broke 187 tests, and the breakage was the argument:
+  the descriptor was now in front of the breakdown, which is what that tab is for. The loading
+  default is "supported" precisely so the cheaper trade is available.
+
+- **AG-1's per-session engine choice landed, and it was one constructor argument** — 2026-09-01.
+  Reasoning in [`../plan-ag/delivery.md`](../plan-ag/delivery.md#ag-1--one-master-per-session-chosen-per-session-2026-09-01).
+
+  Three phases (1, 3 and 4) had been blocked on the same sentence — *nothing constructs it* — and
+  measuring before building is what made it small. Both adapters mount on the router already;
+  `_missing_core_methods` for Antigravity was `[]` the day the adapter landed and nothing had asked
+  it. Claude has 48 public methods, Antigravity 31, Antigravity has none Claude lacks, and the
+  17-method difference is *exactly* `RPC_SURFACES` — so the names on the wire do not depend on which
+  engine is master. That is what makes a switch a field assignment: jrpc-oo sends its method list
+  once at the handshake and cannot renegotiate it, so a surface that moved with the master would
+  cost a re-registration and a browser reconnect.
+
+  **The one structural change** was moving the capability refusal from build time into the delegate,
+  because a delegate generated for the engine mounted at startup keeps answering for it after a
+  swap. **The one design question the plan had not answered** was what a switch does to history, and
+  the specs settle it rather than leave it to taste: the two transcript formats do not translate, so
+  a switch is a session boundary, and it reuses `sessionChanged` — the event every client already
+  clears on — rather than teaching the browser a second way to be reset. Recorded in
+  [`../plan-ag/decisions.md` AG-1](../plan-ag/decisions.md#ag-1).
+
+  Three single-service assumptions in `main.py` turned up by looking rather than by failing: the
+  symbol index, `_collab`, and teardown each reached one adapter. All three fail only *after* a
+  switch.
+
 - **A weekly reset time with no date read as today** — 2026-09-02, from a user pointing at a screenshot
   of the entry below's own output: three windows, two of them weekly, all three saying *"Resets at
   04:00 AM"*. Reasoning in [`../5-webapp/viewers-hud.md`](../5-webapp/viewers-hud.md) § *A Reset Time

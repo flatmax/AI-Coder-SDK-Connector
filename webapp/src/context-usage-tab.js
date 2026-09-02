@@ -44,6 +44,11 @@ import {
   windowPercent,
 } from './context-usage.js';
 import { toRepoPath } from './repo-path.js';
+import {
+  SURFACE,
+  loadCapabilities,
+  supports,
+} from './engine-capabilities.js';
 // The rate-limit derivations are shared with the HUD and the chat panel's
 // toast rather than reimplemented: `windowIsOpen` in particular is the single
 // definition of "has this window reset yet", which the server deliberately
@@ -890,6 +895,13 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // the probe gates sits inside a collapsed group the reader has to open
     // before it is on screen at all.
     this._probeMcpAuthority();
+    // Fired, not awaited — the same shape the HUD uses, and for the same
+    // reason. Putting a round trip in front of the breakdown would delay
+    // the thing this tab exists for in order to save two calls that fail
+    // loudly when they are wrong. `supports()` answers "yes" until the
+    // descriptor lands, so the first refresh may spend those two calls
+    // once; the re-render is what takes the panels away afterwards.
+    loadCapabilities(this).then(() => this.requestUpdate());
     await this._refresh();
   }
 
@@ -1113,6 +1125,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * it is the one that could not read (`stale`).
    */
   async _fetchAccountUsage({ force = false } = {}) {
+    // An engine with no subscription windows to report has none to poll.
+    // The router refuses the method rather than answering with an empty
+    // list, and an empty list here would render as "you have no limits"
+    // — a reading, where the truth is that this engine takes no such
+    // measurement (AG-9).
+    if (!supports(SURFACE.ACCOUNT_RATE_LIMITS)) return;
     try {
       const res = await withRpcTimeout(
         this.rpcExtract('ClaudeCodeService.get_account_usage', force),
@@ -1138,6 +1156,12 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * @returns {Promise<object|null>} An `McpStatusResponse`, or null.
    */
   async _fetchMcpStatus() {
+    // Null, which is already this method's "no answer" — the status
+    // pills simply do not render. The distinction that matters is the
+    // one `EngineHealth.mcp` got wrong before it was deleted: an engine
+    // that serves no MCP inventory must not be reported as an engine
+    // with zero servers.
+    if (!supports(SURFACE.MCP_SERVER_INVENTORY)) return null;
     try {
       const res = await withRpcTimeout(
         this.rpcExtract('ClaudeCodeService.get_mcp_status'),
@@ -1658,7 +1682,15 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    */
   _renderSessionUsage() {
     const usage = this._sessionUsage;
-    const cost = formatCost(usage?.total_cost_usd);
+    // The *cost* hides, not the section. AG-6 is that this engine reports
+    // usage in tokens and no USD is invented for it — so the per-model
+    // rows below are exactly as meaningful either way, and dropping them
+    // with the dollar figure would hide a measurement that was taken to
+    // hide one that was not. `null` is already this method's "no figure",
+    // so the "so far" line and the priced-result note fall away with it.
+    const cost = supports(SURFACE.USD_COST)
+      ? formatCost(usage?.total_cost_usd)
+      : null;
     const seconds = _sessionSeconds(usage);
     const models = usage?.model_usage && typeof usage.model_usage === 'object'
       ? Object.entries(usage.model_usage)
@@ -1753,6 +1785,18 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    * came to find.
    */
   _renderRateLimits() {
+    // Two surfaces, and the section needs neither to be present to be
+    // worth hiding: `account_rate_limits` feeds the gauges and
+    // `rate_limit_events` feeds the notices, so an engine that reports
+    // neither has nothing to put here. Hidden rather than shown empty —
+    // a "Rate limits" heading over nothing reads as "you have none",
+    // which is a claim rather than an absence (AG-9).
+    if (
+      !supports(SURFACE.ACCOUNT_RATE_LIMITS)
+      && !supports(SURFACE.RATE_LIMIT_EVENTS)
+    ) {
+      return '';
+    }
     const account = this._accountUsage;
     const windows =
       account && account.ok && Array.isArray(account.windows)

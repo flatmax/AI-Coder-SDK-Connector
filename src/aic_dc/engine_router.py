@@ -34,22 +34,46 @@ that must be remembered when a 49th is added, and the failure mode is a
 method that works in Python and 404s over RPC, which nothing would catch
 until somebody clicked the button.
 
-What this router does *not* do yet
-==================================
-**It routes to one engine.** The Antigravity adapter does not implement
-the 43-method surface — it has a session, a step pump and a permission
-gate, and no ``chat_streaming``, ``history_list`` or ``get_model`` — so
-there is nothing to switch to. :func:`build_router` therefore takes one
-master today, and the capability descriptor it publishes is that engine's.
+Switching master, and why the wire does not move
+================================================
+AG-1 chooses one master **per session**, so the router mounts every
+adapter it was given and swaps which one it forwards to. The thing that
+makes this cheap is a measured coincidence rather than a design goal:
 
-That is deliberate and it is the whole reason this lands now rather than
-with a second master. The router is **behaviour-preserving**: it exposes
-exactly the method names the adapter exposes, and every call reaches the
-same object it reached before. That claim is cheap to test and expensive
-to give up, and it is what makes the switch, when it comes, a change to
-one constructor rather than to a working system.
+* Claude exposes 48 public methods, Antigravity 31, and Antigravity
+  exposes **nothing Claude does not**.
+* The 17-method difference is *exactly* :data:`RPC_SURFACES`. Not
+  approximately — every method one engine has and the other lacks is
+  already mapped to a hideable surface.
 
-Governing spec: ``specs5/plan-ag/`` — AG-3, AG-9, AG-R-4.
+So the set of names on the wire is the same whichever engine is master:
+48 delegates plus this class's own. That matters more than it looks,
+because jrpc-oo sends its method list **once**, at the handshake
+(``jrpc_oo/ExposeClass.py:37-41``), and cannot renegotiate it afterwards.
+A router whose surface changed with the master would have to re-register
+the service and reconnect every browser to switch engines. This one does
+not have to, so a switch is a field assignment.
+
+What *does* move is which names refuse. The check therefore happens **per
+call**, against ``self._engine`` as it is at that moment, rather than
+being baked into the generated method at build time. That is the one
+structural difference from the first cut, and it is what a mutable master
+requires: a delegate generated for the engine that happened to be mounted
+at startup would keep answering for it after the swap.
+
+What switching is *not*
+=======================
+It is not a way to move a conversation between engines. The two
+transcript formats do not translate — ``sdk-surface.md`` § *What does not
+translate*: Antigravity owns an opaque ``save_dir`` with no
+``SessionStore`` counterpart, and its ``Step`` is flat with
+``trajectory_id``/``depth`` rather than nested content blocks — so a
+switch **ends the outgoing session and starts a new one**. Nothing is
+deleted: each engine keeps its own mirror, and an old conversation stays
+listed and loadable. Switching back is a new session too, for the same
+reason.
+
+Governing spec: ``specs5/plan-ag/`` — AG-1, AG-3, AG-9, AG-R-4.
 """
 
 from __future__ import annotations
@@ -132,6 +156,7 @@ ROUTER_OWNED = frozenset(
     {
         "get_engine_capabilities",
         "list_engines",
+        "switch_engine",
     }
 )
 
@@ -147,16 +172,30 @@ class EngineRouterBase:
     failure AG-9 is written against.
     """
 
-    def __init__(self, master: Any, *, engine: str) -> None:
-        if engine not in capabilities.ENGINES:
-            raise ValueError(
-                f"{engine!r} is not a known engine. Add it to "
-                f"capabilities.ENGINES with a column in the descriptor "
-                f"first — an engine nothing can describe cannot be hidden "
-                f"correctly."
-            )
-        self._master = master
+    def __init__(
+        self,
+        master: Any,
+        *,
+        engine: str,
+        alternates: dict[str, Any] | None = None,
+        event_callback: Any = None,
+    ) -> None:
+        for name in (engine, *(alternates or {})):
+            if name not in capabilities.ENGINES:
+                raise ValueError(
+                    f"{name!r} is not a known engine. Add it to "
+                    f"capabilities.ENGINES with a column in the descriptor "
+                    f"first — an engine nothing can describe cannot be hidden "
+                    f"correctly."
+                )
+        # Every mountable adapter, master included. Which one is master is
+        # `_engine` and nothing else: an adapter held here is *mounted*,
+        # which is a statement about it being constructed and serviceable,
+        # not about it answering calls right now.
+        self._adapters: dict[str, Any] = dict(alternates or {})
+        self._adapters[engine] = master
         self._engine = engine
+        self._event_callback = event_callback
 
     # ------------------------------------------------------------------
     # The router's own RPC methods
@@ -184,16 +223,137 @@ class EngineRouterBase:
         return {
             "active": self._engine,
             "available": list(capabilities.ENGINES),
-            "mountable": [self._engine],
+            "mountable": sorted(self._adapters),
         }
+
+    async def switch_engine(self, engine: str) -> dict[str, Any]:
+        """Make another mounted engine the master (AG-1).
+        **Localhost only.**
+
+        Gated for the reason ``new_session`` and ``resume_session`` are:
+        this ends the conversation every client is looking at, and a
+        participant choosing which engine answers would be deciding for
+        everyone.
+
+        **This is a session boundary, and it cannot be anything else.**
+        The two engines' transcripts do not translate (see the module
+        docstring), so there is no version of this that carries the
+        current conversation across. The outgoing engine is stopped, and
+        the incoming one connects lazily on the next turn — with no
+        resume, which is what makes it a new session. Nothing on disk is
+        touched: the outgoing conversation stays in its own mirror and
+        stays loadable from the history browser.
+
+        Refused mid-turn rather than interrupting one, matching
+        ``new_session``: the user can cancel first, and pulling the engine
+        out from under a live turn loses its tail.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if engine not in capabilities.ENGINES:
+            return {
+                "error": f"{engine!r} is not a known engine",
+                "reason": "unknown_engine",
+            }
+        if engine == self._engine:
+            # Not an error. A second window may have switched already, and
+            # the honest answer to "make X master" when X is master is yes.
+            return {"engine": self._engine, "changed": False}
+        adapter = self._adapters.get(engine)
+        if adapter is None:
+            return {
+                "error": (
+                    f"The {engine} engine is not mounted in this session. It "
+                    f"is a known engine, so this is a missing credential or a "
+                    f"missing optional dependency rather than a typo — "
+                    f"list_engines() reports what is mountable."
+                ),
+                "reason": "not_mountable",
+            }
+        if _engine_is_busy(self._master):
+            return {"error": "A turn is still running", "reason": "turn_active"}
+
+        outgoing = self._engine
+        await _stop_engine(self._master)
+        self._engine = engine
+        logger.info("Engine switched: %s -> %s", outgoing, engine)
+        await self._announce_engine(outgoing)
+        return {"engine": engine, "previous": outgoing, "changed": True}
 
     # ------------------------------------------------------------------
     # Not RPC — leading underscore keeps jrpc-oo out of them
     # ------------------------------------------------------------------
 
     @property
+    def _master(self) -> Any:
+        """The adapter calls forward to, resolved on every access.
+
+        A property rather than a field so that a swap is one assignment to
+        ``_engine`` and cannot leave the two disagreeing.
+        """
+        return self._adapters[self._engine]
+
+    @property
     def _adapter(self) -> Any:
         return self._master
+
+    def _check_localhost_only(self) -> dict[str, Any] | None:
+        """The master's localhost gate, borrowed rather than reimplemented.
+
+        ``permissions.md``'s localhost-only rule is a property of the
+        product rather than of an engine, and both adapters implement the
+        same check; a third copy here would be a third thing to keep in
+        agreement. An adapter without one fails closed.
+        """
+        check = getattr(self._master, "_check_localhost_only", None)
+        if check is None:
+            return {"error": "Restricted to the host", "restricted": True}
+        return check()
+
+    async def _announce_engine(self, previous: str) -> None:
+        """Tell every window the master changed.
+
+        Carries the descriptor rather than only the name, because what the
+        browser has to do on this event is re-decide which panels render,
+        and making it fetch that separately opens a window in which it has
+        the new engine and the old capabilities. The name is present for
+        the engine selector and for diagnostics — the same carve-out
+        :meth:`list_engines` documents, and it is not a licence for a
+        render path to branch on it (AG-R-4).
+        """
+        if self._event_callback is None:
+            return
+        try:
+            await self._event_callback(
+                "engineChanged",
+                {
+                    "engine": self._engine,
+                    "previous": previous,
+                    "capabilities": capabilities.descriptor(self._engine),
+                },
+            )
+            # The transcript on screen belongs to the engine that just went
+            # away, and this is the event every client already agrees to
+            # clear on — the same one `new_session` sends, with the same
+            # empty message list. Reusing it rather than teaching the chat
+            # panel a second way to be reset is the difference between one
+            # clearing path and two that can disagree.
+            #
+            # Sent *after* `engineChanged` so the descriptor is already in
+            # place: a panel that re-rendered on the clear while the store
+            # still held the outgoing engine's capabilities would draw
+            # exactly the surface the switch was meant to hide.
+            await self._event_callback(
+                "sessionChanged",
+                {"session_id": None, "messages": [], "action": "engine"},
+            )
+        except Exception:
+            # A failed announcement must not undo a completed switch. The
+            # engine *has* changed; a window that missed the event is
+            # stale, which is recoverable, where raising here would leave
+            # the router switched and the caller told it failed.
+            logger.exception("engineChanged announcement failed")
 
 
 def _public_methods(instance: Any) -> list[str]:
@@ -214,6 +374,60 @@ def _public_methods(instance: Any) -> list[str]:
     )
 
 
+def _engine_is_busy(adapter: Any) -> bool:
+    """Whether a turn is in flight on this adapter.
+
+    Two questions rather than one, because the adapters answer in
+    different vocabularies and both answers matter. ``streaming_active``
+    is the Claude session's own view of a turn and is authoritative where
+    it exists; ``_turn_tasks`` is the set both adapters keep — it is part
+    of the contract ``claude_code.commit`` reads off a service — and it
+    catches a background job like a commit that is not a chat turn but
+    would still lose its tail if the engine went away underneath it.
+
+    Fails **busy** on an adapter that answers neither, which is the safe
+    direction: refusing a switch that could have been allowed costs the
+    user a second attempt, where allowing one that should have been
+    refused truncates a running turn.
+    """
+    session = getattr(adapter, "session", None)
+    streaming = getattr(session, "streaming_active", None)
+    if streaming:
+        return True
+    tasks = getattr(adapter, "_turn_tasks", None)
+    if tasks is None:
+        return streaming is None
+    return any(not task.done() for task in tasks)
+
+
+async def _stop_engine(adapter: Any) -> None:
+    """Stop an adapter's engine, without letting teardown raise.
+
+    The switch has already been decided by the time this runs, so a
+    failure here must not abort it: the alternative is a router that
+    refused to switch because the engine it was leaving would not go
+    quietly, which strands the user on the engine they asked to leave.
+    Both adapters document ``shutdown`` as never raising; this is the belt
+    for the case where one grows a way to.
+    """
+    shutdown = getattr(adapter, "shutdown", None)
+    if shutdown is None:
+        return
+    try:
+        await shutdown()
+    except Exception:
+        logger.exception("Engine shutdown failed during a switch")
+
+
+def _refusal_message(name: str, surface: str, engine: str) -> str:
+    return (
+        f"{name} serves the {surface!r} surface, which the {engine} "
+        f"engine cannot feed. get_engine_capabilities() reports it as "
+        f"unsupported and the panel should be hidden rather than "
+        f"calling this."
+    )
+
+
 def _delegate(name: str) -> Any:
     """One forwarding method, preserving async-ness and signature.
 
@@ -228,40 +442,42 @@ def _delegate(name: str) -> Any:
     a coroutine, ``get_server_info`` is not — and a wrapper that returned
     a coroutine for a synchronous method would change its contract for
     every caller, not just the RPC one.
+
+    **The capability check is here, at call time, rather than at build
+    time.** The master can change under a mounted router, so a delegate
+    that decided once — when it was generated — would answer for the
+    engine that happened to be mounted at startup. Reading
+    ``self._engine`` on every call is what makes the two states
+    impossible to disagree.
     """
+    surface = RPC_SURFACES.get(name)
+
+    def _resolve(self: Any) -> Any:
+        if surface is not None and not capabilities.supports(
+            self._engine, surface
+        ):
+            raise UnsupportedOnThisEngine(
+                _refusal_message(name, surface, self._engine)
+            )
+        target = getattr(self._master, name, None)
+        if target is None:
+            # Unreachable through the mount check, which refuses an
+            # adapter missing a core method. Stated rather than left to
+            # AttributeError so that if it ever does happen it reads as
+            # what it is instead of as a transport fault.
+            raise UnsupportedOnThisEngine(
+                f"{name} is not implemented by the {self._engine} engine, "
+                f"and is not mapped to a surface that would excuse it."
+            )
+        return target
 
     def _sync_delegate(self: Any, *args: Any, **kwargs: Any) -> Any:
-        return getattr(self._master, name)(*args, **kwargs)
+        return _resolve(self)(*args, **kwargs)
 
     async def _async_delegate(self: Any, *args: Any, **kwargs: Any) -> Any:
-        return await getattr(self._master, name)(*args, **kwargs)
+        return await _resolve(self)(*args, **kwargs)
 
     return _sync_delegate, _async_delegate
-
-
-def _refusal(name: str, surface: str, engine: str) -> Any:
-    """A method that exists on the wire and says why it has no answer.
-
-    Generated rather than omitted, because *omitting* it would take the
-    name out of the handshake's method list and the browser would get a
-    transport-level "no such method" — indistinguishable from a version
-    mismatch or a broken build. The method is there; it declines.
-    """
-
-    def _declines(self: Any, *args: Any, **kwargs: Any) -> Any:
-        raise UnsupportedOnThisEngine(
-            f"{name} serves the {surface!r} surface, which the {engine} "
-            f"engine cannot feed. get_engine_capabilities() reports it as "
-            f"unsupported and the panel should be hidden rather than "
-            f"calling this."
-        )
-
-    _declines.__name__ = name
-    _declines.__doc__ = (
-        f"Unsupported on this engine: {surface}. See "
-        f"get_engine_capabilities()."
-    )
-    return _declines
 
 
 def _missing_core_methods(master: Any, engine: str) -> list[str]:
@@ -305,20 +521,33 @@ def build_router(
     master: Any,
     *,
     engine: str = capabilities.CLAUDE,
+    alternates: dict[str, Any] | None = None,
+    event_callback: Any = None,
     require_full_surface: bool = True,
 ) -> Any:
-    """A router exposing ``master``'s whole surface, plus its own.
+    """A router exposing every mounted adapter's surface, plus its own.
 
     Parameters
     ----------
     master:
-        The engine adapter this session routes to. Its public methods
-        become the router's, generated rather than listed.
+        The engine adapter this session starts on. Which adapter is master
+        can change afterwards (:meth:`EngineRouterBase.switch_engine`); the
+        surface generated here cannot, and does not need to.
     engine:
         Which engine ``master`` is, for the capability descriptor. Checked
         against :data:`capabilities.ENGINES` rather than accepted as a
         free string, because an engine nothing can describe cannot be
         hidden correctly.
+    alternates:
+        Engine name → adapter, for every *other* engine this session may
+        switch to. Each is validated exactly as the master is, at build
+        time rather than at switch time, because a switch that discovered
+        a half-implemented adapter would already have torn down the
+        working one.
+    event_callback:
+        ``async (event_name, payload) -> None``. Used for one event,
+        ``engineChanged``. Optional: a router with no callback switches
+        silently, which is right for a test and wrong for a server.
     require_full_surface:
         Refuse to build if the adapter is missing a core method — one that
         no capability marks optional. On by default, and the reason is
@@ -341,29 +570,34 @@ def build_router(
         ``require_full_surface`` — if it cannot serve the core surface.
         The second message *is* the to-do list for mounting that engine.
     """
-    if engine not in capabilities.ENGINES:
-        # Checked before anything is generated so the message is about the
-        # engine rather than about a surface lookup failing downstream.
-        raise ValueError(
-            f"{engine!r} is not a known engine. Add it to "
-            f"capabilities.ENGINES with a column in the descriptor first."
-        )
+    mounted: dict[str, Any] = dict(alternates or {})
+    mounted[engine] = master
+    for name in mounted:
+        if name not in capabilities.ENGINES:
+            # Checked before anything is generated so the message is about
+            # the engine rather than about a surface lookup failing
+            # downstream.
+            raise ValueError(
+                f"{name!r} is not a known engine. Add it to "
+                f"capabilities.ENGINES with a column in the descriptor first."
+            )
 
-    delegates: dict[str, Any] = {}
-    collisions = []
-    for name in _public_methods(master):
-        if name in ROUTER_OWNED:
-            collisions.append(name)
-            continue
-        surface = RPC_SURFACES.get(name)
-        if surface is not None and not capabilities.supports(engine, surface):
-            delegates[name] = _refusal(name, surface, engine)
-            continue
-        sync, asynchronous = _delegate(name)
-        original = getattr(type(master), name)
-        chosen = asynchronous if inspect.iscoroutinefunction(original) else sync
-        delegates[name] = functools.wraps(original)(chosen)
+    # The surface is the union of every mounted adapter's methods and the
+    # reference engine's, so the names on the wire do not depend on which
+    # adapter is master. That is what lets a switch be a field assignment
+    # rather than a re-registration: jrpc-oo sends this list once, at the
+    # handshake, and cannot revise it afterwards.
+    #
+    # Including the reference even when it is not mounted is deliberate.
+    # It is the surface the webapp was written against, and a name it
+    # calls must exist and *decline* rather than be absent — an absent
+    # method is a transport-level "no such method", indistinguishable from
+    # a version mismatch or a broken build.
+    names = set(_public_methods_of_reference())
+    for adapter in mounted.values():
+        names.update(_public_methods(adapter))
 
+    collisions = sorted(names & ROUTER_OWNED)
     if collisions:
         # Loud, because the silent version is the descriptor quietly
         # becoming whatever the engine returned.
@@ -375,23 +609,52 @@ def build_router(
         )
 
     if require_full_surface:
-        missing = _missing_core_methods(master, engine)
-        if missing:
-            raise ValueError(
-                f"The {engine} adapter cannot be mounted: it is missing "
-                f"{len(missing)} method(s) the webapp calls — "
-                f"{', '.join(missing)}. Implement them, or — where a method "
-                f"belongs to a surface this engine genuinely cannot feed — "
-                f"map it in RPC_SURFACES so the router refuses it instead."
-            )
+        for name, adapter in sorted(mounted.items()):
+            missing = _missing_core_methods(adapter, name)
+            if missing:
+                raise ValueError(
+                    f"The {name} adapter cannot be mounted: it is missing "
+                    f"{len(missing)} method(s) the webapp calls — "
+                    f"{', '.join(missing)}. Implement them, or — where a "
+                    f"method belongs to a surface this engine genuinely "
+                    f"cannot feed — map it in RPC_SURFACES so the router "
+                    f"refuses it instead."
+                )
 
-    # Refusals for surfaces this engine cannot feed, where the adapter did
-    # not define the method at all. Without this the name would be absent
-    # from the handshake and the browser would see "no such method",
-    # which is indistinguishable from a broken build.
-    for name, surface in RPC_SURFACES.items():
-        if name not in delegates and not capabilities.supports(engine, surface):
-            delegates[name] = _refusal(name, surface, engine)
+    delegates: dict[str, Any] = {}
+    for name in sorted(names):
+        sync, asynchronous = _delegate(name)
+        original = _reference_function(name, mounted)
+        chosen = asynchronous if inspect.iscoroutinefunction(original) else sync
+        delegates[name] = (
+            functools.wraps(original)(chosen) if original is not None else chosen
+        )
+        if original is None:
+            delegates[name].__name__ = name
 
     cls = type(RPC_NAME, (EngineRouterBase,), delegates)
-    return cls(master, engine=engine)
+    return cls(
+        master,
+        engine=engine,
+        alternates={k: v for k, v in mounted.items() if k != engine},
+        event_callback=event_callback,
+    )
+
+
+def _reference_function(name: str, mounted: dict[str, Any]) -> Any:
+    """The function a delegate copies its signature and docstring from.
+
+    A mounted adapter is preferred over the reference class, because a
+    session running one engine should describe itself with that engine's
+    own words. Which mounted adapter is arbitrary only in appearance:
+    ``test_async_ness_matches_the_claude_adapter`` already asserts the two
+    agree about being coroutines, which is the one property the choice
+    here can change.
+    """
+    for adapter in mounted.values():
+        original = getattr(type(adapter), name, None)
+        if original is not None:
+            return original
+    from aic_dc.claude_code import ClaudeCodeService
+
+    return getattr(ClaudeCodeService, name, None)

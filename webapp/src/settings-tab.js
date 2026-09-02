@@ -46,6 +46,11 @@ import { LitElement, css, html } from 'lit';
 // It grew a GB tier for this caller — see the note on the function.
 import { formatBytes } from './chat-panel/block-render.js';
 import { RpcMixin } from './rpc-mixin.js';
+import {
+  SURFACE,
+  loadCapabilities,
+  supports,
+} from './engine-capabilities.js';
 import { readPreference, writePreference } from './settings-preferences.js';
 
 /**
@@ -311,6 +316,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _resolved: { type: String, state: true },
     /** True while a `set_model` call is in flight. */
     _modelPending: { type: Boolean, state: true },
+    /**
+     * `list_engines()`'s answer, or null before the first read.
+     *
+     * `{active, available, mountable}`. `available` and `mountable` are
+     * different questions and the control needs both: an engine this build
+     * knows about but that has no credential here is offered as a disabled
+     * option with the reason, not omitted — omitting it makes a missing key
+     * look like a build that never had the engine.
+     */
+    _engines: { type: Object, state: true },
+    /** True while a `switch_engine` call is in flight. */
+    _enginePending: { type: Boolean, state: true },
+    /** Why the last switch was refused, or '' — the server's own sentence. */
+    _engineError: { type: String, state: true },
     /**
      * False once `Collab.get_collab_role` reports this client is not the host.
      * `set_model` and `restart_session` are both localhost-only, so an enabled
@@ -853,6 +872,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._model = '';
     this._resolved = '';
     this._modelPending = false;
+    this._engines = null;
+    this._enginePending = false;
+    this._engineError = '';
     this._isHost = true;
     this._summary = null;
     this._pendingFields = new Set();
@@ -867,6 +889,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._flashTimer = null;
     // Bound so add/removeEventListener find the same reference.
     this._onModelChanged = this._onModelChanged.bind(this);
+    this._onEngineChanged = this._onEngineChanged.bind(this);
   }
 
   connectedCallback() {
@@ -875,10 +898,12 @@ export class SettingsTab extends RpcMixin(LitElement) {
     // its reply and does not need this, but it arrives there too and says the
     // same thing, so no guard is needed.
     window.addEventListener('model-changed', this._onModelChanged);
+    window.addEventListener('engine-changed', this._onEngineChanged);
   }
 
   disconnectedCallback() {
     window.removeEventListener('model-changed', this._onModelChanged);
+    window.removeEventListener('engine-changed', this._onEngineChanged);
     if (this._flashTimer) {
       clearTimeout(this._flashTimer);
       this._flashTimer = null;
@@ -889,10 +914,20 @@ export class SettingsTab extends RpcMixin(LitElement) {
   }
 
   onRpcReady() {
+    // The descriptor first, and awaited before the reads that depend on
+    // it. `supports()` answers "yes" until the real answer lands — the
+    // right default, since hiding every panel for one round trip on the
+    // shipped engine is the worse trade — but a fetch fired before it
+    // lands is a call the router may refuse, and the re-render is what
+    // takes the panel away once it has.
+    loadCapabilities(this).then(() => {
+      this.requestUpdate();
+      this._loadStorage();
+    });
     this._loadInfo();
     this._loadModel();
+    this._loadEngines();
     this._loadPreferences();
-    this._loadStorage();
   }
 
   /**
@@ -1150,6 +1185,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
    */
   async _loadStorage() {
     if (!this.rpcConnected) return;
+    // The mirror is one engine's, not the product's: an engine that keeps
+    // its transcripts somewhere this app does not own has no directory to
+    // measure, and the router refuses the method rather than answering
+    // zero. Asked by capability, never by engine name (AG-R-4).
+    if (!supports(SURFACE.SESSION_MIRROR)) return;
     try {
       const res = await this.rpcExtract('ClaudeCodeService.get_session_storage');
       this._storage =
@@ -1270,6 +1310,159 @@ export class SettingsTab extends RpcMixin(LitElement) {
       // No collab service — single-user, and we are the host.
     }
     this._isHost = true;
+  }
+
+  /**
+   * Read which engines are mounted and which one is master.
+   *
+   * `list_engines` is the one RPC a component is *allowed* to read an
+   * engine name from, and the distinction is worth restating where it is
+   * used: a human choosing which engine to start a session on is a
+   * different thing from a component deciding whether to draw a bar, and
+   * only the second is forbidden from knowing the name (AG-R-4). Nothing
+   * on this tab branches on the answer — it is rendered as text and sent
+   * back as a choice.
+   *
+   * A failure leaves the panel unrendered rather than showing an empty
+   * selector. One engine that cannot be listed is indistinguishable from
+   * one engine that exists, and offering a control that cannot say what
+   * it would switch to is worse than offering none.
+   */
+  async _loadEngines() {
+    if (!this.rpcConnected) return;
+    try {
+      const res = await this.rpcExtract('ClaudeCodeService.list_engines');
+      if (!res || typeof res !== 'object' || res.error) {
+        console.warn('[settings] list_engines failed', res?.error);
+        return;
+      }
+      this._engines = res;
+    } catch (err) {
+      console.warn('[settings] list_engines failed', err);
+    }
+  }
+
+  /**
+   * Another window switched the engine — or this one did.
+   *
+   * The shell has already replaced the capability descriptor by the time
+   * this runs, so there is nothing to refetch here; what is left is the
+   * name in the selector and clearing the "in flight" state, which the
+   * calling window would otherwise hold until its own reply landed.
+   */
+  _onEngineChanged(event) {
+    const engine = event?.detail?.engine;
+    if (typeof engine !== 'string') return;
+    this._engines = { ...(this._engines || {}), active: engine };
+    this._enginePending = false;
+    this._engineError = '';
+  }
+
+  /**
+   * Handle an engine selection.
+   *
+   * Like `_onModelSelect`, the `<select>`'s own value is not the answer —
+   * the reply is. Unlike it, a refusal is *shown* rather than only warned
+   * to the console: `switch_engine` declines for reasons the user can act
+   * on (a turn is still running; that engine has no credential here), and
+   * a control that silently snapped back would be indistinguishable from
+   * one that is broken.
+   */
+  async _onEngineSelect(event) {
+    const wanted = event?.target?.value;
+    const active = this._engines?.active || '';
+    if (event?.target) event.target.value = active;
+    if (!wanted || wanted === active) return;
+    this._enginePending = true;
+    this._engineError = '';
+    try {
+      const res = await this.rpcExtract(
+        'ClaudeCodeService.switch_engine', wanted,
+      );
+      if (!res || typeof res !== 'object' || res.error) {
+        this._engineError = res?.error
+          || 'The engine did not say why the switch failed.';
+        this._enginePending = false;
+        return;
+      }
+      // The broadcast is what updates `_engines.active`, in this window
+      // and every other, so there is one writer rather than two that can
+      // disagree. It arrives here too.
+      if (res.changed === false) this._enginePending = false;
+    } catch (err) {
+      this._engineError = `Could not switch engines: ${err?.message || err}`;
+      this._enginePending = false;
+    }
+  }
+
+  /**
+   * The engine in force, and a switch — when there is more than one.
+   *
+   * Rendered only where a second engine is mountable. A selector with one
+   * option is a control that cannot do anything, and on the overwhelmingly
+   * common single-engine install it would be a permanent question about a
+   * feature that install does not have.
+   *
+   * The warning under it is not decoration. This control ends the
+   * conversation on screen: the two engines' transcripts do not translate,
+   * so there is no version of this that carries the current session
+   * across, and a user who reads "switch" as "switch and continue" would
+   * lose a conversation they thought they were keeping.
+   */
+  _renderEnginePanel() {
+    const engines = this._engines;
+    if (!engines) return '';
+    const mountable = Array.isArray(engines.mountable) ? engines.mountable : [];
+    const available = Array.isArray(engines.available) ? engines.available : [];
+    if (mountable.length < 2) return '';
+    const active = engines.active || '';
+    const readOnly = this._isHost === false;
+    const disabled = !this.rpcConnected || readOnly || this._enginePending;
+    return html`
+      <div class="model-panel" role="group" aria-label="Engine">
+        <div class="model-head">
+          <span class="model-title">⚙️ Engine</span>
+          <select
+            class="model-select"
+            .value=${active}
+            ?disabled=${disabled}
+            autocomplete="off"
+            aria-label="Engine"
+            title=${readOnly
+              ? 'Only the host can switch engines'
+              : 'The engine this session runs on'}
+            @change=${(e) => this._onEngineSelect(e)}
+          >
+            ${available.map(
+              (name) => html`<option
+                value=${name}
+                ?selected=${name === active}
+                ?disabled=${!mountable.includes(name)}
+                title=${mountable.includes(name)
+                  ? ''
+                  : 'Not mounted in this session — no credential, or the '
+                    + 'optional dependency is not installed'}
+              >
+                ${name}${mountable.includes(name) ? '' : ' (not mounted)'}
+              </option>`,
+            )}
+          </select>
+          ${this._enginePending
+            ? html`<span class="model-pending" aria-hidden="true">…</span>`
+            : ''}
+        </div>
+        <p class="model-note">
+          Switching engines <strong>starts a new session</strong>. The two
+          engines keep their transcripts in different formats, so a
+          conversation cannot follow you across — nothing is deleted, and the
+          conversation you leave stays in the history browser.
+          ${readOnly ? 'Only the host can switch engines.' : ''}
+        </p>
+        ${this._engineError
+          ? html`<p class="model-note engine-error">${this._engineError}</p>`
+          : ''}
+      </div>
+    `;
   }
 
   /** Another window changed the model. */
@@ -1751,6 +1944,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
       ${this._renderRetiredNote()}
 
+      ${this._renderEnginePanel()}
+
       ${this._renderModelPanel()}
 
       ${this._renderPreferenceCards()}
@@ -2027,6 +2222,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * browser is a second answer waiting to disagree.
    */
   _renderSessionStorage() {
+    // Ahead of the answer, because "this engine keeps no mirror here"
+    // outranks any state of a figure it never produces. Hidden rather
+    // than shown as "0 B" or "not mirrored": both of those are claims
+    // about a directory, and a number on screen is believed (AG-9).
+    if (!supports(SURFACE.SESSION_MIRROR)) return '';
     const storage = this._storage;
     if (!storage) return '';
     if (storage.error) {

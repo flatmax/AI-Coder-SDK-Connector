@@ -38,6 +38,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Safe to import from the config layer, unlike an engine package: this
+# module is a frozen table of surface names with no dependencies of its
+# own. The rule it must not break is the one the `history` defaults are
+# duplicated for — the config layer answers without importing an engine.
+from aic_dc import capabilities
+
 logger = logging.getLogger(__name__)
 
 
@@ -562,6 +568,46 @@ class ConfigManager:
                 section.get("keywords_max_doc_freq", 0.6)
             ),
         }
+
+    @property
+    def master_engine(self) -> str:
+        """Which engine a session starts on (``specs5/plan-ag`` AG-1).
+
+        Lives in ``app.json`` rather than in ``engine.json`` despite the
+        second file's name. Every key in ``engine.json`` is a *Claude
+        session option* — model, effort, permission mode — read by
+        ``claude_code.engine_config``; which engine is master is a fact
+        about the application, and putting it in one engine's option file
+        would make the second engine's existence conditional on the
+        first's config.
+
+        It does not break :meth:`reload_app_config`'s promise that nothing
+        in ``app.json`` reaches the engine's session options. This is read
+        at startup and at an explicit switch, never mid-session, so a
+        reload changes what the *next* session starts on and invalidates
+        no running context.
+
+        An unknown name falls back to Claude with a warning rather than
+        raising. A typo here should cost the user the second engine, not
+        the ability to start the application — and the fallback is the
+        engine that is always mountable.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("master")
+        if chosen is None:
+            return capabilities.CLAUDE
+        if chosen not in capabilities.ENGINES:
+            logger.warning(
+                "app.json engines.master is %r, which is not one of %s. "
+                "Starting on %s.",
+                chosen,
+                ", ".join(capabilities.ENGINES),
+                capabilities.CLAUDE,
+            )
+            return capabilities.CLAUDE
+        return chosen
 
     @property
     def history_config(self) -> dict[str, Any]:
