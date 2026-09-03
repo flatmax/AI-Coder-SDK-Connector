@@ -53,7 +53,7 @@ the dialog has silently lost its diff — which otherwise presents as users appr
 
 ---
 
-## AG-R-2 — `google-antigravity` is 0.1.15 and alpha
+## AG-R-2 — `google-antigravity` is 0.1.x and alpha
 
 **Severity: high. Likelihood: certain — the classifier says so.**
 

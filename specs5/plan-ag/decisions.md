@@ -20,7 +20,7 @@ Antigravity-as-master consulting Claude.
 
 **Why it matters:** the two engines have genuinely disjoint capabilities. Google offers image
 generation, which Anthropic does not; Claude Code offers a mature permission and transcript surface
-that Antigravity at 0.1.15 does not. The point of hosting both is to use each for what it is good at,
+that Antigravity at 0.1.x does not. The point of hosting both is to use each for what it is good at,
 not to average them.
 
 **Consequence:** every surface downstream of the engine — chat rendering, the Context tab, the HUD,
@@ -388,7 +388,7 @@ consultation that could be resumed is a session, and a session belongs to the en
 `src/aic_dc/antigravity/surface.py` and its test gate land with the consultant, before any engine
 work.
 
-**Why it matters:** `google-antigravity` is **0.1.15 and alpha**. The equivalent probe for
+**Why it matters:** `google-antigravity` is **0.1.x and alpha**. The equivalent probe for
 `claude-agent-sdk` was written against a 0.2.137 wheel that was already stable, and it still found
 things the hand-written inventory had missed and closed them the same day
 ([`../plan/README.md`](../plan/README.md) open item 10). Building it after the engine means the engine

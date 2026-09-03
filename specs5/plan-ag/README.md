@@ -23,7 +23,7 @@ live Antigravity turn, the diff rendered at +5 −0 with the correct hunk, and t
 run and its six findings are in [`delivery.md` § Phase 4](delivery.md#phase-4--the-live-run-and-the-four-things-it-found-2026-09-03). The engine router is
 wired into startup, the master engine is chosen per session, and the webapp hides surfaces the
 running engine cannot feed. The surface of both Antigravity products was read first-hand — the
-installed `google-antigravity` 0.1.15 wheel, and the `agy` 1.1.22 binary. **Phase 2 was taken out of
+installed `google-antigravity` 0.1.15 wheel (0.1.16 since 2026-09-03), and the `agy` 1.1.22 binary (re-probed at 1.1.25). **Phase 2 was taken out of
 order**, ahead of phase 1, because it was the gate everything else was contingent on and it turned
 out to be cheap. The results are in [`sdk-surface.md`](sdk-surface.md); the choices they force are in
 [`decisions.md`](decisions.md); what each phase actually did is in [`delivery.md`](delivery.md).
@@ -256,7 +256,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
   is placed before phase 3 because it is nearly free to run and because the answer changes whether
   Antigravity can be master at all for write operations. Discovering it while building the dialog in
   phase 4 means an engine adapter written against an assumption.
-- **The probe before the engine.** The SDK is 0.1.15 and alpha. Writing the adapter first means
+- **The probe before the engine.** The SDK is 0.1.x and alpha. Writing the adapter first means
   writing it against a snapshot that has already moved, which is the failure the equivalent Claude
   probe exists to close.
 - **The consultant before anything.** It is the only phase that delivers user-visible value before
