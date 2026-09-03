@@ -46,6 +46,10 @@ carries the current conversation across. The outgoing engine is stopped and the 
 blank. Nothing is deleted — each engine keeps its own mirror, and the conversation left behind stays
 loadable.
 
+The call that does it is `switch_engine`, one of the three the router owns rather than delegates
+([AG-3](#ag-3)) — because which engine is master is a fact about the router, not something an engine
+can answer about itself.
+
 **Switching models is a different thing entirely, and stays one.** `set_model` changes the model
 mid-session with the transcript intact, because within one engine the CLI rebuilds its own context.
 The model is not a history boundary; the engine is. Anything that ends up treating the two the same
@@ -149,6 +153,30 @@ descriptor lets the webapp **hide** a surface rather than draw an empty one.
 **Consequence:** the class name stays `ClaudeCodeService` even when it is fronting Antigravity. That
 reads oddly and is the correct trade — it is an interface identifier, not a description of the
 implementation. A rename is a separate, mechanical change that can happen later or never.
+
+### What this became: a router (2026-09-01)
+
+Recorded here because this decision was written before the mechanism existed, and a reader of this
+file would otherwise not learn that one does. `src/aic_dc/engine_router.py` is what
+`main.py` registers under `RPC_NAME`, in place of either adapter.
+
+Its delegating methods are **generated** from the master adapter's rather than hand-written. That is
+forced rather than stylistic: jrpc-oo reads a service's method list off the *class*
+(`ExposeClass.py:37-41`), so a `__getattr__` forwarder would expose nothing at all, and a
+hand-maintained list drifts into methods that work in Python and 404 on the wire.
+
+**Three methods are the router's own and are never delegated** — `get_engine_capabilities`,
+`list_engines`, `switch_engine` — and `build_router` refuses to start if an adapter defines one of
+them. The reason is this decision's own logic: an engine cannot be the authority on what it cannot
+do. A delegated `get_engine_capabilities` would make the descriptor whatever that engine returned,
+which is the failure [AG-9](#ag-9) exists to prevent, arriving through the door AG-3 opened.
+
+The distinction between the two read-only ones matters for [AG-R-4](risks.md#ag-r-4):
+`get_engine_capabilities` is what a *component* asks to decide whether to render, and carries no
+engine identity; `list_engines` names the engine and is for a human-facing selector and diagnostics
+only. A render path reaching for the second is the branch AG-R-4 forbids.
+
+Mechanics, and what nearly shipped wrong, are in [`delivery.md`](delivery.md); this names the choices.
 
 ---
 

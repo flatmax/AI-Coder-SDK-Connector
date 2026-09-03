@@ -331,7 +331,7 @@ default dependency set — which is a `pyproject.toml` edit nobody reviews as a 
 **Severity: critical. Likelihood: observed — it happened on both probe runs, unprompted.**
 
 Gating `create_file` and `edit_file` does not stop the agent from making the edit. It stops it from
-making the edit *that way*. When [`scripts/probe_edit_args.py`](probe_edit_args.py) denied both file tools,
+making the edit *that way*. When [`scripts/probe_edit_args.py`](../../scripts/probe_edit_args.py) denied both file tools,
 `gemini-3.6-flash` immediately reached for `run_command` with the same intent — `sed -i` on the first
 run, an inline `python3 -c "…content.replace(…)…"` on the second. Neither was suggested by the
 prompt. Only once `run_command` was denied on the same seam did the seeded file survive the turn.

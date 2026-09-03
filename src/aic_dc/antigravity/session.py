@@ -152,6 +152,25 @@ class AntigravitySession:
         return self._conversation is not None
 
     @property
+    def conversation_id(self) -> str | None:
+        """The SDK's id for this conversation, or ``None`` before one exists.
+
+        ``Conversation.conversation_id`` is empty until the first message
+        has been exchanged, and the SDK's own property normalises that to
+        ``None`` — so this is "the id a resume would need", not "whether a
+        session is running", which :attr:`started` answers.
+
+        Read-only here on purpose. *Using* it to resume is phase 5, and the
+        descriptor reports ``session_mirror`` as unbuilt until then;
+        reporting the id costs nothing and is what the state snapshot owes
+        a browser that asks which conversation it is looking at.
+        """
+        conversation = self._conversation
+        if conversation is None:
+            return None
+        return getattr(conversation, "conversation_id", None) or None
+
+    @property
     def read_only(self) -> bool:
         """Whether this session can change the working tree.
 

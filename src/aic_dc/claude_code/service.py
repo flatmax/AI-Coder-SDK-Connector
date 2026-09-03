@@ -321,12 +321,19 @@ def _review_file_paths(changed_files: Any) -> list[str]:
     return paths
 
 
-def _doc_convert_available() -> bool:
+def doc_convert_available() -> bool:
     """Whether document conversion can run — i.e. ``markitdown`` imports.
 
     An optional extra (``pip install 'aic-dc[docs]'``), so the import is
     probed rather than assumed, and any failure means "not available"
     rather than a broken snapshot.
+
+    Public, and named without the underscore, because both engines'
+    ``get_current_state`` answer it: it is a fact about the *server's*
+    install, not about whichever engine is master, and the shell has this
+    one snapshot to read it from. The Antigravity adapter imports it here
+    for the same reason it imports ``review`` and ``commit`` — a second
+    copy of a four-line probe is a second answer waiting to disagree.
     """
     try:
         from aic_dc.doc_convert import DocConvert
@@ -1162,7 +1169,7 @@ class ClaudeCodeService:
             **self.doc_builder.status(),
             "review_state": self.review.state(),
             "engine_health": self.get_engine_health(),
-            "doc_convert_available": _doc_convert_available(),
+            "doc_convert_available": doc_convert_available(),
             "disk_warning": await self._disk_warning(),
         }
 

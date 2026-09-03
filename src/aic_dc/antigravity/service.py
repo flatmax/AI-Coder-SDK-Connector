@@ -75,6 +75,7 @@ from aic_dc.antigravity.permissions import AntigravityPermissionGate
 from aic_dc.antigravity.session import AntigravitySession
 from aic_dc.antigravity.steps import StepTranslator
 from aic_dc.claude_code.messages import Event
+from aic_dc.claude_code.service import doc_convert_available
 
 logger = logging.getLogger(__name__)
 
@@ -384,29 +385,94 @@ class AntigravityService:
     # ------------------------------------------------------------------
 
     async def get_current_state(self) -> dict[str, Any]:
-        """Everything the app needs to render itself after a reconnect."""
+        """Everything a freshly connected browser needs to render.
+
+        **The browser's field names are the contract here, not this
+        adapter's.** AG-3 mounts both engines under one RPC name, and the
+        app shell reads this single snapshot for facts that have nothing
+        to do with which engine is master: the repo it is looking at,
+        whether startup finished, whether Doc Convert is installed.
+
+        The first draft of this method answered with the fields this
+        adapter found interesting — ``blocks``, ``request_id``, ``review``
+        — and the shell read none of them. Nothing failed: every key was
+        present, every value was true, and the 94 offline tests passed,
+        because they asserted this method's own shape rather than the
+        reader's. What it cost was the whole engine. ``init_complete`` is
+        the key that dismisses the startup overlay, it was not here, and
+        the first live run as master sat behind "Connecting…" forever
+        (``delivery.md`` § phase 4). A snapshot is only correct against
+        the thing that reads it.
+
+        The keys below are therefore ``app-shell/state-fetch.js``'s and
+        ``chat-panel/events.js``'s, and the ones this engine cannot feed
+        are **absent rather than zeroed**, per AG-9: no ``cost``, no
+        ``rate_limit``, no ``session_usage``, no ``compaction``. The
+        descriptor hides each of those surfaces and every reader of them
+        is guarded, so absence renders as a hidden panel while a zero
+        would render as a measurement.
+
+        ``messages`` is empty by construction rather than by omission. The
+        repo-local mirror is phase 5, so there is no transcript to
+        restore; the key is still sent because the chat panel treats an
+        empty list as "nothing to restore" and a missing one as a snapshot
+        it could not read.
+        """
         session = self._session
         return {
-            "connected": bool(session and session.started),
-            "model": self._model,
-            "permission_mode": self._permission_mode,
-            "read_only": session.read_only if session else True,
-            "streaming": bool(self._turns),
-            "request_id": next(iter(self._turns), None),
-            "blocks": [
-                block
-                for translator in self._turns.values()
-                for block in translator.rendered_blocks()
-            ],
+            # What the app shell reads (app-shell/state-fetch.js).
+            "init_complete": True,
+            "repo_name": self._repo_root.name,
+            "repo_root": str(self._repo_root),
+            "review_state": self.review.state(),
+            "doc_convert_available": doc_convert_available(),
+            # What the chat panel and the dialog read
+            # (chat-panel/events.js § onStateLoaded, permission-dialog).
+            "messages": [],
+            "active_streams": self._active_streams(),
             "pending_permissions": (
                 self._gate.broker.pending() if self._gate is not None else []
             ),
-            "review": self.review.state(),
+            # This engine's own posture.
+            "session_id": session.conversation_id if session else None,
+            "connected": bool(session and session.started),
+            "streaming": bool(self._turns),
+            "model": self._model,
+            "permission_mode": self._permission_mode,
+            "read_only": session.read_only if session else True,
             "credentials": self._credentials.report(),
             "denied_read_files": list(self._denied_read_files),
             # No `cost`. AG-6: there is no USD figure anywhere on this
             # engine, and a zero would be a measurement.
         }
+
+    def _active_streams(self) -> list[dict[str, Any]]:
+        """The turn in flight, in the replay shape a reconnect resumes from.
+
+        Same keys as ``ActiveTurn.to_dict()`` on the Claude side, because
+        ``resumeStreamBlocks`` reads them by name: a ``request_id`` it can
+        route by, the ``blocks`` rendered so far, a ``started_at`` in epoch
+        seconds so the elapsed counter does not restart from the reconnect,
+        and the token counters, which are a whole assistant message away
+        from their next push.
+
+        No ``subagents`` key. This engine's subagent trajectories do not
+        yet produce their own tabs outside a consultation (AG-13), and
+        ``rehydrateSubagentTabs`` treats a missing list as none — which is
+        the fact — rather than as an empty one it has to explain.
+        """
+        return [
+            {
+                "request_id": request_id,
+                "session_id": (
+                    self._session.conversation_id if self._session else None
+                ),
+                "started_at": translator.started_at,
+                "blocks": translator.rendered_blocks(),
+                "usage": {"turn_model_usage": translator.turn_usage()},
+            }
+            for request_id, translator in self._turns.items()
+        ]
 
     async def get_model(self) -> dict[str, Any]:
         return {"model": self._model, "models": [self._model]}

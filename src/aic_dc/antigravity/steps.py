@@ -281,6 +281,17 @@ class StepTranslator:
         self.request_id = request_id
         self._clock = clock
         self._wall_clock = wall_clock
+        #: When this turn began, in epoch seconds.
+        #:
+        #: A translator is constructed at the start of the turn it
+        #: translates, so this is the turn's start time and not an
+        #: approximation of it. It lives here rather than in a second dict
+        #: beside ``_turns`` because a browser reconnecting mid-turn reads
+        #: it from the same object it reads the blocks from — the Claude
+        #: side pairs the two in ``ActiveTurn`` for the same reason, and a
+        #: parallel map keyed by request id is one more thing that can
+        #: disagree with itself.
+        self.started_at = wall_clock()
         # When set, *every* block and card this translator produces is
         # attributed to that agent rather than to the main thread.
         #
