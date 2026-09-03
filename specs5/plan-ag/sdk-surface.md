@@ -6,7 +6,7 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 | What | Version | Where it was read |
 |---|---|---|
 | `google-antigravity` | **0.1.15** — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
-| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF | `~/.local/bin/agy` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03) | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
 > **Do not re-derive this by guessing.** The SDK is at 0.1.15 and alpha; it will move faster than
@@ -227,6 +227,119 @@ See [`risks.md` AG-R-3](risks.md#ag-r-3).
 (`connections/local/local_connection_config.py:147`) is subject to the same trust list. It appears to
 be a separate mechanism — `workspace_only` policies are enforced at the platform layer
 (`hooks/policy.py:442`, `:541-543`) — but this was not confirmed.
+
+---
+
+## The `agy` hook surface — measured 2026-09-03
+
+§ *Why `agy` is nonetheless not the engine* rules `agy` out on the `--permission-mode` postures and
+the `stream-json` output. **Neither is the hook**, and `agy` 1.1.25 has lifecycle hooks. This section
+is what a direct probe found, kept whole because [AG-2](decisions.md#ag-2)'s amendment turns on it and
+because most of it stays true whatever is decided.
+
+Probed by installing a `PreToolUse` hook, capturing its stdin verbatim, and running headless turns
+against a scratch workspace. All artefacts removed afterwards.
+
+### Headless spends the paid subscription
+
+`agy -p` authenticates from the OS keyring (`zalando/go-keyring`, service `antigravity`) and reaches
+`daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` — the same OAuth identity and the
+same Google AI Pro quota as the interactive TUI. `--conversation <id>` resumes a conversation created
+interactively, loading its existing turns.
+
+This is the whole reason the question was reopened: the SDK path cannot reach that backend at any
+price (AG-2 § *a backend split*), and the Gemini API key it must use instead refuses at 20 requests
+per model per day.
+
+### The `PreToolUse` payload carries the write
+
+Captured stdin, unedited but for indentation:
+
+```json
+{
+  "conversationId": "...", "modelName": "gemini-3.8-flash-low", "stepIdx": 4,
+  "artifactDirectoryPath": "/home/.../brain/<id>",
+  "transcriptPath": "/home/.../brain/<id>/.system_generated/logs/transcript_full.jsonl",
+  "workspacePaths": [],
+  "toolCall": {
+    "name": "replace_file_content",
+    "args": {
+      "TargetFile": "/home/.../target.txt",
+      "TargetContent": "FOOBAR_123",
+      "ReplacementContent": "FOOBAR_456",
+      "StartLine": "1", "EndLine": "1",
+      "AllowMultiple": false, "Description": "...", "Instruction": "...",
+      "toolAction": "Editing file", "toolSummary": "..."
+    }
+  }
+}
+```
+
+`write_to_file` carries `CodeContent`. **These are the SDK's own argument names** — the ones
+`permissions.ARG_ALIASES` already maps — so `normalise_args`, `build_diff_payload` and
+`denormalise_args` would work on this payload essentially unchanged. Two products, one tool-argument
+vocabulary, across two transports that share nothing else.
+
+Other tools captured in the same run: `find_by_name` (`Pattern`, `SearchDirectory`), `view_file`
+(`AbsolutePath`), `run_command` (`CommandLine`, `Cwd`, `WaitMsBeforeAsync`). Note `find_by_name` —
+`agy` and the SDK do **not** agree on tool *names*, only on argument names.
+
+### The response contract
+
+`allow` / `deny` / `ask` / `force_ask`, plus `reason` (*"shown to the user/agent"*) and `overwrite`
+— a shallow top-level merge into the tool call's arguments, where *"the modified tool call is what
+actually executes and is recorded"*. `overwrite` is `modified_args` under another name, so the amend
+path [AG-5](decisions.md#ag-5) chose the raw SDK hook to preserve exists here too.
+
+`ask` is useless headlessly — it auto-denies, logged as `Print mode: soft-denying tool confirmation`
+— but an adapter would never return it. The hook blocks, asks AIC⚡DC's own dialog, and returns the
+human's answer.
+
+### Three limits, one of them decisive
+
+- **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local
+  `<workspace>/.agents/hooks.json` was **not** loaded — `hooks_manager.go:53] loaded 0 named hooks
+  from 0 hooks.json file(s)` — including with the exact workspace path added to `trustedWorkspaces`.
+  The global file *"fires unconditionally"*, which means an adapter cannot scope its gate to its own
+  sessions without solving this.
+- **Concurrency.** An `flock` on `presence/<id>.lock` serialises turns; an interactive session and a
+  headless turn on the same conversation conflict. An adapter must own its conversation, which is
+  fine — driving the user's open TUI session was never necessary.
+- **The gate fails open**, which is the one that matters and is
+  [AG-R-12](risks.md#ag-r-12--the-agy-hook-gate-fails-open): the adapter must pass
+  `--dangerously-skip-permissions` because `agy`'s own headless layer auto-denies everything, and a
+  hook that exceeds its `timeout` (default **30s**) does not block the tool — measured, the write
+  landed. A gate that is the only gate and is bypassed by being slow is not a gate.
+
+### `transcript_full.jsonl` is a phase-5 asset regardless
+
+Every conversation writes `.system_generated/logs/transcript.jsonl` and
+`transcript_full.jsonl`, in headless runs as well as interactive ones. The first truncates oversized
+fields and names them in `truncated_fields`; **the second never truncates**. Records are typed
+(`USER_INPUT`, `PLANNER_RESPONSE`, `CODE_ACTION`, `GENERIC`, `SEARCH_WEB`, `CHECKPOINT`), and a
+completed edit carries a real unified diff:
+
+```
+[diff_block_start]
+@@ -1,2 +1,2 @@
+-FOOBAR_123
++FOOBAR_456
+[diff_block_end]
+```
+
+That is *after the fact*, so it cannot serve the permission dialog — but it is exactly what the
+history browser and the repo-local mirror need, and those are two of the surfaces `capabilities.py`
+currently marks `unbuilt` for this engine.
+
+### Not an entry point: `--remote-control`
+
+The binary carries a `--remote-control` flag and a `remotecontrol` package, and a live session logs
+`[RemoteControl] CLI launched without --remote-control, staying disconnected`. It is **not** a local
+IPC: the symbols are WebRTC — `PeerSession`, ICE candidates, SCTP framing, `pendingPin`,
+`GetRemoteControlInfoRequest` — i.e. a brokered peer channel for Google's own remote UI, with pin
+pairing. A running `agy` listens only on two ephemeral localhost ports for its internal language
+server, which answer `400`/`404` to anything else. **There is no way to attach to an already-running
+session**, and that is architectural rather than a missing flag.
 
 ---
 

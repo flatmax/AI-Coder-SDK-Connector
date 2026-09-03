@@ -93,6 +93,64 @@ assumption: a `PreToolCallDecideHook` receives `TargetContent` + `ReplacementCon
 for `edit_file`, and `CodeContent` for `create_file`. The capability `agy` lacks is one the SDK
 demonstrably has. See [`sdk-surface.md` § The permission gate](sdk-surface.md#the-permission-gate--measured-and-it-passes).
 
+### Amended 2026-09-03 — both original reasons are obsolete, and the conclusion survives on a new one
+
+**Reopened deliberately**, because the user's Antigravity access is a paid Google AI Pro subscription
+reachable only through `agy`'s OAuth, while the SDK path is a metered Gemini API key that refuses at
+**20 requests per model per day** (§ *The free tier refuses 20 requests a day* in
+[`delivery.md`](delivery.md)). That makes "can `agy` be the engine?" a question worth re-measuring
+rather than a settled one, and the answer moved.
+
+**Both disqualifying measurements above were about channels that are not the hook.** `agy` 1.1.25
+supports lifecycle hooks (`hooks.json`), and reason 1 measured the `--permission-mode` postures while
+reason 2 measured the `stream-json` output. Measured directly on 2026-09-03 by installing a
+`PreToolUse` hook and capturing its stdin:
+
+- **Reason 1 is obsolete.** `PreToolUse` returns `allow` / `deny` / `ask` / `force_ask`, a `reason`
+  *"shown to the user/agent"*, and **`overwrite`** — key-values merged into the tool call's arguments
+  before it runs, which is `modified_args` under another name. `ask` auto-denies headlessly and is
+  useless to us, but we would never return it: the hook blocks, calls AIC⚡DC, and returns the
+  human's answer itself. That is AG-5's architecture exactly.
+- **Reason 2 is obsolete.** A real captured payload for `replace_file_content` carried
+  `TargetFile`, `TargetContent` (`FOOBAR_123`), `ReplacementContent` (`FOOBAR_456`), `StartLine` and
+  `EndLine` **before the write**, and `write_to_file` carries `CodeContent`. The diff is renderable.
+  The field names are **the SDK's own**, so `permissions.ARG_ALIASES`, `normalise_args` and
+  `build_diff_payload` would work on them essentially unchanged.
+
+**And the conclusion stands anyway, on a reason nobody had looked for: the hook gate fails open.**
+
+Two measurements together:
+
+1. `agy`'s own headless permission layer auto-denies everything it would otherwise prompt for — a
+   turn stopped at `read_file` before reaching an edit. So an adapter must run
+   `--dangerously-skip-permissions` and make the hook the *only* gate.
+2. **A hook that exceeds its `timeout` does not block the tool — the tool proceeds.** Probed with a
+   hook that slept 10s against a `timeout` of 3: the hook ran, the deadline passed, and the edit was
+   applied. `timeout` defaults to **30 seconds**.
+
+Put together, on the one path where the hook is the only gate, *every write is applied unreviewed
+whenever the hook is slow, crashed, or absent* — and it is slow **by design**, because it is waiting
+for a human to answer a permission dialog. A user who takes 31 seconds to read a diff gets the write
+they were still deciding about. That is [AG-R-11](risks.md#ag-r-11)'s shape — a refused edit made
+anyway — arrived at from a new direction, and worse: made *because* the refusal was slow.
+
+Contrast the SDK, where `HookResult(allow=False)` **blocks the write**, verified in phase 2. `agy`'s
+hook is a *cooperative* gate; the SDK's is an *enforcing* one. AG-5 makes the dialog a requirement of
+this engine rather than a feature, and a requirement that fails open is not one.
+
+**So AG-2 stands, with its reasons replaced.** What would overturn it is closing the fail-open, and
+that is a specific, testable question rather than a hope — see
+[AG-R-12](risks.md#ag-r-12--the-agy-hook-gate-fails-open). Until then no `agy` adapter should be
+built, and the quota problem is answered by billing the Gemini key's Cloud project, which is a
+purchase rather than an architecture.
+
+**What was measured and is worth keeping regardless**, in
+[`sdk-surface.md` § The `agy` hook surface](sdk-surface.md#the-agy-hook-surface--measured-2026-09-03):
+headless `agy` spends the paid subscription (same keyring OAuth, same `cloudcode-pa`); hooks load
+from `~/.gemini/config/hooks.json` and, in 1.1.25, **not** from `<workspace>/.agents/hooks.json`
+even when the workspace is trusted; and `transcript_full.jsonl` carries untruncated
+`[diff_block_start]` unified diffs, which is a ready source for the history surfaces phase 5 needs.
+
 **A third reason, not needed for the decision but recorded because it bears on any future
 reconsideration:** Antigravity's terms state *"Using third party software, tools, or services to
 access the Service … is a breach of this Agreement."* Whether a host driving `agy` as a subprocess

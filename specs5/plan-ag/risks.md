@@ -357,3 +357,53 @@ rather than presenting it as a fresh, unrelated request. Deny-by-default on the 
 completion, and asserts the file's bytes are unchanged — asserting on the *file*, not on the hook
 having fired. A hook-level assertion passes while the file is being rewritten by `sed`, which is
 precisely the hole. It goes red if a future engine adapter gates file tools only.
+
+## AG-R-12 — The `agy` hook gate fails open
+
+**Raised 2026-09-03, and it is the finding that keeps [AG-2](decisions.md#ag-2) standing after both
+of its original reasons went obsolete.** Recorded as a risk rather than a closed door, because it is
+the one thing between `agy` and being a viable engine on a paid subscription — and unlike the
+original reasons, it is a specific testable condition rather than a structural absence.
+
+**The exposure.** An `agy` adapter would have to gate writes through a `PreToolUse` hook, and two
+measured facts combine badly:
+
+1. `agy`'s own headless permission layer auto-denies anything it would otherwise prompt for — a probe
+   turn stopped at `read_file` before it ever reached an edit. So the adapter must launch with
+   `--dangerously-skip-permissions`, which removes every other check.
+2. **A hook that exceeds its `timeout` does not block the tool.** Probed with a hook sleeping 10s
+   against `"timeout": 3`: the hook was invoked, the deadline passed, and the write landed anyway.
+   The default `timeout` is **30 seconds**.
+
+So on the only path where the hook is the gate, it is *also* the only gate — and it is bypassed
+whenever it is slow, crashed, or not installed. It is slow **by design**: it is blocking on a human
+reading a diff. A user who takes 31 seconds to decide gets the edit they had not yet approved, with
+no record that anything was skipped.
+
+This is [AG-R-11](#ag-r-11)'s shape from a new direction and strictly worse. AG-R-11 is a refused
+edit re-attempted through another tool; this is a refused edit applied *because the refusal was
+slow*. It also breaks `../3-engine/permissions.md`'s *every request resolves exactly once*: the
+request is still on screen when the operation it governs has already run.
+
+**Contrast the SDK, which is why AG-2 survives.** `HookResult(allow=False)` **blocks the write** —
+verified in phase 2 against a real file. `agy`'s hook is a *cooperative* gate; the SDK's is an
+*enforcing* one. [AG-5](decisions.md#ag-5) makes the dialog a requirement of this engine rather than
+a feature, and a requirement that fails open is not a requirement.
+
+**What would retire this risk** — in order of how much it would settle:
+
+1. **A `timeout` large enough to outlast any dialog, if the value is honoured without a cap.** Turns
+   fail-open into fail-hang, which is the right direction: a stuck host stalls the agent instead of
+   writing without consent. Unmeasured — the cap is the next probe, and the whole question may turn
+   on it.
+2. **An adapter that refuses to start a turn** unless it has verified the hook is installed and its
+   IPC answers. Closes "absent or crashed", not "slow".
+3. **A `PostToolUse` revert** of anything written without an approval on record. After the fact, and
+   no help for `run_command`.
+4. **Filesystem containment** — running the agent against a copy or an overlay and applying approved
+   changes ourselves. Closes it completely and is a different product shape.
+
+**Tripwire, and it must assert on the file rather than on the hook.** A probe that installs a hook
+which sleeps past its `timeout` and then denies, runs one edit turn, and asserts the target's bytes
+are **unchanged**. Asserting that the hook fired passes today, while the write goes through — which
+is exactly how this was found. The same lesson AG-R-11's tripwire records, on a different mechanism.

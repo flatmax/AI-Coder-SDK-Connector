@@ -74,6 +74,21 @@ only. The four live-verification spikes — `probe_edit_args.py`, `probe_consult
 `probe_session.py`, `probe_consultation_tab.py` — sit beside the project's other smoke tests, and
 each phase's entry in [`delivery.md`](delivery.md) cites the one that settled it.
 
+**`agy` was re-examined on 2026-09-03 and remains ruled out — for entirely new reasons.** Because the
+paid access is a Google AI Pro subscription reachable only through `agy`'s OAuth, while the SDK's key
+refuses at 20 requests/day, the question was worth re-measuring. Both of
+[AG-2](decisions.md#ag-2)'s original disqualifications turned out to be obsolete: `agy` 1.1.25 has
+lifecycle hooks, and a `PreToolUse` hook receives `TargetFile` / `TargetContent` /
+`ReplacementContent` **before the write** and can answer `deny` with a reason and `overwrite` the
+arguments — the whole of AG-5's architecture. The decision survives on something nobody had looked
+for: **the hook gate fails open.** An adapter must pass `--dangerously-skip-permissions` (agy's own
+headless layer auto-denies everything), and a hook that exceeds its `timeout` does not block the
+tool — measured, the write landed. A gate that is the only gate and is bypassed by being slow is not
+a gate, and it is slow by design because it waits for a human.
+[AG-R-12](risks.md#ag-r-12--the-agy-hook-gate-fails-open) holds the condition that would reopen it.
+What the probe *did* establish and is worth keeping is in
+[`sdk-surface.md` § The `agy` hook surface](sdk-surface.md#the-agy-hook-surface--measured-2026-09-03).
+
 Eight findings determine the shape of everything below: five from the assessment and the permission
 gate, one from building the router, and two from building the step pump.
 
