@@ -331,6 +331,17 @@ export class SettingsTab extends RpcMixin(LitElement) {
     /** Why the last switch was refused, or '' — the server's own sentence. */
     _engineError: { type: String, state: true },
     /**
+     * The `agy` transport's permission gate, as `install.status()` reports
+     * it: `absent`, `current`, `stale` or `unreadable` — never a boolean,
+     * because "installed" and "installed and usable" are different and the
+     * difference is what this panel exists to explain.
+     *
+     * Null until asked, and null forever on an engine that has no such
+     * method, which is how the panel stays absent rather than empty.
+     */
+    _agyGate: { type: Object, state: true },
+    _agyGatePending: { type: Boolean, state: true },
+    /**
      * False once `Collab.get_collab_role` reports this client is not the host.
      * `set_model` and `restart_session` are both localhost-only, so an enabled
      * control for a participant would be one that always fails. Only ever
@@ -875,6 +886,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._engines = null;
     this._enginePending = false;
     this._engineError = '';
+    this._agyGate = null;
+    this._agyGatePending = false;
     this._isHost = true;
     this._summary = null;
     this._pendingFields = new Set();
@@ -927,6 +940,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._loadInfo();
     this._loadModel();
     this._loadEngines();
+    this._loadAgyGate();
     this._loadPreferences();
   }
 
@@ -1409,6 +1423,134 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * across, and a user who reads "switch" as "switch and continue" would
    * lose a conversation they thought they were keeping.
    */
+  /**
+   * Load the gate's state. Silent when the running engine has no such
+   * method, which is every engine but the `agy` transport.
+   *
+   * Swallowing that one failure is deliberate and narrow: the router
+   * answers "no such method" for an engine that does not serve it, and
+   * rendering an error for a panel that simply does not apply here would
+   * be worse than rendering nothing. Anything the call *does* return —
+   * including `unreadable` — is shown.
+   */
+  async _loadAgyGate() {
+    try {
+      const res = await this.rpcExtract('Settings.get_agy_gate');
+      if (res && typeof res === 'object' && res.state) this._agyGate = res;
+    } catch {
+      this._agyGate = null;
+    }
+  }
+
+  async _setAgyGate(installIt) {
+    this._agyGatePending = true;
+    try {
+      const method = installIt
+        ? 'Settings.install_agy_gate'
+        : 'Settings.uninstall_agy_gate';
+      const res = await this.rpcExtract(method);
+      // `uninstall` answers `{status, removed, gate}`; `install` answers the
+      // status directly. Both carry the state, in one shape or the other.
+      const next = res && res.gate ? res.gate : res;
+      if (next && next.state) this._agyGate = next;
+      else if (res && res.error) this._agyGate = { ...this._agyGate, error: res.message };
+    } catch (err) {
+      this._agyGate = { ...(this._agyGate || {}), error: err?.message || String(err) };
+    } finally {
+      this._agyGatePending = false;
+    }
+  }
+
+  /**
+   * The permission gate for the `agy` transport.
+   *
+   * This is the only control in the app that writes **outside the
+   * repository** — into `~/.gemini/config/hooks.json`, which belongs to
+   * Google's CLI and may already hold the user's own hooks. So the panel
+   * says all four things a person needs to decide: where it writes, what
+   * it costs sessions that have nothing to do with this app, that it is
+   * removed on shutdown, and that nothing else in their file is touched.
+   *
+   * Absent entirely on any engine that does not serve `gate_status`, which
+   * is the honest rendering of "this does not apply to you" — the same
+   * rule the engine selector follows when only one engine is mountable.
+   */
+  _renderAgyGatePanel() {
+    const gate = this._agyGate;
+    if (!gate || !gate.state) return '';
+    const state = gate.state;
+    const installed = state === 'current';
+    const readOnly = this._isHost === false;
+    const disabled = !this.rpcConnected || readOnly || this._agyGatePending;
+    const label = {
+      current: 'Installed',
+      absent: 'Not installed',
+      stale: 'Installed by another build',
+      unreadable: 'Cannot be read',
+    }[state] || state;
+    return html`
+      <div class="model-panel" role="group" aria-label="Antigravity CLI permission gate">
+        <div class="model-head">
+          <span class="model-title">🔒 agy permission gate</span>
+          <span class="model-pending" data-state=${state}>${label}</span>
+          ${state === 'unreadable'
+            ? ''
+            : html`<button
+                class="model-select"
+                ?disabled=${disabled}
+                @click=${() => this._setAgyGate(!installed)}
+                title=${installed
+                  ? 'Remove the gate from your agy configuration'
+                  : 'Add the gate to your agy configuration'}
+              >${this._agyGatePending ? '…' : installed ? 'Remove' : 'Install'}</button>`}
+        </div>
+        <p class="model-note">
+          Turns on the <strong>agy</strong> transport run with agy's own
+          permission prompts disabled, because they cannot ask — so this gate
+          is what shows you a diff before anything is written. Without it a
+          session will not start.
+        </p>
+        <p class="model-note">
+          It is written to <code>${gate.path}</code>, which is
+          <strong>outside this project</strong> and belongs to the Antigravity
+          CLI. Your own entries there are left alone${
+            gate.other_hooks && gate.other_hooks.length
+              ? html` — ${gate.other_hooks.length} of them`
+              : ''
+          }, and only this one is removed again.
+        </p>
+        <p class="model-note">
+          While it is installed, <em>every</em> agy session on this machine —
+          including ones you start yourself in a terminal — runs it once per
+          tool call, costing about <strong>0.2s each</strong>. It is removed
+          automatically when AIC⚡DC shuts down, so that cost is only paid
+          while it is buying you something.
+        </p>
+        ${state === 'stale'
+          ? html`<p class="model-note engine-error">
+              The gate in that file points at a different installation, so it
+              would review that one's turns and not this one's. Installing
+              here takes it over.
+            </p>`
+          : ''}
+        ${state === 'unreadable'
+          ? html`<p class="model-note engine-error">
+              ${gate.detail} AIC⚡DC will not modify a file it cannot parse.
+            </p>`
+          : ''}
+        ${gate.agy_present === false
+          ? html`<p class="model-note">
+              <code>agy</code> is not on your PATH, so this transport cannot
+              run yet whether or not the gate is installed.
+            </p>`
+          : ''}
+        ${gate.error
+          ? html`<p class="model-note engine-error">${gate.error}</p>`
+          : ''}
+      </div>
+    `;
+  }
+
   _renderEnginePanel() {
     const engines = this._engines;
     if (!engines) return '';
@@ -1945,6 +2087,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       ${this._renderRetiredNote()}
 
       ${this._renderEnginePanel()}
+      ${this._renderAgyGatePanel()}
 
       ${this._renderModelPanel()}
 

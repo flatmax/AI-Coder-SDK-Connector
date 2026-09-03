@@ -2096,3 +2096,161 @@ describe('aic-settings-tab session storage hiding', () => {
     expect(el.shadowRoot.querySelector('.storage-note')).toBeTruthy();
   });
 });
+
+
+describe('aic-settings-tab agy permission gate', () => {
+  // The only control in the app that writes outside the repository, into a
+  // file belonging to Google's CLI. The wording *is* the feature: a user
+  // deciding whether to allow that needs to know where it writes, what it
+  // costs sessions unrelated to this app, and that it is reversible. So
+  // these assert on what the panel says, not only on what it does.
+
+  function gate(overrides = {}) {
+    return {
+      state: 'absent',
+      path: '/home/u/.gemini/config/hooks.json',
+      other_hooks: [],
+      agy_present: true,
+      ...overrides,
+    };
+  }
+
+  function panel(el) {
+    return [...el.shadowRoot.querySelectorAll('.model-panel')].find((p) =>
+      p.getAttribute('aria-label') === 'Antigravity CLI permission gate',
+    );
+  }
+
+  it('is absent entirely on an engine that does not serve it', async () => {
+    // The honest rendering of "this does not apply to you". Every engine
+    // but the agy transport answers "no such method".
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el)).toBeUndefined();
+  });
+
+  it('says where it writes, that it is outside the project, and that it is reversible', async () => {
+    publishConfigFiles({ methods: { 'Settings.get_agy_gate': () => gate() } });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('/home/u/.gemini/config/hooks.json');
+    expect(text).toContain('outside this project');
+    expect(text).toContain('removed automatically');
+  });
+
+  it('says what it costs sessions that have nothing to do with this app', async () => {
+    // The tax the user is actually consenting to, and the one thing they
+    // could not discover for themselves until their agy felt slow.
+    publishConfigFiles({ methods: { 'Settings.get_agy_gate': () => gate() } });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('every');
+    expect(text).toContain('including ones you start yourself');
+    expect(text).toContain('0.2s');
+  });
+
+  it('promises the user their own hooks are left alone, and counts them', async () => {
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ other_hooks: ['my-linter', 'fmt'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('left alone');
+    expect(text).toContain('2 of them');
+  });
+
+  it('offers Install when absent and Remove when current', async () => {
+    for (const [state, label] of [['absent', 'Install'], ['current', 'Remove']]) {
+      publishConfigFiles({
+        methods: { 'Settings.get_agy_gate': () => gate({ state }) },
+      });
+      const el = mountTab();
+      await settle(el);
+      expect(panel(el).querySelector('button').textContent.trim()).toBe(label);
+    }
+  });
+
+  it('explains a stale gate rather than silently taking it over', async () => {
+    // It usually means a second checkout is also installed, and quietly
+    // seizing the hook would break whichever one the user was using.
+    publishConfigFiles({
+      methods: { 'Settings.get_agy_gate': () => gate({ state: 'stale' }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('different installation');
+    expect(text).toContain('Installing here takes it over');
+  });
+
+  it('offers no button at all when the file cannot be parsed', async () => {
+    // Nothing will be written to a file we cannot read, so offering the
+    // action would be offering something that will refuse.
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () =>
+          gate({ state: 'unreadable', detail: 'hooks.json is not valid JSON.' }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).querySelector('button')).toBeNull();
+    expect(panel(el).textContent).toContain('will not modify a file it cannot parse');
+  });
+
+  it('installs on click and reflects the new state', async () => {
+    const calls = [];
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate(),
+        'Settings.install_agy_gate': () => {
+          calls.push('install');
+          return gate({ state: 'current' });
+        },
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    panel(el).querySelector('button').click();
+    await settle(el);
+    expect(calls).toEqual(['install']);
+    expect(panel(el).querySelector('button').textContent.trim()).toBe('Remove');
+  });
+
+  it('reads the state back out of an uninstall reply', async () => {
+    // `uninstall` answers {status, removed, gate}; `install` answers the
+    // status directly. Both carry it, in different shapes.
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ state: 'current' }),
+        'Settings.uninstall_agy_gate': () => ({
+          status: 'ok',
+          removed: true,
+          gate: gate({ state: 'absent' }),
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    panel(el).querySelector('button').click();
+    await settle(el);
+    expect(panel(el).querySelector('button').textContent.trim()).toBe('Install');
+  });
+
+  it('says so when agy is not on PATH', async () => {
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ agy_present: false }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).toContain('not on your PATH');
+  });
+});

@@ -2079,9 +2079,38 @@ pointing at another checkout gates *that* build, not this one.
 Two smaller declarations: `resume` is declined rather than silently starting a fresh conversation, and
 `gate_status()` is public so the settings surface can ask its whole question without starting anything.
 
-**What is left of phase 8** is the settings surface itself — a control that calls `install()` with the
-user's consent, `uninstall()` on shutdown so the ~200 ms is paid only while it buys something, and
-renders the four states `status()` reports. Everything it would drive is built and tested: 4,299 tests
-pass, of which 108 are this transport's. The handshake it needs is proved and written down in
+### The settings surface, and where it turned out to belong (same day)
+
+The panel that asks. It is the only control in the app that writes **outside the repository**, so the
+wording is the feature and the tests assert on what it *says*, not only on what it does — it names the
+file, says it is outside the project, counts the user's own hooks it will leave alone, states the
+~0.2 s per tool call that **every** `agy` session on the machine pays including ones started in a
+terminal, and says it is removed on shutdown.
+
+The four states `status()` reports are rendered as four, not as a checkbox: `absent`, `current`,
+`stale`, `unreadable`. A stale gate is explained rather than silently taken over — it usually means a
+second checkout is also installed, and seizing the hook would break whichever one the user was using.
+An unreadable file gets no button at all, because offering an action that will refuse is worse than
+not offering it.
+
+**And a cross-cutting test moved the methods.** `test_the_browser_calls_nothing_the_server_does_not_expose`
+went red: the panel called `ClaudeCodeService.gate_status`, which exists only when the `agy` transport
+is mounted, and nothing mounts it yet. The guard was right, and the fix it forced is better than the
+design it rejected.
+
+**Installing the gate is a machine setting, not an engine capability.** What it changes is the user's
+own `agy` configuration, not a property of a running session — so it must be answerable and reversible
+with **no engine running at all**, and on an engine they are not currently using. It lives on
+`Settings` now. `AgyService` keeps only the half that genuinely is the session's: removing the gate on
+`shutdown`, so the cost is paid while it buys something.
+
+That is a distinction the panel would have got wrong on its own, and the test found it by asking a
+question about the wire rather than about the design.
+
+**Phase 8's transport is complete**: registry, hook, vocabulary, host socket, stream reader, session,
+installer, adapter and settings surface, at 4,299 Python and 4,407 webapp tests. What has *not*
+happened is a live conversation through it end to end — the gate is proved against the real binary,
+and the turn path is proved only against a fake. That run is phase 8's exit criterion and it is the
+next thing to do. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.

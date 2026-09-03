@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from typing import TYPE_CHECKING, Any
 
 from aic_dc.claude_code.engine_config import LIVE_CONTROLS
@@ -467,6 +468,64 @@ class Settings:
     # ------------------------------------------------------------------
     # Introspection helper (for diagnostics, not RPC-exposed)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # The `agy` permission gate — a machine setting, not an engine one
+    # ------------------------------------------------------------------
+    #
+    # These live here rather than on the Antigravity adapter because what
+    # they change is the *user's own* `agy` configuration, not a property
+    # of a running session. A user is entitled to ask whether the gate is
+    # installed, and to remove it, without an engine running at all — and
+    # putting them on an engine would make that impossible on the engine
+    # they are not currently using. See AG-14 and `aic_dc/agy/install.py`.
+
+    def get_agy_gate(self) -> dict[str, Any]:
+        """Whether the gate is in the user's ``agy`` configuration."""
+        from aic_dc.agy import install
+
+        report = install.status(self._config.config_dir)
+        report["agy_present"] = shutil.which("agy") is not None
+        return report
+
+    def install_agy_gate(self) -> dict[str, Any]:
+        """Add it. **Localhost only** — this writes outside the repository.
+
+        Never called automatically. While it is installed, *every* tool call
+        in *every* ``agy`` session on this machine runs our hook, including
+        sessions that have nothing to do with this app. That is a thing to
+        be asked about rather than a startup side effect, which is why there
+        is a button and no default.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        from aic_dc.agy import install
+
+        try:
+            report = install.install(self._config.config_dir)
+        except RuntimeError as exc:
+            return {"error": "unwritable", "message": str(exc)}
+        report["agy_present"] = shutil.which("agy") is not None
+        return report
+
+    def uninstall_agy_gate(self) -> dict[str, Any]:
+        """Remove it. **Localhost only.**
+
+        Also called on shutdown, so the cost is paid only while it buys
+        something and a machine whose AIC⚡DC is closed has an untouched
+        ``agy``.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        from aic_dc.agy import install
+
+        return {
+            "status": "ok",
+            "removed": install.uninstall(),
+            "gate": self.get_agy_gate(),
+        }
 
     @staticmethod
     def is_reloadable(type_key: str) -> bool:
