@@ -121,6 +121,16 @@ required: `--print="" --input-format stream-json`.
 
 ### Why `agy` is nonetheless not the engine
 
+> **Superseded 2026-09-03 — read this section as history, not as the current reasoning.** Both
+> measurements below were re-checked against `agy` 1.1.25 and **both are obsolete**: each measured a
+> channel that is not the lifecycle hook. A `PreToolUse` hook gates a call, carries the replacement
+> text before the write, and can amend the arguments. `agy` is still not the engine, but for reasons
+> of cost and containment recorded in [`decisions.md` AG-2](decisions.md#ag-2) § *Amended 2026-09-03*
+> — and the measurements that replaced these are in
+> [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). Kept in full because the
+> decision stood on it for four days and because how it was superseded is worth reading: neither
+> measurement was wrong, both were about the wrong channel.
+
 Two measurements settle it. **Both were re-run against 1.1.22 on 2026-08-30** and one of them came
 back materially different from the first pass — see the correction under point 2, which matters
 because the original wording was broader than the evidence and would not survive a re-check.

@@ -163,9 +163,18 @@ know". AG-2 makes the question moot by not driving `agy` at all.
 The Python SDK's `Step` carries content, thinking, deltas, full tool calls and per-step usage, and
 `PostToolCallHook` receives a `ToolResult`. The data exists there.
 
-**Consequence:** a Gemini API key or Vertex project is **mandatory, not conditional** — `agy` was the
-path that would have inherited the owner's existing login, and it is closed. This is a procurement
-gate on everything past phase 1.
+**Consequence:** a Gemini API key or Vertex project is **mandatory, not conditional** *for the SDK
+engine* — `agy` was the path that would have inherited the owner's existing login, and it is closed
+**to the SDK**. This is a procurement gate on everything past phase 1.
+
+**Sharpened 2026-09-03, because "closed" was doing too much work.** What is closed is the SDK's route
+to the subscription, and that is a backend split rather than a credential-format problem (below).
+What is *not* closed is `agy` itself: headless `agy -p` spends the paid Google AI Pro quota on the
+same keyring OAuth as the interactive TUI, measured. So the honest statement is that **the paid
+account is reachable, and not by the engine we built** — which is why the amendment above weighs a
+second adapter against simply billing the key's Cloud project, rather than treating the subscription
+as unreachable. Anyone reading this paragraph to mean "the subscription cannot be used at all" would
+be drawing a stronger conclusion than the measurements support.
 
 **Why it is closed, measured 2026-08-31 — a backend split, not a missing auth format.** This was
 originally argued from absence ("the SDK contains no OAuth code"), which is true and is the weaker

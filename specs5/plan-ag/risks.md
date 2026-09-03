@@ -219,6 +219,15 @@ The Python SDK accepts only `GeminiAPIEndpoint` or `VertexEndpoint`
 (`connections/local/local_connection.py:200-201`). It cannot reuse the `agy` login, which is what
 the owner already has.
 
+**Scope, clarified 2026-09-03:** this risk is about the **SDK engine**, not about the account. `agy`
+itself does reach the subscription — headless `agy -p` authenticates from the same keyring OAuth and
+calls the same Code Assist backend as the interactive TUI, measured. So the exposure is precise: the
+engine AIC⚡DC actually runs is billed separately from the subscription the user already pays for, and
+the free tier of that separate billing refuses at 20 requests per model per day. The mitigation is a
+purchase (billing on the key's Cloud project), not an architecture — see
+[`decisions.md` AG-2](decisions.md#ag-2) § *Amended 2026-09-03* for why the alternative was measured
+and declined.
+
 **The reason is a backend split, established by measurement on 2026-08-31 and recorded in full at
 [`decisions.md` AG-2](decisions.md#ag-2).** `agy` authenticates with the `auth/aicode` scope against
 `cloudcode-pa.googleapis.com`, the Code Assist surface where a consumer AI Pro subscription's coding
