@@ -427,6 +427,32 @@ should arrive with an SDK bump, and a new write tool must not.
 gate that stopped at the top-level trajectory is bypassed by asking a child to do the write. It is
 the same shape of hole as AG-R-11's `run_command`, one level down.
 
+#### One call, two vocabularies — measured in the phase-4 live run (2026-09-03)
+
+**The permission hook and the step stream do not name a call's arguments the same way**, and the
+difference is not a naming style — it is two independent spellings of the same values, with different
+path formats. Read off one live turn's raw frames:
+
+| Call | Hook `preToolArgs.argumentsJson` | Step stream |
+|---|---|---|
+| `find_file` | `Pattern`, `SearchDirectory` | `findFile.query`, `findFile.directoryPath` |
+| `view_file` | `AbsolutePath` | `viewFile.filePath`, `startLine`, `endLine` |
+| `edit_file` | `TargetFile`, `TargetContent`, `ReplacementContent`, `Instruction`, `StartLine`, `EndLine` | `editFile.filePath`, `editFile.diffBlock[].lines[].action` |
+
+The hook sends **bare paths**; the step stream sends **`file://` URIs**. So a module that learns a
+path key from one side and meets the other gets either a miss or a URI where it wanted a path, and
+neither announces itself.
+
+This is what `permissions.ARG_ALIASES` exists to absorb, and in the phase-4 run it had absorbed only
+half: the mutating entries matched (which is why the dialog's diff rendered), and `view_file` was
+aliased against `TargetFile` — a name the hook does not send — while `find_file` had no entry at all.
+The dialog showed `PATH (none named)` above an input block containing the path.
+
+**The probe cannot cover this.** § *The probe* states that reflection sees shape, and an argument name
+inside a JSON string is not shape — the same blind spot that let `agy`'s contentless frames and
+`policy.ask_user`'s bare bool through. Argument names are settled by reading a live frame, and this
+table is that reading. Anything relying on it is relying on a measurement, not a contract.
+
 ### Usage and cost
 
 `UsageMetadata` (`types.py:700-771`) is tokens only:

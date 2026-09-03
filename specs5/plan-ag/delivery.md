@@ -1547,3 +1547,121 @@ on the vendor's own account: the free tier does not merely defer image generatio
 prompts, it makes an interactive agent *"practically unusable"* — Google's phrase — and it does so
 invisibly, because queueing looks like nothing at all. Lowering the model pin buys usability today; it
 does not buy back the capability, and a paid key should raise it again.
+
+---
+
+## Phase 4 — the live run, and the four things it found (2026-09-03)
+
+The first conversation ever held through the Antigravity engine as master. The adapter, the gate and
+the per-session switch all landed on 2026-09-01 and had never been driven; the phase-4 row said *"no
+live turn has run through it, which is now the whole of the gap"*. One has now, and **the exit
+criterion is not met**.
+
+Setup: a fresh repo (`calc.py`, two functions), `switch_engine` to Antigravity through the chat
+panel's own notice, permission mode **Ask**, one prompt — *"Read calc.py, then add a multiply(a, b)
+function that returns a * b. Make only that one edit."*
+
+**What worked.** The engine notice and the amber chip both read correctly, and `switch_engine` did
+what AG-1 says it does. The `edit_file` dialog rendered a real side-by-side diff at **+5 −0** with the
+correct hunk, so [AG-5](decisions.md#ag-5)'s central claim — that the raw `PreToolCallDecideHook`
+carries enough to render a diff — holds in the browser and not only in the phase-2 probe. The write
+landed correctly. The step stream drove tool cards as they arrived.
+
+**What did not.** The turn was declared dead in the UI while it was still running, and then edited the
+file anyway.
+
+### 1. `chat_streaming` awaits the whole turn, and the browser gives up at 75s
+
+The transcript ended at a single line —
+
+> **ASSISTANT** — **Error:** Timed out waiting for response
+
+— with every tool card that had already rendered *replaced* by it: no diff, no answer, no footer, tab
+reading `Main: idle`. Meanwhile the server log ran on to `STATE_FULLY_IDLE` three minutes later and
+`calc.py` gained its function.
+
+The two engines implement the same router method with opposite lifetime contracts, and the docstrings
+say so plainly:
+
+| | Returns when | Survives a disconnect |
+|---|---|---|
+| `claude_code/service.py:1232` | *"as soon as the engine has accepted it"* — the turn runs in a background task | yes, *"a client that disconnects mid-turn re-attaches to a turn that kept running"* |
+| `antigravity/service.py:318` | after `async for event in session.stream_turn(...)` drains — i.e. the whole turn | no |
+
+The browser's JRPC deadline is 75s (`webapp/src/app-shell/index.js:230`). So **any Antigravity turn
+longer than 75 seconds renders a fatal error while continuing to run**, and a permission dialog makes
+that a certainty rather than a risk, because the user's own thinking time is inside the budget. Timed
+from the log: prompt at 12:30:47, the deadline fired at ~12:32:02 while the `view_file` dialog was
+open, the turn finished at 12:35:32.
+
+**This is the worst available failure mode**, and worth naming as such: the app tells the user the
+turn failed, destroys the record of what it did, and *then* writes to their file. A user who read that
+error and walked away would have an edited working tree and no idea. Everything else on this list is
+cosmetic beside it, and nothing downstream is trustworthy until it is fixed. The fix is a port rather
+than a design — Claude's implementation is the template.
+
+The same defect costs the reload case: an Antigravity turn does not survive a refresh, and a Claude
+one does.
+
+### 2. Every read-only tool call raises a modal
+
+Four dialogs for one edit — `find_file`, `view_file`, `edit_file`, `view_file` — of which exactly one
+is a mutation.
+
+`ALWAYS_ASK` and `GATED_BY_DEFAULT` are both computed correctly at
+`antigravity/permissions.py:271`, but they only populate the payload's `gated_by_default` field, which
+shapes the dialog's *wording*. Nothing consults them before `broker.can_use_tool`, so the gate
+forwards every call the `PreToolCallDecideHook` sees, and in Ask mode the broker asks about all of
+them. On Claude the CLI decides which calls need `can_use_tool` and auto-allows reads, so the shared
+broker never sees them — which is why one shared broker across two engines does not by itself give one
+behaviour.
+
+The dialog then states something false. It says:
+
+> read calls are not normally gated. This one is: A deny or ask rule matched, or a hook asked for
+> confirmation.
+
+No rule matched. On this engine every read is gated, so the sentence explaining why *this* one is
+unusual is the sentence that is wrong. **The harness agrees with Claude, not with us** — its own log
+reads `permission_manager.go:917] permissions: skipping check for step 2: handler *handlers.FindHandler
+does not declare permissions`, so Antigravity's own permission manager considers `find_file`
+permission-free while AIC⚡DC asks about it.
+
+The fix is to consult the existing classification before the broker, honouring deny rules and
+`denied_read_files` so the narrowing cannot become a hole.
+
+### 3. The read tools' argument aliases are against names the SDK does not send
+
+The dialog rendered `PATH (none named)` directly above an input block reading
+`{"AbsolutePath": "/tmp/ag-repo/calc.py"}`.
+
+`ARG_ALIASES["view_file"]` maps `TargetFile`; the hook is handed **`AbsolutePath`**. `find_file` has
+no entry at all and is handed `Pattern` / `SearchDirectory`. The **mutating** aliases are all correct
+— `edit_file` really does send `TargetFile`, `TargetContent`, `ReplacementContent`, `Instruction` —
+which is exactly why the diff rendered and nobody noticed the read half had drifted.
+
+**The surface probe structurally cannot catch this**, and its own docstring says why: reflection sees
+*shape*, and an argument name inside a JSON string is not shape. This is the third finding in this
+directory of that kind, after `agy` frames with no content and `policy.ask_user`'s bare bool.
+
+### 4. The hook and the step stream use different names for the same call
+
+Not a defect yet, and the thing most likely to become one:
+
+| Call | Hook `argumentsJson` | Step stream |
+|---|---|---|
+| `find_file` | `Pattern`, `SearchDirectory` | `findFile.query`, `findFile.directoryPath` |
+| `view_file` | `AbsolutePath` | `viewFile.filePath` |
+| `edit_file` | `TargetFile`, `TargetContent`, `ReplacementContent` | `editFile.filePath`, `editFile.diffBlock` |
+
+Two vocabularies for one call, and the step stream's paths are `file://` URIs where the hook's are
+bare. Recorded in [`sdk-surface.md`](sdk-surface.md) so the next module to read a path picks
+deliberately rather than by whichever it met first.
+
+### What this says about the phase
+
+Phase 3's entry ended on *"the fakes described a friendlier SDK than the real one"*. This run is the
+same lesson one layer up: **the offline suite described a friendlier engine than the real one**, and
+every one of these four is a thing no unit test was ever going to fail on — a lifetime contract, a
+call that is asked about rather than allowed, an alias against a name nobody sent, and two spellings
+that agree until they do not. The gate for phase 4 is a conversation, and it has to be held.
