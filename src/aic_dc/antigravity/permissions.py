@@ -249,7 +249,19 @@ def denormalise_args(tool_name: str, amended: dict[str, Any]) -> dict[str, Any]:
     aliases = ARG_ALIASES.get(tool_name)
     if not aliases:
         return dict(amended)
-    reverse = {target: source for source, target in aliases.items()}
+    # First alias wins, which is why this is a loop and not a
+    # comprehension. Two source names can share a target — `CommandLine`
+    # and `Command` both mean `command`, `AbsolutePath` and `TargetFile`
+    # both mean `file_path` — and a comprehension keeps the *last*, so an
+    # amended command went back as `Command` while the engine sends and
+    # reads `CommandLine`. `overwrite`/`modified_args` is a merge, so an
+    # unrecognised key lands *beside* the real one and leaves it in place:
+    # the amend silently does nothing and the original command runs. The
+    # aliases are ordered with the engine's own spelling first for exactly
+    # this reason, and `setdefault` is what honours that order.
+    reverse: dict[str, str] = {}
+    for source, target in aliases.items():
+        reverse.setdefault(target, source)
     out: dict[str, Any] = {}
     for key, value in amended.items():
         out[reverse.get(key, key)] = value

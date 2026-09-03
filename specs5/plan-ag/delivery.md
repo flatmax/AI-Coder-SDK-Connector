@@ -1900,7 +1900,45 @@ Four new assertions come with it, and they check the *class* rather than merely 
 — because an unrecognised name is already gated, so the omission this guards against does not ungate
 anything. It renders a file edit as a shell command with no diff.
 
-**What is not built:** the adapter itself — session lifecycle, the step reader, cancel, and the socket
-server on the host side that `hook.py` talks to. The handshake it needs is proved and written down in
+### The host end, and a shipped bug it exposed (same day)
+
+`agy/gate_server.py` is what `hook.py` connects to: one unix socket per session, one connection per
+tool call. It owns almost nothing — the queue, the countdown, the localhost rule, the dialog payload
+and the diff are all the *shared* `PermissionBroker`'s, reached through the existing
+`AntigravityPermissionGate`. So a request raised by `agy` lands in the same `pending()` list and
+renders in the same dialog as one raised by any other engine, which is
+[`permissions.md`](../3-engine/permissions.md)'s *one ask path* holding across a third transport.
+
+Three things are genuinely this module's, and each is a small surprise:
+
+- **There is no call id.** The hook's JSON carries `conversationId`, `stepIdx`, `toolCall`,
+  `transcriptPath`, `workspacePaths` and `artifactDirectoryPath` — the raw protobuf has a `callId`
+  and the hook's payload does not. One is composed from the conversation and the step index: unique
+  within a conversation, stable across a retry of the same step.
+- **`stop()` releases before it closes**, and the order is load-bearing. While the registry entry
+  stands the hook *denies* anything it cannot get an answer for, so closing the socket first would
+  refuse a tool call racing the shutdown. Releasing first makes it pass through as unowned, which is
+  what it is.
+- **A stale socket file is removed on `start()`**, because a killed process leaves one and `bind`
+  would fail on it — at session start, where it reads as "the engine will not run" rather than as
+  stale state.
+
+**And writing the amend test found a bug in shipped code.** `denormalise_args` built its reverse map
+with a dict comprehension, so where two source names share a target the *last* won: `CommandLine` and
+`Command` both mean `command`, so an amended command went back as `Command` while the engine sends
+and reads `CommandLine`.
+
+That failure is silent and worse than an error, because `overwrite`/`modified_args` is a **merge**:
+the unrecognised key lands *beside* the real one rather than replacing it, so the original argument
+survives. **The user watches themselves edit a dangerous command, allows it, and the command they
+edited away runs.** A manufactured record of consent — the same family as
+[AG-R-11](risks.md#ag-r-11), reached by a third road, and present on the SDK path since the aliases
+were written.
+
+Fixed by preferring the *first* alias, which is why the tables are ordered with the engine's own
+spelling first. Four regression tests, and the near-miss is worth naming: nothing on the SDK path
+exercised an amend, so it took building a second transport to notice.
+
+**What is not built:** the session adapter — lifecycle, the step reader, and cancel. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.

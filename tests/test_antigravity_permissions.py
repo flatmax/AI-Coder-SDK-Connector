@@ -298,6 +298,48 @@ class TestArgumentTranslation:
 # ----------------------------------------------------------------------
 
 
+class TestTheAmendPathGoesBackSpelledRight:
+    """`overwrite`/`modified_args` is a *merge*, which is what makes this bite.
+
+    An unrecognised key lands beside the real one rather than replacing it,
+    so a mis-spelled amend does not error — the original argument stays and
+    the call runs as the agent proposed it. The user watches themselves
+    edit a command, allows it, and the command they edited away executes.
+    That is a manufactured record of consent, the same family as AG-R-11.
+
+    Found 2026-09-03 while wiring the `agy` transport, and present on the
+    SDK path since the aliases were written: two source names can share a
+    target, and the reverse map was a dict comprehension, so the *last*
+    won.
+    """
+
+    def test_a_command_goes_back_as_the_engine_spells_it(self):
+        assert denormalise_args("run_command", {"command": "ls"}) == {
+            "CommandLine": "ls"
+        }
+
+    def test_the_first_alias_wins_wherever_two_share_a_target(self):
+        """The tables are ordered with the engine's own spelling first."""
+        assert denormalise_args("view_file", {"file_path": "/a"}) == {
+            "AbsolutePath": "/a"
+        }
+
+    def test_an_edits_fields_survive_the_round_trip(self):
+        """The case that already worked, pinned so the fix cannot regress it."""
+        original = {
+            "TargetFile": "/tmp/a.py",
+            "TargetContent": "old",
+            "ReplacementContent": "new",
+        }
+        assert denormalise_args("edit_file", normalise_args("edit_file", original)) | original == (
+            denormalise_args("edit_file", normalise_args("edit_file", original))
+        )
+
+    def test_an_unknown_key_is_passed_through(self):
+        """A newer engine's field is more likely than a mistake."""
+        assert denormalise_args("run_command", {"Newfangled": 1}) == {"Newfangled": 1}
+
+
 class TestNothingMutatingIsUngated:
     def test_the_seam_is_read_from_the_transports_not_restated(self):
         """One seam per transport, and neither restated here.
