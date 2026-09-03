@@ -1881,6 +1881,25 @@ product's central feature silently degrades. Recorded in
 [`sdk-surface.md`](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03);
 a per-transport name map is a requirement of the adapter rather than a refinement.
 
+### The vocabulary, merged rather than kept beside (same day)
+
+The trap above is closed. `agy/tools.py` holds this transport's tool classes, write seam, argument
+aliases and diff shapes, and `permissions.py` **merges** them into the tables it already has rather
+than consulting a second set. The names do not collide — no SDK tool is called
+`replace_file_content` — so one table can hold both vocabularies, and one table cannot disagree with
+itself. Two would be the copy that drifts, and the direction it drifts is a mutating tool nobody
+gates.
+
+`ALWAYS_ASK` widens from `MUTATING_TOOLS` to the union of both transports' write seams, which broke
+`test_the_seam_is_read_from_options_not_restated` — a test asserting `ALWAYS_ASK is MUTATING_TOOLS`.
+Restated rather than deleted: identity no longer holds and the property it stood for does, so it now
+asserts the seam is *derived from* both modules and equal to their union. A literal set in
+`permissions.py` would be exactly the drift it was written to prevent.
+
+Four new assertions come with it, and they check the *class* rather than merely that a dialog appears
+— because an unrecognised name is already gated, so the omission this guards against does not ungate
+anything. It renders a file edit as a shell command with no diff.
+
 **What is not built:** the adapter itself — session lifecycle, the step reader, cancel, and the socket
 server on the host side that `hook.py` talks to. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown

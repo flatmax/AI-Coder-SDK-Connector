@@ -83,6 +83,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aic_dc.antigravity.agy import tools as agy_tools
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.claude_code.permissions import (
     GATED_BY_DEFAULT,
@@ -189,7 +190,26 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
 #: ``run_command`` is in it: a denied ``edit_file`` came back as ``sed -i``
 #: on both probe runs, so a gate that covered only the file tools would
 #: produce a manufactured record of consent.
-ALWAYS_ASK = MUTATING_TOOLS
+ALWAYS_ASK = MUTATING_TOOLS | agy_tools.MUTATING_TOOLS
+
+# --- The `agy` transport's vocabulary, merged rather than kept beside ---
+#
+# AG-14 adds a second transport that reaches the *same* Antigravity through
+# the CLI, and the two products agree on argument names while disagreeing on
+# tool names — `replace_file_content` rather than `edit_file`. The names do
+# not collide, so one table can hold both vocabularies, and one table cannot
+# disagree with itself; two would be the copy that drifts. Same reasoning as
+# `ALWAYS_ASK is MUTATING_TOOLS` above, which is why that seam is widened
+# here rather than duplicated.
+#
+# Merged *after* the SDK entries and with `setdefault` semantics in mind:
+# where a name is shared (`run_command`, `view_file`, `generate_image`) the
+# two agree, and an SDK entry must win any future disagreement, because the
+# SDK path is the one with an enforcing gate.
+for _name, _cls in agy_tools.TOOL_CLASSES.items():
+    TOOL_CLASSES.setdefault(_name, _cls)
+for _name, _aliases in agy_tools.ARG_ALIASES.items():
+    ARG_ALIASES.setdefault(_name, _aliases)
 
 
 def normalise_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -337,7 +357,15 @@ def _diff_tool_for(tool_name: str) -> str:
     ``edit_file`` carries old and new text, which is Claude's ``Edit``.
     ``create_file`` and ``generate_image`` carry whole content or no
     content, which is ``Write``.
+
+    ``agy``'s names are answered from :data:`agy_tools.DIFF_SHAPE`, because
+    that transport calls the same operations something else. Getting this
+    wrong is the quiet failure ``agy/tools.py`` documents: the gate still
+    holds, and the dialog renders no diff.
     """
+    shape = agy_tools.DIFF_SHAPE.get(tool_name)
+    if shape is not None:
+        return shape
     return "Edit" if tool_name == "edit_file" else "Write"
 
 

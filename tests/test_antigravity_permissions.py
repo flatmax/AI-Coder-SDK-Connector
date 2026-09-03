@@ -34,6 +34,7 @@ from aic_dc.antigravity import permissions as ag_permissions
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.antigravity.permissions import (
     ALWAYS_ASK,
+    ARG_ALIASES,
     TOOL_CLASSES,
     AntigravityPermissionGate,
     denormalise_args,
@@ -298,9 +299,74 @@ class TestArgumentTranslation:
 
 
 class TestNothingMutatingIsUngated:
-    def test_the_seam_is_read_from_options_not_restated(self):
-        """One seam, so the two modules cannot drift."""
-        assert ALWAYS_ASK is MUTATING_TOOLS
+    def test_the_seam_is_read_from_the_transports_not_restated(self):
+        """One seam per transport, and neither restated here.
+
+        This asserted ``ALWAYS_ASK is MUTATING_TOOLS`` until AG-14 added a
+        second transport whose tool names differ — ``replace_file_content``
+        rather than ``edit_file`` — so the seam is now the union of both.
+        Identity no longer holds and the property it stood for does: the
+        write boundary is *read from* the modules that define it, so a tool
+        added to either set is gated here without anyone editing this file.
+
+        A literal set in ``permissions.py`` would be the copy that drifts,
+        and the direction it drifts is a mutating tool nobody gates.
+        """
+        from aic_dc.antigravity.agy import tools as agy_tools
+
+        assert MUTATING_TOOLS <= ALWAYS_ASK
+        assert agy_tools.MUTATING_TOOLS <= ALWAYS_ASK
+        assert ALWAYS_ASK == MUTATING_TOOLS | agy_tools.MUTATING_TOOLS
+
+    def test_every_agy_write_tool_is_gated(self):
+        """The trap `agy/tools.py` exists for, asserted from this side.
+
+        An unrecognised name still classifies as ``exec`` and is gated, so
+        omitting one of these would not ungate it — it would render a file
+        edit as a shell command with no diff. That is a gate holding while
+        the product's central feature degrades, which is why this checks
+        the *class* and not merely that a dialog appears.
+        """
+        from aic_dc.antigravity.agy import tools as agy_tools
+
+        for tool in agy_tools.MUTATING_TOOLS:
+            assert tool in ALWAYS_ASK, tool
+            assert TOOL_CLASSES[tool] in ("write", "exec", "delegate"), tool
+
+    def test_an_agy_edit_renders_as_a_diff_not_a_command(self):
+        """`replace_file_content` is Claude's `Edit` in shape, not `Write`."""
+        from aic_dc.antigravity.permissions import _diff_tool_for
+
+        assert _diff_tool_for("replace_file_content") == "Edit"
+        assert _diff_tool_for("multi_replace_file_content") == "Edit"
+        assert _diff_tool_for("write_to_file") == "Write"
+        # The SDK's own names are untouched by the merge.
+        assert _diff_tool_for("edit_file") == "Edit"
+        assert _diff_tool_for("create_file") == "Write"
+
+    def test_an_agy_edits_arguments_reach_the_diff_builder(self):
+        """The half the two products agree on, pinned."""
+        merged = normalise_args(
+            "replace_file_content",
+            {
+                "TargetFile": "/tmp/x/a.py",
+                "TargetContent": "old",
+                "ReplacementContent": "new",
+            },
+        )
+        assert merged["file_path"] == "/tmp/x/a.py"
+        assert merged["old_string"] == "old"
+        assert merged["new_string"] == "new"
+
+    def test_a_shared_name_keeps_the_sdks_meaning(self):
+        """Where the two agree, the SDK entry wins any future divergence.
+
+        The SDK path is the one with an enforcing gate, so it is the one a
+        disagreement must resolve toward.
+        """
+        assert TOOL_CLASSES["run_command"] == "exec"
+        assert TOOL_CLASSES["view_file"] == "read"
+        assert ARG_ALIASES["run_command"]["CommandLine"] == "command"
 
     def test_every_mutating_tool_is_classified(self):
         assert set(ALWAYS_ASK) <= set(TOOL_CLASSES)
