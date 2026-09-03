@@ -1746,6 +1746,29 @@ its mechanism: the handler is the shared chat panel's, and any engine's
 `engine_error` meets the same silence. It is Antigravity-specific in how often it
 fires, because the free tier's ceiling is 20 requests.
 
-Queued rather than fixed with the other three: it is a chat-panel change with its
-own spec section ([`chat.md` § Engine Event Routing](../5-webapp/chat.md#engine-event-routing))
-and it was found during verification rather than in the run this entry records.
+**Fixed the same day.** `onSystemEvent` now renders the three subtypes that carry
+something a *user* must read — `engine_error`, `turn_timeout` and `engine_notice` —
+as durable transcript cards, with a toast only as the glance. The reasoning lives in
+[`chat.md` § Engine Event Routing](../5-webapp/chat.md#engine-event-routing); the
+short version is that a toast expires in about three seconds and neither the rate
+limit nor the reader's absence does. Repeats are dropped, because one error arrives
+as several `stepUpdate` frames for one step — three, in the run that found this.
+
+The forward-compat diagnostics (`unknown_step`, `unknown_message`, `step_unreadable`)
+deliberately stay out of the transcript: they are about our reader rather than the
+user's turn, and `engine-errors.jsonl` and the Debug section are their home.
+
+**And a sixth thing fell out of building it.** The first attempt appended
+`{role: 'system'}` and the card rendered under an **"Assistant"** heading, because
+`renderMessage` reads `system_event` for the label and treats every non-`user` role
+as the assistant. That is precisely the attribution `steps.py` routes
+`SYSTEM_MESSAGE` away from a text block to avoid, arrived at from the other
+direction. Five producers already had the flag right; `handleUnsupportedSlash` did
+not, and had been telling users the engine's refusal of a slash command in the
+assistant's voice. Corrected with the same change.
+
+Verified: the card renders under a **SYSTEM** heading carrying the engine's own
+words, the HTTP code and the retry delay. The end-to-end path was exercised through
+`app-shell`'s own `systemEvent` entry point with the exact payload captured from the
+live 429 — the backend half was already proved by that capture, and the free tier
+would not produce a second one on demand.

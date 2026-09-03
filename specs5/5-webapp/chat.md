@@ -630,7 +630,36 @@ Handler routes `compactionEvent` stages and adjacent engine events to appropriat
 | `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption. The banner sits between the transcript and the input area beside the disconnected note — both are standing conditions about the channel rather than events in the conversation — and shows the count of failed appends, the engine's last error, the version and credential warnings, and one line per capability the session started without. Amber, not the note's red: the conversation works. Red only once the engine reports the gap count past the repo's `history.mirror_gap_tolerance`, at which point the banner says to read the mirror as broken rather than unlucky and where to look; the comparison is the engine's, and the browser is handed the verdict rather than the threshold. Dismissal is keyed to *which* problems are showing, including how many gaps and whether they have escalated, so a warning that has been read stays quiet and the next thing to go wrong — or the same thing getting worse — does not. `connected: false` alone is not a fault: it is the normal state before the first prompt, and a session that loses its engine says so in `last_error`. Underneath the summary lines, the payload's tail of the CLI's own stderr renders as preformatted output — the last thing the subprocess said, which on a failed connect is the only diagnosis there is. It is the one field that can *only* be read and never raise the banner: it is absent from both the problem test and the dismissal key, because the CLI writes routine chatter there and the tail grows on a healthy session, so it must not open a banner and must not undo a dismissal. Appended after the summary, so a banner forced open on a healthy engine still says the engine reports nothing wrong and then shows the output. The payload has no MCP server list to leave out: `EngineHealth.mcp` was declared, serialised and never written, and was deleted 2026-08-28 — per-server detail is the Context tab's, read from `get_mcp_status()`, which can fail visibly where a field that always answered `[]` could not |
 | `disk_warning` (on the state snapshot and on `postResponseComplete`) | A system-event card in the transcript, not a toast: the sentence names a threshold, a cause and what to do about it, which is more reading than a toast's three seconds allow, and the card renders the directory it names as code. Read from *both* carriers, because the server spends one flag on whichever notices first — the snapshot for "checked at startup", a finished turn for a session that crosses the threshold while the browser is open. No request-id filter: the directory belongs to the session, so a collaborator's turn is as good a messenger as our own. The browser adds no one-shot of its own; a second owner of that rule could only disagree with the server's, and would swallow the honest second warning from a restarted server |
 
+| `systemEvent` → `engine_error` | A system-event card in the transcript **and** an error toast. Same argument as `disk_warning` above: the engine's message is more reading than a toast's three seconds allow, and it is the only account of why the turn stopped. The card carries the engine's own words verbatim plus the HTTP code where there is one; the toast carries only enough to send the reader to the card. Repeats are dropped — one error arrives as several `stepUpdate` frames for the same step, and three copies of a 600-character message is a worse transcript than none |
+| `systemEvent` → `turn_timeout` | Same treatment. The sentence names the bound that was exceeded **and** says that anything already done stands, including a file already written — which is the half a reader has to act on, and the half a bare "timed out" withholds |
+| `systemEvent` → `engine_notice` | Card, no toast. The harness speaking rather than the model: `steps.py` routes `StepType.SYSTEM_MESSAGE` to a `systemEvent` instead of a text block precisely so it is not read as the assistant's prose, which only works if something renders it |
+| `systemEvent` → `unknown_step`, `unknown_message`, `step_unreadable` | Nothing in the transcript. These are forward-compat diagnostics about *our* reader rather than about the user's turn, and they have a home in `.aic-dc/engine-errors.jsonl` and the Debug section. Putting them here would spend the reader's attention on our bookkeeping |
+
 Handler accepts events for both the current streaming request ID and the most recently completed request ID, since post-turn housekeeping runs asynchronously after `streamComplete`.
+
+#### Every `systemEvent` but one used to fall off the end of the handler
+
+*Found in the phase-4 live run, 2026-09-03.* An Antigravity turn died on a free-tier `429`. The engine
+reported it as a step addressed to **`TARGET_USER`** carrying the quota, the limit of 20 and *"Please
+retry in 29.957436016s"*; `steps.py` translated it faithfully into an `engine_error`; and the chat
+rendered two tool cards and a stop — no badge, no message, no advice. `onSystemEvent` handled exactly
+one subtype, `conversation_reset`, and returned silently for every other.
+
+The bridge that delivers these says the opposite in its own docstring — *"surfaced rather than
+swallowed, because a silently dropped message type is how a CLI upgrade breaks the UI invisibly"*
+(`app-shell/index.js`). That was the intent; the handler is where it stopped being true, and the gap
+was invisible because the one handled subtype is rare and the dropped ones are rarer still on Claude.
+
+**The mechanism is not engine-specific even though the run that found it was.** This is the shared chat
+panel, so any engine's `engine_error` met the same silence. Only the *frequency* belongs to
+Antigravity, whose free tier caps at 20 requests.
+
+**A system row is `system_event: true`, not `role: 'system'`.** `renderMessage` reads the flag for both
+the label and the styling and treats every non-`user` role as the assistant, so a `{role: 'system'}`
+message renders under an **"Assistant"** heading — attributing the harness's words to the model, which
+is the exact confusion `steps.py` routes `SYSTEM_MESSAGE` away from a text block to avoid. Five
+producers already had this right (`events.js`, `tabs.js`, `subagent-tabs.js`); the unsupported-slash
+notice did not, and was corrected with this change.
 
 The `compacted` stage of the old pipeline — which replaced the whole message list with a
 model-generated summary — has no successor. Compaction is the engine's, it happens to the engine's
@@ -695,6 +724,8 @@ the UI in two places that must be got right:
 - One restore path, two routes into it. A transcript reached by resuming (`session-changed`) and the same transcript reached by reconnecting (`state-loaded`) are normalized by the same function, so they cannot render differently. An assistant turn keeps its `blocks`, files, and footer through a restore rather than collapsing to prose, and nothing absent from the record is defaulted — a turn the transcript could supply no usage for draws no footer, and one with no terminal reason draws no badge
 - Up-arrow recall is seeded from the restored list, not the raw one, so it skips exactly what the renderer labels as a system event. A compact summary is a user-role record the CLI wrote about the context it dropped, and it is never offered back as something the user typed
 - No system event is fed back to the model
+- Anything the engine addresses to the *user* reaches the transcript. A turn that stopped for a reason the engine explained never renders as a turn that merely stopped: the explanation is a durable card, not only a toast, because a toast outlives neither the condition nor the reader's absence
+- A row the engine authored is marked `system_event`, never merely given a non-`user` role. The label and the styling both read that flag, so an unmarked row is attributed to the assistant — which is the one attribution these rows exist to avoid
 - Session-changed handler resets streaming state before replacing the message list
 - Passive stream completion always prepends the user message from the result if present
 - A turn's tool cards are never hidden by a global preference; the transcript always shows what the agent did

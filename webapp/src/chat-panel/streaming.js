@@ -598,16 +598,96 @@ export function onEngineHealth(panel, event) {
 }
 
 /**
+ * The `system-event` subtypes that say something to the *user*, and what.
+ *
+ * Returns null for everything else, which is most of them and deliberately:
+ * `unknown_step`, `unknown_message` and `step_unreadable` are forward-compat
+ * diagnostics about *our* reader rather than about the user's turn, and they
+ * have a home already in `.aic-dc/engine-errors.jsonl` and the Debug section.
+ * Putting them in the transcript would spend the reader's attention on our
+ * bookkeeping.
+ *
+ * The three here are the opposite: each is the engine explaining, in its own
+ * words, something that happened to the turn in front of the user.
+ *
+ * `text` goes in the transcript and `toast` is the glance. They differ on
+ * purpose — the same lesson `pre_compact` taught below, from the other
+ * direction. A toast expires in about three seconds; a rate-limit message
+ * naming a retry delay is worth more than three seconds, and the user may not
+ * be looking. So the durable copy carries the engine's whole message and the
+ * toast carries only enough to send them to it.
+ *
+ * @param {string} subtype
+ * @param {object} data — the subtype's own payload
+ * @returns {{text: string, toast: string, severity: string}|null}
+ */
+export function systemNotice(subtype, data) {
+  const payload = data && typeof data === 'object' ? data : {};
+  const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+  if (subtype === 'engine_error') {
+    // The HTTP code earns its place: 429 is the free tier's request ceiling
+    // and the single most likely reason an Antigravity turn dies mid-way,
+    // and it reads very differently from a 500.
+    const code = Number.isFinite(payload.http_code) && payload.http_code
+      ? ` (HTTP ${payload.http_code})`
+      : '';
+    return {
+      text: `The engine reported an error${code}: ${message || 'no message was given.'}`,
+      toast: '❌ The engine reported an error',
+      severity: 'error',
+    };
+  }
+  if (subtype === 'turn_timeout') {
+    const seconds = Number.isFinite(payload.seconds) ? payload.seconds : null;
+    const bound = seconds === null ? '' : ` after ${Math.round(seconds)}s`;
+    return {
+      text:
+        `The turn was abandoned${bound} because it exceeded this engine's `
+        + 'time limit. Anything it had already done stands — including any '
+        + 'file it had already written.',
+      toast: '⏱️ The turn timed out',
+      severity: 'error',
+    };
+  }
+  if (subtype === 'engine_notice' && message) {
+    // The harness speaking rather than the model. `steps.py` routes it here
+    // instead of into a text block precisely so it is not rendered as the
+    // assistant's prose — which only works if something renders it at all.
+    return { text: message, toast: '', severity: 'info' };
+  }
+  return null;
+}
+
+/**
  * Handle a `system-event` window event.
  *
- * Almost all of these are diagnostics with no user-facing consequence. One is
- * not: `conversation_reset` — the engine dropped the conversation underneath
- * us. The user's next turn will start from nothing, so saying so is the
- * difference between a surprise and an explanation.
+ * `conversation_reset` — the engine dropped the conversation underneath us.
+ * The user's next turn will start from nothing, so saying so is the difference
+ * between a surprise and an explanation.
  *
- * `pre_compact` used to toast here and no longer does. The compaction it
- * announces runs for tens of seconds; the toast expired after three, so the
- * stall it existed to explain was unexplained for most of its duration.
+ * **Everything else used to fall off the end of this function**, and the
+ * phase-4 live run is what made that visible. A turn died on a free-tier
+ * `429`; the engine reported it as a step addressed to `TARGET_USER` carrying
+ * the quota, the limit and *"Please retry in 29.957436016s"*; `steps.py`
+ * translated it faithfully into an `engine_error`; and the chat rendered two
+ * tool cards and a stop, with no badge, no message and no advice. The
+ * bridge's own docstring in `app-shell/index.js` says these are "surfaced
+ * rather than swallowed, because a silently dropped message type is how a CLI
+ * upgrade breaks the UI invisibly" — which was the intent, and this handler
+ * was where it stopped being true.
+ *
+ * The mechanism is not engine-specific even though the run that found it was:
+ * this is the shared chat panel, so any engine's `engine_error` met the same
+ * silence. Only the *frequency* is Antigravity's, because the free tier caps
+ * at 20 requests.
+ *
+ * Repeats are dropped. One error arrives as several `stepUpdate` frames for
+ * the same step — three, in the run that found this — and three copies of a
+ * 600-character quota message is a worse transcript than none.
+ *
+ * `pre_compact` deliberately does not toast. The compaction it announces runs
+ * for tens of seconds; the toast expired after three, so the stall it existed
+ * to explain was unexplained for most of its duration.
  * `aic-compaction-progress` reads the same event off the same window channel
  * and holds an indicator until the engine retracts it — see
  * compaction-progress.js. Toasting as well would announce one compaction
@@ -620,7 +700,26 @@ export function onSystemEvent(panel, event) {
   const subtype = data?.subtype;
   if (subtype === 'conversation_reset') {
     panel._emitToast('The engine reset the conversation', 'warning');
+    return;
   }
+  const notice = systemNotice(subtype, data?.data);
+  if (!notice) return;
+
+  const last = panel.messages[panel.messages.length - 1];
+  if (last?.system_event && last.content === notice.text) return;
+
+  // `system_event: true` is what `renderMessage` reads for the label and the
+  // styling — **not** `role`, which only distinguishes You from Assistant.
+  // A `{role: 'system'}` message renders under an "Assistant" heading, which
+  // is precisely the attribution `steps.py` routes these away from a text
+  // block to avoid. Matches the five other producers of engine-authored rows
+  // (`events.js`, `tabs.js`, `subagent-tabs.js`).
+  panel.messages = [
+    ...panel.messages,
+    { role: 'user', content: notice.text, system_event: true },
+  ];
+  if (notice.toast) panel._emitToast(notice.toast, notice.severity);
+  panel.requestUpdate();
 }
 
 /**
@@ -1026,9 +1125,14 @@ export function handleUnsupportedSlash(panel, result) {
   const equivalent = typeof result?.equivalent === 'string' && result.equivalent
     ? `\n\nUse ${result.equivalent} instead.`
     : '';
+  // `system_event: true`, not `role: 'system'`. This row said the engine had
+  // no meaning for a command and rendered it under an "Assistant" heading,
+  // because `renderMessage` reads the flag and treats every non-`user` role
+  // as the assistant. The same slip the engine-error rows above were written
+  // to avoid, one function away.
   panel.messages = [
     ...panel.messages,
-    { role: 'system', content: `${message}${equivalent}` },
+    { role: 'user', content: `${message}${equivalent}`, system_event: true },
   ];
   panel._emitToast(message, 'warning');
 }
