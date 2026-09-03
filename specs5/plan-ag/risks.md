@@ -358,52 +358,57 @@ completion, and asserts the file's bytes are unchanged — asserting on the *fil
 having fired. A hook-level assertion passes while the file is being rewritten by `sed`, which is
 precisely the hole. It goes red if a future engine adapter gates file tools only.
 
-## AG-R-12 — The `agy` hook gate fails open
+## AG-R-12 — An `agy` hook gate is only as wide as its matcher
 
-**Raised 2026-09-03, and it is the finding that keeps [AG-2](decisions.md#ag-2) standing after both
-of its original reasons went obsolete.** Recorded as a risk rather than a closed door, because it is
-the one thing between `agy` and being a viable engine on a paid subscription — and unlike the
-original reasons, it is a specific testable condition rather than a structural absence.
+**Raised 2026-09-03 as "the hook gate fails open", and corrected the same day when the original
+measurement turned out to be wrong.** The wrong version is kept in outline because the way it was
+wrong is the risk.
 
-**The exposure.** An `agy` adapter would have to gate writes through a `PreToolUse` hook, and two
-measured facts combine badly:
+**What was measured first.** A `PreToolUse` hook sleeping 10s against `"timeout": 3` was invoked, the
+deadline passed, and the edit landed. Read as: a timeout does not block, so the gate fails open.
 
-1. `agy`'s own headless permission layer auto-denies anything it would otherwise prompt for — a probe
-   turn stopped at `read_file` before it ever reached an edit. So the adapter must launch with
-   `--dangerously-skip-permissions`, which removes every other check.
-2. **A hook that exceeds its `timeout` does not block the tool.** Probed with a hook sleeping 10s
-   against `"timeout": 3`: the hook was invoked, the deadline passed, and the write landed anyway.
-   The default `timeout` is **30 seconds**.
+**What was wrong with it.** That probe's `matcher` was `replace_file_content` alone. Re-run with
+`"matcher": "*"`, the identical timeout **blocked the write** — the file was untouched and the agent
+reported *"the configured `PreToolUse` lifecycle hook intercepted and blocked the tool execution."*
+A hook killed at its deadline exits non-zero, and `agy` treats that as a refusal.
 
-So on the only path where the hook is the gate, it is *also* the only gate — and it is bypassed
-whenever it is slow, crashed, or not installed. It is slow **by design**: it is blocking on a human
-reading a diff. A user who takes 31 seconds to decide gets the edit they had not yet approved, with
-no record that anything was skipped.
+So the timeout is not the hole. **The hole is a narrow matcher**: a blocked tool is an error the model
+can see, and it will reach for a different tool to accomplish the same thing. Anything the matcher
+does not cover is ungated. That is [AG-R-11](#ag-r-11) exactly — a denied edit re-attempted by
+another route — on a third mechanism, after `sed -i` and inline `python3`.
 
-This is [AG-R-11](#ag-r-11)'s shape from a new direction and strictly worse. AG-R-11 is a refused
-edit re-attempted through another tool; this is a refused edit applied *because the refusal was
-slow*. It also breaks `../3-engine/permissions.md`'s *every request resolves exactly once*: the
-request is still on screen when the operation it governs has already run.
+**The failure modes, measured.** Only one of four fails open, and it is the one under our control:
 
-**Contrast the SDK, which is why AG-2 survives.** `HookResult(allow=False)` **blocks the write** —
-verified in phase 2 against a real file. `agy`'s hook is a *cooperative* gate; the SDK's is an
-*enforcing* one. [AG-5](decisions.md#ag-5) makes the dialog a requirement of this engine rather than
-a feature, and a requirement that fails open is not a requirement.
+| Hook behaviour | Tool | Why |
+|---|---|---|
+| exceeds `timeout` | **blocked** | killed at the deadline, which is a non-zero exit |
+| exits non-zero | **blocked** | `command failed: exit status 1` |
+| prints malformed JSON | **blocked** | unmarshal failure |
+| command missing / not executable | **blocked** | `exit status 127` |
+| **prints nothing, exits 0** | **allowed** | parsed as `{}`, empty decision defaults to allow |
 
-**What would retire this risk** — in order of how much it would settle:
+**Mitigations, all cheap and none speculative:**
 
-1. **A `timeout` large enough to outlast any dialog, if the value is honoured without a cap.** Turns
-   fail-open into fail-hang, which is the right direction: a stuck host stalls the agent instead of
-   writing without consent. Unmeasured — the cap is the next probe, and the whole question may turn
-   on it.
-2. **An adapter that refuses to start a turn** unless it has verified the hook is installed and its
-   IPC answers. Closes "absent or crashed", not "slow".
-3. **A `PostToolUse` revert** of anything written without an approval on record. After the fact, and
-   no help for `run_command`.
-4. **Filesystem containment** — running the agent against a copy or an overlay and applying approved
-   changes ourselves. Closes it completely and is a different product shape.
+- **`"matcher": "*"`, never a tool list.** The seam is every tool, for the same reason
+  [AG-5](decisions.md#ag-5) makes it every *mutating* tool on the SDK: a gate the model can walk
+  around is a manufactured record of consent. A per-tool matcher is the mistake this entry exists to
+  prevent.
+- **Never exit 0 with empty stdout.** Every path through the hook prints a decision. The one
+  fail-open case is ours to not write, and it should carry a test.
+- **Raise `--print-timeout`** (default **5m**), which bounds the whole turn and therefore the dialog.
+  A hook may block as long as it likes — `timeout` is passed straight to `context.WithTimeout` with no
+  ceiling, verified at `86400` — but the turn around it will not.
+- **`permissions.allow` instead of `--dangerously-skip-permissions`.** Grants of the form
+  `file(<workspace>/*)` stop the headless layer soft-denying, while the hook keeps an absolute veto —
+  a hook `deny` overrides a settings `allow`. Defence in depth rather than one gate.
 
-**Tripwire, and it must assert on the file rather than on the hook.** A probe that installs a hook
-which sleeps past its `timeout` and then denies, runs one edit turn, and asserts the target's bytes
-are **unchanged**. Asserting that the hook fired passes today, while the write goes through — which
-is exactly how this was found. The same lesson AG-R-11's tripwire records, on a different mechanism.
+**Tripwire, and it must assert on the file rather than on the hook.** A probe that denies an edit,
+lets the turn run to completion, and asserts the target's bytes are unchanged — with the hook
+recording *every* tool it was asked about, so a route-around shows up as a second tool name rather
+than as a silent pass. Asserting that the hook fired is what produced the wrong answer the first
+time: it fired, and the file changed anyway.
+
+**Standing caveat on the correction.** The first reading was published in this file and in
+[AG-2](decisions.md#ag-2) before it was checked against a second matcher. It survived one probe and
+one commit. The lesson is the one AG-R-11's own tripwire already states — assert on the artefact, not
+on the mechanism — and it is recorded twice because it has now been learned twice.

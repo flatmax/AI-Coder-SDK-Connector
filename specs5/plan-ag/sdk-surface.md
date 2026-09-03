@@ -295,21 +295,50 @@ path [AG-5](decisions.md#ag-5) chose the raw SDK hook to preserve exists here to
 — but an adapter would never return it. The hook blocks, asks AIC⚡DC's own dialog, and returns the
 human's answer.
 
-### Three limits, one of them decisive
+### The response contract fails closed, except in one place
+
+Measured across five failure modes on live edit turns. Only the last allows the tool:
+
+| Hook behaviour | Tool | `agy`'s own words |
+|---|---|---|
+| exceeds `timeout` | **blocked** | killed at the deadline → non-zero exit |
+| exits non-zero | **blocked** | `command failed: exit status 1` |
+| prints malformed JSON | **blocked** | `failed to unmarshal result from hook … syntax error` |
+| command missing | **blocked** | `exit status 127` |
+| **exit 0, empty stdout** | **allowed** | parsed as `{}`; an empty decision defaults to allow |
+
+`timeout` is passed straight to `context.WithTimeout` with **no ceiling** — verified at `86400`, where
+a 40-second hook ran to completion and its `deny` was honoured. What *does* bound a dialog is
+`--print-timeout`, which defaults to **5m** and caps the whole headless turn.
+
+**This was initially measured backwards, and the way it went wrong is the finding.** A first probe
+used `"matcher": "replace_file_content"`, saw a timed-out hook and a modified file, and concluded the
+gate failed open. Re-run with `"matcher": "*"` the same timeout blocked the write. A blocked tool is
+an error the model can see, and it reaches for a different tool — so anything outside the matcher is
+ungated. [AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher) carries it;
+the seam is every tool, never a list.
+
+### Two limits that remain
 
 - **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local
-  `<workspace>/.agents/hooks.json` was **not** loaded — `hooks_manager.go:53] loaded 0 named hooks
-  from 0 hooks.json file(s)` — including with the exact workspace path added to `trustedWorkspaces`.
-  The global file *"fires unconditionally"*, which means an adapter cannot scope its gate to its own
-  sessions without solving this.
+  `<workspace>/.agents/hooks.json` was **not** loaded in headless mode —
+  `hooks_manager.go:53] loaded 0 named hooks from 0 hooks.json file(s)` — including with the exact
+  workspace path in `trustedWorkspaces`. The embedded changelog's fix for this is wired to the TUI's
+  workspace-change event, not the headless bootstrap. The global file *"fires unconditionally"*, so a
+  gate installed there intercepts the user's own unrelated `agy` sessions and must pass them through.
+  **The natural isolation key does not work:** `workspacePaths` was **empty** in every payload
+  captured here. `conversationId` is the sound one — an adapter knows the conversation it started —
+  and it is unverified.
 - **Concurrency.** An `flock` on `presence/<id>.lock` serialises turns; an interactive session and a
-  headless turn on the same conversation conflict. An adapter must own its conversation, which is
-  fine — driving the user's open TUI session was never necessary.
-- **The gate fails open**, which is the one that matters and is
-  [AG-R-12](risks.md#ag-r-12--the-agy-hook-gate-fails-open): the adapter must pass
-  `--dangerously-skip-permissions` because `agy`'s own headless layer auto-denies everything, and a
-  hook that exceeds its `timeout` (default **30s**) does not block the tool — measured, the write
-  landed. A gate that is the only gate and is bypassed by being slow is not a gate.
+  headless turn on the same conversation conflict. An adapter must own its conversation, which is no
+  loss — driving the user's open TUI session was never necessary.
+
+### Defence in depth is available
+
+`permissions.allow` entries — `read_file(<path>)`, `write_file(<path>)`, `file(<glob>)`,
+`command(<prefix>)` — stop the headless layer soft-denying without `--dangerously-skip-permissions`,
+and a hook `deny` still overrides a settings `allow`: *"tool call denied by pre-tool hook"*, file
+untouched. So the hook can be an additional veto rather than the only gate.
 
 ### `transcript_full.jsonl` is a phase-5 asset regardless
 
