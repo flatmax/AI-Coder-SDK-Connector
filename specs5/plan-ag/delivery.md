@@ -2054,8 +2054,34 @@ to explain the difference. It **merges** rather than writes, preserves every oth
 its own entry, deletes the file only if ours was the last thing in it, and refuses to touch a file it
 cannot parse rather than replacing it. 16 tests, most of them about restraint.
 
-**Phase 8's remaining work** is the adapter that mounts this behind the engine router — the 31 RPC
-methods and the event dispatch — and the settings surface that calls `install()` with the user's
-consent and `uninstall()` on shutdown, so the 200 ms is paid only while it buys something. The handshake it needs is proved and written down in
+### The adapter, and the one place inheritance is right (same day)
+
+`agy/service.py` mounts everything above behind the engine router. It **inherits**
+`AntigravityService`, which is the opposite of what this project does everywhere else — the
+Antigravity adapter holds a real `ReviewMode` and calls `commit.py` rather than subclassing the Claude
+adapter, deliberately, because those are two engines and a shared base invites each into the other's
+lifecycle.
+
+Here it is one engine reached two ways. AG-14 calls `agy` a *transport*, not an engine, and the class
+says so: two-thirds of the surface is repository, index and review work that is not transport-specific,
+and a parallel class would duplicate 31 method bodies whose only content is `return
+self._repo.something()`. The copy is what drifts — which is the argument this file would otherwise be
+making against itself. What is overridden is exactly what differs: how a session starts, how a turn is
+pumped, and what ⏹ does.
+
+**It refuses to start a session without the gate installed, and the refusal is the feature.** `agy`
+launches with `--dangerously-skip-permissions`, which is safe *only* while our hook is in the user's
+global configuration. A session started without it is not a degraded experience — it is an agent
+editing the tree with nothing in the way. So `connect_engine` answers `gate_not_installed`, names the
+file, and says the gate is removed again on shutdown. `stale` is refused as well as `absent`: a hook
+pointing at another checkout gates *that* build, not this one.
+
+Two smaller declarations: `resume` is declined rather than silently starting a fresh conversation, and
+`gate_status()` is public so the settings surface can ask its whole question without starting anything.
+
+**What is left of phase 8** is the settings surface itself — a control that calls `install()` with the
+user's consent, `uninstall()` on shutdown so the ~200 ms is paid only while it buys something, and
+renders the four states `status()` reports. Everything it would drive is built and tested: 4,299 tests
+pass, of which 108 are this transport's. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.
