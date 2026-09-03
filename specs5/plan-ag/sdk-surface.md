@@ -124,9 +124,9 @@ required: `--print="" --input-format stream-json`.
 > **Superseded 2026-09-03 — read this section as history, not as the current reasoning.** Both
 > measurements below were re-checked against `agy` 1.1.25 and **both are obsolete**: each measured a
 > channel that is not the lifecycle hook. A `PreToolUse` hook gates a call, carries the replacement
-> text before the write, and can amend the arguments. `agy` is still not the engine, but for reasons
-> of cost and containment recorded in [`decisions.md` AG-2](decisions.md#ag-2) § *Amended 2026-09-03*
-> — and the measurements that replaced these are in
+> text before the write, and can amend the arguments. The exclusion this section argued for was
+> **reversed the same day** by [AG-14](decisions.md#ag-14), which adds `agy` as a second transport
+> beside the SDK engine — and the measurements that replaced these are in
 > [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). Kept in full because the
 > decision stood on it for four days and because how it was superseded is worth reading: neither
 > measurement was wrong, both were about the wrong channel.
@@ -356,6 +356,30 @@ This is what makes a **global** hook shippable. It will see the user's own unrel
 workspace-local `hooks.json` does not load headlessly — and it can allow-and-return immediately for
 any conversation the host does not own. `workspacePaths` cannot do that job: it is empty in every
 payload captured here, in both `-p` and bidirectional modes.
+
+### The tool *names* differ, and only the tool names — measured 2026-09-03
+
+The trap for anyone reusing `permissions.py` here. `agy` and the SDK agree on **argument** names and
+disagree on **tool** names:
+
+| Job | SDK (`BuiltinTools`) | `agy` |
+|---|---|---|
+| edit a file | `edit_file` | `replace_file_content` |
+| create a file | `create_file` | `write_to_file` |
+| find files | `find_file` | `find_by_name` |
+| list a directory | `list_directory` | `list_dir` |
+| read a file | `view_file` | `view_file` |
+| run a command | `run_command` | `run_command` |
+
+So `TOOL_CLASSES`, `MUTATING_TOOLS` and `ALWAYS_ASK` — all keyed on SDK names — match `agy` on two
+entries and miss the rest. The failure is quiet rather than loud, and in the safe direction: an
+unrecognised name classifies as `exec` and is gated. But `replace_file_content` would not be in
+`ALWAYS_ASK`, the dialog would call a file edit a command, and `_diff_tool_for` would not recognise it,
+so **no diff would render** — the gate holding while the product's central feature silently degrades.
+
+A per-transport name map is therefore a requirement of phase 8, not a refinement. The argument names
+needing no such map is the genuine convenience; the tool names are the thing that looks like it
+transfers and does not.
 
 ### Two limits that remain
 

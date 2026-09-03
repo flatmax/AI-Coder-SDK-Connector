@@ -1818,3 +1818,70 @@ be *"practically unusable for interactive work"* in Google's words; it is that
 **twenty requests a day is not enough to test the engine, let alone use it**. Every
 remaining phase-4 and phase-5 verification is gated on a paid key or on waiting a day
 per handful of turns.
+
+---
+
+## Phase 8 — the gate, before the adapter (2026-09-03)
+
+[AG-14](decisions.md#ag-14) landed and the first thing built under it is the permission gate, for the
+reason phase 2 was taken out of order: everything downstream is contingent on it, and on this
+transport it is **the only gate there is**. `agy`'s own headless layer auto-denies rather than asking,
+so the adapter runs with `--dangerously-skip-permissions` and nothing stands behind the hook.
+
+**What landed.** `src/aic_dc/antigravity/agy/` — a sub-package rather than more files beside
+`service.py`, deliberately: `surface.py` derives its `handled` bucket by globbing `*.py` next to
+itself, and code in here touches no SDK symbol, so it must stay outside that glob or it would report
+SDK surface as covered that is not.
+
+- `registry.py` — which conversations this host owns, as files on disk.
+- `hook.py` — the process `agy` runs before every tool call.
+- `scripts/probe_agy_gate.py` — the live tripwire.
+- `tests/test_agy_gate.py` — 35 tests, nearly all of them failure paths.
+
+**The design decision worth recording is the split.** The obvious shape is to ask the running app and
+let it answer "not mine". That is wrong, and the failure case says why: with the host down, *every*
+question goes unanswered, and one channel cannot tell "not ours" from "ours but unreachable". Reading
+silence as the first ungates our own sessions; as the second, it breaks the user's. So ownership is a
+fact on disk and the decision is a question over a socket, and each fails safely on its own terms:
+
+| Situation | Answer | Why |
+|---|---|---|
+| No registry entry | **allow** | Somebody else's `agy` session. The common case — the hook is global. |
+| Entry present, host answers | the human's answer | The dialog did its job. |
+| Entry present, host unreachable | **deny** | Ours and unreviewable. A dead host makes our sessions un-runnable rather than un-gated. |
+| Payload unparseable, we own nothing | **allow** | Cannot be ours, and refusing would break a stranger's session on a bug of ours. |
+| Payload unparseable, we own something | **deny** | Might be ours. |
+
+**The live tripwire passed, and its first version passed for the wrong reason.** The gate denied
+*everything*, so the model gave up before proposing a write — leaving "the file is unchanged" true and
+meaningless. That is the same shape as the AG-R-12 error two entries up, caught this time before it
+was committed. The sharpened version allows the read class so the model can actually reach an edit,
+and asserts that a write was refused as well as that the file is intact:
+
+```
+tools the gate was asked about: run_command, find_by_name ×8, list_dir, view_file ×6,
+                                replace_file_content, grep_search ×2
+of those, refused:              run_command, list_dir, replace_file_content
+file after the turn:            'ORIGINAL_TEXT'
+PASS: 3 write attempt(s) refused across 3 distinct route(s), file unchanged
+```
+
+**Three distinct routes.** Denied the edit, the model tried `run_command`, and `list_dir`. That is
+[AG-R-11](risks.md#ag-r-11) live on this transport — the same behaviour as `sed -i` and inline
+`python3` on the SDK — and it is exactly what the `"*"` matcher is for. A per-tool matcher would have
+shipped a gate the model walks around.
+
+**And it surfaced the trap for reusing `permissions.py`:** `agy` and the SDK agree on *argument*
+names and disagree on *tool* names — `replace_file_content` not `edit_file`, `write_to_file` not
+`create_file`, `find_by_name` not `find_file`, `list_dir` not `list_directory`. The argument names
+transferring is the real convenience; the tool names look like they transfer and do not, and the
+failure is quiet: an unknown name classifies as `exec`, so the call is still gated, but the dialog
+calls a file edit a command and `_diff_tool_for` renders no diff. A gate that holds while the
+product's central feature silently degrades. Recorded in
+[`sdk-surface.md`](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03);
+a per-transport name map is a requirement of the adapter rather than a refinement.
+
+**What is not built:** the adapter itself — session lifecycle, the step reader, cancel, and the socket
+server on the host side that `hook.py` talks to. The handshake it needs is proved and written down in
+the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
+before `init` and a tool call cannot precede the first prompt.
