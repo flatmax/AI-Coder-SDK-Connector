@@ -635,6 +635,7 @@ export function systemNotice(subtype, data) {
       text: `The engine reported an error${code}: ${message || 'no message was given.'}`,
       toast: '❌ The engine reported an error',
       severity: 'error',
+      collapse: true,
     };
   }
   if (subtype === 'turn_timeout') {
@@ -647,6 +648,7 @@ export function systemNotice(subtype, data) {
         + 'file it had already written.',
       toast: '⏱️ The turn timed out',
       severity: 'error',
+      collapse: true,
     };
   }
   if (subtype === 'engine_notice' && message) {
@@ -681,9 +683,21 @@ export function systemNotice(subtype, data) {
  * silence. Only the *frequency* is Antigravity's, because the free tier caps
  * at 20 requests.
  *
- * Repeats are dropped. One error arrives as several `stepUpdate` frames for
- * the same step — three, in the run that found this — and three copies of a
- * 600-character quota message is a worse transcript than none.
+ * **A failing turn reports one failure, not one card per attempt.** Measured
+ * against a live 429 on 2026-09-03: a single rate limit produced *four*
+ * cards totalling ~4,500 characters, because the engine retries and each
+ * attempt reports the same failure with a little more gRPC detail than the
+ * last. Four walls of `map[@type:type.googleapis.com/google.rpc.QuotaFailure…]`
+ * is its own kind of unreadable — the opposite failure to the silence this
+ * handler was written to fix, and no better. So a `collapse` notice replaces
+ * the previous card of its own subtype within the same turn instead of
+ * stacking, and the last telling wins because it is the most complete.
+ *
+ * The trade is stated rather than hidden: two genuinely different errors in
+ * one turn leave only the second on screen. The full sequence is in the
+ * server log either way, and a turn's outcome is its last error. Subtypes
+ * without `collapse` — `engine_notice` — always append, because two harness
+ * notices are two facts and collapsing them would lose one.
  *
  * `pre_compact` deliberately does not toast. The compaction it announces runs
  * for tens of seconds; the toast expired after three, so the stall it existed
@@ -696,7 +710,7 @@ export function systemNotice(subtype, data) {
  * nothing, as though the session were waiting.
  */
 export function onSystemEvent(panel, event) {
-  const { data } = event.detail || {};
+  const { data, requestId } = event.detail || {};
   const subtype = data?.subtype;
   if (subtype === 'conversation_reset') {
     panel._emitToast('The engine reset the conversation', 'warning');
@@ -705,6 +719,7 @@ export function onSystemEvent(panel, event) {
   const notice = systemNotice(subtype, data?.data);
   if (!notice) return;
 
+  const turn = requestId ?? null;
   const last = panel.messages[panel.messages.length - 1];
   if (last?.system_event && last.content === notice.text) return;
 
@@ -714,11 +729,27 @@ export function onSystemEvent(panel, event) {
   // is precisely the attribution `steps.py` routes these away from a text
   // block to avoid. Matches the five other producers of engine-authored rows
   // (`events.js`, `tabs.js`, `subagent-tabs.js`).
-  panel.messages = [
-    ...panel.messages,
-    { role: 'user', content: notice.text, system_event: true },
-  ];
-  if (notice.toast) panel._emitToast(notice.toast, notice.severity);
+  const row = {
+    role: 'user',
+    content: notice.text,
+    system_event: true,
+    // Carried so a retry can find the card it supersedes. Prefixed like the
+    // other engine-authored fields rather than named `subtype`, which the
+    // result payloads already use for something else.
+    system_subtype: subtype,
+    system_request: turn,
+  };
+  const supersedes =
+    notice.collapse
+    && last?.system_event
+    && last.system_subtype === subtype
+    && last.system_request === turn;
+  panel.messages = supersedes
+    ? [...panel.messages.slice(0, -1), row]
+    : [...panel.messages, row];
+  // The toast is the glance and fires once per distinct report; a retry that
+  // only refines the card it replaces does not re-interrupt the reader.
+  if (notice.toast && !supersedes) panel._emitToast(notice.toast, notice.severity);
   panel.requestUpdate();
 }
 

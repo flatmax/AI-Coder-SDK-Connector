@@ -1691,9 +1691,6 @@ describe('ChatPanel compaction toast', () => {
   });
 
   it('does not repeat one error once per frame', async () => {
-    // One error arrives as several `stepUpdate` frames for the same step —
-    // three, in the run that found this. Three copies of a 600-character
-    // quota message is a worse transcript than none.
     const p = mountPanel();
     await settle(p);
     const detail = {
@@ -1703,6 +1700,69 @@ describe('ChatPanel compaction toast', () => {
     for (let i = 0; i < 3; i += 1) pushEvent('system-event', detail);
     await settle(p);
     expect(p.messages.filter((m) => m.system_event)).toHaveLength(1);
+  });
+
+  it('reports one failing turn once, however many attempts it made', async () => {
+    // Measured against a live 429: one rate limit produced four cards and
+    // ~4,500 characters, because the engine retries and each attempt reports
+    // the same failure with a little more gRPC detail. Four walls of
+    // `map[@type:…QuotaFailure…]` is the opposite failure to the silence this
+    // handler fixed, and no better.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    const attempts = [
+      'Quota exceeded, limit: 20. Please retry in 29s.',
+      'Quota exceeded, limit: 20. Please retry in 21s. Status: RESOURCE_EXHAUSTED',
+      'Quota exceeded, limit: 20. Please retry in 17s. Status: RESOURCE_EXHAUSTED, '
+        + 'Details: map[@type:type.googleapis.com/google.rpc.QuotaFailure ...]',
+    ];
+    for (const message of attempts) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'engine_error', data: { message, http_code: 429 } },
+      });
+    }
+    await settle(p);
+
+    const cards = p.messages.filter((m) => m.system_event);
+    expect(cards).toHaveLength(1);
+    // The last telling wins, because it is the most complete.
+    expect(cards[0].content).toContain('QuotaFailure');
+    expect(cards[0].content).toContain('retry in 17s');
+    // And the reader is interrupted once, not once per attempt.
+    expect(toasts).toHaveLength(1);
+  });
+
+  it('keeps a later turn distinct from the one before it', async () => {
+    const p = mountPanel();
+    await settle(p);
+    for (const requestId of ['r1', 'r2']) {
+      pushEvent('system-event', {
+        requestId,
+        data: { subtype: 'engine_error', data: { message: `failed ${requestId}` } },
+      });
+    }
+    await settle(p);
+    expect(p.messages.filter((m) => m.system_event)).toHaveLength(2);
+  });
+
+  it('never collapses two harness notices into one', async () => {
+    // Two notices are two facts; only the retrying subtypes supersede.
+    const p = mountPanel();
+    await settle(p);
+    for (const message of ['Switching model.', 'Compacting context.']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'engine_notice', data: { message } },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter((m) => m.system_event);
+    expect(cards.map((m) => m.content)).toEqual([
+      'Switching model.',
+      'Compacting context.',
+    ]);
   });
 
   it('says a timed-out turn may still have written files', async () => {

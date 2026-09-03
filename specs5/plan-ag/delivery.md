@@ -1767,8 +1767,54 @@ direction. Five producers already had the flag right; `handleUnsupportedSlash` d
 not, and had been telling users the engine's refusal of a slash command in the
 assistant's voice. Corrected with the same change.
 
-Verified: the card renders under a **SYSTEM** heading carrying the engine's own
-words, the HTTP code and the retry delay. The end-to-end path was exercised through
-`app-shell`'s own `systemEvent` entry point with the exact payload captured from the
-live 429 — the backend half was already proved by that capture, and the free tier
-would not produce a second one on demand.
+Verified end to end against a **real live 429** later the same day: the card rendered
+under a SYSTEM heading carrying the engine's own words, the HTTP code, the quota
+metric and the retry delay, where before the fix the same failure rendered nothing.
+
+**And that verification immediately found the opposite failure.** One rate limit
+produced **four** cards totalling ~4,500 characters, because the engine retries and
+each attempt reports the same failure with a little more gRPC detail than the last —
+four walls of `map[@type:type.googleapis.com/google.rpc.QuotaFailure…]`. A transcript
+nobody can read is not an improvement on a transcript that says nothing. So a notice
+marked `collapse` now **replaces** the previous card of its own subtype within the
+same turn rather than stacking, and the last telling wins because it is the most
+complete; the toast fires once per distinct report rather than once per attempt. The
+trade is stated rather than hidden — two genuinely different errors in one turn leave
+only the second on screen — and `engine_notice` is deliberately *not* collapsible,
+because two harness notices are two facts.
+
+The collapse itself is covered by tests and **not** re-verified live, for the reason
+in the next section.
+
+
+### The free tier refuses 20 requests a day, and that is what stopped phase 4
+
+*Measured 2026-09-03, and it corrects a claim in this directory.* § *The hangs were
+the model* records Google confirming that free-tier requests are **queued rather than
+refused**, so rationing arrives as latency and never as a `429`. That is true of the
+*per-minute* limit and it is not the whole story. There is a second ceiling that
+refuses outright:
+
+```
+quotaId:    GenerateRequestsPerDayPerProjectPerModel-FreeTier
+quotaValue: 20
+status:     RESOURCE_EXHAUSTED   httpCode: 429
+```
+
+Twenty agent *requests* per model per day — not turns, and an agent turn is several
+requests. An afternoon of phase-4 verification spent it, and every Antigravity turn
+after that failed instantly for the rest of the day.
+
+**This is what leaves phase 4's exit criterion unmet.** One conversation running end
+to end *including an approved write* has still not been demonstrated: the write path
+was proved on the first run (a real `edit_file` dialog, a correct +5 −0 diff, the
+write landing), and the fixed build has been shown to allow reads without asking and
+to keep its transcript — but no single conversation has yet done all of it, because
+the quota ran out between the two. The deny path is likewise unit-tested only.
+
+It also sharpens [AG-12](decisions.md#ag-12) further than § *What it means for AG-12*
+already did. The billing case is no longer just that the free tier is slow enough to
+be *"practically unusable for interactive work"* in Google's words; it is that
+**twenty requests a day is not enough to test the engine, let alone use it**. Every
+remaining phase-4 and phase-5 verification is gated on a paid key or on waiting a day
+per handful of turns.

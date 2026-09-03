@@ -45,7 +45,15 @@ approved write*, because the verification turn hit the free tier's request ceili
 
 **The free tier is slower than it looks, and that is now the main practical constraint.** Measured
 2026-09-02 and confirmed by Google: a free-tier key's requests are **queued behind paid traffic
-rather than refused**, so capacity rationing arrives as latency and never as a `429`. A five-token
+rather than refused**, so *per-minute* capacity rationing arrives as latency and never as a `429`.
+
+**Corrected 2026-09-03: that is the per-minute story, and there is a second, harder one.** Alongside
+the queueing there is a **daily** ceiling that does refuse — `quotaId:
+GenerateRequestsPerDayPerProjectPerModel-FreeTier`, `quotaValue: 20`, arriving as a real `429` with
+`RESOURCE_EXHAUSTED` and a `retryDelay`. Twenty agent *requests* per model per day is a handful of
+turns, not a day's work: it was reached in an afternoon of phase-4 verification and then blocked the
+rest of it. So the free tier fails two different ways — slowly within a minute, and flatly within a
+day — and only the second announces itself. A five-token
 prompt took 30.9 s then timed out at 70 s on `gemini-3.7-flash` while `gemini-3.5-flash` answered in
 3.9 s. The consultant's pinned model was lowered to `gemini-3.5-flash` to keep the feature working;
 a paid key should raise it back, because the point of a second opinion is a *capable* independent one.
