@@ -354,7 +354,7 @@ class TestNothingMutatingIsUngated:
         A literal set in ``permissions.py`` would be the copy that drifts,
         and the direction it drifts is a mutating tool nobody gates.
         """
-        from aic_dc.antigravity.agy import tools as agy_tools
+        from aic_dc.agy import tools as agy_tools
 
         assert MUTATING_TOOLS <= ALWAYS_ASK
         assert agy_tools.MUTATING_TOOLS <= ALWAYS_ASK
@@ -369,7 +369,7 @@ class TestNothingMutatingIsUngated:
         the product's central feature degrades, which is why this checks
         the *class* and not merely that a dialog appears.
         """
-        from aic_dc.antigravity.agy import tools as agy_tools
+        from aic_dc.agy import tools as agy_tools
 
         for tool in agy_tools.MUTATING_TOOLS:
             assert tool in ALWAYS_ASK, tool

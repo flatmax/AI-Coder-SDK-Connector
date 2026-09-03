@@ -2005,8 +2005,57 @@ whatever happens.
 
 Neither was caught by review. Both were caught by a test asserting on the outcome the user sees.
 
+### Installing into somebody else's configuration (same day)
+
+The gate must live in `~/.gemini/config/hooks.json` — outside this repository, in a file belonging to
+Google's CLI that the user may already be using — because workspace-local hooks are not loaded
+headlessly on 1.1.25. That is the most invasive thing this project does, and `agy`'s own docs say
+global hooks *"fire unconditionally"*, so it is handed every tool call from every `agy` session on the
+machine including the user's own.
+
+**What that costs a session that has nothing to do with us, measured.** The answer was nearly
+unacceptable and the measurement is why:
+
+| | Per tool call, on the user's own sessions |
+|---|---|
+| As first written | **~700 ms** |
+| After moving the package | **~200 ms** |
+
+The hook lived at `aic_dc/antigravity/agy/`, and **importing `aic_dc.antigravity` alone costs 500 ms
+and pulls in the Claude SDK.** Every tool call in the user's unrelated `agy` work would have paid that,
+to be told "not mine". So the package moved to `aic_dc/agy/` — `import aic_dc` is as cheap as starting
+Python — and the remainder is interpreter startup, which is unavoidable when the caller spawns a
+process per call. It also reads better: this transport does not touch the SDK, and
+`antigravity/surface.py` globs its own directory for the `handled` bucket, so being outside that glob
+was always the point.
+
+Nothing else changes for standalone `agy`: a call from an unclaimed conversation is answered
+`{"decision": "allow"}` and never reaches a dialog, a socket or a queue.
+
+**And one failure would have been unacceptable.** `agy` **blocks** a tool whose hook command cannot be
+run — exit 127, measured. A stale entry left by a crash, pointing at a virtualenv since deleted, would
+stop the user's own `agy` working *entirely*, with an error naming a program they may not recognise.
+The installed command is wrapped:
+
+```
+<python> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+The fallback is sound rather than convenient: `hook.main` exits 0 on every path it controls, including
+a denial and including an unexpected exception, so a **non-zero exit means the interpreter never
+started** — which means this host is not running, owns no conversations, and allow is the correct
+answer. The one case it does not cover is a transient fork failure while a turn is genuinely being
+gated; recorded rather than hidden, and the reason `status()` reports a stale install loudly instead of
+silently repairing it.
+
+`install.py` therefore answers four states rather than a boolean — `absent`, `current`, `stale`,
+`unreadable` — because "installed" and "installed and usable" are different and a settings surface has
+to explain the difference. It **merges** rather than writes, preserves every other key, removes only
+its own entry, deletes the file only if ours was the last thing in it, and refuses to touch a file it
+cannot parse rather than replacing it. 16 tests, most of them about restraint.
+
 **Phase 8's remaining work** is the adapter that mounts this behind the engine router — the 31 RPC
-methods, the event dispatch, and the settings surface that installs the hook into the user's global
-`hooks.json` with their consent. The session, the gate and the pump are done and tested. The handshake it needs is proved and written down in
+methods and the event dispatch — and the settings surface that calls `install()` with the user's
+consent and `uninstall()` on shutdown, so the 200 ms is paid only while it buys something. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.

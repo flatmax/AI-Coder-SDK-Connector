@@ -1,6 +1,6 @@
 """The ``PreToolUse`` hook ``agy`` runs before every tool call.
 
-This is the gate of [AG-14](../../../../specs5/plan-ag/decisions.md#ag-14),
+This is the gate of [AG-14](../../../specs5/plan-ag/decisions.md#ag-14),
 and on this transport **it is the only gate there is**. ``agy``'s own
 headless permission layer cannot prompt — it auto-denies anything it would
 otherwise ask about, logged as ``Print mode: soft-denying tool
@@ -38,7 +38,7 @@ The hook is installed in the user's global ``~/.gemini/config/hooks.json``
 because workspace-local hooks are not loaded headlessly on 1.1.25, so it
 sees *every* ``agy`` session on the machine, including ones the user runs
 themselves. Those must pass through untouched and unstalled.
-:mod:`~aic_dc.antigravity.agy.registry` answers that, keyed on
+:mod:`~aic_dc.agy.registry` answers that, keyed on
 ``conversationId``; this module's job is to act on the answer and to fail
 in the right direction when it cannot get one.
 
@@ -57,7 +57,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from aic_dc.antigravity.agy import registry
+from aic_dc.agy import registry
 
 logger = logging.getLogger(__name__)
 

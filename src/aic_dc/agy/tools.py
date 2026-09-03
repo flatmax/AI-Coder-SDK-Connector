@@ -22,7 +22,7 @@ omission. But the dialog would call a file edit a *command*, and
 ``_diff_tool_for`` would not recognise it, so **no diff would render** —
 the gate holding while the product's central feature silently degrades.
 A gate that works and a dialog that shows nothing is not a safe failure;
-it is the same manufactured consent [AG-R-11](../../../../specs5/plan-ag/risks.md#ag-r-11)
+it is the same manufactured consent [AG-R-11](../../../specs5/plan-ag/risks.md#ag-r-11)
 is about, arrived at by a different road.
 
 Why these merge into the shared tables rather than sitting beside them
@@ -75,7 +75,7 @@ TOOL_CLASSES: dict[str, str] = {
     "ask_question": "interact",
 }
 
-#: The write seam for this transport — [AG-5](../../../../specs5/plan-ag/decisions.md#ag-5)'s
+#: The write seam for this transport — [AG-5](../../../specs5/plan-ag/decisions.md#ag-5)'s
 #: boundary in ``agy``'s words.
 #:
 #: ``run_command`` is here for the reason AG-R-11 exists, and it is no

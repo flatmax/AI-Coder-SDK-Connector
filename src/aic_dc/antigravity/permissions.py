@@ -83,7 +83,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from aic_dc.antigravity.agy import tools as agy_tools
+from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.claude_code.permissions import (
     GATED_BY_DEFAULT,
@@ -470,7 +470,7 @@ class AntigravityPermissionGate:
 
         **Shared by both Antigravity transports on purpose.** The SDK path
         reaches it through :meth:`run`; the ``agy`` path reaches it from
-        :mod:`~aic_dc.antigravity.agy.gate_server`, which otherwise calls
+        :mod:`~aic_dc.agy.gate_server`, which otherwise calls
         ``broker.can_use_tool`` directly and would therefore raise a dialog
         for every read. That is exactly the defect fixed on the SDK path on
         2026-09-03 — four dialogs for a turn whose only mutation was one

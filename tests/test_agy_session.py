@@ -25,14 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from aic_dc.antigravity.agy import registry
-from aic_dc.antigravity.agy.gate_server import AgyGateServer
-from aic_dc.antigravity.agy.session import (
+from aic_dc.agy import registry
+from aic_dc.agy.gate_server import AgyGateServer
+from aic_dc.agy.session import (
     AgyNotInstalledError,
     AgySession,
     TurnInProgressError,
 )
-from aic_dc.antigravity.agy.steps import AgyTranslator
+from aic_dc.agy.steps import AgyTranslator
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
 CONV = "b1d377c5-ef66-4d58-a7ca-5aee75acc853"

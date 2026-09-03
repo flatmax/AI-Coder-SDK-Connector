@@ -1,6 +1,6 @@
 """The host end of the gate — where a hook's question becomes a dialog.
 
-:mod:`~aic_dc.antigravity.agy.hook` runs inside ``agy``'s process tree and
+:mod:`~aic_dc.agy.hook` runs inside ``agy``'s process tree and
 knows nothing about permissions; it decides *whose* call this is and then
 asks. This is what it asks. One unix socket per session, one connection
 per tool call, newline-delimited JSON each way.
@@ -27,7 +27,7 @@ The amend path survives the trip
 before allowing it — maps onto ``agy``'s ``overwrite``, described in its
 own documentation as *"merged into the tool call's arguments before it
 runs … the modified tool call is what actually executes and is recorded"*.
-That is the capability [AG-5](../../../../specs5/plan-ag/decisions.md#ag-5)
+That is the capability [AG-5](../../../specs5/plan-ag/decisions.md#ag-5)
 chose the raw hook over ``policy.ask_user`` to keep, and it is available
 here for the same reason it is on the SDK path.
 
@@ -58,7 +58,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from aic_dc.antigravity.agy import registry
+from aic_dc.agy import registry
 from aic_dc.antigravity.permissions import (
     AntigravityPermissionGate,
     denormalise_args,
@@ -109,7 +109,7 @@ class AgyGateServer:
     """A unix socket that turns ``agy``'s hook calls into dialogs.
 
     One per session. :meth:`claim` publishes the socket against a
-    conversation id so :mod:`~aic_dc.antigravity.agy.hook` will recognise
+    conversation id so :mod:`~aic_dc.agy.hook` will recognise
     calls belonging to it — and, just as importantly, will keep passing
     through every conversation this host has *not* claimed.
     """
@@ -136,7 +136,7 @@ class AgyGateServer:
         """Refuse every subsequent call without asking. This is ⏹.
 
         There is no halt frame on this transport
-        (:mod:`~aic_dc.antigravity.agy.session`), so stopping a turn means
+        (:mod:`~aic_dc.agy.session`), so stopping a turn means
         starving it: the agent asks for a tool, is refused with a reason
         naming the user's stop, and winds down. The same mechanism the
         Claude adapter leans on, where ``cancel_streaming`` denies the

@@ -1,6 +1,6 @@
 """Which ``agy`` conversations this host owns, readable by a separate process.
 
-The gate of [AG-14](../../../../specs5/plan-ag/decisions.md#ag-14) has a
+The gate of [AG-14](../../../specs5/plan-ag/decisions.md#ag-14) has a
 problem the SDK's does not: **it runs in the user's own configuration.**
 Workspace-local ``hooks.json`` is not loaded by ``agy`` 1.1.25 in headless
 mode, so the hook must live in ``~/.gemini/config/hooks.json``, which
@@ -29,7 +29,7 @@ A registry splits the question in two, and each half fails safely:
   not running at all.
 - **The decision** is asked over the socket named in that file, and only
   for conversations we already know are ours. Silence there is a fault,
-  and :mod:`~aic_dc.antigravity.agy.hook` denies on it.
+  and :mod:`~aic_dc.agy.hook` denies on it.
 
 So a dead host makes our sessions un-runnable rather than un-gated, and
 leaves the user's untouched. That is the trade AG-5 requires — the dialog

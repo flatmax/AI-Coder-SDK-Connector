@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from aic_dc.antigravity.agy import hook, registry
+from aic_dc.agy import hook, registry
 
 OURS = "cd4edb7f-6de3-468f-9815-e76b310a920a"
 THEIRS = "11111111-2222-3333-4444-555555555555"
@@ -226,7 +226,7 @@ class TestTheProcessAlwaysPrints:
 
     def run(self, stdin: str, config_dir: Path):
         return subprocess.run(
-            [sys.executable, "-m", "aic_dc.antigravity.agy.hook", str(config_dir)],
+            [sys.executable, "-m", "aic_dc.agy.hook", str(config_dir)],
             input=stdin,
             capture_output=True,
             text=True,

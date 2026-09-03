@@ -22,8 +22,8 @@ import asyncio
 
 import pytest
 
-from aic_dc.antigravity.agy import hook, registry
-from aic_dc.antigravity.agy.gate_server import AgyGateServer
+from aic_dc.agy import hook, registry
+from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.antigravity.permissions import AntigravityPermissionGate
 
 OURS = "cd4edb7f-6de3-468f-9815-e76b310a920a"

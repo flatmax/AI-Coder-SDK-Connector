@@ -42,7 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from aic_dc.antigravity.agy import registry  # noqa: E402
+from aic_dc.agy import registry  # noqa: E402
 
 GLOBAL_HOOKS = Path.home() / ".gemini" / "config" / "hooks.json"
 ORIGINAL = "ORIGINAL_TEXT"
@@ -139,7 +139,7 @@ def install_hook(config_dir: Path) -> Path | None:
         backup = Path(tempfile.mkdtemp()) / "hooks.json.bak"
         shutil.copy2(GLOBAL_HOOKS, backup)
     command = (
-        f"{sys.executable} -m aic_dc.antigravity.agy.hook {config_dir}"
+        f"{sys.executable} -m aic_dc.agy.hook {config_dir}"
     )
     GLOBAL_HOOKS.write_text(
         json.dumps(

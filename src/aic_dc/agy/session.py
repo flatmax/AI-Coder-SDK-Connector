@@ -1,6 +1,6 @@
 """One long-lived ``agy`` process, and the turns driven through it.
 
-The last piece of [AG-14](../../../../specs5/plan-ag/decisions.md#ag-14):
+The last piece of [AG-14](../../../specs5/plan-ag/decisions.md#ag-14):
 spawn, read ``init``, claim the conversation, then feed prompts and pump
 the stream. The handshake is not a design choice — it is forced, and the
 order is proved in ``scripts/probe_agy_gate.py``:
@@ -20,7 +20,7 @@ input message event"*. The SDK transport has ``conversation.cancel()``,
 which sends a real ``halt_request``; there is no counterpart here.
 
 What there *is* instead is the gate. Every tool call on this transport
-passes through :mod:`~aic_dc.antigravity.agy.gate_server`, so ⏹ can
+passes through :mod:`~aic_dc.agy.gate_server`, so ⏹ can
 **starve** a turn: from the moment it is pressed, every call is refused
 with a reason naming the user's stop. The agent reads those refusals and
 winds down, which is the same mechanism the Claude adapter already relies
@@ -48,8 +48,8 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from aic_dc.antigravity.agy.gate_server import AgyGateServer
-from aic_dc.antigravity.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.gate_server import AgyGateServer
+from aic_dc.agy.steps import AgyTranslator, unwrap
 from aic_dc.claude_code.messages import Event
 
 logger = logging.getLogger(__name__)

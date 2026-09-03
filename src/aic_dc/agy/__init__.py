@@ -1,6 +1,6 @@
 """The ``agy`` transport — Antigravity reached through the CLI, not the SDK.
 
-[AG-14](../../../../specs5/plan-ag/decisions.md) adds this beside
+[AG-14](../../../specs5/plan-ag/decisions.md) adds this beside
 :mod:`aic_dc.antigravity.service`'s SDK engine rather than in place of it.
 The two reach *different backends*: the SDK speaks to Gemini API or Vertex
 on a metered key, and ``agy`` speaks to Code Assist on the owner's OAuth —

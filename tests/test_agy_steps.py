@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import pytest
 
-from aic_dc.antigravity.agy.steps import AgyTranslator, unwrap
+from aic_dc.agy.steps import AgyTranslator, unwrap
 
 
 def frame(step: dict) -> dict:
