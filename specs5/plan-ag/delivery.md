@@ -1939,6 +1939,37 @@ Fixed by preferring the *first* alias, which is why the tables are ordered with 
 spelling first. Four regression tests, and the near-miss is worth naming: nothing on the SDK path
 exercised an amend, so it took building a second transport to notice.
 
-**What is not built:** the session adapter — lifecycle, the step reader, and cancel. The handshake it needs is proved and written down in
+### The stream reader, and the capture that had to come first (same day)
+
+`agy/steps.py` translates the CLI's NDJSON into the *same* events the SDK pump emits —
+`streamChunk`, `toolUse`, `toolResult`, `systemEvent`, `turnUsage`, `streamComplete` — so the chat
+panel needs no branch for a third transport (AG-R-4).
+
+**It could not be written until the stream was captured**, and the capture is the entry's real
+content. `sdk-surface.md` recorded the vocabulary from `-p` runs, and against a bidirectional turn
+that record was incomplete in three ways, each of which would have produced a pump that was plausible
+and wrong:
+
+- **Frames are nested** under their own event name, not flat. Read flat, every field is `None` and the
+  turn renders empty *without raising* — the failure `diff_agy_init` was corrected for at 1.1.22, on a
+  different frame. `unwrap` is a named function with five tests rather than an inline `.get`.
+- **`text_delta` is a real delta, and the SDK's `streamChunk` is cumulative.** The browser replaces by
+  `block_id`, so forwarding `agy`'s fragment would render only the last few words of every message —
+  and accumulating the SDK's would repeat every prefix. The two transports need *opposite* handling
+  and neither mistake raises anything. This pump accumulates, so the browser keeps one rule.
+- **`step_type` is not the closed vocabulary it was recorded as.** Three members documented; a plain
+  read-a-file turn produced a fourth, `system_message`. An unknown member renders as a notice rather
+  than being dropped — the rule `StepType.UNKNOWN` earns on the SDK side, for the same reason.
+
+One absence is load-bearing: `tool_info.output` was **not** present on a completed `find_by_name`,
+where the 1.1.22 correction found it for `run_command`. So it is per-tool, and a completed call with
+no output is reported complete with none rather than left pending, which would spin forever.
+
+The fixtures are transcribed from the capture rather than invented, because phase 3's lesson was that
+a fake describing a friendlier engine than the real one passes every test while the pump is wrong.
+28 tests.
+
+**What is not built:** the session itself — spawn, the `init` read, the claim, and cancel. Its
+handshake is already proved in `scripts/probe_agy_gate.py`, which does exactly that sequence. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.

@@ -119,6 +119,59 @@ One turn per line, session held open across lines. `{"event":"user_message",…}
 `agy -p --input-format stream-json` silently consumes `--input-format` as the prompt. The `=` form is
 required: `--print="" --input-format stream-json`.
 
+### The stream, measured in bidirectional mode (2026-09-03)
+
+The vocabulary above was read from `-p` captures and is **incomplete in three ways** that matter to a
+pump. Captured from one bidirectional turn, since that is the mode an adapter uses.
+
+**Every frame is nested under its own event name**, exactly as `init` is:
+
+```json
+{"event":"step_update","step_update":{ … }}
+{"event":"result","result":{ … }}
+```
+
+A parser written against a flat shape reads `None` for every field *without erroring* — the same
+failure `diff_agy_init` was corrected for at 1.1.22, on a different frame.
+
+**`step_type` has a fourth member.** The recorded vocabulary is
+`user_input | agent_response | tool`; a plain read-a-file turn also produced **`system_message`**. On
+a CLI releasing weekly a closed vocabulary that is not actually closed is how a step type arrives as
+silence in the chat, so a pump must render an unknown `step_type` rather than drop it.
+
+| `step_type` | Fields beyond `conversation_id`, `step_index`, `state` |
+|---|---|
+| `user_input` | — |
+| `agent_response` | `text_delta`, `duration_seconds`, `usage` |
+| `tool` | `tool_name`, `tool_info: {name, parameters}`, `duration_seconds` |
+| `system_message` | `duration_seconds` |
+
+`state` is `ACTIVE` or `DONE`.
+
+**`text_delta` is a real delta, and the SDK's equivalent is not.** This is the one that would produce
+a plausible, wrong pump. `streamChunk` on the SDK path carries the *whole accumulated block* — checked
+in phase 3 and recorded above as "content is cumulative", with the browser replacing by `block_id`.
+`agy`'s `text_delta` carries only the new fragment:
+
+```
+step_index 5 : "I am searching for `calc.py` to read its contents and summarize what it does.\n"
+step_index 9 : "[calc.py](file:///…/calc.py) defines a "
+```
+
+A pump that replaced on this would render only the last fragment of every message; one that
+accumulated on the SDK's would repeat the prefix of every message. The two transports need opposite
+handling, and neither failure raises anything.
+
+**Tool arguments are nested differently from the hook's.** The stream gives
+`tool_info.parameters`, the hook gives `toolCall.args` — the same values under two paths, which is
+[§ One call, two vocabularies](#one-call-two-vocabularies--measured-in-the-phase-4-live-run-2026-09-03)
+appearing a third time. And `tool_info.output` was **absent** on a completed `find_by_name` here,
+where the 1.1.22 `-p` correction found it present for `run_command`; so it is per-tool rather than
+universal, and a pump must not require it.
+
+**`result`** carries `status`, `response` (the turn's whole prose), `duration_seconds`, `num_turns`
+and `usage` — `{input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}`.
+
 ### Why `agy` is nonetheless not the engine
 
 > **Superseded 2026-09-03 — read this section as history, not as the current reasoning.** Both
