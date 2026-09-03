@@ -1665,3 +1665,87 @@ same lesson one layer up: **the offline suite described a friendlier engine than
 every one of these four is a thing no unit test was ever going to fail on — a lifetime contract, a
 call that is asked about rather than allowed, an alias against a name nobody sent, and two spellings
 that agree until they do not. The gate for phase 4 is a conversation, and it has to be held.
+
+### The first three fixed, and a fifth found while verifying them (2026-09-03)
+
+**1. The turn lifetime.** `chat_streaming` now admits, spawns
+`_run_turn` as a background task, and returns `{"status": "started"}` — the Claude
+adapter's shape to the letter. No webapp change went with it, because `input.js`
+already reads only `error` / `routed` / `unsupported` from the reply and takes
+everything else off the event stream. Two things came with it rather than after:
+the turn-in-progress refusal moved *ahead* of the spawn (`stream_turn` raises, but
+it is a generator, so its `TurnInProgressError` now lands where no synchronous
+refusal can be made of it), and the failure branch emits the translator's own
+closing events. With no RPC reply left to carry a failure, the event stream is the
+only channel there is, so a path that emits no terminal event is a spinner that
+never stops — survivable before only because the browser ignored the status anyway.
+
+**The regression test hangs against the old code rather than failing**, which was
+discovered by running it: checking the new tests against the pre-fix
+implementation timed out a five-minute command with nothing to show. Every one of
+them now goes through a `_start` helper that wraps the call in
+`asyncio.wait_for`, so the six fail in 31s with a `TimeoutError` naming the test.
+A guard that hangs is worse than one that fails, so the deadline is part of the
+assertion rather than a convenience.
+
+**2. The read class.** The gate answers `read` itself and never reaches the
+broker with it — `ALWAYS_ASK` is still checked first, so `start_subagent` (class
+`delegate`, ungated by default) cannot slip through the narrowing.
+
+**This required wiring a control that had never been connected.** `denied_read_files`
+had *no reader at all*: the service stored the list, answered `get_denied_read_files`
+with it, and nothing consulted it. That was invisible while every read raised a
+dialog the user could refuse by hand — and allowing reads without asking is exactly
+what would have turned it into a silent read of a file the user had marked. So the
+gate now takes a `denied_reads` callable (a callable, not a snapshot: the list is
+toggled from the file tree mid-session) and **denies** a matching read with a reason
+the model can act on, rather than asking about it. Directory prefixes match, which
+is what shift-clicking a folder means.
+
+**3. The read aliases.** `view_file` gains `AbsolutePath` and `find_file` gains
+`SearchDirectory`; `Pattern` is deliberately *not* aliased to a path, because the
+dialog promises a file where it says PATH and a glob is not one. `list_directory`'s
+inherited `DirectoryPath` turned out to be correct — confirmed on the verification
+run's live frame — and `search_directory` remains unmeasured and is labelled so.
+
+### Verified live, and the honest gaps
+
+A second conversation on the fixed build (2026-09-03): `list_directory` and
+`view_file` both ran with **zero dialogs**, both tool cards rendered and **stayed**,
+and the turn settled with the composer re-enabled. The first run's single
+`Error: Timed out waiting for response` replacing the whole transcript did not
+recur.
+
+Two things this run did **not** establish, stated rather than implied:
+
+- **The deny path was not exercised live.** The turn died before it reached
+  `secrets.env`, so the refusal is covered by unit tests only.
+- **The edit dialog was not re-reached**, so the end-to-end criterion — a full
+  conversation including an approved write — is still unmet. It failed for a
+  reason that has nothing to do with any of this: `429`, *"Quota exceeded for
+  metric: generativelanguage.googleapis.com/generate_content_free_tier_requests,
+  limit: 20"*. The same free-tier ceiling § *The hangs were the model* and AG-12
+  are about.
+
+### 5. A turn killed by a rate limit says nothing at all
+
+Found while verifying the above, and the reason the run's failure was confusing:
+the engine explained itself perfectly and the browser dropped it.
+
+The step arrived as `STATE_ERROR` / `SOURCE_SYSTEM` / **`TARGET_USER`** — addressed
+to the human — carrying the whole story: the 429, the quota metric, the limit of
+20, and *"Please retry in 29.957436016s."* `steps.py` translated it correctly into
+a `systemEvent` with `subtype: "engine_error"`. Then
+`chat-panel/streaming.js`'s `onSystemEvent` **handles exactly one subtype,
+`conversation_reset`, and silently returns for every other**.
+
+So a turn that died of a rate limit renders as two tool cards and a stop, with no
+badge, no message and no retry advice — while the payload naming the wait in
+seconds sits unread on the window channel. This is not Antigravity-specific in
+its mechanism: the handler is the shared chat panel's, and any engine's
+`engine_error` meets the same silence. It is Antigravity-specific in how often it
+fires, because the free tier's ceiling is 20 requests.
+
+Queued rather than fixed with the other three: it is a chat-panel change with its
+own spec section ([`chat.md` § Engine Event Routing](../5-webapp/chat.md#engine-event-routing))
+and it was found during verification rather than in the run this entry records.

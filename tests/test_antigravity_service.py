@@ -34,6 +34,7 @@ import pytest
 from aic_dc import capabilities
 from aic_dc.antigravity.credentials import GEMINI_API, NONE, Credentials
 from aic_dc.antigravity.service import PERMISSION_MODES, AntigravityService
+from aic_dc.claude_code.messages import Event
 from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.engine_router import RPC_SURFACES, build_router
 
@@ -210,6 +211,213 @@ class TestItDeclinesRatherThanPretends:
         """AG-6: a zero would be a measurement."""
         state = asyncio.run(service(tmp_path).get_current_state())
         assert not any("cost" in k or "usd" in k for k in state)
+
+
+class FakeSession:
+    """A session whose turn does not finish until the test lets it.
+
+    The gate is the whole point. Every assertion below is about what is
+    true *while a turn is still running*, and a fake that completed
+    promptly would pass against the very implementation this class exists
+    to keep from coming back.
+    """
+
+    def __init__(self, release, fail=None):
+        self._release = release
+        self._fail = fail
+        self.cancelled = False
+
+    async def cancel(self):
+        self.cancelled = True
+
+    async def stream_turn(self, prompt, *, translator=None):
+        yield Event("streamChunk", {"block_id": "b1", "content": "working"})
+        await self._release.wait()
+        if self._fail is not None:
+            raise self._fail
+        for event in translator.stream_complete():
+            yield event
+
+
+def _running(svc, release, fail=None):
+    """Attach a gated fake session and collect dispatched event names."""
+    fake = FakeSession(release, fail)
+
+    async def _ensure():
+        return fake
+
+    names: list[str] = []
+
+    async def _callback(name, *args):
+        names.append(name)
+
+    svc._ensure_session = _ensure
+    svc._event_callback = _callback
+    return fake, names
+
+
+async def _start(svc, *args):
+    """``chat_streaming`` under a deadline, because the bug is a hang.
+
+    Every test below gates its fake turn open and then asserts something
+    about the reply. Against the implementation this class guards — one
+    that awaited the turn — that reply never comes, so a bare ``await``
+    would hang the suite instead of failing it. Discovered the honest way:
+    checking these tests against the old code timed out a five-minute
+    command with nothing to show for it.
+
+    A regression guard that hangs is worse than one that fails, so the
+    deadline is part of the assertion rather than a convenience.
+    """
+    return await asyncio.wait_for(svc.chat_streaming(*args), timeout=5)
+
+
+class TestATurnDoesNotHoldTheRpcOpen:
+    """The phase-4 live run's finding, pinned.
+
+    Until 2026-09-03 ``chat_streaming`` awaited the turn to exhaustion, so
+    the browser's 75s JRPC deadline fired mid-turn on anything slow — and a
+    permission dialog, which waits on a human by design, guaranteed it. The
+    browser then took the transport's contentless timeout down ``input.js``'s
+    ``catch`` branch and erased the transcript it had already drawn, while
+    the turn ran on and edited the file. Nothing in this suite failed,
+    because nothing here had ever driven a turn.
+
+    See ``specs5/plan-ag/delivery.md`` § *Phase 4 — the live run*.
+    """
+
+    def test_the_reply_arrives_before_the_turn_finishes(self, tmp_path):
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()
+            _fake, names = _running(svc, release)
+
+            reply = await _start(svc, "r1", "hi")
+            # The turn is provably still running: nothing has released it.
+            assert reply == {"status": "started"}
+            assert "r1" in svc._turns
+            assert svc._turn_tasks
+
+            task = next(iter(svc._turn_tasks))
+            release.set()
+            await task
+            assert "streamComplete" in names
+            assert "r1" not in svc._turns
+
+        asyncio.run(body())
+
+    def test_the_reply_carries_no_turn_result(self, tmp_path):
+        """A result key here would be a second, racing source of truth.
+
+        Everything about the turn arrives as a pushed event keyed on the
+        request id — which is what lets a browser that reloaded mid-turn
+        re-attach rather than lose it.
+        """
+
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()
+            _fake, _names = _running(svc, release)
+            reply = await _start(svc, "r1", "hi")
+            assert set(reply) == {"status"}
+            release.set()
+            await next(iter(svc._turn_tasks))
+
+        asyncio.run(body())
+
+    def test_a_second_turn_is_refused_synchronously(self, tmp_path):
+        """``stream_turn`` raises, but it is a generator.
+
+        Its ``TurnInProgressError`` lands on first iteration, which is now
+        inside the background task — where no synchronous refusal can be
+        made out of it. So the adapter answers before it spawns, the way
+        the Claude adapter's ``session.admit`` does.
+        """
+
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()
+            _fake, _names = _running(svc, release)
+            await _start(svc, "r1", "hi")
+
+            second = await _start(svc, "r2", "again")
+            assert second["reason"] == "turn_in_progress"
+            assert "r2" not in svc._turns
+
+            release.set()
+            await next(iter(svc._turn_tasks))
+            # And the refusal lifts once the first turn is done.
+            assert not svc._turns
+
+        asyncio.run(body())
+
+    def test_a_pending_dialog_does_not_delay_the_reply(self, tmp_path):
+        """The case that actually bit, stated as itself.
+
+        ``permissions.py`` lets a request wait indefinitely on purpose, so
+        a gated engine that held the RPC open for the turn would be holding
+        it open for the user's attention span.
+        """
+
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()  # stands in for an unanswered dialog
+            _fake, _names = _running(svc, release)
+
+            reply = await _start(svc, "r1", "hi")
+            assert reply == {"status": "started"}
+
+            release.set()
+            await next(iter(svc._turn_tasks))
+
+        asyncio.run(body())
+
+    def test_a_turn_that_raises_still_settles_the_browser(self, tmp_path):
+        """With no RPC reply left, the event stream is the only channel.
+
+        A path that emits no terminal event is now a spinner that never
+        stops, so the failure branch closes the turn out of the
+        translator's own state rather than leaving ``stream_turn``'s
+        closing events unrun.
+        """
+
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()
+            _fake, names = _running(svc, release, fail=RuntimeError("harness died"))
+
+            await _start(svc, "r1", "hi")
+            task = next(iter(svc._turn_tasks))
+            release.set()
+            await task
+
+            assert "systemEvent" in names
+            assert "streamComplete" in names, "the spinner would never stop"
+            assert "r1" not in svc._turns
+            assert svc._errors, "the failure is recorded, not just broadcast"
+
+        asyncio.run(body())
+
+    def test_cancel_reaches_the_running_turn(self, tmp_path):
+        """⏹ has to work against a turn whose RPC already returned."""
+
+        async def body():
+            svc = service(tmp_path)
+            release = asyncio.Event()
+            fake, _names = _running(svc, release)
+            svc._session = fake
+
+            await _start(svc, "r1", "hi")
+            assert (await svc.cancel_streaming("r1"))["status"] == "ok"
+            assert fake.cancelled
+
+            # A stale cancel from a reconnecting browser hits nothing.
+            assert (await svc.cancel_streaming("gone"))["status"] == "not_running"
+
+            release.set()
+            await next(iter(svc._turn_tasks))
+
+        asyncio.run(body())
 
 
 class TestPermissionPostures:

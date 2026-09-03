@@ -125,10 +125,17 @@ TOOL_CLASSES: dict[str, str] = {
 #: Antigravity's hook-argument names, in the spelling the existing payload
 #: builders read.
 #:
-#: Measured, not guessed: every key on the left is from a live capture in
-#: ``sdk-surface.md`` § The permission gate. The Go side sends CamelCase
-#: through ``PreToolArgs.arguments_json`` and this is the only place that
-#: knows it.
+#: Mostly measured, and the two exceptions are labelled where they sit.
+#: The Go side sends CamelCase through ``PreToolArgs.arguments_json`` and
+#: this is the only place that knows it — see ``sdk-surface.md``
+#: § *One call, two vocabularies*, which is the phase-4 finding that the
+#: hook's spelling and the step stream's are not the same spelling.
+#:
+#: An entry that stops matching degrades to "no path named, full input
+#: shown". That is legible, and it is also quiet: the read tools sat
+#: mis-aliased from the day they were written and the dialog looked
+#: healthy throughout, because the *mutating* entries were correct and
+#: they are the ones that render the diff.
 ARG_ALIASES: dict[str, dict[str, str]] = {
     "edit_file": {
         "TargetFile": "file_path",
@@ -151,8 +158,27 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
         "WorkingDir": "cwd",
         "Explanation": "description",
     },
-    "view_file": {"TargetFile": "file_path"},
+    # Measured off live hook frames in the phase-4 run (2026-09-03). The
+    # read tools had been aliased against names the SDK does not send —
+    # `view_file` against `TargetFile`, and `find_file` not at all — so the
+    # dialog rendered `PATH (none named)` above an input block containing
+    # the path. The mutating entries above were right, which is exactly why
+    # nobody noticed: the diff rendered, so the dialog looked healthy.
+    #
+    # `TargetFile` is kept beside `AbsolutePath` rather than replaced. The
+    # aliases are additive and cost nothing when absent, and on an SDK at
+    # 0.1.x a name that moved once can move back.
+    "view_file": {"AbsolutePath": "file_path", "TargetFile": "file_path"},
+    # `find_file`'s path is the directory it searches; `Pattern` is the
+    # query and is deliberately not aliased to a path field, because the
+    # dialog would then name a glob where it promises a file.
+    "find_file": {"SearchDirectory": "file_path"},
+    # Unmeasured, and marked as such rather than quietly trusted: no live
+    # frame for either has been read, and the phase-4 finding was precisely
+    # that the step stream's spelling is not the hook's. They degrade to
+    # "no path named, full input shown", which is legible.
     "list_directory": {"DirectoryPath": "file_path"},
+    "search_directory": {"SearchDirectory": "file_path"},
 }
 
 #: The tools this gate must never allow without asking.
@@ -343,8 +369,14 @@ class AntigravityPermissionGate:
         broadcast: Any,
         note_prompt: Any = None,
         localhost_available: Any = None,
+        denied_reads: Any = None,
         **broker_kwargs: Any,
     ) -> None:
+        self._repo_root = Path(repo_root)
+        # A callable, not a list. The user toggles these from the file tree
+        # mid-session, and a snapshot taken when the gate was built would
+        # go stale at the first shift-click.
+        self._denied_reads = denied_reads or (lambda: [])
         self.broker = _AntigravityBroker(
             repo_root,
             broadcast=broadcast,
@@ -352,6 +384,42 @@ class AntigravityPermissionGate:
             localhost_available=localhost_available,
             **broker_kwargs,
         )
+
+    def _denied_read_target(self, tool_name: str, args: dict[str, Any]) -> str | None:
+        """The denied path this read would touch, or ``None``.
+
+        The user's shift-click on the file tree is a **deny**, not an ask,
+        so this answers a different question from the dialog's: matching
+        means the call is refused with a reason, never presented.
+
+        Prefix matching rather than equality, so denying a directory
+        denies the files under it — which is what shift-clicking a folder
+        in the tree means. Paths are resolved first because the hook is
+        handed absolute paths while the tree records repo-relative ones.
+        """
+        raw = args.get("file_path")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                target = self._repo_root / target
+            target = target.resolve()
+        except (OSError, ValueError):  # noqa: BLE001 - a probe, not a control path
+            return None
+        for entry in self._denied_reads() or []:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            try:
+                denied = Path(entry.strip())
+                if not denied.is_absolute():
+                    denied = self._repo_root / denied
+                denied = denied.resolve()
+            except (OSError, ValueError):  # noqa: BLE001
+                continue
+            if target == denied or denied in target.parents:
+                return entry.strip()
+        return None
 
     def as_hook(self) -> Any:
         """This gate as a real ``PreToolCallDecideHook``, for the config.
@@ -386,11 +454,57 @@ class AntigravityPermissionGate:
         adding a tool: an unknown name classifies as ``exec`` and gets the
         most cautious dialog, where the alternative would ungate whatever
         arrives next.
+
+        **The read class is answered here rather than by the broker**, and
+        the phase-4 live run is why. A ``PreToolCallDecideHook`` fires for
+        *every* call, so forwarding all of them produced a modal for
+        ``find_file`` and two more for ``view_file`` in a turn whose only
+        mutation was one edit — four dialogs, three of them for reads. On
+        Claude the CLI decides which calls need ``can_use_tool`` at all and
+        allows reads itself, so the shared broker never sees them; sharing
+        a broker does not by itself give two engines one behaviour, because
+        half of Claude's behaviour lives in the CLI rather than in the
+        broker. The harness agrees, incidentally — its own log reads
+        ``permissions: skipping check for step 2: handler *handlers.FindHandler
+        does not declare permissions``.
+
+        It also made the dialog lie. It explains a gated read with *"read
+        calls are not normally gated. This one is: a deny or ask rule
+        matched"* — true on Claude, and on this engine a sentence about an
+        exception that was in fact the rule.
+
+        The narrowing is not a blanket allow. ``ALWAYS_ASK`` wins over the
+        class, so a tool that is both mutating and somehow classed ``read``
+        is still asked about, and a **denied** read is refused outright —
+        that is the user's own shift-click on the file tree, and it must
+        not be softened into an auto-allow by the very change that stops
+        the asking.
         """
         from google.antigravity.types import HookResult
 
         tool_name = str(getattr(data, "name", "") or "")
         args = dict(getattr(data, "args", None) or {})
+
+        if tool_name not in ALWAYS_ASK and not GATED_BY_DEFAULT.get(
+            TOOL_CLASSES.get(tool_name, "exec"), True
+        ):
+            normalised = normalise_args(tool_name, args)
+            denied = self._denied_read_target(tool_name, normalised)
+            if denied is not None:
+                logger.info(
+                    "Antigravity %s refused: %s is denied to the agent",
+                    tool_name,
+                    denied,
+                )
+                return HookResult(
+                    allow=False,
+                    message=(
+                        f"The user has denied the agent read access to "
+                        f"{denied}. Do not try to read it by another route; "
+                        f"ask them for what you need from it instead."
+                    ),
+                )
+            return HookResult(allow=True)
 
         try:
             result = await self.broker.can_use_tool(

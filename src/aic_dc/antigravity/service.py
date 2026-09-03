@@ -228,6 +228,15 @@ class AntigravityService:
             broadcast=self._broadcast,
             note_prompt=self._note_permission_prompt,
             localhost_available=self._localhost_available,
+            # Read live rather than copied in, so a shift-click on the file
+            # tree takes effect on the next call rather than the next
+            # session. This list had no reader at all until 2026-09-03: the
+            # service stored it and answered `get_denied_read_files` with
+            # it, and nothing enforced it — survivable only because every
+            # read was raising a dialog the user could refuse by hand. The
+            # gate now allows reads without asking, so wiring this is part
+            # of that change rather than a separate improvement.
+            denied_reads=self.get_denied_read_files,
         )
         session = AntigravitySession(
             self._repo_root,
@@ -285,12 +294,44 @@ class AntigravityService:
         images: list[str] | None = None,
         viewer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run one turn, streaming its events. **Localhost only.**
+        """Start a turn. Returns as soon as the engine has accepted it.
+        **Localhost only.**
 
         ``images`` is declined rather than dropped. The SDK accepts image
         input, so this is unbuilt rather than impossible — but a turn that
         silently discarded the screenshot a user attached would answer the
         wrong question convincingly, which is worse than refusing.
+
+        **The turn runs in a background task, and this returning early is
+        the whole point of it.** Until 2026-09-03 this method awaited
+        ``stream_turn`` to exhaustion, so the browser's JRPC call stayed
+        open for the length of the turn — against a client deadline of 75s
+        (``webapp/src/app-shell/index.js``). The first live phase-4
+        conversation found what that costs: the deadline fired mid-turn,
+        ``input.js`` took the transport's contentless *"Timed out waiting
+        for response"* down its ``catch`` branch, and
+        ``rollbackUnstartedTurn`` erased the tool cards it had already
+        drawn — while the turn ran happily on and edited the file three
+        minutes later. **The app said the turn failed and then wrote to
+        the user's tree**, which is the worst arrangement of those two
+        facts available.
+
+        A permission dialog does not merely risk that overrun, it
+        guarantees it: the user's thinking time is inside the same budget,
+        and ``permissions.py`` deliberately lets a request wait
+        indefinitely. So a gated engine cannot hold the RPC open for a
+        turn, and the fix is not a longer deadline.
+
+        The shape is the Claude adapter's, deliberately and to the letter
+        (``claude_code.service.chat_streaming``): admit, spawn, return
+        ``{"status": "started"}``, and let every later fact arrive as a
+        server-push event keyed on ``request_id``. The browser already
+        expects exactly this — it reads ``error`` / ``routed`` /
+        ``unsupported`` from the reply and nothing else — so no webapp
+        change goes with it. It also buys the property the Claude
+        docstring names: the task's lifetime is independent of any
+        WebSocket, so a client that reloads mid-turn re-attaches to a turn
+        that kept running rather than losing it.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
@@ -307,13 +348,58 @@ class AntigravityService:
         if viewer:
             self._viewer = dict(viewer)
 
+        # Decided here rather than inside the generator. ``stream_turn``
+        # raises TurnInProgressError, but it is an async generator, so the
+        # raise lands on first iteration — which is now inside the
+        # background task, where a synchronous refusal cannot be made out
+        # of it. Claude answers the same question in `session.admit`
+        # before it spawns, for the same reason.
+        if self._turns:
+            return {
+                "error": (
+                    "A turn is already running on this session. Stop it "
+                    "before sending another."
+                ),
+                "reason": "turn_in_progress",
+            }
+
         try:
             session = await self._ensure_session()
         except Exception as exc:  # noqa: BLE001
             return self._record_error("connect", exc)
 
         translator = StepTranslator(request_id)
+        # Registered before the task is spawned, not inside it: `cancel_
+        # streaming` and `_note_permission_prompt` both key off `_turns`,
+        # and a browser is free to press ⏹ on the reply to this call.
         self._turns[request_id] = translator
+        task = asyncio.create_task(
+            self._run_turn(session, translator, request_id, message),
+            name=f"ag-turn-{request_id}",
+        )
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+        return {"status": "started"}
+
+    async def _run_turn(
+        self,
+        session: AntigravitySession,
+        translator: StepTranslator,
+        request_id: str,
+        message: str,
+    ) -> None:
+        """Drive one turn to completion, dispatching as it goes.
+
+        Returns nothing, and that is the constraint the error path is
+        written to: with no RPC reply left to carry a failure, **the event
+        stream is the only channel there is**, so every exit from here has
+        to leave the browser settled. A path that emits no terminal event
+        is a spinner that never stops.
+
+        That was survivable while the caller awaited the turn and could
+        answer with a status — barely, since the browser ignored the
+        status anyway — and it is not survivable now.
+        """
         try:
             async for event in session.stream_turn(message, translator=translator):
                 await self._dispatch(event, request_id)
@@ -326,14 +412,15 @@ class AntigravityService:
                 ),
                 request_id,
             )
-            return {"status": "error", "message": str(exc)}
+            # The stream raised part-way, so `stream_turn`'s own closing
+            # events never ran. Emitted here from the translator's own
+            # state — a half-finished turn still has blocks, tokens and
+            # tool calls worth reporting, and `streamComplete` is what
+            # ends the spinner and settles the tab.
+            for event in translator.stream_complete():
+                await self._dispatch(event, request_id)
         finally:
             self._turns.pop(request_id, None)
-        return {
-            "status": "ok",
-            "response": translator.response_text(),
-            "usage": translator.turn_usage(),
-        }
 
     async def cancel_streaming(self, request_id: str) -> dict[str, Any]:
         """Halt the running turn. **Localhost only.**

@@ -343,6 +343,164 @@ class TestNothingMutatingIsUngated:
         assert payload["gated_by_default"] is True
 
 
+class TestReadsAreAllowedWithoutADialog:
+    """The phase-4 live run's second finding.
+
+    A ``PreToolCallDecideHook`` fires for every call, and this gate used to
+    forward all of them to the broker — so one turn whose only mutation was
+    a single edit raised four dialogs, three of them for reads. On Claude
+    the CLI answers the read class itself and the shared broker never sees
+    it, which is why one shared broker did not give one behaviour.
+
+    See ``specs5/plan-ag/delivery.md`` § *Phase 4 — the live run*.
+    """
+
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("find_file", {"Pattern": "calc.py", "SearchDirectory": "/tmp/x"}),
+            ("view_file", {"AbsolutePath": "/tmp/x/calc.py"}),
+            ("list_directory", {"DirectoryPath": "/tmp/x"}),
+            ("search_web", {"Query": "python"}),
+            ("finish", {}),
+        ],
+    )
+    def test_a_read_never_reaches_the_broker(self, tmp_path, tool, args):
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        # No responder: if this asks, it hangs, and the timeout is the
+        # assertion. Nothing may be waiting on a human here.
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(None, FakeCall(tool, args))
+
+        result = asyncio.run(go())
+        assert result.allow is True
+        assert recorder.requests() == [], f"{tool} raised a dialog"
+
+    @pytest.mark.parametrize("tool", sorted(MUTATING_TOOLS))
+    def test_the_narrowing_does_not_reach_a_mutating_tool(self, tmp_path, tool):
+        """``ALWAYS_ASK`` is checked before the class, not after.
+
+        ``start_subagent`` is the one that would slip: its class is
+        ``delegate``, which is ungated by default, so a narrowing that
+        consulted only the class would ungate the tool that spawns a child
+        with the same write access.
+        """
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        async def go():
+            await ask(g, FakeCall(tool, {}), {"action": "deny"})
+
+        asyncio.run(go())
+        assert len(recorder.requests()) == 1
+
+    def test_a_denied_file_is_refused_rather_than_quietly_read(self, tmp_path):
+        """The control this change must not soften.
+
+        Shift-clicking a file in the tree is a **deny**. While every read
+        raised a dialog the user could refuse it by hand, so the list
+        having no reader never showed; allowing reads without asking is
+        exactly what turns that into a silent read.
+        """
+        secret = tmp_path / "secrets.env"
+        secret.write_text("TOKEN=1", encoding="utf-8")
+        recorder = Recorder()
+        g = gate(tmp_path, recorder, denied_reads=lambda: ["secrets.env"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(secret)})
+                )
+
+        result = asyncio.run(go())
+        assert result.allow is False
+        # A reason the model can act on, not a bare refusal.
+        assert "denied" in result.message
+        assert "another route" in result.message
+        assert recorder.requests() == [], "a deny is not a question"
+
+    def test_denying_a_directory_denies_what_is_under_it(self, tmp_path):
+        """Which is what shift-clicking a folder in the tree means."""
+        (tmp_path / "private").mkdir()
+        target = tmp_path / "private" / "notes.md"
+        target.write_text("x", encoding="utf-8")
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: ["private"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(go()).allow is False
+
+    def test_an_undenied_neighbour_is_still_allowed(self, tmp_path):
+        """A check that cannot pass the wrong way is decoration."""
+        target = tmp_path / "public.md"
+        target.write_text("x", encoding="utf-8")
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: ["secrets.env"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(go()).allow is True
+
+    def test_the_denied_list_is_read_per_call(self, tmp_path):
+        """The user toggles these mid-session, from the file tree."""
+        target = tmp_path / "a.py"
+        target.write_text("x", encoding="utf-8")
+        denied: list[str] = []
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: denied)
+
+        async def once():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(once()).allow is True
+        denied.append("a.py")
+        assert asyncio.run(once()).allow is False
+
+
+class TestTheReadToolsPathIsNamed:
+    """The third phase-4 finding: aliases against names nobody sends.
+
+    The dialog rendered ``PATH (none named)`` directly above an input block
+    reading ``{"AbsolutePath": "/tmp/ag-repo/calc.py"}``. The mutating
+    aliases were correct throughout, which is why the drift went unseen —
+    those are the ones that render the diff.
+    """
+
+    def test_view_file_carries_the_path_the_sdk_actually_sends(self):
+        merged = normalise_args("view_file", {"AbsolutePath": "/tmp/x/calc.py"})
+        assert merged["file_path"] == "/tmp/x/calc.py"
+        # The engine's own words are kept beside the alias.
+        assert merged["AbsolutePath"] == "/tmp/x/calc.py"
+
+    def test_the_old_spelling_still_works(self):
+        """Additive, because a name that moved once can move back."""
+        assert normalise_args("view_file", {"TargetFile": "/a"})["file_path"] == "/a"
+
+    def test_find_file_names_the_directory_it_searches(self):
+        merged = normalise_args(
+            "find_file", {"Pattern": "*.py", "SearchDirectory": "/tmp/x"}
+        )
+        assert merged["file_path"] == "/tmp/x"
+
+    def test_a_glob_is_never_presented_as_a_path(self):
+        """The dialog promises a file where it says PATH."""
+        merged = normalise_args("find_file", {"Pattern": "*.py"})
+        assert "file_path" not in merged
+
+
 # ----------------------------------------------------------------------
 # The callback's shape — the only thing that differs between engines
 # ----------------------------------------------------------------------
