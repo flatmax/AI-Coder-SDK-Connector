@@ -260,6 +260,7 @@ Verified line by line. This is the table that says the engine is viable.
 | Subagent tabs | `SubagentConfig`; per-trajectory usage; `trajectory_id` / `parent_trajectory_id` / `depth` on every `Step` | `connection.py:71`; `conversation.py:300-308`; `types.py:889-935` |
 | Serve the indexes to the agent | `tools: list[Callable]` — plain in-process Python callables | `connection.py:57`; `local_connection.py:206-271` |
 | Budget cap | `BudgetConfig` + `StopReason.MAX_*_EXCEEDED` | `types.py:829-887` |
+| Why the turn ended | `_last_turn_stop_reason` (private) today; `StopArgs.stop_reason` + `.error_message` from 0.1.16 — see § *The first drift it caught* | `conversation.py:326-328`; `hooks/hooks.py:239`, `types.py:1100-1119` |
 | Per-turn usage | `Conversation.last_turn_usage` — a difference against turn-start | `conversation.py:310-318` |
 | Image generation | `BuiltinTools.GENERATE_IMAGE`; image model wired by default | `types.py:308`; `local_connection_config.py:303-317` |
 
@@ -489,7 +490,7 @@ field worth surfacing.
 `../plan/sdk-surface.md` § *The probe* argues that a hand-written inventory drifts silently and that
 the fix is to diff the *installed* package against this repo's own syntax trees, bucketing every name
 as `handled` / `declined` / `pending` and failing the gate only on a name in **none** of the three.
-That argument applies here with more force, not less: this SDK is at **0.1.15 and alpha**, where
+That argument applies here with more force, not less: this SDK is at **0.1.16 and alpha**, where
 `claude-agent-sdk` was at 0.2.137 and stable.
 
 `src/aic_dc/antigravity/surface.py` should therefore be built in phase 1, alongside the consultant
@@ -509,6 +510,36 @@ And the CLI half, which static reflection structurally cannot reach: **`agy`'s `
 free, machine-readable capability inventory** — model, cwd, permission mode, and the full tool list.
 One `agy models` call and one no-op `-p` turn produce it. That is the `diff_server_info` analogue,
 and it is worth wiring even though `agy` is not the engine.
+
+### The first drift it caught — `StopHook`, 0.1.16 (2026-09-03)
+
+The gate earned itself on the first bump after it was written. `google-antigravity` 0.1.16 adds
+**`StopHook`** (`hooks/hooks.py:239`), a `TransformHook[StopArgs, StopHookResult]` invoked when the root
+trajectory reaches fully idle, and `tests/test_antigravity_surface.py` went red with that name in the
+failure message. Nothing else in the release moved: no config field, no builtin tool, no enum member, no
+stale entry. That is the mechanism working exactly as § *The probe* argues it should — a name arriving as
+a red test rather than as a capability nobody notices for months.
+
+**It is deferred, and on its observability half rather than its control one.** The two halves pull in
+opposite directions and only one is worth having:
+
+| Half | What it offers | Verdict |
+|---|---|---|
+| `StopArgs.stop_reason`, `.error_message` | A **public, typed** read of why the turn ended, plus a fatal-error string with no step-stream equivalent. | The reason to want it. |
+| `StopDecision.CONTINUE` | Blocks termination and injects `reason` as a system prompt, resuming the agent loop. | Not a host's call to make silently. Resuming a turn the user did not ask to resume is the agent deciding it is not finished. |
+
+The first half matters more than it looks. `session.stop_reason_of` currently reaches for
+`_last_turn_stop_reason` on the conversation or its `_connection` — a private attribute whose
+public-looking sibling **does not exist**, and every turn reported a blank reason until that was found on
+2026-09-02 (see [`delivery.md` § *Phase 3*](delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02)).
+`StopHook` is the documented route to the same value.
+
+It waits anyway, because **the `StopReason` rows in `STEP_MEMBERS` are pending for a reason that applies
+here first**: the pump forwards a stop reason verbatim onto `streamComplete` and nothing renders the
+difference between a budget cap and an ordinary stop. Hardening the *source* of a value that has no
+*sink* is the wrong order, and it would also mean registering a transform hook on the turn-termination
+path of a daily-releasing alpha SDK to improve a read that currently works. Both move together when
+something renders a stop reason.
 
 **Two things the probe will not be able to do**, stated here because a green gate invites the wrong
 inference. It reads *shape*, never semantics — every correction in this file that mattered

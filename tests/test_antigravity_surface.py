@@ -2,10 +2,13 @@
 
 The same gate ``test_claude_code_sdk_surface`` is, against a much less
 stable target. That SDK was 0.2.137 and shipping occasionally; this one is
-**0.1.15, alpha, and releasing roughly daily with no compatibility
+**0.1.16, alpha, and releasing roughly daily with no compatibility
 commitment**. An Antigravity release that adds a step type, a builtin tool
 or a hook class is not a build break and never will be — it is a feature
 we quietly do not offer, or worse, a step the chat silently drops.
+
+It has caught one already: 0.1.16 added ``StopHook`` and this file went
+red with that name in the message, which is the whole mechanism working.
 
 The gate is deliberately not "coverage must be complete". At phase 1 there
 is no engine at all, so *nothing* is handled and that is correct: AG-8

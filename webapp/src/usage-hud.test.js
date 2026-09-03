@@ -1768,6 +1768,25 @@ describe('UsageHud rate limits', () => {
     expect(notes(el).join(' ')).toContain('Overage unavailable — no payment method on file');
   });
 
+  it('spells an underscored reason as words, like the Context tab does', async () => {
+    // The live value on a managed account is `org_level_disabled`, and it
+    // was printed raw here while `context-usage-tab` printed it spaced —
+    // two surfaces disagreeing about one field from `rate_limit`. Dropping
+    // the underscores is not the paraphrase the comment above `_renderOverage`
+    // rules out: the words stay the CLI's.
+    publishUsage();
+    const el = mountHud();
+    pushLimit(limitFixture({
+      overage_status: 'rejected',
+      overage_disabled_reason: 'org_level_disabled',
+    }));
+    pushComplete(resultFixture());
+    await settle(el);
+    const text = notes(el).join(' ');
+    expect(text).toContain('Overage unavailable — org level disabled');
+    expect(text).not.toContain('org_level_disabled');
+  });
+
   it('says overage is available without inventing a figure for it', async () => {
     publishUsage();
     const el = mountHud();

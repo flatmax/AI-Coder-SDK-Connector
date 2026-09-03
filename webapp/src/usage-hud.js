@@ -1235,6 +1235,13 @@ export class UsageHud extends RpcMixin(LitElement) {
    * `overage_disabled_reason` is printed in the CLI's own words. It is the
    * answer to the only question this line raises, and paraphrasing a reason
    * we have never enumerated would be inventing one.
+   *
+   * Its underscores are dropped, which is not a paraphrase — the words are
+   * still the CLI's, and `org_level_disabled` in running prose is a machine
+   * token that reads as a leaked identifier rather than an explanation. The
+   * Context tab has always spelled the same field this way; this line was
+   * the one showing the raw form, so the two surfaces disagreed about a
+   * value they both read from `rate_limit`.
    */
   _renderOverage(rl) {
     const status = rl.overage_status;
@@ -1243,7 +1250,7 @@ export class UsageHud extends RpcMixin(LitElement) {
     if (status === 'rejected') {
       const why = typeof rl.overage_disabled_reason === 'string'
         && rl.overage_disabled_reason
-        ? ` — ${rl.overage_disabled_reason}`
+        ? ` — ${rl.overage_disabled_reason.replace(/_/g, ' ')}`
         : '';
       return html`<div class="rl-note rl-rejected">Overage unavailable${why}</div>`;
     }

@@ -169,6 +169,38 @@ class TestWhatBecomesAMessage:
         assert rendered[1]["content"] == "first"
         assert rendered[3]["content"] == "second"
 
+    def test_text_either_side_of_a_tool_call_does_not_run_together(self):
+        """One turn, two text blocks, and a sentence boundary between them.
+
+        A turn's prose arrives as one block per API message, so the line
+        before a tool call and the line after it are separate entries.
+        Joining them on ``""`` produced "the file first.Added the docstring"
+        — visible in the history preview and in search snippets, though not
+        in the resumed chat, which renders ``blocks`` instead and so kept
+        the seam hidden.
+        """
+        rendered = render(
+            human("u1", "add a docstring"),
+            assistant("a1", {"type": "text", "text": "I'll read the file first."}),
+            assistant(
+                "a2",
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                message_id="msg_2",
+            ),
+            tool_reply("u2", "t1", "file body"),
+            assistant(
+                "a3",
+                {"type": "text", "text": "Added the docstring."},
+                message_id="msg_3",
+            ),
+        )
+        content = rendered[1]["content"]
+        assert "first.Added" not in content
+        assert content == "I'll read the file first.\n\nAdded the docstring."
+        # The structured route is untouched: it always kept them apart.
+        texts = [b["content"] for b in rendered[1]["blocks"] if b["kind"] == "text"]
+        assert texts == ["I'll read the file first.", "Added the docstring."]
+
     def test_a_prompt_carrying_text_and_an_image_is_still_a_prompt(self):
         """A list content block is not by itself a tool reply."""
         message = FakeSessionMessage(

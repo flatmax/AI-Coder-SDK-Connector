@@ -371,6 +371,40 @@ describe('ContextUsageTab fetching', () => {
     );
   });
 
+  it('does not paint a session that has not started yet as an error', async () => {
+    // Opening this tab before the first prompt is the ordinary way to
+    // reach it, and red says a fault. The Settings tab answers the same
+    // state in secondary grey; this one was the odd surface out.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'The Claude Code engine is not connected.',
+        reason: 'no-engine',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+    expect(el.shadowRoot.querySelector('.empty').textContent).toContain(
+      'engine is not connected',
+    );
+  });
+
+  it('keeps red for a request that actually failed', async () => {
+    // The other half of the same decision: 'failed' is a fault and must
+    // still read as one, or the distinction has just moved the problem.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'Could not read context usage: Control request timeout',
+        reason: 'failed',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error').textContent).toContain(
+      'Control request timeout',
+    );
+  });
+
   it('tells a reader whose request failed to try it again', async () => {
     // The case that used to read as a missing session: the engine was
     // there, the control request went out, and it did not come back.
@@ -3383,6 +3417,41 @@ describe('ContextUsageTab session usage', () => {
     const note = sectionFor(el, 'Session').textContent.replace(/\s+/g, ' ');
     expect(note).toContain('42s since the engine connected');
     expect(note).toContain('per-turn or cumulative');
+  });
+
+  it('does not head an empty per-model table with its columns', async () => {
+    // The state a live session sits in before the first priced result:
+    // seconds are known, cost and model usage are not. The section renders
+    // on the seconds, and it used to draw Model/Prompt/Completion over no
+    // rows — with the "no per-model figures yet" note suppressed, because
+    // that note was gated on there being a cost. Three headings promising
+    // data that never arrives read as a load that failed.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { duration_seconds: 42 } });
+    await settle(el);
+    const section = sectionFor(el, 'Session');
+    expect(section.querySelector('table')).toBeNull();
+    expect(section.textContent.replace(/\s+/g, ' ')).toContain(
+      'No per-model figures yet',
+    );
+  });
+
+  it('still heads the table once there are rows to head', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      session_usage: {
+        duration_seconds: 42,
+        model_usage: { 'claude-opus-5': { inputTokens: 10, outputTokens: 2 } },
+      },
+    });
+    await settle(el);
+    const section = sectionFor(el, 'Session');
+    expect(section.querySelector('table')).toBeTruthy();
+    expect(section.textContent).not.toContain('No per-model figures yet');
   });
 });
 

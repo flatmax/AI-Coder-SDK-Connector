@@ -6,8 +6,11 @@ turns. It was accurate the day it was written and nothing enforces it
 since — which is the failure mode this module exists to close, and it
 bites harder here than it does for Claude Code. That probe was written
 against a ``claude-agent-sdk`` that was 0.2.137 and stable. This one is
-written against **0.1.15 and alpha**, on a release cadence of roughly one
+written against **0.1.16 and alpha**, on a release cadence of roughly one
 per day, with no stability commitment for anything in it.
+
+That cadence is not hypothetical: 0.1.16 added ``StopHook``, and the gate
+below named it before anything else did.
 
 So this probe reflects over the *installed* SDK and diffs it against what
 this package handles, producing three answers per surface:
@@ -241,6 +244,27 @@ HOOK_CLASSES: dict[str, tuple[str, str]] = {
         "answers an agent-initiated ask_question. Blocked on the same "
         "missing dialog as the ASK_QUESTION tool, and pending for that "
         "reason rather than on its own merits",
+    ),
+    "StopHook": (
+        PENDING,
+        "new in 0.1.16, and deferred on its *observability* half rather "
+        "than its control one. It fires when the root trajectory reaches "
+        "fully idle, carrying StopArgs — response_text, trajectory_id, "
+        "continuation_count, stop_reason and error_message. What it would "
+        "buy is a public route to the first of those two: session."
+        "stop_reason_of reads `_last_turn_stop_reason` off the "
+        "conversation or its `_connection`, a private attribute whose "
+        "public-looking sibling does not exist, and every turn reported a "
+        "blank reason until that was found on 2026-09-02. StopArgs."
+        "stop_reason is the documented, typed one, and error_message has "
+        "no step-stream equivalent at all. It waits on the StopReason rows "
+        "below, which are pending because nothing renders the difference "
+        "between a budget cap and an ordinary stop yet — hardening the "
+        "source of a value with no sink is the wrong order. The CONTINUE "
+        "half is not why: StopDecision.CONTINUE blocks termination and "
+        "injects a system prompt to resume the loop, and resuming a turn "
+        "the user did not ask to resume is not a host's decision to take "
+        "silently",
     ),
     "PreTurnHook": (
         DECLINED,

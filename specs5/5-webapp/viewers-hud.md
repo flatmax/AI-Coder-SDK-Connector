@@ -127,6 +127,19 @@ of one.
 **Cost is absent rather than `$0.0000` before the first priced result**, on the same grounds as
 `turn_cost_basis`: a session that has run nothing has no estimate, and a zero is a claim about it.
 
+**The per-model table is absent when it has no rows, and the note explaining that stands on the rows
+alone.** *Found 2026-09-03, walking the app with Claude as master.* The section renders when **any** of
+cost, wall duration or per-model rows is known — but the "no per-model figures yet" note was gated on
+there being a *cost*. That leaves one reachable state uncovered, and it is the state a live session
+passes through: the engine has connected, so the clock is running, and no priced result has landed yet,
+so there is neither a cost nor a `model_usage` map. The section drew `Model | Prompt | Completion` over
+an empty body, with no word about why. Column headings promising data that never arrives read as a load
+that failed, which is the same misreading § *When the breakdown fails* records one section up.
+
+A heading is a promise about the rows under it. Where there are none the table goes and the sentence
+stays: *"No per-model figures yet — the engine reports them with the first priced result"*, which says
+both what is missing and what will supply it.
+
 **A `/clear` moves the figure down**, because the engine restarts its ledger and this follows it. Holding
 the pre-`/clear` number would report something nothing tracks any more and would disagree with the CLI's
 own panel, which restarts too. The cost is stated rather than hidden: after a `/clear` the figure
@@ -491,6 +504,22 @@ been slow. A client-side failure (the transport dropped it, the deadline fired) 
 request did leave and did not come back, which is all `failed` claims. Whether an engine is up is not
 something the browser can conclude from its own timeout.
 
+**The headline above the note follows the same `reason`, and only `failed` is red.** *Found 2026-09-03,
+walking the app with Claude as master.* The note was already choosing its words by reason; the sentence
+above it was styled `.error` unconditionally, so opening this tab before sending the first prompt — the
+ordinary way to reach it — put *"The Claude Code engine is not connected."* on screen in error red, with
+a calm grey explanation directly underneath contradicting its tone. Nothing was wrong. Red is the app's
+claim that something is, and a `no-engine` window is not a fault but a session that has not started yet.
+
+The idiom to match already existed one tab away: the Settings panel answers this identical state in
+secondary grey — *"The engine has not connected yet, so it has not said which models it offers — the list
+arrives with the first turn."* That is the shape a pre-session state should take, and it is why this is
+recorded as the Context tab having been out of step rather than as a new convention. `failed` keeps the
+error colour, because there the app *is* reporting a fault and demoting it would move the problem rather
+than fix it. This is the same family as [`chat.md` § *Engine Indicator and Notice*](chat.md#engine-indicator-and-notice)
+(AG-9): a surface that is unbuilt or not yet started must say so in its own register, not borrow the one
+that means broken.
+
 **Deadlines are laid out so the innermost one fires first.** The engine bounds a control request at
 60s; the transport waits 75s; this tab's own deadline is 90s. Each layer knows more about the call than
 the layer outside it, so the useful error is the innermost one, and a layer that fires first steals the
@@ -621,6 +650,15 @@ Overage itself gets one line and no second gauge — it is a fallback rather tha
 reports it as a status and a reason rather than a figure, and `overage_disabled_reason` is printed in
 the CLI's own words because paraphrasing a reason this repo has never enumerated would be inventing
 one.
+
+**Its underscores are dropped, on both surfaces.** *Corrected 2026-09-03, seen live on a managed
+account.* The measured value is `org_level_disabled`, and the HUD printed it verbatim while the Context
+tab printed it spaced — two surfaces disagreeing about one field they both read from `rate_limit`.
+Spacing is not the paraphrase the rule above forbids: the words stay the CLI's and nothing is
+interpreted. What it removes is a machine token sitting in running prose, which reads as an identifier
+that leaked rather than as the explanation the line exists to give. The rule against inventing a reason
+governs the *reason*; how it is typeset is this app's business, and the two surfaces must typeset it the
+same way.
 
 `utilization` is a **fraction, 0.0–1.0** (`RateLimitInfo`), and `resets_at` is **Unix seconds** — not
 milliseconds and not ISO. Both are pinned by tests, because each has exactly one plausible wrong
@@ -873,6 +911,12 @@ tier-distribution HUD.
   another's, and no surface renders a figure from one window under another's name.
 - No surface invents a utilisation for a record that carries none. `—` is the answer, beside the window
   and reset time that *are* known.
+- Error styling is reserved for a fault. A state that is merely not started yet — no engine, no first
+  turn — is rendered in the same register as any other explanation, and says what will end it.
+- A table is rendered only when it has rows. Where there are none, the empty-state sentence takes its
+  place, and that sentence is never gated on a field other than the rows it stands in for.
+- Both surfaces typeset `overage_disabled_reason` the same way: the CLI's own words, spaced rather than
+  underscored. Neither paraphrases it.
 - No surface states a reset time that falls on another day without naming that day. A bare clock time is
   reserved for a reset that lands today, where it cannot be read as anything else.
 - No surface claims to show the CLI's `/usage` figures. The SDK does not expose them.

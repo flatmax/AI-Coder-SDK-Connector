@@ -134,6 +134,16 @@ changes underneath a reader, and the SDK ships the parser for it.
 Rendering happens at read time, not write time:
 
 - User messages, assistant text and thinking blocks come from parsed `SessionMessage`s.
+- **A rendered turn carries its prose twice, and the flat copy is joined on a blank line.** `blocks`
+  holds the turn's structure — each text and thinking block separately, interleaved with the tool cards
+  — and `content` is the same prose flattened for the readers that cannot use structure: the history
+  browser's preview pane and the search snippet. A turn's text arrives as one block per API message, so
+  the line before a tool call and the line after it are two entries, and concatenating them produced
+  *"I'll read the file first.Added the docstring"* — a sentence boundary silently eaten. *Found
+  2026-09-03, reading a preview in the history browser.* It survived because the two readers disagree
+  about which field they use: the resumed chat renders `blocks` and always looked right, so only the
+  surfaces nothing else covers showed the seam. The blank line is the join, matching the paragraph
+  break the structured route renders between the same two blocks.
 - Tool calls are summarised for display when the card is built — name, input summary, status, duration.
   A full `Read` result of a 2000-line file has no browse value, but summarising it *into storage* would
   be a second version of the truth; summarising it into a card is just rendering.
@@ -385,5 +395,8 @@ read them.
 - Subagent transcripts are keyed by SDK agent ID; no positional index appears in any path or record.
 - No rendered row attributes to the user text the user did not write. A `user` entry carrying
   `origin.kind == "task-notification"` renders as a system note, and no session preview opens with one.
+- A turn's flat `content` and its structured `blocks` say the same thing. Text blocks are separated in
+  the flat copy, never concatenated, so no reader that lacks the structure loses a sentence boundary
+  the structured reader shows.
 - The disk-usage warning fires at most once per server lifetime and never blocks work, and reading the
   same size on demand never spends that one shot.
