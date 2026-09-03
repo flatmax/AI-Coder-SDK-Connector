@@ -461,6 +461,54 @@ class AntigravityPermissionGate:
                 return entry.strip()
         return None
 
+    def pre_verdict(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> tuple[bool, str] | None:
+        """The answer this gate gives *without* opening a dialog, or ``None``.
+
+        ``None`` means "ask the user". Anything else is decided here.
+
+        **Shared by both Antigravity transports on purpose.** The SDK path
+        reaches it through :meth:`run`; the ``agy`` path reaches it from
+        :mod:`~aic_dc.antigravity.agy.gate_server`, which otherwise calls
+        ``broker.can_use_tool`` directly and would therefore raise a dialog
+        for every read. That is exactly the defect fixed on the SDK path on
+        2026-09-03 — four dialogs for a turn whose only mutation was one
+        edit — and putting the narrowing in one method is what stops a
+        third transport reintroducing it a third time.
+
+        Two decisions live here, and only these two:
+
+        - A **read** is allowed without asking, as the Claude CLI does
+          before the shared broker ever sees one. ``ALWAYS_ASK`` is checked
+          first, so a mutating tool cannot slip through on a class that
+          happens to be ungated — ``start_subagent`` is ``delegate``, which
+          is.
+        - A read of a **denied** path is refused outright. That is the
+          user's own shift-click on the file tree, and it must not be
+          softened into an auto-allow by the very change that stops the
+          asking.
+        """
+        if tool_name in ALWAYS_ASK:
+            return None
+        if GATED_BY_DEFAULT.get(TOOL_CLASSES.get(tool_name, "exec"), True):
+            return None
+        normalised = normalise_args(tool_name, args)
+        denied = self._denied_read_target(tool_name, normalised)
+        if denied is not None:
+            logger.info(
+                "Antigravity %s refused: %s is denied to the agent",
+                tool_name,
+                denied,
+            )
+            return (
+                False,
+                f"The user has denied the agent read access to {denied}. Do "
+                f"not try to read it by another route; ask them for what you "
+                f"need from it instead.",
+            )
+        return (True, "")
+
     def as_hook(self) -> Any:
         """This gate as a real ``PreToolCallDecideHook``, for the config.
 
@@ -525,26 +573,12 @@ class AntigravityPermissionGate:
         tool_name = str(getattr(data, "name", "") or "")
         args = dict(getattr(data, "args", None) or {})
 
-        if tool_name not in ALWAYS_ASK and not GATED_BY_DEFAULT.get(
-            TOOL_CLASSES.get(tool_name, "exec"), True
-        ):
-            normalised = normalise_args(tool_name, args)
-            denied = self._denied_read_target(tool_name, normalised)
-            if denied is not None:
-                logger.info(
-                    "Antigravity %s refused: %s is denied to the agent",
-                    tool_name,
-                    denied,
-                )
-                return HookResult(
-                    allow=False,
-                    message=(
-                        f"The user has denied the agent read access to "
-                        f"{denied}. Do not try to read it by another route; "
-                        f"ask them for what you need from it instead."
-                    ),
-                )
-            return HookResult(allow=True)
+        verdict = self.pre_verdict(tool_name, args)
+        if verdict is not None:
+            allow, message = verdict
+            if allow:
+                return HookResult(allow=True)
+            return HookResult(allow=False, message=message)
 
         try:
             result = await self.broker.can_use_tool(

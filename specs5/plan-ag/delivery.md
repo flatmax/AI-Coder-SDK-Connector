@@ -1969,7 +1969,44 @@ The fixtures are transcribed from the capture rather than invented, because phas
 a fake describing a friendlier engine than the real one passes every test while the pump is wrong.
 28 tests.
 
-**What is not built:** the session itself — spawn, the `init` read, the claim, and cancel. Its
-handshake is already proved in `scripts/probe_agy_gate.py`, which does exactly that sequence. The handshake it needs is proved and written down in
+### The session, and a narrowing that nearly went missing for a third time (same day)
+
+`agy/session.py` holds one `agy` process open across turns — `--print= --input-format stream-json`,
+prompts on stdin, frames on stdout — and does the forced handshake: spawn, read `init`, claim, then
+prompt. Fifteen tests drive it through a **fake `agy` that is a real subprocess** speaking the real
+protocol, because a fake answering in-process would exercise neither the handshake's order nor the
+pipes.
+
+**Stop has no halt frame on this transport.** The input protocol accepts one event, `user`; the
+binary answers anything else with *"unsupported stream input message event"*. The SDK has
+`conversation.cancel()` and there is no counterpart. What there is instead is the gate: ⏹ **starves**
+the turn by refusing every subsequent tool call with a reason naming the user's stop, which is the
+mechanism the Claude adapter already leans on — `cancel_streaming` releases the turn's open
+permissions *before* interrupting, because a released dialog is what makes an interrupt actionable.
+
+The limit is stated rather than discovered: **a turn producing only prose cannot be starved**,
+because it asks permission for nothing. Killing the process would stop it and end the session, so
+`cancel()` starves and `close()` is the separate, explicit act.
+
+**Two bugs the tests caught, and both were repeats.**
+
+The first is the one worth the entry. `gate_server.decide` called `broker.can_use_tool` **directly**,
+bypassing the read-class narrowing that lives in `AntigravityPermissionGate.run` — so every read on
+this transport would have raised a dialog. That is precisely the phase-4 defect fixed this morning
+on the SDK path, four dialogs for a turn whose only mutation was one edit, **reintroduced by a third
+transport within hours of being fixed on the second.** The narrowing is now
+`AntigravityPermissionGate.pre_verdict`, called by both, so a fourth transport cannot reintroduce it
+by writing plausible code.
+
+The second: a prompt that could not be written to a dead process `return`ed, skipping
+`stream_complete` and leaving the browser spinning — the *same* mistake as the SDK adapter's error
+path, fixed this morning, made again this afternoon in a different file. Both now close the turn out
+whatever happens.
+
+Neither was caught by review. Both were caught by a test asserting on the outcome the user sees.
+
+**Phase 8's remaining work** is the adapter that mounts this behind the engine router — the 31 RPC
+methods, the event dispatch, and the settings surface that installs the hook into the user's global
+`hooks.json` with their consent. The session, the gate and the pump are done and tested. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.

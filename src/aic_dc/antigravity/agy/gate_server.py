@@ -126,10 +126,38 @@ class AgyGateServer:
         self._config_dir = config_dir
         self._server: Any = None
         self._claimed: str | None = None
+        self._refusal: str | None = None
 
     @property
     def socket_path(self) -> Path:
         return self._socket_path
+
+    def refuse_all(self, reason: str) -> None:
+        """Refuse every subsequent call without asking. This is ⏹.
+
+        There is no halt frame on this transport
+        (:mod:`~aic_dc.antigravity.agy.session`), so stopping a turn means
+        starving it: the agent asks for a tool, is refused with a reason
+        naming the user's stop, and winds down. The same mechanism the
+        Claude adapter leans on, where ``cancel_streaming`` denies the
+        turn's open permissions *before* interrupting because a released
+        dialog is what makes the interrupt actionable.
+
+        Deliberately **not** a dialog. The user has already answered this
+        question by pressing stop, and putting it to them again per tool
+        call would be the opposite of cancelling.
+        """
+        self._refusal = reason
+
+    def resume(self) -> None:
+        """Stop refusing. Called when a new turn starts, never mid-turn.
+
+        A stop applies to the turn it was pressed during: carrying it into
+        the next one would make ⏹ a mode rather than an action, and the
+        user would find their next turn refusing everything for no visible
+        reason.
+        """
+        self._refusal = None
 
     async def start(self) -> None:
         """Listen. Safe to call once; a second call is a no-op."""
@@ -166,6 +194,7 @@ class AgyGateServer:
         racing the shutdown. Releasing first makes those pass through as
         unowned, which is what they are once this host has let go.
         """
+        self._refusal = None
         if self._claimed:
             registry.release(self._claimed, config_dir=self._config_dir)
             self._claimed = None
@@ -195,6 +224,23 @@ class AgyGateServer:
             return dict(UNREADABLE)
         args = call.get("args")
         args = dict(args) if isinstance(args, dict) else {}
+
+        if self._refusal is not None:
+            # Stopped. Answered without a dialog: the user already said so.
+            return {"decision": "deny", "reason": self._refusal}
+
+        # The narrowing that keeps reads out of the dialog, shared with the
+        # SDK transport rather than reimplemented. Calling the broker
+        # directly is what would raise a dialog for every read — the exact
+        # defect fixed on the SDK path on 2026-09-03, and this is the third
+        # transport that could have reintroduced it.
+        verdict = self._gate.pre_verdict(tool_name, args)
+        if verdict is not None:
+            allow, message = verdict
+            return {"decision": "allow"} if allow else {
+                "decision": "deny",
+                "reason": message,
+            }
 
         result = await self._gate.broker.can_use_tool(
             tool_name, args, _AgyContext(payload)
