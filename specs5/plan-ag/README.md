@@ -5,7 +5,10 @@ ships and streams into its own tab, the engine router is wired into startup, and
 chosen as master. **Turns have now been driven through it as master (2026-09-03)** — the permission
 dialog, the diff and the step stream all work — and doing so found six defects, five of them fixed
 the same day. Phase 4's criterion is still unmet: no conversation has yet run end to end *including
-an approved write*. This directory is
+an approved write*, because the free tier's 20-requests-per-day ceiling was reached first.
+**That ceiling is what [AG-14](decisions.md#ag-14) answers**, reversing AG-2's exclusion of `agy` and
+adding phase 8 — a subprocess-driven `agy` as a second transport, and the only one that reaches the
+user's paid subscription. This directory is
 the plan of record for adding Google's Antigravity SDK as a second agent backend beside the existing
 Claude Code engine.
 
@@ -74,20 +77,28 @@ only. The four live-verification spikes — `probe_edit_args.py`, `probe_consult
 `probe_session.py`, `probe_consultation_tab.py` — sit beside the project's other smoke tests, and
 each phase's entry in [`delivery.md`](delivery.md) cites the one that settled it.
 
-**`agy` was re-examined on 2026-09-03 and remains ruled out — but the reasons changed completely,
-and it is now a cost decision rather than a capability one.** Because the paid access is a Google AI
-Pro subscription reachable only through `agy`'s OAuth, while the SDK's key refuses at 20 requests/day,
-the question was worth re-measuring. Both of [AG-2](decisions.md#ag-2)'s original disqualifications
-are obsolete: `agy` 1.1.25 has lifecycle hooks, and a `PreToolUse` hook receives `TargetFile` /
-`TargetContent` / `ReplacementContent` **before the write**, can answer `deny` with a reason the model
+**`agy` was re-examined on 2026-09-03 and the exclusion was reversed — see
+[AG-14](decisions.md#ag-14), which adds it as a *second transport* beside the SDK engine rather than
+in place of it.** The question was reopened because the paid access is a Google AI Pro subscription
+reachable only through `agy`'s OAuth, while the SDK's key refuses at 20 requests/day — so this is
+"reach the account the user pays for, or do not run" rather than a preference between transports.
+
+Both of [AG-2](decisions.md#ag-2)'s original disqualifications turned out to be about the wrong
+channel. `agy` 1.1.25 has lifecycle hooks: a `PreToolUse` hook receives `TargetFile` /
+`TargetContent` / `ReplacementContent` **before the write**, answers `deny` with a reason the model
 reads, and can `overwrite` the arguments — the whole of AG-5's architecture, in the SDK's own field
-names. The gate also **fails closed**: a hook that times out, exits non-zero, prints malformed JSON or
-does not exist all block the tool. What remains is that a third adapter is roughly phases 3–4 again
-against a working SDK engine whose only problem is quota, and that in 1.1.25 the gate cannot be scoped
-to our own sessions — workspace-local `hooks.json` does not load headlessly, so shipping means a
-global hook in the user's own configuration. See
-[AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher) and
-[`sdk-surface.md` § The `agy` hook surface](sdk-surface.md#the-agy-hook-surface--measured-2026-09-03).
+names. The gate **fails closed** on timeout, non-zero exit, malformed JSON and missing command; the
+single fail-open case is exit 0 with empty stdout, which is ours not to write.
+
+Two further measurements closed the objections that survived those: hooks **do** fire in
+bidirectional `stream-json` mode and not only under `-p`, and the hook payload's `conversationId` is
+**exactly** the `init` frame's `conversation_id` — so a gate living in the user's global
+`hooks.json` can be scoped to the host's own sessions and pass every other one straight through.
+That last point was the blocker, because workspace-local `hooks.json` does not load headlessly in
+1.1.25 and `workspacePaths` is empty in every captured payload.
+
+**The terms clause is now live rather than moot** — AG-2 made it moot by not driving `agy` at all.
+It is recorded in AG-2 and the user chose to proceed knowing it.
 
 **One correction is recorded rather than quietly fixed.** The first pass reported the hook gate as
 *failing open* on a timeout and that reached both `decisions.md` and `risks.md` before it was checked.
@@ -248,6 +259,7 @@ Each phase is independently shippable and leaves the tree working. Phase 0 is th
 | **5. History and sessions** | Resume by `conversation_id`; a repo-local mirror rebuilt as a step observer rather than as a store implementation, since there is no `SessionStore` protocol to implement. **Its own store root**, so that a record written by one engine cannot be handed to the other ([AG-1](decisions.md#ag-1)). | Restarting the server resumes the previous Antigravity conversation with context intact, and the history browser renders it. |
 | **6. Capability descriptor** ✅ | The descriptor of [AG-3](decisions.md#ag-3) made real, and every surface in § *What does not translate* given an entry. Per-engine hiding across the Context tab, HUD and settings. | No surface renders an empty or synthesised value for a fact its engine cannot report; no webapp branch keys off an engine name string ([AG-R-4](risks.md#ag-r-4)). **Met, 2026-09-02.** `src/aic_dc/capabilities.py` holds 14 surfaces, distinguishing `absent` (no source data, ever) from `unbuilt` (a to-do); the router publishes it, `engine-capabilities.js` answers `supports()` synchronously, and seven surfaces hide on it across the HUD, the Context tab, the settings tab and the chat panel's action bar. Cost hides at the *figure*, not the row ([AG-6](decisions.md#ag-6)). Six surfaces still have no consumer, because they have no UI on either engine yet — see [`delivery.md`](delivery.md#phase-6--the-rest-of-the-consumers-2026-09-02). **Amended 2026-09-03:** hiding twelve surfaces at once reads as a broken build rather than as a different engine, so the chat panel now names the engine that is answering and lists the surfaces it has not had built for it — keyed on `unbuilt`, never on an engine name. See [AG-9 § What hiding cost](decisions.md#ag-9--engine-specific-surfaces-are-hidden-never-stubbed). |
 | **6b. The consultation as an agent tab** ◑ | [AG-13](decisions.md#ag-13). The consultant streams `Conversation.receive_steps()` through the existing `StepTranslator`, tagging every event with a minted consultation id, and emits `subagentEvent` so the tab strip picks it up. Stop wired to `Conversation.cancel()`. Cost hidden via the descriptor. | A `second_opinion` call from a Claude turn opens its own tab, fills with thinking and text as Google produces them, can be stopped mid-flight, and shows tokens with no USD figure. **No webapp change** — if one is needed, the id contract has been got wrong. **Met live 2026-09-02**: `scripts/probe_consultation_tab.py` drives a real Gemini consultation and all six contract checks pass — 13 chunks streamed progressively, each carrying the consultation id, terminal event last. No webapp file changed. **Confirmed in the browser 2026-09-02**: the dialog gates it, the tab appears, settles and mirrors a row into Main, with no webapp change. It also found a real bug — a failed consultation settled as a green `completed` — now fixed and re-verified. Outstanding: both live browser attempts timed out provider-side, so a *successful* stream has not been watched rendering; ⏹ Stop is now routed end to end (`stop_task` → `ConsultantBridge.cancel()`), and a stalled consultation reports a heartbeat every 20s and explains itself with the harness's own stderr when it gives up. |
+| **8. `agy` as a second transport** | [AG-14](decisions.md#ag-14). One long-lived `agy --print="" --input-format stream-json` process per session; a `PreToolUse` hook in the user's global `hooks.json` that blocks on AIC⚡DC's dialog and returns the human's answer, scoped by `conversationId`; the step stream for the transcript and `transcript_full.jsonl` for what it omits. Reuses the shared `PermissionBroker`, the dialog, and the payload builders — the hook's argument names are the SDK's own. | A user holds a full conversation on the **paid subscription**, including an approved write, with the gate proven by a tripwire that asserts the *file* is unchanged after a deny — not that the hook fired. Plus: a second `agy` session belonging to the user runs concurrently and is **never** intercepted. |
 | **7. Packaging** | `google-antigravity` as an optional extra, not a base dependency — a second bundled binary on top of the ~295 MB CLI ([AG-R-10](risks.md#ag-r-10)). | A base install is a one-engine install with no broken UI, and its size has not moved. |
 
 ## Ordering constraints that are not obvious

@@ -65,6 +65,13 @@ by a check somebody has to remember to write.
 
 ## AG-2 — The Python SDK is the engine; `agy` is not
 
+> **Reversed in part on 2026-09-03 by [AG-14](#ag-14).** The SDK remains *an* engine and the one with
+> an enforcing gate. What is no longer true is the exclusion: `agy` ships alongside it as a second
+> transport, because it is the only route to the user's paid subscription and every objection below
+> has now been answered by measurement. Read this decision for the reasoning that held for four days
+> and for the two amendments that dismantled it; read AG-14 for what is being built.
+
+
 `google.antigravity` driving the bundled `localharness` binary is the Antigravity engine. The `agy`
 CLI is **not** an engine candidate, notwithstanding that its flag surface is a much closer analogue of
 the `claude` CLI and that it is already authenticated.
@@ -620,6 +627,81 @@ choice should be re-made on its merits rather than inherited from this decision.
 
 **What is *not* a reason to prefer any of these:** the owner's Google AI Pro subscription. It funds
 none of them — see [AG-2](#ag-2).
+
+---
+
+## AG-14 — `agy` is a *second Antigravity transport*, and it is the one that reaches the paid account **(user)**
+
+**Decided 2026-09-03, and it reverses the operative half of [AG-2](#ag-2).** The SDK engine stays; a
+subprocess-driven `agy` joins it as a second way of reaching Antigravity. AG-2's conclusion — "the
+Python SDK is the engine; `agy` is not" — held for four days on two measurements that turned out to be
+about the wrong channel, and then on cost and containment, and both of those have now been answered by
+measurement rather than argument.
+
+**Why it matters:** the SDK engine cannot reach the user's paid Google AI Pro subscription **at any
+price**, because `agy` and the SDK address different backends (AG-2 § *a backend split*). The Gemini
+API key it must use instead refuses at **20 requests per model per day**, which is not enough to
+verify the engine, let alone use it — an afternoon of phase-4 work spent it and then blocked the rest
+of the day. So the choice is not "which transport is nicer" but "reach the account the user pays for,
+or do not run".
+
+### What was measured, and when
+
+| Question | Answer | When |
+|---|---|---|
+| Does headless `agy` spend the subscription? | **Yes** — same keyring OAuth, same Code Assist backend as the TUI | 2026-09-03 |
+| Does a `PreToolUse` hook carry the write before it happens? | **Yes** — `TargetFile`, `TargetContent`, `ReplacementContent`, `StartLine`, `EndLine`; `CodeContent` for `write_to_file`. **The SDK's own field names** | 2026-09-03 |
+| Can the hook refuse, with a reason, and amend? | **Yes** — `deny` + `reason`, and `overwrite` merged into the args before the call runs | 2026-09-03 |
+| Does the gate fail closed? | **Yes** on timeout, non-zero exit, malformed JSON and missing command. **No** on exit 0 with empty stdout — ours not to write | 2026-09-03 |
+| Do hooks fire in **bidirectional** `stream-json` mode, not just `-p`? | **Yes** — 4 payloads on one turn, covering `run_command`, `view_file` and `replace_file_content` | 2026-09-03 |
+| Can a global hook be scoped to our own sessions? | **Yes** — the hook payload's `conversationId` is **exactly** the `init` event's `conversation_id`, and `init` precedes every tool call | 2026-09-03 |
+
+That last row is what unblocked the decision. Workspace-local `hooks.json` does not load headlessly in
+1.1.25, so the gate has to live in the user's global `~/.gemini/config/hooks.json` and will see their
+own unrelated `agy` sessions. `workspacePaths` is **empty** in every captured payload and cannot scope
+it. `conversationId` can: AIC⚡DC learns its conversation id from the `init` frame before any tool call
+arrives, so the hook can allow-and-return immediately for any conversation the host does not own.
+
+### The shape
+
+One long-lived process per session, not one per turn:
+
+```
+agy --print="" --input-format stream-json --output-format stream-json \
+    --print-timeout <long> --dangerously-skip-permissions
+{"event":"user","message":{"role":"user","content":"…"}}
+```
+
+- **The gate is a `PreToolUse` hook** that blocks on AIC⚡DC's own dialog and returns the human's
+  answer. `matcher` is `"*"`, never a tool list — [AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher).
+- **`--dangerously-skip-permissions` is required**, because `agy`'s own headless layer auto-denies
+  anything it would otherwise prompt for and would refuse the turn before our hook ever ran. The flag
+  is not a relaxation here; it removes a gate that cannot ask, in favour of one that can. Where
+  `permissions.allow` grants can cover the workspace they should be used instead, since a hook `deny`
+  still overrides a settings `allow` and two gates beat one.
+- **The transcript is the stream**, plus `transcript_full.jsonl` for what the stream omits — which is
+  where the diff for a *completed* edit lives, untruncated.
+
+### What this does not authorise
+
+- **Not a replacement for the SDK engine.** That engine is built, tested and working, and it is the
+  one with an *enforcing* gate — `HookResult(allow=False)` blocks the write inside the harness. `agy`'s
+  hook is cooperative, and the difference is real even though the failure modes measured favourably.
+  Both transports ship; the user chooses.
+- **Not a licence to weaken AG-5.** Every mitigation in AG-R-12 is a **requirement** of this phase,
+  not a recommendation: `matcher: "*"`, never exit 0 silently, `--print-timeout` well past any dialog,
+  and a tripwire that asserts on the *file* rather than on the hook having fired.
+- **Not a decision about the terms clause**, which is below and is now live rather than moot. AG-2
+  made it moot by not driving `agy` at all; this decision does drive it. **The user was shown the
+  clause and chose to proceed** — recorded here so it is a decision rather than an oversight.
+
+### What would reverse this
+
+Workspace-local hook loading arriving in a later `agy` would *improve* it, not reverse it. What would
+reverse it: a paid Gemini key making the SDK engine sufficient, in which case this becomes a
+second transport nobody needs; or Google closing the hook surface, which on an alpha CLI releasing
+weekly is a live possibility and is the reason the probe belongs in the suite rather than in a
+paragraph.
 
 ---
 

@@ -328,6 +328,35 @@ an error the model can see, and it reaches for a different tool — so anything 
 ungated. [AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher) carries it;
 the seam is every tool, never a list.
 
+### Bidirectional mode, and the isolation key — measured 2026-09-03
+
+The two questions [AG-14](decisions.md#ag-14) turned on, both settled by one probe.
+
+**Hooks fire in bidirectional `stream-json` mode, not only under `-p`.** One turn driven as
+
+```
+agy --print="" --input-format stream-json --output-format stream-json --dangerously-skip-permissions
+{"event":"user","message":{"role":"user","content":"…"}}
+```
+
+produced **four** `PreToolUse` payloads — `run_command` ×2, `view_file`, `replace_file_content`. That
+`run_command` is gated in this mode matters as much as the edit: it is AG-R-11's route-around tool.
+
+**`conversationId` is a sound isolation key.** The hook payload's `conversationId` was *exactly* the
+`init` frame's `conversation_id`, and `init` is the stream's first event, so a host learns the id it
+owns before any tool call can arrive:
+
+```
+stream init conversation_id : cd4edb7f-6de3-468f-9815-e76b310a920a
+hook  conversationId        : cd4edb7f-6de3-468f-9815-e76b310a920a   → match
+hook  workspacePaths        : []                                     → unusable
+```
+
+This is what makes a **global** hook shippable. It will see the user's own unrelated `agy` sessions —
+workspace-local `hooks.json` does not load headlessly — and it can allow-and-return immediately for
+any conversation the host does not own. `workspacePaths` cannot do that job: it is empty in every
+payload captured here, in both `-p` and bidirectional modes.
+
 ### Two limits that remain
 
 - **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local

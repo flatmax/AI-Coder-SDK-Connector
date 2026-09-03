@@ -396,7 +396,8 @@ another route — on a third mechanism, after `sed -i` and inline `python3`.
 | command missing / not executable | **blocked** | `exit status 127` |
 | **prints nothing, exits 0** | **allowed** | parsed as `{}`, empty decision defaults to allow |
 
-**Mitigations, all cheap and none speculative:**
+**Mitigations — and as of [AG-14](decisions.md#ag-14) these are phase-8 requirements, not advice.**
+A gate is the product on this transport, so each of these is a thing the phase does not ship without:
 
 - **`"matcher": "*"`, never a tool list.** The seam is every tool, for the same reason
   [AG-5](decisions.md#ag-5) makes it every *mutating* tool on the SDK: a gate the model can walk
