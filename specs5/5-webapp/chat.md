@@ -396,6 +396,7 @@ Two visual groups separated by a thin vertical divider:
 - Session group — new session, open history browser (hidden in file search mode, and on any tab but the live conversation: a subagent transcript and a historical archive have no session of their own to restart, so ✨ there would restart the one behind the tab being read)
   - ✨ calls `new_session` and clears nothing locally. The server broadcasts `sessionChanged` with an empty message list and the panel acts on that, so the client that started the session and the clients merely watching it take one path. It is disabled while a turn is streaming because the server refuses mid-turn, and a button whose only outcome is a refusal it could have predicted is noise. Two refusals still reach the user as toasts: `turn_in_progress` (the turn started underneath the click) and `restricted` (the call is the host's — it discards the context every client is looking at)
   - 📜 stays live while a turn streams. Browsing is a pure read of the mirrored transcript; it is *resuming* from inside the browser that the engine refuses mid-turn
+  - The engine chip — which engine is answering. Present only when more than one engine is mountable, and it opens the engine notice rather than acting directly. See § Engine Indicator and Notice
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
 
@@ -417,6 +418,48 @@ The action bar uses a dual-direction collapse pattern keyed on whether the searc
 The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (preset, sessions visible) — never both fighting for the same row. Active toggles inside the search bar and outside it share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
 
 The **permission-mode indicator is exempt from collapse.** It is the one control in the row that must never be hidden by a focus state: a user who cannot see whether the agent is allowed to write files has lost the plot, and a search box is not a good enough reason.
+
+### Engine Indicator and Notice
+
+AIC⚡DC can run on more than one engine, and a surface the running engine cannot feed is hidden
+rather than drawn empty ([plan-ag AG-9](../plan-ag/decisions.md#ag-9)). Hiding one surface is
+quieter than drawing one wrong number. Hiding twelve is a UI that reads as broken, and on
+2026-09-03 a user reported exactly that — the history browser gone, the always-allow button gone, no
+slash commands, no cost — none of which was a fault: `app.json`'s `engines.master` named the second
+engine, and every one of those surfaces was correctly hidden. What was missing was any way to find
+that out. The only place naming the running engine was the Settings tab's selector, which a user has
+to already suspect the engine to go looking for.
+
+**The chip.** A control in the session group naming the engine that is answering. Rendered **only
+when `list_engines().mountable` holds more than one entry** — with a single engine there is no
+question to answer and a permanent label is furniture. Clicking it opens the notice, the same way
+the turn footer's mirror-gap marker forces the health banner open: the indicator and the explanation
+should not be two separate things to find. It carries the warning appearance whenever the engine has
+unbuilt surfaces, and it carries it *after* the notice is dismissed, which is what makes dismissing
+the notice safe rather than a way to lose the only explanation.
+
+**The notice.** A dismissible strip beside the health banner — both are standing conditions about
+the channel rather than events in the conversation. It names the engine, lists by name the surfaces
+this build has not wired to it, and offers a one-click switch when exactly one alternate is
+mountable. With more than one alternate it offers none: that is a choice rather than a recovery, and
+choosing the first of three would be picking for the user and calling it a fix.
+
+It lists the surfaces rather than counting them. "5 features unavailable" is the same non-answer as
+the empty panels it is explaining — the reader's question is *which* ones, because that is what
+tells them whether the thing they reached for is coming back. The names are the descriptor's own
+`title` fields, so the browser is not a second author of what a surface is called.
+
+**What opens it is `unbuilt`, never an engine name.** An `absent` surface is a genuine difference
+between engines and the UI is complete without it; an `unbuilt` one is a feature this project built
+and has not reached this engine with, and its absence is an unfinished application. Only the second
+interrupts. On the shipped engine that count is zero, so the notice never appears there. Nothing in
+either control branches on which engine is running ([AG-R-4](../plan-ag/risks.md#ag-r-4)): the
+descriptor decides whether to speak and carries no engine identity, and the name is read from
+`list_engines` purely to render it and to hand back to `switch_engine`.
+
+Switching is a session boundary and says so — the two engines' transcripts do not translate, so the
+notice states that a switch starts a new session, and that nothing is deleted and the current
+conversation stays loadable.
 
 ## Preset Selector
 
@@ -656,6 +699,7 @@ the UI in two places that must be got right:
 - Passive stream completion always prepends the user message from the result if present
 - A turn's tool cards are never hidden by a global preference; the transcript always shows what the agent did
 - The permission-mode indicator is visible in every layout state of the action bar
+- A surface hidden because the running engine cannot feed it is never hidden anonymously: whenever more than one engine is mountable the action bar names the engine that is answering, and an engine with `unbuilt` surfaces names them. What decides both is the capability descriptor, never an engine-name comparison
 - A slash command the engine answers itself — routed or denied — is never sent to the model as prose. Every other one, including an unrecognized one, reaches the CLI unchanged; the palette never rewrites what the user typed except when they pick an entry from it
 - The panel never re-runs a tool call, never edits a tool input, and never speaks into a subagent
 - A file chip's label and the path its click carries are separate: the label is repo-relative, what is dispatched is the path the engine reported

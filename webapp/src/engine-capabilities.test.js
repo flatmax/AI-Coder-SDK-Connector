@@ -23,6 +23,7 @@ import {
   setCapabilities,
   supports,
   surfaceDetail,
+  surfacesWithStatus,
 } from './engine-capabilities.js';
 
 /** A descriptor shaped like the server's, for the Antigravity engine. */
@@ -201,5 +202,48 @@ describe('loadCapabilities', () => {
     await loadCapabilities(h);
     expect(h.rpcExtract).toHaveBeenCalledTimes(2);
     debug.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------
+// surfacesWithStatus — the one reader that separates absent from unbuilt
+// ---------------------------------------------------------------
+//
+// The webapp hides both identically and must keep doing so. This exists
+// for the single place the difference is the whole point: telling a user
+// why the application is missing features. `unbuilt` means this project
+// built a feature and has not wired it to the running engine — an
+// unfinished application. `absent` means the engine has no source data
+// and never will — a complete application over a different engine. Only
+// the first is worth saying out loud, which is why they are asked for
+// separately rather than as one "not supported" list.
+
+describe('surfacesWithStatus', () => {
+  beforeEach(() => resetCapabilities());
+
+  it('answers empty before the descriptor has loaded', () => {
+    expect(surfacesWithStatus('unbuilt')).toEqual([]);
+  });
+
+  it('separates unbuilt from absent rather than lumping them as hidden', () => {
+    setCapabilities(ANTIGRAVITY);
+    expect(surfacesWithStatus('unbuilt').map((s) => s.key))
+      .toEqual(['transcript_history']);
+    expect(surfacesWithStatus('absent').map((s) => s.key))
+      .toEqual(['context_window_usage', 'usd_cost']);
+  });
+
+  it('carries the descriptor title, so the browser does not rename a surface',
+    () => {
+      setCapabilities(ANTIGRAVITY);
+      expect(surfacesWithStatus('supported')).toEqual([
+        { key: 'image_generation', title: 'Generated images', note: '' },
+      ]);
+    });
+
+  it('sorts by title, so the list does not reorder between renders', () => {
+    setCapabilities(ANTIGRAVITY);
+    expect(surfacesWithStatus('absent').map((s) => s.title))
+      .toEqual(['Context window', 'USD cost']);
   });
 });

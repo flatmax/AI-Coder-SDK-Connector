@@ -250,4 +250,54 @@ describe('ChatPanel action bar — what it carries', () => {
       expect(panel.shadowRoot.querySelector('.history-button')).toBeTruthy();
     });
   });
+
+  // -------------------------------------------------------------
+  // The engine chip — the answer to "why did the button go away?"
+  // -------------------------------------------------------------
+  //
+  // The tests above pin that the history button hides on an engine with
+  // no transcripts. That is correct and it is what a user reported as the
+  // application being broken, because nothing in the bar said which
+  // engine was running. The chip is the other half: hiding stays, and it
+  // stops being anonymous.
+
+  describe('engine chip', () => {
+    afterEach(() => resetCapabilities());
+
+    it('is absent on a single-engine install, which has nothing to ask',
+      async () => {
+        const panel = mountPanel();
+        panel._engines = { active: 'claude', mountable: ['claude'] };
+        await settle(panel);
+        expect(panel.shadowRoot.querySelector('.engine-chip')).toBeFalsy();
+      });
+
+    it('names the running engine when a second one is mountable', async () => {
+      const panel = mountPanel();
+      panel._engines = {
+        active: 'claude', mountable: ['antigravity', 'claude'],
+      };
+      await settle(panel);
+      const chip = panel.shadowRoot.querySelector('.engine-chip');
+      expect(chip).toBeTruthy();
+      expect(chip.textContent).toContain('Claude');
+    });
+
+    it('stands beside the gap it explains when a surface is hidden',
+      async () => {
+        resetCapabilities();
+        setCapabilities({
+          transcript_history: { supported: false, status: 'unbuilt', note: '' },
+        });
+        const panel = mountPanel();
+        panel._engines = {
+          active: 'antigravity', mountable: ['antigravity', 'claude'],
+        };
+        await settle(panel);
+        expect(panel.shadowRoot.querySelector('.history-button')).toBeFalsy();
+        const chip = panel.shadowRoot.querySelector('.engine-chip');
+        expect(chip.textContent).toContain('Antigravity');
+        expect(chip.classList.contains('engine-unfinished')).toBe(true);
+      });
+  });
 });

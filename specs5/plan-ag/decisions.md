@@ -360,6 +360,44 @@ the first is a measurement and the second is an absence.
 and adding a per-engine feature means adding its key there in the same commit. A surface that is
 hidden on both engines is dead code and should be deleted rather than described.
 
+### What hiding cost, and the half that was missing (2026-09-03)
+
+Found by a user reporting the application as "unusable": no history browser, no always-allow button
+on the permission dialog, no slash commands, no cost. Every one of those was this decision working
+exactly as written. `app.json`'s `engines.master` named Antigravity, the descriptor hid the twelve
+surfaces that engine cannot feed, and the UI drew nothing where each had been. Nothing was broken.
+
+**What was wrong is that nothing said so.** The reasoning above is about a *single* surface, and it
+holds at that scale: one missing bar is quieter than one wrong bar. It does not survive twelve at
+once, because at twelve the absence stops reading as "this engine works differently" and starts
+reading as "this build is broken" — and the two are indistinguishable to the person looking at them.
+The only place in the entire application that named the running engine was a selector inside the
+Settings tab, which is findable only by someone who already suspects the engine. That is precisely
+what a user cannot suspect, because the symptom gives them nothing to suspect it from.
+
+**So hiding stays, and it stops being anonymous.** Two additions, both in the chat panel's action
+bar and banner strip, specified in
+[`../5-webapp/chat.md` § Engine Indicator and Notice](../5-webapp/chat.md#engine-indicator-and-notice):
+
+- an engine chip, present whenever more than one engine is mountable, naming the engine that is
+  answering — because with one engine there is no question to answer and a permanent label is
+  furniture, and with two there is a question the application previously answered nowhere;
+- a dismissible notice listing, by name, the surfaces this engine has not had built for it.
+
+**The rule that decides whether the notice speaks is `unbuilt`, never an engine name.** This is
+where the `absent`/`unbuilt` split stops being bookkeeping for us and earns its place in the
+product. An `absent` surface is a real difference between two engines and the UI is *complete*
+without it; saying "this engine cannot report USD cost" where the figure used to be replaces a
+measurement with an apology, which is the failure this decision is written against. An `unbuilt`
+surface is a feature this project has built and has not wired to the running engine, and a UI
+without it is *unfinished*. Only the second is worth interrupting somebody about. On Claude the
+count is zero, so the shipped engine never draws the notice — which is the test that it is keyed to
+the right fact rather than to a convenient one.
+
+That keeps [AG-R-4](risks.md#ag-r-4) intact. *Whether* to speak is decided from the descriptor,
+which carries no engine identity; the *name* is read from `list_engines`, rendered as text and
+handed back to `switch_engine` as a choice. A third engine changes neither file.
+
 ---
 
 ## AG-10 — One repo root, one working tree, one master writing to it

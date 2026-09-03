@@ -89,6 +89,7 @@
 
 import { LitElement } from 'lit';
 
+import { loadCapabilities } from '../engine-capabilities.js';
 import { RpcMixin } from '../rpc-mixin.js';
 import { speechPlayer } from '../speech-player.js';
 // Side-effect imports — these modules register
@@ -115,6 +116,7 @@ import {
   onUpdated,
   switchMode,
 } from './events.js';
+import { engineNoticeKey } from './engine-notice.js';
 import { INITIAL_PERMISSION_MODE, probeModeAuthority } from './permission-mode.js';
 import {
   _AGENT_LABEL_MAX_LENGTH,
@@ -268,6 +270,16 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._engineHealth = null;
     this._healthDismissed = null;
     this._healthForced = false;
+
+    // Which engines this session has, and which one is answering. Null until
+    // `list_engines` replies, which `engine-notice.js` reads as "not known
+    // yet" and renders nothing for — the honest state, and the one that keeps
+    // a single-engine install free of a chip it has no question to answer.
+    this._engines = null;
+    this._engineNoticeDismissed = null;
+    this._engineNoticeForced = false;
+    this._engineSwitchPending = false;
+    this._engineSwitchError = '';
 
     // Per-block expansion state: Map<block_id, boolean>. Not reactive — it is
     // mutated in place, so a dirty-check on identity would never fire;
@@ -456,6 +468,85 @@ export class ChatPanel extends RpcMixin(LitElement) {
     );
   }
 
+  /**
+   * Read the descriptor and the engine list, and re-render on both.
+   *
+   * Two reads rather than one because they answer different questions and
+   * only one of them is allowed to decide what is drawn. The descriptor says
+   * *what can be rendered* and carries no engine identity (AG-R-4);
+   * `list_engines` says *which engine is answering*, which this panel uses
+   * as text and as the argument to a switch, never as a branch.
+   *
+   * Failures are quiet on purpose. Not knowing the engine list leaves
+   * `_engines` null, which renders no chip and no notice — the same as a
+   * single-engine install, and the right answer for a browser that cannot
+   * reach the server at all.
+   */
+  async _loadEngineCapabilities() {
+    loadCapabilities(this).then(() => this.requestUpdate());
+    if (!this.rpcConnected) return;
+    try {
+      const result = await this.rpcExtract('ClaudeCodeService.list_engines');
+      if (result && typeof result === 'object' && !result.error) {
+        this._engines = result;
+      }
+    } catch (err) {
+      console.debug('[chat] list_engines not readable yet:', err);
+    }
+  }
+
+  /**
+   * Switch master engines from the notice.
+   *
+   * The reply is not what updates `_engines.active` — the `engineChanged`
+   * broadcast is, in this window and every other, so there is one writer
+   * rather than two that can disagree. What the reply settles here is
+   * whether the request was refused, and a refusal is shown rather than
+   * logged: `switch_engine` declines for reasons the user can act on.
+   *
+   * @param {string} engine — a name from `list_engines().mountable`
+   */
+  async _onSwitchEngine(engine) {
+    if (!engine || this._engineSwitchPending) return;
+    this._engineSwitchPending = true;
+    this._engineSwitchError = '';
+    try {
+      const result = await this.rpcExtract(
+        'ClaudeCodeService.switch_engine', engine,
+      );
+      if (!result || typeof result !== 'object' || result.error) {
+        this._engineSwitchError = result?.error
+          || 'The engine did not say why the switch failed.';
+      }
+    } catch (err) {
+      this._engineSwitchError =
+        `Could not switch engines: ${err?.message || err}`;
+    } finally {
+      this._engineSwitchPending = false;
+    }
+  }
+
+  /**
+   * The master engine changed — here or in another window.
+   *
+   * The shell has already replaced the capability descriptor by the time
+   * this runs (see `app-shell/index.js` § engineChanged), so what is left is
+   * the name and the dismissal. The dismissal is cleared rather than kept:
+   * its key includes the engine, so a stale one could never match anyway,
+   * and clearing it says plainly that the new engine's gaps are a new thing
+   * to be told about.
+   */
+  _onEngineChanged(event) {
+    const engine = event?.detail?.engine;
+    if (typeof engine !== 'string') return;
+    this._engines = { ...(this._engines || {}), active: engine };
+    this._engineSwitchPending = false;
+    this._engineSwitchError = '';
+    if (this._engineNoticeDismissed !== engineNoticeKey(this)) {
+      this._engineNoticeDismissed = null;
+    }
+  }
+
   firstUpdated() {
     // After the textarea exists in the shadow
     // DOM, force its inline height to match the
@@ -503,6 +594,15 @@ export class ChatPanel extends RpcMixin(LitElement) {
     // path as much as the startup one: permission mode, engine health, and any
     // turn still in flight all come from here.
     loadEngineState(this);
+    // Which engine is answering, and what it can feed. Asked here rather
+    // than left to whichever other component happens to ask first: this
+    // panel's own action bar depends on the descriptor — the history button
+    // is drawn from `supports(TRANSCRIPT_HISTORY)` — so a panel that never
+    // asked would render whatever the loading default said and never
+    // correct itself. Here rather than in `connectedCallback` because the
+    // proxy does not exist there, and the failed call would be noise on
+    // every mount.
+    this._loadEngineCapabilities();
     // Whether this client may change the permission mode. Separate call
     // because it asks the collab service, not the engine — and it must not be
     // gated on the engine answering, or a participant would briefly see an
