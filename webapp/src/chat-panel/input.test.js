@@ -2862,3 +2862,45 @@ describe('ChatPanel paste-to-prompt action', () => {
     expect(p._input).toBe('AA');
   });
 });
+
+describe('ChatPanel start-error wording', () => {
+  // Found by running a live agy turn: the reply was
+  // {error: "engine", message: "agy exited before sending its init frame"}
+  // and the panel rendered **"Error: engine"** — a category the user
+  // cannot act on, with the actionable half unread in the same payload.
+
+  it('shows the message rather than the error code', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': () => ({
+        error: 'engine',
+        phase: 'connect',
+        message: 'agy exited before sending its init frame',
+      }),
+    });
+    const panel = mountPanel();
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    const text = panel.messages.map((m) => m.content).join(' ');
+    expect(text).toContain('agy exited before sending its init frame');
+    expect(text).not.toMatch(/Error:\s*engine\s*$/);
+  });
+
+  it('still shows the code when that is all there is', async () => {
+    // Several refusals carry only `error`, and it is a sentence there.
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': () => ({
+        error: 'The Claude Code engine is not connected.',
+      }),
+    });
+    const panel = mountPanel();
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    expect(panel.messages.map((m) => m.content).join(' ')).toContain(
+      'engine is not connected',
+    );
+  });
+});

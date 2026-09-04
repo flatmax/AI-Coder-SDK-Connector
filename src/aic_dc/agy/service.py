@@ -65,10 +65,33 @@ logger = logging.getLogger(__name__)
 class AgyService(AntigravityService):
     """Antigravity, driven through the CLI on the owner's own subscription."""
 
-    def __init__(self, *args: Any, executable: str = "agy", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        executable: str = "agy",
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self._executable = executable
         self._agy_gate: AgyGateServer | None = None
+        # **Not the SDK's default.** The two Antigravity surfaces do not
+        # agree on model names: the SDK takes `gemini-3.7-flash` plus a
+        # separate `ThinkingLevel`, while `agy` bakes the effort into the
+        # name and rejects the bare form —
+        # ``--model gemini-3.7-flash requires --effort (available: low,
+        # medium, high)``. Inheriting the SDK's default therefore made
+        # every session exit before its init frame, surfacing as
+        # "Error: engine" with the real message discarded.
+        #
+        # `sdk-surface.md` § *What `agy` models returns* recorded this
+        # disagreement on 2026-08-30 and the code did it anyway, which is
+        # the argument for the assertion in `test_agy_service.py` rather
+        # than another paragraph.
+        #
+        # None means "agy's own default", which is the only value this
+        # side can be sure it accepts.
+        self._model = model
 
     # ------------------------------------------------------------------
     # Lifecycle

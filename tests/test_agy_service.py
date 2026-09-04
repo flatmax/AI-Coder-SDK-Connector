@@ -121,6 +121,44 @@ class TestItWillNotRunUngated:
         assert "agy_present" in report
 
 
+class TestItDoesNotInheritTheSdksModel:
+    """The bug that made every live session fail, found by running one.
+
+    The two Antigravity surfaces disagree about model names: the SDK takes
+    ``gemini-3.7-flash`` plus a separate ``ThinkingLevel``, while ``agy``
+    bakes the effort into the name and rejects the bare form —
+
+        --model gemini-3.7-flash requires --effort (available: low, medium, high)
+
+    Inheriting ``options.DEFAULT_MODEL`` therefore made `agy` exit before
+    its init frame on **every** session. ``sdk-surface.md`` § *What `agy`
+    models returns* recorded the disagreement on 2026-08-30 and the code
+    did it anyway, which is why this is an assertion and not a third
+    paragraph of prose.
+    """
+
+    def test_no_model_is_passed_by_default(self, tmp_path):
+        from aic_dc.agy.session import AgySession
+
+        svc = service(tmp_path)
+        assert svc._model is None
+        argv = AgySession(tmp_path, gate=None, model=svc._model)._argv()
+        assert "--model" not in argv
+
+    def test_the_sdk_default_is_never_what_we_send(self, tmp_path):
+        from aic_dc.antigravity import options
+
+        assert service(tmp_path)._model != options.DEFAULT_MODEL
+
+    def test_an_explicit_model_is_still_passed(self, tmp_path):
+        """A user choosing an agy model name must reach agy."""
+        from aic_dc.agy.session import AgySession
+
+        svc = service(tmp_path, model="gemini-3.7-flash-low")
+        argv = AgySession(tmp_path, gate=None, model=svc._model)._argv()
+        assert argv[argv.index("--model") + 1] == "gemini-3.7-flash-low"
+
+
 class TestATurn:
     """One turn end to end against a fake ``agy``, with the gate installed."""
 
