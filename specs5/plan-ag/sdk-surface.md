@@ -67,6 +67,21 @@ gemini-3.5-flash-{high,medium,low}    claude-opus-4-6-thinking
 CLI, none of Claude Code's tools, no Anthropic billing — and surfacing it naively in a UI that also
 hosts a real Claude Code engine would make "which engine am I talking to" unanswerable.
 
+**The output is two tab-separated columns, and both are load-bearing** — recorded because the model
+picker parses it. Re-read at 1.1.25 on 2026-09-04, where the list has grown a `gemini-3.8-flash`
+family and is fourteen entries:
+
+```
+gemini-3.8-flash-low<TAB>Gemini 3.8 Flash (Low)
+claude-sonnet-4-6<TAB>Claude Sonnet 4.6 (Thinking)
+```
+
+The first column is the id `--model` takes; the second is a display label. The label was originally
+discarded on the belief that the webapp's model list is a list of names — it is a list of
+`{value, displayName, …}` objects, and discarding the label came from the same misreading that had
+the ids sent as bare strings and rendered as nothing. Both columns are used now. The *"Fetching
+available models…"* banner goes to **stderr**, so a parser reading stdout does not have to filter it.
+
 Note also that reasoning effort is baked into the *model name* here, where the SDK models it as a
 separate `ThinkingLevel` enum (`models.py:44-63`). The two Antigravity surfaces do not agree with
 each other on this.

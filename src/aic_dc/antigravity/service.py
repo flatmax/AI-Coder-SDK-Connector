@@ -562,7 +562,21 @@ class AntigravityService:
         ]
 
     async def get_model(self) -> dict[str, Any]:
-        return {"model": self._model, "models": [self._model]}
+        """The model in force, and the one-entry menu it makes.
+
+        The SDK has no "list what this key may use" call, so the only name
+        this side can vouch for is the one it is configured with. That is a
+        menu of one rather than nothing: the user cannot choose here, but
+        they are entitled to read what is answering.
+
+        ``models`` entries are **objects**, matching the Claude adapter and
+        the browser's ``modelEntries``, which drops anything that is not
+        one. A bare string here rendered as an empty picker rather than as
+        a single row — the same defect the `agy` transport shipped with.
+        """
+        if not self._model:
+            return {"model": self._model, "models": []}
+        return {"model": self._model, "models": [{"value": self._model}]}
 
     async def set_model(self, model: str | None = None) -> dict[str, Any]:
         """Change the model. **Localhost only.**

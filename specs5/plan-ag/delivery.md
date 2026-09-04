@@ -2202,7 +2202,53 @@ rather than hidden. `sdk-surface.md` warns that surfacing them naively makes "wh
 talking to" unanswerable; the engine selector now answers it, reading *antigravity (subscription)*
 beside them.
 
-### Open: the model picker is still empty on `agy` (2026-09-04, unresolved)
+### Closed: the model picker was empty because `models` was the wrong shape (2026-09-04)
+
+**The cause was in neither the transport nor the event chain, and the section below excluded every
+place it was not.** `get_model`'s `models` is a list of **objects** — the Claude adapter returns the
+CLI's own `{value, displayName, resolvedModel, description}` dicts — and `AgyService` returned a list
+of bare **id strings**. `settings-tab.js`'s `modelEntries` opens with `if (!m || typeof m !==
+'object') continue`, so all fourteen names were dropped one at a time, `entries` came out empty, and
+`offline` — which is literally `entries.length === 0` — disabled the select and printed *"The engine
+has not connected yet…"*.
+
+So every observation in the note below was true and none of them was the fault. The backend did
+answer with the fourteen ids; the event did reach the window; `_loadModel` did run and did assign
+them to `this._models`. The list was thrown away one layer further on, at render.
+
+**The wrong belief is quotable, which is why it survived a fix.** `1b48ba5`'s message states that
+*"`get_model`'s shape is a list of names on every engine"* and drops the display labels `agy models`
+prints in order to honour it, citing [AG-R-4](risks.md#ag-r-4). The shape is a list of objects; the
+labels were always welcome, under a `displayName` key the Claude CLI already fills in. Dropping them
+was harmless — returning strings was fatal — and the two came from one misreading.
+
+**It was invisible to the tests because they asserted on the wrong side of the boundary.** The Python
+test was named `test_the_ids_are_offered_and_the_labels_dropped` and pinned the string list as the
+contract; the webapp tests added in `9eb4a89` asserted on `el._models`, the raw array, and defined a
+`modelSelect` helper they never called. Both suites were green for the whole of the two reports. The
+tests now assert on the rendered `<option>` set, and the name-only case fails on the old renderer
+with `expected [] to deeply equal …` — the reported symptom, reproduced.
+
+The fix is in three places, and the third is the one worth arguing about:
+
+- `AgyService._list_models` returns `{value, displayName}` per model, keeping the label.
+- `AntigravityService.get_model` had the same defect one line long — `models: [self._model]`, a bare
+  string — so the SDK transport's one-entry menu rendered empty too. It returns an object, and an
+  empty list rather than `[None]` when no model is set.
+- `modelEntries` **normalises a bare string** to `{value}` rather than skipping it. This is defence
+  in depth and not a second contract: a transport answering with names is wrong, but the honest
+  failure is an option with no label, never a picker that blames the engine for not connecting.
+  Silently dropping an entire populated list is what made this cost two sessions.
+
+**The general lesson, because this surface has now had it twice.** `offline` conflates *"the engine
+has told us nothing"* with *"we could not read what it told us"*, and it renders the first. A caption
+that names a cause is an assertion, and this one was wrong while being the most prominent text on the
+panel — it is what sent both diagnoses at the transport. The note below is kept whole because its
+three hypotheses were reasonable, all three were wrong, and the shape of that error is the finding:
+every one of them was about *whether the data arrived*, and none about *what was done with it once it
+had*.
+
+### The note as it stood, before the cause was found (2026-09-04)
 
 **Reported twice, and the second report is after the fix that was supposed to close it.** With
 `agy` master — the chip reading *⚠ antigravity (subscription)* — Settings shows an **empty model

@@ -77,7 +77,7 @@ class AgyService(AntigravityService):
         self._executable = executable
         self._agy_gate: AgyGateServer | None = None
         #: `agy models`, read once. None until asked.
-        self._models: list[str] | None = None
+        self._models: list[dict[str, Any]] | None = None
         # **Not the SDK's default.** The two Antigravity surfaces do not
         # agree on model names: the SDK takes `gemini-3.7-flash` plus a
         # separate `ThinkingLevel`, while `agy` bakes the effort into the
@@ -114,13 +114,27 @@ class AgyService(AntigravityService):
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
 
-    async def _list_models(self) -> list[str]:
-        """The model ids ``agy`` will accept, from ``agy models``.
+    async def _list_models(self) -> list[dict[str, Any]]:
+        """The models ``agy`` will accept, from ``agy models``.
 
         Cached for the life of the adapter. It is a subprocess and the
         answer is a property of the account rather than of the session, so
         running it per request would spend ~1s of the user's time to
         re-learn something that has not changed.
+
+        **Entries are objects, because that is ``get_model``'s contract on
+        every engine.** This previously returned bare id strings on the
+        stated grounds that "the shape is a list of names", and it is not:
+        the Claude adapter returns the CLI's own ``{value, displayName,
+        resolvedModel, description}`` dicts, and the browser's
+        ``modelEntries`` skips anything that is not an object. Fourteen
+        names therefore arrived in the browser and rendered as *nothing* —
+        an empty, disabled select under the note that says the engine has
+        not connected yet, which is the one sentence guaranteed to send a
+        reader looking at the transport instead of at the shape. Returning
+        objects is the smaller change and the honest one, and it lets the
+        display labels `agy models` already prints be kept rather than
+        thrown away.
 
         An empty list on any failure, and every caller treats that as
         "unknown" rather than "none": a model picker that went blank
@@ -141,15 +155,18 @@ class AgyService(AntigravityService):
         except Exception:  # noqa: BLE001 - a picker must not break a session
             logger.warning("Could not read the model list from %s", self._executable)
             return []
-        names: list[str] = []
+        names: list[dict[str, Any]] = []
         for line in out.decode("utf-8", "replace").splitlines():
-            # `id<TAB>Display Name`. The id is what --model takes; the
-            # label is dropped because `get_model`'s contract is a list of
-            # names and inventing a second shape for one transport would
-            # make the picker engine-aware (AG-R-4).
-            name = line.split("\t", 1)[0].strip()
-            if name and not name.startswith("#"):
-                names.append(name)
+            # `id<TAB>Display Name`. The id is what --model takes and is
+            # the `value`; the label is what the user reads. Keeping it
+            # does not make the picker engine-aware (AG-R-4) — it is the
+            # same `displayName` key the Claude CLI's handshake fills in,
+            # so the browser renders both engines through one code path.
+            value, _, label = line.partition("\t")
+            value = value.strip()
+            if not value or value.startswith("#"):
+                continue
+            names.append({"value": value, "displayName": label.strip() or value})
         self._models = names
         return names
 
@@ -184,7 +201,7 @@ class AgyService(AntigravityService):
         if not model:
             return {"model": self._model}
         known = await self._list_models()
-        if known and model not in known:
+        if known and model not in {entry["value"] for entry in known}:
             return {
                 "error": "unknown_model",
                 "message": (

@@ -2184,4 +2184,88 @@ describe('aic-settings-tab model list follows the engine', () => {
     el._onEngineChanged({ detail: {} });
     expect(el._models).toEqual(['opus']);
   });
+
+  // The tests above assert on `_models`, and every one of them passed
+  // while the picker rendered nothing at all. `_models` held the fourteen
+  // names the agy transport sent; `modelEntries` dropped every one of
+  // them, because it takes objects and they were strings — so the select
+  // was empty, disabled, and captioned "the engine has not connected
+  // yet". These assert on what is *on screen*, which is the only thing
+  // the report was ever about.
+
+  it('renders an option per model the engine offers', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: [
+            { value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)' },
+            { value: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6' },
+          ],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const options = [...modelSelect(el).querySelectorAll('option')];
+    expect(options.map((o) => o.value)).toEqual(
+      expect.arrayContaining(['gemini-3.8-flash-low', 'claude-sonnet-4-6']),
+    );
+    expect(options.map((o) => o.textContent.trim())).toEqual(
+      expect.arrayContaining(['Gemini 3.8 Flash (Low)', 'Claude Sonnet 4.6']),
+    );
+  });
+
+  it('leaves the picker usable rather than disabled when models arrived', async () => {
+    // `offline` is `entries.length === 0`, and it both disables the
+    // control and swaps the caption for one blaming the transport. That
+    // caption is what made this read as an engine fault.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: [{ value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)' }],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(modelSelect(el).disabled).toBe(false);
+  });
+
+  it('renders a name-only list rather than dropping it', async () => {
+    // Defence in depth for the shape that failed. A transport answering
+    // with bare ids is wrong about the contract, but the honest failure
+    // is an option with no label — never a picker that claims the engine
+    // never connected.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: ['gemini-3.8-flash-low', 'claude-sonnet-4-6'],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const options = [...modelSelect(el).querySelectorAll('option')];
+    expect(options.map((o) => o.value)).toEqual(
+      expect.arrayContaining(['gemini-3.8-flash-low', 'claude-sonnet-4-6']),
+    );
+    expect(modelSelect(el).disabled).toBe(false);
+  });
+
+  it('still says the engine has not connected when the list is genuinely empty', async () => {
+    // The `offline` caption is right in exactly one case, and the fix
+    // must not have cost it.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: null, models: [] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect([...modelSelect(el).querySelectorAll('option')]).toHaveLength(0);
+    expect(modelSelect(el).disabled).toBe(true);
+  });
 });

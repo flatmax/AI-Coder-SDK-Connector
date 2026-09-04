@@ -205,7 +205,16 @@ export function retiredNoteSignature(files) {
  */
 export function modelEntries(models, current) {
   const entries = [];
-  for (const m of Array.isArray(models) ? models : []) {
+  for (const raw of Array.isArray(models) ? models : []) {
+    // A bare name is normalised rather than skipped. The contract is a
+    // list of objects and both engines now send them, but skipping was
+    // the wrong failure: the `agy` transport sent fourteen *strings* and
+    // every one was dropped here, so a populated list rendered as an
+    // empty, disabled select under the note that says the engine has not
+    // connected yet. That is indistinguishable from having no models at
+    // all, and it sent two sessions looking at the transport. A name with
+    // no label is still a model the user can pick.
+    const m = typeof raw === 'string' ? { value: raw } : raw;
     if (!m || typeof m !== 'object') continue;
     const value = typeof m.value === 'string' ? m.value : '';
     if (!value) continue;

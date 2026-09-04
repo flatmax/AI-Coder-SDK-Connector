@@ -189,16 +189,45 @@ class TestTheModelSurface:
 
     LIST = "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6\n"
 
-    def test_the_ids_are_offered_and_the_labels_dropped(self, tmp_path):
-        """`get_model`'s contract is a list of names on every engine.
+    def test_the_ids_and_their_labels_are_offered_as_objects(self, tmp_path):
+        """`get_model`'s contract is a list of **objects** on every engine.
 
-        A second shape for one transport would make the picker
-        engine-aware, which is AG-R-4.
+        This assertion previously demanded bare strings, on the stated
+        grounds that "the shape is a list of names". It is not: the Claude
+        adapter returns the CLI's `{value, displayName, ...}` dicts and the
+        browser's `modelEntries` skips anything else — so the fourteen
+        names this transport sent rendered as an empty picker. The test was
+        green throughout, which is why it is written against the shape the
+        browser consumes rather than against the ids alone.
         """
         svc = self.fake_agy_models(tmp_path, self.LIST)
         assert asyncio.run(svc.get_model())["models"] == [
-            "gemini-3.8-flash-low",
-            "claude-sonnet-4-6",
+            {"value": "gemini-3.8-flash-low", "displayName": "Gemini 3.8 Flash (Low)"},
+            {"value": "claude-sonnet-4-6", "displayName": "Claude Sonnet 4.6"},
+        ]
+
+    def test_every_entry_carries_the_key_the_browser_selects_on(self, tmp_path):
+        """`modelEntries` reads `value`, and drops an entry without one.
+
+        Pinned separately from the exact-list assertion above because this
+        is the property that failed in the browser, and a later change that
+        enriched the entries would keep that one honest by accident.
+        """
+        svc = self.fake_agy_models(tmp_path, self.LIST)
+        offered = asyncio.run(svc.get_model())["models"]
+        assert offered
+        assert all(isinstance(e, dict) and e.get("value") for e in offered)
+
+    def test_a_model_with_no_label_still_has_a_name_to_show(self, tmp_path):
+        """`agy` prints `id<TAB>Label`; a bare id is not a reason to blank.
+
+        `displayName` falls back to the id rather than to an empty string,
+        because an option rendering as nothing is the failure this whole
+        surface has already had once.
+        """
+        svc = self.fake_agy_models(tmp_path, "gemini-3.8-flash-low\n")
+        assert asyncio.run(svc.get_model())["models"] == [
+            {"value": "gemini-3.8-flash-low", "displayName": "gemini-3.8-flash-low"},
         ]
 
     def test_claude_models_routed_through_google_are_offered_too(self, tmp_path):
@@ -209,7 +238,8 @@ class TestTheModelSurface:
         since it says *antigravity (subscription)* beside them.
         """
         svc = self.fake_agy_models(tmp_path, self.LIST)
-        assert "claude-sonnet-4-6" in asyncio.run(svc.get_model())["models"]
+        offered = asyncio.run(svc.get_model())["models"]
+        assert "claude-sonnet-4-6" in {entry["value"] for entry in offered}
 
     def test_an_unknown_name_is_refused_at_selection(self, tmp_path):
         """Rather than at session start, where it reads as a broken engine.
