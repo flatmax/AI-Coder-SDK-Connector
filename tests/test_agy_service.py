@@ -168,6 +168,97 @@ class TestItDoesNotInheritTheSdksModel:
         assert argv[argv.index("--model") + 1] == "gemini-3.7-flash-low"
 
 
+class TestTheModelSurface:
+    """`agy` has its own model vocabulary, and it must be offered.
+
+    Setting the model to ``None`` stopped the SDK's default reaching `agy`
+    and killing every session — and left the picker showing one blank
+    entry, because ``get_model`` answered ``{"model": None, "models":
+    [None]}``. The fix for a crash is not allowed to be a hole in the UI.
+    """
+
+    def fake_agy_models(self, tmp_path, out, rc=0):
+        """A stand-in `agy` that prints a model list, like the real one."""
+        script = tmp_path / "agy"
+        script.write_text(
+            f"#!/bin/sh\n[ \"$1\" = models ] && printf '{out}' && exit {rc}\nexit 1\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+        return service(tmp_path, executable=str(script))
+
+    LIST = "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6\n"
+
+    def test_the_ids_are_offered_and_the_labels_dropped(self, tmp_path):
+        """`get_model`'s contract is a list of names on every engine.
+
+        A second shape for one transport would make the picker
+        engine-aware, which is AG-R-4.
+        """
+        svc = self.fake_agy_models(tmp_path, self.LIST)
+        assert asyncio.run(svc.get_model())["models"] == [
+            "gemini-3.8-flash-low",
+            "claude-sonnet-4-6",
+        ]
+
+    def test_claude_models_routed_through_google_are_offered_too(self, tmp_path):
+        """They are on the account and hiding them would be the bigger lie.
+
+        `sdk-surface.md` notes that surfacing these naively makes "which
+        engine am I talking to" hard — which the engine label now answers,
+        since it says *antigravity (subscription)* beside them.
+        """
+        svc = self.fake_agy_models(tmp_path, self.LIST)
+        assert "claude-sonnet-4-6" in asyncio.run(svc.get_model())["models"]
+
+    def test_an_unknown_name_is_refused_at_selection(self, tmp_path):
+        """Rather than at session start, where it reads as a broken engine.
+
+        This is not hypothetical: ``options.DEFAULT_MODEL`` is exactly such
+        a name, and it cost a day as a bare "Error: engine".
+        """
+        svc = self.fake_agy_models(tmp_path, self.LIST)
+        result = asyncio.run(svc.set_model("gemini-3.7-flash"))
+        assert result["error"] == "unknown_model"
+        assert "exiting" in result["message"]
+        # And it did not take.
+        assert svc._model is None
+
+    def test_a_known_name_is_accepted(self, tmp_path):
+        svc = self.fake_agy_models(tmp_path, self.LIST)
+        assert asyncio.run(svc.set_model("claude-sonnet-4-6"))["model"] == (
+            "claude-sonnet-4-6"
+        )
+
+    def test_an_unreadable_list_does_not_block_a_choice(self, tmp_path):
+        """Empty means *unknown*, never *none*.
+
+        A picker that went blank because a subprocess timed out would look
+        exactly like this transport having no models — and refusing every
+        name on that basis would strand the user.
+        """
+        svc = service(tmp_path, executable="agy-does-not-exist")
+        assert asyncio.run(svc.get_model())["models"] == []
+        assert asyncio.run(svc.set_model("anything"))["model"] == "anything"
+
+    def test_the_list_is_read_once(self, tmp_path):
+        """It is a subprocess, and the answer belongs to the account."""
+        counter = tmp_path / "runs"
+        script = tmp_path / "agy"
+        script.write_text(
+            f"#!/bin/sh\necho x >> {counter}\nprintf 'a\tA\n'\n", encoding="utf-8"
+        )
+        script.chmod(0o755)
+        svc = service(tmp_path, executable=str(script))
+
+        async def go():
+            await svc.get_model()
+            await svc.get_model()
+
+        asyncio.run(go())
+        assert counter.read_text().count("x") == 1
+
+
 class TestATurn:
     """One turn end to end against a fake ``agy``, with the gate installed."""
 

@@ -46,6 +46,7 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5, AG-3.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from pathlib import Path
@@ -75,6 +76,8 @@ class AgyService(AntigravityService):
         super().__init__(*args, **kwargs)
         self._executable = executable
         self._agy_gate: AgyGateServer | None = None
+        #: `agy models`, read once. None until asked.
+        self._models: list[str] | None = None
         # **Not the SDK's default.** The two Antigravity surfaces do not
         # agree on model names: the SDK takes `gemini-3.7-flash` plus a
         # separate `ThinkingLevel`, while `agy` bakes the effort into the
@@ -110,6 +113,90 @@ class AgyService(AntigravityService):
         report = install.status(self._config_dir)
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
+
+    async def _list_models(self) -> list[str]:
+        """The model ids ``agy`` will accept, from ``agy models``.
+
+        Cached for the life of the adapter. It is a subprocess and the
+        answer is a property of the account rather than of the session, so
+        running it per request would spend ~1s of the user's time to
+        re-learn something that has not changed.
+
+        An empty list on any failure, and every caller treats that as
+        "unknown" rather than "none": a model picker that went blank
+        because a subprocess timed out would look exactly like this
+        transport having no models, which is the confusion the whole
+        surface exists to avoid.
+        """
+        if self._models is not None:
+            return self._models
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._executable,
+                "models",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except Exception:  # noqa: BLE001 - a picker must not break a session
+            logger.warning("Could not read the model list from %s", self._executable)
+            return []
+        names: list[str] = []
+        for line in out.decode("utf-8", "replace").splitlines():
+            # `id<TAB>Display Name`. The id is what --model takes; the
+            # label is dropped because `get_model`'s contract is a list of
+            # names and inventing a second shape for one transport would
+            # make the picker engine-aware (AG-R-4).
+            name = line.split("\t", 1)[0].strip()
+            if name and not name.startswith("#"):
+                names.append(name)
+        self._models = names
+        return names
+
+    async def get_model(self) -> dict[str, Any]:
+        """The current model and the ones this account can use.
+
+        ``None`` for the current model is honest rather than a gap: no
+        ``--model`` is passed unless the user picks one, so ``agy`` is
+        using its own default and this side does not know its name. The
+        ``init`` frame carried a ``model`` field at 1.1.22 and does not at
+        1.1.25, so there is nowhere to read it from.
+        """
+        return {"model": self._model, "models": await self._list_models()}
+
+    async def set_model(self, model: str | None = None) -> dict[str, Any]:
+        """Choose a model. **Localhost only.**
+
+        **Validated against ``agy models``, and that is the point.** An
+        unrecognised name does not fail at selection — it fails when the
+        next session starts, as `agy` exiting before its init frame, which
+        surfaced as a bare "Error: engine" and cost a day to diagnose. The
+        SDK's own default is exactly such a name, so this is not a
+        hypothetical class of mistake.
+
+        Takes effect on the next session, matching the SDK transport:
+        restarting mid-conversation would drop the context the user is
+        talking to.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not model:
+            return {"model": self._model}
+        known = await self._list_models()
+        if known and model not in known:
+            return {
+                "error": "unknown_model",
+                "message": (
+                    f"{model!r} is not a model this Antigravity account "
+                    f"offers. `agy` rejects an unknown name by exiting "
+                    f"before the session starts, so it is refused here "
+                    f"instead."
+                ),
+                "models": known,
+            }
+        self._model = model
+        return {"model": self._model}
 
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start ``agy``. **Localhost only.**

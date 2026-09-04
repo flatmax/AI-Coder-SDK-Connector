@@ -2149,3 +2149,64 @@ that risk.
 did not patch `GLOBAL_HOOKS`, so it asserted against the real `~/.gemini/config/hooks.json` — green for
 a day because that file was absent, red the moment a gate was installed for real. Now pointed at a temp
 path, like its neighbours.
+
+
+---
+
+## The `agy` transport, driven from the browser (2026-09-04)
+
+**It works.** Claude, then a switch to *antigravity (subscription)*, then a turn on the paid account —
+reported by the user after the two defects below were fixed. That is the transport end to end through
+the UI rather than through a probe.
+
+Three things had to be fixed first, and all three were found by running it rather than by 4,300
+passing tests.
+
+**The SDK's model name.** `AgyService` inherited `options.DEFAULT_MODEL` and passed it as `--model`.
+`agy` bakes reasoning effort into the name and rejects the bare form, so it exited before its init
+frame on *every* session. `sdk-surface.md` had recorded that disagreement on 2026-08-30.
+
+**The discarded message.** `_record_error` answers `{error: "engine", message: …}` and `input.js`
+rendered the *code*, so the whole failure read as **"Error: engine"** while the sentence sat unread in
+the same payload.
+
+**A selector that lied.** After a refused switch the `<select>` kept showing the engine the user picked
+— Lit re-applies `.value` only when the bound value changes, and `active` had not — while the session
+stayed on the old engine and the refusal sat inside a dismissible notice. `live()` and a toast.
+
+That last one is the third instance in two days of one rule, now an invariant in
+[`chat.md`](../5-webapp/chat.md): **a control that reports its own success must read its state back
+from the thing it changed**, not from the input the user gave it.
+
+### The model surface (same day)
+
+Setting the model to `None` was the right fix for the crash and left a hole: `get_model` answered
+`{"model": None, "models": [None]}`, so the picker showed one blank entry on the subscription engine.
+
+`agy models` is read once — it is a subprocess, and the answer belongs to the account rather than the
+session — and its 14 ids are served through the existing contract. The labels it also returns are
+dropped: `get_model`'s shape is a list of names on every engine, and a second shape for one transport
+would make the picker engine-aware, which is AG-R-4.
+
+**`set_model` validates against that list**, and that is the substance rather than a nicety. An
+unrecognised name does not fail at selection; it fails at the *next session start*, as `agy` exiting
+before its init frame — which is precisely the failure above, and `options.DEFAULT_MODEL` is exactly
+such a name. Refusing it here turns a day of diagnosis into a sentence.
+
+An unreadable list means **unknown**, never *none*: a picker blank because a subprocess timed out
+looks identical to a transport with no models, and refusing every name on that basis would strand the
+user. So an empty list validates nothing.
+
+The Claude models Google routes to — `claude-sonnet-4-6`, `claude-opus-4-6-thinking` — are offered
+rather than hidden. `sdk-surface.md` warns that surfacing them naively makes "which engine am I
+talking to" unanswerable; the engine selector now answers it, reading *antigravity (subscription)*
+beside them.
+
+### What phase 8 still owes
+
+Its exit criterion, both halves, neither demonstrated:
+
+- a conversation on the subscription **including an approved write**, so the dialog renders a real
+  diff from `replace_file_content` and the edit lands;
+- a **second `agy` session of the user's own, running concurrently and never intercepted** — the half
+  that has had no test at all, and the one that matters for trusting a hook installed globally.
