@@ -730,6 +730,26 @@ Three things follow, and each is the reason the move is not merely cosmetic:
   so it stays a signal rather than furniture.
 - **Choosing an engine that needs a permission gate asks first.** See below.
 
+### A refused switch must not look like a successful one
+
+*Found by running it, 2026-09-04.* The selector read **antigravity (subscription)** while every reply
+came back from Claude Code — same conversation, wrong engine, nothing saying so.
+
+Two defects, and each alone was enough to produce that:
+
+- **A `<select>` shows what the user picked the moment they pick it**, and Lit re-applies `.value`
+  only when the *bound* value changes. After a refused switch `active` is unchanged, so the binding
+  is skipped and the control keeps displaying an engine that is not running. `live()` compares
+  against the DOM instead, so the selector snaps back to the truth.
+- **The refusal was recorded where it could be dismissed.** `_engineSwitchError` renders inside the
+  engine notice, which is dismissible and keyed per engine — so a user who had dismissed it got a
+  selector showing their choice, a session on the old engine, and no word anywhere. It is toasted as
+  well now.
+
+The general rule, which this is the third instance of today: **a control that reports its own success
+must read its state back from the thing it changed**, not from the input the user gave it. The
+optimistic half of an optimistic update has to be reconciled or it becomes a lie.
+
 ### Consent for the `agy` gate is asked where the engine is chosen
 
 Selecting the `agy` transport with its permission hook absent used to switch successfully and then
@@ -762,6 +782,7 @@ own machine, outlives the session, and is answerable with no engine running.
 - No system event is fed back to the model
 - The engine a session runs on is chosen beside the conversation, not in Settings, and is labelled by
   what the server calls it rather than by its identifier
+- The engine selector shows the engine that is *running*, never the one that was clicked. A refused switch snaps it back and says why somewhere undismissable
 - Consent to write outside the repository is asked before the write, carrying where it writes, that it
   is outside the project, and how it is undone. Declining leaves the app in the state that still works
 - Anything the engine addresses to the *user* reaches the transcript. A turn that stopped for a reason the engine explained never renders as a turn that merely stopped: the explanation is a durable card, not only a toast, because a toast outlives neither the condition nor the reader's absence

@@ -523,6 +523,14 @@ export class ChatPanel extends RpcMixin(LitElement) {
       this._engineSwitchError =
         `Could not switch engines: ${err?.message || err}`;
     } finally {
+      // Toasted as well as recorded. The notice is dismissible and keyed
+      // per engine, so a user who had dismissed it got a selector that
+      // showed the engine they picked, a session still on the old one,
+      // and no word anywhere about why — which is indistinguishable from
+      // the switch having worked.
+      if (this._engineSwitchError) {
+        this._emitToast(`Engine switch failed: ${this._engineSwitchError}`, 'error');
+      }
       this._engineSwitchPending = false;
     }
   }

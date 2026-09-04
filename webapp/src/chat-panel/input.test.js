@@ -3013,3 +3013,43 @@ describe('ChatPanel engine switch gate prompt', () => {
     expect(calls).toEqual(['claude']);
   });
 });
+
+
+describe('ChatPanel engine switch failure is visible', () => {
+  // The selector showed the engine the user picked while the session
+  // stayed on the old one, and the only account of why lived inside a
+  // notice they may have dismissed. A failed switch looked exactly like a
+  // successful one.
+
+  it('toasts the refusal rather than only recording it', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.switch_engine': () => ({
+        error: 'A turn is still running',
+        reason: 'turn_active',
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    p._emitToast = (m, kind) => toasts.push([m, kind]);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(p._engineSwitchError).toContain('A turn is still running');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0][0]).toContain('A turn is still running');
+    expect(toasts[0][1]).toBe('error');
+  });
+
+  it('says nothing when the switch works', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.switch_engine': () => ({ engine: 'agy', changed: true }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    p._emitToast = (m) => toasts.push(m);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(toasts).toEqual([]);
+  });
+});

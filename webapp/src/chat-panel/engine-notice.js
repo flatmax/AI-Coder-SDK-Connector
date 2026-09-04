@@ -54,6 +54,7 @@
 // Antigravity for a third engine tomorrow and this file needs no edit.
 
 import { html, nothing } from 'lit';
+import { live } from 'lit/directives/live.js';
 
 import { surfacesWithStatus } from '../engine-capabilities.js';
 
@@ -182,13 +183,22 @@ export function renderEngineChip(panel) {
   // no way to reopen it. Absent when the engine is complete, so it is a
   // signal rather than furniture.
   return html`
+    <!--
+      \`live()\` rather than a plain property bind, and it is load-bearing.
+      A \`<select>\` shows whatever the user picked the instant they pick it,
+      and Lit only re-applies \`.value\` when the *bound* value changes. So
+      after a refused switch — \`active\` unchanged — the control kept
+      displaying an engine that was not running, which is how a failed
+      switch looked exactly like a successful one. \`live()\` compares
+      against the DOM, so the selector snaps back to the truth.
+    -->
     <select
       class="action-button engine-chip ${unfinished ? 'engine-unfinished' : ''}"
       ?disabled=${panel._engineSwitchPending}
       autocomplete="off"
       aria-label=${title}
       title=${title}
-      .value=${value.active}
+      .value=${live(value.active)}
       @change=${(e) => panel._onSwitchEngine(e.target.value)}
     >
       ${value.mountable.map(
