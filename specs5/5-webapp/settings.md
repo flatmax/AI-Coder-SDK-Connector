@@ -89,6 +89,18 @@ dialog to intercept a phantom `change`, and what it changes is the host's bill.
 route also re-reads `get_model()`, and so does the tab becoming visible: the model list is empty until
 the engine's first-turn handshake and nothing pushes it when that arrives.
 
+**So does an engine change, and that one was found by running it.** *2026-09-04:* selecting `agy` in
+the action bar's engine selector and then opening this tab offered Claude's models — names the new
+engine rejects, in a control whose whole job is to offer names it accepts. `engine-changed` updated the
+active engine's name and nothing else. The list is **cleared** before the re-read rather than left
+until the reply lands: a stale list is the best-available answer after a transient RPC failure, and is
+not one here, because it belongs to a different engine.
+
+This is the same shape as the selector that lied about the active engine, one surface along — state
+that was correct when it was fetched and became wrong when something else changed. Moving the engine
+selector into the action bar is what made it reachable in one click, which is why it surfaced the day
+that move landed rather than eventually.
+
 ## Config Cards
 
 | Card | Format | Applies |
@@ -403,3 +415,5 @@ Controls.
   `default` in place of "no model pinned"
 - The model select shows what is in force, not what was clicked: it moves on the RPC reply, and a
   refused switch leaves it where it was
+- The model list belongs to the engine that answered for it. An engine change clears it and re-reads
+  it, so no model name is ever offered for an engine that would reject it
