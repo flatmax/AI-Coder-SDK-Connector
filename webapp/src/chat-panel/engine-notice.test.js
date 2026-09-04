@@ -170,15 +170,59 @@ describe('renderEngineChip', () => {
     expect(host.querySelector('.engine-unfinished')).not.toBeNull();
   });
 
-  it('opens the notice when clicked, dismissal and all', () => {
+  it('switches engines on change, without a trip through Settings', () => {
+    // The chip *is* the selector now. It used to be a button that opened
+    // the notice, and choosing an engine meant finding the Settings tab —
+    // two steps away from the place the question is asked.
+    setCapabilities(ANTIGRAVITY);
+    const asked = [];
+    const p = panel({
+      _engines: { active: 'antigravity', mountable: ['antigravity', 'claude'] },
+      _onSwitchEngine: (name) => asked.push(name),
+    });
+    const select = draw(renderEngineChip(p)).querySelector('select');
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    expect(asked).toEqual(['claude']);
+  });
+
+  it('shows the server\'s labels rather than a capitalised identifier', () => {
+    // Two engines reach the same product and differ only in which account
+    // pays. "Antigravity" and "Agy" cannot say that; the server's labels
+    // can, and a table here would be the AG-R-4 branch.
+    setCapabilities(ANTIGRAVITY);
+    const p = panel({
+      _engines: {
+        active: 'agy',
+        mountable: ['claude', 'agy'],
+        labels: { claude: 'claude', agy: 'antigravity (subscription)' },
+      },
+    });
+    const text = draw(renderEngineChip(p)).textContent;
+    expect(text).toContain('antigravity (subscription)');
+    expect(text).not.toContain('Agy');
+  });
+
+  it('keeps a way back into the notice while the engine has gaps', () => {
+    // Dismissal is per engine and per gap set, so without this the user
+    // who dismissed it once could never see what is missing again.
     setCapabilities(ANTIGRAVITY);
     const p = panel({
       _engines: { active: 'antigravity', mountable: ['antigravity', 'claude'] },
       _engineNoticeDismissed: 'something',
     });
-    draw(renderEngineChip(p)).querySelector('button').click();
+    draw(renderEngineChip(p)).querySelector('button.engine-gaps').click();
     expect(p._engineNoticeForced).toBe(true);
     expect(p._engineNoticeDismissed).toBeNull();
+  });
+
+  it('offers no gaps button on an engine that has none', () => {
+    // Otherwise it is furniture rather than a signal.
+    setCapabilities(CLAUDE);
+    const p = panel({
+      _engines: { active: 'claude', mountable: ['claude', 'antigravity'] },
+    });
+    expect(draw(renderEngineChip(p)).querySelector('button.engine-gaps')).toBeNull();
   });
 });
 

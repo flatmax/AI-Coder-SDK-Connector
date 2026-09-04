@@ -1551,63 +1551,16 @@ export class SettingsTab extends RpcMixin(LitElement) {
     `;
   }
 
-  _renderEnginePanel() {
-    const engines = this._engines;
-    if (!engines) return '';
-    const mountable = Array.isArray(engines.mountable) ? engines.mountable : [];
-    const available = Array.isArray(engines.available) ? engines.available : [];
-    if (mountable.length < 2) return '';
-    const active = engines.active || '';
-    const readOnly = this._isHost === false;
-    const disabled = !this.rpcConnected || readOnly || this._enginePending;
-    return html`
-      <div class="model-panel" role="group" aria-label="Engine">
-        <div class="model-head">
-          <span class="model-title">⚙️ Engine</span>
-          <select
-            class="model-select"
-            .value=${active}
-            ?disabled=${disabled}
-            autocomplete="off"
-            aria-label="Engine"
-            title=${readOnly
-              ? 'Only the host can switch engines'
-              : 'The engine this session runs on'}
-            @change=${(e) => this._onEngineSelect(e)}
-          >
-            ${available.map(
-              (name) => html`<option
-                value=${name}
-                ?selected=${name === active}
-                ?disabled=${!mountable.includes(name)}
-                title=${mountable.includes(name)
-                  ? ''
-                  : 'Not mounted in this session — no credential, or the '
-                    + 'optional dependency is not installed'}
-              >
-                ${(engines.labels && engines.labels[name]) || name}${
-                  mountable.includes(name) ? '' : ' (not mounted)'
-                }
-              </option>`,
-            )}
-          </select>
-          ${this._enginePending
-            ? html`<span class="model-pending" aria-hidden="true">…</span>`
-            : ''}
-        </div>
-        <p class="model-note">
-          Switching engines <strong>starts a new session</strong>. The two
-          engines keep their transcripts in different formats, so a
-          conversation cannot follow you across — nothing is deleted, and the
-          conversation you leave stays in the history browser.
-          ${readOnly ? 'Only the host can switch engines.' : ''}
-        </p>
-        ${this._engineError
-          ? html`<p class="model-note engine-error">${this._engineError}</p>`
-          : ''}
-      </div>
-    `;
-  }
+  // The engine selector moved to the chat panel's action bar on
+  // 2026-09-04. It was here because Settings is where configuration
+  // lives, and that was the wrong reading: which engine is answering is a
+  // fact about *this conversation*, and the place it is asked is beside
+  // the conversation. The chip in the action bar already said which one —
+  // it is now the control as well.
+  //
+  // What stays here is the agy permission gate, because that genuinely is
+  // configuration: it changes the user's own machine, outlives the
+  // session, and is answerable with no engine running.
 
   /** Another window changed the model. */
   _onModelChanged(event) {
@@ -2088,7 +2041,6 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
       ${this._renderRetiredNote()}
 
-      ${this._renderEnginePanel()}
       ${this._renderAgyGatePanel()}
 
       ${this._renderModelPanel()}

@@ -508,6 +508,7 @@ export class ChatPanel extends RpcMixin(LitElement) {
    */
   async _onSwitchEngine(engine) {
     if (!engine || this._engineSwitchPending) return;
+    if (!(await this._ensureGateFor(engine))) return;
     this._engineSwitchPending = true;
     this._engineSwitchError = '';
     try {
@@ -524,6 +525,65 @@ export class ChatPanel extends RpcMixin(LitElement) {
     } finally {
       this._engineSwitchPending = false;
     }
+  }
+
+  /**
+   * Offer to install the permission gate, if the chosen engine needs one.
+   *
+   * Asked **at the moment of choosing** rather than left to be discovered.
+   * Without it the switch succeeds, the next prompt is refused with
+   * `gate_not_installed`, and the user has to find a Settings panel they
+   * had no reason to open — which is a worse trade than one confirm.
+   *
+   * The confirm carries the same three facts the Settings panel does,
+   * because this is the same consent: where it writes, that it is outside
+   * this project, and that it is reversible. Declining leaves the engine
+   * unswitched rather than switching to one that cannot run, since a
+   * selector that moves and then refuses every turn is the confusing half
+   * of both options.
+   *
+   * Engines with no gate to install are unaffected: `get_agy_gate` answers
+   * `absent` only for the transport that has one, and a `current` gate
+   * short-circuits without asking anything.
+   *
+   * @returns {Promise<boolean>} whether the switch should proceed
+   */
+  async _ensureGateFor(engine) {
+    let gate;
+    try {
+      gate = await this.rpcExtract('Settings.get_agy_gate');
+    } catch {
+      // No such method, or the call failed. Not this engine's concern —
+      // let the switch proceed and let the engine refuse if it must.
+      return true;
+    }
+    if (!gate || gate.state === 'current' || !gate.needed_by) return true;
+    if (gate.needed_by !== engine) return true;
+
+    const ok = window.confirm(
+      `${(this._engines?.labels || {})[engine] || engine} reviews every file `
+      + 'it writes through '
+      + 'AIC⚡DC, and that needs a small permission hook installed in\n\n'
+      + `${gate.path}\n\n`
+      + 'That file is outside this project — it belongs to the Antigravity '
+      + 'CLI. Your own entries in it are left alone, it adds about 0.03s to '
+      + 'each tool call in any agy session on this machine, and it stays '
+      + 'until you remove it in Settings.\n\n'
+      + 'Install it and switch?',
+    );
+    if (!ok) return false;
+    try {
+      const res = await this.rpcExtract('Settings.install_agy_gate');
+      if (res && res.error) {
+        this._engineSwitchError = res.message || res.error;
+        return false;
+      }
+    } catch (err) {
+      this._engineSwitchError =
+        `Could not install the permission gate: ${err?.message || err}`;
+      return false;
+    }
+    return true;
   }
 
   /**

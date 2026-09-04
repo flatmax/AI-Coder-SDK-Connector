@@ -85,6 +85,8 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+
+from aic_dc import capabilities
 from typing import TYPE_CHECKING, Any
 
 from aic_dc.claude_code.engine_config import LIVE_CONTROLS
@@ -486,6 +488,10 @@ class Settings:
 
         report = install.status(self._config.config_dir)
         report["agy_present"] = shutil.which("agy") is not None
+        # Which engine this gate is *for*, named by the server so the
+        # browser can ask "does the engine I am switching to need this?"
+        # without a hard-coded engine name of its own — AG-R-4.
+        report["needed_by"] = capabilities.AGY
         return report
 
     def install_agy_gate(self) -> dict[str, Any]:

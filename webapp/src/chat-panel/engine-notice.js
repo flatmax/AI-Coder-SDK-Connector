@@ -140,8 +140,14 @@ export function dismissEngineNotice(panel) {
  * in two places to add an engine, and the one that was forgotten would
  * render a blank.
  */
-function engineLabel(name) {
+function engineLabel(name, value) {
   if (typeof name !== 'string' || !name) return 'an unknown engine';
+  // The server's label wins. Two of these engines reach the *same product*
+  // and differ only in which account pays, which a capitalised identifier
+  // cannot say — and a label table here would be a branch on an engine
+  // name, which AG-R-4 forbids. `list_engines` carries them.
+  const supplied = value?.labels?.[name];
+  if (typeof supplied === 'string' && supplied) return supplied;
   return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
@@ -165,20 +171,40 @@ export function renderEngineChip(panel) {
   const value = engines(panel);
   if (!value || value.mountable.length < 2) return nothing;
   const unfinished = engineIsUnfinished();
-  const label = engineLabel(value.active);
+  const label = engineLabel(value.active, value);
   const title = unfinished
     ? `Running on ${label}, which has features this build has not finished. `
-      + 'Click for what is missing.'
-    : `Running on ${label}. Click to change engine.`;
+      + 'Choose another engine, or open the notice for what is missing.'
+    : `Running on ${label}. Choose which engine this session runs on.`;
+  // A fragment: the selector, and — only when there is something to say —
+  // the way back into the notice. Losing that when the chip stopped being
+  // a button would have stranded "what is missing" behind a dismissal with
+  // no way to reopen it. Absent when the engine is complete, so it is a
+  // signal rather than furniture.
   return html`
-    <button
+    <select
       class="action-button engine-chip ${unfinished ? 'engine-unfinished' : ''}"
-      @click=${() => revealEngineNotice(panel)}
+      ?disabled=${panel._engineSwitchPending}
+      autocomplete="off"
       aria-label=${title}
       title=${title}
+      .value=${value.active}
+      @change=${(e) => panel._onSwitchEngine(e.target.value)}
     >
-      ${unfinished ? '⚠' : '⚙'} ${label}
-    </button>
+      ${value.mountable.map(
+        (name) => html`<option value=${name} ?selected=${name === value.active}>
+          ${name === value.active && unfinished ? '⚠ ' : ''}${engineLabel(name, value)}
+        </option>`,
+      )}
+    </select>
+    ${unfinished
+      ? html`<button
+          class="action-button engine-gaps"
+          @click=${() => revealEngineNotice(panel)}
+          aria-label="What this engine has not finished"
+          title="What this engine has not finished"
+        >⚠</button>`
+      : nothing}
   `;
 }
 
@@ -250,7 +276,7 @@ export function renderEngineNotice(panel) {
                 >
                   ${pending
                     ? 'Switching…'
-                    : `Switch to ${engineLabel(alternates[0])}`}
+                    : `Switch to ${engineLabel(alternates[0], engines(panel))}`}
                 </button>
                 <span class="engine-switch-note">
                   Starts a new session — the two engines' transcripts do not
@@ -270,8 +296,8 @@ export function renderEngineNotice(panel) {
           : nothing}
         <div class="health-line health-engine">
           Which engine a session starts on is app.json's
-          <code>engines.master</code>, and the Settings tab can change it
-          mid-run.
+          <code>engines.master</code>, and the selector in the action bar
+          changes it mid-run.
         </div>
       </div>
       <button

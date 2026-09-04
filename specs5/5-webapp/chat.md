@@ -712,6 +712,42 @@ the UI in two places that must be got right:
 | `session-deleted` | Inward (`window`) | Re-dispatched by the shell from the `sessionDeleted` broadcast; drops the row, its search hits, its subagent listing, and the preview if that session was the one selected |
 | `open-history` | Inward (`window`) | Opens the browser on behalf of another surface. The only inward window event on the panel that does not come from the server: the Settings tab's session-storage figure argues for deleting sessions and links here, because deletion belongs beside the transcript being deleted rather than behind a settings button ([settings.md § Session Controls](settings.md)). It opens; it does not toggle — a second request from a surface that cannot see the browser must not close it |
 
+### The engine selector is the chip, not a settings field
+
+**Moved 2026-09-04, at the user's request.** The action bar's engine chip said *which* engine was
+answering and the Settings tab held the control that changed it. That split was the wrong reading of
+where the question lives: which engine is answering is a fact about *this conversation*, not about the
+installation, so the place to change it is beside the conversation. The chip is now the `<select>`.
+
+Three things follow, and each is the reason the move is not merely cosmetic:
+
+- **Labels come from `list_engines`.** Two of the three engines reach the *same product* and differ
+  only in which account pays; `Antigravity` and `Agy` cannot say that, and a label table in the
+  browser would be the engine-name branch [AG-R-4](../plan-ag/risks.md#ag-r-4) forbids.
+- **A ⚠ button sits beside it only while the engine has unbuilt surfaces.** The chip used to open the
+  notice on click; a `<select>` cannot. Dismissal is per engine *and* per gap set, so without a way
+  back a user who dismissed once could never see what is missing again. Absent when there are no gaps,
+  so it stays a signal rather than furniture.
+- **Choosing an engine that needs a permission gate asks first.** See below.
+
+### Consent for the `agy` gate is asked where the engine is chosen
+
+Selecting the `agy` transport with its permission hook absent used to switch successfully and then
+refuse the next prompt with `gate_not_installed`, pointing at a Settings panel the user had no reason
+to open. It now asks at the moment of choosing, and the confirm carries the same three facts the
+Settings panel does, because it is the same consent: **where it writes**, that the file is **outside
+this project**, and that it is **reversible**.
+
+Declining leaves the engine unswitched rather than switching to one that cannot run — a selector that
+moves and then refuses every turn is the confusing half of both options.
+
+**Which engine needs it is the server's answer, not the browser's.** `Settings.get_agy_gate` carries
+`needed_by`, so no component here hard-codes a transport name. An engine whose server has no such
+method switches unasked, which is every engine but this one.
+
+Removing the gate stays in Settings, because that genuinely is configuration: it changes the user's
+own machine, outlives the session, and is answerable with no engine running.
+
 ## Invariants
 
 - Every rendered streaming element is keyed by block identity; a chunk with a stale `seq` for its block is discarded rather than applied
@@ -724,6 +760,10 @@ the UI in two places that must be got right:
 - One restore path, two routes into it. A transcript reached by resuming (`session-changed`) and the same transcript reached by reconnecting (`state-loaded`) are normalized by the same function, so they cannot render differently. An assistant turn keeps its `blocks`, files, and footer through a restore rather than collapsing to prose, and nothing absent from the record is defaulted — a turn the transcript could supply no usage for draws no footer, and one with no terminal reason draws no badge
 - Up-arrow recall is seeded from the restored list, not the raw one, so it skips exactly what the renderer labels as a system event. A compact summary is a user-role record the CLI wrote about the context it dropped, and it is never offered back as something the user typed
 - No system event is fed back to the model
+- The engine a session runs on is chosen beside the conversation, not in Settings, and is labelled by
+  what the server calls it rather than by its identifier
+- Consent to write outside the repository is asked before the write, carrying where it writes, that it
+  is outside the project, and how it is undone. Declining leaves the app in the state that still works
 - Anything the engine addresses to the *user* reaches the transcript. A turn that stopped for a reason the engine explained never renders as a turn that merely stopped: the explanation is a durable card, not only a toast, because a toast outlives neither the condition nor the reader's absence
 - A row the engine authored is marked `system_event`, never merely given a non-`user` role. The label and the styling both read that flag, so an unmarked row is attributed to the assistant — which is the one attribution these rows exist to avoid
 - Session-changed handler resets streaming state before replacing the message list
