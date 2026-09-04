@@ -2121,3 +2121,67 @@ describe('aic-settings-tab agy permission gate', () => {
   });
 });
 
+
+
+describe('aic-settings-tab model list follows the engine', () => {
+  // Reported from a live run: switched to the agy engine in the action
+  // bar, then could not choose a model in Settings. The panel was still
+  // showing the *previous* engine's models — names the new one rejects,
+  // in a control whose whole job is to offer names it accepts.
+
+  function modelSelect(el) {
+    return [...el.shadowRoot.querySelectorAll('select')].find(
+      (s) => (s.getAttribute('aria-label') || '') === 'Model',
+    );
+  }
+
+  it('re-reads the models when the engine changes', async () => {
+    let engine = 'claude';
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () =>
+          engine === 'claude'
+            ? { model: 'opus', models: ['opus', 'sonnet'] }
+            : { model: null, models: ['gemini-3.8-flash-low', 'claude-sonnet-4-6'] },
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._models).toEqual(['opus', 'sonnet']);
+
+    engine = 'agy';
+    window.dispatchEvent(
+      new CustomEvent('engine-changed', { detail: { engine: 'agy' } }),
+    );
+    await settle(el);
+    expect(el._models).toEqual(['gemini-3.8-flash-low', 'claude-sonnet-4-6']);
+  });
+
+  it('does not leave the old engine\'s models on screen while it asks', async () => {
+    // A stale list here is not a best-available answer, it belongs to a
+    // different engine — so it is cleared rather than left until the reply.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: 'opus', models: ['opus'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    el._onEngineChanged({ detail: { engine: 'agy' } });
+    // Synchronously after the event, before the RPC can have answered.
+    expect(el._models).toEqual([]);
+    expect(el._model).toBe('');
+  });
+
+  it('ignores an engine-changed carrying no engine', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: 'opus', models: ['opus'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    el._onEngineChanged({ detail: {} });
+    expect(el._models).toEqual(['opus']);
+  });
+});

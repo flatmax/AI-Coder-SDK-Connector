@@ -1370,44 +1370,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._engines = { ...(this._engines || {}), active: engine };
     this._enginePending = false;
     this._engineError = '';
+    // **The model list belongs to the engine, so it has to be re-read.**
+    // Without this the panel went on showing the *previous* engine's
+    // models after a switch — names the new one will reject, in a control
+    // whose whole job is to offer names it accepts. Cleared first rather
+    // than left until the reply lands: a stale list here is not the
+    // best-available answer the way it is after a transient RPC failure,
+    // it is a list belonging to a different engine.
+    this._models = [];
+    this._model = '';
+    this._resolved = '';
+    this._loadModel();
   }
 
-  /**
-   * Handle an engine selection.
-   *
-   * Like `_onModelSelect`, the `<select>`'s own value is not the answer —
-   * the reply is. Unlike it, a refusal is *shown* rather than only warned
-   * to the console: `switch_engine` declines for reasons the user can act
-   * on (a turn is still running; that engine has no credential here), and
-   * a control that silently snapped back would be indistinguishable from
-   * one that is broken.
-   */
-  async _onEngineSelect(event) {
-    const wanted = event?.target?.value;
-    const active = this._engines?.active || '';
-    if (event?.target) event.target.value = active;
-    if (!wanted || wanted === active) return;
-    this._enginePending = true;
-    this._engineError = '';
-    try {
-      const res = await this.rpcExtract(
-        'ClaudeCodeService.switch_engine', wanted,
-      );
-      if (!res || typeof res !== 'object' || res.error) {
-        this._engineError = res?.error
-          || 'The engine did not say why the switch failed.';
-        this._enginePending = false;
-        return;
-      }
-      // The broadcast is what updates `_engines.active`, in this window
-      // and every other, so there is one writer rather than two that can
-      // disagree. It arrives here too.
-      if (res.changed === false) this._enginePending = false;
-    } catch (err) {
-      this._engineError = `Could not switch engines: ${err?.message || err}`;
-      this._enginePending = false;
-    }
-  }
 
   /**
    * The engine in force, and a switch — when there is more than one.
