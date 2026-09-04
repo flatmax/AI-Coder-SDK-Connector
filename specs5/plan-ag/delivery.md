@@ -2202,6 +2202,49 @@ rather than hidden. `sdk-surface.md` warns that surfacing them naively makes "wh
 talking to" unanswerable; the engine selector now answers it, reading *antigravity (subscription)*
 beside them.
 
+### Open: the model picker is still empty on `agy` (2026-09-04, unresolved)
+
+**Reported twice, and the second report is after the fix that was supposed to close it.** With
+`agy` master — the chip reading *⚠ antigravity (subscription)* — Settings shows an **empty model
+select**, disabled, above the note *"The engine has not connected yet, so it has not said which models
+it offers — the list arrives with the first turn."* That note is the `offline` branch, and `offline` is
+literally `entries.length === 0`, so the browser has no list. (The ⚠ on the chip is the unfinished-engine
+marker and is expected; it is not this.)
+
+The first report was diagnosed as `settings-tab`'s `engine-changed` handler updating the active
+engine's *name* and nothing else, and fixed in `9eb4a89` by clearing and re-reading. The symptom
+survived that, so the diagnosis was incomplete rather than wrong — the clear-and-re-read is still
+correct, it just is not the whole path.
+
+What is excluded by measurement rather than by argument:
+
+- **The backend answers.** `AgyService.get_model()`, probed in-process, returns the 14 ids with
+  `model: None`. `agy models` exits 0 and prints `id<TAB>Label`; its *"Fetching available models…"*
+  banner goes to stderr, which is already discarded, so it is not being parsed as a fourteenth-and-a-half
+  model name.
+- **The router does not refuse it.** Neither `get_model` nor `set_model` is in `RPC_SURFACES`, so
+  both delegate to whichever adapter is master; there is no `UnsupportedOnThisEngine` path here.
+- **The event chain exists end to end**: `_announce_engine` → `engineChanged` → `app-shell`
+  re-dispatches `engine-changed` on `window` → `settings-tab._onEngineChanged` clears and calls
+  `_loadModel`.
+
+So the failure is between the browser making that call and the list arriving — which leaves these,
+in the order worth probing:
+
+1. **The window was running code older than the fix.** `--dev` runs Vite, so a reload picks the edit
+   up, but a window left open across the commit does not. The cheapest thing to check first, and the
+   one that would make this a non-defect.
+2. **`_loadModel` returned early on `!this.rpcConnected`**, or `get_model` came back with an
+   `error` — both paths `console.warn('[settings] get_model failed', …)` and leave the list alone.
+   **The browser console is the next artefact needed**; nothing else distinguishes them.
+3. **`engine-changed` never reached this window.** The chat panel listens on the same event and
+   clears its transcript, so *did the conversation clear on the switch* is a free observation that
+   separates "the event did not arrive" from "the reload ran and got nothing".
+
+Worth stating plainly because it shaped the wrong first diagnosis: with **Claude** master and no turn
+yet run, this panel is *also* empty, for the honest reason the note gives. Empty-before and
+empty-after look identical on screen, which is why the switch appeared to be the thing that broke it.
+
 ### What phase 8 still owes
 
 Its exit criterion, both halves, neither demonstrated:
