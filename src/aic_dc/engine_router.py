@@ -224,6 +224,17 @@ class EngineRouterBase:
             "active": self._engine,
             "available": list(capabilities.ENGINES),
             "mountable": sorted(self._adapters),
+            # Supplied by the server rather than mapped in the browser. A
+            # label table in the webapp would be a branch on an engine
+            # name, which AG-R-4 forbids — and the thing a user is choosing
+            # between here is *which account pays*, which is not something
+            # the browser can know. A name with no label falls back to
+            # itself, so an engine added without one is legible rather
+            # than blank.
+            "labels": {
+                name: capabilities.ENGINE_LABELS.get(name, name)
+                for name in capabilities.ENGINES
+            },
         }
 
     async def switch_engine(self, engine: str) -> dict[str, Any]:

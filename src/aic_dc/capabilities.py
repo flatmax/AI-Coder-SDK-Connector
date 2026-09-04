@@ -79,6 +79,23 @@ UNBUILT = "unbuilt"
 #: look a row up, and :func:`descriptor` deliberately does not send them.
 CLAUDE = "claude"
 ANTIGRAVITY = "antigravity"
+#: The ``agy`` transport (AG-14). The *same product* as ``ANTIGRAVITY``,
+#: reached through the CLI on the owner's Google subscription rather than
+#: through the SDK on a metered API key. It is a separate identifier
+#: because a session runs on one or the other and they differ in what they
+#: can feed — not because it is a third engine.
+AGY = "agy"
+
+#: What the engine selector calls each one. **Supplied by the server**,
+#: because a label map in the webapp would be a branch on an engine name,
+#: which is exactly what AG-R-4 forbids — and because the thing a user is
+#: choosing between here is *which account pays*, which only this side
+#: knows.
+ENGINE_LABELS: dict[str, str] = {
+    CLAUDE: "claude",
+    ANTIGRAVITY: "antigravity (API key)",
+    AGY: "antigravity (subscription)",
+}
 
 
 @dataclass(frozen=True)
@@ -98,9 +115,22 @@ class Surface:
     claude: str
     antigravity: str
     note: str = ""
+    #: The ``agy`` transport's status, when it differs from the SDK's.
+    #:
+    #: ``None`` means *the same as* ``antigravity``, and that default is
+    #: the honest one: both reach the same product, so a surface the SDK
+    #: cannot feed is one Antigravity cannot feed, whichever way it is
+    #: driven. Only where the *transport* changes the answer does this
+    #: carry a value — which today is the transcript surfaces, because
+    #: ``agy`` writes a full conversation log to disk and the SDK does not.
+    agy: str | None = None
 
     def status_for(self, engine: str) -> str:
-        return self.claude if engine == CLAUDE else self.antigravity
+        if engine == CLAUDE:
+            return self.claude
+        if engine == AGY and self.agy is not None:
+            return self.agy
+        return self.antigravity
 
 
 #: Every surface where the two engines differ.
@@ -254,7 +284,7 @@ SURFACES: tuple[Surface, ...] = (
 _BY_KEY = {surface.key: surface for surface in SURFACES}
 
 #: Engines this module knows how to answer for.
-ENGINES = (CLAUDE, ANTIGRAVITY)
+ENGINES = (CLAUDE, ANTIGRAVITY, AGY)
 
 
 class UnknownSurfaceError(KeyError):

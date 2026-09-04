@@ -1585,7 +1585,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
                   : 'Not mounted in this session — no credential, or the '
                     + 'optional dependency is not installed'}
               >
-                ${name}${mountable.includes(name) ? '' : ' (not mounted)'}
+                ${(engines.labels && engines.labels[name]) || name}${
+                  mountable.includes(name) ? '' : ' (not mounted)'
+                }
               </option>`,
             )}
           </select>

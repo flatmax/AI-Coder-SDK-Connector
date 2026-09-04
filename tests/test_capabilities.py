@@ -284,4 +284,58 @@ class TestTheHelpers:
 
 def test_statuses_are_distinct():
     assert len({SUPPORTED, ABSENT, UNBUILT}) == 3
-    assert capabilities.ENGINES == (CLAUDE, ANTIGRAVITY)
+    # AG-14 added a third identifier: `agy` is the *same product* as
+    # `antigravity`, reached on the owner's subscription rather than a
+    # metered key. A session runs on one or the other and they differ in
+    # what they can feed, so it is a row in the descriptor — not a third
+    # engine, which is why `Surface.agy` defaults to "same as antigravity".
+    assert capabilities.ENGINES == (CLAUDE, ANTIGRAVITY, capabilities.AGY)
+
+
+def test_the_agy_transport_inherits_antigravitys_answers_by_default():
+    """Both reach the same product, so a surface it cannot feed is unfed.
+
+    The default is the honest one. Only where the *transport* changes the
+    answer should a surface override it, and a blanket copy would hide the
+    places it genuinely differs.
+    """
+    for surface in capabilities.SURFACES:
+        if surface.agy is None:
+            assert surface.status_for(capabilities.AGY) == surface.antigravity
+
+
+def test_every_engine_has_a_label_for_the_selector():
+    """Supplied by the server, because a map in the webapp is an AG-R-4 branch.
+
+    And because what a user chooses between here is which account pays,
+    which is not something the browser can know.
+    """
+    for engine in capabilities.ENGINES:
+        assert capabilities.ENGINE_LABELS.get(engine)
+    assert len(set(capabilities.ENGINE_LABELS.values())) == len(capabilities.ENGINES)
+
+
+def test_the_two_antigravity_labels_say_which_account_pays():
+    """The thing that actually differs, at the moment of choosing."""
+    assert "subscription" in capabilities.ENGINE_LABELS[capabilities.AGY]
+    assert "API key" in capabilities.ENGINE_LABELS[capabilities.ANTIGRAVITY]
+
+
+def test_the_descriptor_names_no_engine_the_browser_could_branch_on():
+    """AG-R-4, checked for the third engine as well as the first two.
+
+    Scoped to *structure* rather than to a substring. A `note` may well
+    say "agy's equivalent returns '2 lines, 18 bytes'" — that is developer
+    prose about another transport and the browser never renders it. What
+    AG-R-4 forbids is the payload giving a component something to key off,
+    so what is asserted is that no field carries the engine's identity and
+    that the fields present are the same four whatever engine is asked.
+    """
+    shapes = set()
+    for engine in capabilities.ENGINES:
+        payload = capabilities.descriptor(engine)
+        assert "engine" not in payload
+        for entry in payload.values():
+            shapes.add(tuple(sorted(entry)))
+            assert entry.get("engine") is None
+    assert shapes == {("note", "status", "supported", "title")}

@@ -2254,3 +2254,89 @@ describe('aic-settings-tab agy permission gate', () => {
     expect(panel(el).textContent).toContain('not on your PATH');
   });
 });
+
+
+describe('aic-settings-tab engine labels', () => {
+  // AG-R-4: the browser must not branch on an engine name, and a label
+  // table here would be exactly that. The server supplies them, because
+  // what a user chooses between is which account pays — which only the
+  // server knows.
+
+  function selector(el) {
+    return [...el.shadowRoot.querySelectorAll('.model-panel')]
+      .find((p) => p.getAttribute('aria-label') === 'Engine')
+      ?.querySelector('select');
+  }
+
+  it('shows the server\'s labels, not the raw engine names', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.list_engines': () => ({
+          active: 'claude',
+          available: ['claude', 'antigravity', 'agy'],
+          mountable: ['claude', 'antigravity', 'agy'],
+          labels: {
+            claude: 'claude',
+            antigravity: 'antigravity (API key)',
+            agy: 'antigravity (subscription)',
+          },
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const options = [...selector(el).options].map((o) => o.textContent.trim());
+    expect(options).toContain('antigravity (API key)');
+    expect(options).toContain('antigravity (subscription)');
+    // The value stays the identifier; only the label changes.
+    expect([...selector(el).options].map((o) => o.value)).toEqual([
+      'claude',
+      'antigravity',
+      'agy',
+    ]);
+  });
+
+  it('falls back to the raw name when the server sends no label', async () => {
+    // An engine added without one should read as itself rather than blank.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.list_engines': () => ({
+          active: 'claude',
+          available: ['claude', 'newthing'],
+          mountable: ['claude', 'newthing'],
+          labels: { claude: 'claude' },
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(
+      [...selector(el).options].map((o) => o.textContent.trim()),
+    ).toContain('newthing');
+  });
+
+  it('still marks an unmountable engine as such', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.list_engines': () => ({
+          active: 'claude',
+          // Two mountable, because the panel hides entirely below that —
+          // there is nothing to pick between.
+          available: ['claude', 'antigravity', 'agy'],
+          mountable: ['claude', 'antigravity'],
+          labels: {
+            claude: 'claude',
+            antigravity: 'antigravity (API key)',
+            agy: 'antigravity (subscription)',
+          },
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const agy = [...selector(el).options].find((o) => o.value === 'agy');
+    expect(agy.textContent).toContain('antigravity (subscription)');
+    expect(agy.textContent).toContain('not mounted');
+    expect(agy.disabled).toBe(true);
+  });
+});

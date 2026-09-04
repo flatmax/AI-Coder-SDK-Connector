@@ -662,6 +662,35 @@ own unrelated `agy` sessions. `workspacePaths` is **empty** in every captured pa
 it. `conversationId` can: AIC⚡DC learns its conversation id from the `init` frame before any tool call
 arrives, so the hook can allow-and-return immediately for any conversation the host does not own.
 
+### It is a selectable engine, labelled by which account pays **(user, 2026-09-03)**
+
+`agy` gets its own identifier in `capabilities.ENGINES` and its own row in the picker, rather than
+being a hidden setting on the Antigravity engine. A session runs on one or the other and they differ
+in what they can feed, so the descriptor has to be able to tell them apart.
+
+**The picker names them by credential, not by mechanism** — `antigravity (API key)` and
+`antigravity (subscription)` — because the thing a user is choosing between is which account pays.
+"SDK" and "CLI" describe how *we* reach the product and answer a question nobody asked.
+
+**The labels are supplied by the server.** A label table in the webapp would be a branch on an engine
+name, which [AG-R-4](risks.md#ag-r-4) forbids, and the billing fact behind the label is not something
+the browser can know. `list_engines()` carries them; a name with no label falls back to itself, so an
+engine added later reads as itself rather than blank.
+
+**`Surface.agy` defaults to "same as `antigravity`"**, and that default is the honest one: both reach
+the same product, so a surface the SDK cannot feed is one Antigravity cannot feed however it is
+driven. Only where the *transport* changes the answer does a surface override it — nothing does today,
+and the transcript surfaces are where it will, once phase 5 reads `transcript_full.jsonl`, which the
+SDK path has no equivalent of.
+
+**Selecting it with the gate absent refuses and points at Settings (user).** Not an inline offer and
+certainly not an automatic install: consent to write into `~/.gemini/config/hooks.json` should happen
+where the explanation is, not bundled into what looks like a routine dropdown change. `connect_engine`
+already answers `gate_not_installed` with the file named.
+
+**It mounts on the binary being present**, not on a credential — `agy` carries its own OAuth, which is
+the whole reason this transport exists.
+
 ### The shape
 
 One long-lived process per session, not one per turn:

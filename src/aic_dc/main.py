@@ -1110,7 +1110,31 @@ async def run(
                 "Antigravity engine mounted (credential from %s)",
                 antigravity_credentials.source,
             )
+        # The same product on the owner's subscription rather than a
+        # metered key (AG-14). Mounted on the binary being present rather
+        # than on a credential, because `agy` carries its own OAuth — which
+        # is the entire reason this transport exists. The permission gate
+        # it needs is *not* checked here: it is installed from Settings
+        # with the user's consent, and `connect_engine` refuses without it
+        # rather than running an ungated agent.
+        import shutil as _shutil
+
+        from aic_dc.agy.service import AgyService
+
+        if _shutil.which("agy") is not None:
+            engines[capabilities.AGY] = AgyService(
+                config,
+                repo=repo,
+                event_callback=event_callback,
+                credentials=antigravity_credentials,
+            )
+            logger.info("agy transport mounted (Antigravity CLI on PATH)")
         else:
+            logger.info(
+                "agy transport not mounted: the Antigravity CLI is not on PATH"
+            )
+
+        if not antigravity_credentials.available:
             logger.info(
                 "Antigravity engine not mounted: %s",
                 antigravity_credentials.source or "no Gemini API key",
