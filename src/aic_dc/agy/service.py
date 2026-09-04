@@ -111,28 +111,6 @@ class AgyService(AntigravityService):
         report["agy_present"] = shutil.which(self._executable) is not None
         return report
 
-    async def shutdown(self) -> dict[str, Any] | None:
-        """Stop the session **and remove the gate**. Never raises.
-
-        Removing it here is what keeps the cost honest: the user's own
-        ``agy`` sessions pay nothing once this app is closed. A crash leaves
-        the entry behind, which is why the installed command carries the
-        allow-on-failure fallback and why :func:`install.status` reports a
-        stale entry rather than hiding it.
-
-        Installing is **not** the mirror of this and does not live here.
-        It is :class:`aic_dc.settings.Settings`'s, because what it changes
-        is the user's own machine rather than a property of a session — so
-        it must be answerable and reversible with no engine running, and on
-        an engine they are not currently using.
-        """
-        await super().shutdown()
-        try:
-            install.uninstall()
-        except Exception:  # noqa: BLE001 - teardown must not raise
-            logger.exception("Could not remove the agy gate on shutdown")
-        return {"status": "ok"}
-
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start ``agy``. **Localhost only.**
 
@@ -178,7 +156,7 @@ class AgyService(AntigravityService):
                     "The AIC-DC permission gate is not installed in "
                     f"{gate['path']}, so a turn could not be reviewed before "
                     "it wrote to your files. Install it from Settings — it "
-                    "is removed again when AIC-DC shuts down."
+                    "stays installed until you remove it there."
                 ),
                 "gate": gate,
             }

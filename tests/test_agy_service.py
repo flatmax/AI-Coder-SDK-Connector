@@ -84,14 +84,23 @@ class TestItMounts:
 class TestItWillNotRunUngated:
     """The refusal is the feature. Running anyway fails silently."""
 
-    def test_a_turn_is_refused_when_the_gate_is_not_installed(self, tmp_path):
+    def test_a_turn_is_refused_when_the_gate_is_not_installed(
+        self, tmp_path, monkeypatch
+    ):
+        # Pointed at a temp file rather than the real one. Without this the
+        # test reads the developer's own ~/.gemini/config/hooks.json and
+        # passes or fails on whether *they* have the gate installed — which
+        # is how it went green for a day and then red the moment one was.
+        monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
         svc = service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
         assert result["reason"] == "absent"
-        # The message says where to fix it and that it is temporary.
+        # The message says where to fix it, and that fixing it sticks —
+        # the gate is not removed on shutdown, so a session started later
+        # finds it ready.
         assert "Settings" in result["message"]
-        assert "shuts down" in result["message"]
+        assert "until you remove it" in result["message"]
 
     def test_a_stale_gate_is_refused_too(self, tmp_path, monkeypatch):
         """A gate pointing at another checkout gates *that* one, not this."""

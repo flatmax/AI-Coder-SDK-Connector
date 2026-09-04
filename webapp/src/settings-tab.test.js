@@ -2137,7 +2137,7 @@ describe('aic-settings-tab agy permission gate', () => {
     const text = panel(el).textContent.replace(/\s+/g, ' ');
     expect(text).toContain('/home/u/.gemini/config/hooks.json');
     expect(text).toContain('outside this project');
-    expect(text).toContain('removed automatically');
+    expect(text).toContain('closing AIC⚡DC does not take it out');
   });
 
   it('says what it costs sessions that have nothing to do with this app', async () => {
@@ -2149,7 +2149,7 @@ describe('aic-settings-tab agy permission gate', () => {
     const text = panel(el).textContent.replace(/\s+/g, ' ');
     expect(text).toContain('every');
     expect(text).toContain('including ones you start yourself');
-    expect(text).toContain('0.2s');
+    expect(text).toContain('0.03s');
   });
 
   it('promises the user their own hooks are left alone, and counts them', async () => {

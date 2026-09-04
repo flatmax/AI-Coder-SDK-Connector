@@ -15,21 +15,32 @@ installed **every tool call in every `agy` session on the machine** spawns
 our hook process, including the interactive one the user runs themselves.
 Measured 2026-09-03:
 
-- **~200 ms per tool call.** Almost all of it is Python interpreter
-  startup, which is unavoidable when the caller spawns a process per call.
-  It was 700 ms until the hook was moved out from under
-  ``aic_dc.antigravity``, whose import alone costs 500 ms and pulls in the
-  Claude SDK — a tax this module's own existence would have levied on the
-  user's unrelated work.
+- **~30 ms per tool call**, against ~10 ms for starting Python at all. It
+  was ~500 ms until the hook was moved out from under
+  ``aic_dc.antigravity``, whose import alone costs that much and pulls in
+  the Claude SDK — a tax this module's own existence would have levied on
+  the user's unrelated work.
+
+  **Corrected 2026-09-04.** This said 200 ms for a day, measured through
+  ``uv run``, which adds ~170 ms of its own startup and is *not* what gets
+  installed: :func:`hook_command` writes ``sys.executable``, the
+  virtualenv's own interpreter. Measuring the convenience wrapper rather
+  than the command under test overstated the cost by sevenfold, and it was
+  the number the decision to uninstall on shutdown was made against.
 - **Nothing else.** A call belonging to a conversation this host has not
   claimed is answered ``{"decision": "allow"}`` and never reaches a
   dialog, a socket or a queue.
 
 So the honest summary is: standalone ``agy`` keeps working exactly as it
-did, and pays about a fifth of a second per tool call while AIC⚡DC has the
-gate installed. That is why :func:`uninstall` exists and why the adapter
-calls it on shutdown — the tax should be paid only while it buys
-something.
+did, and pays about 30 ms per tool call while the gate is installed.
+
+**The gate is sticky, and the corrected measurement is why.** It was
+removed on shutdown while the cost was believed to be 200 ms — worth
+paying only when it bought something. At 30 ms it is not worth the
+surprise of a Settings toggle that silently un-sets itself, or of the next
+session refusing to start because the thing the user switched on had been
+taken away behind them. :func:`uninstall` is now reached only from
+Settings, by the person who put it there.
 
 The failure that would be unacceptable, and how it is closed
 ============================================================

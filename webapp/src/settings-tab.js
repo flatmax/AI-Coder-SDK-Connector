@@ -1522,9 +1522,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
         <p class="model-note">
           While it is installed, <em>every</em> agy session on this machine —
           including ones you start yourself in a terminal — runs it once per
-          tool call, costing about <strong>0.2s each</strong>. It is removed
-          automatically when AIC⚡DC shuts down, so that cost is only paid
-          while it is buying you something.
+          tool call, costing about <strong>0.03s each</strong>. It stays
+          until you remove it here — closing AIC⚡DC does not take it out,
+          so a session you start later finds it ready.
         </p>
         ${state === 'stale'
           ? html`<p class="model-note engine-error">

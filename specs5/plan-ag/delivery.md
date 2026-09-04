@@ -2018,8 +2018,8 @@ unacceptable and the measurement is why:
 
 | | Per tool call, on the user's own sessions |
 |---|---|
-| As first written | **~700 ms** |
-| After moving the package | **~200 ms** |
+| As first written | **~500 ms** |
+| After moving the package | **~30 ms** |
 
 The hook lived at `aic_dc/antigravity/agy/`, and **importing `aic_dc.antigravity` alone costs 500 ms
 and pulls in the Claude SDK.** Every tool call in the user's unrelated `agy` work would have paid that,
@@ -2114,3 +2114,38 @@ and the turn path is proved only against a fake. That run is phase 8's exit crit
 next thing to do. The handshake it needs is proved and written down in
 the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
 before `init` and a tool call cannot precede the first prompt.
+
+
+---
+
+## The 200 ms that was 30 ms (2026-09-04)
+
+A measurement error worth its own entry, because a design decision was made against it.
+
+`install.py` recorded the gate as costing **~200 ms per tool call** on every `agy` session on the
+machine. It costs **~30 ms**, against ~10 ms for starting Python at all. The figure was taken through
+`uv run`, which adds ~170 ms of its own startup — and `uv run` is **not what gets installed**:
+`hook_command` writes `sys.executable`, the virtualenv's interpreter. The convenience wrapper was
+measured instead of the command under test, and it overstated the cost sevenfold.
+
+**What it bought was the wrong design.** Uninstall-on-shutdown existed *because* 200 ms per tool call
+seemed too much to leave running — the tax should be paid only while it bought something. At 30 ms
+that argument does not hold, and what it cost instead was a Settings toggle that silently un-set
+itself and a next session refusing to start because the thing the user switched on had been taken
+away behind them.
+
+**So the gate is sticky (user, 2026-09-04).** `uninstall` is reached only from Settings, by the person
+who put it there. The drawbacks are real and smaller than the one being traded away: the 30 ms is
+permanent rather than session-scoped, and an entry left pointing at a deleted virtualenv persists —
+harmlessly, because the `||` fallback answers *allow*, and visibly, because `status()` reports
+`stale` rather than repairing it.
+
+A shell fast-path was measured and **declined**: testing the registry directory before starting Python
+answers an unowned call in ~0 ms rather than 30 ms. It was not adopted because it puts a third branch
+of globbing shell into the one command whose correctness is the whole gate, and 30 ms does not buy
+that risk.
+
+**And one test was reading the developer's machine.** `test_a_turn_is_refused_when_the_gate_is_not_installed`
+did not patch `GLOBAL_HOOKS`, so it asserted against the real `~/.gemini/config/hooks.json` — green for
+a day because that file was absent, red the moment a gate was installed for real. Now pointed at a temp
+path, like its neighbours.
