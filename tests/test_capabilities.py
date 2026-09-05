@@ -97,8 +97,16 @@ class TestItMatchesTheSpec:
             for s in SURFACES
             if s.claude == SUPPORTED and s.antigravity == SUPPORTED
         }
-        assert universal <= {"amend_tool_input"}, (
-            f"{sorted(universal - {'amend_tool_input'})} are supported "
+        # `persisted_permission_rules` joined this set with AG-15, and it
+        # stays for the same reason `amend_tool_input` is here: the row
+        # carries an argument. It records that the two engines reach the
+        # same capability by different means — Claude writes a settings
+        # file through `updated_permissions`, Antigravity has no such
+        # channel and AIC-DC keeps the rule itself — and that a row reading
+        # ABSENT was what named the work that closed it.
+        allowed = {"amend_tool_input", "persisted_permission_rules"}
+        assert universal <= allowed, (
+            f"{sorted(universal - allowed)} are supported "
             "everywhere. The descriptor covers surfaces where the engines "
             "differ; delete the row or say why it earns one."
         )
@@ -237,15 +245,25 @@ class TestTheEnginesDisagreeWhereExpected:
         assert supports(CLAUDE, "usd_cost")
         assert not supports(ANTIGRAVITY, "usd_cost")
 
-    def test_always_allow_is_absent_not_unbuilt(self):
-        """A decision forced by the SDK, not a to-do.
+    def test_always_allow_is_supported_on_both_by_different_means(self):
+        """**Restated for AG-15.** The premise moved; the row still earns its place.
 
-        ``updated_permissions`` has no counterpart at any layer, so this
-        must never drift into the unbuilt list and become somebody's
-        sprint task.
+        This asserted ``antigravity == ABSENT``, reasoning that
+        ``updated_permissions`` has no counterpart at any layer and so the
+        capability "must never drift into the unbuilt list and become
+        somebody\'s sprint task".
+
+        The first half is still true and the conclusion did not follow from
+        it. No counterpart meant the *engine* could not persist a rule — not
+        that the *product* could not, and the row\'s own note said so:
+        "AIC-DC would have to own the rule store to change this." AG-15 did
+        exactly that, so the honest assertion is the opposite one, and the
+        lesson is that a surface can be absent from an SDK and present in
+        the app.
         """
         row = next(s for s in SURFACES if s.key == "persisted_permission_rules")
-        assert row.antigravity == ABSENT
+        assert row.antigravity == SUPPORTED
+        assert row.claude == SUPPORTED
 
     def test_the_permission_gate_itself_is_not_a_hidden_surface(self):
         """It works on both, so it earns no row — and must not gain one.

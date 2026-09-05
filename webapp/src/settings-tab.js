@@ -350,6 +350,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
      */
     _agyGate: { type: Object, state: true },
     _agyGatePending: { type: Boolean, state: true },
+    _permissionRules: { type: Array, state: true },
+    _forgettingRule: { type: String, state: true },
     /**
      * False once `Collab.get_collab_role` reports this client is not the host.
      * `set_model` and `restart_session` are both localhost-only, so an enabled
@@ -599,6 +601,45 @@ export class SettingsTab extends RpcMixin(LitElement) {
       font-family: 'SFMono-Regular', Consolas, monospace;
       font-size: 0.75rem;
       word-break: break-all;
+    }
+    .rule-list {
+      list-style: none;
+      margin: 0.4rem 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .rule-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      justify-content: space-between;
+    }
+    .rule-label {
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.75rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .rule-forget {
+      flex: none;
+      cursor: pointer;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid var(--border, #30363d);
+      background: transparent;
+      color: var(--text-secondary, #8b949e);
+    }
+    .rule-forget:hover:not(:disabled) {
+      color: var(--danger, #f85149);
+      border-color: var(--danger, #f85149);
+    }
+    .rule-forget:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
     .model-note {
       margin: 0.4rem 0 0;
@@ -950,6 +991,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._loadModel();
     this._loadEngines();
     this._loadAgyGate();
+    this._loadPermissionRules();
     this._loadPreferences();
   }
 
@@ -1459,6 +1501,89 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * is the honest rendering of "this does not apply to you" — the same
    * rule the engine selector follows when only one engine is mountable.
    */
+  /**
+   * The standing "always allow" rules the user has granted (AG-15).
+   *
+   * An empty list is a real answer and is rendered as one — "you have
+   * granted nothing" is exactly what someone auditing their permissions
+   * wants to be told, so this panel does not hide on empty the way the
+   * gate panel hides on "not applicable". It hides only when the method
+   * is absent, which means a build too old to have it.
+   */
+  async _loadPermissionRules() {
+    try {
+      const res = await this.rpcExtract('Settings.get_permission_rules');
+      if (res && Array.isArray(res.rules)) {
+        this._permissionRules = res.rules;
+        this._permissionRuleStore = res.store || '';
+      }
+    } catch {
+      // Absent, not broken: an older server has no such method, and a
+      // panel that cannot be populated should not appear at all.
+      this._permissionRules = null;
+    }
+  }
+
+  async _forgetPermissionRule(id) {
+    this._forgettingRule = id;
+    try {
+      const res = await this.rpcExtract('Settings.forget_permission_rule', id);
+      // The server answers with the remaining rules, so the list is
+      // whatever it says rather than whatever this end predicted — the
+      // invariant from chat.md: a control that reports its own success
+      // reads its state back from the thing it changed.
+      if (res && Array.isArray(res.rules)) this._permissionRules = res.rules;
+      else await this._loadPermissionRules();
+    } catch {
+      await this._loadPermissionRules();
+    } finally {
+      this._forgettingRule = '';
+    }
+  }
+
+  _renderPermissionRulesPanel() {
+    const rules = this._permissionRules;
+    if (!Array.isArray(rules)) return '';
+    const readOnly = this._isHost === false;
+    return html`
+      <div class="model-panel" role="group" aria-label="Standing permission rules">
+        <div class="model-head">
+          <span class="model-title">📋 Standing permission rules</span>
+          <span class="model-pending">${rules.length || 'none'}</span>
+        </div>
+        ${rules.length === 0
+          ? html`<p class="model-note">
+              You have not granted any standing permissions. Choosing
+              <em>always allow</em> on a permission dialog records the rule
+              here, and it applies until you remove it.
+            </p>`
+          : html`
+              <ul class="rule-list">
+                ${rules.map((rule) => html`
+                  <li class="rule-row">
+                    <span class="rule-label" title=${rule.label || ''}>
+                      ${rule.label || rule.rule_content || 'rule'}
+                    </span>
+                    <button
+                      class="rule-forget"
+                      ?disabled=${readOnly || !this.rpcConnected
+                        || this._forgettingRule === rule.id}
+                      @click=${() => this._forgetPermissionRule(rule.id)}
+                      title="Stop allowing this without asking"
+                    >${this._forgettingRule === rule.id ? '…' : 'Forget'}</button>
+                  </li>
+                `)}
+              </ul>
+              <p class="model-note">
+                Each rule allows exactly what its label says and nothing
+                wider — one command, or one file for one tool. Stored in
+                <code>${this._permissionRuleStore || 'the AIC-DC config'}</code>.
+              </p>
+            `}
+      </div>
+    `;
+  }
+
   _renderAgyGatePanel() {
     const gate = this._agyGate;
     if (!gate || !gate.state) return '';
@@ -2026,6 +2151,7 @@ export class SettingsTab extends RpcMixin(LitElement) {
       ${this._renderRetiredNote()}
 
       ${this._renderAgyGatePanel()}
+      ${this._renderPermissionRulesPanel()}
 
       ${this._renderModelPanel()}
 

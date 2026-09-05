@@ -183,11 +183,15 @@ SURFACES: tuple[Surface, ...] = (
         key="persisted_permission_rules",
         title='"Always allow" — permission rules that outlive the call',
         claude=SUPPORTED,
-        antigravity=ABSENT,
-        note="AG-5's one genuine loss. updated_permissions has no "
-        "counterpart at any layer, so the gate offers no suggested_rules "
-        "and an always-allow degrades to allow-once. AIC-DC would have "
-        "to own the rule store to change this.",
+        antigravity=SUPPORTED,
+        note="Supported on both since AG-15 (2026-09-05), by different "
+        "means: Claude writes a rule into its own settings via "
+        "updated_permissions, and Antigravity has no counterpart at any "
+        "layer, so AIC-DC keeps the rule itself in a per-repo store "
+        "shared by both transports. This row read ABSENT until then, and "
+        "its own note said what would change it — 'AIC-DC would have to "
+        "own the rule store' — which is the entry doing its job as a "
+        "to-do list rather than a record.",
     ),
     Surface(
         key="amend_tool_input",

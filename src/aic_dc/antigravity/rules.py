@@ -51,6 +51,7 @@ rule dict back verbatim, so the extra key survives the round trip for free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -206,6 +207,42 @@ class RuleStore:
             if _matches(entry, command=command, path=path, tool_name=tool_name):
                 return entry
         return None
+
+    def remove(self, identifier: str) -> bool:
+        """Forget one rule, by :func:`rule_id`. Returns whether one went.
+
+        **The counterpart to `add`, and the reason it exists is a gap
+        rather than a symmetry.** AG-15 shipped with granting as one click
+        and un-granting as hand-editing JSON, which is the wrong shape for
+        a permission: a user who cannot see what they granted cannot audit
+        it, and one who cannot revoke it has to trust that they clicked the
+        row they meant.
+        """
+        self._reload()
+        try:
+            data: Any = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict) or not isinstance(data.get(self._repo), list):
+            return False
+        kept = [
+            e
+            for e in data[self._repo]
+            if not (isinstance(e, dict) and rule_id(e) == identifier)
+        ]
+        if len(kept) == len(data[self._repo]):
+            return False
+        data[self._repo] = kept
+        try:
+            tmp = self._path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            logger.exception("Could not rewrite the Antigravity rule store")
+            return False
+        self._mtime = None
+        self._reload()
+        return True
 
     def add(self, rule: dict[str, Any]) -> bool:
         """Persist one rule. Returns whether it was written.
@@ -365,3 +402,23 @@ def derive_rules(
     # can describe in one line, and `start_subagent` is in the write seam
     # precisely because its child's calls are not knowable here.
     return rules
+
+
+def rule_id(rule: dict[str, Any]) -> str:
+    """A stable identifier for one rule, derived rather than stored.
+
+    Derived so that rules written before this function existed still have
+    one, and so that two identical grants cannot end up with different ids
+    — the id *is* what the rule grants, hashed.
+
+    Over the match data and the behaviour only. The label and
+    ``rule_content`` are presentation: if a future change reworded a label,
+    an id built over it would change, and the browser's "forget this one"
+    would silently stop finding the rule it was looking at.
+    """
+    match = rule.get(MATCH_KEY) if isinstance(rule, dict) else None
+    payload = json.dumps(
+        {"match": match, "behavior": (rule or {}).get("behavior", "allow")},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

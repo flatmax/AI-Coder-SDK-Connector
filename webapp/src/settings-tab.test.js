@@ -2269,3 +2269,76 @@ describe('aic-settings-tab model list follows the engine', () => {
     expect(modelSelect(el).disabled).toBe(true);
   });
 });
+
+describe('aic-settings-tab standing permission rules', () => {
+  // AG-15 shipped granting without un-granting: "always allow" was one
+  // click and revoking it meant hand-editing JSON. These cover the panel
+  // that closed that, and the property that matters is the *list* — a
+  // permission you cannot see is one you cannot audit.
+
+  const RULE = {
+    id: 'abc123',
+    label: 'Always allow run_command(ls)',
+    rule_content: 'ls',
+    behavior: 'allow',
+    destination: 'aicDcRules',
+  };
+
+  function rulesPanel(el) {
+    return [...el.shadowRoot.querySelectorAll('[role="group"]')].find(
+      (node) => node.getAttribute('aria-label') === 'Standing permission rules',
+    );
+  }
+
+  it('lists what has been granted', async () => {
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({
+        rules: [RULE], store: '/tmp/rules.json',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    const panel = rulesPanel(el);
+    expect(panel).toBeTruthy();
+    expect(panel.textContent).toContain('Always allow run_command(ls)');
+  });
+
+  it('says so plainly when nothing has been granted', async () => {
+    // Not hidden on empty. "You have granted nothing" is exactly what
+    // someone auditing their permissions wants to be told, and a panel
+    // that vanished would leave them unable to tell that from a bug.
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({ rules: [], store: '/tmp/r.json' }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(rulesPanel(el).textContent).toContain('not granted any standing');
+  });
+
+  it('forgetting one calls the server and renders what it answers', async () => {
+    // The answer is the server's remaining list, not this end's guess —
+    // the chat.md invariant that a control reporting its own success reads
+    // its state back from the thing it changed.
+    const forget = vi.fn(() => ({ ok: true, rule_id: 'abc123', rules: [] }));
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({ rules: [RULE], store: '/x' }),
+      'Settings.forget_permission_rule': forget,
+    });
+    const el = mountTab();
+    await settle(el);
+    rulesPanel(el).querySelector('.rule-forget').click();
+    await settle(el);
+    expect(forget).toHaveBeenCalledWith('abc123');
+    expect(rulesPanel(el).textContent).toContain('not granted any standing');
+  });
+
+  it('is absent entirely when the server has no such method', async () => {
+    // An older build. A panel that cannot be populated should not appear,
+    // rather than appearing empty and reading as "you have granted
+    // nothing" — which would be a claim rather than an absence.
+    publishFakeRpc({});
+    const el = mountTab();
+    await settle(el);
+    expect(rulesPanel(el)).toBeFalsy();
+  });
+});

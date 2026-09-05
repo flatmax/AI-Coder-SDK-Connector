@@ -2677,3 +2677,82 @@ it behind the rule path being proven first.
 `(True, "")` is what "no dialog" means, and that is asserted — the call never reaches
 `broker.can_use_tool`. Persistence across a restart is asserted at the store. What has not been done is
 a live turn where a human clicks *always allow* and the next identical call passes silently.
+
+---
+
+## Phase 9b — the half AG-15 shipped without: seeing and revoking (2026-09-05)
+
+**AG-15 gave the user a way to grant a standing permission and no way to take it back.** Granting was
+one click; revoking meant hand-editing `~/.config/aic-dc/antigravity-rules.json`. That is the wrong
+shape for a permission — someone who cannot see what they granted cannot audit it, and someone who
+cannot revoke it has to trust they clicked the row they meant.
+
+Claude gets this for free: its rules are lines in settings files the user already edits, and the CLI
+warns about ones that will not match. Antigravity's live in a store *we* keep, so the app is the only
+thing that can show them.
+
+**What landed.** `rules.rule_id` and `RuleStore.remove`, two `Settings` RPCs, and a settings panel
+listing the rules with a Forget button beside each.
+
+### It went on `Settings`, and the first attempt was architecturally wrong
+
+The obvious home was `AntigravityService`, and two router tests rejected it immediately:
+
+- `test_claude_refuses_nothing` — `RPC_SURFACES` may hide a method on Antigravity and **never** on
+  Claude. Claude is the reference surface and refuses nothing.
+- `test_the_real_adapters_both_mount` — Antigravity exposes **nothing Claude does not**, which is what
+  keeps `48 = 31 + 17` true and lets an engine switch be a field assignment rather than a
+  re-registration.
+
+Two Antigravity-only methods on the engine surface break both. The precedent was already there and had
+been missed: `Settings.get_agy_gate` puts a per-engine control that is *not part of a conversation* on
+the settings service, for a reason that applies here with more force — **a standing permission
+outlives the session that granted it.** A user is entitled to ask what they have granted with no
+engine running, and especially about the engine they are *not* on, which is exactly when they are
+about to switch to it.
+
+A capability-descriptor row was written for this and then removed. `get_agy_gate` has none either: the
+panel hides by the method being absent, which is the established idiom for a settings control, and a
+descriptor row would have implied a hideable *engine* surface that does not exist.
+
+### The id is derived, and over the grant rather than the label
+
+`rule_id` hashes the matching data and the behaviour — **not** the label or `rule_content`. Two
+reasons, both about revoking the wrong thing:
+
+- **Not an index.** A list refreshed between render and click would revoke a different rule than the
+  one the user pointed at.
+- **Not the label.** A future change that reworded a label would change every id, and the browser's
+  "forget this one" would silently stop finding the rule it was looking at.
+
+Derived rather than stored, so rules written before this existed have one too, and two identical grants
+cannot end up with different ids.
+
+### Three smaller decisions
+
+- **Listing is not localhost-gated; forgetting is.** Reading what you have granted is not a privileged
+  act, and a remote viewer who cannot see the rules cannot notice one they would object to. Revoking
+  only ever *narrows* what the agent may do — but the authority question is the same one
+  `resolve_permission` answers, and answering it differently here would make the rule about the
+  direction rather than about the surface.
+- **The panel does not hide when empty.** "You have granted nothing" is precisely what someone
+  auditing their permissions wants to be told, and a panel that vanished would be indistinguishable
+  from a bug. It hides only when the *method* is absent, which means a build too old to have it.
+- **`forget` answers with the remaining rules**, and the panel renders that rather than its own
+  prediction — [`chat.md`](../5-webapp/chat.md)'s invariant that a control reporting its own success
+  reads its state back from the thing it changed. Recorded there after three separate instances; this
+  is the fourth place it applies.
+
+### And the descriptor was lying by then
+
+Checking this work turned up that `capabilities.py` still had `persisted_permission_rules` as **ABSENT**
+on Antigravity, with a note ending *"AIC-DC would have to own the rule store to change this"* — which
+is what AG-15 had done an hour earlier. `capabilities.py` is meant to be the to-do list as data, so a
+stale row defeats its purpose.
+
+Two tests encoded the old premise and both were restated rather than deleted. The interesting one
+asserted the surface *"must never drift into the unbuilt list and become somebody's sprint task"*,
+reasoning from `updated_permissions` having no counterpart at any layer. True — and it only meant the
+**engine** could not persist a rule, not that the **product** could not. The row's own note had said
+what would change it. **A surface can be absent from an SDK and present in the app**, and that is now
+the recorded lesson rather than an assumption sitting in a test.

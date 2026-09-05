@@ -468,6 +468,21 @@ class AntigravityService:
             permission_id, decision or {}, resolved_by="localhost"
         )
 
+    def _rule_store(self) -> Any:
+        """The standing-rule store, without needing a session.
+
+        Read from the gate when there is one so that a rule granted this
+        session is listed immediately, and constructed directly otherwise:
+        the rules outlive sessions, and a settings panel opened before the
+        first turn must still show what the user has granted. The two point
+        at the same file.
+        """
+        from aic_dc.antigravity.rules import RuleStore
+
+        if self._gate is not None:
+            return self._gate.rules
+        return RuleStore(self._repo_root, config_dir=self._config_dir)
+
     def _note_permission_prompt(self, tool_use_id: str | None) -> str | None:
         """Attribute a dialog to the turn that caused it.
 

@@ -190,3 +190,78 @@ class TestWhatIsOffered:
 
     def test_nothing_is_offered_when_there_is_no_command(self, tmp_path):
         assert derive_rules(tmp_path, "run_command", {}, "exec") == []
+
+
+class TestRevocation:
+    """AG-15 shipped granting without un-granting. This is that half.
+
+    A permission a user can grant in one click and can only revoke by
+    hand-editing JSON is the wrong shape: they cannot audit what they have
+    given away, and cannot be sure they clicked the row they meant.
+    """
+
+    def test_a_forgotten_rule_stops_allowing(self, tmp_path):
+        from aic_dc.antigravity.rules import rule_id
+
+        s = store(tmp_path)
+        rule = command_rule(tmp_path, "ls")
+        s.add(rule)
+        assert s.allows(command="ls", path=None, tool_name="run_command")
+        assert s.remove(rule_id(rule)) is True
+        assert s.allows(command="ls", path=None, tool_name="run_command") is None
+
+    def test_forgetting_leaves_the_other_rules_alone(self, tmp_path):
+        from aic_dc.antigravity.rules import rule_id
+
+        s = store(tmp_path)
+        keep = command_rule(tmp_path, "ls")
+        drop = command_rule(tmp_path, "git status")
+        s.add(keep)
+        s.add(drop)
+        s.remove(rule_id(drop))
+        assert s.allows(command="ls", path=None, tool_name="run_command")
+        assert s.allows(
+            command="git status", path=None, tool_name="run_command"
+        ) is None
+
+    def test_forgetting_an_unknown_id_changes_nothing(self, tmp_path):
+        s = store(tmp_path)
+        s.add(command_rule(tmp_path, "ls"))
+        assert s.remove("nosuchid") is False
+        assert len(s.rules()) == 1
+
+    def test_the_id_is_stable_across_stores(self, tmp_path):
+        """Derived from what the rule grants, not from where it sits.
+
+        A list refreshed between render and click must not revoke a
+        different rule than the one the user pointed at, so the id cannot
+        be an index — and it must survive a reload, so it cannot be
+        generated per process.
+        """
+        from aic_dc.antigravity.rules import rule_id
+
+        rule = command_rule(tmp_path, "ls")
+        s = store(tmp_path)
+        s.add(rule)
+        assert rule_id(s.rules()[0]) == rule_id(rule)
+        assert rule_id(store(tmp_path).rules()[0]) == rule_id(rule)
+
+    def test_the_id_ignores_presentation(self, tmp_path):
+        """Over what is granted, not over the label.
+
+        If a future change reworded a label, an id built over it would
+        change and the browser's "forget this one" would silently stop
+        finding the rule it was looking at.
+        """
+        from aic_dc.antigravity.rules import rule_id
+
+        rule = command_rule(tmp_path, "ls")
+        reworded = dict(rule, label="Something else entirely")
+        assert rule_id(reworded) == rule_id(rule)
+
+    def test_two_different_grants_have_different_ids(self, tmp_path):
+        from aic_dc.antigravity.rules import rule_id
+
+        assert rule_id(command_rule(tmp_path, "ls")) != rule_id(
+            command_rule(tmp_path, "rm -rf /")
+        )
