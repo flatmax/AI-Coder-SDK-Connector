@@ -1184,6 +1184,14 @@ class ClaudeCodeService:
             # rather than the trap (`cost.py` § session_totals).
             "session_usage": self.session.session_usage,
             "permission_mode": self.session.permission_mode,
+            # The postures this engine will actually accept, so the
+            # selector offers what can be chosen rather than a list
+            # compiled against one engine. Reported the way `get_model`
+            # reports its menu — by the side that validates — because the
+            # alternative is a table in the browser that has to agree with
+            # a tuple here, and AG-R-4 forbids the webapp keying off an
+            # engine name to pick between two such tables.
+            "permission_modes": list(PERMISSION_MODES),
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
             **self.doc_builder.status(),

@@ -106,12 +106,40 @@ export function needsConfirmation(mode) {
  * whose value is not among its options renders as the *first* option, which
  * would show `Plan` for a session running in something else entirely.
  */
-export function permissionModeOptions(current) {
-  if (!current || PERMISSION_MODES.some((entry) => entry.value === current)) {
-    return PERMISSION_MODES;
+export function permissionModeOptions(current, offered = null) {
+  // What the running engine says it accepts, when it says anything.
+  // `null`/absent means an engine that does not report a list, which is
+  // every build before this one — so the full table, exactly as before.
+  //
+  // This exists because the table below is *Claude's* six, and Antigravity
+  // accepts two. The selector offered all six on every engine, and picking
+  // one of the other four returned `unsupported` — a control that is
+  // reachable and refuses, which is the same defect phase 5 found in the
+  // history browser's Fork button. Filtered on what the engine reports
+  // rather than on which engine it is: AG-R-4.
+  const known = Array.isArray(offered) && offered.length
+    ? PERMISSION_MODES.filter((entry) => offered.includes(entry.value))
+    : PERMISSION_MODES;
+  // A mode the engine reports but this build has no label for is appended
+  // rather than dropped, and that rule now has two reasons. The original:
+  // a `<select>` whose value is not among its options renders as the
+  // *first* one, so an unknown current mode would show as `Plan` for a
+  // session running in something else. The second: `offered` can name a
+  // mode a newer engine has and this webapp does not, and filtering it out
+  // would make a real posture unreachable.
+  const extra = (Array.isArray(offered) ? offered : [])
+    .filter((value) => !PERMISSION_MODES.some((entry) => entry.value === value))
+    .map((value) => ({ value, label: value, detail: 'Reported by the engine.' }));
+  // The identity of the unfiltered table is preserved deliberately: Lit
+  // re-renders on reference change, and rebuilding an identical array on
+  // every paint would churn the one control the user may be mid-click on.
+  const options =
+    known === PERMISSION_MODES && !extra.length ? known : [...known, ...extra];
+  if (!current || options.some((entry) => entry.value === current)) {
+    return options;
   }
   return [
-    ...PERMISSION_MODES,
+    ...options,
     { value: current, label: current, detail: 'Reported by the engine.' },
   ];
 }
@@ -154,7 +182,7 @@ export function permissionModeOptions(current) {
  */
 export function renderPermissionModeSelector(panel) {
   const current = panel._permissionMode || INITIAL_PERMISSION_MODE;
-  const options = permissionModeOptions(current);
+  const options = permissionModeOptions(current, panel._permissionModes);
   const entry = options.find((o) => o.value === current);
   const readOnly = panel._canSetPermissionMode === false;
   const pending = !!panel._permissionModePending;

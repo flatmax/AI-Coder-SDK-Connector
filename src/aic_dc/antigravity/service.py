@@ -81,14 +81,26 @@ logger = logging.getLogger(__name__)
 
 #: Permission postures this engine understands.
 #:
-#: Deliberately fewer than Claude's. ``plan`` is real — ``AgentBehavior``
-#: has a planning mode and ``BuiltinSlashCommandName.PLAN`` is the one
-#: slash command that exists — and ``default`` is the dialog on every
-#: mutating call. What is *not* here is ``acceptEdits`` and
-#: ``bypassPermissions``: AG-5 makes the dialog a requirement of this
-#: engine rather than a feature, and a posture that skips it is the
-#: blanket bypass that decision says must never ship.
-PERMISSION_MODES = ("default", "plan")
+#: Deliberately fewer than Claude's six. ``plan`` is real —
+#: ``AgentBehavior`` has a planning mode and
+#: ``BuiltinSlashCommandName.PLAN`` is the one slash command that exists —
+#: and ``default`` is the dialog on every mutating call.
+#:
+#: ``acceptEdits`` was added on 2026-09-05, and it **amends AG-5 rather
+#: than overturning it**. That decision makes the dialog a requirement of
+#: this engine, and what it was protecting is the execution path:
+#: AG-R-11 measured the agent, refused an edit, reaching for ``sed -i``,
+#: then inline ``python3``, then ``list_dir`` — three routes to one write,
+#: every one of them through the shell. So this posture lets through a
+#: *file write to a file inside the repository* and nothing else;
+#: ``run_command`` and the subagent spawners keep their dialog. That is
+#: the same line ``agy``'s own accept-edits draws, and the same one
+#: Claude's does.
+#:
+#: What is still *not* here is ``bypassPermissions``. A blanket bypass is
+#: what AG-5 says must never ship on this engine, and it is the one
+#: posture that would hand AG-R-11's shell route an ungated agent.
+PERMISSION_MODES = ("default", "plan", "acceptEdits")
 
 
 class AntigravityService:
@@ -312,6 +324,10 @@ class AntigravityService:
             # gate now allows reads without asking, so wiring this is part
             # of that change rather than a separate improvement.
             denied_reads=self.get_denied_read_files,
+            # The session's posture, read live: `acceptEdits` lets an
+            # in-repo file write through without a dialog, and the
+            # user flips it from the action bar mid-session.
+            permission_mode=lambda: self._permission_mode,
             # AG-15's standing rules. Passed explicitly rather than left to
             # the default so that a host given a config directory keeps all
             # of its state in one place, and so a test that forgets it
@@ -815,6 +831,15 @@ class AntigravityService:
             "streaming": bool(self._turns),
             "model": self._model,
             "permission_mode": self._permission_mode,
+            # Two, where Claude reports six. The selector renders what the
+            # engine says it accepts, so the four this one refuses stop
+            # being offerable — until now the dropdown was Claude's list
+            # hardcoded in the webapp, and picking "Accept edits" here got
+            # an `unsupported` error. A control that is reachable and
+            # refuses is the same defect phase 5 found in the history
+            # browser's Fork button, and AG-9's rule is the same: hide it
+            # on what the engine reports, never on its name.
+            "permission_modes": list(PERMISSION_MODES),
             "read_only": session.read_only if session else True,
             "credentials": self._credentials.report(),
             "denied_read_files": list(self._denied_read_files),

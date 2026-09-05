@@ -932,6 +932,12 @@ export async function loadEngineState(panel) {
   } else if (!panel._permissionMode) {
     panel._permissionMode = INITIAL_PERMISSION_MODE;
   }
+  // The postures this engine will accept. Absent from an engine that does
+  // not report them, which leaves the selector showing the full table —
+  // the behaviour of every build before this key existed.
+  panel._permissionModes = Array.isArray(state.permission_modes)
+    ? state.permission_modes
+    : null;
   if (state.engine_health && typeof state.engine_health === 'object') {
     panel._engineHealth = state.engine_health;
   }

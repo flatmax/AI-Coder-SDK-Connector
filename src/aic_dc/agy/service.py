@@ -291,6 +291,10 @@ class AgyService(AntigravityService):
             note_prompt=self._note_permission_prompt,
             localhost_available=self._localhost_available,
             denied_reads=self.get_denied_read_files,
+            # The session's posture, read live: `acceptEdits` lets an
+            # in-repo file write through without a dialog, and the
+            # user flips it from the action bar mid-session.
+            permission_mode=lambda: self._permission_mode,
         )
         self._agy_gate = AgyGateServer(
             self._config_dir / "agy-sessions" / "gate.sock",

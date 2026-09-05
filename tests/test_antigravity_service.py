@@ -451,14 +451,28 @@ class TestATurnDoesNotHoldTheRpcOpen:
 
 
 class TestPermissionPostures:
-    def test_it_offers_no_mode_that_skips_the_dialog(self, tmp_path):
-        """AG-5: the dialog is a requirement of this engine, not a feature."""
-        assert "acceptEdits" not in PERMISSION_MODES
+    def test_it_offers_no_blanket_bypass(self, tmp_path):
+        """AG-5's load-bearing half, and the half that did not move.
+
+        **Was**: no posture may skip the dialog at all, so neither
+        ``acceptEdits`` nor ``bypassPermissions`` existed. On 2026-09-05
+        the user amended that after asking how to stop approving every
+        write, and the amendment is narrow — a *file write inside the
+        repository* may apply silently; execution may not.
+
+        What AG-5 was protecting is the execution path, and that is why
+        the line falls here. AG-R-11 measured the agent, refused an edit,
+        reaching for ``sed -i``, then inline ``python3``, then
+        ``list_dir`` — three routes to one write, all through the shell.
+        ``bypassPermissions`` is the one posture that would hand that
+        route an ungated agent, so it is still absent.
+        """
         assert "bypassPermissions" not in PERMISSION_MODES
 
-    @pytest.mark.parametrize("mode", ["acceptEdits", "bypassPermissions"])
-    def test_a_bypass_posture_is_refused(self, tmp_path, mode):
-        result = asyncio.run(service(tmp_path).set_permission_mode(mode))
+    def test_a_blanket_bypass_is_refused(self, tmp_path):
+        result = asyncio.run(
+            service(tmp_path).set_permission_mode("bypassPermissions")
+        )
         assert result["error"] == "unsupported"
 
     @pytest.mark.parametrize("mode", PERMISSION_MODES)
@@ -847,3 +861,40 @@ class TestTheFileTreeLearnsAboutWrites:
             {"tool_use_id": "t1", "status": "ok", "files_modified": ["/r/a.py"]},
         )
         assert any(name == "toolResult" for name, _ in pushed)
+
+
+class TestItReportsThePosturesItAccepts:
+    """The selector renders this list, so it has to be the true one.
+
+    The webapp's table is Claude's six. This engine accepts two, and
+    `set_permission_mode` answers `unsupported` for the rest — so until
+    the state snapshot carried the list, four of the six were controls a
+    user could pick and be refused. The same defect phase 5 found in the
+    history browser's Fork button, and the same rule: the browser renders
+    what the engine reports, never what its name is (AG-R-4).
+    """
+
+    def test_the_snapshot_names_them(self, tmp_path):
+        state = asyncio.run(service(tmp_path).get_current_state())
+        assert state["permission_modes"] == list(PERMISSION_MODES)
+
+    def test_it_is_exactly_what_set_permission_mode_accepts(self, tmp_path):
+        """One list, asserted from both ends.
+
+        A second list that drifts would put the defect straight back:
+        the selector would offer a posture the setter refuses.
+        """
+        svc = service(tmp_path)
+        offered = asyncio.run(svc.get_current_state())["permission_modes"]
+        for mode in offered:
+            assert "error" not in asyncio.run(svc.set_permission_mode(mode)), mode
+
+    def test_it_offers_no_blanket_bypass(self, tmp_path):
+        """AG-5's surviving half, asserted rather than commented.
+
+        ``acceptEdits`` is offered since the 2026-09-05 amendment;
+        ``bypassPermissions`` is not, and must not appear in a list the
+        browser renders as choosable.
+        """
+        offered = asyncio.run(service(tmp_path).get_current_state())["permission_modes"]
+        assert "bypassPermissions" not in offered

@@ -292,6 +292,45 @@ amend path permanently and for nothing.
 any layer. "Always allow" must be implemented AIC⚡DC-side, as its own store consulted by the hook
 before it opens a dialog. It cannot be delegated.
 
+### Amended 2026-09-05 (user): the dialog is mandatory for *execution*, not for every edit
+
+**What changed and who changed it.** The engine offered `default` and `plan` and nothing else, on the
+reasoning that "a posture that skips the dialog is the blanket bypass this decision says must never
+ship". A user asked how to stop approving every write, and decided the amendment. `acceptEdits` now
+exists on this engine.
+
+**The line, and it is not a compromise between two positions — it is where the evidence puts it.**
+
+| | under `acceptEdits` |
+|---|---|
+| file write, target **inside** the repository | applies, no dialog |
+| file write, target outside the repository | still asks |
+| `run_command` | **still asks** |
+| `start_subagent` / `invoke_subagent` | **still asks** |
+| a write whose path cannot be read | still asks |
+
+What this decision was protecting was never "edits are dangerous". It was the *execution* path:
+[AG-R-11](risks.md#ag-r-11) measured the agent, refused an `edit_file`, reaching for `sed -i`, then
+inline `python3`, then `list_dir` — three routes to one write, every one through the shell. A posture
+that let `run_command` through would hand that route an ungated agent, which is the failure the
+original wording exists to prevent. A posture that lets an in-repo file write through does not: the
+diff viewer shows it and git keeps it.
+
+**It is also not a novel line.** `agy`'s own `accept-edits` auto-approves `write_to_file` and
+`replace_file_content` and explicitly does *not* auto-approve `run_command` — measured by asking it
+on 2026-09-05 — and Claude's `acceptEdits` draws the same one. Three products agreeing on where the
+boundary sits is a stronger argument than any of them alone.
+
+**`bypassPermissions` is still absent, and that half of this decision has not moved.** It is the one
+posture that turns the gate off for execution too.
+
+Enforced in `AntigravityPermissionGate._accept_edits_verdict`, consulted after a standing AG-15 rule
+and before `ALWAYS_ASK` — because `ALWAYS_ASK` is where every write tool lives, so a check after it
+could never fire for the calls this posture exists for.
+
+---
+
+
 **The gate is closed and it passed (2026-08-30).** A `PreToolCallDecideHook` receives
 `TargetContent` + `ReplacementContent` + a line range for `edit_file`, and `CodeContent` for
 `create_file`; `allow=False` leaves the file byte-identical. The dialog can render a real diff, and

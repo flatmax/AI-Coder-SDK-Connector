@@ -452,6 +452,7 @@ class AntigravityPermissionGate:
         localhost_available: Any = None,
         denied_reads: Any = None,
         config_dir: Any = None,
+        permission_mode: Any = None,
         **broker_kwargs: Any,
     ) -> None:
         self._repo_root = Path(repo_root)
@@ -465,6 +466,11 @@ class AntigravityPermissionGate:
         # mid-session, and a snapshot taken when the gate was built would
         # go stale at the first shift-click.
         self._denied_reads = denied_reads or (lambda: [])
+        # The session's posture, read live for the reason the denied list
+        # is: the user changes it from the action bar mid-session, and a
+        # value copied in when the gate was built would be the posture they
+        # had two turns ago.
+        self._permission_mode = permission_mode or (lambda: "default")
         self.broker = _AntigravityBroker(
             repo_root,
             broadcast=broadcast,
@@ -473,6 +479,53 @@ class AntigravityPermissionGate:
             rules=self.rules,
             **broker_kwargs,
         )
+
+    def _accept_edits_verdict(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> tuple[bool, str] | None:
+        """Allow an in-repo file write without asking, under ``acceptEdits``.
+
+        ``None`` for everything else, which leaves the ordinary path
+        untouched — this method can only ever *remove* a dialog for a
+        write, never add one or allow anything else.
+
+        Three conditions, and each is doing work:
+
+        - **The posture is ``acceptEdits``.** Read live from the session.
+        - **The tool is classed ``write``.** Not "is in ALWAYS_ASK", which
+          also holds ``run_command`` and the subagent spawners — the two
+          this posture must keep asking about, because AG-R-11 measured
+          the agent reaching for exactly them when an edit was refused.
+        - **The target resolves inside the repository.** A write to
+          somewhere else is not the thing the user waved through; they
+          accepted edits to their project, not to their home directory.
+          ``_absolute_path`` resolves first, so ``../`` cannot walk out.
+
+        A path we cannot read falls through to the dialog rather than
+        being allowed, which is the safe direction: the one case where we
+        do not know what is being written is the case to ask about.
+        """
+        if self._permission_mode() != "acceptEdits":
+            return None
+        if TOOL_CLASSES.get(tool_name) != "write":
+            return None
+        target = self._absolute_path(args)
+        if target is None:
+            return None
+        try:
+            root = self._repo_root.resolve()
+        except (OSError, ValueError):  # noqa: BLE001 - fall back to asking
+            return None
+        if root != Path(target) and root not in Path(target).parents:
+            logger.info(
+                "Antigravity %s still asks under acceptEdits: %s is outside %s",
+                tool_name,
+                target,
+                root,
+            )
+            return None
+        logger.info("Antigravity %s allowed by acceptEdits: %s", tool_name, target)
+        return (True, "")
 
     def _absolute_path(self, args: dict[str, Any]) -> str | None:
         """The call's path, resolved, in the form a stored rule holds.
@@ -585,6 +638,27 @@ class AntigravityPermissionGate:
                     standing.get("label"),
                 )
                 return (True, "")
+
+        # `acceptEdits`, and the boundary is deliberately `agy`'s own.
+        #
+        # Checked here — after a standing rule, before ALWAYS_ASK — because
+        # ALWAYS_ASK is where every write tool lives, so a check after it
+        # could never fire for the calls this posture exists for.
+        #
+        # **AG-5 is amended by this, not overturned.** That decision makes
+        # the dialog a requirement of this engine rather than a feature,
+        # and what it was protecting is the *execution* path: AG-R-11
+        # measured the agent, refused an edit, reaching for `sed -i`, then
+        # inline `python3`, then `list_dir` — three routes to one write,
+        # all through the shell. So the dialog stays mandatory for
+        # `run_command` and for `start_subagent`/`invoke_subagent`, which
+        # is the same line `agy`'s own accept-edits draws, and the same one
+        # Claude's draws. What this lets through is a file write, to a file
+        # inside the repository, which the diff viewer will show and git
+        # will keep.
+        allowed = self._accept_edits_verdict(tool_name, normalised)
+        if allowed is not None:
+            return allowed
 
         if tool_name in ALWAYS_ASK:
             return None

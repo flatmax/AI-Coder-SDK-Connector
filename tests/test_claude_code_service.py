@@ -1869,6 +1869,12 @@ class TestState:
             "compaction",
             "rate_limit",
             "permission_mode",
+            # The postures this engine accepts, so the selector can offer
+            # what is choosable rather than a list compiled against one
+            # engine. Added 2026-09-05: Antigravity accepts two of the six
+            # and the dropdown was offering all of them, so four options
+            # answered `unsupported` when picked.
+            "permission_modes",
             "model",
             "pending_permissions",
             "doc_index_ready",

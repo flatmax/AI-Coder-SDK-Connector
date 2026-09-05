@@ -794,3 +794,105 @@ class TestRegistration:
         )
         assert MUTATING_TOOLS <= set(kwargs["capabilities"]["enabled_tools"])
         assert options.build_config(**kwargs).hooks
+
+
+class TestAcceptEditsStopsAtTheShell:
+    """The 2026-09-05 amendment to AG-5, and exactly how far it goes.
+
+    A file write inside the repository applies without a dialog. Execution
+    does not, and neither does a write outside the repository. That is the
+    same line ``agy``'s own ``accept-edits`` draws and the same one
+    Claude's does — and it is where AG-R-11 says it has to be, having
+    measured the agent, refused an edit, reaching for ``sed -i``, then
+    inline ``python3``, then ``list_dir``: three routes to one write, all
+    through the shell.
+
+    Every assertion here is about ``pre_verdict`` answering *without* a
+    dialog. ``None`` means "ask the user", which is the unchanged path.
+    """
+
+    def gate(self, tmp_path, mode="acceptEdits"):
+        async def broadcast(_event):
+            return None
+
+        return AntigravityPermissionGate(
+            tmp_path,
+            broadcast=broadcast,
+            localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+            permission_mode=lambda: mode,
+        )
+
+    def test_an_in_repo_edit_is_allowed_without_asking(self, tmp_path):
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) == (True, "")
+
+    def test_the_agy_spelling_of_the_same_call_too(self, tmp_path):
+        """One posture, both transports — the tool tables are merged."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict(
+            "replace_file_content", {"TargetFile": str(tmp_path / "a.py")}
+        ) == (True, "")
+
+    def test_a_command_still_asks(self, tmp_path):
+        """AG-R-11's route, and the reason the line is drawn here."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("run_command", {"command": "sed -i s/a/b/ a.py"}) is None
+
+    def test_a_subagent_still_asks(self, tmp_path):
+        """A gate that stopped at the top trajectory is bypassed by asking
+        a child to do the write — the same hole one level down."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("start_subagent", {"prompt": "edit it"}) is None
+        assert gate.pre_verdict("invoke_subagent", {"prompt": "edit it"}) is None
+
+    def test_a_write_outside_the_repository_still_asks(self, tmp_path):
+        """They accepted edits to their project, not to their home directory."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {"file_path": "/etc/passwd"}) is None
+
+    def test_a_relative_path_cannot_walk_out(self, tmp_path):
+        """`_absolute_path` resolves before the containment check."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {"file_path": "../../etc/passwd"}) is None
+
+    def test_a_write_with_no_readable_path_still_asks(self, tmp_path):
+        """The one case where we do not know what is being written is the
+        case to ask about."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {}) is None
+
+    def test_default_is_unchanged(self, tmp_path):
+        """The posture has to be *on*. Everything above must be inert
+        under the mode the session starts in."""
+        gate = self.gate(tmp_path, mode="default")
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) is None
+
+    def test_plan_is_unchanged(self, tmp_path):
+        gate = self.gate(tmp_path, mode="plan")
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) is None
+
+    def test_a_read_of_a_denied_path_is_still_refused(self, tmp_path):
+        """The user's shift-click outranks the posture: this posture is
+        about writes, and softening a denial would be a different change
+        smuggled in with it."""
+        async def broadcast(_event):
+            return None
+
+        denied = str(tmp_path / "secret.env")
+        gate = AntigravityPermissionGate(
+            tmp_path,
+            broadcast=broadcast,
+            localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+            denied_reads=lambda: [denied],
+            permission_mode=lambda: "acceptEdits",
+        )
+        allowed, _reason = gate.pre_verdict("view_file", {"file_path": denied})
+        assert allowed is False

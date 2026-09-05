@@ -610,6 +610,13 @@ export class ChatPanel extends RpcMixin(LitElement) {
     this._engines = { ...(this._engines || {}), active: engine };
     this._engineSwitchPending = false;
     this._engineSwitchError = '';
+    // Re-read the engine's own facts, because a switch changes them and
+    // the descriptor is not all of them. `_permissionModes` is the one
+    // that bites: it is the list the selector renders, the two engines
+    // report different lists, and a stale one would offer postures the
+    // new engine refuses — which is the defect this key was added to fix,
+    // reappearing one switch later.
+    loadEngineState(this);
     if (this._engineNoticeDismissed !== engineNoticeKey(this)) {
       this._engineNoticeDismissed = null;
     }

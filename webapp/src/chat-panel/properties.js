@@ -286,6 +286,20 @@ export const PROPERTIES = {
    */
   _permissionMode: { type: String, state: true },
   /**
+   * The postures the *running* engine accepts, as it reports them.
+   *
+   * `null` until `get_current_state` answers, and for any engine that does
+   * not report a list — both of which mean "show the full table", which is
+   * what every build before this one did.
+   *
+   * It exists because the table in permission-mode.js is Claude's six and
+   * Antigravity accepts two, so the selector was offering four options that
+   * returned `unsupported` when picked. Read from the engine rather than
+   * mapped from its name (AG-R-4), and re-read on `engineChanged` because a
+   * switch changes the answer.
+   */
+  _permissionModes: { type: Array, state: true },
+  /**
    * True while a `set_permission_mode` call is in flight. Disables the selector
    * so two overlapping changes can't race, and shows a pending marker so the
    * lag between click and flip reads as "waiting" rather than "ignored".

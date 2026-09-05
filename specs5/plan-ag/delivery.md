@@ -3653,3 +3653,89 @@ The Claude hook does two things and this does one. It also queues a **symbol re-
 `Reindexer` this engine has never had. Left out rather than half-done, and named here so it is a known
 gap: a stale symbol index degrades autocomplete, where a stale tree hides the agent's work from the
 person who approved it. The second is the one worth fixing first.
+
+---
+
+## A posture between "ask every time" and "ask nothing" (2026-09-05)
+
+Two changes from one question — *"is there a way to permit all changes and writes rather than having
+to accept each one?"* One was a defect; the other was a decision only the user could make.
+
+### The defect: a control that was reachable and refused
+
+The permission-mode dropdown is a hardcoded table of **Claude's six** postures. Antigravity accepted
+two. Picking one of the other four returned:
+
+```
+{'error': 'unsupported', 'message': "'acceptEdits' is not a posture this engine offers…"}
+```
+
+Four options that answered an error when chosen — the same shape phase 5 found in the history
+browser's Fork button, and found the same way: by a user reaching for something the UI offered.
+
+Fixed the way AG-9 says: the engine reports the postures it accepts in `get_current_state`, exactly
+as `get_model` reports its own menu, and the selector renders that. **Not** a table in the browser
+keyed on which engine is running, which is what AG-R-4 forbids. A mode the engine reports that this
+build has no label for still renders, because filtering it out would make a real posture unreachable
+on a newer engine — and the current mode is always included, since a `<select>` whose value is absent
+from its options silently displays the *first* one.
+
+`_onEngineChanged` now re-reads the state too. Without that the list would be right until the first
+switch and stale afterwards — the same defect, one action later.
+
+### The decision: AG-5, amended by its owner
+
+The reason there was nothing to select is [AG-5](decisions.md#ag-5): the dialog is *a requirement of
+this engine rather than a feature*, so no posture may skip it. That is a decision, not a bug, and
+changing it was the user's call. They took the narrow version:
+
+| | under `acceptEdits` |
+|---|---|
+| file write, target **inside** the repository | applies, no dialog |
+| file write, target outside the repository | still asks |
+| `run_command` | **still asks** |
+| `start_subagent` / `invoke_subagent` | **still asks** |
+| a write whose path cannot be read | still asks |
+
+**The line is where the evidence puts it.** AG-5 was never protecting "edits are dangerous" — it was
+protecting the *execution* path. [AG-R-11](risks.md#ag-r-11) measured the agent, refused an
+`edit_file`, reaching for `sed -i`, then inline `python3`, then `list_dir`: three routes to one
+write, all through the shell. Letting `run_command` through would hand that route an ungated agent.
+Letting an in-repo file write through does not — the diff viewer shows it and git keeps it.
+
+It is also not a line we invented. `agy`'s own `accept-edits` auto-approves `write_to_file` and
+`replace_file_content` and explicitly does not auto-approve `run_command` — measured by asking it the
+same afternoon — and Claude's `acceptEdits` draws the same boundary. Three products agreeing is a
+better argument than any one of them.
+
+`bypassPermissions` is still absent and that half of AG-5 has not moved.
+
+### Where it is enforced, and the ordering that matters
+
+`AntigravityPermissionGate._accept_edits_verdict`, consulted **after** a standing AG-15 rule and
+**before** `ALWAYS_ASK`. The ordering is the whole of it: `ALWAYS_ASK` holds every write tool, so a
+check placed after it could never fire for the calls this posture exists for — the same trap AG-15
+documents for its own rule lookup.
+
+Three conditions, each doing work: the posture is on (read live, because the user flips it from the
+action bar mid-session); the tool is classed `write` (**not** "is in `ALWAYS_ASK`", which also holds
+`run_command` and the subagent spawners); and the target resolves inside the repository, resolved
+first so `../` cannot walk out. A path that cannot be read falls through to the dialog — the one case
+where we do not know what is being written is the case to ask about.
+
+Ten tests pin the boundary rather than the implementation, including that `default` and `plan` are
+completely inert and that a shift-clicked denied read is still refused: this posture is about writes,
+and softening a denial would be a different change smuggled in with it.
+
+### Asked the engine first
+
+Everything above about `agy`'s own permission surface came from asking `agy`, not from guessing:
+`--mode accept-edits`, `settings.json` `permissions.allow` with `write_file(<path>)`, and the
+confirmation that `--dangerously-skip-permissions` still fires `PreToolUse` hooks and a hook `deny`
+still blocks.
+
+**None of it applies to what the user was seeing**, and that is worth recording because it is the
+obvious wrong turn. We run `agy` with `--dangerously-skip-permissions`, so its permission layer is
+out of the loop entirely — every dialog on this transport is ours. Configuring `--mode accept-edits`
+would have configured a layer that is not running. What the answer *did* confirm is the property
+AG-R-12 relies on: our hook keeps an absolute veto regardless of that flag.
