@@ -104,7 +104,23 @@ class TestItMatchesTheSpec:
         # file through `updated_permissions`, Antigravity has no such
         # channel and AIC-DC keeps the rule itself — and that a row reading
         # ABSENT was what named the work that closed it.
-        allowed = {"amend_tool_input", "persisted_permission_rules"}
+        #
+        # `session_mirror` and `transcript_history` joined it with phase 5,
+        # and they earn their rows the same way: each records that the two
+        # engines reach one capability by different means. Claude's mirror
+        # is the CLI's own transcript handed back to the CLI on resume;
+        # Antigravity's is an observer writing CLI-shaped entries, and its
+        # resume is a handshake argument to a harness that keeps its own
+        # context. A reader who deleted these rows would lose the reason
+        # the two are not the same thing, and would also lose the record of
+        # what the rows said while they were UNBUILT — which is what named
+        # the work.
+        allowed = {
+            "amend_tool_input",
+            "persisted_permission_rules",
+            "session_mirror",
+            "transcript_history",
+        }
         assert universal <= allowed, (
             f"{sorted(universal - allowed)} are supported "
             "everywhere. The descriptor covers surfaces where the engines "
@@ -149,6 +165,7 @@ class TestItMatchesTheSpec:
             "MCP bridge": "mcp_server_inventory",
             "session mirror": "session_mirror",
             "history rendering": "transcript_history",
+            "Forking a past conversation": "session_fork",
             "RateLimitEvent": "rate_limit_events",
             "Image generation": "image_generation",
             "ask_question": "agent_questions",
@@ -223,15 +240,22 @@ class TestTheDescriptor:
             assert set(claude[key]) == set(antigravity[key])
 
     def test_unbuilt_and_absent_both_read_as_unsupported(self):
-        """Why there is no data is not the browser's business."""
+        """Why there is no data is not the browser's business.
+
+        ``transcript_history`` used to be the ``UNBUILT`` half of this
+        pair and stopped being one in phase 5; ``subagent_tabs`` is the
+        replacement, and the assertion is about the *distinction* rather
+        than about either row, so the pair has to be two rows that are
+        genuinely on the two sides of it.
+        """
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["supported"] is False
-        assert d["transcript_history"]["supported"] is False
+        assert d["subagent_tabs"]["supported"] is False
 
     def test_the_distinction_survives_for_developers(self):
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["status"] == ABSENT
-        assert d["transcript_history"]["status"] == UNBUILT
+        assert d["subagent_tabs"]["status"] == UNBUILT
 
 
 class TestTheEnginesDisagreeWhereExpected:
@@ -286,13 +310,17 @@ class TestTheHelpers:
             assert set(unbuilt_surfaces(engine)) <= set(hidden_surfaces(engine))
 
     def test_antigravitys_to_do_list_is_the_later_phases(self):
-        """The ordering constraint, discharged as data rather than memory."""
+        """The ordering constraint, discharged as data rather than memory.
+
+        Two rows left this set on 2026-09-05 when phase 5 built them, and
+        the list shrinking is the point: it is the to-do list *as data*,
+        so a surface that has been built and still reads UNBUILT is a lie
+        this assertion is here to catch.
+        """
         assert set(unbuilt_surfaces(ANTIGRAVITY)) == {
             "agent_questions",
             "mcp_server_inventory",
-            "session_mirror",
             "subagent_tabs",
-            "transcript_history",
         }
 
     def test_claude_has_nothing_unbuilt(self):

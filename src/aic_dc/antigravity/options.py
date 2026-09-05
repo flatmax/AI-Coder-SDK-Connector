@@ -130,6 +130,7 @@ def build_config_kwargs(
     decide_hook: Any = None,
     tools: tuple[Any, ...] = (),
     write_tools: frozenset[str] | None = None,
+    resume: str | None = None,
 ) -> dict[str, Any]:
     """The keyword arguments for a ``LocalAgentConfig``, as plain data.
 
@@ -161,6 +162,18 @@ def build_config_kwargs(
         review session with no shell, say — and never to widen it:
         anything outside :data:`MUTATING_TOOLS` has no gate and is
         refused.
+    resume:
+        A conversation id to continue (phase 5). Emitted as
+        ``conversation_id`` plus ``session_continuation_mode: "resume"``,
+        which is the SDK's own pair — ``AgentConfig`` refuses ``RESUME``
+        with no id, so they are set together or not at all. **``RESUME``
+        rather than ``CREATE_OR_RESUME``**: the third mode would answer a
+        request to continue a conversation by silently starting a new one,
+        which is the failure ``connect_engine`` refused to commit before
+        this was built. ``save_dir`` is deliberately left unset, so the
+        harness reads back the trajectory store it wrote the session into;
+        pointing it somewhere of ours would make every existing
+        conversation unresumable.
 
     Raises
     ------
@@ -229,6 +242,14 @@ def build_config_kwargs(
         # server, no transport, no lifecycle — the SDK derives schemas from
         # signatures.
         kwargs["tools"] = list(tools)
+    if resume:
+        # Set as a pair, because the SDK validates them as one: RESUME
+        # with no id raises at construction. The string rather than the
+        # enum member keeps this function free of the SDK import, which is
+        # the whole reason it is split from `build_config`; the enum is a
+        # `str` subclass, so the value is what it compares equal to.
+        kwargs["conversation_id"] = resume
+        kwargs["session_continuation_mode"] = "resume"
 
     kwargs.update(credentials.config_kwargs())
     return kwargs

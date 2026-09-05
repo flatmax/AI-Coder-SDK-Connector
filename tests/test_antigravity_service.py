@@ -13,12 +13,18 @@ second engine growing its own file tree. The symbol index is the injected
 one; ``commit_all`` calls the shared module; ``ReviewMode`` is the real
 class with this engine's posture rather than a reimplementation.
 
-**It declines rather than pretends.** Where something is unbuilt —
-resuming a conversation, image input — the call returns an error saying
-so. A turn that silently dropped a user's attached screenshot would
-answer the wrong question convincingly, and a ``connect_engine(resume=…)``
-that quietly started a fresh session would lose the context that was asked
-for. Those are the two places a stub would have been easiest and worst.
+**It declines rather than pretends.** Where something is unbuilt — image
+input, forking a conversation — the call returns an error saying so. A
+turn that silently dropped a user's attached screenshot would answer the
+wrong question convincingly. Resuming used to be the headline example
+here and stopped being one in phase 5; what replaced it is the assertion
+that a resume reaches the engine's *own* continuation mechanism rather
+than being approximated by replaying our transcript into a prompt.
+
+**It mirrors and it resumes.** Phase 5's classes at the bottom of this
+file drive the seven history RPCs end to end against a real store, so a
+change to the stored entry shape fails here as well as in
+``test_antigravity_mirror.py``.
 
 Everything runs offline. Nothing here starts a harness.
 """
@@ -185,11 +191,35 @@ class TestItSharesRatherThanCopies:
 
 
 class TestItDeclinesRatherThanPretends:
-    def test_resume_is_refused_not_silently_ignored(self, tmp_path):
-        """Starting a fresh session would lose the context asked for."""
-        result = asyncio.run(service(tmp_path).connect_engine(resume="abc"))
-        assert result["error"] == "unsupported"
-        assert "phase 5" in result["message"]
+    def test_a_resume_reaches_the_sdks_own_continuation_pair(self, tmp_path):
+        """**Was**: resume is refused, because phase 5 had not built it.
+
+        It is built, so the assertion is now about *how*: the id has to
+        reach the SDK as ``conversation_id`` plus
+        ``session_continuation_mode: "resume"``, set together because
+        ``AgentConfig`` refuses one without the other, and as ``RESUME``
+        rather than ``CREATE_OR_RESUME`` — the mode that would answer a
+        request to continue a conversation by silently starting a new one,
+        which is exactly the failure the old refusal existed to avoid.
+
+        Asserted on the config the session *would* ask for rather than on
+        a live connect, which is what ``config_kwargs`` is public for: the
+        thing worth pinning here needs no key and no 119 MB binary.
+        """
+        from aic_dc.antigravity.session import AntigravitySession
+
+        session = AntigravitySession(tmp_path, resume="a-conversation-id")
+        kwargs = session.config_kwargs()
+        assert kwargs["conversation_id"] == "a-conversation-id"
+        assert kwargs["session_continuation_mode"] == "resume"
+
+    def test_a_session_that_is_not_resuming_names_neither_field(self, tmp_path):
+        """A stray CREATE_OR_RESUME would resume by accident."""
+        from aic_dc.antigravity.session import AntigravitySession
+
+        kwargs = AntigravitySession(tmp_path).config_kwargs()
+        assert "conversation_id" not in kwargs
+        assert "session_continuation_mode" not in kwargs
 
     def test_image_input_is_refused_not_dropped(self, tmp_path):
         """A turn without the screenshot answers the wrong question well."""
@@ -571,3 +601,187 @@ class TestCancel:
     def test_resolve_without_a_session_says_so(self, tmp_path):
         result = asyncio.run(service(tmp_path).resolve_permission("p1"))
         assert result["error"] == "unknown"
+
+
+# ----------------------------------------------------------------------
+# Phase 5: history, the mirror, and resume
+# ----------------------------------------------------------------------
+
+
+CONVERSATION = "cd4edb7f-6de3-468f-9815-e76b310a920a"
+
+
+def mirroring_service(tmp_path, cls=AntigravityService, **kw):
+    """An adapter with a repo, so the mirror and the store are real."""
+    kw.setdefault(
+        "credentials", Credentials(mode=GEMINI_API, api_key="k", source="test")
+    )
+    cfg = types.SimpleNamespace(
+        repo_root=str(tmp_path),
+        config_dir=str(tmp_path / "config"),
+        aic_dc_dir=str(tmp_path / ".aic-dc"),
+    )
+    return cls(cfg, **kw)
+
+
+class TestTheMirrorHasItsOwnRoot:
+    """AG-1: a record written by one engine is unreachable by the other."""
+
+    def test_it_is_not_the_claude_store(self, tmp_path):
+        svc = mirroring_service(tmp_path)
+        assert svc.session_store.root == tmp_path / ".aic-dc" / "antigravity-sessions"
+
+    def test_the_two_transports_do_not_share_one(self, tmp_path):
+        """The same *product*, and not the same conversation store.
+
+        An `agy` conversation id means nothing to the SDK's harness and
+        the other way about, so one root would offer the user a list of
+        conversations half of which the running transport would fail to
+        resume — or silently open fresh under an id that already had a
+        transcript.
+        """
+        from aic_dc.agy.service import AgyService
+
+        sdk = mirroring_service(tmp_path)
+        agy = mirroring_service(tmp_path, cls=AgyService)
+        assert sdk.session_store.root != agy.session_store.root
+
+    def test_no_repo_means_no_mirror_rather_than_a_crash(self, tmp_path):
+        """The engine runs fine without one; what is lost is the history."""
+        svc = service(tmp_path)
+        assert svc.session_store is None
+        assert asyncio.run(svc.history_list()) == []
+        assert "error" in asyncio.run(svc.history_load("x"))
+
+
+class TestTheHistoryRpcs:
+    """Seven delegations. Driven end to end rather than by mocking, so a
+    change to the entry shape fails here and not only in the mirror's own
+    tests."""
+
+    def _with_a_conversation(self, tmp_path):
+        svc = mirroring_service(tmp_path)
+
+        async def run():
+            await svc._mirror.attach(CONVERSATION)
+            await svc._mirror.note_prompt("rename the widget", request_id="r1")
+            await svc._dispatch(
+                Event("streamChunk", {
+                    "block_id": "s1:text", "seq": 0,
+                    "content": "renamed it", "done": True, "agent_id": None,
+                }),
+                "r1",
+            )
+            await svc._dispatch(
+                Event("streamComplete", {"request_id": "r1", "usage": {}}), "r1"
+            )
+
+        asyncio.run(run())
+        return svc
+
+    def test_the_dispatch_seam_is_what_records_a_turn(self, tmp_path):
+        """Both transports funnel through ``_dispatch``, so it observes
+        there rather than in the two turn runners — one call site for one
+        job, which is how neither comes to be forgotten."""
+        svc = self._with_a_conversation(tmp_path)
+        rows = asyncio.run(svc.history_list())
+        assert [r["session_id"] for r in rows] == [CONVERSATION]
+
+    def test_a_conversation_loads_back_rendered(self, tmp_path):
+        svc = self._with_a_conversation(tmp_path)
+        messages = asyncio.run(svc.history_load(CONVERSATION))
+        assert [m["role"] for m in messages] == ["user", "assistant"]
+        assert messages[1]["content"] == "renamed it"
+
+    def test_search_finds_the_prompt(self, tmp_path):
+        svc = self._with_a_conversation(tmp_path)
+        hits = asyncio.run(svc.history_search("widget"))
+        assert [h["session_id"] for h in hits] == [CONVERSATION]
+
+    def test_an_empty_search_is_not_an_error(self, tmp_path):
+        assert asyncio.run(mirroring_service(tmp_path).history_search("")) == []
+
+    def test_a_missing_session_reports_why(self, tmp_path):
+        svc = mirroring_service(tmp_path)
+        answer = asyncio.run(svc.history_load(CONVERSATION))
+        assert "error" in answer
+
+    def test_the_live_conversation_is_not_deletable(self, tmp_path):
+        """The mirror is live: it would come straight back, and the next
+        connect would resume an id with nothing behind it."""
+        svc = self._with_a_conversation(tmp_path)
+        answer = asyncio.run(svc.history_delete(CONVERSATION))
+        assert answer["reason"] == "session_live"
+
+    def test_deleting_a_past_conversation_works(self, tmp_path):
+        svc = self._with_a_conversation(tmp_path)
+        svc._auto_resume = False  # as `new_session` leaves it
+        answer = asyncio.run(svc.history_delete(CONVERSATION))
+        assert answer["status"] == "deleted"
+        assert asyncio.run(svc.history_list()) == []
+
+    def test_storage_is_measured_over_this_engines_root_only(self, tmp_path):
+        svc = self._with_a_conversation(tmp_path)
+        (tmp_path / ".aic-dc" / "sessions").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".aic-dc" / "sessions" / "other.jsonl").write_text("x" * 5000)
+        answer = asyncio.run(svc.get_session_storage())
+        assert 0 < answer["bytes"] < 5000
+        assert answer["over_warning"] is False
+
+    def test_an_image_pointer_that_resolves_to_nothing_says_so(self, tmp_path):
+        svc = self._with_a_conversation(tmp_path)
+        answer = asyncio.run(svc.history_image(CONVERSATION, "nope", 0))
+        assert "error" in answer
+
+
+class TestResume:
+    def test_the_state_snapshot_carries_the_mirrored_transcript(self, tmp_path):
+        """Phase 5's other half of "a restart is invisible": a browser
+        that reconnects is shown the conversation it left, before any
+        harness is running."""
+        svc = TestTheHistoryRpcs()._with_a_conversation(tmp_path)
+        state = asyncio.run(svc.get_current_state())
+        assert [m["role"] for m in state["messages"]] == ["user", "assistant"]
+
+    def test_a_fresh_process_resumes_the_most_recent_conversation(self, tmp_path):
+        """No stored pointer: the store sorts by last-modified, and a
+        pointer file is one more thing that can disagree."""
+        TestTheHistoryRpcs()._with_a_conversation(tmp_path)
+        restarted = mirroring_service(tmp_path)
+        assert asyncio.run(restarted._resume_target(None)) == CONVERSATION
+
+    def test_new_session_turns_auto_resume_off(self, tmp_path):
+        svc = TestTheHistoryRpcs()._with_a_conversation(tmp_path)
+        asyncio.run(svc.new_session())
+        assert asyncio.run(svc._resume_target(None)) is None
+        assert svc._mirror.session_id is None
+
+    def test_new_session_deletes_nothing(self, tmp_path):
+        """The conversation left behind stays listed and loadable."""
+        svc = TestTheHistoryRpcs()._with_a_conversation(tmp_path)
+        asyncio.run(svc.new_session())
+        assert [r["session_id"] for r in asyncio.run(svc.history_list())] == [
+            CONVERSATION
+        ]
+
+    def test_an_explicit_id_beats_the_most_recent(self, tmp_path):
+        svc = mirroring_service(tmp_path)
+        assert asyncio.run(svc._resume_target("explicit")) == "explicit"
+
+    def test_forking_is_refused_rather_than_approximated(self, tmp_path):
+        """Copying our mirror would fork the *record* and leave both
+        branches pointed at one engine conversation."""
+        svc = TestTheHistoryRpcs()._with_a_conversation(tmp_path)
+        answer = asyncio.run(svc.resume_session(CONVERSATION, fork=True))
+        assert answer["reason"] == "unsupported"
+
+    def test_resuming_an_unreadable_conversation_is_refused(self, tmp_path):
+        """The harness would refuse the handshake and the user would be
+        looking at an engine that will not start."""
+        svc = mirroring_service(tmp_path)
+        answer = asyncio.run(svc.resume_session(CONVERSATION))
+        assert answer["reason"] == "not_resumable"
+
+    def test_resume_needs_an_id(self, tmp_path):
+        answer = asyncio.run(mirroring_service(tmp_path).resume_session(""))
+        assert answer["reason"] == "no_session_id"

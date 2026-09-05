@@ -68,14 +68,40 @@ TOOL_RESULT_PREVIEW_LINES = 120
 # rather than the model finishing it.
 CANCELLED_TERMINAL_REASONS = frozenset({"aborted_streaming", "aborted_tools"})
 
-# Tool name → the input key naming the file it writes. Used to attribute
-# file changes to a tool result before the PostToolUse hook lands in a
-# later phase; the hook is authoritative once it exists.
-_FILE_WRITING_TOOLS = {
-    "Write": "file_path",
-    "Edit": "file_path",
-    "MultiEdit": "file_path",
-    "NotebookEdit": "notebook_path",
+# Tool name → the input keys that name the file it writes, in the order to
+# try. Used to attribute file changes to a tool result before the
+# PostToolUse hook lands in a later phase; the hook is authoritative once
+# it exists.
+#
+# **All three engine vocabularies live in this one table**, and that is the
+# point rather than an accident of tidying. The names do not collide — no
+# Claude tool is called `edit_file` and no SDK tool is called
+# `replace_file_content` — so one table can hold them all, and one table
+# cannot disagree with itself. The same reasoning `agy/tools.py` records
+# for merging its tool classes into the shared ones, and the same failure
+# if it is not done: a browsed Antigravity transcript would attribute no
+# files at all, silently, while the live turn attributed them fine.
+#
+# `generate_image` is the reason the values are tuples: it exists in both
+# Antigravity vocabularies under two different argument names.
+_FILE_WRITING_TOOLS: dict[str, tuple[str, ...]] = {
+    # Claude Code.
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+    # Antigravity, through the SDK's `BuiltinTools` (AG-2).
+    "create_file": ("file_path",),
+    "edit_file": ("file_path",),
+    # Antigravity, through `agy` (AG-14). The argument names are the CLI's
+    # own PascalCase; see `agy/tools.py` for the full vocabulary and for
+    # why the two products agree on arguments and differ on tool names.
+    "write_to_file": ("TargetFile",),
+    "replace_file_content": ("TargetFile",),
+    "multi_replace_file_content": ("TargetFile",),
+    "notebook_edit": ("TargetFile",),
+    # In both, under two spellings.
+    "generate_image": ("output_path", "OutputPath"),
 }
 
 # Which id names a subagent row, in the order to try. Same precedence the
@@ -1393,20 +1419,24 @@ def flatten_tool_result(content: Any) -> str:
 def files_written_by(tool_name: str, tool_input: dict[str, Any] | None) -> list[str]:
     """Paths a tool call writes, deduced from the call's own input.
 
-    The one home for the tool-name → path-key table. History rendering has
-    to attribute files the same way the live path does, and the narrow name
-    is the honest one: this sees only the four file tools, so a file changed
-    by ``Bash`` is not in the answer (CC-18).
+    The one home for the tool-name → path-key table, for **every** engine.
+    History rendering has to attribute files the same way the live path
+    does, and the narrow name is the honest one: this sees only the file
+    tools, so a file changed by ``Bash`` or ``run_command`` is not in the
+    answer (CC-18).
 
     Attribution from the *input* is itself a stopgap — the ``PostToolUse``
     hook reports what was actually written and supersedes this once it
     lands — but it must be the same stopgap in both directions.
     """
-    key = _FILE_WRITING_TOOLS.get(tool_name)
-    if key is None or not tool_input:
+    keys = _FILE_WRITING_TOOLS.get(tool_name)
+    if not keys or not tool_input:
         return []
-    path = tool_input.get(key)
-    return [path] if isinstance(path, str) and path else []
+    for key in keys:
+        path = tool_input.get(key)
+        if isinstance(path, str) and path:
+            return [path]
+    return []
 
 
 def _files_modified(call: _ToolCall | None, is_error: bool) -> list[str]:

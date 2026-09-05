@@ -118,10 +118,26 @@ class TestItWillNotRunUngated:
         assert result["error"] == "not_installed"
         assert "not on PATH" in result["message"]
 
-    def test_resume_is_declined_rather_than_silently_ignored(self, tmp_path):
-        result = asyncio.run(service(tmp_path).connect_engine(resume="abc"))
-        assert result["error"] == "unsupported"
-        assert "lose the context" in result["message"]
+    def test_a_resume_becomes_agys_own_conversation_flag(self, tmp_path):
+        """**Was**: resume is declined, because phase 5 had not built it.
+
+        ``--conversation <id>`` is the flag; the id is the one `agy`'s own
+        ``init`` frame gave us, which is the same id the mirror filed the
+        transcript under. Asserted on the argv rather than by spawning,
+        because what could go wrong here is the flag name and the shape of
+        its argument.
+        """
+        from aic_dc.agy.session import AgySession
+
+        session = AgySession(tmp_path, gate=object(), resume="a-conversation-id")
+        argv = session._argv()
+        assert "--conversation" in argv
+        assert argv[argv.index("--conversation") + 1] == "a-conversation-id"
+
+    def test_a_session_that_is_not_resuming_passes_no_conversation(self, tmp_path):
+        from aic_dc.agy.session import AgySession
+
+        assert "--conversation" not in AgySession(tmp_path, gate=object())._argv()
 
     def test_gate_status_is_answerable_without_starting_anything(self, tmp_path):
         """The settings surface's whole question."""

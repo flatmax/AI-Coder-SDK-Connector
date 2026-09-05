@@ -2975,3 +2975,207 @@ readable one** — which is also what makes `resume_session` possible, since tha
 
 Recorded here rather than in a comment because it is a measured property of somebody else's parser on
 an SDK that moves, and because the failure it causes is silent in both directions.
+
+### What phase 5 does next, in order
+
+Written down because the contract above was the expensive part and it should not have to be
+rediscovered.
+
+1. **`src/aic_dc/antigravity/mirror.py`** — an observer that turns the events **both** translators
+   already emit (`streamChunk`, `toolUse`, `toolResult`, `systemEvent`) into `{uuid, type, message}`
+   entries and appends them to a `RepoSessionStore` rooted at its own directory. One observer serves
+   both transports *because* phase 8 made `AgyTranslator` and `StepTranslator` emit the same
+   vocabulary — that is the payoff for a decision made for a different reason.
+2. **Key on the engine's conversation id**, which is already a UUID on both transports. See the
+   contract above: a readable key silently renders as "no such session".
+3. **Its own store root** (AG-1), so a record written by one engine cannot be handed to the other.
+   `RepoSessionStore` takes it as an argument.
+4. **The seven RPCs** — `history_list`, `history_load`, `history_search`, `history_delete`,
+   `history_image`, `get_session_storage`, `resume_session` — delegating to `claude_code.history`
+   with that store. They are mapped in `RPC_SURFACES` already, so the router refuses them today and
+   will stop refusing when `capabilities.py` flips.
+5. **Flip `session_mirror` and `transcript_history`** from `UNBUILT` to `SUPPORTED`. Two of the five
+   surfaces the chat panel currently lists as not built for this engine.
+6. **Resume**, which is the exit criterion's other half: `agy --conversation <id>` and the SDK's
+   `SessionContinuationMode.RESUME` + `save_dir`. Both take the same id the mirror is keyed on, which
+   is why step 2 is not merely tidy.
+
+**Do not** start by writing a session-store implementation. There is no protocol to implement and the
+existing store already does the work; the phase is an observer plus seven delegations.
+
+---
+
+## Phase 5 — history and sessions, and the two things a browser found (2026-09-05)
+
+**The exit criterion is met.** *"Restarting the server resumes the previous Antigravity conversation
+with context intact, and the history browser renders it"* — proven twice: once headlessly by
+`scripts/probe_agy_resume.py` against the paid subscription, and once by a human driving two fresh
+servers over one throwaway repository.
+
+The groundwork entry above was right about the shape, and the phase cost about what it predicted:
+**one new module, seven delegations, and no `SessionStore` implementation.**
+
+### What was built
+
+`src/aic_dc/antigravity/mirror.py` — a `SessionMirror` that observes the events **both** translators
+already emit and appends CLI-shaped entries to a `RepoSessionStore` rooted at this transport's own
+directory. It is wired at `AntigravityService._dispatch`, which is the one point every event of both
+transports passes through: `AgyService` inherits that method and overrides only what *produces* the
+events. Observing in the two turn runners instead would have been two call sites for one job, which
+is how one of them comes to be forgotten.
+
+The five history RPCs, `get_session_storage` and `resume_session` are delegations to
+`claude_code.history` with this engine's store. Resume is the engine's own on both transports —
+`agy --conversation <id>` and `conversation_id` + `SessionContinuationMode.RESUME` — so nothing here
+replays a transcript into a prompt. `save_dir` is deliberately left unset: it defaults to the store
+the harness wrote the session into, and pointing it somewhere of ours would make every conversation
+recorded before the change unresumable.
+
+**Its own store root, per [AG-1](decisions.md#ag-1) — and *three* roots rather than two.**
+`.aic-dc/antigravity-sessions/` and `.aic-dc/agy-sessions/` are separate from each other as well as
+from Claude's. The two transports reach the same *product* and not the same conversation store: an
+`agy` conversation id means nothing to `localharness` and the other way about, so one root would have
+offered the user a list half of which the running transport would fail to resume.
+
+### The fact the groundwork entry got half right
+
+It recorded that an entry parses down to `{uuid, type, message}` and that everything else is
+droppable. That is true **of one entry**, and it is why the bisect that established it did not see
+the other half:
+
+> `_build_conversation_chain` finds the terminal entry and walks *back* through `parentUuid`. With no
+> links every entry is its own terminal, the walk picks the last one, and the conversation is one
+> message long.
+
+So `parentUuid` is not droppable once there are two entries, and a mirror written to the letter of
+the earlier note would have rendered every conversation as its most recent message — silently, and
+looking like a rendering bug rather than a storage one. The chain is also **re-seeded from disk** on
+the first append after a resume: an unparented entry appended to an existing transcript starts a
+second chain, and the reader walks back from one terminal only, so the older half would stop
+rendering the moment a resumed session took a turn.
+
+`tests/test_antigravity_mirror.py` asserts this by outcome rather than by field — events in one end,
+`history.load_session` out the other — because that is the only assertion the four failed guesses
+would not also have passed.
+
+### The tool-name table, merged rather than copied
+
+`history._Turn._attach_result` attributes a browsed turn's files with
+`claude_code.messages.files_written_by`, and the live pump had its own
+`antigravity.steps.TOOL_WRITTEN_PATH_FIELDS`. Two tables for one fact, and the failure was exactly
+the one this plan has now paid for four times: a turn would list the files it touched while it
+streamed and list none after a refresh. Nothing errors; the number is just smaller.
+
+`_FILE_WRITING_TOOLS` now holds all three vocabularies — Claude's, the SDK's and `agy`'s — and
+`_files_written` delegates to it. The names do not collide, so one table can hold them all and one
+table cannot disagree with itself. That is `agy/tools.py`'s own argument, applied to the fourth
+table it applies to. `generate_image` is why the values became tuples: it exists in both Antigravity
+vocabularies under two different argument names.
+
+### What the live probe proved that the mirror could not
+
+`scripts/probe_agy_resume.py` runs two processes over one work directory. The first tells the model a
+passphrase it could not otherwise know; the second — a **different process**, with the session
+object, the conversation id and the mirror's chain all gone — asks for it back.
+
+```
+[probe] conversation 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] phase one done; mirrored under 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] --- restarting: phase two runs in a new process ---
+[probe] state snapshot: 2 messages ['user', 'assistant']
+[probe] reconnected to 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] the model answered: 'KESTREL-9-ORRERY'
+[probe] history_load after the resume: ['user', 'assistant', 'user', 'assistant']
+```
+
+**The passphrase is the point, and it is not decoration.** A mirror looks perfect for a resume that
+silently opened a blank conversation — the transcript is ours and it is on disk either way. Only the
+engine can answer whether its context came back, and only a token it could not guess makes the answer
+mean anything.
+
+`AgySession.start` now **refuses** rather than warning when a resume comes back with a different
+conversation id. A resume that quietly became a new conversation is the one failure worth not
+starting over: the user asked to continue, the context is gone, and nothing downstream would say so —
+the turn would simply behave as though the agent had forgotten everything.
+
+### The two things only a browser found
+
+Both were invisible to 4,412 green Python tests and 4,431 green webapp tests, and both are the same
+shape: **a surface newly enabled exposes an unguarded call to a *different* surface.** Until phase 5
+these travelled together — an engine with no history browser was never asked for a session's
+subagents, and was never shown a Fork button — so the pairing had never had to be a decision.
+
+**1. The router's refusal rendered as red text at the top of every preview.** Selecting a session
+called `list_subagent_transcripts`, which serves `subagent_tabs`, which `agy` cannot feed; the router
+refused it correctly and the browser drew the refusal. The refusal was right and asking at all was
+the bug. `_loadSubagents` now checks `supports(SURFACE.SUBAGENT_TABS)` first.
+
+**2. Fork was offered on an engine that refuses it.** `resume_session(fork=True)` returns
+`unsupported`, because Claude forks by copying a transcript the CLI rebuilds its context from while
+Antigravity's conversation store belongs to the harness and is opaque. Copying our mirror would fork
+the *record* and leave both branches pointed at one engine conversation — two transcripts of one
+session, diverging the moment either took a turn. A refusal the user can reach by clicking is a
+stub with extra steps, so this became a descriptor row (`session_fork`) and the button is hidden on
+it, per [AG-9](decisions.md#ag-9). No engine-name branch: the webapp reads the descriptor.
+
+Both are pinned by tests in `webapp/src/history-browser.test.js` that set a descriptor with one
+surface on and the other off — the configuration that did not exist before this phase.
+
+### A third finding, and the design change it forced
+
+The first cut wrote a closing assistant entry per turn to carry the engine's token counters. It
+rendered nothing, and **the history browser counted it**: a two-message conversation showed as
+`3 msgs`, seen in the browser and not by any test. It bought nothing either — Antigravity reports
+`prompt_token_count` / `candidates_token_count`, which share no field name with the four counters
+`_Turn.freeze` sums, and `turn-cost.js` skips this engine's flat usage shape on the live path too.
+
+So the counters are not mirrored at all, and the reason is **placement rather than squeamishness**:
+this engine has no per-message usage — the SDK reports a turn diff at close and `agy` a running total
+on its result frame — so there is no entry either of them belongs on. Every assistant entry of a turn
+now carries an *empty* `usage` under one shared `message.id`, which is the CLI's own arrangement and
+is what still makes a browsed turn read as **one engine turn** rather than one per block. The footer
+of the resumed conversation reads `2.0s · 1 engine turn` with no token chip, which is what the live
+turn shows.
+
+### A fourth: a switch said "blank" and meant "continue"
+
+`switch_engine`'s docstring has said since AG-1 landed that a switch *"ends the outgoing session and
+starts a new one… the incoming one connects lazily on the next turn, **with no resume**, which is what
+makes it a new session."* Nothing enforced it. Each adapter's auto-resume flag survived the switch, so
+the incoming engine's next connect quietly reattached to whatever conversation it was last in.
+
+**This was inert while only one engine could resume**, and phase 5 is what makes it a contradiction:
+the switch broadcasts `sessionChanged` with an empty message list, so a browser is told the panel is
+blank while the server intends to reattach — and the next state load repopulates the chat with a
+conversation the user was told had been left behind. Watched happening in the browser during this
+phase's verification.
+
+Both adapters now implement `_start_blank_session`, and the router calls it on the **incoming**
+engine only — the outgoing one is being stopped, not restarted, and clearing its target would decide
+on its behalf that it may never be switched back to. Nothing is deleted either way: the conversation
+left behind stays listed and loadable, which is the whole reason a switch can afford to be a
+boundary.
+
+Worth naming that the Claude half of this was a **pre-existing** gap, not one phase 5 introduced. It
+is fixed here because this is where it became observable, and because a rule that holds on one engine
+and not the other is not a rule.
+
+### What phase 5 deliberately did not build
+
+- **No events log for this engine.** `EventsLog`'s `event` domain is closed on purpose and none of
+  its members is a thing this engine reports, so a browsed Antigravity conversation carries the
+  model's work and not the operational lines around it. `systemEvent` reaches the transcript only for
+  `compaction`, which is the one subtype with a CLI counterpart (`compact_boundary`) that
+  `history._compaction_divider` already renders.
+- **No derived history index.** It caches a finished row keyed by transcript mtime; a cold index is a
+  slower listing, never a wrong one, and a second one for this engine before anybody has felt the
+  cost would be a file to keep in agreement for no measured gain.
+- **No fork**, as above.
+
+### One deviation from the testing recipe, recorded because it was deliberate
+
+The house rule is to test against a new instance started with `--preview`. Three of the user's own
+`--preview` servers were running at the time, and `--preview` does `rm -rf dist` on startup — which
+would have pulled the static bundle out from under two live windows. `--dev` was used instead: it
+serves through Vite and touches no `dist`, and the load-bearing half of the rule — *a Python process
+started fresh, on a throwaway repository under a trusted root* — is unaffected either way.

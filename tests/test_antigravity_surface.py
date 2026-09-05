@@ -369,15 +369,20 @@ class TestCoverageIsDerived:
         assert handled == {
             # credentials.py resolves four; consultant.py passes four more
             # for a one-shot config; options.py adds `hooks` (where AG-5's
-            # gate attaches) and `tools` (AG-4's index callables).
+            # gate attaches) and `tools` (AG-4's index callables); phase 5
+            # adds the resume pair, `conversation_id` and
+            # `session_continuation_mode`, which the SDK validates together
+            # and which options.py therefore sets together.
             "config": [
                 "api_key",
                 "capabilities",
+                "conversation_id",
                 "hooks",
                 "location",
                 "model",
                 "policies",
                 "project",
+                "session_continuation_mode",
                 "tools",
                 "vertex",
                 "workspaces",

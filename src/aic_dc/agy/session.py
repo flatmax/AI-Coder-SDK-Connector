@@ -88,11 +88,13 @@ class AgySession:
         gate: AgyGateServer,
         model: str | None = None,
         executable: str = "agy",
+        resume: str | None = None,
     ) -> None:
         self._repo_root = Path(repo_root)
         self._gate = gate
         self._model = model
         self._executable = executable
+        self._resume = resume or None
         self._proc: Any = None
         self._conversation_id: str | None = None
         self._turn_active = False
@@ -145,6 +147,13 @@ class AgySession:
         ]
         if self._model:
             argv += ["--model", self._model]
+        if self._resume:
+            # Phase 5. `agy` restores the conversation's context itself,
+            # from its own store — nothing here replays our mirror into a
+            # prompt. The id is the one the `init` frame gave us when the
+            # conversation was created, which is the same id the mirror
+            # filed the transcript under.
+            argv += ["--conversation", self._resume]
         return argv
 
     async def start(self) -> str:
@@ -201,6 +210,22 @@ class AgySession:
         if not self._conversation_id:
             await self.close()
             raise RuntimeError("agy's init frame carried no conversation id")
+
+        if self._resume and self._conversation_id != self._resume:
+            # A resume that quietly became a new conversation is the one
+            # failure worth refusing to start over: the user asked to
+            # continue, the context is gone, and nothing downstream would
+            # say so — the turn would simply behave as though the agent had
+            # forgotten everything. Reported as an error the caller can
+            # show, with the id agy actually opened, since that is the
+            # session the work would otherwise have gone into.
+            opened = self._conversation_id
+            await self.close()
+            raise RuntimeError(
+                f"agy was asked to resume conversation {self._resume} and "
+                f"opened {opened} instead, so its context is not the one "
+                f"that was asked for."
+            )
 
         # The one window. After this the hook recognises our calls; before
         # it, it would pass them through as a stranger's.

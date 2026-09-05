@@ -122,18 +122,6 @@ TOOL_RESULT_FIELDS: dict[str, frozenset[str]] = {
     "start_subagent": frozenset(),
 }
 
-#: Tool arguments that name a file the engine wrote.
-#:
-#: Feeds ``files_modified`` on a tool result, which is what re-indexes the
-#: symbol table and refreshes the file tree. Only tools that actually
-#: write appear: ``view_file`` names a path too, and re-indexing on a read
-#: would make every turn look like it changed the tree.
-TOOL_WRITTEN_PATH_FIELDS: dict[str, tuple[str, ...]] = {
-    "create_file": ("file_path",),
-    "edit_file": ("file_path",),
-    "generate_image": ("output_path",),
-}
-
 #: The tool that ends a turn rather than doing work. Suppressed from the
 #: transcript; see :meth:`StepTranslator._tool_events`.
 FINISH_TOOL = "finish"
@@ -831,12 +819,19 @@ def _nonzero_exit(results: dict[str, Any]) -> bool:
 
 
 def _files_written(name: str, inputs: dict[str, Any]) -> list[str]:
-    paths = []
-    for field_name in TOOL_WRITTEN_PATH_FIELDS.get(name, ()):
-        value = inputs.get(field_name)
-        if isinstance(value, str) and value:
-            paths.append(value)
-    return paths
+    """Files this call wrote, from the shared tool → path-key table.
+
+    Delegated rather than tabulated here. This pump feeds ``files_modified``
+    on a live tool result, and ``history._Turn._attach_result`` feeds the
+    same field when the turn is read back off disk — from
+    :func:`~aic_dc.claude_code.messages.files_written_by`. Two tables would
+    mean a turn that listed the files it touched while it streamed and
+    listed none after a refresh, which is the quiet kind of wrong: nothing
+    fails, the number is just smaller.
+    """
+    from aic_dc.claude_code.messages import files_written_by
+
+    return files_written_by(name, inputs)
 
 
 def _scope(step: Any) -> str | None:

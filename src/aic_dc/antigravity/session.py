@@ -113,6 +113,12 @@ class AntigravitySession:
     tools:
         Plain Python callables for the symbol and document indexes
         (AG-4). Empty in phase 3.
+    resume:
+        A conversation id to continue instead of starting fresh (phase 5).
+        The harness keeps its own trajectory store, so resuming is a
+        handshake argument rather than a replay: the id is the *engine's*
+        own, and what comes back is the model's context, not a transcript
+        we read out of our mirror.
     """
 
     def __init__(
@@ -125,6 +131,7 @@ class AntigravitySession:
         tools: tuple[Any, ...] = (),
         write_tools: frozenset[str] | None = None,
         turn_timeout: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        resume: str | None = None,
     ) -> None:
         self._repo_root = Path(repo_root).resolve()
         self._credentials = credentials or resolve_credentials()
@@ -133,6 +140,7 @@ class AntigravitySession:
         self._tools = tools
         self._write_tools = write_tools
         self._turn_timeout = turn_timeout
+        self._resume = resume or None
 
         self._agent: Any = None
         self._conversation: Any = None
@@ -196,6 +204,7 @@ class AntigravitySession:
             decide_hook=self._decide_hook,
             tools=self._tools,
             write_tools=self._write_tools,
+            resume=self._resume,
         )
 
     # ------------------------------------------------------------------

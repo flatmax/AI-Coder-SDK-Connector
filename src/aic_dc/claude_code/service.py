@@ -2248,6 +2248,23 @@ class ClaudeCodeService:
     # Sessions — new, resume, fork
     # ------------------------------------------------------------------
 
+    def _start_blank_session(self) -> None:
+        """Do not continue where this engine left off. Called by the router.
+
+        The two fields ``new_session`` clears, without the broadcasts: the
+        router has already told every client the panel is empty, and this
+        is the server agreeing with it. Underscored so it stays off the
+        RPC surface — ``new_session`` is the public version of the same
+        intent.
+
+        Both adapters implement this, and that is the point: a switch is a
+        session boundary for whichever engine is arriving
+        (``engine_router._start_blank``). Nothing is deleted; the
+        conversation left behind stays listed and loadable.
+        """
+        self._resume_request = None
+        self._auto_resume = False
+
     async def new_session(self) -> dict[str, Any]:
         """Abandon the current conversation and start a blank one.
         **Localhost only.**

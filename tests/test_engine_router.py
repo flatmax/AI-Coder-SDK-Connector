@@ -702,9 +702,21 @@ class TestEveryMountedEngineIsValidatedUpFront:
     def test_the_real_adapters_both_mount(self):
         """The measurement the whole design rests on.
 
-        Claude 48 public methods, Antigravity 31, and the 17-method
-        difference is exactly RPC_SURFACES — so the wire surface is the
-        same whichever is master, and a switch never renegotiates it.
+        Every method Antigravity does not implement is one mapped to a
+        surface its descriptor says it cannot feed — so the wire surface
+        is the same whichever engine is master, and a switch never
+        renegotiates it.
+
+        **Restated in phase 5**, which is the first time the two sets came
+        apart. The identity used to be "the difference is exactly
+        ``RPC_SURFACES``", which held only while *every* mapped surface
+        was unsupported here. Phase 5 built two of them, so seven methods
+        moved from "refused by the router" to "implemented", and the
+        literal old assertion would now be arguing that building a surface
+        is a regression. What it was actually protecting is below, and it
+        is the stronger statement: a missing method must always have a
+        declared reason, and a surface declared supported must always have
+        its methods.
         """
         from aic_dc.antigravity.service import AntigravityService
         from aic_dc.claude_code import ClaudeCodeService
@@ -713,9 +725,90 @@ class TestEveryMountedEngineIsValidatedUpFront:
         ag_names = exposed(AntigravityService)
         assert not (ag_names - claude_names), (
             "Antigravity exposes a method Claude does not. The union is "
-            "still generated, but the neat 48 = 31 + 17 identity below no "
-            "longer holds and the surface table needs revisiting."
+            "still generated, but the identity below no longer holds and "
+            "the surface table needs revisiting."
         )
         from aic_dc.engine_router import RPC_SURFACES
 
-        assert claude_names - ag_names == set(RPC_SURFACES)
+        excused = {
+            name
+            for name, surface in RPC_SURFACES.items()
+            if not capabilities.supports(ANTIGRAVITY, surface)
+        }
+        assert claude_names - ag_names == excused, (
+            "A method is missing with no surface excusing it, or a surface "
+            "reads SUPPORTED while the adapter has no method for it. The "
+            "second is the quiet one: build_router refuses to mount, so it "
+            "is a server that will not start."
+        )
+
+
+class TestASwitchIsASessionBoundary:
+    """The invariant `switch_engine`'s docstring always claimed.
+
+    *"The outgoing engine is stopped, and the incoming one connects
+    lazily on the next turn — with no resume, which is what makes it a
+    new session."* Nothing enforced that: each adapter's auto-resume flag
+    survived the switch. It was invisible while only one engine could
+    resume, and became a contradiction in phase 5 when both could — the
+    switch broadcasts `sessionChanged` with an empty message list, so a
+    browser was told the panel is blank while the server intended to
+    reattach, and the next state load would repopulate the chat with a
+    conversation the user had been told was left behind.
+    """
+
+    def _pair(self):
+        class Adapter(SwitchableAdapter):
+            def __init__(self):
+                super().__init__()
+                self.blanked = 0
+
+            def _start_blank_session(self):
+                self.blanked += 1
+
+        claude, antigravity = Adapter(), Adapter()
+        router = build_router(
+            claude,
+            engine=CLAUDE,
+            alternates={ANTIGRAVITY: antigravity},
+            require_full_surface=False,
+        )
+        return router, claude, antigravity
+
+    def test_the_incoming_engine_is_told_to_start_blank(self):
+        router, _claude, antigravity = self._pair()
+        asyncio.run(router.switch_engine(ANTIGRAVITY))
+        assert antigravity.blanked == 1
+
+    def test_the_outgoing_engine_is_not(self):
+        """It is being stopped, not restarted. Clearing its resume target
+        would decide, on its behalf, that it may never be switched back
+        to — and nothing is deleted by a switch."""
+        router, claude, _antigravity = self._pair()
+        asyncio.run(router.switch_engine(ANTIGRAVITY))
+        assert claude.blanked == 0
+
+    def test_switching_to_the_engine_already_master_blanks_nothing(self):
+        """Not an error and not a reset: it is already the answer."""
+        router, claude, _antigravity = self._pair()
+        asyncio.run(router.switch_engine(CLAUDE))
+        assert claude.blanked == 0
+
+    def test_an_adapter_without_the_hook_still_switches(self):
+        """A switch that has happened must not be undone by tidying up.
+
+        An adapter with no hook is one that cannot resume anyway, so
+        there is nothing for it to be told.
+        """
+        router, _, _ = switchable()
+        result = asyncio.run(router.switch_engine(ANTIGRAVITY))
+        assert result["changed"] is True
+
+    def test_both_real_adapters_implement_it(self):
+        """Stated from this side too: a hook only one engine has is a
+        boundary only one engine respects."""
+        from aic_dc.antigravity.service import AntigravityService
+        from aic_dc.claude_code import ClaudeCodeService
+
+        for cls in (ClaudeCodeService, AntigravityService):
+            assert callable(getattr(cls, "_start_blank_session", None)), cls

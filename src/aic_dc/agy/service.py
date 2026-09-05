@@ -66,6 +66,18 @@ logger = logging.getLogger(__name__)
 class AgyService(AntigravityService):
     """Antigravity, driven through the CLI on the owner's own subscription."""
 
+    #: This transport's own transcript mirror (AG-1).
+    #:
+    #: Separate from the SDK transport's although both reach the same
+    #: product, because a conversation id is only meaningful to the
+    #: harness that minted it: `agy` keeps its conversations in the CLI's
+    #: store and `localharness` keeps its trajectories in the SDK's, and
+    #: neither can resume the other's. Sharing a root would put every
+    #: conversation in one list and let the user pick one this transport
+    #: would then fail — or worse, silently open a new one under an id
+    #: that already had a transcript.
+    MIRROR_DIR = "agy-sessions"
+
     def __init__(
         self,
         *args: Any,
@@ -221,11 +233,11 @@ class AgyService(AntigravityService):
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start ``agy``. **Localhost only.**
 
-        Two refusals before anything spawns, and both are deliberate:
-
-        ``resume`` is declined for the same reason the SDK transport
-        declines it — starting a fresh conversation when the caller asked
-        to continue one is the wrong kind of success.
+        ``resume`` becomes ``agy --conversation <id>``; absent, this
+        continues whatever conversation the mirror says was last active,
+        which is what makes a server restart invisible (phase 5). `agy`
+        restores the context from its own store — nothing here replays our
+        transcript into a prompt.
 
         **A session will not start without the gate installed.** Running
         one anyway would mean `agy` executing with
@@ -236,15 +248,6 @@ class AgyService(AntigravityService):
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        if resume:
-            return {
-                "error": "unsupported",
-                "message": (
-                    "Resuming an agy conversation is not built yet. Starting "
-                    "a fresh session instead would silently lose the context "
-                    "you asked for."
-                ),
-            }
         if shutil.which(self._executable) is None:
             return {
                 "error": "not_installed",
@@ -268,14 +271,15 @@ class AgyService(AntigravityService):
                 "gate": gate,
             }
         try:
-            await self._ensure_session()
+            await self._ensure_session(resume=resume)
         except Exception as exc:  # noqa: BLE001 - reported, not raised
             return self._record_error("connect", exc)
         return {"status": "connected", "model": self._model}
 
-    async def _ensure_session(self) -> Any:
+    async def _ensure_session(self, resume: str | None = None) -> Any:
         if self._session is not None and self._session.started:
             return self._session
+        target = await self._resume_target(resume)
 
         # The same gate object the SDK transport builds, so the dialog, the
         # queue and `resolve_permission` are literally shared. Only what
@@ -297,13 +301,22 @@ class AgyService(AntigravityService):
             gate=self._agy_gate,
             model=self._model,
             executable=self._executable,
+            resume=target,
         )
         try:
             await session.start()
         except AgyNotInstalledError:
             await self._agy_gate.stop()
             raise
+        except Exception:
+            # Anything else — including a resume `agy` answered with a
+            # different conversation — leaves a gate socket listening for a
+            # session that never started. Reaped here rather than at the
+            # next connect, which would find the socket in use.
+            await self._agy_gate.stop()
+            raise
         self._session = session
+        await self._sync_mirror()
         return session
 
     async def _close_session(self) -> None:
@@ -386,6 +399,7 @@ class AgyService(AntigravityService):
         failure branch here only has to report *why* — never to invent a
         terminal event, which would emit two.
         """
+        await self._open_mirrored_turn(request_id, message)
         try:
             async for event in session.stream_turn(message, translator=translator):
                 await self._dispatch(event, request_id)

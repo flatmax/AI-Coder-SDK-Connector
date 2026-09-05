@@ -111,6 +111,20 @@ class AntigravityService:
         adapter's LSP methods have.
     """
 
+    #: Where this transport's transcript mirror lives, under ``.aic-dc/``.
+    #:
+    #: **Its own root, and that is AG-1 rather than tidiness.** A session
+    #: record does not say which engine wrote it, and ``resume_session``
+    #: hands an id to whichever engine is master — so a record written by
+    #: one would be offered to a harness that has never heard of it, and
+    #: the honest failure ("no such session") is indistinguishable from a
+    #: bug. A separate root makes a foreign record unreachable by
+    #: construction rather than by a check somebody has to remember to
+    #: write. Overridden by the ``agy`` transport, which reaches the same
+    #: *product* through a different harness with a different session
+    #: store, so its ids are no more resumable here than Claude's are.
+    MIRROR_DIR = "antigravity-sessions"
+
     def __init__(
         self,
         config: Any,
@@ -145,6 +159,25 @@ class AntigravityService:
         self._committing = False
         self._turn_tasks: set[asyncio.Task] = set()
 
+        # Phase 5. The mirror and the store it writes into, both `None`
+        # without a repo — there is no `.aic-dc/` to mirror into, and the
+        # engine runs fine without one. What is lost is the history
+        # browser and the ability to resume after a restart, never a turn.
+        self.session_store = self._build_session_store()
+        self._mirror = self._build_mirror()
+        # Whether a connect nobody gave a target for should continue the
+        # previous conversation. True at startup, because a server restart
+        # is meant to be invisible — that is phase 5's exit criterion in
+        # one field. `new_session` is the one thing that clears it, and it
+        # is the Claude adapter's arrangement deliberately: two engines
+        # that answered "which conversation am I in" differently would
+        # make a switch feel like a bug.
+        self._auto_resume = True
+        # A conversation `resume_session` asked for, held across the
+        # connect it triggers so that a concurrent first turn cannot
+        # connect around it and get a blank session.
+        self._resume_request: str | None = None
+
         self._session: AntigravitySession | None = None
         self._gate: AntigravityPermissionGate | None = None
         self._permission_mode = "default"
@@ -164,6 +197,42 @@ class AntigravityService:
             set_permission_mode=self._apply_permission_mode,
             current_permission_mode=lambda: self._permission_mode,
             restricted=self._check_localhost_only,
+        )
+
+    def _build_session_store(self) -> Any:
+        """The repo-local transcript mirror's store, or ``None``.
+
+        ``MIRROR_DIR`` is read off ``type(self)`` rather than off the
+        module, so the ``agy`` transport's override reaches this without
+        it having to reimplement the method. The two transports reach the
+        same product but not the same *conversation store*: an ``agy``
+        conversation id means nothing to the SDK's harness and the other
+        way about, so a shared root would offer every session to an engine
+        that could resume half of them.
+        """
+        aic_dc_dir = getattr(self._config, "aic_dc_dir", None)
+        if aic_dc_dir is None:
+            logger.info(
+                "No repo directory, so Antigravity sessions are not "
+                "mirrored; there will be no history and no resume."
+            )
+            return None
+        from aic_dc.claude_code.session_store import RepoSessionStore
+
+        return RepoSessionStore(Path(aic_dc_dir) / type(self).MIRROR_DIR)
+
+    def _build_mirror(self) -> Any:
+        if self.session_store is None:
+            return None
+        from aic_dc.antigravity.mirror import SessionMirror
+
+        return SessionMirror(
+            self.session_store,
+            self._repo_root,
+            # Read live rather than copied in, so a mid-session `set_model`
+            # is what a browsed turn reports rather than what the session
+            # started on.
+            model=lambda: self._model,
         )
 
     def _attach_symbol_index(self, symbol_index: Any) -> None:
@@ -194,24 +263,22 @@ class AntigravityService:
     async def connect_engine(self, resume: str | None = None) -> dict[str, Any]:
         """Start the harness. **Localhost only.**
 
-        ``resume`` is accepted and ignored, and that is a declaration
-        rather than an oversight: resuming by ``conversation_id`` is phase
-        5, and the descriptor reports ``session_mirror`` as unbuilt on
-        this engine. Silently starting a *fresh* session when the caller
-        asked to resume one would be the wrong kind of success.
+        ``resume`` names the conversation to continue. Absent, the engine
+        continues the one it was already in, or — on the first connect of
+        a fresh process — the most recent one in this engine's own mirror.
+        **That default is what makes a server restart invisible**, which
+        is phase 5's exit criterion; ``new_session`` is what turns it off.
+
+        Resuming is a handshake argument, never a replay. The harness
+        rebuilds its own context from its own trajectory store; nothing
+        here reads our mirror back into a prompt, because a transcript
+        that looked right while the model's view had diverged is the exact
+        failure ``specs5/3-engine/history.md`` records for the native
+        engine.
         """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
-        if resume:
-            return {
-                "error": "unsupported",
-                "message": (
-                    "Resuming an Antigravity conversation is not built yet "
-                    "(phase 5). Starting a fresh session instead would "
-                    "silently lose the context you asked for."
-                ),
-            }
         if not self._credentials.available:
             return {
                 "error": "no_credentials",
@@ -222,14 +289,15 @@ class AntigravityService:
                 "credentials": self._credentials.report(),
             }
         try:
-            await self._ensure_session()
+            await self._ensure_session(resume=resume)
         except Exception as exc:  # noqa: BLE001 - reported, not raised
             return self._record_error("connect", exc)
         return {"status": "connected", "model": self._model}
 
-    async def _ensure_session(self) -> AntigravitySession:
+    async def _ensure_session(self, resume: str | None = None) -> AntigravitySession:
         if self._session is not None and self._session.started:
             return self._session
+        target = await self._resume_target(resume)
         self._gate = AntigravityPermissionGate(
             self._repo_root,
             broadcast=self._broadcast,
@@ -255,10 +323,79 @@ class AntigravityService:
             credentials=self._credentials,
             model=self._model,
             decide_hook=self._gate.as_hook(),
+            resume=target,
         )
         await session.start()
         self._session = session
+        await self._sync_mirror()
         return session
+
+    async def _resume_target(self, requested: str | None) -> str | None:
+        """Which conversation the imminent connect attaches to.
+
+        Three cases, in order of how explicit the ask was: an id passed to
+        ``connect_engine``; a pending ``resume_session``; and otherwise
+        :meth:`_visible_session_id` — the session we are already in, or
+        the most recent one in the mirror, or nothing after
+        ``new_session``.
+
+        The last two are the same method deliberately, and for the reason
+        the Claude adapter gives: the session the engine attaches to and
+        the session the browser is shown have to be the same one, and two
+        functions answering that separately is how they come to disagree.
+        """
+        if requested:
+            return requested
+        if self._resume_request:
+            return self._resume_request
+        return await self._visible_session_id()
+
+    async def _visible_session_id(self) -> str | None:
+        """Which conversation's transcript the browser should be shown."""
+        session = self._session
+        if session is not None and session.conversation_id:
+            return session.conversation_id
+        if self._resume_request:
+            return self._resume_request
+        if not self._auto_resume:
+            return None
+        return await self._most_recent_session_id()
+
+    async def _most_recent_session_id(self) -> str | None:
+        """The newest conversation in this engine's mirror, or ``None``.
+
+        No stored pointer to the "current" one: the store already sorts by
+        ``last_modified``, and a pointer file is one more thing that can
+        disagree with the transcripts it names.
+        """
+        if self.session_store is None:
+            return None
+        try:
+            from claude_agent_sdk import list_sessions_from_store
+
+            recent = await list_sessions_from_store(
+                self.session_store, str(self._repo_root), limit=1
+            )
+        except Exception:
+            # Never fatal. Failing to find the previous conversation costs
+            # continuity; refusing to start costs the user everything.
+            logger.exception("Could not work out which conversation to resume")
+            return None
+        return recent[0].session_id if recent else None
+
+    async def _sync_mirror(self) -> None:
+        """Point the mirror at whatever conversation the engine is in now.
+
+        Called after a connect and again on **every** event of a turn,
+        because on the SDK transport the id arrives mid-turn: the SDK
+        derives it from the event processor's main trajectory, so
+        ``Conversation.conversation_id`` is empty until the first step
+        lands. :meth:`SessionMirror.attach` is a comparison when nothing
+        has changed, which is what makes calling it that often free.
+        """
+        if self._mirror is None or self._session is None:
+            return
+        await self._mirror.attach(self._session.conversation_id)
 
     async def new_session(self) -> dict[str, Any]:
         """Discard the conversation and start a fresh one. **Localhost only.**"""
@@ -267,22 +404,144 @@ class AntigravityService:
             return restricted
         await self._close_session()
         self._turns.clear()
+        # The user asked for blank, so neither the pending target nor the
+        # store lookup applies. Nothing is deleted: the conversation left
+        # behind stays in the mirror and stays loadable.
+        self._resume_request = None
+        self._auto_resume = False
+        if self._mirror is not None:
+            self._mirror.detach()
         await self._broadcast(
             Event("sessionReset", {"engine": "antigravity"}, turn_scoped=False)
         )
+        await self._broadcast(
+            Event(
+                "sessionChanged",
+                {"session_id": None, "messages": [], "action": "new"},
+                turn_scoped=False,
+            )
+        )
         return {"status": "ok"}
 
+    def _start_blank_session(self) -> None:
+        """Do not continue where this engine left off. Called by the router.
+
+        The switch itself is the router's, and it has already told every
+        browser the panel is empty; this is the server agreeing with that.
+        Underscored so it stays off the RPC surface — it is not a thing a
+        browser asks for, and ``new_session`` is the public version of the
+        same intent, with the broadcasts a user-initiated reset owes.
+
+        Nothing is deleted. The conversation left behind stays in the
+        mirror and stays loadable from the history browser, which is the
+        whole reason a switch can afford to be a boundary.
+        """
+        self._resume_request = None
+        self._auto_resume = False
+        if self._mirror is not None:
+            self._mirror.detach()
+
     async def restart_session(self) -> dict[str, Any]:
-        """Tear the harness down and bring it back. **Localhost only.**"""
+        """Tear the harness down and bring it back. **Localhost only.**
+
+        The conversation comes with it. ``_close_session`` drops the
+        session object but not the id it was in, so the reconnect resumes
+        rather than starting blank — the same bargain the Claude adapter
+        makes, and the reason a restart is a way to apply a setting rather
+        than a way to lose your context.
+        """
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+        previous = await self._visible_session_id()
         await self._close_session()
         try:
-            await self._ensure_session()
+            await self._ensure_session(resume=previous)
         except Exception as exc:  # noqa: BLE001
             return self._record_error("restart", exc)
         return {"status": "ok", "model": self._model}
+
+    async def resume_session(
+        self, session_id: str, fork: bool = False
+    ) -> dict[str, Any]:
+        """Attach the engine to a past conversation. **Localhost only.**
+
+        Never a replay: the id goes to the harness, which rebuilds its own
+        context from its own trajectory store. What we render is a
+        *record* of the conversation; what the model gets is the
+        conversation.
+
+        ``fork`` is refused rather than approximated. Claude forks by
+        copying a transcript the CLI will rebuild from, and Antigravity
+        has no counterpart at any layer — the trajectory store is the
+        harness's and is opaque (``sdk-surface.md`` § *What does not
+        translate*). Copying our mirror would fork the *record* and leave
+        both branches pointed at one engine conversation, so the second
+        turn on either would append to the same context. That is not a
+        fork; it is two transcripts of one session.
+
+        Gated for ``connect_engine``'s reason: a participant choosing
+        which conversation the host's engine attaches to would be deciding
+        for everyone.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not session_id:
+            return {"error": "A session ID is required", "reason": "no_session_id"}
+        if fork:
+            return {
+                "error": (
+                    "Forking is not available on this engine: the harness "
+                    "owns the conversation store and there is no way to "
+                    "copy one. Resume it instead, or start a new session."
+                ),
+                "reason": "unsupported",
+            }
+        if self._turns:
+            return {"error": "A turn is still running", "reason": "turn_in_progress"}
+        if self.session_store is None:
+            return {
+                "error": "No session history: this run has no repo directory",
+                "reason": "no_repo",
+            }
+
+        messages = await self.history_load(session_id)
+        if isinstance(messages, dict):
+            # Browsable but not resumable — deleted, unreadable, or from
+            # before the mirror existed. Reported rather than attempted:
+            # the harness would refuse the handshake and the user would be
+            # looking at an engine that will not start.
+            return {
+                "error": messages.get("error", "That session cannot be read"),
+                "reason": "not_resumable",
+            }
+
+        await self._close_session()
+        self._resume_request = session_id
+        self._auto_resume = True
+        outcome = await self.connect_engine(resume=session_id)
+        if "error" in outcome:
+            self._resume_request = None
+            return {
+                "error": outcome["error"],
+                "reason": outcome.get("reason", "connect_failed"),
+            }
+        self._resume_request = None
+        resumed = self._session.conversation_id if self._session else session_id
+        await self._broadcast(
+            Event(
+                "sessionChanged",
+                {
+                    "session_id": resumed,
+                    "messages": messages,
+                    "action": "resumed",
+                    "forked_from": None,
+                },
+                turn_scoped=False,
+            )
+        )
+        return {"session_id": resumed}
 
     async def shutdown(self) -> dict[str, Any] | None:
         """Stop the harness. Never raises — teardown that raises orphans it."""
@@ -412,8 +671,10 @@ class AntigravityService:
         answer with a status — barely, since the browser ignored the
         status anyway — and it is not survivable now.
         """
+        await self._open_mirrored_turn(request_id, message)
         try:
             async for event in session.stream_turn(message, translator=translator):
+                await self._sync_mirror()
                 await self._dispatch(event, request_id)
         except Exception as exc:  # noqa: BLE001 - a turn failure is an event
             self._record_error("turn", exc)
@@ -526,11 +787,12 @@ class AntigravityService:
         is guarded, so absence renders as a hidden panel while a zero
         would render as a measurement.
 
-        ``messages`` is empty by construction rather than by omission. The
-        repo-local mirror is phase 5, so there is no transcript to
-        restore; the key is still sent because the chat panel treats an
-        empty list as "nothing to restore" and a missing one as a snapshot
-        it could not read.
+        ``messages`` is the mirrored transcript of the conversation this
+        browser is about to be shown — which since phase 5 is the
+        conversation the next connect will resume, not necessarily one
+        that is running. Those are the same conversation, so showing it
+        before the harness is up is not a guess; it is what makes a
+        reloaded page look like the one the user left.
         """
         session = self._session
         return {
@@ -542,7 +804,7 @@ class AntigravityService:
             "doc_convert_available": doc_convert_available(),
             # What the chat panel and the dialog read
             # (chat-panel/events.js § onStateLoaded, permission-dialog).
-            "messages": [],
+            "messages": await self._current_messages(),
             "active_streams": self._active_streams(),
             "pending_permissions": (
                 self._gate.broker.pending() if self._gate is not None else []
@@ -559,6 +821,256 @@ class AntigravityService:
             # No `cost`. AG-6: there is no USD figure anywhere on this
             # engine, and a zero would be a measurement.
         }
+
+    async def _current_messages(self) -> list[dict[str, Any]]:
+        """The rendered transcript the browser should be looking at.
+
+        Underscored: ``add_service`` publishes every public method, and a
+        browser that wants a particular conversation asks ``history_load``
+        for it by id.
+
+        An unreadable transcript renders as an empty conversation rather
+        than a failed snapshot. Every other field here is still worth
+        painting, and a browser that cannot get a snapshot cannot show the
+        user anything at all.
+        """
+        session_id = await self._visible_session_id()
+        if not session_id:
+            return []
+        loaded = await self.history_load(session_id)
+        if isinstance(loaded, dict):
+            logger.warning(
+                "Could not render conversation %s for the state snapshot: %s",
+                session_id,
+                loaded.get("error"),
+            )
+            return []
+        return loaded
+
+    # ------------------------------------------------------------------
+    # History — seven delegations, no second implementation
+    # ------------------------------------------------------------------
+    #
+    # Every one of these forwards to `claude_code.history` with *this*
+    # engine's store. That module is engine-agnostic by construction —
+    # `load_session(store, session_id, directory, …)` takes the store as
+    # an argument, and `RepoSessionStore(root)` takes its root as one — so
+    # phase 5 needed no sibling of it and no `SessionStore` protocol
+    # implementation. Importing from `claude_code` here reads oddly and is
+    # the same trade AG-3 makes about the class name: those modules are
+    # engine-agnostic in everything but their package, and the copy is
+    # what would drift.
+
+    async def history_list(
+        self, limit: int = 50
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Past conversations on this engine, most recently modified first.
+
+        A bare list on success and ``{"error": …}`` on failure, the union
+        the RPC table specifies. An empty list would conflate "no history
+        yet" with "could not read it", and only the second is worth a
+        user's time.
+
+        No derived index is passed. The index caches a *finished row* keyed
+        by transcript mtime and is a performance feature; a cold index is a
+        slower listing, never a wrong one, and building a second one for
+        this engine before anybody has felt the cost would be a file to
+        keep in agreement for no measured gain.
+        """
+        if self.session_store is None:
+            return []
+
+        from aic_dc.claude_code import history
+
+        try:
+            return await history.list_sessions(
+                self.session_store,
+                str(self._repo_root),
+                limit=max(0, int(limit)),
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_list failed")
+            return {"error": f"Could not read the session history: {exc}"}
+
+    async def history_load(
+        self, session_id: str
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """One past conversation's messages, rendered for the browser.
+
+        **Read-only, and deliberately not a resume.** This reads a
+        transcript; ``resume_session`` is what puts the engine back into
+        one. Keeping them apart means browsing history cannot disturb a
+        turn that is running.
+
+        No events are interleaved: this engine has no events log, because
+        ``EventsLog``'s ``event`` domain is closed on purpose and none of
+        its members is a thing this engine reports. A browsed conversation
+        therefore carries the model's work and not the operational lines
+        around it, which is stated here rather than left to be discovered
+        from an empty list.
+        """
+        if not session_id:
+            return {"error": "A session ID is required"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from aic_dc.claude_code import history
+
+        try:
+            messages = await history.load_session(
+                self.session_store, session_id, str(self._repo_root)
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_load failed for %s", session_id)
+            return {"error": f"Could not read session {session_id}: {exc}"}
+
+        if not messages:
+            # An empty transcript is never stored, so nothing to render
+            # means the session is gone or unparseable — not that it
+            # happened and said nothing.
+            return {"error": f"Session {session_id} has no readable transcript"}
+        return messages
+
+    async def history_search(
+        self, query: str, role: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any]:
+        """Substring search across every stored conversation, newest first."""
+        if not query:
+            # Not an error: an empty search box is a user who has not
+            # searched yet, and an error toast for typing nothing is noise.
+            return []
+        if self.session_store is None:
+            return []
+
+        from aic_dc.claude_code.history_index import ROLES, SEARCH_LIMIT, search
+
+        if role and role not in ROLES:
+            return {"error": f"Unknown role {role!r}; expected one of {sorted(ROLES)}"}
+
+        try:
+            return await search(
+                self.session_store,
+                str(self._repo_root),
+                query,
+                role=role or None,
+                limit=max(1, int(limit)) if limit else SEARCH_LIMIT,
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_search failed")
+            return {"error": f"Could not search the session history: {exc}"}
+
+    async def history_delete(self, session_id: str) -> dict[str, Any]:
+        """Delete one past conversation's transcript. **Localhost only.**
+
+        Gated because this destroys history every client can see, and
+        because a participant who could delete the record of a turn could
+        delete the evidence of what they were invited to review.
+
+        The conversation on screen is refused rather than deleted: the
+        mirror is *live*, so the transcript would come straight back and
+        the next connect would resume an id with nothing behind it.
+        Starting a new session first makes it deletable, which is one
+        click and is honest about what is happening.
+
+        Missing is not an error. A row deleted twice, or deleted by
+        another client first, is a browser that already has what it asked
+        for.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not session_id:
+            return {"error": "A session ID is required", "reason": "no_session_id"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+        if session_id == await self._visible_session_id():
+            return {
+                "error": "That is the current conversation. Start a new session first.",
+                "reason": "session_live",
+            }
+
+        from aic_dc.claude_code import history
+
+        try:
+            await history.delete_session(
+                self.session_store, session_id, str(self._repo_root)
+            )
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_delete failed for %s", session_id)
+            return {"error": f"Could not delete session {session_id}: {exc}"}
+
+        await self._broadcast(
+            Event("sessionDeleted", {"session_id": session_id}, turn_scoped=False)
+        )
+        return {"session_id": session_id, "status": "deleted"}
+
+    async def history_image(
+        self, session_id: str, entry_uuid: str, block: int
+    ) -> dict[str, Any]:
+        """One image out of a past prompt, as a data URI.
+
+        Mounted although this engine declines image *input* today
+        (``chat_streaming`` refuses rather than dropping them), because
+        the surface is the transcript's rather than the turn's: a
+        conversation mirrored by a later build that does accept images
+        must be readable by this one, and a reader that 404s on it would
+        be a hole that only appears once the feature lands.
+        """
+        if not session_id:
+            return {"error": "A session ID is required"}
+        if not entry_uuid:
+            return {"error": "A message ID is required"}
+        if self.session_store is None:
+            return {"error": "No session history: this run has no repo directory"}
+
+        from aic_dc.claude_code import history
+
+        try:
+            data_uri = await history.load_image(
+                self.session_store,
+                session_id,
+                str(self._repo_root),
+                entry_uuid=entry_uuid,
+                block=int(block),
+            )
+        except history.ImageUnavailable as exc:
+            return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("history_image failed for %s", session_id)
+            return {"error": f"Could not read that image: {exc}"}
+        return {"data_uri": data_uri}
+
+    async def get_session_storage(self) -> dict[str, Any]:
+        """How much disk this engine's mirror is using.
+
+        Measured over ``MIRROR_DIR`` and not over the whole of
+        ``.aic-dc/``, because that is the directory the answer argues for
+        deleting from — a figure that included the other engine's
+        transcripts would invite a user to delete rows that would not
+        shrink it.
+
+        The threshold comes from ``app.json`` through the same key the
+        Claude adapter reads, so the number a user edited applies to both
+        engines rather than to whichever one they were on when they
+        edited it.
+        """
+        if self.session_store is None:
+            return {
+                "error": "No session history: this run has no repo directory",
+                "reason": "no_repo",
+            }
+        from aic_dc.claude_code.session_store import DISK_WARNING_BYTES
+
+        try:
+            loop = asyncio.get_running_loop()
+            total = await loop.run_in_executor(None, self.session_store.total_bytes)
+        except Exception as exc:  # noqa: BLE001 - answered, not raised
+            logger.exception("Could not measure the session directory")
+            return {"error": f"Could not measure the session directory: {exc}"}
+        history_config = getattr(self._config, "history_config", None)
+        section = history_config if isinstance(history_config, dict) else {}
+        threshold = section.get("session_dir_warning_bytes", DISK_WARNING_BYTES)
+        return {"bytes": int(total), "over_warning": int(total) >= int(threshold)}
 
     def _active_streams(self) -> list[dict[str, Any]]:
         """The turn in flight, in the replay shape a reconnect resumes from.
@@ -845,6 +1357,25 @@ class AntigravityService:
         except Exception:  # noqa: BLE001 - absence is not a denial here
             return True
 
+    async def _open_mirrored_turn(self, request_id: str, message: str) -> None:
+        """Record the prompt that opens this turn.
+
+        Called by both transports' turn runners rather than by
+        ``chat_streaming``, because the two adapters implement that method
+        separately and the runner is the one place both funnel through
+        before the first event.
+
+        The prompt may land *after* this returns: on the SDK transport the
+        conversation has no id yet, so the mirror holds the text and files
+        it the moment :meth:`_sync_mirror` learns one. Ordering is
+        preserved either way — the mirror writes the held prompt before
+        anything the turn produced.
+        """
+        if self._mirror is None:
+            return
+        await self._sync_mirror()
+        await self._mirror.note_prompt(message, request_id=request_id)
+
     async def _broadcast(self, event: Event) -> None:
         await self._dispatch(event, None)
 
@@ -864,7 +1395,15 @@ class AntigravityService:
         Turn-scoped events take the request ID first, exactly as the
         Claude pump's do — the browser has one handler per event name and
         it must not have to know which engine sent it (AG-R-4).
+
+        **The mirror observes here**, because this is the one point every
+        event of both transports passes through — ``AgyService`` inherits
+        this method and overrides only what produces the events. Observing
+        in the two turn runners instead would be two call sites for one
+        job, which is how one of them comes to be forgotten.
         """
+        if self._mirror is not None:
+            await self._mirror.observe(event)
         if self._event_callback is None:
             return
         args: tuple[Any, ...] = (

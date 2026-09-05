@@ -60,6 +60,7 @@ export const SURFACE = Object.freeze({
   MCP_SERVER_INVENTORY: 'mcp_server_inventory',
   SESSION_MIRROR: 'session_mirror',
   TRANSCRIPT_HISTORY: 'transcript_history',
+  SESSION_FORK: 'session_fork',
   RATE_LIMIT_EVENTS: 'rate_limit_events',
   SUBAGENT_TABS: 'subagent_tabs',
   AGENT_QUESTIONS: 'agent_questions',

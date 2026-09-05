@@ -217,19 +217,45 @@ SURFACES: tuple[Surface, ...] = (
         key="session_mirror",
         title="Repo-local verbatim session mirror",
         claude=SUPPORTED,
-        antigravity=UNBUILT,
-        note="Phase 5. There is no SessionStore protocol to implement — "
-        "Antigravity owns an opaque save_dir — so the mirror is rebuilt "
-        "as a step observer rather than as a store.",
+        antigravity=SUPPORTED,
+        note="Supported on both since phase 5 (2026-09-05), by different "
+        "means. There is no SessionStore protocol to implement — "
+        "Antigravity owns an opaque save_dir — so the mirror is an "
+        "observer of the events both transports already emit "
+        "(antigravity/mirror.py), writing CLI-shaped entries into a store "
+        "root of its own per AG-1. Resume is the engine's own: the "
+        "conversation id goes back to the harness, which rebuilds its "
+        "context from its own trajectory store rather than from anything "
+        "we replay.",
     ),
     Surface(
         key="transcript_history",
         title="History browser and transcript rendering",
         claude=SUPPORTED,
-        antigravity=UNBUILT,
-        note="Phase 5. Step is flat, with trajectory_id and depth, rather "
-        "than nested content blocks, so history.py needs a full sibling "
-        "rather than a branch.",
+        antigravity=SUPPORTED,
+        note="Supported on both since phase 5 (2026-09-05). This row read "
+        "'history.py needs a full sibling rather than a branch', and "
+        "measuring it found the opposite: history.py takes the store as "
+        "an argument and is engine-agnostic already, so the five history "
+        "RPCs are delegations to it and there is no sibling. Step being "
+        "flat turned out to be a fact about the *pump*, which had already "
+        "absorbed it, rather than about the reader.",
+    ),
+    Surface(
+        key="session_fork",
+        title="Fork a past conversation into a branch",
+        claude=SUPPORTED,
+        antigravity=ABSENT,
+        note="Claude forks by copying a transcript the CLI then rebuilds "
+        "its context from, so the copy *is* the fork. Antigravity's "
+        "conversation store belongs to the harness and is opaque "
+        "(sdk-surface.md § What does not translate), so copying our mirror "
+        "would fork the record and leave both branches pointed at one "
+        "engine conversation — two transcripts of one session, diverging "
+        "the moment either took a turn. Added in phase 5, which is what "
+        "made the history browser's Fork button reachable on this engine "
+        "at all; before that the panel was hidden and the question could "
+        "not arise.",
     ),
     Surface(
         key="rate_limit_events",

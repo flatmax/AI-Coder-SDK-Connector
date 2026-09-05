@@ -114,8 +114,6 @@ PENDING_CONFIG: dict[str, str] = {
     "this in place of max_budget_usd, which has no Antigravity equivalent "
     "— a better control than a dollar cap for a session whose price is not "
     "observable.",
-    "conversation_id":"resumes a prior conversation. Phase 5, with the "
-    "repo-local mirror built as a step observer.",
     "debug_config": "the SDK's debug sink. logging_setup owns AIC-DC's "
     "logging; worth wiring once there is somewhere to route it, which is "
     "the analogue of the Claude engine's engine-errors.jsonl.",
@@ -130,10 +128,13 @@ PENDING_CONFIG: dict[str, str] = {
     "field that turns a rate limit into a slow turn instead of a dead one: "
     "the free tier throttles at 5 RPM and both later probe runs hit 429s "
     "*mid-turn*, because an agent turn is many model calls.",
-    "save_dir": "where a conversation is persisted. Phase 5.",
-    "session_continuation_mode": "RESUME / CREATE_OR_RESUME / CREATE_ONLY. "
-    "Phase 5 — the choice between resuming and starting fresh is the "
-    "history browser's, not the adapter's.",
+    "save_dir": "where the harness persists a conversation's trajectory. "
+    "Left unset by phase 5 deliberately rather than pending an owner: "
+    "resume reads back the store the session was written into, so pointing "
+    "this somewhere of ours would make every conversation recorded before "
+    "the change unresumable. It becomes worth setting only if the two "
+    "transports ever need their harness state separated on disk, which is "
+    "the same question app_data_dir raises.",
     "skills_paths": "skill directories. The repo's .claude/skills/ is "
     "Claude's format and there is no shared one, so this is a second set "
     "of files to author rather than a switch to flip.",
