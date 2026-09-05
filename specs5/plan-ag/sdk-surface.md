@@ -6,7 +6,7 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 | What | Version | Where it was read |
 |---|---|---|
 | `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03 — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
-| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03) | `~/.local/bin/agy` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
 > **Do not re-derive this by guessing.** The SDK is at 0.1.x and alpha; it will move faster than
@@ -300,6 +300,17 @@ An untrusted cwd does not error — it **silently diverts writes to a scratch di
 agent believes it succeeded. For a product whose file tree and diff viewer are rooted at the repo,
 that presents as "the agent says it edited the file and the diff is empty."
 See [`risks.md` AG-R-3](risks.md#ag-r-3).
+
+> **Amended 2026-09-05 — the diversion is real and `trustedWorkspaces` is not a sufficient
+> explanation for it.** On 1.1.26, three phase-8 probe runs diverted a newly-created file from
+> **inside** `/tmp/temp`, which *is* on the trust list above; git-initialising the workspace changed
+> nothing. Every diverted file on record — `probe.txt` here, plus `hello.txt`,
+> `test_hello_world.py` and `stranger.txt` — was **created**, whereas a same-day browser run
+> *edited an existing* file under the same trusted root and the edit landed at its real path. The
+> better-supported reading is that a bare filename handed to `write_to_file` does not resolve against
+> the session's cwd. **This has not been isolated with a controlled probe**, so it is a sharper
+> hypothesis, not a measurement — which is exactly the standard the rest of this file is held to, and
+> the paragraph above did not meet it either.
 
 **Unknown:** whether the Python SDK's `workspaces` field
 (`connections/local/local_connection_config.py:147`) is subject to the same trust list. It appears to

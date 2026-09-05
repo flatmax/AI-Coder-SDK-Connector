@@ -41,7 +41,9 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _agy_probe_support import probe_root  # noqa: E402
 from aic_dc.agy import registry  # noqa: E402
 
 GLOBAL_HOOKS = Path.home() / ".gemini" / "config" / "hooks.json"
@@ -59,17 +61,20 @@ def log(message: str) -> None:
 #: which is the shape of the mistake this whole file exists to avoid.
 #: The shipping gate allows reads for the same reason, via the dialog's
 #: own classification.
+#: **Derived, not written out.** This was a hand-maintained set and it
+#: had `list_directory` — the *SDK's* name — where `agy` sends `list_dir`.
+#: So the probe's gate refused a read; the model lost the ability to look
+#: around, gave up before ever proposing an edit, and `list_dir` was then
+#: counted as a refused "write attempt", turning the run green. That is
+#: the third instance of this tripwire passing for the wrong reason
+#: (2026-09-05), and the second in one day.
+#:
+#: The vocabulary already exists in code, merged across both transports in
+#: `permissions.TOOL_CLASSES`, so reading it is what keeps this honest: a
+#: second copy of a tool-name table is the drift phase 8 has now been
+#: caught by twice.
 READ_CLASS = frozenset(
-    {
-        "view_file",
-        "find_by_name",
-        "list_directory",
-        "search_directory",
-        "grep_search",
-        "read_url_content",
-        "search_web",
-        "codebase_search",
-    }
+    name for name, tool_class in TOOL_CLASSES.items() if tool_class == "read"
 )
 
 
@@ -180,7 +185,16 @@ def main() -> int:
         log("agy is not on PATH; nothing to probe")
         return 2
 
-    work = Path(tempfile.mkdtemp(prefix="agy-gate-"))
+    # **This must be a workspace agy trusts, and the reason is the whole
+    # point of this file.** Outside one, agy diverts every write into its
+    # own scratch directory and reports success (AG-R-3) — so `target.txt`
+    # would be unchanged at the end whether the gate denied the write or
+    # waved it through, and the tripwire below would pass without testing
+    # anything. That is precisely the "passed for the wrong reason" failure
+    # this probe was rewritten once to avoid, arriving by a second road.
+    # Found on 2026-09-05, when the sibling isolation probe hit the
+    # diversion in plain /tmp — which is what this probe had been using.
+    work = probe_root("agy-gate-")
     config_dir = work / "cfg"
     target = work / "target.txt"
     target.write_text(ORIGINAL + "\n", encoding="utf-8")

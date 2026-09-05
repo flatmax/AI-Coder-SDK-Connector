@@ -83,6 +83,23 @@ Measured, not hypothesised: `agy` was asked to create a file in the current dire
 `~/.gemini/antigravity-cli/scratch/` instead, reporting success with a `file://` link. The cause was
 `trustedWorkspaces` in the CLI's `settings.json` not listing the working directory.
 
+> **Amended 2026-09-05 — the stated cause is in doubt, the risk is not.** Three phase-8 probe runs
+> diverted a write from **inside** `/tmp/temp`, which *is* in `trustedWorkspaces`, on `agy` 1.1.26. A
+> git-initialised workspace diverted identically, ruling out the second guess. What every diverted
+> file on record has in common is that it was **newly created** — `probe.txt`, `hello.txt`,
+> `test_hello_world.py`, `stranger.txt` — while a same-day browser run *edited an existing* file under
+> the same trusted root and the edit landed on disk. So a bare filename given to `write_to_file` may
+> simply not resolve against the session's cwd, with the trust list the most visible correlate rather
+> than the mechanism. **Not isolated with a controlled probe**, so this replaces one unverified
+> explanation with a better-supported one rather than with a fact.
+>
+> The consequence for the mitigation is the point: AG-10's health check asserts *"the repo root is a
+> workspace the engine will write to"*, and a check phrased against the trust list would pass on a
+> machine where creation still diverts. It should assert the **outcome** — write a sentinel and stat
+> it where it was asked for — and it should cover **creation specifically**, which is the case every
+> observed diversion shares. See
+> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-the-first-two-explanations-were-wrong).
+
 **Why it bites:** it does not error. The agent believes it succeeded, the transcript says it
 succeeded, and the file tree and diff viewer — both rooted at the repo — show nothing. The user's
 reading is "the agent lied about editing my file", and the actual cause is in a settings file in

@@ -283,3 +283,41 @@ class TestTheTurnCloses:
             "usage",
             "response_text",
         }
+
+
+class TestTheSharedAccountingObject:
+    """`stats` is a contract with code this translator never mentions.
+
+    `AntigravityService._note_permission_prompt` — inherited by
+    `AgyService` — reaches straight into `translator.stats` to attribute a
+    dialog to the turn that caused it. This translator did not have the
+    attribute, so every permission dialog on the `agy` transport raised
+    `AttributeError` there. It was caught and logged rather than surfaced,
+    so the gate kept working and only the turn's prompt count was lost,
+    which is why the whole suite stayed green through it.
+
+    Found by reading the server log during the phase-8 live write run, not
+    by a test — so these pin the shape a caller in another module relies
+    on.
+    """
+
+    def test_a_fresh_translator_exposes_the_stats_a_caller_reaches_into(self):
+        t = AgyTranslator("r1")
+        assert t.stats.permission_prompts == 0
+        assert t.stats.tool_calls == 0
+
+    def test_the_service_can_count_a_prompt_against_the_turn(self):
+        # Written as the caller writes it, deliberately: the defect was an
+        # attribute error at exactly this expression.
+        t = AgyTranslator("r1")
+        t.stats.permission_prompts += 1
+        assert t.stats.permission_prompts == 1
+
+    def test_tool_calls_are_counted_on_the_same_object_the_stream_reports(self):
+        # One counter, not two. `num_tool_calls` used to read a private
+        # field that `stats` duplicated, which is the drift that lets a
+        # HUD and a stream payload disagree about one turn.
+        t = AgyTranslator("r1")
+        t.translate(frame(TOOL_ACTIVE))
+        assert t.stats.tool_calls == 1
+        assert t.stream_complete()[-1].payload["num_tool_calls"] == 1

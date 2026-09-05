@@ -52,6 +52,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from aic_dc.antigravity.steps import TurnStats
 from aic_dc.claude_code.messages import Event
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,18 @@ class AgyTranslator:
         self._usage: dict[str, int] = {}
         self._status = ""
         self._response = ""
-        self._tool_calls = 0
+        # The *same* accounting object the SDK transport's translator
+        # carries, and it is shared rather than reinvented because a
+        # caller they share reaches straight into it:
+        # `AntigravityService._note_permission_prompt` — inherited by
+        # `AgyService` — does `translator.stats.permission_prompts += 1`.
+        # Without this attribute every permission dialog on this transport
+        # raised `AttributeError` there. It was caught and logged as
+        # "Could not record the permission prompt on the turn", so the
+        # dialog still worked and only the turn's prompt count was lost,
+        # which is why 4,300 green tests and a working gate did not show
+        # it. Found by watching the log during the phase-8 write run.
+        self.stats = TurnStats()
 
     # ------------------------------------------------------------------
     # Frames in
@@ -221,7 +233,7 @@ class AgyTranslator:
         call_id = f"agy-tool-{index}"
 
         if call_id not in self._tools:
-            self._tool_calls += 1
+            self.stats.tool_calls += 1
             card = {
                 "tool_use_id": call_id,
                 "name": name,
@@ -317,7 +329,7 @@ class AgyTranslator:
                 {
                     "request_id": self.request_id,
                     "stop_reason": stop_reason,
-                    "num_tool_calls": self._tool_calls,
+                    "num_tool_calls": self.stats.tool_calls,
                     "files_modified": [],
                     "usage": self.turn_usage(),
                     "response_text": self.response_text(),

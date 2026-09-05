@@ -2293,9 +2293,196 @@ empty-after look identical on screen, which is why the switch appeared to be the
 
 ### What phase 8 still owes
 
+> **Superseded 2026-09-05 for the first half — see
+> [§ The approved write](#phase-8--the-approved-write-and-what-running-it-found-2026-09-05).**
+
 Its exit criterion, both halves, neither demonstrated:
 
 - a conversation on the subscription **including an approved write**, so the dialog renders a real
   diff from `replace_file_content` and the edit lands;
 - a **second `agy` session of the user's own, running concurrently and never intercepted** — the half
   that has had no test at all, and the one that matters for trusting a hook installed globally.
+
+---
+
+## Phase 8 — the approved write, and what running it found (2026-09-05)
+
+**The first half of the exit criterion is met, in a browser, on the paid subscription.** Not through a
+probe: a real dialog, answered by a person clicking **Allow once**.
+
+```
+10:23:55  run_command  pwd && ls -la                        → allow
+10:24:03  run_command  find /home/flatmax -name target.txt  → deny, with a reason
+10:25:16  replace_file_content  target.txt                  → dialog, +1 −1
+10:25:37  …                                                 resolved as allow by localhost
+          target.txt on disk: MODIFIED_TEXT   git diff: 1 insertion(+), 1 deletion(-)
+```
+
+The dialog rendered `replace_file_content` **as a write with a side-by-side diff** — `−ORIGINAL_TEXT`
+against `+MODIFIED_TEXT`, counted `+1 −1` — which is the thing
+[§ The tool *names* differ](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03)
+warned would degrade silently if the per-transport name map had a hole. It does not.
+
+**The deny path was exercised without being planned, and it is the better half of the record.** The
+agent's second move was `find /home/flatmax -name "target.txt"` — a search of the whole home
+directory for a file that was in its own cwd. Denied with a reason naming the working directory, it
+adapted and edited the right file. That is [AG-R-11](risks.md#ag-r-11)'s route-around instinct being
+*steered* rather than escaping, and it is the first time the reason-carrying deny has been watched
+changing an agent's course on this transport.
+
+### Set up the way the previous entries said to, and that mattered twice
+
+Driven from a **second, freshly started** server — `--server-port 18081 --webapp-port 19000` — because
+the instance hosting the session is both the software under test and the thing whose child process the
+session is. And pointed by `--repo-path` at a **throwaway git repo**, `/tmp/temp/agy-write-test`,
+rather than at this working tree: the demonstration has an agent editing a file, and the working tree
+is where the work is.
+
+### AG-R-3, live, and the tripwire it had already been quietly holding up
+
+The isolation probe was written at the same time and **failed on its first two runs — for a reason
+that had nothing to do with the gate.** Its assertion "the stranger never reached our gate" passed
+immediately and every time: 9 calls on the first run, 15 on the second, **every one of them ours**.
+What failed was the *other* assertion, that the stranger's own work completed:
+
+```
+[probe] the gate decided 15 call(s), for conversation(s) {'ad55c68b-…'}   ← ours only
+[probe] stranger's run status: SUCCESS
+[probe] FAIL: the stranger's file was never written
+```
+
+`SUCCESS` with no file is [AG-R-3](risks.md#ag-r-3): the probe's workspaces were plain `/tmp`
+temporary directories, `/tmp` is not in `trustedWorkspaces` (`/tmp/temp` is, one path component
+away), and `agy` had written `stranger.txt` into `~/.gemini/antigravity-cli/scratch/` while reporting
+success. Confirmed by finding the file there, timestamped to the run.
+
+**That is a hole in `probe_agy_gate.py`, and it is the finding worth keeping.** The deny tripwire's
+entire assertion is *the target file is unchanged*. Under diversion that is true **whether the gate
+denied the write or waved it through** — so its recorded PASS rested on an assumption nobody had
+checked, and would have kept reading green through a gate that had stopped working. It is the same
+"passed for the wrong reason" failure the probe was rewritten once to avoid, arriving by a second
+road: the first time the model never proposed a write, this time the write could not land anyway.
+
+`scripts/_agy_probe_support.py` now owns the setup for all three probes and **raises rather than
+warns** when it cannot find a trusted workspace, because the failure it prevents is a green test that
+means nothing.
+
+**A correction to that helper, worth its own paragraph.** Its first version took the first trusted
+root it found — which on this machine is `culvertHouse`, **a real project** — so a helper written to
+make write probes safe had arranged for an agent to run loose in the user's own repository. It now
+refuses anything outside the system temp directory.
+
+### The trusted workspace was not the whole story, and the first two explanations were wrong
+
+Being under a trusted root turned out to be necessary and **not sufficient**, and the two hypotheses
+tried before the evidence was read properly are recorded because each was reasonable and each cost a
+subscription turn.
+
+1. *"`/tmp` is untrusted."* True, and it was not the cause: moved to `/tmp/temp`, which **is**
+   trusted, the write diverted again.
+2. *"The working demonstration was a git repo and the probe was not."* Also true, also not the cause:
+   `git init`-ing the probe's workspaces changed nothing.
+
+What every diverted file ever recorded has in common is that it was **newly created** — `probe.txt`
+(2026-08-30), `hello.txt` and `test_hello_world.py` (2026-09-04), `stranger.txt` on all three runs
+here. Against that, the browser demonstration *edited an existing* file and the edit landed. So the
+working reading is that a bare filename handed to `write_to_file` is not resolved against the
+session's cwd, and the trusted-workspace story was the most visible correlate rather than the
+mechanism.
+
+**That is a reading of the evidence and not a measured rule.** It has not been isolated with a
+controlled probe, and "creation and modification are trusted differently" is not excluded. It does
+change what a probe must do: seed the file and ask for an *edit*, which both live probes now do.
+
+It also puts a question against [AG-R-3](risks.md#ag-r-3) as currently written, which attributes the
+diversion to `trustedWorkspaces` alone. The risk is real either way — a write reported as successful
+that is not where the user thinks — but its stated trigger may be wrong, and a mitigation aimed at the
+trust list would then miss.
+
+### A shipped bug, found by reading the log rather than by a test
+
+`AgyTranslator` had no `stats` attribute. `AntigravityService._note_permission_prompt` — **inherited**
+by `AgyService` — does `translator.stats.permission_prompts += 1`, so **every permission dialog on
+this transport** raised `AttributeError` there:
+
+```
+ERROR aic_dc.claude_code.permissions: Could not record the permission prompt on the turn
+  File ".../antigravity/service.py", line 466, in _note_permission_prompt
+    translator.stats.permission_prompts += 1
+AttributeError: 'AgyTranslator' object has no attribute 'stats'
+```
+
+It was caught and logged, so the gate kept working, the dialog kept rendering, the tool card kept its
+`gated` badge, and only the turn's prompt count was lost. **4,317 tests stayed green through it**, and
+so did two live browser runs, because nothing asserted on a count that nothing displayed prominently.
+
+Fixed by giving the translator the *same* `TurnStats` the SDK transport's translator carries rather
+than a second one, and folding `_tool_calls` onto it — one counter, so a HUD and a `streamComplete`
+payload cannot disagree about one turn. Three tests pin it, written as the *caller* writes it, and
+they fail against the old code.
+
+The near-miss worth naming: this is the second defect in phase 8 that inheritance produced and tests
+did not see. The first was `denormalise_args` preferring the last alias; both are shared code meeting
+a second transport whose shape nobody re-checked.
+
+### The second half, met the same day
+
+```
+[probe] ours     : c7090b73-a6c8-4161-aced-8199294f6fec
+[probe] stranger : be99f0b7-7113-44bb-b55f-b30052d6364b
+[probe] the gate decided 9 call(s), for conversation(s) {'c7090b73-…'}
+[probe] PASS: 9 call(s) of ours gated, 0 of the stranger's, its work completed, 13.2s of overlap
+```
+
+**Phase 8's exit criterion is met in both halves.** A second `agy` session belonging to the user, in
+its own workspace, ran concurrently with one this host owned and was **never intercepted** — while a
+gate installed in the user's *global* `hooks.json` was firing on every tool call on the machine. That
+is what `conversationId` isolation was designed for and the first time it has been shown working
+against a real second session rather than in a unit test.
+
+Four assertions, and three of them exist because the fourth is easy to pass by accident:
+
+- the stranger's `conversationId` never appears in the gate's record — the one that matters;
+- the stranger's own work **completed**, so it was not stalled on
+  `hook.SOCKET_TIMEOUT_SECONDS` or denied;
+- **our own** calls did reach the gate in the same window — the control, without which the whole
+  thing passes trivially against a hook that is not installed at all;
+- the two turns **overlapped in time**, measured at 13.2s, since sequential sessions would not test
+  concurrency and the registry is keyed per conversation precisely so simultaneous ones can disagree
+  about ownership.
+
+The only change between the three failing runs and this one was **seeding the stranger's file and
+asking for an edit** instead of asking it to create one, which is the strongest evidence for the
+reading in the section above: nothing about the gate, the workspace or the trust list moved.
+
+### The probes, as they now stand
+
+`scripts/probe_agy_write.py` was also run end to end, and it is the regression harness the browser
+demonstration cannot be:
+
+```
+[probe] dialog: run_command ×11 [exec] → allow
+[probe] dialog: replace_file_content [write] → allow
+[probe] tools the gate decided: run_command ×11, view_file, replace_file_content, view_file
+[probe] diff: target.txt  +1 −1  new_file=False
+[probe] PASS: replace_file_content was presented as a write with a real diff (+1 −1), approved,
+        and the edit landed
+```
+
+Worth reading the two lists against each other: `view_file` appears in what the **gate decided** and
+never in what raised a **dialog**. That is `pre_verdict` narrowing reads away from the modal — the
+defect fixed on the SDK path on 2026-09-03, which this transport could have reintroduced and did not.
+
+It asserts four things rather than the obvious one, because the obvious one is weak: that a dialog was
+raised at all; that it was classified `write` and not `exec`; that it carried a real diff with both
+texts and a non-zero count each side; and only then that the file changed. The first three would pass
+against a gate that rendered beautifully and dropped the answer; the fourth alone would pass against a
+gate that never ran.
+
+### What phase 8 still owes, as of this entry
+
+- The `agy` version in the specs is stale: these runs were against **1.1.26**, where
+  [`sdk-surface.md`](sdk-surface.md) records 1.1.22 and 1.1.25.
+- A smaller one, seen in the same log: the browser called `get_context_usage` on the `agy` engine and
+  the router refused it — *"the panel should be hidden rather than calling this"*. The capability
+  descriptor says hidden and something asked anyway.
