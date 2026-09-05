@@ -77,6 +77,52 @@ looked.
 
 ## AG-R-3 — A write can be silently diverted out of the repo
 
+> ## **CAUSE FOUND AND FIXED, 2026-09-05. It was ours.**
+>
+> **`agy` was never diverting anything.** The agent was writing exactly where it intended, in the only
+> directory it had ever been in: `agy`'s own scratch directory. AIC⚡DC spawned the subprocess with
+> `cwd=repo_root` and never told `agy` that the repository was its **workspace**, so every tool call
+> on this transport ran outside the user's tree.
+>
+> Measured with everything else held constant — same parent directory, same `git init`, same seed
+> file, same process cwd, one flag different:
+>
+> | | tool `pwd` | `git rev-parse --show-toplevel` |
+> |---|---|---|
+> | `--add-dir <repo>` | `/tmp/temp/wstest` | `/tmp/temp/wstest` |
+> | *(control, no flag)* | `~/.gemini/antigravity-cli/scratch` | `fatal: not a git repository` |
+>
+> And `agy`'s system prompt closes the loop — it instructs the model that when it needs somewhere to
+> write it may use *"the default project directory at `~/.gemini/antigravity-cli/scratch`"* and should
+> *"recommend the user set that subdirectory as the active workspace."* Which is what it did, every
+> time, correctly, given where it was standing.
+>
+> **The fix is one flag**: `AgySession._argv()` passes `--add-dir <repo_root>`. The same prompt that
+> produced `scratch/hello_world/hello.py` now produces `hello_world.py` in the repository, with
+> nothing written to scratch — and it goes through `write_to_file` and the permission dialog rather
+> than the shell heredoc the model previously fell back to when `write_to_file` was refused.
+>
+> **How it was found is the lesson.** Not by a probe. A user asked *"create a helloworld script"* in a
+> new repository, then *"create it in this repo"*, and the model's own second turn ran `pwd` —
+> answering `~/.gemini/antigravity-cli/scratch` — then found the `agy` pid, read `/proc/<pid>/cwd`,
+> and wrote the file where it had been asked. **The agent diagnosed this, in its transcript, and the
+> transcript was readable because phase 5 had shipped the mirror a few hours earlier.**
+>
+> Four causes were guessed at over six days and each disproven by measurement: `trustedWorkspaces`,
+> git-ness, workspace emptiness, concurrency. The fifth was never guessed because it was not a
+> property of `agy` at all. The correlation the register had settled on — *"a create lands when the
+> turn also touches an existing file, and diverts when creating is all the turn does"* — is explained
+> exactly: a turn that edits an existing file is given a path and writes there; a turn that only
+> creates picks its own location, which was the scratch directory.
+>
+> **What stays.** The detection in `agy/steps.py` and the sentinel-write tripwire both stay: they
+> assert an outcome and cost nothing, and a future release of somebody else's CLI can reintroduce this
+> shape by another route. What is retired is the *theory* — this entry no longer needs one.
+>
+> The original assessment and the four dead ends are kept below, because the way they were wrong is
+> the reusable part: every one of them was a hypothesis about the other product, and the variable
+> nobody controlled for was in our own argv.
+
 **Severity: high. Likelihood: certain on an unconfigured machine — observed 2026-08-30.**
 
 Measured, not hypothesised: `agy` was asked to create a file in the current directory and wrote it to

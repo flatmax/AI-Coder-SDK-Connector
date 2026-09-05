@@ -366,3 +366,67 @@ class TestItSurvivesAChattySubprocess:
                 return out
 
         assert "streamComplete" in names(asyncio.run(go()))
+
+
+class TestTheAgentIsInTheRepository:
+    """``--add-dir``, and why ``cwd=`` was never enough.
+
+    Measured 2026-09-05 with everything else held constant — same parent
+    directory, same ``git init``, same process cwd, one flag different::
+
+        with --add-dir : pwd -> /tmp/temp/wstest
+                         git rev-parse -> /tmp/temp/wstest
+        without        : pwd -> ~/.gemini/antigravity-cli/scratch
+                         git rev-parse -> fatal: not a git repository
+
+    So without it the agent is not in the user's repository at all, and
+    `agy`'s system prompt tells it that when it needs somewhere to write,
+    its scratch directory is the place. Asked to "create a helloworld
+    script" it did precisely that and reported success with a `file://`
+    link — the symptom recorded as
+    [AG-R-3](../specs5/plan-ag/risks.md#ag-r-3) for six days, under four
+    causes that were each disproven.
+    """
+
+    def test_the_repo_is_added_to_the_workspace(self, tmp_path):
+        from aic_dc.agy.session import AgySession
+
+        argv = AgySession(tmp_path, gate=object())._argv()
+        assert "--add-dir" in argv
+        assert argv[argv.index("--add-dir") + 1] == str(tmp_path)
+
+    def test_exactly_one_directory(self, tmp_path):
+        """AG-10: one repo root, one working tree.
+
+        The flag is repeatable and must not be repeated — the diff viewer
+        and the file tree both resolve paths against a single root, and a
+        second would hand them paths they cannot place.
+        """
+        from aic_dc.agy.session import AgySession
+
+        argv = AgySession(tmp_path, gate=object())._argv()
+        assert argv.count("--add-dir") == 1
+
+    def test_it_is_the_resolved_repo_root(self, tmp_path):
+        """A relative path would be resolved against `agy`'s cwd, not ours."""
+        from aic_dc.agy.session import AgySession
+
+        argv = AgySession(str(tmp_path), gate=object())._argv()
+        target = argv[argv.index("--add-dir") + 1]
+        assert Path(target).is_absolute()
+
+    def test_the_process_cwd_is_the_repo_too(self, tmp_path):
+        """Both, not either.
+
+        `cwd=` is what makes a relative path the user types resolve, and
+        `--add-dir` is what puts the *agent* there. Setting only the first
+        is what shipped, and it looked correct in every log — `agy` even
+        reported `workspaceDirs=[/tmp/temp]` while running its tools
+        somewhere else entirely.
+        """
+        import inspect
+
+        from aic_dc.agy import session as mod
+
+        source = inspect.getsource(mod.AgySession.start)
+        assert "cwd=str(self._repo_root)" in source

@@ -3403,3 +3403,102 @@ the new one. **Not verified on an actual PyInstaller artefact**, because buildin
 multi-minute per-platform job; the argument-parser rejection was demonstrated against the console
 script, which runs the same parser. The release workflow builds the binary on every release and the
 gate is installed by a click rather than at startup, so the first real artefact will exercise it.
+
+---
+
+## AG-R-3, solved: the agent was never in the repository (2026-09-05)
+
+Six days, four disproven causes, and the answer was one missing flag in our own argv.
+
+### What the user saw
+
+A new git repository, a fresh `agy` session, and *"create a helloworld script"*. The chat said the
+file was created and linked it. The file was not in the repository.
+
+### What the transcript said
+
+**Readable because phase 5 shipped the mirror a few hours earlier** — this is its first real user
+session, and the first time this failure has been inspectable after the fact rather than reconstructed:
+
+```
+[user]        create a helloworld script
+[tool_use]    write_to_file {"TargetFile": ".../antigravity-cli/scratch/hello_world/hello.py"}
+[tool_result] err=True                      ← "not a valid artifact path"
+[tool_use]    run_command   cat << 'EOF' > .../scratch/hello_world/hello.py
+[tool_result] err=False
+```
+
+The model never aimed at the repository. `write_to_file` was refused, so it fell back to a shell
+heredoc — which is also why no permission dialog rendered a diff for it.
+
+Then the second turn, which is where the model diagnosed the bug on our behalf:
+
+```
+[user]        create it in this repo
+[tool_use]    run_command  pwd && git rev-parse --show-toplevel
+[tool_result] /home/flatmax/.gemini/antigravity-cli/scratch
+```
+
+It went on to find the `agy` pid, read `/proc/<pid>/cwd` → `/tmp/temp`, check git there, and write the
+file where it had been asked. The agent worked out where it was supposed to be by inspecting its own
+process.
+
+### The cause
+
+`AgySession` spawned `agy` with `cwd=repo_root` and **never told it the repository was its
+workspace**. `agy`'s own log even reported `workspaceDirs=[/tmp/temp]` while running its tools in the
+scratch directory — which is exactly the kind of near-miss that keeps a wrong theory alive.
+
+Its system prompt completes the picture: when the model needs somewhere to write, it is told it may
+use *"the default project directory at `~/.gemini/antigravity-cli/scratch`"* and should *"recommend
+the user set that subdirectory as the active workspace."* Given where it was standing, the model
+behaved correctly every time.
+
+### The measurement
+
+Everything held constant — same parent directory, same `git init`, same seed file, same process cwd —
+one flag different:
+
+| | tool `pwd` | `git rev-parse --show-toplevel` |
+|---|---|---|
+| `--add-dir <repo>` | `/tmp/temp/wstest` | `/tmp/temp/wstest` |
+| *(control)* | `~/.gemini/antigravity-cli/scratch` | `fatal: not a git repository` |
+
+The control was run second and deliberately, because the treatment alone would have been a
+correlation with the directory rather than with the flag.
+
+### The fix, and the same prompt afterwards
+
+`AgySession._argv()` passes `--add-dir <repo_root>` — one directory, never a list, because AG-10 is
+one repo root and one working tree and the diff viewer resolves against a single one.
+
+Driven live through the shipping adapter with the identical prompt that failed:
+
+```
+[probe] dialog: write_to_file -> allow
+[probe] dialog: run_command  -> allow
+=== what landed in the repo:  hello_world.py
+=== anything new in scratch?  (nothing)
+```
+
+The file lands in the repository, nothing goes to scratch, and the write arrives as `write_to_file`
+through the permission dialog instead of as a heredoc that no diff could be rendered from. That last
+part is a second defect this fixes without having been aimed at it: the gate was reviewing the
+model's *workaround* rather than its intent.
+
+### Why four hypotheses missed it
+
+`trustedWorkspaces`, git-ness, workspace emptiness, concurrency. Every one was a hypothesis about
+`agy`'s behaviour, and each was disproven by a probe that changed something about the *workspace*. The
+variable nobody controlled for was in our own argv, and it was invisible from inside the failing
+system: `agy` reported the right `workspaceDirs`, the process had the right `cwd`, and the file was
+genuinely written where the tool call said it would be.
+
+The register's last correlation — *"a create lands when the turn also touches an existing file, and
+diverts when creating is all the turn does"* — is now explained rather than replaced. A turn that
+edits an existing file is handed a path and writes there. A turn that only creates picks its own
+location, and its own location was the scratch directory.
+
+**The reusable lesson**: when four hypotheses about somebody else's product have all failed, the
+variable is probably in the argument list you control. And the thing that finally exposed it was a
+user asking an ordinary question, in a transcript that had only been readable for a few hours.

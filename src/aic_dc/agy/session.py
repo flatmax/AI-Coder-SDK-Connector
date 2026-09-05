@@ -138,6 +138,37 @@ class AgySession:
             "--print=",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
+            # **The repository, as the agent's own working directory.**
+            #
+            # Not decoration, and `cwd=` on the subprocess is not a
+            # substitute for it. Measured 2026-09-05 with everything else
+            # held constant — same parent, same `git init`, same process
+            # cwd — the tools run in different places:
+            #
+            #     with --add-dir : pwd -> /tmp/temp/wstest
+            #     without        : pwd -> ~/.gemini/antigravity-cli/scratch
+            #                      git rev-parse -> not a git repository
+            #
+            # So without this the agent is not in the user's repo at all.
+            # It is in `agy`'s own scratch directory, with no git and no
+            # project — and `agy`'s system prompt tells it that when it
+            # needs somewhere to write, that scratch directory is the
+            # place, and to suggest the user adopt it as their workspace.
+            # Which is exactly what it did: asked to "create a helloworld
+            # script" it wrote one to `scratch/hello_world/hello.py` and
+            # reported success with a file:// link, because that *was* its
+            # working directory.
+            #
+            # That is [AG-R-3](../../../specs5/plan-ag/risks.md#ag-r-3),
+            # whose cause had been guessed at four times — trustedWorkspaces,
+            # git-ness, emptiness, concurrency — and disproven four times.
+            # Nothing was ever diverted. The agent wrote where it was, and
+            # nobody had told it where to be.
+            #
+            # One directory, never a list: AG-10 is one repo root and one
+            # working tree, and a second would give the diff viewer and
+            # the file tree paths they cannot resolve.
+            "--add-dir", str(self._repo_root),
             # The gate is the only gate on this transport. agy's own
             # headless layer auto-denies rather than asking, and would
             # refuse the turn before our hook ever ran. This removes a gate
