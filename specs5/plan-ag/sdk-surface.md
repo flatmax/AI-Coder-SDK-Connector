@@ -774,7 +774,7 @@ field worth surfacing.
 | USD cost — turn footer, session cost, `max_budget_usd` | `cost.py` from `total_cost_usd` | **None.** Tokens only. |
 | Live context-window usage / compaction thresholds | `get_context_usage`, Context tab | **None.** `compaction_threshold` is write-only. |
 | Slash-command palette | `list_commands`, `SLASH_ROUTES` (`service.py:97-130`) | **Near-total loss.** `BuiltinSlashCommandName` has exactly one member: `PLAN` (`types.py:1455-1463`). |
-| "Always allow" / persisted rules | `updated_permissions` | **None.** AIC⚡DC would own persistence. |
+| "Always allow" / persisted rules | `updated_permissions` | **None from the engine** — but see [AG-15](decisions.md#ag-15): AIC⚡DC owns the store, `derive_suggested_rules` already works with no CLI suggestions, and `pre_verdict` is the seam that consults it. Absent in the shipped dialog as of 2026-09-05. |
 | Amend input before approving | `updated_input` | **Recoverable** via `HookResult.modified_args`, not via `policy.ask_user`. |
 | In-process MCP bridge | `create_sdk_mcp_server` | **Does not port**, and is **obsolete** — pass callables instead. |
 | Repo-local verbatim session mirror | `session_store.py` over the SDK's `SessionStore` protocol | **No protocol counterpart.** Antigravity owns an opaque `save_dir`. Rebuild as a step observer. |

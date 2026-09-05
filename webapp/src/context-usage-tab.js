@@ -1060,6 +1060,14 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
 
   /** The breakdown and its health decoration; errors land in `_error`. */
   async _refreshBreakdown() {
+    // This one had **no** capability guard at all, where
+    // `_fetchAccountUsage` and `_fetchMcpStatus` beside it both did — so on
+    // an engine that cannot report a context window it called the one
+    // method the router is guaranteed to refuse, every refresh. The two
+    // neighbours having guards is what made the omission invisible on
+    // review.
+    await loadCapabilities(this);
+    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
     try {
       // Both calls go out together: they are separate control requests
       // to the same subprocess, and this one is slow enough (3-14s) that
@@ -1130,6 +1138,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // list, and an empty list here would render as "you have no limits"
     // — a reading, where the truth is that this engine takes no such
     // measurement (AG-9).
+    // Awaited — see app-shell/state-fetch.js. The optimistic loading
+    // default is for render paths; a fetch that slips through it is an
+    // RPC the router has already refused.
+    await loadCapabilities(this);
     if (!supports(SURFACE.ACCOUNT_RATE_LIMITS)) return;
     try {
       const res = await withRpcTimeout(
@@ -1161,6 +1173,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // one `EngineHealth.mcp` got wrong before it was deleted: an engine
     // that serves no MCP inventory must not be reported as an engine
     // with zero servers.
+    await loadCapabilities(this);
     if (!supports(SURFACE.MCP_SERVER_INVENTORY)) return null;
     try {
       const res = await withRpcTimeout(

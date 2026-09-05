@@ -23,26 +23,31 @@ failure it prevents is a green test that means nothing.
 ``/tmp`` itself is typically *not* trusted while ``/tmp/temp`` is, so the
 distinction is easy to miss by one path component.
 
-A trusted root is necessary and, on its own, was not sufficient
+A trusted root is necessary and, on its own, is not sufficient
 -----------------------------------------------------------------
 Three runs on 2026-09-05 diverted a write from inside ``/tmp/temp``, which
 *is* trusted — twice from a plain directory and once from a
 git-initialised one, so repository-ness is not the difference either.
 
-What every diverted file ever recorded has in common is that it was
-**newly created**: ``probe.txt`` (2026-08-30), ``hello.txt`` and
-``test_hello_world.py`` (2026-09-04), and ``stranger.txt`` on all three
-runs here. Against that, the same day's browser demonstration *edited an
-existing* file at ``/tmp/temp/agy-write-test/target.txt`` and the edit
-landed on disk.
+**The trigger is not known, and two plausible explanations have already
+been wrong.** They are recorded because each looked well-supported:
 
-So the working reading is that a bare filename handed to ``write_to_file``
-is not resolved against the session's cwd, and "untrusted workspace" was
-only ever the most visible correlate. **This is a reading of the evidence,
-not a measured rule** — it has not been isolated with a controlled probe,
-and the alternative that creation and modification are trusted differently
-is not excluded. Probes that need a write to land should therefore **seed
-the file and ask for an edit**, which is what the two live probes do.
+1. *"The workspace is untrusted."* Moving to a trusted root did not stop
+   it.
+2. *"Newly-created files divert; edits land."* This fitted every
+   observation at the time — every diverted file on record was a creation
+   (``probe.txt``, ``hello.txt``, ``test_hello_world.py``, ``stranger.txt``)
+   and the write that landed was an edit. It was then tested directly by
+   ``probe_agy_write_target.py``, one session and one turn asked to do
+   both, and **both landed**. Disproven.
+
+So a probe cannot currently predict whether a given write will land. What
+it *can* do is fail loudly and unambiguously when one does not, which is
+what :func:`probe_root` and the callers' scratch-directory hints are for.
+
+The largest untested difference between the runs that diverted and those
+that did not is that the diverting ones had **two ``agy`` processes running
+concurrently**. That is a candidate, not a finding.
 """
 
 from __future__ import annotations

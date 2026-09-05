@@ -767,9 +767,22 @@ export class UsageHud extends RpcMixin(LitElement) {
     // This also stops a poll the server would refuse: the router raises
     // `UnsupportedOnThisEngine` for a method whose surface is hidden, so
     // without this the HUD would retry a guaranteed error every tick.
-    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
+    // Awaited, not just consulted: `supports()` answers "yes" until the
+    // descriptor lands, so the first poll after connect would otherwise go
+    // out on an engine that refuses it. Shared, cached promise — see the
+    // note in app-shell/state-fetch.js.
+    //
+    // **The flag is claimed before the await, and that ordering is the
+    // point.** `_fetchInFlight` is checked at the top of this method, so an
+    // await between the check and the set lets two overlapping polls both
+    // pass the guard and issue two control requests — which is exactly what
+    // this flag exists to prevent, and what
+    // `collapses overlapping fetches into one control request` caught when
+    // the await was first put above it.
     this._fetchInFlight = true;
     try {
+      await loadCapabilities(this);
+      if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
       // Bounded: a reply dropped by a reconnecting socket would
       // otherwise leave `_fetchInFlight` set forever and blank this
       // section for the rest of the session. See withRpcTimeout.

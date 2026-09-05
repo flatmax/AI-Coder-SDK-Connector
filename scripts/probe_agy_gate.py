@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _agy_probe_support import probe_root  # noqa: E402
 from aic_dc.agy import registry  # noqa: E402
+from aic_dc.antigravity.permissions import TOOL_CLASSES  # noqa: E402
 
 GLOBAL_HOOKS = Path.home() / ".gemini" / "config" / "hooks.json"
 ORIGINAL = "ORIGINAL_TEXT"

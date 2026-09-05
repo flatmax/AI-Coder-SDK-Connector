@@ -83,22 +83,29 @@ Measured, not hypothesised: `agy` was asked to create a file in the current dire
 `~/.gemini/antigravity-cli/scratch/` instead, reporting success with a `file://` link. The cause was
 `trustedWorkspaces` in the CLI's `settings.json` not listing the working directory.
 
-> **Amended 2026-09-05 — the stated cause is in doubt, the risk is not.** Three phase-8 probe runs
-> diverted a write from **inside** `/tmp/temp`, which *is* in `trustedWorkspaces`, on `agy` 1.1.26. A
-> git-initialised workspace diverted identically, ruling out the second guess. What every diverted
-> file on record has in common is that it was **newly created** — `probe.txt`, `hello.txt`,
-> `test_hello_world.py`, `stranger.txt` — while a same-day browser run *edited an existing* file under
-> the same trusted root and the edit landed on disk. So a bare filename given to `write_to_file` may
-> simply not resolve against the session's cwd, with the trust list the most visible correlate rather
-> than the mechanism. **Not isolated with a controlled probe**, so this replaces one unverified
-> explanation with a better-supported one rather than with a fact.
+> **Amended 2026-09-05 — the stated cause is wrong, the risk is not, and the real trigger is
+> unknown.** Three phase-8 probe runs diverted a write from **inside** `/tmp/temp`, which *is* in
+> `trustedWorkspaces`, on `agy` 1.1.26. So the trust list is not a sufficient explanation.
 >
-> The consequence for the mitigation is the point: AG-10's health check asserts *"the repo root is a
-> workspace the engine will write to"*, and a check phrased against the trust list would pass on a
-> machine where creation still diverts. It should assert the **outcome** — write a sentinel and stat
-> it where it was asked for — and it should cover **creation specifically**, which is the case every
-> observed diversion shares. See
-> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-the-first-two-explanations-were-wrong).
+> Two replacement explanations were then tried and **both failed**, which is why this amendment offers
+> none:
+>
+> 1. *"The workspace must be a git repository."* `git init`-ing the probe workspace changed nothing.
+> 2. *"Newly-created files divert; edits land."* This fitted every observation available — every
+>    diverted file on record was a creation (`probe.txt`, `hello.txt`, `test_hello_world.py`,
+>    `stranger.txt`), and the write that landed was an edit. `scripts/probe_agy_write_target.py` was
+>    written to isolate exactly that: **one session, one workspace, one turn**, asked to edit an
+>    existing file *and* create a new one. **Both landed.** Disproven.
+>
+> The largest untested difference between the diverting runs and the clean ones is that the diverting
+> ones had **two `agy` processes running concurrently**. That is a candidate and nothing more.
+>
+> **The consequence for the mitigation is the point, and it survives not knowing the cause.** AG-10's
+> health check asserts *"the repo root is a workspace the engine will write to"*. A check phrased
+> against `trustedWorkspaces` would pass on a machine where writes divert anyway — measured here. It
+> must assert the **outcome**: write a sentinel, then `stat` it at the path it was asked for. That is
+> the one form of the check that does not depend on a mechanism nobody has pinned down. See
+> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-two-explanations-that-were-wrong).
 
 **Why it bites:** it does not error. The agent believes it succeeded, the transcript says it
 succeeded, and the file tree and diff viewer — both rooted at the repo — show nothing. The user's

@@ -106,6 +106,28 @@ class AgySession:
     def started(self) -> bool:
         return self._proc is not None
 
+    @property
+    def read_only(self) -> bool:
+        """Whether this session can change the working tree.
+
+        Part of the session contract ``AntigravityService`` reads —
+        ``get_current_state`` and ``get_engine_status`` both do
+        ``session.read_only``, and ``AgyService`` inherits both. Without
+        this property **the whole app-state load failed** for an `agy`
+        session with ``'AgySession' object has no attribute 'read_only'``,
+        which is not a degraded panel but a browser that cannot render the
+        engine at all. Reported from a live run on 2026-09-05.
+
+        The answer is the gate, which is this transport's counterpart to
+        the SDK's decide hook: ``agy`` runs with
+        ``--dangerously-skip-permissions``, so its own headless layer is
+        not gating anything and :class:`~aic_dc.agy.gate_server.AgyGateServer`
+        is the only thing between the model and the tree. No gate would
+        mean no way to review a write, and the honest answer then is that
+        this session must not make them.
+        """
+        return self._gate is None
+
     def _argv(self) -> list[str]:
         argv = [
             self._executable,

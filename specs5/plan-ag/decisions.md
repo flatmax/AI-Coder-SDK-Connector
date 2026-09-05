@@ -804,3 +804,88 @@ engine and so shaping the engine around a one-shot call. Phase 3 has since built
 the consultant now **consumes** it — `Conversation.receive_steps()` through the existing
 `StepTranslator` — rather than growing its own. The direction of dependency is the whole difference,
 and the tripwire changes to match.
+
+---
+
+## AG-15 — "Always allow" is buildable on Antigravity, and AIC⚡DC owns the rule **(user)**
+
+**The dialog on this engine offers `Allow once` and `Deny`, and nothing else.** Reported from a live
+`agy` turn on 2026-09-05 against a `run_command`: the Claude dialog for the same call offers a third
+control that stops the question being asked again, and this one does not. That is a real difference
+in what the two engines cost a user to operate, not a cosmetic one — a session where every repeat of
+the same call raises a modal trains exactly the click-through habit [R-12](../3-engine/risks.md#r-12)
+is about.
+
+### Why it is absent today, which was a correct decision on a wrong assumption
+
+`antigravity/permissions.py` sends `"suggested_rules": []` with the reasoning recorded inline:
+*"Antigravity has no `updated_permissions` at any layer, so there is no rule for the dialog to offer
+to persist — and an offer it cannot keep is worse than no offer."*
+
+Both halves are true. The gap is that they only rule out **borrowing the engine's** rule store, and
+[`sdk-surface.md`](sdk-surface.md#what-does-not-translate) already says what follows from that in the
+same breath — *"**None.** AIC⚡DC would own persistence"*. Nobody had gone back to that sentence.
+
+### The decision
+
+**AIC⚡DC owns the rule store for this engine, and the gate consults it before the broker.** Not the
+engine, not `agy`'s `settings.json`, and not a second dialog concept.
+
+Three facts make this cheap rather than speculative:
+
+1. **The derivation already exists and is not Claude-specific.**
+   `claude_code.permissions.derive_suggested_rules` takes `(repo_root, tool_name, tool_input,
+   tool_class, suggestions)` and, when `suggestions` is empty — which is *always* on this engine —
+   falls through to its own derivation: command prefixes for `exec`, path rules for `read`/`write`.
+   That fallback is the whole of what is needed here. It is a function, not a method on the Claude
+   session.
+2. **There is already a seam in front of the dialog.** `AntigravityPermissionGate.pre_verdict` is
+   consulted before `broker.can_use_tool` on both transports — it is what keeps reads out of the
+   modal, and `AgyGateServer.decide` already calls it. A persisted allow-rule is a second thing it
+   answers, in the same place, for both transports at once.
+3. **The decision plumbing exists end to end.** `allow_always` is already in `_DECISION_ACTIONS` and
+   `ALLOW_ACTIONS`, `_normalise` already returns a `rule`, and the browser already renders the control
+   when `suggested_rules` is non-empty. **No webapp change should be needed**, and if one turns out to
+   be, the rule shape has been got wrong — the same test AG-13 set itself.
+
+So the work is: derive the rules, put them on the payload, persist the chosen one, and consult it.
+
+### What is deliberately *not* adopted
+
+- **`agy`'s `permissions.allow` in its own `settings.json`.**
+  [`sdk-surface.md` § Defence in depth](sdk-surface.md#defence-in-depth-is-available) records that
+  these entries exist and that a hook `deny` still overrides them. They are the wrong vehicle twice
+  over: the adapter runs with `--dangerously-skip-permissions`, so that layer is not consulted at all,
+  and writing rules into a file belonging to Google's CLI would put our state in another product's
+  configuration — the thing [`agy/install.py`](../../src/aic_dc/agy/install.py) is careful about for
+  the hook and should not stop being careful about for rules.
+- **A rule store per transport.** One engine, two transports ([AG-3](#ag-3)) — a rule the user set on
+  the subscription that stops applying when they switch to the API key would be an engine-name
+  distinction leaking into behaviour, which is [AG-R-4](risks.md#ag-r-4).
+- **`allow_mode` on this engine, for now.** The mode-escalation control is a larger grant than the
+  call on screen and Antigravity's `permission_mode` handling is not yet exercised against it.
+  `suggested_mode` stays `None` until the rule path is proven.
+
+### The trap this will hit, named in advance because it has been hit twice
+
+`derive_suggested_rules` reaches `_RULE_TOOL_FOR_PATHS` and `_WRITE_PATH_KEYS`, and **both are keyed
+on Claude tool names.** `agy` sends `replace_file_content` and `write_to_file`, the SDK sends
+`edit_file` and `create_file`. Unmapped, the path branch produces **no rule at all**, so the control
+would simply not appear for file edits — the quiet, safe-direction failure this phase has now met
+twice ([§ The tool *names* differ](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03),
+and the read-class hole in `probe_agy_gate.py` on 2026-09-05).
+
+The fix is the one already chosen for `TOOL_CLASSES`: **merge**, so one table holds both vocabularies
+and cannot disagree with itself.
+
+### Exit criterion
+
+A repeated `run_command` on the `agy` transport is approved once with **"always allow"**, the rule
+survives a **server restart**, and the same command in a later session raises **no dialog** — while a
+*different* command still does. Proven by a test that asserts the second call never reaches
+`broker.can_use_tool`, not merely that the dialog was dismissed.
+
+**And a denial tripwire, because this is the one feature whose bug is an ungated write:** a persisted
+rule must never widen beyond what was shown. A rule derived from `rm -rf build/` must not match
+`rm -rf /`, and a path rule for `src/a.py` must not match `src/`. The stored form is asserted, not the
+dialog's label.

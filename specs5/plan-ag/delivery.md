@@ -2425,6 +2425,32 @@ The near-miss worth naming: this is the second defect in phase 8 that inheritanc
 did not see. The first was `denormalise_args` preferring the last alias; both are shared code meeting
 a second transport whose shape nobody re-checked.
 
+### And a third, an hour later, which was not survivable
+
+The user restarted onto the fixed build and the browser could not render the engine at all:
+
+```
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_current_state() failed:
+      'AgySession' object has no attribute 'read_only'          ← three times in one page load
+```
+
+`AntigravityService.get_current_state` and `get_engine_status` both do `session.read_only`,
+`AgyService` inherits both, and **neither catches** — so where the `stats` bug cost a prompt count,
+this cost the whole app-state load.
+
+`AntigravitySession.read_only` is `self._decide_hook is None`. The `agy` counterpart is the gate: this
+transport runs with `--dangerously-skip-permissions`, so `AgyGateServer` is the only thing between the
+model and the tree, and no gate would mean no way to review a write. `AgySession.read_only` is
+therefore `self._gate is None`.
+
+**Three instances of one pattern is a pattern, so the test is written against the pattern.** Inheriting
+a method also inherits every attribute that method reads off objects the subclass supplies, and
+nothing enumerated those: `tests/test_agy_service.py` now pins the *session contract*
+(`conversation_id`, `started`, `read_only`) as a list, asserts the SDK session answers the same names
+so a new one is noticed here, and calls `get_current_state` to reproduce the reported symptom exactly.
+The adapter test above it pins which **methods** exist, which is a different contract and is why it
+stayed green through all three.
+
 ### The second half, met the same day
 
 ```
@@ -2483,6 +2509,76 @@ gate that never ran.
 
 - The `agy` version in the specs is stale: these runs were against **1.1.26**, where
   [`sdk-surface.md`](sdk-surface.md) records 1.1.22 and 1.1.25.
-- A smaller one, seen in the same log: the browser called `get_context_usage` on the `agy` engine and
-  the router refused it — *"the panel should be hidden rather than calling this"*. The capability
-  descriptor says hidden and something asked anyway.
+- ~~The webapp calls surfaces the descriptor says are hidden.~~ **Fixed the same day — see
+  [§ The startup wall of ERROR](#the-startup-wall-of-error-and-the-two-reasons-for-it-2026-09-05).**
+- **The dialog offers no "always allow"**, reported from a live `run_command` on 2026-09-05. Now
+  [AG-15](decisions.md#ag-15) and phase 9: the reasoning that put `suggested_rules: []` there was
+  sound about the *engine* and stopped one sentence short of the conclusion `sdk-surface.md` had
+  already drawn — that AIC⚡DC owns persistence. `derive_suggested_rules`' no-suggestions fallback and
+  `pre_verdict` are the two pieces that make it small.
+
+---
+
+## The startup wall of ERROR, and the two reasons for it (2026-09-05)
+
+Every page load on the `agy` engine produced this, in the server log and the browser console:
+
+```
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_context_usage() failed: … the agy engine cannot feed …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_context_usage() failed: …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_mcp_status()     failed: …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_account_usage(False) failed: …
+```
+
+Every one of those refusals is **correct**. The router raises `UnsupportedOnThisEngine` rather than
+answering with a synthesised empty value, which is [AG-9](decisions.md#ag-9--engine-specific-surfaces-are-hidden-never-stubbed)
+working exactly as designed — and each message says so in its own words: *"the panel should be hidden
+rather than calling this."* Something asked anyway, four times, before the user had done anything.
+
+**Why it is worth fixing despite being cosmetic.** It is the same failure AG-9's amendment already
+named once: hiding twelve surfaces at once reads as a broken build rather than as a different engine.
+A wall of red `ERROR` at startup reads worse. It also trains the reader to ignore the log, on the one
+transport whose gate is the only thing between a model and the working tree.
+
+### Two causes, and the second is the interesting one
+
+**1. One fetch had no guard at all.** `_refreshBreakdown` called `get_context_usage` with no
+capability check, while `_fetchAccountUsage` and `_fetchMcpStatus` on either side of it both had one.
+Neighbours that do the right thing are good camouflage for one that does not.
+
+**2. The guards that existed were consulted but not awaited**, and that is a genuine design seam
+rather than an oversight. `supports()` answers **true while the descriptor is still loading**, and
+`engine-capabilities.js` argues for that default at length: answering `false` would hide every panel
+for one RPC round trip on the shipped engine, and a panel that draws and then hides costs nothing
+because every reader already tolerates absent data.
+
+That reasoning is sound **for a render path and only for a render path.** A fetch is not undoable by a
+later re-render: by the time the descriptor arrives, the request has gone and been refused. The same
+file even anticipates the consequence — *"a fetch that slips through during load fails loudly instead
+of drawing a synthesised zero"* — and treats it as acceptable. Four red lines per page load is what
+"acceptable" turned out to look like.
+
+So the rule is now explicit: **render paths consult the descriptor, fetch paths await it.**
+`await loadCapabilities(host)` before the guard, which costs at most one round trip for the whole page
+because the promise is cached and shared.
+
+### A bug introduced while fixing it, caught by an existing test
+
+The first version put the `await` between `_fetchContext`'s in-flight check and the line that sets the
+flag — so two overlapping polls could both pass the guard and issue two control requests, which is
+precisely what the flag exists to prevent. `collapses overlapping fetches into one control request`
+failed, and the ordering rule is now stated where the flag is claimed: **claim, then await.**
+
+### What the tests assert, and why it has to be the handler
+
+`188` context-tab tests failed on the first run for a duller reason: the shared `settle()` helper loops
+a fixed number of microtasks for "the whole chain", and the chain grew a hop. Raised from 6 to 12,
+with the reason recorded there rather than left as a bumped constant.
+
+The four new tests assert **the RPC handler was never called**, which is the only thing that separates
+a guarded fetch from a refused one — both leave the panel empty, so asserting on the panel would pass
+either way. Three cover the missing guard with the descriptor pre-loaded; the fourth leaves it unloaded
+and lets the component fetch it over RPC, which is the only one that catches the unawaited guard, and
+is what a real page load does. Both fail against the old code. A fifth is the control: with the surface
+supported, the call still goes out — without it, a guard that refused everything would pass the rest
+while breaking the shipped engine.

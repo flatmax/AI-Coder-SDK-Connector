@@ -403,3 +403,81 @@ class TestATurn:
         data = json.loads((tmp_path / "hooks.json").read_text(encoding="utf-8"))
         command = data[install.HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
         assert sys.executable in command
+
+
+class TestTheSessionContractTheServiceReadsThrough:
+    """`AgyService` inherits methods that reach into the *session*.
+
+    The adapter test above pins the RPC surface — which methods exist.
+    That is not the same contract as the one broken here three times, and
+    the difference is why a green suite shipped all three: inheriting a
+    method also inherits every attribute that method reads off objects the
+    subclass supplies, and nothing enumerates those.
+
+    The live failures, in order:
+
+    - `translator.stats` — every permission dialog raised `AttributeError`
+      in `_note_permission_prompt`; caught and logged, so only the turn's
+      prompt count was lost.
+    - `session.read_only` — `get_current_state` and `get_engine_status`
+      both read it, and neither catches, so the **whole app-state load
+      failed** and the browser could not render the engine at all.
+
+    So these assert on the attributes rather than on the methods. Adding a
+    `session.foo` to an inherited method still needs a test, but this makes
+    the common case fail here rather than in somebody's browser.
+    """
+
+    #: Read off `self._session` by `AntigravityService.get_current_state`
+    #: and `get_engine_status`, which `AgyService` inherits unchanged.
+    SESSION_ATTRS = ("conversation_id", "started", "read_only")
+
+    def _session(self, tmp_path):
+        from aic_dc.agy.gate_server import AgyGateServer
+        from aic_dc.agy.session import AgySession
+        from aic_dc.antigravity.permissions import AntigravityPermissionGate
+
+        async def broadcast(_event):
+            return None
+
+        gate = AntigravityPermissionGate(tmp_path, broadcast=broadcast)
+        return AgySession(
+            tmp_path,
+            gate=AgyGateServer(tmp_path / "g.sock", gate=gate),
+        )
+
+    @pytest.mark.parametrize("attr", SESSION_ATTRS)
+    def test_the_session_answers_what_the_inherited_methods_read(
+        self, tmp_path, attr
+    ):
+        assert hasattr(self._session(tmp_path), attr)
+
+    def test_a_gated_session_is_not_read_only(self, tmp_path):
+        # The gate is this transport's decide hook: agy runs with
+        # --dangerously-skip-permissions, so it is the only thing between
+        # the model and the working tree.
+        assert self._session(tmp_path).read_only is False
+
+    def test_the_sdk_transports_session_answers_the_same_names(self):
+        # If the SDK session grows an attribute the shared methods read,
+        # this is where the agy one is noticed to be missing it.
+        from aic_dc.antigravity.session import AntigravitySession
+
+        for attr in self.SESSION_ATTRS:
+            assert hasattr(AntigravitySession, attr), attr
+
+    @pytest.mark.asyncio
+    async def test_get_current_state_does_not_raise_with_a_session_attached(
+        self, tmp_path
+    ):
+        """The user's actual symptom, reproduced.
+
+        `'AgySession' object has no attribute 'read_only'` surfaced as
+        `RPC ClaudeCodeService.get_current_state() failed`, three times in
+        one page load.
+        """
+        svc = service(tmp_path)
+        svc._session = self._session(tmp_path)
+        state = await svc.get_current_state()
+        assert state["read_only"] is False
+        assert state["connected"] is False
