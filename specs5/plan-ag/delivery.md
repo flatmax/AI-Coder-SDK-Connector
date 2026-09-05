@@ -2916,3 +2916,62 @@ The reason this is fit to stop on rather than chase further: **the mitigation do
 The detection added earlier fires on the *outcome* — target missing here, file of that name in the
 scratch directory — so it catches a diverted write whatever produced it. Every hour spent on the cause
 buys a better explanation of a failure that is already caught and named.
+
+---
+
+## Phase 5 groundwork — the mirror's contract, measured (2026-09-05)
+
+Phase 5 says the repo-local mirror is *"rebuilt as a step observer rather than as a store
+implementation, since there is no `SessionStore` protocol to implement"*. That says what to build and
+leaves open the thing that decides whether it is cheap or expensive: **what shape must an entry be for
+the existing history stack to render it?**
+
+Read out of the code rather than guessed, and then measured against the real parser.
+
+### The stack is already engine-agnostic, and that is most of the phase
+
+Three facts, each of which removes work:
+
+- **`RepoSessionStore(root)` takes its root as a constructor argument.** AG-1's *"its own store root, so
+  a record written by one engine cannot be handed to the other"* is therefore a parameter, not a
+  second implementation.
+- **The store is format-agnostic.** `_append_sync` writes dicts as JSONL and dedups on `uuid`;
+  `_parse_lines` reads them back as dicts. It has no opinion about what is in them.
+- **`history.load_session(store, session_id, directory, …)` takes the store as an argument**, as do the
+  other helpers. Nothing in the history stack is bound to the Claude adapter — the same arrangement
+  that already lets this engine import `claude_code.review` and `claude_code.commit`.
+
+So the mirror is: write entries the parser accepts, into a second store root, and delegate all seven
+RPC methods to helpers that already exist.
+
+### What the parser requires, and the two hours it took to find out
+
+`load_session` hands the entries to the SDK's own `get_session_messages_from_store`, so the entry
+shape is the CLI's, not ours. Four guesses at it all parsed **zero** messages, including — puzzlingly
+— a **verbatim entry copied out of the real mirror**.
+
+The bisect that settled it: a real entry parses down to `{uuid, type, message}` and **nothing else is
+required**. `parentUuid`, `sessionId`, `cwd`, `isSidechain`, `userType`, `version`, `gitBranch`,
+`permissionMode`, `promptId`, `promptSource`, `entrypoint` and `timestamp` are all droppable.
+
+The reason every synthetic attempt failed was in the argument, not the entry:
+
+```
+session id "sess-abc"                        → 0 messages parsed
+session id "a3f1…-uuid"                      → 2 messages parsed
+```
+
+**The session id must be a UUID.** Nothing says so, nothing raises, and an empty list is the same
+answer the parser gives for a session that does not exist — so a mirror keyed on `agy-1` or
+`antigravity-session-3` would have written perfectly good transcripts that the history browser
+reported as missing, with no error anywhere.
+
+**This is free for us, and worth stating because it constrains a decision nobody would have thought
+to make.** Both transports already produce UUIDs: `agy`'s `init` frame carries
+`conversation_id: cd4edb7f-6de3-468f-9815-e76b310a920a`, and the SDK's `Conversation.conversation_id`
+is the same shape. **The mirror must key on the engine's own conversation id and must never invent a
+readable one** — which is also what makes `resume_session` possible, since that id is exactly what
+`agy --conversation <id>` and `SessionContinuationMode.RESUME` take.
+
+Recorded here rather than in a comment because it is a measured property of somebody else's parser on
+an SDK that moves, and because the failure it causes is silent in both directions.
