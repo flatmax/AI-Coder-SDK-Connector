@@ -55,7 +55,7 @@ from typing import Any
 
 from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.steps import TurnStats
-from aic_dc.claude_code.messages import Event
+from aic_dc.claude_code.messages import Event, files_written_by
 
 logger = logging.getLogger(__name__)
 
@@ -294,16 +294,30 @@ class AgyTranslator:
         # completed call with none is complete with no output — never left
         # pending, which would spin forever.
         output = info.get("output")
+        failed = state == "ERROR"
+        # Which files this call put on disk, from the one shared table
+        # (`claude_code.messages.files_written_by`, which knows all three
+        # engines' tool vocabularies). This payload had no such key at
+        # all, so the file tree never learned that a turn had written
+        # anything: the user's write landed and the picker went on showing
+        # the repository as it was before. Empty on a failed call — a
+        # refused write modified nothing, and saying otherwise would make
+        # the tree reload for a file that is not there.
+        files = [] if failed else files_written_by(name, params)
+        for path in files:
+            if path not in self.stats.files_modified:
+                self.stats.files_modified.append(path)
         return events + [
             Event(
                 "toolResult",
                 {
                     "tool_use_id": call_id,
                     "name": name,
-                    "status": "error" if state == "ERROR" else "success",
+                    "status": "error" if failed else "success",
                     "content": "" if output is None else str(output),
                     "duration_ms": _duration_ms(step.get("duration_seconds")),
                     "agent_id": None,
+                    "files_modified": files,
                 },
             )
         ]
@@ -363,7 +377,11 @@ class AgyTranslator:
                     "request_id": self.request_id,
                     "stop_reason": stop_reason,
                     "num_tool_calls": self.stats.tool_calls,
-                    "files_modified": [],
+                    # The turn's files, accumulated per call rather than
+                    # left empty: the footer lists what the turn touched,
+                    # and an empty list said "nothing" for every turn that
+                    # wrote something.
+                    "files_modified": list(self.stats.files_modified),
                     "usage": self.turn_usage(),
                     "response_text": self.response_text(),
                 },

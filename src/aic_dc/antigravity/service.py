@@ -1376,6 +1376,43 @@ class AntigravityService:
         await self._sync_mirror()
         await self._mirror.note_prompt(message, request_id=request_id)
 
+    async def _note_disk_writes(self, event: Event) -> None:
+        """Tell every browser the tree changed, when a call wrote to it.
+
+        The file picker reloads on a ``filesModified`` push and on nothing
+        else. On the Claude engine that push comes from a ``PostToolUse``
+        hook (``claude_code/hooks.py``); this engine has no such hook, and
+        for a while it had no push either — so an approved write landed on
+        disk and the tree went on showing the repository as it was before.
+        Reported by a user watching the picker not move after a write they
+        had just allowed.
+
+        Derived from the event rather than from a second walk of the
+        filesystem: a completed tool result already names the files it
+        wrote, from the same shared table
+        (:func:`~aic_dc.claude_code.messages.files_written_by`) the turn
+        footer and the browsed transcript use. One source, three readers.
+
+        **Session-wide, never turn-scoped.** The tree is the same tree for
+        every watching browser, including ones that did not send this
+        turn — the same reasoning the Claude hook records.
+
+        What this deliberately does *not* do is re-index the symbol table.
+        The Claude hook does both, and the second half needs a
+        ``Reindexer`` this engine has never had; a stale symbol index
+        degrades autocomplete, where a stale tree hides the agent's work.
+        Named here so the gap is a known one rather than an oversight.
+        """
+        if event.name != "toolResult" or self._event_callback is None:
+            return
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        paths = payload.get("files_modified")
+        if not isinstance(paths, list) or not paths:
+            return
+        await self._dispatch(
+            Event("filesModified", list(paths), turn_scoped=False), None
+        )
+
     async def _broadcast(self, event: Event) -> None:
         await self._dispatch(event, None)
 
@@ -1404,6 +1441,7 @@ class AntigravityService:
         """
         if self._mirror is not None:
             await self._mirror.observe(event)
+        await self._note_disk_writes(event)
         if self._event_callback is None:
             return
         args: tuple[Any, ...] = (

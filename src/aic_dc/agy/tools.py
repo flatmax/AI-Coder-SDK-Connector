@@ -133,6 +133,53 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
     "find_by_name": {"SearchDirectory": "file_path"},
 }
 
+#: Guidance prepended to every ``agy`` prompt, and the one thing it says.
+#:
+#: **Why a prompt and not a config setting: there is no setting.** ``agy``
+#: declares ``write_to_file`` as *"Use this tool to create new files"* with
+#: ``ArtifactMetadata`` documented as *"Required when creating an artifact
+#: file"* — optional, by its own schema, for anything else. But the
+#: *presence* of that field is what makes ``agy`` classify the write as an
+#: artifact and enforce ``artifacts must be in
+#: <appDataDir>/brain/<conversation-id>/``. So a model that helpfully fills
+#: it in for an ordinary source file gets::
+#:
+#:     invalid tool call error (invalid_args) /tmp/temp/hello.py is not a
+#:     valid artifact path; artifacts must be in .../brain/<id>/
+#:
+#: and the failure happens inside ``agy`` while *declaring permissions*,
+#: which is **before** any hook runs — so AIC⚡DC's gate never sees the
+#: call and cannot amend it. ``settings.json`` has no artifact toggle.
+#:
+#: What it costs is not one failed call. The model routes around the
+#: broken tool with a ``run_command`` heredoc ([AG-R-11](../../../specs5/plan-ag/risks.md#ag-r-11)
+#: exactly, on a third mechanism), and then the write is a *shell command*:
+#: the dialog renders a command instead of a diff, ``files_written_by``
+#: cannot attribute the file (CC-18), and [AG-15](../../../specs5/plan-ag/decisions.md#ag-15)'s
+#: "always allow" is structurally useless because an exact-match rule on a
+#: heredoc containing the whole file can never match twice.
+#:
+#: Confirmed by ``agy`` itself on 2026-09-05, asked to create a file with
+#: the field omitted: it succeeded, the file landed in the workspace, and
+#: it named the presence of ``ArtifactMetadata`` as the trigger and
+#: clarifying the system instructions as the host's remedy.
+#:
+#: Wrapped in the framing tag the transcript reader already strips
+#: (``history.strip_framing``), so it reaches the model and not the user.
+WRITE_GUIDANCE = (
+    "<aic-dc-ui-context>\n"
+    "When creating or editing files in this workspace, call write_to_file "
+    "WITHOUT the ArtifactMetadata field. That field marks the call as an "
+    "artifact document, and agy then rejects any TargetFile outside its "
+    "brain/<conversation-id> directory — so including it makes the write "
+    "fail and is not recoverable by retrying. Supply ArtifactMetadata only "
+    "for a genuine artifact written into that directory. Prefer "
+    "write_to_file and replace_file_content over shell redirection for "
+    "file changes, so the edit can be reviewed as a diff.\n"
+    "</aic-dc-ui-context>\n\n"
+)
+
+
 #: How the diff builder should reason about an ``agy`` write.
 #:
 #: ``build_diff_payload`` switches on a *Claude* tool name to decide

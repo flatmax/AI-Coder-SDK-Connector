@@ -3502,3 +3502,154 @@ location, and its own location was the scratch directory.
 **The reusable lesson**: when four hypotheses about somebody else's product have all failed, the
 variable is probably in the argument list you control. And the thing that finally exposed it was a
 user asking an ordinary question, in a transcript that had only been readable for a few hours.
+
+---
+
+## The write that could not be a write, and the field that caused it (2026-09-05)
+
+Reported by a user immediately after `--add-dir` landed: the agent now had the right repository, targeted
+the right path, *asked for permission*, was allowed — and still did not use the write tool. It fell
+back to `cat`. Their three questions were the diagnosis: **why did it fail after I allowed it, why
+`cat`, and why is the dialog not the one Claude shows?**
+
+### The failure
+
+```
+declaring permissions: cortex tool write_to_file: convert tool call for permissions:
+model output error: invalid tool call error (invalid_args)
+/tmp/temp/hello.py is not a valid artifact path;
+artifacts must be in ~/.gemini/antigravity-cli/brain/<conversation-id>/
+```
+
+`agy` declares `write_to_file` as *"Use this tool to create new files"*, with `ArtifactMetadata`
+described as *"Required when creating an artifact file"* — optional, by its own schema, for anything
+else. The model supplied it anyway, for an ordinary source file:
+
+```json
+{"ArtifactMetadata":{…,"UserFacing":true},"CodeContent":"…","TargetFile":"/tmp/temp/hello.py"}
+```
+
+**The presence of that field is what makes `agy` classify the write as an artifact** and enforce the
+brain-directory path rule. One optional field, and the call is unrecoverable.
+
+### Three consequences, and the user found all three
+
+1. **"I allowed it and it still failed."** The permission they granted was not the one that failed.
+   The refusal happens inside `agy` while *declaring permissions* — **before any hook runs** — so the
+   gate never saw the call and could not have amended it. `HookResult.modified_args` is the SDK
+   transport's; this hook protocol is allow/deny only.
+2. **"It reverted to `cat`."** [AG-R-11](risks.md#ag-r-11) again, on a third mechanism: a refused write
+   re-attempted through the shell. Except this refusal came from `agy` itself rather than from a
+   permission decision, so nothing in the register predicted it.
+3. **"The dialog seemed different."** Because it was no longer a write. A `run_command` dialog renders
+   a *command*, not a diff; `files_written_by` cannot attribute the file (CC-18); and
+   [AG-15](decisions.md#ag-15)'s "always allow" is structurally useless against it, because rules match
+   exactly and a heredoc embeds the whole file — a rule granted for one could never match again.
+
+So the sharp statement is: **edits already behaved like Claude on this transport** — phase 8 watched
+`replace_file_content` render `+1 −1`, get allowed by a click and land — **and creates did not**,
+because `agy` rejected its own create tool.
+
+### Asked the engine, and it answered
+
+There is no `settings.json` toggle, so `agy` itself was asked to create a file with the field omitted
+and explain the rule. It did both:
+
+> *"The presence of the `ArtifactMetadata` parameter object in the tool arguments tells the tool
+> implementation that the target file is intended to be an artifact. When provided, the tool validates
+> that `TargetFile` resides strictly within the session artifact directory."*
+
+and its recommended host-side remedy was to *"clarify in system prompts that `ArtifactMetadata` must
+only be supplied when writing artifact documents"*. The probe file landed in the workspace.
+
+### The fix, and what it is not
+
+`agy_tools.WRITE_GUIDANCE`, prepended to every `agy` prompt: name the field, say that including it
+makes the write fail unrecoverably, and prefer the file tools over shell redirection.
+
+**It is a workaround on a model behaviour, and it is recorded as one.** It is not a config setting,
+because there is none; it is not a gate fix, because the failure precedes the gate. What makes it
+tolerable is that the guidance is *specific* — "prefer `write_to_file`" would have changed nothing,
+since the model was already choosing it. What it could not know is that one optional field made the
+call impossible.
+
+Wrapped in `<aic-dc-ui-context>`, the framing block `history.strip_framing` already removes, so the
+model reads it and the user does not. The framed text is what the mirror stores, deliberately: a
+transcript's job is to say what the model was actually sent.
+
+### Verified live, on the prompt that had failed twice
+
+```
+[probe] dialog: write_to_file class=write diff=True -> allow
+[probe] dialog: run_command   class=exec  diff=False -> allow   ← `python3 hello.py`, verifying it
+[tool_result] is_error=False
+=== repo: hello.py
+```
+
+`write_to_file` succeeded, gated as a **write** with a **real diff**, and the file landed in the
+repository. Rendered back through `history.load_session`, the user's first message reads
+`'please create a hello world script'` — the guidance stripped.
+
+The remaining `run_command` is the model running the script it just wrote, which is the behaviour we
+want reviewed rather than suppressed.
+
+### Worth reporting upstream
+
+`agy`'s own schema says the field is optional and its permission converter treats it as decisive.
+Every host driving `agy` headlessly will hit this, and none of them can see why: the error is only in
+the conversation database, not on the wire, and the model's fallback makes the turn *look* successful.
+
+---
+
+## The picker that never learned about a write (2026-09-05)
+
+Reported straight after the write path started working: the file landed, the diff dialog was right,
+and **the file tree went on showing the repository as it was before**.
+
+### How the tree learns anything
+
+One push and nothing else. `files-tab.js` reloads on a `files-modified` DOM event, which
+`app-shell/index.js` dispatches from the `filesModified` server push. On the Claude engine that push
+comes from a **`PostToolUse` hook** (`claude_code/hooks.py`): it extracts the written paths, queues a
+re-index, and broadcasts them session-wide.
+
+**Neither Antigravity transport has that hook, and neither had a substitute.** Every approved write on
+this engine has been invisible to the picker since the transport shipped. It was never noticed because
+the writes that had been demonstrated were probes asserting on `stat`, not humans watching a tree.
+
+### Two gaps, one behind the other
+
+`AgyTranslator`'s `toolResult` carried **no `files_modified` key at all** — so even a consumer that
+wanted to know could not. `StepTranslator` had computed it since phase 3, which is why this looked
+like one transport's bug and was really two:
+
+1. `agy`'s pump now derives the written files from the shared table
+   (`claude_code.messages.files_written_by`, which since phase 5 knows all three engines'
+   vocabularies) and puts them on the result, and accumulates them into `stats.files_modified` so the
+   turn footer stops reporting an empty list for every turn that wrote something.
+2. `AntigravityService._dispatch` — the seam both transports funnel through, and where the phase-5
+   mirror already observes — pushes `filesModified` when a result names files.
+
+Derived from the event rather than from a second walk of the filesystem: the result already names
+what it wrote, from the same table the turn footer and the browsed transcript read. One source, three
+readers.
+
+**Session-wide, never turn-scoped**, for the reason the Claude hook records: the tree is the same tree
+for every watching browser, including ones that did not send the turn. A turn-scoped push carries the
+request id first and would be dropped by exactly the clients most likely to be watching rather than
+driving.
+
+### Verified live
+
+```
+[probe] PUSH filesModified -> ['/tmp/temp/tree/notes.md']
+[probe] toolResult files_modified=['/tmp/temp/tree/notes.md']
+=== repo: notes.md
+```
+
+### The half deliberately not built
+
+The Claude hook does two things and this does one. It also queues a **symbol re-index**, which needs a
+`Reindexer` this engine has never had. Left out rather than half-done, and named here so it is a known
+gap: a stale symbol index degrades autocomplete, where a stale tree hides the agent's work from the
+person who approved it. The second is the one worth fixing first.

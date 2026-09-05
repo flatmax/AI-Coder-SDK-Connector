@@ -785,3 +785,65 @@ class TestResume:
     def test_resume_needs_an_id(self, tmp_path):
         answer = asyncio.run(mirroring_service(tmp_path).resume_session(""))
         assert answer["reason"] == "no_session_id"
+
+
+class TestTheFileTreeLearnsAboutWrites:
+    """The picker reloads on ``filesModified`` and on nothing else.
+
+    On the Claude engine that push comes from a ``PostToolUse`` hook. This
+    engine has no such hook and had no push, so an approved write landed
+    on disk and the tree went on showing the repository as it was before —
+    reported by a user watching the picker not move after a write they had
+    just allowed.
+    """
+
+    def _pushes(self, tmp_path, payload):
+        pushed = []
+
+        async def callback(name, *args):
+            pushed.append((name, args))
+
+        svc = service(tmp_path, event_callback=callback)
+        asyncio.run(svc._dispatch(Event("toolResult", payload), "r1"))
+        return pushed
+
+    def test_a_write_tells_every_browser(self, tmp_path):
+        pushed = self._pushes(
+            tmp_path,
+            {"tool_use_id": "t1", "status": "ok", "files_modified": ["/r/a.py"]},
+        )
+        assert ("filesModified", (["/r/a.py"],)) in pushed
+
+    def test_it_is_session_wide_not_turn_scoped(self, tmp_path):
+        """The tree is the same tree for every watching browser.
+
+        A turn-scoped push carries the request id first, and a browser
+        that did not send this turn would drop it — leaving exactly the
+        clients most likely to be *watching* rather than driving with a
+        stale tree.
+        """
+        pushed = self._pushes(
+            tmp_path,
+            {"tool_use_id": "t1", "status": "ok", "files_modified": ["/r/a.py"]},
+        )
+        name, args = next(p for p in pushed if p[0] == "filesModified")
+        assert args == (["/r/a.py"],), "a request id leaked into a session event"
+
+    def test_a_result_that_wrote_nothing_pushes_nothing(self, tmp_path):
+        """A read must not make the tree reload on every tool call."""
+        pushed = self._pushes(
+            tmp_path, {"tool_use_id": "t1", "status": "ok", "files_modified": []}
+        )
+        assert not any(name == "filesModified" for name, _ in pushed)
+
+    def test_a_payload_without_the_key_is_not_an_error(self, tmp_path):
+        pushed = self._pushes(tmp_path, {"tool_use_id": "t1", "status": "ok"})
+        assert not any(name == "filesModified" for name, _ in pushed)
+
+    def test_the_tool_result_itself_still_goes_out(self, tmp_path):
+        """The push is *additional*, never a replacement."""
+        pushed = self._pushes(
+            tmp_path,
+            {"tool_use_id": "t1", "status": "ok", "files_modified": ["/r/a.py"]},
+        )
+        assert any(name == "toolResult" for name, _ in pushed)

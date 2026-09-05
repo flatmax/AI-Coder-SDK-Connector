@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from aic_dc.agy import install
+from aic_dc.agy import tools as agy_tools
 from aic_dc.agy.gate_server import AgyGateServer
 from aic_dc.agy.session import AgyNotInstalledError, AgySession
 from aic_dc.agy.steps import AgyTranslator
@@ -378,8 +379,19 @@ class AgyService(AntigravityService):
         self._turns[request_id] = translator
         import asyncio
 
+        # Framed here rather than in `_run_agy_turn`, so the *framed* text
+        # is what the mirror records: `agy_tools.WRITE_GUIDANCE` explains
+        # why the guidance is needed at all, and the transcript's job is to
+        # say what the model was actually sent. `history.strip_framing`
+        # removes the block again at read time, so the user sees what they
+        # typed.
         task = asyncio.create_task(
-            self._run_agy_turn(session, translator, request_id, message),
+            self._run_agy_turn(
+                session,
+                translator,
+                request_id,
+                agy_tools.WRITE_GUIDANCE + message,
+            ),
             name=f"agy-turn-{request_id}",
         )
         self._turn_tasks.add(task)

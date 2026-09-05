@@ -531,3 +531,71 @@ class TestTheSessionContractTheServiceReadsThrough:
         state = await svc.get_current_state()
         assert state["read_only"] is False
         assert state["connected"] is False
+
+
+class TestTheWriteGuidance:
+    """Why every `agy` prompt carries a framing block.
+
+    `agy` declares `write_to_file` as *"Use this tool to create new
+    files"*, with `ArtifactMetadata` documented as *"Required when
+    creating an artifact file"* — optional, by its own schema, for
+    anything else. The *presence* of that field is nonetheless what makes
+    it enforce `artifacts must be in <appDataDir>/brain/<conversation-id>`,
+    so a model that fills it in for an ordinary source file gets its write
+    refused. Measured twice against a real session on 2026-09-05, and
+    confirmed by `agy` itself when asked.
+
+    The refusal is not recoverable in-flight: it happens inside `agy`
+    while *declaring permissions*, which is before any hook runs, so the
+    gate never sees the call and cannot amend it. The model then routes
+    around the broken tool with a `run_command` heredoc — and a write that
+    arrives as a shell command has no diff to render, no attributable
+    file, and no rule "always allow" could ever match twice.
+    """
+
+    def test_every_prompt_carries_it(self, tmp_path, monkeypatch):
+        from aic_dc.agy import tools as agy_tools
+
+        sent = {}
+
+        async def fake_run(self, session, translator, request_id, message):
+            sent["message"] = message
+
+        monkeypatch.setattr(AgyService, "_run_agy_turn", fake_run)
+
+        async def fake_ensure(self):
+            return object()
+
+        monkeypatch.setattr(AgyService, "_ensure_session", fake_ensure)
+        svc = service(tmp_path)
+        asyncio.run(svc.chat_streaming("r1", "please create a hello world script"))
+        asyncio.run(asyncio.sleep(0))
+        assert sent["message"].startswith(agy_tools.WRITE_GUIDANCE)
+        assert sent["message"].endswith("please create a hello world script")
+
+    def test_it_names_the_field_that_causes_the_failure(self):
+        """The guidance has to be specific to work.
+
+        "Prefer write_to_file" alone does not help — the model was already
+        preferring it. What it could not know is that one optional field
+        makes the call unrecoverable.
+        """
+        from aic_dc.agy import tools as agy_tools
+
+        assert "ArtifactMetadata" in agy_tools.WRITE_GUIDANCE
+        assert "write_to_file" in agy_tools.WRITE_GUIDANCE
+
+    def test_it_is_wrapped_in_the_framing_the_reader_strips(self):
+        """It is for the model, not for the user.
+
+        `history.strip_framing` removes this block at read time, so a
+        browsed transcript shows what the user typed. Storing the framed
+        text and stripping it on the way out is deliberate — the
+        transcript's job is to say what the model was actually sent.
+        """
+        from aic_dc.claude_code.history import strip_framing
+
+        from aic_dc.agy import tools as agy_tools
+
+        framed = agy_tools.WRITE_GUIDANCE + "do the thing"
+        assert strip_framing(framed) == "do the thing"
