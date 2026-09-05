@@ -2582,3 +2582,98 @@ and lets the component fetch it over RPC, which is the only one that catches the
 is what a real page load does. Both fail against the old code. A fifth is the control: with the surface
 supported, the call still goes out — without it, a guard that refused everything would pass the rest
 while breaking the shipped engine.
+
+---
+
+## Phase 9 — "Always allow" on Antigravity (2026-09-05)
+
+[AG-15](decisions.md#ag-15) built. The dialog on this engine offered `Allow once` and `Deny`; it now
+offers a standing rule, and AIC⚡DC keeps it.
+
+**What landed.** `src/aic_dc/antigravity/rules.py` — the store, the matching, and the derivation —
+plus three wiring points in `permissions.py`: `_build_payload` offers the rules, an overridden
+`_to_result` persists the chosen one, and `pre_verdict` consults the store before anything else.
+
+### The prediction AG-15 made about the webapp was almost exactly right
+
+It said **no webapp change**, and that if one were needed the rule shape had been got wrong. One line
+was needed and it is not the shape: `DESTINATION_FILES` gained a label for the new destination, because
+the dialog renders "→ *where the rule went*" beside the rule and every existing entry names a
+`.claude/` settings file. Reusing `localSettings` would have been a plain lie about where the grant
+lives. The shape, the `allow_always` action and the control that sends it all already existed.
+
+### Matching is exact, and that is the whole of the safety argument
+
+The only bug this feature can have is an ungated write, so every choice is the narrow one:
+
+| Rule | Matches | Does **not** match |
+|---|---|---|
+| `rm -rf build/` (literal) | that command | `rm -rf /`, `rm -rf build`, `rm -rf build/ /` |
+| `git push:*` (prefix) | `git push`, `git push --force origin main` | `git pushover`, `git pull` |
+| `src/a.py` (path) | that file, that tool | `src/`, `src/b.py`, `src/a.py.bak` |
+
+**Path rules are keyed on the tool name, not the tool class**, and that is the conservative choice
+rather than the convenient one. Both transports have two tools that write a file — `edit_file`/
+`create_file`, `replace_file_content`/`write_to_file` — so matching by class would let a grant the user
+made *by reading a diff* also permit a whole-file overwrite they never saw. The cost is one extra
+prompt the first time the agent reaches for the other tool. Being too narrow costs a click; being too
+wide is an unreviewed write.
+
+**The matching data rides on the rule dict** under `aic_dc_match`, written when the rule is derived and
+the resolved path and parsed command are already in hand. The alternative is re-deriving them from
+`rule_content` at match time — unescaping gitignore metacharacters and re-parsing a prefix pattern in
+the one code path whose failure mode is granting more than was clicked. The dialog echoes the dict back
+verbatim, so the extra key survives the round trip for free.
+
+`derive_rules` is **not** `claude_code.permissions.derive_suggested_rules`, and the reason is the trap
+AG-15 named in advance: that function's path branch is keyed on `_RULE_TOOL_FOR_PATHS`, a table of
+Claude tool names mapping to the tool the *Claude CLI* consults — both halves meaningless here. Fed an
+Antigravity name it returns nothing, so the control would silently never appear for file edits. What
+*is* reused is `_derived_command_rules` and `_derived_path_rule`: the prefix-splitting and the
+gitignore escaping encode decisions that took a CLI-behaviour investigation to get right, and a second
+copy would drift toward granting more.
+
+### `pre_verdict` checks the store before `ALWAYS_ASK`, deliberately
+
+Every write tool lives in `ALWAYS_ASK`, so checking the store after it would mean the one control the
+user pressed had no effect on the calls they pressed it for. Safe **only** because matching is exact.
+
+One ordering inside that: a **denied read still beats a standing allow**. Shift-clicking a file in the
+tree is a later and more specific instruction than a rule granted earlier, and the newer one holds.
+
+### A test restated rather than deleted
+
+`test_always_allow_degrades_to_allow_once_by_construction` asserted `suggested_rules == []`, on the
+rule that *an offer the engine cannot keep is worse than no offer*. That rule still holds; its premise
+no longer does. It is now `test_always_allow_is_offered_and_kept`, and it asserts **both** halves —
+offered, and written — because asserting only the first would pass on exactly the silent discard the
+original existed to prevent. Same treatment as `ALWAYS_ASK is MUTATING_TOOLS` when the seam widened.
+
+### Two mistakes made while building it, both of a kind
+
+**The tests wrote standing permission grants into the developer's real `~/.config/aic-dc`.** Three
+entries, keyed by `pytest` temp directories, in the actual store — noticed only by opening the file by
+hand. `store_path` takes its config directory rather than resolving one, exactly as
+`agy.registry.registry_dir` does, and the fixture now defaults it under `tmp_path`; every one of the
+five gate constructions across the suite passes it.
+
+That is the **second** time in two days a helper written to make this work safe reached into the
+user's own files — the probe helper picked `culvertHouse`, a real project, as a scratch root. Both had
+the same shape: a default that is correct in production and catastrophic in a test, with nothing
+forcing the test to say which it wanted.
+
+**And lifting `_config_dir` to the base class had to be done, not merely tidied.** `AgyService`
+defined it as a `@property`; the SDK transport now needs the same value, so it moved to
+`AntigravityService.__init__` as an attribute. A property on a subclass **shadows** a base-class
+instance attribute, so leaving the override in place would have raised
+`AttributeError: property has no setter` on every `AgyService` construction — not a style point.
+
+### What is not built
+
+`suggested_mode` stays `None`. Mode escalation grants far more than the call on screen, and AG-15 puts
+it behind the rule path being proven first.
+
+**The exit criterion is met at the seam and not yet in a browser.** `pre_verdict` returning
+`(True, "")` is what "no dialog" means, and that is asserted — the call never reaches
+`broker.can_use_tool`. Persistence across a restart is asserted at the store. What has not been done is
+a live turn where a human clicks *always allow* and the next identical call passes silently.

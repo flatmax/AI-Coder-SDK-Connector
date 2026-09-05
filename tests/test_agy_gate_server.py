@@ -71,7 +71,8 @@ def wired(tmp_path):
     """A gate, a server on a real socket, and a claimed conversation."""
     recorder = Recorder()
     gate = AntigravityPermissionGate(
-        tmp_path, broadcast=recorder, localhost_available=lambda: True
+        tmp_path, broadcast=recorder, localhost_available=lambda: True,
+        config_dir=tmp_path / "cfg",
     )
     config_dir = tmp_path / "cfg"
     server = AgyGateServer(

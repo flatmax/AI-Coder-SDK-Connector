@@ -440,7 +440,9 @@ class TestTheSessionContractTheServiceReadsThrough:
         async def broadcast(_event):
             return None
 
-        gate = AntigravityPermissionGate(tmp_path, broadcast=broadcast)
+        gate = AntigravityPermissionGate(
+            tmp_path, broadcast=broadcast, config_dir=tmp_path / 'cfg'
+        )
         return AgySession(
             tmp_path,
             gate=AgyGateServer(tmp_path / "g.sock", gate=gate),

@@ -87,7 +87,8 @@ def wired(tmp_path):
         events.append(event)
 
     gate = AntigravityPermissionGate(
-        tmp_path, broadcast=broadcast, localhost_available=lambda: True
+        tmp_path, broadcast=broadcast, localhost_available=lambda: True,
+        config_dir=tmp_path / "cfg",
     )
     config_dir = tmp_path / "cfg"
     server = AgyGateServer(tmp_path / "g.sock", gate=gate, config_dir=config_dir)
@@ -147,7 +148,8 @@ class TestTheHandshake:
         server = AgyGateServer(
             tmp_path / "g.sock",
             gate=AntigravityPermissionGate(
-                tmp_path, broadcast=lambda e: None, localhost_available=lambda: True
+                tmp_path, broadcast=lambda e: None, localhost_available=lambda: True,
+                config_dir=tmp_path / "cfg",
             ),
             config_dir=tmp_path / "cfg",
         )

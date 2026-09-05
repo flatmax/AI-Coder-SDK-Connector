@@ -85,6 +85,7 @@ from typing import Any
 
 from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.options import MUTATING_TOOLS
+from aic_dc.antigravity.rules import RuleStore, derive_rules
 from aic_dc.claude_code.permissions import (
     GATED_BY_DEFAULT,
     PermissionBroker,
@@ -277,6 +278,42 @@ class _AntigravityBroker(PermissionBroker):
     moment to lift the table lookup into a strategy — not before.
     """
 
+    def __init__(self, *args: Any, rules: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._rules = rules
+
+    def _to_result(self, pending: Any, decision: dict[str, Any]) -> Any:
+        """Allow or deny, and **persist** an always-allow rule ourselves.
+
+        The base implementation turns ``decision['rule']`` into a
+        ``PermissionUpdate`` on ``updated_permissions``, which is the Claude
+        CLI's channel for writing a rule into a settings file. Antigravity
+        has no such channel at any layer — that is
+        [AG-5](../../../specs5/plan-ag/decisions.md#ag-5)'s one unrecovered
+        capability — and on the ``agy`` transport the field is not even read:
+        `gate_server.decide` looks at ``message`` and ``updated_input`` only.
+
+        So the rule is written here instead, and then **dropped from the
+        result**. Leaving it on would send the engine a permission update it
+        cannot apply, which is worse than useless: it would look like the
+        rule had been handled by something other than us.
+        """
+        rule = decision.get("rule")
+        if rule and self._rules is not None:
+            if self._rules.add(rule):
+                logger.info(
+                    "Antigravity standing rule stored: %s", rule.get("label")
+                )
+            else:
+                # Allowed once regardless — the user answered the question
+                # in front of them and the call should proceed. What is lost
+                # is the standing part, and it is said out loud rather than
+                # left to look like it worked.
+                logger.warning(
+                    "Antigravity standing rule NOT stored: %s", rule.get("label")
+                )
+        return super()._to_result(pending, {**decision, "rule": None})
+
     async def _build_payload(
         self,
         *,
@@ -338,11 +375,15 @@ class _AntigravityBroker(PermissionBroker):
             "title": None,
             "display_name": None,
             "description": normalised.get("description") or None,
-            # Empty rather than absent. Antigravity has no
-            # `updated_permissions` at any layer, so there is no rule for
-            # the dialog to offer to persist — and an offer it cannot keep
-            # is worse than no offer. See this module's docstring.
-            "suggested_rules": [],
+            # AG-15. This was `[]`, on reasoning that was right about the
+            # engine and stopped one step short: Antigravity has no
+            # `updated_permissions` at any layer, so there is nothing to
+            # persist a rule *into* — and therefore AIC⚡DC keeps it, which
+            # `sdk-surface.md` had already said in the same breath. The
+            # offer is one we can now keep, so it is made.
+            "suggested_rules": derive_rules(
+                self._repo_root, tool_name, normalised, tool_class
+            ),
             "suggested_mode": None,
             "diff": diff,
             "command": (
@@ -410,9 +451,16 @@ class AntigravityPermissionGate:
         note_prompt: Any = None,
         localhost_available: Any = None,
         denied_reads: Any = None,
+        config_dir: Any = None,
         **broker_kwargs: Any,
     ) -> None:
         self._repo_root = Path(repo_root)
+        # AG-15. One store per repository, shared by both transports —
+        # a grant the user made on the subscription must not evaporate when
+        # they switch to the API key, since it is one engine reached two
+        # ways. Held on the gate rather than the broker because
+        # `pre_verdict` is the reader and it is the gate's.
+        self.rules = RuleStore(repo_root, config_dir=config_dir)
         # A callable, not a list. The user toggles these from the file tree
         # mid-session, and a snapshot taken when the gate was built would
         # go stale at the first shift-click.
@@ -422,8 +470,27 @@ class AntigravityPermissionGate:
             broadcast=broadcast,
             note_prompt=note_prompt,
             localhost_available=localhost_available,
+            rules=self.rules,
             **broker_kwargs,
         )
+
+    def _absolute_path(self, args: dict[str, Any]) -> str | None:
+        """The call's path, resolved, in the form a stored rule holds.
+
+        Both sides of the comparison go through the same resolution, which
+        is the point: a rule stored from an absolute hook path must match a
+        call whose path arrived relative, and vice versa.
+        """
+        raw = args.get("file_path") or args.get("path")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                target = self._repo_root / target
+            return str(target.resolve())
+        except (OSError, ValueError):  # noqa: BLE001 - a probe, not a control path
+            return None
 
     def _denied_read_target(self, tool_name: str, args: dict[str, Any]) -> str | None:
         """The denied path this read would touch, or ``None``.
@@ -489,11 +556,40 @@ class AntigravityPermissionGate:
           softened into an auto-allow by the very change that stops the
           asking.
         """
+        normalised = normalise_args(tool_name, args)
+
+        # AG-15. Checked **before** ALWAYS_ASK, because a standing rule is
+        # the user having already answered this exact question — and
+        # ALWAYS_ASK is where every write tool lives, so checking after it
+        # would mean the one control the user pressed had no effect on the
+        # calls they pressed it for.
+        #
+        # Safe only because matching is exact: one command, or one path with
+        # one tool name. `rules.py` carries that argument, and it is the
+        # load-bearing one for this whole feature.
+        standing = self.rules.allows(
+            command=normalised.get("command"),
+            path=self._absolute_path(normalised),
+            tool_name=tool_name,
+        )
+        if standing is not None:
+            # A denied read still wins over a standing allow: shift-clicking
+            # a file in the tree is a later, more specific instruction than
+            # a rule granted earlier, and the user would reasonably expect
+            # the newer one to hold.
+            denied = self._denied_read_target(tool_name, normalised)
+            if denied is None:
+                logger.info(
+                    "Antigravity %s allowed by a standing rule: %s",
+                    tool_name,
+                    standing.get("label"),
+                )
+                return (True, "")
+
         if tool_name in ALWAYS_ASK:
             return None
         if GATED_BY_DEFAULT.get(TOOL_CLASSES.get(tool_name, "exec"), True):
             return None
-        normalised = normalise_args(tool_name, args)
         denied = self._denied_read_target(tool_name, normalised)
         if denied is not None:
             logger.info(

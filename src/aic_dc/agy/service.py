@@ -100,9 +100,12 @@ class AgyService(AntigravityService):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    @property
-    def _config_dir(self) -> Path:
-        return Path(getattr(self._config, "config_dir", None) or Path.home() / ".config" / "aic-dc")
+    # `_config_dir` was defined here as a property until AG-15 gave the SDK
+    # transport a rule store that needs the same value. It is now set once
+    # in `AntigravityService.__init__` and inherited — which it had to be,
+    # not merely ought to be: a property on this subclass shadows the base
+    # class's instance attribute, so the base's assignment would have raised
+    # `AttributeError: property has no setter` on every `AgyService`.
 
     def gate_status(self) -> dict[str, Any]:
         """Whether the gate is installed in the user's `agy` configuration.

@@ -66,6 +66,11 @@ class Recorder:
 
 
 def gate(tmp_path, recorder, **kw) -> AntigravityPermissionGate:
+    # `config_dir` defaulted here rather than left to the caller, because
+    # the gate now owns a *persistent* rule store (AG-15) and the fallback
+    # is the developer's own `~/.config/aic-dc`. The first version of these
+    # tests wrote three standing permission grants into the real file.
+    kw.setdefault("config_dir", tmp_path / "cfg")
     return AntigravityPermissionGate(
         tmp_path, broadcast=recorder, localhost_available=lambda: True, **kw
     )
@@ -663,20 +668,19 @@ class TestResultConversion:
         assert result.allow is True
         assert result.modified_args == {"ReplacementContent": "safer"}
 
-    def test_always_allow_degrades_to_allow_once_by_construction(self, tmp_path):
-        """AG-5's one genuine loss, and it is closed at the right end.
+    def test_always_allow_is_offered_and_kept(self, tmp_path):
+        """**Restated for AG-15, not deleted.** The property is unchanged.
 
-        Antigravity has no ``updated_permissions`` at any layer, so a rule
-        cannot be persisted. Rather than accepting an always-allow and
-        quietly dropping the rule, the payload offers **no**
-        ``suggested_rules`` at all — so the broker's own normalisation has
-        nothing to bind an always-allow to and degrades it to allow-once,
-        logging that it did.
+        This test used to assert ``suggested_rules == []``, on the rule that
+        *an offer the engine cannot keep is worse than no offer*: Antigravity
+        has no ``updated_permissions`` at any layer, so an always-allow could
+        only have been accepted and silently discarded.
 
-        That ordering matters: an offer the engine cannot keep is worse
-        than no offer, because the user believes they will not be asked
-        again. This asserts the offer is absent, which is the thing that
-        makes the degradation honest rather than a silent discard.
+        That rule still holds and the premise no longer does. AG-15 gives the
+        store to AIC⚡DC, so the offer is one we can keep — and the honest
+        assertion flips with it: the rule is offered, **and** it is written.
+        Asserting only that it is offered would pass on exactly the silent
+        discard the original was written to prevent.
         """
         recorder = Recorder()
         g = gate(tmp_path, recorder)
@@ -690,8 +694,34 @@ class TestResultConversion:
 
         result = asyncio.run(go())
         assert result.allow is True
-        assert recorder.requests()[0].payload["suggested_rules"] == []
+        rules = recorder.requests()[0].payload["suggested_rules"]
+        assert [r["rule_content"] for r in rules] == ["ls", "ls:*"]
+        # Kept, not merely offered.
+        assert [r["rule_content"] for r in g.rules.rules()] == ["ls"]
+        # Still no mode escalation: AG-15 leaves that alone until the rule
+        # path is proven, because it grants more than the call on screen.
         assert recorder.requests()[0].payload["suggested_mode"] is None
+
+    def test_a_stored_rule_stops_the_next_identical_call_asking(self, tmp_path):
+        """The exit criterion, at the seam that decides it.
+
+        `pre_verdict` returning `(True, "")` is what "no dialog" means — the
+        call never reaches `broker.can_use_tool`, which is the assertion
+        AG-15 asks for rather than "the dialog was dismissed".
+        """
+        g = gate(tmp_path, Recorder())
+
+        async def go():
+            return await ask(
+                g,
+                FakeCall("run_command", {"CommandLine": "ls"}),
+                {"action": "allow_always"},
+            )
+
+        asyncio.run(go())
+        assert g.pre_verdict("run_command", {"CommandLine": "ls"}) == (True, "")
+        # And a different command still asks.
+        assert g.pre_verdict("run_command", {"CommandLine": "rm -rf /"}) is None
 
     def test_a_rule_that_somehow_arrived_is_warned_about(self, tmp_path, caplog):
         """Defence in depth for a path the payload should make unreachable.

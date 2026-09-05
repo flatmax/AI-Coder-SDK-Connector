@@ -130,6 +130,13 @@ class AntigravityService:
         repo_root = getattr(config, "repo_root", None) or Path.cwd()
         self._repo_root = Path(repo_root)
         self._model = model
+        # Lifted from `AgyService`, which defined the identical property,
+        # once the SDK transport needed it too for AG-15's rule store. One
+        # definition rather than two that must agree — the same reasoning as
+        # merging the tool tables, and the same failure if they drift.
+        self._config_dir = Path(
+            getattr(config, "config_dir", None) or Path.home() / ".config" / "aic-dc"
+        )
         self._credentials = credentials or resolve_credentials()
 
         # The contract `claude_code.commit` reaches for. Named here rather
@@ -237,6 +244,11 @@ class AntigravityService:
             # gate now allows reads without asking, so wiring this is part
             # of that change rather than a separate improvement.
             denied_reads=self.get_denied_read_files,
+            # AG-15's standing rules. Passed explicitly rather than left to
+            # the default so that a host given a config directory keeps all
+            # of its state in one place, and so a test that forgets it
+            # cannot silently write grants into the developer's own config.
+            config_dir=self._config_dir,
         )
         session = AntigravitySession(
             self._repo_root,

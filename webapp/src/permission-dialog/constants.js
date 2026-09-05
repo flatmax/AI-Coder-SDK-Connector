@@ -179,4 +179,14 @@ export const DESTINATION_FILES = {
   localSettings: '.claude/settings.local.json',
   userSettings: '~/.claude/settings.json',
   session: '(this session only)',
+  // Antigravity (AG-15). Not one of the CLI's settings files: that engine
+  // has no `updated_permissions` at any layer, so AIC-DC keeps the rule
+  // itself. Naming a `.claude/` file here would be a plain lie about where
+  // the grant went — the chip renders this label beside the rule.
+  //
+  // This is the *only* webapp change AG-15 needed. The rule shape, the
+  // `allow_always` action and the control that sends it all already
+  // existed, which was the decision's own test of whether the shape had
+  // been got right.
+  aicDcRules: '~/.config/aic-dc/antigravity-rules.json',
 };
