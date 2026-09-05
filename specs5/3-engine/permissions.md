@@ -213,6 +213,12 @@ prompts-per-turn metric that tells us whether the tiering above is working (see
 - With no localhost client connected, no permission request is ever allowed.
 - Every file-mutation dialog shows the proposed change as a diff or, where a diff is impossible, the
   full new content with an explicit label. It never shows only a tool name and raw input.
+- A read the user has denied is **refused**, never asked about, on every engine. Denying is the
+  answer the user already gave by marking the file; re-asking would offer to overturn it by accident.
+- Whichever party decides that a read needs no dialog, some party decides it. Sharing a
+  `PermissionBroker` across engines does not by itself give them one behaviour, because on Claude the
+  CLI answers the read class before the broker ever sees it — so an engine driving the broker from a
+  hook that fires on *every* call has to answer it too, or it asks about all of them.
 - "Always allow" always writes a visible, scoped rule; there are no invisible grants.
 - A denial always carries a machine-readable reason.
 - The active permission mode is visible in the UI at all times and is broadcast to every client on

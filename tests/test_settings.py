@@ -631,3 +631,99 @@ class TestIsReloadable:
 
     def test_unknown_type_not_reloadable(self):
         assert Settings.is_reloadable("bogus") is False
+
+
+class TestStandingPermissionRules:
+    """AG-15's review-and-revoke half, on the surface that serves it.
+
+    These live on ``Settings`` rather than on the engine adapter, and the
+    reason is worth keeping: a standing permission **outlives the session
+    that granted it**, so a user must be able to ask what they have granted
+    without an engine running — and especially about the engine they are
+    not currently using, which is exactly when they are about to switch to
+    it.
+
+    There is a second, harder constraint. The engine router holds two
+    invariants: ``RPC_SURFACES`` may hide a method on Antigravity and never
+    on Claude, and Antigravity exposes nothing Claude does not. Two
+    Antigravity-only methods on the engine surface break both, and the
+    first attempt at this feature did exactly that before ``get_agy_gate``
+    was noticed as the established precedent.
+    """
+
+    def _repo(self, config):
+        # The same fallback `Settings._rule_store` uses. `repo_root` is
+        # None on a bare ConfigManager, and rules are keyed by repository,
+        # so a test that keyed on None would be writing to a different
+        # store than the one under test and would pass by not looking.
+        from pathlib import Path
+
+        return getattr(config, "repo_root", None) or Path.cwd()
+
+    def _rule(self, config):
+        from aic_dc.antigravity.rules import derive_rules
+
+        return derive_rules(
+            self._repo(config), "run_command", {"command": "ls"}, "exec"
+        )[0]
+
+    def _store(self, config):
+        from aic_dc.antigravity.rules import RuleStore
+
+        return RuleStore(self._repo(config), config_dir=config.config_dir)
+
+    def test_no_rules_is_a_real_answer_not_an_error(self, settings):
+        # "You have granted nothing" is precisely what someone auditing
+        # their permissions wants to be told, so this is not a surface that
+        # hides when empty.
+        result = settings.get_permission_rules()
+        assert result["rules"] == []
+        assert result["store"]
+
+    def test_a_granted_rule_is_listed_with_an_id(self, settings, config):
+        self._store(config).add(self._rule(config))
+        rules = settings.get_permission_rules()["rules"]
+        assert len(rules) == 1
+        assert rules[0]["id"]
+        assert rules[0]["label"] == "Always allow run_command(ls)"
+
+    def test_forgetting_removes_it_and_answers_with_what_is_left(
+        self, settings, config
+    ):
+        self._store(config).add(self._rule(config))
+        rule_id = settings.get_permission_rules()["rules"][0]["id"]
+        result = settings.forget_permission_rule(rule_id)
+        assert result["ok"] is True
+        # The remaining rules ride back on the answer, so the panel reads
+        # its state from the thing it changed rather than predicting it —
+        # the invariant chat.md records after three separate instances.
+        assert result["rules"] == []
+        assert settings.get_permission_rules()["rules"] == []
+
+    def test_forgetting_an_unknown_rule_says_so(self, settings):
+        result = settings.forget_permission_rule("nosuchid")
+        assert result["error"] == "unknown"
+        assert "already have been removed" in result["reason"]
+
+    def test_forgetting_nothing_is_refused(self, settings):
+        assert settings.forget_permission_rule("")["error"] == "unknown"
+
+    def test_forgetting_is_localhost_only(self, config):
+        """The permission surface, so the same authority rule as resolve.
+
+        Revoking only ever *narrows* what the agent may do, so the
+        direction is safe — but the authority question is identical, and
+        answering it differently here would make the rule about the
+        direction rather than about the surface.
+        """
+        svc = Settings(config)
+        svc._collab = _StubCollab(is_localhost=False)
+        _assert_restricted(svc.forget_permission_rule("anything"))
+
+    def test_listing_is_not_localhost_only(self, config):
+        # Reading what you have granted is not a privileged act, and a
+        # remote viewer who cannot see the rules cannot notice one they
+        # would object to.
+        svc = Settings(config)
+        svc._collab = _StubCollab(is_localhost=False)
+        assert "error" not in svc.get_permission_rules()

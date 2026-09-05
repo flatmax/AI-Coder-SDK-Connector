@@ -321,12 +321,19 @@ def _review_file_paths(changed_files: Any) -> list[str]:
     return paths
 
 
-def _doc_convert_available() -> bool:
+def doc_convert_available() -> bool:
     """Whether document conversion can run — i.e. ``markitdown`` imports.
 
     An optional extra (``pip install 'aic-dc[docs]'``), so the import is
     probed rather than assumed, and any failure means "not available"
     rather than a broken snapshot.
+
+    Public, and named without the underscore, because both engines'
+    ``get_current_state`` answer it: it is a fact about the *server's*
+    install, not about whichever engine is master, and the shell has this
+    one snapshot to read it from. The Antigravity adapter imports it here
+    for the same reason it imports ``review`` and ``commit`` — a second
+    copy of a four-line probe is a second answer waiting to disagree.
     """
     try:
         from aic_dc.doc_convert import DocConvert
@@ -826,26 +833,58 @@ class ClaudeCodeService:
         nothing would look wrong. Under ``aic-dc-antigravity`` they reach
         the dialog by the ordinary ``mcp`` classification.
 
-        **Absent when there is no credential, rather than present and
-        broken.** AG-R-8 makes a missing key the most likely first
-        experience of this engine, and two tools that always answer "no
+        **Absent when it cannot work, rather than present and broken.**
+        AG-R-8 makes a missing key the most likely first experience of
+        this engine, and since phase 7 a missing *wheel* is the other way
+        it can be absent (AG-R-10). Two tools that always answer "no
         credentials" cost context on every turn and buy nothing — AG-9's
         "hidden rather than stubbed" applied to a tool definition. That is
         also why this is not recorded as a degradation: an unconfigured
         optional engine is not a fault in this one.
+
+        The two reasons are reported separately, and that is worth a line
+        because the first version did not. A base install *with* a key
+        logged "no Gemini API key or Vertex project" and told the user to
+        set one they already had — a diagnostic that sends someone to fix
+        the wrong thing is worse than none.
         """
         try:
             from aic_dc.antigravity import Consultant, ConsultantBridge
             from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
 
             consultant = Consultant(self._repo_root)
-            bridge = ConsultantBridge(consultant)
+            # AG-13: the consultation streams into its own agent tab. The
+            # bridge needs two things from the session to do that — a way
+            # to push, and the id of the turn the tab belongs to.
+            # ``subagentEvent`` is turn-scoped, and the browser drops one
+            # whose request id does not match a live Main tab, so reading
+            # the id *at emit time* rather than at construction is what
+            # makes the tab attach to the turn that actually asked.
+            bridge = ConsultantBridge(
+                consultant,
+                emit=self._dispatch,
+                request_id=lambda: self.session.active_request_id,
+            )
+            self.consultant_bridge = bridge
             if not bridge.available:
-                logger.info(
-                    "Antigravity consultant not mounted: no Gemini API key or "
-                    "Vertex project. Set one to offer second opinions and "
-                    "image generation from a Claude turn (AG-R-8)."
-                )
+                from aic_dc.antigravity.surface import sdk_installed
+
+                if not sdk_installed():
+                    logger.info(
+                        "Antigravity consultant not mounted: "
+                        "google-antigravity is not installed. It is an "
+                        "optional extra because it bundles a second ~119 MB "
+                        "binary (AG-R-10); install aic-dc[antigravity] for "
+                        "second opinions and image generation from a Claude "
+                        "turn. There is no agy equivalent — the CLI has no "
+                        "one-shot consultation mode."
+                    )
+                else:
+                    logger.info(
+                        "Antigravity consultant not mounted: no Gemini API key "
+                        "or Vertex project. Set one to offer second opinions "
+                        "and image generation from a Claude turn (AG-R-8)."
+                    )
                 return mcp_servers
             servers = dict(mcp_servers or {})
             servers[AG_SERVER_NAME] = bridge.build_server()
@@ -1145,12 +1184,20 @@ class ClaudeCodeService:
             # rather than the trap (`cost.py` § session_totals).
             "session_usage": self.session.session_usage,
             "permission_mode": self.session.permission_mode,
+            # The postures this engine will actually accept, so the
+            # selector offers what can be chosen rather than a list
+            # compiled against one engine. Reported the way `get_model`
+            # reports its menu — by the side that validates — because the
+            # alternative is a table in the browser that has to agree with
+            # a tuple here, and AG-R-4 forbids the webapp keying off an
+            # engine name to pick between two such tables.
+            "permission_modes": list(PERMISSION_MODES),
             "model": self.session.model,
             "pending_permissions": self.permissions.pending(),
             **self.doc_builder.status(),
             "review_state": self.review.state(),
             "engine_health": self.get_engine_health(),
-            "doc_convert_available": _doc_convert_available(),
+            "doc_convert_available": doc_convert_available(),
             "disk_warning": await self._disk_warning(),
         }
 
@@ -1815,6 +1862,22 @@ class ClaudeCodeService:
         restricted = self._check_localhost_only()
         if restricted is not None:
             return restricted
+
+        # An Antigravity consultation is a subagent row like any other, so
+        # its ⏹ arrives here — but it is not a CLI task and the CLI has
+        # never heard of its id. Routed by the id's own shape rather than
+        # by asking the CLI first and falling back on an error, because a
+        # `stop_task` for an unknown id is not a *failure* the CLI reports
+        # cleanly, and AG-13's button has to be real rather than decorative
+        # (it maps to the `subagent_tabs` surface for exactly this reason).
+        bridge = getattr(self, "consultant_bridge", None)
+        if bridge is not None and str(task_id).startswith("consultation-"):
+            stopped = await bridge.cancel()
+            return {
+                "status": "stopping" if stopped else "not_running",
+                "task_id": task_id,
+            }
+
         try:
             await self.session.stop_task(task_id)
         except (EngineNotReadyError, SessionLostError) as exc:
@@ -2212,6 +2275,23 @@ class ClaudeCodeService:
     # ------------------------------------------------------------------
     # Sessions — new, resume, fork
     # ------------------------------------------------------------------
+
+    def _start_blank_session(self) -> None:
+        """Do not continue where this engine left off. Called by the router.
+
+        The two fields ``new_session`` clears, without the broadcasts: the
+        router has already told every client the panel is empty, and this
+        is the server agreeing with it. Underscored so it stays off the
+        RPC surface — ``new_session`` is the public version of the same
+        intent.
+
+        Both adapters implement this, and that is the point: a switch is a
+        session boundary for whichever engine is arriving
+        (``engine_router._start_blank``). Nothing is deleted; the
+        conversation left behind stays listed and loadable.
+        """
+        self._resume_request = None
+        self._auto_resume = False
 
     async def new_session(self) -> dict[str, Any]:
         """Abandon the current conversation and start a blank one.

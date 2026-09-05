@@ -143,6 +143,15 @@ jobs:
       # get Word/PDF/PowerPoint/Excel conversion out of the box.
       # --frozen installs exactly what uv.lock pins (no re-resolve),
       # so every platform's binary is built from the same versions.
+      #
+      # **`antigravity` is deliberately not among these**, and its
+      # absence is now a decision rather than an omission
+      # (specs5/plan-ag/risks.md AG-R-10). The released binary is a base
+      # install: Claude, plus the `agy` transport for anyone with the
+      # Antigravity CLI on PATH — which needs no wheel and is the reason
+      # the extra is affordable. Adding it here would put a second
+      # ~123 MiB binary into every platform's artefact for the API-key
+      # route alone. The verification step below fails if it appears.
       - name: Install project with build + docs-convert extras
         run: uv sync --no-dev --extra build --extra docs-convert --frozen
 
@@ -212,6 +221,22 @@ jobs:
           fi
           echo "Engine present in archive:"
           grep -o "[^'\"]*_bundled[^'\"]*" "$TOC" | sort -u | head -5
+          # AG-R-10's tripwire, at build time. `google-antigravity` is an
+          # optional extra and this build does not sync it, so its
+          # ~123 MiB `localharness` must not be in the artefact. The risk
+          # register asks for base-install size measured per release,
+          # because the leak is "a pyproject.toml edit nobody reviews as
+          # a size change" — and a number in a release note is something
+          # a human has to notice. This is the half that fails by itself.
+          if grep -qi "localharness" "$TOC"; then
+            echo "::error::localharness is in the onefile archive."
+            echo "google-antigravity is an optional extra (specs5/plan-ag/risks.md AG-R-10):"
+            echo "the wheel bundles a second ~123 MiB binary on top of the ~297 MiB claude one."
+            echo "Either it has moved back into [project.dependencies], or a --collect-all was"
+            echo "added for it. The agy transport reaches the same product with no wheel."
+            exit 1
+          fi
+          echo "Antigravity SDK correctly absent: this artefact is a base install."
           echo "Hidden-import and collection warnings (informational):"
           grep -E "missing module named aic_dc|missing module named jrpc_oo" build/*/warn-*.txt | head -20 \
             || echo "(none for aic_dc / jrpc_oo)"

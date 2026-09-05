@@ -97,8 +97,32 @@ class TestItMatchesTheSpec:
             for s in SURFACES
             if s.claude == SUPPORTED and s.antigravity == SUPPORTED
         }
-        assert universal <= {"amend_tool_input"}, (
-            f"{sorted(universal - {'amend_tool_input'})} are supported "
+        # `persisted_permission_rules` joined this set with AG-15, and it
+        # stays for the same reason `amend_tool_input` is here: the row
+        # carries an argument. It records that the two engines reach the
+        # same capability by different means — Claude writes a settings
+        # file through `updated_permissions`, Antigravity has no such
+        # channel and AIC-DC keeps the rule itself — and that a row reading
+        # ABSENT was what named the work that closed it.
+        #
+        # `session_mirror` and `transcript_history` joined it with phase 5,
+        # and they earn their rows the same way: each records that the two
+        # engines reach one capability by different means. Claude's mirror
+        # is the CLI's own transcript handed back to the CLI on resume;
+        # Antigravity's is an observer writing CLI-shaped entries, and its
+        # resume is a handshake argument to a harness that keeps its own
+        # context. A reader who deleted these rows would lose the reason
+        # the two are not the same thing, and would also lose the record of
+        # what the rows said while they were UNBUILT — which is what named
+        # the work.
+        allowed = {
+            "amend_tool_input",
+            "persisted_permission_rules",
+            "session_mirror",
+            "transcript_history",
+        }
+        assert universal <= allowed, (
+            f"{sorted(universal - allowed)} are supported "
             "everywhere. The descriptor covers surfaces where the engines "
             "differ; delete the row or say why it earns one."
         )
@@ -141,6 +165,7 @@ class TestItMatchesTheSpec:
             "MCP bridge": "mcp_server_inventory",
             "session mirror": "session_mirror",
             "history rendering": "transcript_history",
+            "Forking a past conversation": "session_fork",
             "RateLimitEvent": "rate_limit_events",
             "Image generation": "image_generation",
             "ask_question": "agent_questions",
@@ -215,15 +240,22 @@ class TestTheDescriptor:
             assert set(claude[key]) == set(antigravity[key])
 
     def test_unbuilt_and_absent_both_read_as_unsupported(self):
-        """Why there is no data is not the browser's business."""
+        """Why there is no data is not the browser's business.
+
+        ``transcript_history`` used to be the ``UNBUILT`` half of this
+        pair and stopped being one in phase 5; ``subagent_tabs`` is the
+        replacement, and the assertion is about the *distinction* rather
+        than about either row, so the pair has to be two rows that are
+        genuinely on the two sides of it.
+        """
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["supported"] is False
-        assert d["transcript_history"]["supported"] is False
+        assert d["subagent_tabs"]["supported"] is False
 
     def test_the_distinction_survives_for_developers(self):
         d = descriptor(ANTIGRAVITY)
         assert d["usd_cost"]["status"] == ABSENT
-        assert d["transcript_history"]["status"] == UNBUILT
+        assert d["subagent_tabs"]["status"] == UNBUILT
 
 
 class TestTheEnginesDisagreeWhereExpected:
@@ -237,15 +269,25 @@ class TestTheEnginesDisagreeWhereExpected:
         assert supports(CLAUDE, "usd_cost")
         assert not supports(ANTIGRAVITY, "usd_cost")
 
-    def test_always_allow_is_absent_not_unbuilt(self):
-        """A decision forced by the SDK, not a to-do.
+    def test_always_allow_is_supported_on_both_by_different_means(self):
+        """**Restated for AG-15.** The premise moved; the row still earns its place.
 
-        ``updated_permissions`` has no counterpart at any layer, so this
-        must never drift into the unbuilt list and become somebody's
-        sprint task.
+        This asserted ``antigravity == ABSENT``, reasoning that
+        ``updated_permissions`` has no counterpart at any layer and so the
+        capability "must never drift into the unbuilt list and become
+        somebody\'s sprint task".
+
+        The first half is still true and the conclusion did not follow from
+        it. No counterpart meant the *engine* could not persist a rule — not
+        that the *product* could not, and the row\'s own note said so:
+        "AIC-DC would have to own the rule store to change this." AG-15 did
+        exactly that, so the honest assertion is the opposite one, and the
+        lesson is that a surface can be absent from an SDK and present in
+        the app.
         """
         row = next(s for s in SURFACES if s.key == "persisted_permission_rules")
-        assert row.antigravity == ABSENT
+        assert row.antigravity == SUPPORTED
+        assert row.claude == SUPPORTED
 
     def test_the_permission_gate_itself_is_not_a_hidden_surface(self):
         """It works on both, so it earns no row — and must not gain one.
@@ -268,13 +310,17 @@ class TestTheHelpers:
             assert set(unbuilt_surfaces(engine)) <= set(hidden_surfaces(engine))
 
     def test_antigravitys_to_do_list_is_the_later_phases(self):
-        """The ordering constraint, discharged as data rather than memory."""
+        """The ordering constraint, discharged as data rather than memory.
+
+        Two rows left this set on 2026-09-05 when phase 5 built them, and
+        the list shrinking is the point: it is the to-do list *as data*,
+        so a surface that has been built and still reads UNBUILT is a lie
+        this assertion is here to catch.
+        """
         assert set(unbuilt_surfaces(ANTIGRAVITY)) == {
             "agent_questions",
             "mcp_server_inventory",
-            "session_mirror",
             "subagent_tabs",
-            "transcript_history",
         }
 
     def test_claude_has_nothing_unbuilt(self):
@@ -284,4 +330,58 @@ class TestTheHelpers:
 
 def test_statuses_are_distinct():
     assert len({SUPPORTED, ABSENT, UNBUILT}) == 3
-    assert capabilities.ENGINES == (CLAUDE, ANTIGRAVITY)
+    # AG-14 added a third identifier: `agy` is the *same product* as
+    # `antigravity`, reached on the owner's subscription rather than a
+    # metered key. A session runs on one or the other and they differ in
+    # what they can feed, so it is a row in the descriptor — not a third
+    # engine, which is why `Surface.agy` defaults to "same as antigravity".
+    assert capabilities.ENGINES == (CLAUDE, ANTIGRAVITY, capabilities.AGY)
+
+
+def test_the_agy_transport_inherits_antigravitys_answers_by_default():
+    """Both reach the same product, so a surface it cannot feed is unfed.
+
+    The default is the honest one. Only where the *transport* changes the
+    answer should a surface override it, and a blanket copy would hide the
+    places it genuinely differs.
+    """
+    for surface in capabilities.SURFACES:
+        if surface.agy is None:
+            assert surface.status_for(capabilities.AGY) == surface.antigravity
+
+
+def test_every_engine_has_a_label_for_the_selector():
+    """Supplied by the server, because a map in the webapp is an AG-R-4 branch.
+
+    And because what a user chooses between here is which account pays,
+    which is not something the browser can know.
+    """
+    for engine in capabilities.ENGINES:
+        assert capabilities.ENGINE_LABELS.get(engine)
+    assert len(set(capabilities.ENGINE_LABELS.values())) == len(capabilities.ENGINES)
+
+
+def test_the_two_antigravity_labels_say_which_account_pays():
+    """The thing that actually differs, at the moment of choosing."""
+    assert "subscription" in capabilities.ENGINE_LABELS[capabilities.AGY]
+    assert "API key" in capabilities.ENGINE_LABELS[capabilities.ANTIGRAVITY]
+
+
+def test_the_descriptor_names_no_engine_the_browser_could_branch_on():
+    """AG-R-4, checked for the third engine as well as the first two.
+
+    Scoped to *structure* rather than to a substring. A `note` may well
+    say "agy's equivalent returns '2 lines, 18 bytes'" — that is developer
+    prose about another transport and the browser never renders it. What
+    AG-R-4 forbids is the payload giving a component something to key off,
+    so what is asserted is that no field carries the engine's identity and
+    that the fields present are the same four whatever engine is asked.
+    """
+    shapes = set()
+    for engine in capabilities.ENGINES:
+        payload = capabilities.descriptor(engine)
+        assert "engine" not in payload
+        for entry in payload.values():
+            shapes.add(tuple(sorted(entry)))
+            assert entry.get("engine") is None
+    assert shapes == {("note", "status", "supported", "title")}

@@ -286,6 +286,20 @@ export const PROPERTIES = {
    */
   _permissionMode: { type: String, state: true },
   /**
+   * The postures the *running* engine accepts, as it reports them.
+   *
+   * `null` until `get_current_state` answers, and for any engine that does
+   * not report a list — both of which mean "show the full table", which is
+   * what every build before this one did.
+   *
+   * It exists because the table in permission-mode.js is Claude's six and
+   * Antigravity accepts two, so the selector was offering four options that
+   * returned `unsupported` when picked. Read from the engine rather than
+   * mapped from its name (AG-R-4), and re-read on `engineChanged` because a
+   * switch changes the answer.
+   */
+  _permissionModes: { type: Array, state: true },
+  /**
    * True while a `set_permission_mode` call is in flight. Disables the selector
    * so two overlapping changes can't race, and shows a pending marker so the
    * lag between click and flip reads as "waiting" rather than "ignored".
@@ -327,4 +341,35 @@ export const PROPERTIES = {
    * empty answer is still an answer.
    */
   _healthForced: { type: Boolean, state: true },
+  /**
+   * `list_engines()`'s answer — `{active, available, mountable}` — or null
+   * before it has been read.
+   *
+   * The one place this panel is allowed to hold an engine *name*, and it is
+   * held to render it and to send it back to `switch_engine`, never to decide
+   * what to draw. What to draw is the capability descriptor's business
+   * (AG-R-4), and `engine-notice.js` keeps the two apart.
+   */
+  _engines: { type: Object, state: true },
+  /**
+   * The `engineNoticeKey` of the engine-gap set the user dismissed, or null.
+   * Keyed by engine and gaps rather than by session, so a dismissal covers
+   * what was read and not the next engine's different gaps.
+   */
+  _engineNoticeDismissed: { type: String, state: true },
+  /**
+   * True when the engine chip asked for the notice. Forces it open even on an
+   * engine with nothing missing, because that click is a question — "which
+   * engine is this?" — and "this one, and it is complete" is still an answer.
+   */
+  _engineNoticeForced: { type: Boolean, state: true },
+  /** True while a `switch_engine` call from the notice is in flight. */
+  _engineSwitchPending: { type: Boolean, state: true },
+  /**
+   * Why the last switch was refused, or ''. Shown rather than logged:
+   * `switch_engine` declines for reasons the user can act on — a turn is still
+   * running, that engine has no credential here — and a button that did
+   * nothing would be indistinguishable from a broken one.
+   */
+  _engineSwitchError: { type: String, state: true },
 };

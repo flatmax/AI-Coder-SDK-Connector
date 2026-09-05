@@ -205,7 +205,16 @@ export function retiredNoteSignature(files) {
  */
 export function modelEntries(models, current) {
   const entries = [];
-  for (const m of Array.isArray(models) ? models : []) {
+  for (const raw of Array.isArray(models) ? models : []) {
+    // A bare name is normalised rather than skipped. The contract is a
+    // list of objects and both engines now send them, but skipping was
+    // the wrong failure: the `agy` transport sent fourteen *strings* and
+    // every one was dropped here, so a populated list rendered as an
+    // empty, disabled select under the note that says the engine has not
+    // connected yet. That is indistinguishable from having no models at
+    // all, and it sent two sessions looking at the transport. A name with
+    // no label is still a model the user can pick.
+    const m = typeof raw === 'string' ? { value: raw } : raw;
     if (!m || typeof m !== 'object') continue;
     const value = typeof m.value === 'string' ? m.value : '';
     if (!value) continue;
@@ -330,6 +339,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
     _enginePending: { type: Boolean, state: true },
     /** Why the last switch was refused, or '' — the server's own sentence. */
     _engineError: { type: String, state: true },
+    /**
+     * The `agy` transport's permission gate, as `install.status()` reports
+     * it: `absent`, `current`, `stale` or `unreadable` — never a boolean,
+     * because "installed" and "installed and usable" are different and the
+     * difference is what this panel exists to explain.
+     *
+     * Null until asked, and null forever on an engine that has no such
+     * method, which is how the panel stays absent rather than empty.
+     */
+    _agyGate: { type: Object, state: true },
+    _agyGatePending: { type: Boolean, state: true },
+    _permissionRules: { type: Array, state: true },
+    _forgettingRule: { type: String, state: true },
     /**
      * False once `Collab.get_collab_role` reports this client is not the host.
      * `set_model` and `restart_session` are both localhost-only, so an enabled
@@ -579,6 +601,45 @@ export class SettingsTab extends RpcMixin(LitElement) {
       font-family: 'SFMono-Regular', Consolas, monospace;
       font-size: 0.75rem;
       word-break: break-all;
+    }
+    .rule-list {
+      list-style: none;
+      margin: 0.4rem 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .rule-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      justify-content: space-between;
+    }
+    .rule-label {
+      font-family: var(--mono, ui-monospace, monospace);
+      font-size: 0.75rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .rule-forget {
+      flex: none;
+      cursor: pointer;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      border: 1px solid var(--border, #30363d);
+      background: transparent;
+      color: var(--text-secondary, #8b949e);
+    }
+    .rule-forget:hover:not(:disabled) {
+      color: var(--danger, #f85149);
+      border-color: var(--danger, #f85149);
+    }
+    .rule-forget:disabled {
+      opacity: 0.5;
+      cursor: default;
     }
     .model-note {
       margin: 0.4rem 0 0;
@@ -875,6 +936,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._engines = null;
     this._enginePending = false;
     this._engineError = '';
+    this._agyGate = null;
+    this._agyGatePending = false;
     this._isHost = true;
     this._summary = null;
     this._pendingFields = new Set();
@@ -927,6 +990,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._loadInfo();
     this._loadModel();
     this._loadEngines();
+    this._loadAgyGate();
+    this._loadPermissionRules();
     this._loadPreferences();
   }
 
@@ -1356,44 +1421,19 @@ export class SettingsTab extends RpcMixin(LitElement) {
     this._engines = { ...(this._engines || {}), active: engine };
     this._enginePending = false;
     this._engineError = '';
+    // **The model list belongs to the engine, so it has to be re-read.**
+    // Without this the panel went on showing the *previous* engine's
+    // models after a switch — names the new one will reject, in a control
+    // whose whole job is to offer names it accepts. Cleared first rather
+    // than left until the reply lands: a stale list here is not the
+    // best-available answer the way it is after a transient RPC failure,
+    // it is a list belonging to a different engine.
+    this._models = [];
+    this._model = '';
+    this._resolved = '';
+    this._loadModel();
   }
 
-  /**
-   * Handle an engine selection.
-   *
-   * Like `_onModelSelect`, the `<select>`'s own value is not the answer —
-   * the reply is. Unlike it, a refusal is *shown* rather than only warned
-   * to the console: `switch_engine` declines for reasons the user can act
-   * on (a turn is still running; that engine has no credential here), and
-   * a control that silently snapped back would be indistinguishable from
-   * one that is broken.
-   */
-  async _onEngineSelect(event) {
-    const wanted = event?.target?.value;
-    const active = this._engines?.active || '';
-    if (event?.target) event.target.value = active;
-    if (!wanted || wanted === active) return;
-    this._enginePending = true;
-    this._engineError = '';
-    try {
-      const res = await this.rpcExtract(
-        'ClaudeCodeService.switch_engine', wanted,
-      );
-      if (!res || typeof res !== 'object' || res.error) {
-        this._engineError = res?.error
-          || 'The engine did not say why the switch failed.';
-        this._enginePending = false;
-        return;
-      }
-      // The broadcast is what updates `_engines.active`, in this window
-      // and every other, so there is one writer rather than two that can
-      // disagree. It arrives here too.
-      if (res.changed === false) this._enginePending = false;
-    } catch (err) {
-      this._engineError = `Could not switch engines: ${err?.message || err}`;
-      this._enginePending = false;
-    }
-  }
 
   /**
    * The engine in force, and a switch — when there is more than one.
@@ -1409,61 +1449,235 @@ export class SettingsTab extends RpcMixin(LitElement) {
    * across, and a user who reads "switch" as "switch and continue" would
    * lose a conversation they thought they were keeping.
    */
-  _renderEnginePanel() {
-    const engines = this._engines;
-    if (!engines) return '';
-    const mountable = Array.isArray(engines.mountable) ? engines.mountable : [];
-    const available = Array.isArray(engines.available) ? engines.available : [];
-    if (mountable.length < 2) return '';
-    const active = engines.active || '';
+  /**
+   * Load the gate's state. Silent when the running engine has no such
+   * method, which is every engine but the `agy` transport.
+   *
+   * Swallowing that one failure is deliberate and narrow: the router
+   * answers "no such method" for an engine that does not serve it, and
+   * rendering an error for a panel that simply does not apply here would
+   * be worse than rendering nothing. Anything the call *does* return —
+   * including `unreadable` — is shown.
+   */
+  async _loadAgyGate() {
+    try {
+      const res = await this.rpcExtract('Settings.get_agy_gate');
+      if (res && typeof res === 'object' && res.state) this._agyGate = res;
+    } catch {
+      this._agyGate = null;
+    }
+  }
+
+  async _setAgyGate(installIt) {
+    this._agyGatePending = true;
+    try {
+      const method = installIt
+        ? 'Settings.install_agy_gate'
+        : 'Settings.uninstall_agy_gate';
+      const res = await this.rpcExtract(method);
+      // `uninstall` answers `{status, removed, gate}`; `install` answers the
+      // status directly. Both carry the state, in one shape or the other.
+      const next = res && res.gate ? res.gate : res;
+      if (next && next.state) this._agyGate = next;
+      else if (res && res.error) this._agyGate = { ...this._agyGate, error: res.message };
+    } catch (err) {
+      this._agyGate = { ...(this._agyGate || {}), error: err?.message || String(err) };
+    } finally {
+      this._agyGatePending = false;
+    }
+  }
+
+  /**
+   * The permission gate for the `agy` transport.
+   *
+   * This is the only control in the app that writes **outside the
+   * repository** — into `~/.gemini/config/hooks.json`, which belongs to
+   * Google's CLI and may already hold the user's own hooks. So the panel
+   * says all four things a person needs to decide: where it writes, what
+   * it costs sessions that have nothing to do with this app, that it is
+   * removed on shutdown, and that nothing else in their file is touched.
+   *
+   * Absent entirely on any engine that does not serve `gate_status`, which
+   * is the honest rendering of "this does not apply to you" — the same
+   * rule the engine selector follows when only one engine is mountable.
+   */
+  /**
+   * The standing "always allow" rules the user has granted (AG-15).
+   *
+   * An empty list is a real answer and is rendered as one — "you have
+   * granted nothing" is exactly what someone auditing their permissions
+   * wants to be told, so this panel does not hide on empty the way the
+   * gate panel hides on "not applicable". It hides only when the method
+   * is absent, which means a build too old to have it.
+   */
+  async _loadPermissionRules() {
+    try {
+      const res = await this.rpcExtract('Settings.get_permission_rules');
+      if (res && Array.isArray(res.rules)) {
+        this._permissionRules = res.rules;
+        this._permissionRuleStore = res.store || '';
+      }
+    } catch {
+      // Absent, not broken: an older server has no such method, and a
+      // panel that cannot be populated should not appear at all.
+      this._permissionRules = null;
+    }
+  }
+
+  async _forgetPermissionRule(id) {
+    this._forgettingRule = id;
+    try {
+      const res = await this.rpcExtract('Settings.forget_permission_rule', id);
+      // The server answers with the remaining rules, so the list is
+      // whatever it says rather than whatever this end predicted — the
+      // invariant from chat.md: a control that reports its own success
+      // reads its state back from the thing it changed.
+      if (res && Array.isArray(res.rules)) this._permissionRules = res.rules;
+      else await this._loadPermissionRules();
+    } catch {
+      await this._loadPermissionRules();
+    } finally {
+      this._forgettingRule = '';
+    }
+  }
+
+  _renderPermissionRulesPanel() {
+    const rules = this._permissionRules;
+    if (!Array.isArray(rules)) return '';
     const readOnly = this._isHost === false;
-    const disabled = !this.rpcConnected || readOnly || this._enginePending;
     return html`
-      <div class="model-panel" role="group" aria-label="Engine">
+      <div class="model-panel" role="group" aria-label="Standing permission rules">
         <div class="model-head">
-          <span class="model-title">⚙️ Engine</span>
-          <select
-            class="model-select"
-            .value=${active}
-            ?disabled=${disabled}
-            autocomplete="off"
-            aria-label="Engine"
-            title=${readOnly
-              ? 'Only the host can switch engines'
-              : 'The engine this session runs on'}
-            @change=${(e) => this._onEngineSelect(e)}
-          >
-            ${available.map(
-              (name) => html`<option
-                value=${name}
-                ?selected=${name === active}
-                ?disabled=${!mountable.includes(name)}
-                title=${mountable.includes(name)
-                  ? ''
-                  : 'Not mounted in this session — no credential, or the '
-                    + 'optional dependency is not installed'}
-              >
-                ${name}${mountable.includes(name) ? '' : ' (not mounted)'}
-              </option>`,
-            )}
-          </select>
-          ${this._enginePending
-            ? html`<span class="model-pending" aria-hidden="true">…</span>`
-            : ''}
+          <span class="model-title">📋 Standing permission rules</span>
+          <span class="model-pending">${rules.length || 'none'}</span>
+        </div>
+        ${rules.length === 0
+          ? html`<p class="model-note">
+              You have not granted any standing permissions. Choosing
+              <em>always allow</em> on a permission dialog records the rule
+              here, and it applies until you remove it.
+            </p>`
+          : html`
+              <ul class="rule-list">
+                ${rules.map((rule) => html`
+                  <li class="rule-row">
+                    <span class="rule-label" title=${rule.label || ''}>
+                      ${rule.label || rule.rule_content || 'rule'}
+                    </span>
+                    <button
+                      class="rule-forget"
+                      ?disabled=${readOnly || !this.rpcConnected
+                        || this._forgettingRule === rule.id}
+                      @click=${() => this._forgetPermissionRule(rule.id)}
+                      title="Stop allowing this without asking"
+                    >${this._forgettingRule === rule.id ? '…' : 'Forget'}</button>
+                  </li>
+                `)}
+              </ul>
+              <p class="model-note">
+                Each rule allows exactly what its label says and nothing
+                wider — one command, or one file for one tool. Stored in
+                <code>${this._permissionRuleStore || 'the AIC-DC config'}</code>.
+              </p>
+            `}
+      </div>
+    `;
+  }
+
+  _renderAgyGatePanel() {
+    const gate = this._agyGate;
+    if (!gate || !gate.state) return '';
+    const state = gate.state;
+    const installed = state === 'current';
+    const readOnly = this._isHost === false;
+    const disabled = !this.rpcConnected || readOnly || this._agyGatePending;
+    const label = {
+      current: 'Installed',
+      absent: 'Not installed',
+      stale: 'Installed by another build',
+      unreadable: 'Cannot be read',
+      // Returned by `install` when the command it would write does not
+      // run here — it refuses rather than writing one, because a gate
+      // that cannot run is `agy` taking its allow-fallback on every call
+      // while this panel says "Installed".
+      unrunnable: 'Could not be installed',
+    }[state] || state;
+    return html`
+      <div class="model-panel" role="group" aria-label="Antigravity CLI permission gate">
+        <div class="model-head">
+          <span class="model-title">🔒 agy permission gate</span>
+          <span class="model-pending" data-state=${state}>${label}</span>
+          ${state === 'unreadable'
+            ? ''
+            : html`<button
+                class="model-select"
+                ?disabled=${disabled}
+                @click=${() => this._setAgyGate(!installed)}
+                title=${installed
+                  ? 'Remove the gate from your agy configuration'
+                  : 'Add the gate to your agy configuration'}
+              >${this._agyGatePending ? '…' : installed ? 'Remove' : 'Install'}</button>`}
         </div>
         <p class="model-note">
-          Switching engines <strong>starts a new session</strong>. The two
-          engines keep their transcripts in different formats, so a
-          conversation cannot follow you across — nothing is deleted, and the
-          conversation you leave stays in the history browser.
-          ${readOnly ? 'Only the host can switch engines.' : ''}
+          Turns on the <strong>agy</strong> transport run with agy's own
+          permission prompts disabled, because they cannot ask — so this gate
+          is what shows you a diff before anything is written. Without it a
+          session will not start.
         </p>
-        ${this._engineError
-          ? html`<p class="model-note engine-error">${this._engineError}</p>`
+        <p class="model-note">
+          It is written to <code>${gate.path}</code>, which is
+          <strong>outside this project</strong> and belongs to the Antigravity
+          CLI. Your own entries there are left alone${
+            gate.other_hooks && gate.other_hooks.length
+              ? html` — ${gate.other_hooks.length} of them`
+              : ''
+          }, and only this one is removed again.
+        </p>
+        <p class="model-note">
+          While it is installed, <em>every</em> agy session on this machine —
+          including ones you start yourself in a terminal — runs it once per
+          tool call, costing about <strong>0.03s each</strong>. It stays
+          until you remove it here — closing AIC⚡DC does not take it out,
+          so a session you start later finds it ready.
+        </p>
+        ${state === 'stale'
+          ? html`<p class="model-note engine-error">
+              The gate in that file points at a different installation, so it
+              would review that one's turns and not this one's. Installing
+              here takes it over.
+            </p>`
+          : ''}
+        ${state === 'unreadable'
+          ? html`<p class="model-note engine-error">
+              ${gate.detail} AIC⚡DC will not modify a file it cannot parse.
+            </p>`
+          : ''}
+        ${state === 'unrunnable'
+          ? html`<p class="model-note engine-error">${gate.detail}</p>`
+          : ''}
+        ${gate.agy_present === false
+          ? html`<p class="model-note">
+              <code>agy</code> is not on your PATH, so this transport cannot
+              run yet whether or not the gate is installed.
+            </p>`
+          : ''}
+        ${gate.error
+          ? html`<p class="model-note engine-error">${gate.error}</p>`
           : ''}
       </div>
     `;
   }
+
+  // The engine selector moved to the chat panel's action bar on
+  // 2026-09-04. It was here because Settings is where configuration
+  // lives, and that was the wrong reading: which engine is answering is a
+  // fact about *this conversation*, and the place it is asked is beside
+  // the conversation. The chip in the action bar already said which one —
+  // it is now the control as well.
+  //
+  // What stays here is the agy permission gate, because that genuinely is
+  // configuration: it changes the user's own machine, outlives the
+  // session, and is answerable with no engine running.
 
   /** Another window changed the model. */
   _onModelChanged(event) {
@@ -1944,7 +2158,8 @@ export class SettingsTab extends RpcMixin(LitElement) {
 
       ${this._renderRetiredNote()}
 
-      ${this._renderEnginePanel()}
+      ${this._renderAgyGatePanel()}
+      ${this._renderPermissionRulesPanel()}
 
       ${this._renderModelPanel()}
 

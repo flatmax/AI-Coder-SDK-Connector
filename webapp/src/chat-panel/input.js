@@ -284,7 +284,18 @@ export async function send(panel) {
     //     isn't an error and must not be rendered as one.
     if (result && typeof result === 'object') {
       if (result.error) {
-        handleStreamStartError(panel, requestId, result.error);
+        // `message` first, `error` second. Several refusals answer with a
+        // *code* in `error` and the sentence in `message` — the engine
+        // adapters' `_record_error` sends `{error: "engine", message:
+        // "agy exited before sending its init frame"}`. Rendering the
+        // code produced **"Error: engine"**, which named a category the
+        // user cannot act on while the actionable half sat unread in the
+        // same payload.
+        handleStreamStartError(
+          panel,
+          requestId,
+          result.message || result.error,
+        );
         return;
       }
       if (result.status === 'routed') {

@@ -46,7 +46,8 @@ class Service(ClaudeCodeService):
         self._repo_root = Path(repo_root)
 
 
-def mount(monkeypatch, *, available: bool, existing=None, explode=False):
+def mount(monkeypatch, *, available: bool, existing=None, explode=False,
+          want_bridge=False):
     """Run the mount with the credential state a test asks for."""
 
     class FakeConsultant:
@@ -58,8 +59,13 @@ def mount(monkeypatch, *, available: bool, existing=None, explode=False):
             )()
 
     class FakeBridge:
-        def __init__(self, consultant):
+        def __init__(self, consultant, *, emit=None, request_id=None):
             self._c = consultant
+            # Recorded rather than ignored: AG-13's tab needs both, and a
+            # double that accepted them without noticing would let the
+            # wiring rot silently.
+            self.emit = emit
+            self.request_id = request_id
 
         @property
         def available(self):
@@ -72,7 +78,11 @@ def mount(monkeypatch, *, available: bool, existing=None, explode=False):
 
     monkeypatch.setattr(ag, "Consultant", FakeConsultant)
     monkeypatch.setattr(ag, "ConsultantBridge", FakeBridge)
-    return Service()._add_consultant(existing)
+    service = Service()
+    servers = service._add_consultant(existing)
+    if want_bridge:
+        return servers, service.consultant_bridge
+    return servers
 
 
 # ----------------------------------------------------------------------
@@ -194,3 +204,101 @@ class TestItIsActuallyWired:
             pytest.skip("no Gemini credential on this machine")
         servers = Service(tmp_path)._add_consultant(None)
         assert AG_SERVER_NAME in servers
+
+
+class TestTheTabWiring:
+    """AG-13: the bridge is given what it needs to open an agent tab.
+
+    Both halves matter and both fail silently if absent. Without ``emit``
+    the consultation streams nowhere; without a *live* ``request_id`` the
+    browser drops every ``subagentEvent``, because ``onSubagentEvent``
+    resolves the owner tab by request id and returns early when it cannot.
+    """
+
+    def test_the_bridge_is_handed_an_emit(self, monkeypatch):
+        servers, bridge = mount(monkeypatch, available=True, want_bridge=True)
+        assert bridge.emit is not None
+
+    def test_the_request_id_is_read_late_not_captured_early(self, monkeypatch):
+        """A callable, not a value.
+
+        The bridge is built once when the session is constructed and the
+        turn it must attribute to changes on every prompt. Capturing an id
+        at construction would attach every consultation for the life of
+        the session to the first turn — or, before any turn, to ``None``.
+        """
+        servers, bridge = mount(monkeypatch, available=True, want_bridge=True)
+        assert callable(bridge.request_id)
+
+
+class TestStopReachesTheConsultation:
+    """AG-13's ⏹, wired end to end.
+
+    The tab offers Stop on every subagent row, and a consultation is a
+    subagent row like any other — so the click arrives at ``stop_task``.
+    But a consultation is not a CLI task and the CLI has never heard of
+    its id, so without this routing the button was decorative: it would
+    have asked the CLI to stop something it does not know about.
+    """
+
+    class Bridge:
+        def __init__(self, stopped=True):
+            self._stopped = stopped
+            self.cancels = 0
+
+        async def cancel(self):
+            self.cancels += 1
+            return self._stopped
+
+    def service_with_bridge(self, stopped=True):
+        service = Service()
+        service._collab = None
+        service.consultant_bridge = self.Bridge(stopped)
+        return service
+
+    def test_a_consultation_id_reaches_the_bridge(self):
+        import asyncio
+
+        service = self.service_with_bridge()
+        result = asyncio.run(service.stop_task("consultation-abc-1"))
+        assert service.consultant_bridge.cancels == 1
+        assert result["status"] == "stopping"
+
+    def test_stopping_one_that_is_not_running_says_so(self):
+        """Rather than claiming to have stopped something."""
+        import asyncio
+
+        service = self.service_with_bridge(stopped=False)
+        assert asyncio.run(service.stop_task("consultation-abc-1"))["status"] == (
+            "not_running"
+        )
+
+    def test_a_cli_task_id_does_not_reach_the_bridge(self):
+        """The routing is by id shape; a real subagent must still work."""
+        import asyncio
+
+        service = self.service_with_bridge()
+
+        class Session:
+            def __init__(self):
+                self.stopped = []
+
+            async def stop_task(self, task_id):
+                self.stopped.append(task_id)
+
+        service.session = Session()
+        asyncio.run(service.stop_task("toolu_01ABC"))
+        assert service.consultant_bridge.cancels == 0
+        assert service.session.stopped == ["toolu_01ABC"]
+
+    def test_the_prefix_matches_what_the_bridge_mints(self):
+        """Two constants that must agree, checked rather than assumed."""
+        from pathlib import Path
+
+        from aic_dc.antigravity import bridge as bridge_module
+        from aic_dc.claude_code import service as service_module
+
+        minted = Path(bridge_module.__file__).read_text(encoding="utf-8")
+        routed = Path(service_module.__file__).read_text(encoding="utf-8")
+        assert 'f"consultation-{id(self):x}-{self._counter}"' in minted
+        assert 'startswith("consultation-")' in routed

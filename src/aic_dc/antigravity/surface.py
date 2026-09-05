@@ -6,8 +6,11 @@ turns. It was accurate the day it was written and nothing enforces it
 since — which is the failure mode this module exists to close, and it
 bites harder here than it does for Claude Code. That probe was written
 against a ``claude-agent-sdk`` that was 0.2.137 and stable. This one is
-written against **0.1.15 and alpha**, on a release cadence of roughly one
+written against **0.1.16 and alpha**, on a release cadence of roughly one
 per day, with no stability commitment for anything in it.
+
+That cadence is not hypothetical: 0.1.16 added ``StopHook``, and the gate
+below named it before anything else did.
 
 So this probe reflects over the *installed* SDK and diffs it against what
 this package handles, producing three answers per surface:
@@ -64,6 +67,7 @@ from __future__ import annotations
 import ast
 import functools
 import importlib.metadata
+import importlib.util
 import logging
 from pathlib import Path
 from typing import Any
@@ -111,8 +115,6 @@ PENDING_CONFIG: dict[str, str] = {
     "this in place of max_budget_usd, which has no Antigravity equivalent "
     "— a better control than a dollar cap for a session whose price is not "
     "observable.",
-    "conversation_id":"resumes a prior conversation. Phase 5, with the "
-    "repo-local mirror built as a step observer.",
     "debug_config": "the SDK's debug sink. logging_setup owns AIC-DC's "
     "logging; worth wiring once there is somewhere to route it, which is "
     "the analogue of the Claude engine's engine-errors.jsonl.",
@@ -127,10 +129,13 @@ PENDING_CONFIG: dict[str, str] = {
     "field that turns a rate limit into a slow turn instead of a dead one: "
     "the free tier throttles at 5 RPM and both later probe runs hit 429s "
     "*mid-turn*, because an agent turn is many model calls.",
-    "save_dir": "where a conversation is persisted. Phase 5.",
-    "session_continuation_mode": "RESUME / CREATE_OR_RESUME / CREATE_ONLY. "
-    "Phase 5 — the choice between resuming and starting fresh is the "
-    "history browser's, not the adapter's.",
+    "save_dir": "where the harness persists a conversation's trajectory. "
+    "Left unset by phase 5 deliberately rather than pending an owner: "
+    "resume reads back the store the session was written into, so pointing "
+    "this somewhere of ours would make every conversation recorded before "
+    "the change unresumable. It becomes worth setting only if the two "
+    "transports ever need their harness state separated on disk, which is "
+    "the same question app_data_dir raises.",
     "skills_paths": "skill directories. The repo's .claude/skills/ is "
     "Claude's format and there is no shared one, so this is a second set "
     "of files to author rather than a switch to flip.",
@@ -241,6 +246,27 @@ HOOK_CLASSES: dict[str, tuple[str, str]] = {
         "answers an agent-initiated ask_question. Blocked on the same "
         "missing dialog as the ASK_QUESTION tool, and pending for that "
         "reason rather than on its own merits",
+    ),
+    "StopHook": (
+        PENDING,
+        "new in 0.1.16, and deferred on its *observability* half rather "
+        "than its control one. It fires when the root trajectory reaches "
+        "fully idle, carrying StopArgs — response_text, trajectory_id, "
+        "continuation_count, stop_reason and error_message. What it would "
+        "buy is a public route to the first of those two: session."
+        "stop_reason_of reads `_last_turn_stop_reason` off the "
+        "conversation or its `_connection`, a private attribute whose "
+        "public-looking sibling does not exist, and every turn reported a "
+        "blank reason until that was found on 2026-09-02. StopArgs."
+        "stop_reason is the documented, typed one, and error_message has "
+        "no step-stream equivalent at all. It waits on the StopReason rows "
+        "below, which are pending because nothing renders the difference "
+        "between a budget cap and an ordinary stop yet — hardening the "
+        "source of a value with no sink is the wrong order. The CONTINUE "
+        "half is not why: StopDecision.CONTINUE blocks termination and "
+        "injects a system prompt to resume the loop, and resuming a turn "
+        "the user did not ask to resume is not a host's decision to take "
+        "silently",
     ),
     "PreTurnHook": (
         DECLINED,
@@ -478,6 +504,37 @@ CAPABILITY_FIELDS: dict[str, tuple[str, str]] = {
 # ----------------------------------------------------------------------
 
 
+def sdk_installed() -> bool:
+    """Whether ``google-antigravity`` is present in this install.
+
+    **The one authority on that question**, and it is a control path
+    rather than a diagnostic: phase 7 made the SDK an optional extra
+    (AG-R-10), so a base install is one where the API-key engine and the
+    consultant do not exist. Both are mounted on this, exactly as they
+    are already mounted on a credential — an engine in the selector that
+    raises ``ImportError`` on its first turn is the "broken UI" the
+    phase's exit criterion forbids, and it is worse than an engine that
+    is simply not offered.
+
+    ``find_spec`` rather than an import, deliberately. The answer is
+    needed at startup, on every run, including the ones that will never
+    touch this engine; importing the SDK to find out costs pydantic and
+    gRPC on a path that is meant to be free. It also asks the honest
+    question — *is this installed* — where a failed import conflates that
+    with a broken one.
+
+    Not cached. A cache here is a third thing that can be wrong about an
+    install, and the call is a spec lookup.
+    """
+    try:
+        return importlib.util.find_spec("google.antigravity") is not None
+    except (ImportError, ValueError):
+        # ModuleNotFoundError for a missing `google` namespace package,
+        # ValueError for a parent that exists but has no `__spec__`.
+        # Both mean the same thing to every caller.
+        return False
+
+
 def _sdk() -> Any:
     """Import the SDK, or ``None`` when it is not installed.
 
@@ -486,13 +543,21 @@ def _sdk() -> Any:
     that says "unknown". ``google-antigravity`` is an optional extra
     (AG-R-10 — it bundles a second ~119 MB binary), so absent is a
     supported state rather than a broken install.
+
+    Asks :func:`sdk_installed` first rather than deciding for itself, so
+    the probe and the mount cannot disagree about whether this install
+    has an SDK. The import that follows is for *reflection* — the probe
+    needs the module object, not the answer.
     """
+    if not sdk_installed():
+        logger.debug("google-antigravity is not installed; surface unknown")
+        return None
     try:
         import google.antigravity
 
         return google.antigravity
     except Exception:  # noqa: BLE001 - a probe, never a control path
-        logger.debug("google-antigravity is not importable; surface unknown")
+        logger.debug("google-antigravity is installed but did not import")
         return None
 
 

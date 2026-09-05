@@ -22,7 +22,7 @@ write (asserted against the file's bytes on disk afterwards).
 Requires a Gemini API key -- the SDK has no OAuth path at 0.1.15:
 
     export GEMINI_API_KEY=...
-    .venv/bin/python specs5/plan-ag/probe_edit_args.py
+    .venv/bin/python scripts/probe_edit_args.py
 
 Exits 0 if the probe reached a verdict, 1 if it could not run.
 """

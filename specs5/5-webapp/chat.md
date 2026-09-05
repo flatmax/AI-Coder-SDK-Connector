@@ -396,6 +396,7 @@ Two visual groups separated by a thin vertical divider:
 - Session group — new session, open history browser (hidden in file search mode, and on any tab but the live conversation: a subagent transcript and a historical archive have no session of their own to restart, so ✨ there would restart the one behind the tab being read)
   - ✨ calls `new_session` and clears nothing locally. The server broadcasts `sessionChanged` with an empty message list and the panel acts on that, so the client that started the session and the clients merely watching it take one path. It is disabled while a turn is streaming because the server refuses mid-turn, and a button whose only outcome is a refusal it could have predicted is noise. Two refusals still reach the user as toasts: `turn_in_progress` (the turn started underneath the click) and `restricted` (the call is the host's — it discards the context every client is looking at)
   - 📜 stays live while a turn streams. Browsing is a pure read of the mirrored transcript; it is *resuming* from inside the browser that the engine refuses mid-turn
+  - The engine chip — which engine is answering. Present only when more than one engine is mountable, and it opens the engine notice rather than acting directly. See § Engine Indicator and Notice
 
 Git action buttons (copy diff, commit, reset) and the review toggle live in the file picker's top toolbar, alongside the sort glyphs and Settings button. They are not in the chat action bar. See [file-picker.md](file-picker.md).
 
@@ -417,6 +418,48 @@ The action bar uses a dual-direction collapse pattern keyed on whether the searc
 The symmetry means the action bar always shows either "what the user is searching for" (search expanded) or "what they can do next" (preset, sessions visible) — never both fighting for the same row. Active toggles inside the search bar and outside it share the same accent halo treatment so the user learns one "glowing therefore active" rule across every icon-only control (see [file-picker.md § Active-State Halo](file-picker.md#active-state-halo)).
 
 The **permission-mode indicator is exempt from collapse.** It is the one control in the row that must never be hidden by a focus state: a user who cannot see whether the agent is allowed to write files has lost the plot, and a search box is not a good enough reason.
+
+### Engine Indicator and Notice
+
+AIC⚡DC can run on more than one engine, and a surface the running engine cannot feed is hidden
+rather than drawn empty ([plan-ag AG-9](../plan-ag/decisions.md#ag-9)). Hiding one surface is
+quieter than drawing one wrong number. Hiding twelve is a UI that reads as broken, and on
+2026-09-03 a user reported exactly that — the history browser gone, the always-allow button gone, no
+slash commands, no cost — none of which was a fault: `app.json`'s `engines.master` named the second
+engine, and every one of those surfaces was correctly hidden. What was missing was any way to find
+that out. The only place naming the running engine was the Settings tab's selector, which a user has
+to already suspect the engine to go looking for.
+
+**The chip.** A control in the session group naming the engine that is answering. Rendered **only
+when `list_engines().mountable` holds more than one entry** — with a single engine there is no
+question to answer and a permanent label is furniture. Clicking it opens the notice, the same way
+the turn footer's mirror-gap marker forces the health banner open: the indicator and the explanation
+should not be two separate things to find. It carries the warning appearance whenever the engine has
+unbuilt surfaces, and it carries it *after* the notice is dismissed, which is what makes dismissing
+the notice safe rather than a way to lose the only explanation.
+
+**The notice.** A dismissible strip beside the health banner — both are standing conditions about
+the channel rather than events in the conversation. It names the engine, lists by name the surfaces
+this build has not wired to it, and offers a one-click switch when exactly one alternate is
+mountable. With more than one alternate it offers none: that is a choice rather than a recovery, and
+choosing the first of three would be picking for the user and calling it a fix.
+
+It lists the surfaces rather than counting them. "5 features unavailable" is the same non-answer as
+the empty panels it is explaining — the reader's question is *which* ones, because that is what
+tells them whether the thing they reached for is coming back. The names are the descriptor's own
+`title` fields, so the browser is not a second author of what a surface is called.
+
+**What opens it is `unbuilt`, never an engine name.** An `absent` surface is a genuine difference
+between engines and the UI is complete without it; an `unbuilt` one is a feature this project built
+and has not reached this engine with, and its absence is an unfinished application. Only the second
+interrupts. On the shipped engine that count is zero, so the notice never appears there. Nothing in
+either control branches on which engine is running ([AG-R-4](../plan-ag/risks.md#ag-r-4)): the
+descriptor decides whether to speak and carries no engine identity, and the name is read from
+`list_engines` purely to render it and to hand back to `switch_engine`.
+
+Switching is a session boundary and says so — the two engines' transcripts do not translate, so the
+notice states that a switch starts a new session, and that nothing is deleted and the current
+conversation stays loadable.
 
 ## Preset Selector
 
@@ -587,7 +630,36 @@ Handler routes `compactionEvent` stages and adjacent engine events to appropriat
 | `engineHealth` | No toast; the health banner owns this. A mirror gap is a banner, not an interruption. The banner sits between the transcript and the input area beside the disconnected note — both are standing conditions about the channel rather than events in the conversation — and shows the count of failed appends, the engine's last error, the version and credential warnings, and one line per capability the session started without. Amber, not the note's red: the conversation works. Red only once the engine reports the gap count past the repo's `history.mirror_gap_tolerance`, at which point the banner says to read the mirror as broken rather than unlucky and where to look; the comparison is the engine's, and the browser is handed the verdict rather than the threshold. Dismissal is keyed to *which* problems are showing, including how many gaps and whether they have escalated, so a warning that has been read stays quiet and the next thing to go wrong — or the same thing getting worse — does not. `connected: false` alone is not a fault: it is the normal state before the first prompt, and a session that loses its engine says so in `last_error`. Underneath the summary lines, the payload's tail of the CLI's own stderr renders as preformatted output — the last thing the subprocess said, which on a failed connect is the only diagnosis there is. It is the one field that can *only* be read and never raise the banner: it is absent from both the problem test and the dismissal key, because the CLI writes routine chatter there and the tail grows on a healthy session, so it must not open a banner and must not undo a dismissal. Appended after the summary, so a banner forced open on a healthy engine still says the engine reports nothing wrong and then shows the output. The payload has no MCP server list to leave out: `EngineHealth.mcp` was declared, serialised and never written, and was deleted 2026-08-28 — per-server detail is the Context tab's, read from `get_mcp_status()`, which can fail visibly where a field that always answered `[]` could not |
 | `disk_warning` (on the state snapshot and on `postResponseComplete`) | A system-event card in the transcript, not a toast: the sentence names a threshold, a cause and what to do about it, which is more reading than a toast's three seconds allow, and the card renders the directory it names as code. Read from *both* carriers, because the server spends one flag on whichever notices first — the snapshot for "checked at startup", a finished turn for a session that crosses the threshold while the browser is open. No request-id filter: the directory belongs to the session, so a collaborator's turn is as good a messenger as our own. The browser adds no one-shot of its own; a second owner of that rule could only disagree with the server's, and would swallow the honest second warning from a restarted server |
 
+| `systemEvent` → `engine_error` | A system-event card in the transcript **and** an error toast. Same argument as `disk_warning` above: the engine's message is more reading than a toast's three seconds allow, and it is the only account of why the turn stopped. The card carries the engine's own words verbatim plus the HTTP code where there is one; the toast carries only enough to send the reader to the card. **One failing turn reports one failure**, however many attempts it made: a later `engine_error` for the same request *replaces* the card rather than stacking, and the toast fires once per distinct report. Measured against a live 429 — a single rate limit produced four cards and ~4,500 characters of gRPC detail maps, which is the opposite failure to the silence this row exists to fix and no better. The last telling wins, being the most complete; two genuinely different errors in one turn therefore leave only the second, and the full sequence stays in the server log |
+| `systemEvent` → `turn_timeout` | Same treatment, including the replace-rather-than-stack rule. The sentence names the bound that was exceeded **and** says that anything already done stands, including a file already written — which is the half a reader has to act on, and the half a bare "timed out" withholds |
+| `systemEvent` → `engine_notice` | Card, no toast, and **never** collapsed — two harness notices are two facts, and superseding one with the next would lose it. Only the retrying failure subtypes replace.  The harness speaking rather than the model: `steps.py` routes `StepType.SYSTEM_MESSAGE` to a `systemEvent` instead of a text block precisely so it is not read as the assistant's prose, which only works if something renders it |
+| `systemEvent` → `unknown_step`, `unknown_message`, `step_unreadable` | Nothing in the transcript. These are forward-compat diagnostics about *our* reader rather than about the user's turn, and they have a home in `.aic-dc/engine-errors.jsonl` and the Debug section. Putting them here would spend the reader's attention on our bookkeeping |
+
 Handler accepts events for both the current streaming request ID and the most recently completed request ID, since post-turn housekeeping runs asynchronously after `streamComplete`.
+
+#### Every `systemEvent` but one used to fall off the end of the handler
+
+*Found in the phase-4 live run, 2026-09-03.* An Antigravity turn died on a free-tier `429`. The engine
+reported it as a step addressed to **`TARGET_USER`** carrying the quota, the limit of 20 and *"Please
+retry in 29.957436016s"*; `steps.py` translated it faithfully into an `engine_error`; and the chat
+rendered two tool cards and a stop — no badge, no message, no advice. `onSystemEvent` handled exactly
+one subtype, `conversation_reset`, and returned silently for every other.
+
+The bridge that delivers these says the opposite in its own docstring — *"surfaced rather than
+swallowed, because a silently dropped message type is how a CLI upgrade breaks the UI invisibly"*
+(`app-shell/index.js`). That was the intent; the handler is where it stopped being true, and the gap
+was invisible because the one handled subtype is rare and the dropped ones are rarer still on Claude.
+
+**The mechanism is not engine-specific even though the run that found it was.** This is the shared chat
+panel, so any engine's `engine_error` met the same silence. Only the *frequency* belongs to
+Antigravity, whose free tier caps at 20 requests.
+
+**A system row is `system_event: true`, not `role: 'system'`.** `renderMessage` reads the flag for both
+the label and the styling and treats every non-`user` role as the assistant, so a `{role: 'system'}`
+message renders under an **"Assistant"** heading — attributing the harness's words to the model, which
+is the exact confusion `steps.py` routes `SYSTEM_MESSAGE` away from a text block to avoid. Five
+producers already had this right (`events.js`, `tabs.js`, `subagent-tabs.js`); the unsupported-slash
+notice did not, and was corrected with this change.
 
 The `compacted` stage of the old pipeline — which replaced the whole message list with a
 model-generated summary — has no successor. Compaction is the engine's, it happens to the engine's
@@ -640,6 +712,62 @@ the UI in two places that must be got right:
 | `session-deleted` | Inward (`window`) | Re-dispatched by the shell from the `sessionDeleted` broadcast; drops the row, its search hits, its subagent listing, and the preview if that session was the one selected |
 | `open-history` | Inward (`window`) | Opens the browser on behalf of another surface. The only inward window event on the panel that does not come from the server: the Settings tab's session-storage figure argues for deleting sessions and links here, because deletion belongs beside the transcript being deleted rather than behind a settings button ([settings.md § Session Controls](settings.md)). It opens; it does not toggle — a second request from a surface that cannot see the browser must not close it |
 
+### The engine selector is the chip, not a settings field
+
+**Moved 2026-09-04, at the user's request.** The action bar's engine chip said *which* engine was
+answering and the Settings tab held the control that changed it. That split was the wrong reading of
+where the question lives: which engine is answering is a fact about *this conversation*, not about the
+installation, so the place to change it is beside the conversation. The chip is now the `<select>`.
+
+Three things follow, and each is the reason the move is not merely cosmetic:
+
+- **Labels come from `list_engines`.** Two of the three engines reach the *same product* and differ
+  only in which account pays; `Antigravity` and `Agy` cannot say that, and a label table in the
+  browser would be the engine-name branch [AG-R-4](../plan-ag/risks.md#ag-r-4) forbids.
+- **A ⚠ button sits beside it only while the engine has unbuilt surfaces.** The chip used to open the
+  notice on click; a `<select>` cannot. Dismissal is per engine *and* per gap set, so without a way
+  back a user who dismissed once could never see what is missing again. Absent when there are no gaps,
+  so it stays a signal rather than furniture.
+- **Choosing an engine that needs a permission gate asks first.** See below.
+
+### A refused switch must not look like a successful one
+
+*Found by running it, 2026-09-04.* The selector read **antigravity (subscription)** while every reply
+came back from Claude Code — same conversation, wrong engine, nothing saying so.
+
+Two defects, and each alone was enough to produce that:
+
+- **A `<select>` shows what the user picked the moment they pick it**, and Lit re-applies `.value`
+  only when the *bound* value changes. After a refused switch `active` is unchanged, so the binding
+  is skipped and the control keeps displaying an engine that is not running. `live()` compares
+  against the DOM instead, so the selector snaps back to the truth.
+- **The refusal was recorded where it could be dismissed.** `_engineSwitchError` renders inside the
+  engine notice, which is dismissible and keyed per engine — so a user who had dismissed it got a
+  selector showing their choice, a session on the old engine, and no word anywhere. It is toasted as
+  well now.
+
+The general rule, which this is the third instance of today: **a control that reports its own success
+must read its state back from the thing it changed**, not from the input the user gave it. The
+optimistic half of an optimistic update has to be reconciled or it becomes a lie.
+
+### Consent for the `agy` gate is asked where the engine is chosen
+
+Selecting the `agy` transport with its permission hook absent used to switch successfully and then
+refuse the next prompt with `gate_not_installed`, pointing at a Settings panel the user had no reason
+to open. It now asks at the moment of choosing, and the confirm carries the same three facts the
+Settings panel does, because it is the same consent: **where it writes**, that the file is **outside
+this project**, and that it is **reversible**.
+
+Declining leaves the engine unswitched rather than switching to one that cannot run — a selector that
+moves and then refuses every turn is the confusing half of both options.
+
+**Which engine needs it is the server's answer, not the browser's.** `Settings.get_agy_gate` carries
+`needed_by`, so no component here hard-codes a transport name. An engine whose server has no such
+method switches unasked, which is every engine but this one.
+
+Removing the gate stays in Settings, because that genuinely is configuration: it changes the user's
+own machine, outlives the session, and is answerable with no engine running.
+
 ## Invariants
 
 - Every rendered streaming element is keyed by block identity; a chunk with a stale `seq` for its block is discarded rather than applied
@@ -652,10 +780,18 @@ the UI in two places that must be got right:
 - One restore path, two routes into it. A transcript reached by resuming (`session-changed`) and the same transcript reached by reconnecting (`state-loaded`) are normalized by the same function, so they cannot render differently. An assistant turn keeps its `blocks`, files, and footer through a restore rather than collapsing to prose, and nothing absent from the record is defaulted — a turn the transcript could supply no usage for draws no footer, and one with no terminal reason draws no badge
 - Up-arrow recall is seeded from the restored list, not the raw one, so it skips exactly what the renderer labels as a system event. A compact summary is a user-role record the CLI wrote about the context it dropped, and it is never offered back as something the user typed
 - No system event is fed back to the model
+- The engine a session runs on is chosen beside the conversation, not in Settings, and is labelled by
+  what the server calls it rather than by its identifier
+- The engine selector shows the engine that is *running*, never the one that was clicked. A refused switch snaps it back and says why somewhere undismissable
+- Consent to write outside the repository is asked before the write, carrying where it writes, that it
+  is outside the project, and how it is undone. Declining leaves the app in the state that still works
+- Anything the engine addresses to the *user* reaches the transcript. A turn that stopped for a reason the engine explained never renders as a turn that merely stopped: the explanation is a durable card, not only a toast, because a toast outlives neither the condition nor the reader's absence
+- A row the engine authored is marked `system_event`, never merely given a non-`user` role. The label and the styling both read that flag, so an unmarked row is attributed to the assistant — which is the one attribution these rows exist to avoid
 - Session-changed handler resets streaming state before replacing the message list
 - Passive stream completion always prepends the user message from the result if present
 - A turn's tool cards are never hidden by a global preference; the transcript always shows what the agent did
 - The permission-mode indicator is visible in every layout state of the action bar
+- A surface hidden because the running engine cannot feed it is never hidden anonymously: whenever more than one engine is mountable the action bar names the engine that is answering, and an engine with `unbuilt` surfaces names them. What decides both is the capability descriptor, never an engine-name comparison
 - A slash command the engine answers itself — routed or denied — is never sent to the model as prose. Every other one, including an unrecognized one, reaches the CLI unchanged; the palette never rewrites what the user typed except when they pick an entry from it
 - The panel never re-runs a tool call, never edits a tool input, and never speaks into a subagent
 - A file chip's label and the path its click carries are separate: the label is repo-relative, what is dispatched is the path the engine reported

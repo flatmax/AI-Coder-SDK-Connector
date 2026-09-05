@@ -162,6 +162,39 @@ export const ALWAYS_ALLOW_SESSION_TOOLTIP =
   + 'either.';
 
 /**
+ * Antigravity's rules (AG-15). A third destination, and a third truth.
+ *
+ * The two tooltips above were written when a rule went either to a Claude
+ * settings file or nowhere. Antigravity has no `updated_permissions` at any
+ * layer, so AIC-DC keeps the rule itself — which makes both of the others
+ * wrong: it is not session-only, and it emphatically does **not** apply to
+ * the `claude` CLI, which has never heard of this file.
+ *
+ * Caught in a browser on 2026-09-05, not by a test: the Antigravity dialog
+ * rendered the Claude tooltip, telling the user their grant reached a CLI
+ * it cannot reach. A misleading sentence on a permission control is worse
+ * than a missing one, because the user acts on it.
+ */
+export const ALWAYS_ALLOW_AIC_DC_TOOLTIP =
+  'Writes a rule to a file AIC-DC keeps, which you can review and revoke '
+  + 'in Settings. It applies to this repository, on this engine, for you — '
+  + 'not to the claude CLI and not to anyone else.';
+
+/**
+ * The tooltip for one rule, chosen by **where the rule goes**.
+ *
+ * A function rather than a boolean at the call site, because the call site
+ * had one — `rule.session ? A : B` — and a third destination fell through
+ * to B and asserted something untrue. Destinations are added from the
+ * server; the mapping belongs where the destinations are described.
+ */
+export function alwaysAllowTooltip(rule) {
+  if (rule?.session) return ALWAYS_ALLOW_SESSION_TOOLTIP;
+  if (rule?.destination === 'aicDcRules') return ALWAYS_ALLOW_AIC_DC_TOOLTIP;
+  return ALWAYS_ALLOW_TOOLTIP;
+}
+
+/**
  * What the "shared" tag on a rule row has to say (CC-16).
  *
  * `.claude/settings.json` is git-tracked, so this grant is not personal: it
@@ -179,4 +212,14 @@ export const DESTINATION_FILES = {
   localSettings: '.claude/settings.local.json',
   userSettings: '~/.claude/settings.json',
   session: '(this session only)',
+  // Antigravity (AG-15). Not one of the CLI's settings files: that engine
+  // has no `updated_permissions` at any layer, so AIC-DC keeps the rule
+  // itself. Naming a `.claude/` file here would be a plain lie about where
+  // the grant went — the chip renders this label beside the rule.
+  //
+  // This is the *only* webapp change AG-15 needed. The rule shape, the
+  // `allow_always` action and the control that sends it all already
+  // existed, which was the decision's own test of whether the shape had
+  // been got right.
+  aicDcRules: '~/.config/aic-dc/antigravity-rules.json',
 };

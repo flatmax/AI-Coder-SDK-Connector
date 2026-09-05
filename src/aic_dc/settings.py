@@ -84,6 +84,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+
+from aic_dc import capabilities
 from typing import TYPE_CHECKING, Any
 
 from aic_dc.claude_code.engine_config import LIVE_CONTROLS
@@ -467,6 +470,151 @@ class Settings:
     # ------------------------------------------------------------------
     # Introspection helper (for diagnostics, not RPC-exposed)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # The `agy` permission gate — a machine setting, not an engine one
+    # ------------------------------------------------------------------
+    #
+    # These live here rather than on the Antigravity adapter because what
+    # they change is the *user's own* `agy` configuration, not a property
+    # of a running session. A user is entitled to ask whether the gate is
+    # installed, and to remove it, without an engine running at all — and
+    # putting them on an engine would make that impossible on the engine
+    # they are not currently using. See AG-14 and `aic_dc/agy/install.py`.
+
+    def get_agy_gate(self) -> dict[str, Any]:
+        """Whether the gate is in the user's ``agy`` configuration."""
+        from aic_dc.agy import install
+
+        report = install.status(self._config.config_dir)
+        report["agy_present"] = shutil.which("agy") is not None
+        # Which engine this gate is *for*, named by the server so the
+        # browser can ask "does the engine I am switching to need this?"
+        # without a hard-coded engine name of its own — AG-R-4.
+        report["needed_by"] = capabilities.AGY
+        return report
+
+    # ------------------------------------------------------------------
+    # AG-15's standing permission rules — review and revoke
+    # ------------------------------------------------------------------
+    # Here rather than on the Antigravity adapter for the *same* reason as
+    # the gate above, and it is a stronger reason: a standing permission
+    # outlives every session that granted it. A user is entitled to ask
+    # what they have granted, and to take it back, without an engine
+    # running — and especially on the engine they are not currently using,
+    # which is precisely when they might be about to switch to it.
+    #
+    # It was also the only way to add this at all without breaking the
+    # router's invariant: `test_claude_refuses_nothing` holds that
+    # `RPC_SURFACES` may hide a surface on Antigravity and never on Claude,
+    # and `test_the_real_adapters_both_mount` holds that Antigravity
+    # exposes nothing Claude does not. Two Antigravity-only methods on the
+    # engine surface violate both. The `Settings` class is where a
+    # per-engine control that is not part of a conversation belongs, and
+    # `get_agy_gate` had already established it.
+
+    def _rule_store(self) -> Any:
+        """The rule store for the repository this app is serving.
+
+        ``repo_root`` falls back to the working directory the same way
+        ``AntigravityService`` does. It is ``None`` on a bare
+        ``ConfigManager`` — which is what a test constructs — and the store
+        keys its entries by repository, so passing ``None`` through would
+        raise from ``pathlib`` rather than answering "no rules".
+        """
+        from pathlib import Path
+
+        from aic_dc.antigravity.rules import RuleStore
+
+        return RuleStore(
+            getattr(self._config, "repo_root", None) or Path.cwd(),
+            config_dir=self._config.config_dir,
+        )
+
+    def get_permission_rules(self) -> dict[str, Any]:
+        """The standing "always allow" rules for this repository.
+
+        Each carries an ``id`` derived from what it *grants* rather than
+        from its position in the list, so a panel refreshed between render
+        and click cannot revoke the wrong rule.
+
+        Answers ``{"rules": []}`` on a machine that has never granted one,
+        which is a real answer rather than an absence — this is not a
+        surface to hide, because "you have granted nothing" is exactly what
+        a user checking their permissions wants to be told.
+        """
+        from aic_dc.antigravity.rules import rule_id
+
+        store = self._rule_store()
+        return {
+            "rules": [dict(r, id=rule_id(r)) for r in store.rules()],
+            "store": str(store.path),
+        }
+
+    def forget_permission_rule(self, rule_id: str) -> dict[str, Any]:
+        """Revoke one standing rule. **Localhost only.**
+
+        Gated for the same reason ``resolve_permission`` is: this is the
+        permission surface. Revoking only ever *narrows* what the agent may
+        do, so the direction is the safe one — but the authority question is
+        identical, and answering it differently here would make the rule
+        about the direction rather than about the surface, which is harder
+        to keep right as more methods arrive.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        if not isinstance(rule_id, str) or not rule_id:
+            return {"error": "unknown", "reason": "No rule was named."}
+        if not self._rule_store().remove(rule_id):
+            return {
+                "error": "unknown",
+                "reason": (
+                    "No standing rule with that id. It may already have been "
+                    "removed, in another window or by hand."
+                ),
+            }
+        logger.info("Antigravity standing rule forgotten: %s", rule_id)
+        return {"ok": True, "rule_id": rule_id, **self.get_permission_rules()}
+
+    def install_agy_gate(self) -> dict[str, Any]:
+        """Add it. **Localhost only** — this writes outside the repository.
+
+        Never called automatically. While it is installed, *every* tool call
+        in *every* ``agy`` session on this machine runs our hook, including
+        sessions that have nothing to do with this app. That is a thing to
+        be asked about rather than a startup side effect, which is why there
+        is a button and no default.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        from aic_dc.agy import install
+
+        try:
+            report = install.install(self._config.config_dir)
+        except RuntimeError as exc:
+            return {"error": "unwritable", "message": str(exc)}
+        report["agy_present"] = shutil.which("agy") is not None
+        return report
+
+    def uninstall_agy_gate(self) -> dict[str, Any]:
+        """Remove it. **Localhost only.**
+
+        Also called on shutdown, so the cost is paid only while it buys
+        something and a machine whose AIC⚡DC is closed has an untouched
+        ``agy``.
+        """
+        restricted = self._check_localhost_only()
+        if restricted is not None:
+            return restricted
+        from aic_dc.agy import install
+
+        return {
+            "status": "ok",
+            "removed": install.uninstall(),
+            "gate": self.get_agy_gate(),
+        }
 
     @staticmethod
     def is_reloadable(type_key: str) -> bool:

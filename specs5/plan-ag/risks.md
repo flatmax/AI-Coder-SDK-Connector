@@ -20,7 +20,7 @@ measurement raised **`AG-R-11`**, which is live, critical, and was not predicted
 > `edit_file` carries `TargetContent`, `ReplacementContent` and a line range; `create_file` carries
 > `CodeContent`. `allow=False` leaves the file byte-identical on disk. Captures and the probe command
 > are in [`sdk-surface.md` § The permission gate — measured, and it passes](sdk-surface.md#the-permission-gate--measured-and-it-passes);
-> the probe is `probe_edit_args.py`. **None of the fallbacks below were needed.** The tripwire stands
+> the probe is `scripts/probe_edit_args.py`. **None of the fallbacks below were needed.** The tripwire stands
 > and should be kept — it is now a regression test, not a gate.
 >
 > The measurement did expose a different failure of the same mechanism, which is live and unmitigated:
@@ -53,7 +53,7 @@ the dialog has silently lost its diff — which otherwise presents as users appr
 
 ---
 
-## AG-R-2 — `google-antigravity` is 0.1.15 and alpha
+## AG-R-2 — `google-antigravity` is 0.1.x and alpha
 
 **Severity: high. Likelihood: certain — the classifier says so.**
 
@@ -77,11 +77,134 @@ looked.
 
 ## AG-R-3 — A write can be silently diverted out of the repo
 
+> ## **CAUSE FOUND AND FIXED, 2026-09-05. It was ours.**
+>
+> **`agy` was never diverting anything.** The agent was writing exactly where it intended, in the only
+> directory it had ever been in: `agy`'s own scratch directory. AIC⚡DC spawned the subprocess with
+> `cwd=repo_root` and never told `agy` that the repository was its **workspace**, so every tool call
+> on this transport ran outside the user's tree.
+>
+> Measured with everything else held constant — same parent directory, same `git init`, same seed
+> file, same process cwd, one flag different:
+>
+> | | tool `pwd` | `git rev-parse --show-toplevel` |
+> |---|---|---|
+> | `--add-dir <repo>` | `/tmp/temp/wstest` | `/tmp/temp/wstest` |
+> | *(control, no flag)* | `~/.gemini/antigravity-cli/scratch` | `fatal: not a git repository` |
+>
+> And `agy`'s system prompt closes the loop — it instructs the model that when it needs somewhere to
+> write it may use *"the default project directory at `~/.gemini/antigravity-cli/scratch`"* and should
+> *"recommend the user set that subdirectory as the active workspace."* Which is what it did, every
+> time, correctly, given where it was standing.
+>
+> **The fix is one flag**: `AgySession._argv()` passes `--add-dir <repo_root>`. The same prompt that
+> produced `scratch/hello_world/hello.py` now produces `hello_world.py` in the repository, with
+> nothing written to scratch — and it goes through `write_to_file` and the permission dialog rather
+> than the shell heredoc the model previously fell back to when `write_to_file` was refused.
+>
+> **How it was found is the lesson.** Not by a probe. A user asked *"create a helloworld script"* in a
+> new repository, then *"create it in this repo"*, and the model's own second turn ran `pwd` —
+> answering `~/.gemini/antigravity-cli/scratch` — then found the `agy` pid, read `/proc/<pid>/cwd`,
+> and wrote the file where it had been asked. **The agent diagnosed this, in its transcript, and the
+> transcript was readable because phase 5 had shipped the mirror a few hours earlier.**
+>
+> Four causes were guessed at over six days and each disproven by measurement: `trustedWorkspaces`,
+> git-ness, workspace emptiness, concurrency. The fifth was never guessed because it was not a
+> property of `agy` at all. The correlation the register had settled on — *"a create lands when the
+> turn also touches an existing file, and diverts when creating is all the turn does"* — is explained
+> exactly: a turn that edits an existing file is given a path and writes there; a turn that only
+> creates picks its own location, which was the scratch directory.
+>
+> **What stays.** The detection in `agy/steps.py` and the sentinel-write tripwire both stay: they
+> assert an outcome and cost nothing, and a future release of somebody else's CLI can reintroduce this
+> shape by another route. What is retired is the *theory* — this entry no longer needs one.
+>
+> The original assessment and the four dead ends are kept below, because the way they were wrong is
+> the reusable part: every one of them was a hypothesis about the other product, and the variable
+> nobody controlled for was in our own argv.
+
 **Severity: high. Likelihood: certain on an unconfigured machine — observed 2026-08-30.**
 
 Measured, not hypothesised: `agy` was asked to create a file in the current directory and wrote it to
 `~/.gemini/antigravity-cli/scratch/` instead, reporting success with a `file://` link. The cause was
 `trustedWorkspaces` in the CLI's `settings.json` not listing the working directory.
+
+> **Amended 2026-09-05 — the stated cause is wrong, the risk is not, and the real trigger is
+> unknown.** Three phase-8 probe runs diverted a write from **inside** `/tmp/temp`, which *is* in
+> `trustedWorkspaces`, on `agy` 1.1.26. So the trust list is not a sufficient explanation.
+>
+> Two replacement explanations were then tried and **both failed**, which is why this amendment offers
+> none:
+>
+> 1. *"The workspace must be a git repository."* `git init`-ing the probe workspace changed nothing.
+> 2. *"Newly-created files divert; edits land."* This fitted every observation available — every
+>    diverted file on record was a creation (`probe.txt`, `hello.txt`, `test_hello_world.py`,
+>    `stranger.txt`), and the write that landed was an edit. `scripts/probe_agy_write_target.py` was
+>    written to isolate exactly that: **one session, one workspace, one turn**, asked to edit an
+>    existing file *and* create a new one. **Both landed.** Disproven.
+>
+> The largest untested difference between the diverting runs and the clean ones is that the diverting
+> ones had **two `agy` processes running concurrently**. That is a candidate and nothing more.
+>
+> **Excluded 2026-09-05, and the run that excluded it found something better.**
+> `scripts/probe_agy_concurrent_write.py` ran the same create twice in one workspace — once alone,
+> once beside a second working `agy` session — and **both diverted**, the solo one included. So
+> concurrency is not the trigger, and the probe reported itself INCONCLUSIVE rather than claiming a
+> result, because a comparison whose control also fails proves nothing.
+>
+> What it does establish is sharper than what it set out to test. The *solo* create diverted in a
+> freshly-initialised **empty** git repository, while `probe_agy_write_target.py` — which seeded
+> `existing.txt` and asked for an edit *and* a create in one turn — had **both** land in a workspace
+> under the same root. The two differ in whether the workspace **contained a file at all**.
+>
+> **That hypothesis was tested immediately and is also wrong.** The probe was re-run with a file
+> seeded in the workspace and the create diverted again, solo and concurrent alike. Emptiness is not
+> the trigger.
+>
+> **What the four runs do line up on is the shape of the *turn*, not of the workspace.** Every
+> observation on record, with the workspace root held constant at `/tmp/temp`:
+>
+> | Turn | Outcome |
+> |---|---|
+> | edit an existing file **and** create a new one (`probe_agy_write_target`) | **both landed** |
+> | edit an existing file (browser demo; isolation probe's stranger) | **landed** |
+> | create only, empty workspace (`probe_agy_concurrent_write`, ×2) | **diverted** |
+> | create only, seeded workspace (same probe, re-run, ×2) | **diverted** |
+> | create only, fresh directory (the original 2026-08-30 capture) | **diverted** |
+>
+> So the sharpest statement the evidence supports is: **a create lands when the turn also touches an
+> existing file, and diverts when creating is all the turn does.** That is a correlation across five
+> runs and still not a mechanism — the third explanation offered here, after two that were confidently
+> wrong, so it is written as an observation rather than a cause.
+>
+> It does not change the mitigation, which is the useful part: the detection below fires on the
+> outcome and needs no theory about what produced it.
+>
+> **The consequence for the mitigation is the point, and it survives not knowing the cause.** AG-10's
+> health check asserts *"the repo root is a workspace the engine will write to"*. A check phrased
+> against `trustedWorkspaces` would pass on a machine where writes divert anyway — measured here. It
+> must assert the **outcome**: write a sentinel, then `stat` it at the path it was asked for. That is
+> the one form of the check that does not depend on a mechanism nobody has pinned down. See
+> [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-two-explanations-that-were-wrong).
+
+**Mitigated 2026-09-05, at detection rather than at startup — and the reason is that the specified
+mitigation cannot be built honestly.** The startup check above has to assert an *outcome*, and the
+only thing that produces an outcome is a real write, which costs a turn on the user's subscription
+every time the app starts. So the check was moved to where it is free: `agy/steps.py` inspects every
+completed call in the write seam, and a target that is **missing here** while a file of that name sits
+in `~/.gemini/antigravity-cli/scratch/` is reported as a `systemEvent` naming both paths.
+
+Deliberately narrow. "The file is missing" alone has innocent explanations — the model naming a path
+it never created, a tool that failed for an unrelated reason — and a false alarm about a write that
+did land would be worse than the silence it replaces. The pair has no innocent reading.
+
+The notice says the edit is **not lost** and names the file holding it, because a user told only "the
+file is not there" would redo work that has already been done. And it sits *beside* the tool card
+rather than rewriting it: `agy` reported success, the card says so, and the two disagreeing is exactly
+the information the user needs.
+
+This does not close the risk — a diverted write still happens, and nothing prevents it. What changes is
+that it stops being undiagnosable, which was the whole of the severity.
 
 **Why it bites:** it does not error. The agent believes it succeeded, the transcript says it
 succeeded, and the file tree and diff viewer — both rooted at the repo — show nothing. The user's
@@ -94,7 +217,7 @@ root is a workspace the engine will actually write to, and reports a degradation
 banner if it is not.
 
 **Settled in phase 1 (2026-08-31): the SDK is not subject to the trust list.** The tripwire below was
-run — `probe_consultant.py` § *AG-R-3: workspace containment* — on the same machine whose
+run — `scripts/probe_consultant.py` § *AG-R-3: workspace containment* — on the same machine whose
 `trustedWorkspaces` diverted `agy`. A `create_file` turn with `workspaces=[repo_root]` wrote
 `aic-dc-sentinel.txt` and it was found by `stat` **at the expected absolute path** in this repository,
 not under `~/.gemini/`. The two mechanisms are separate, as the `hooks/policy.py` reading suggested
@@ -219,6 +342,15 @@ The Python SDK accepts only `GeminiAPIEndpoint` or `VertexEndpoint`
 (`connections/local/local_connection.py:200-201`). It cannot reuse the `agy` login, which is what
 the owner already has.
 
+**Scope, clarified 2026-09-03:** this risk is about the **SDK engine**, not about the account. `agy`
+itself does reach the subscription — headless `agy -p` authenticates from the same keyring OAuth and
+calls the same Code Assist backend as the interactive TUI, measured. So the exposure is precise: the
+engine AIC⚡DC actually runs is billed separately from the subscription the user already pays for, and
+the free tier of that separate billing refuses at 20 requests per model per day. The mitigation is a
+purchase (billing on the key's Cloud project), not an architecture — see
+[`decisions.md` AG-2](decisions.md#ag-2) § *Amended 2026-09-03* for why the alternative was measured
+and declined.
+
 **The reason is a backend split, established by measurement on 2026-08-31 and recorded in full at
 [`decisions.md` AG-2](decisions.md#ag-2).** `agy` authenticates with the `auth/aicode` scope against
 `cloudcode-pa.googleapis.com`, the Code Assist surface where a consumer AI Pro subscription's coding
@@ -307,10 +439,17 @@ streamed. A consultation that could be resumed is a session, and a session belon
 
 ## AG-R-10 — A second bundled binary
 
+> **Mitigated 2026-09-05 (phase 7).** `google-antigravity` is now the `antigravity` extra. The
+> numbers below are measured rather than estimated, and the risk is closed to the extent a
+> dependency-set risk can be: it is now one `pyproject.toml` edit away from returning, and there is a
+> test and a build-time assertion in the way of that edit.
+
 **Severity: medium. Likelihood: certain if the SDK is a hard dependency.**
 
-`localharness` is 119,721,512 bytes inside the wheel. The bundled `claude` CLI is already ~295 MB and
-is the reason packaging is its own phase on the Claude side.
+`localharness` is **129,065,896 bytes** inside the 0.1.16 wheel — it was 119,721,512 in 0.1.15, so it
+grew by ~9 MB in the four days between the two measurements, which is its own small argument. The
+bundled `claude` CLI is already ~295 MB and is the reason packaging is its own phase on the Claude
+side.
 
 **Why it bites:** it compounds a problem that is already the most likely thing to block a release,
 and it does so for a capability many users will not enable. An install that grows by 120 MB to ship a
@@ -321,8 +460,39 @@ install. The engine reports its own absence through the capability descriptor
 ([AG-9](decisions.md#ag-9)) exactly as it reports a missing surface, so a base install is a
 one-engine install with no broken UI rather than an error.
 
-**Tripwire:** base-install size, measured per release. A jump means the extra has leaked into the
-default dependency set — which is a `pyproject.toml` edit nobody reviews as a size change.
+**What it costs, measured on 2026-09-05** with `uv pip install` into two clean Python 3.14 venvs,
+`claude-agent-sdk` 0.2.152:
+
+| Install | `site-packages` |
+|---|---|
+| `aic-dc` | **273.1 MiB** |
+| `aic-dc[antigravity]` | 408.3 MiB |
+
+So the extra is **135.2 MiB**, of which `localharness` alone is 123.1 MiB (129,065,896 bytes).
+
+**Measure a *fresh* install, before its first run.** The first attempt at this table reported 285.8 MiB
+for the base, because that venv had already started a server and `__pycache__` had added ~9 MiB of
+bytecode to `site-packages` — while the comparison venv had not been run. The absolute number moved,
+the difference moved with it, and nothing looked wrong. Sum apparent file sizes rather than `du`
+blocks, too: `uv` hardlinks from its cache, so block counting answers a different question depending
+on what else is installed.
+
+**And the extra is narrower than its name.** It buys the *metered* route, not the engine: the `agy`
+transport ([AG-14](decisions.md#ag-14)) reaches the same Antigravity product over a pipe on the
+owner's own subscription, imports nothing from `google.antigravity`, and mounts on the CLI being on
+PATH — so a base install is still a two-engine install for anyone who has it. What a base install
+genuinely loses is the API-key session and the **consultant**, since `second_opinion` and
+`generate_image` are the SDK's and `agy` has no one-shot consultation mode.
+
+**Tripwire, in three places** — because the leak is a `pyproject.toml` edit nobody reviews as a size
+change, and a number in a release note is something a human has to notice:
+
+1. `tests/test_antigravity_packaging.py` reads `pyproject.toml` and fails if `google-antigravity` is
+   back in `[project.dependencies]`, or if the extra loses its version floor.
+2. The release workflow's verify step fails if `localharness` appears in the PyInstaller archive.
+3. Base-install size, measured per release against the table above.
+
+The first two are what make this a caught regression rather than a noticed one.
 
 ---
 
@@ -331,7 +501,7 @@ default dependency set — which is a `pyproject.toml` edit nobody reviews as a 
 **Severity: critical. Likelihood: observed — it happened on both probe runs, unprompted.**
 
 Gating `create_file` and `edit_file` does not stop the agent from making the edit. It stops it from
-making the edit *that way*. When [`probe_edit_args.py`](probe_edit_args.py) denied both file tools,
+making the edit *that way*. When [`scripts/probe_edit_args.py`](../../scripts/probe_edit_args.py) denied both file tools,
 `gemini-3.6-flash` immediately reached for `run_command` with the same intent — `sed -i` on the first
 run, an inline `python3 -c "…content.replace(…)…"` on the second. Neither was suggested by the
 prompt. Only once `run_command` was denied on the same seam did the seeded file survive the turn.
@@ -357,3 +527,104 @@ rather than presenting it as a fresh, unrelated request. Deny-by-default on the 
 completion, and asserts the file's bytes are unchanged — asserting on the *file*, not on the hook
 having fired. A hook-level assertion passes while the file is being rewritten by `sed`, which is
 precisely the hole. It goes red if a future engine adapter gates file tools only.
+
+## AG-R-12 — An `agy` hook gate is only as wide as its matcher
+
+**Raised 2026-09-03 as "the hook gate fails open", and corrected the same day when the original
+measurement turned out to be wrong.** The wrong version is kept in outline because the way it was
+wrong is the risk.
+
+**What was measured first.** A `PreToolUse` hook sleeping 10s against `"timeout": 3` was invoked, the
+deadline passed, and the edit landed. Read as: a timeout does not block, so the gate fails open.
+
+**What was wrong with it.** That probe's `matcher` was `replace_file_content` alone. Re-run with
+`"matcher": "*"`, the identical timeout **blocked the write** — the file was untouched and the agent
+reported *"the configured `PreToolUse` lifecycle hook intercepted and blocked the tool execution."*
+A hook killed at its deadline exits non-zero, and `agy` treats that as a refusal.
+
+So the timeout is not the hole. **The hole is a narrow matcher**: a blocked tool is an error the model
+can see, and it will reach for a different tool to accomplish the same thing. Anything the matcher
+does not cover is ungated. That is [AG-R-11](#ag-r-11) exactly — a denied edit re-attempted by
+another route — on a third mechanism, after `sed -i` and inline `python3`.
+
+**The failure modes, measured.** Only one of four fails open, and it is the one under our control:
+
+| Hook behaviour | Tool | Why |
+|---|---|---|
+| exceeds `timeout` | **blocked** | killed at the deadline, which is a non-zero exit |
+| exits non-zero | **blocked** | `command failed: exit status 1` |
+| prints malformed JSON | **blocked** | unmarshal failure |
+| command missing / not executable | **blocked** | `exit status 127` |
+| **prints nothing, exits 0** | **allowed** | parsed as `{}`, empty decision defaults to allow |
+
+**Mitigations — and as of [AG-14](decisions.md#ag-14) these are phase-8 requirements, not advice.**
+A gate is the product on this transport, so each of these is a thing the phase does not ship without:
+
+- **`"matcher": "*"`, never a tool list.** The seam is every tool, for the same reason
+  [AG-5](decisions.md#ag-5) makes it every *mutating* tool on the SDK: a gate the model can walk
+  around is a manufactured record of consent. A per-tool matcher is the mistake this entry exists to
+  prevent.
+- **Never exit 0 with empty stdout.** Every path through the hook prints a decision. The one
+  fail-open case is ours to not write, and it should carry a test.
+- **Raise `--print-timeout`** (default **5m**), which bounds the whole turn and therefore the dialog.
+  A hook may block as long as it likes — `timeout` is passed straight to `context.WithTimeout` with no
+  ceiling, verified at `86400` — but the turn around it will not.
+- **`permissions.allow` instead of `--dangerously-skip-permissions`.** Grants of the form
+  `file(<workspace>/*)` stop the headless layer soft-denying, while the hook keeps an absolute veto —
+  a hook `deny` overrides a settings `allow`. Defence in depth rather than one gate.
+
+**Tripwire, and it must assert on the file rather than on the hook.** A probe that denies an edit,
+lets the turn run to completion, and asserts the target's bytes are unchanged — with the hook
+recording *every* tool it was asked about, so a route-around shows up as a second tool name rather
+than as a silent pass. Asserting that the hook fired is what produced the wrong answer the first
+time: it fired, and the file changed anyway.
+
+**Standing caveat on the correction.** The first reading was published in this file and in
+[AG-2](decisions.md#ag-2) before it was checked against a second matcher. It survived one probe and
+one commit. The lesson is the one AG-R-11's own tripwire already states — assert on the artefact, not
+on the mechanism — and it is recorded twice because it has now been learned twice.
+
+### The second way it failed open, found 2026-09-05
+
+Read the table again and notice what it says about *`agy`*: four of five failures **block**. `agy`
+fails closed. The one fail-open row is the one we write.
+
+**Our installed command converts all four into fail-open**, deliberately:
+
+```
+<interpreter> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+That is sound on one premise, stated in `agy/install.py`: *a non-zero exit means the interpreter
+could not start, which means this host is not running, which means it owns no conversations, so allow
+is correct.* The premise buys something real — a stale entry must not stop a stranger's `agy` — and it
+holds exactly while the only way the command can fail is that a Python has gone missing.
+
+**It was false on a PyInstaller build.** There `sys.executable` is the frozen binary, not a Python, so
+`<binary> -m aic_dc.agy.hook …` exits 2 with *"unrecognized arguments"* — on every call, of a session
+this host **was** running and **did** own. Every tool call auto-approved. And `status()` reported the
+gate `current`, because it decides by comparing the installed command against the one it would write,
+and the string matched perfectly.
+
+So: an ungated agent, reporting itself gated, on the transport where the gate *is* the product
+([AG-5](decisions.md#ag-5)). It was invisible from a source checkout, where the `-m` form is correct
+and every test passes, and no test could have caught it — the suite runs where `sys.executable` is a
+Python.
+
+**What closes it, at two layers:**
+
+- `hook_command` emits `<binary> --agy-hook <config_dir>` on a frozen build — a suppressed CLI flag
+  whose only caller is that string.
+- **`install` probes the command before writing it** (`hook_runs`) and refuses one that does not
+  answer with a JSON decision. That is the general fix, and the frozen binary was only its first
+  instance: a moved virtualenv or an uninstalled package reach the same place. It runs the left side
+  only, without the fallback — running the whole command would print a perfect decision and mask
+  precisely the failure being looked for.
+
+Failing closed here costs the user an error message at the moment they asked for a gate, which is the
+cheapest place in the system to spend one.
+
+**Added tripwire:** `install` returns `unrunnable` rather than writing, and the Settings panel renders
+that state with its reason. The deeper lesson is a third instance of this entry's own: **a string that
+is correct is not a mechanism that works**, and `status` comparing strings was measuring the first
+while claiming the second.

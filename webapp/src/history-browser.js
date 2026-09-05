@@ -1215,6 +1215,18 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
    */
   async _loadSubagents(sessionId) {
     if (!this.rpcConnected || !sessionId) return;
+    // Its own surface, and not this panel's. Until phase 5 the two moved
+    // together — an engine with no history browser was never asked for a
+    // session's subagents — and the first engine to have one without the
+    // other rendered the router's refusal as red text at the top of every
+    // preview: "list_subagent_transcripts serves the 'subagent_tabs'
+    // surface, which the agy engine cannot feed." The refusal was right;
+    // asking at all was the bug. Found in a browser on 2026-09-05.
+    if (!supports(SURFACE.SUBAGENT_TABS)) {
+      this._subagents = [];
+      this._subagentsError = '';
+      return;
+    }
     const gen = ++this._subagentsGeneration;
     this._loadingSubagents = true;
     this._subagentsError = '';
@@ -1838,21 +1850,23 @@ export class HistoryBrowser extends RpcMixin(LitElement) {
             </span>`
           : ''}
       </div>
-      <button
-        class="load-button secondary fork-button
-          ${this._confirmResume === 'forked' ? 'armed' : ''}"
-        ?disabled=${blocked}
-        @click=${() => this._onResumeClick(true)}
-        title=${this._confirmResume === 'forked'
-          ? UNREAD_CONFIRM_TITLE
-          : 'Branch a copy; the original session stays intact'}
-      >
-        ${this._loadingSession === 'forked'
-          ? 'Forking…'
-          : this._confirmResume === 'forked'
-            ? 'Fork anyway?'
-            : 'Fork'}
-      </button>
+      ${supports(SURFACE.SESSION_FORK)
+        ? html`<button
+            class="load-button secondary fork-button
+              ${this._confirmResume === 'forked' ? 'armed' : ''}"
+            ?disabled=${blocked}
+            @click=${() => this._onResumeClick(true)}
+            title=${this._confirmResume === 'forked'
+              ? UNREAD_CONFIRM_TITLE
+              : 'Branch a copy; the original session stays intact'}
+          >
+            ${this._loadingSession === 'forked'
+              ? 'Forking…'
+              : this._confirmResume === 'forked'
+                ? 'Fork anyway?'
+                : 'Fork'}
+          </button>`
+        : ''}
       <button
         class="load-button resume-button
           ${this._confirmResume === 'resumed' ? 'armed' : ''}"

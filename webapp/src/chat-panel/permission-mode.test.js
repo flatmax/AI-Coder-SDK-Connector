@@ -573,3 +573,55 @@ describe('onRoleChanged', () => {
     }
   });
 });
+
+describe('the selector offers only what the engine accepts', () => {
+  // The table in permission-mode.js is Claude's six. Antigravity accepts
+  // two — `set_permission_mode('acceptEdits')` there returns
+  // `{error: 'unsupported'}` — and the selector offered all six on every
+  // engine, so four of them were controls that were reachable and refused.
+  // Same defect phase 5 found in the history browser's Fork button, and
+  // the same fix: render what the engine reports, never what its name is
+  // (AG-R-4). Found on 2026-09-05 by a user asking how to stop approving
+  // every write.
+
+  it('filters to the engine’s list', () => {
+    const options = permissionModeOptions('default', ['default', 'plan']);
+    expect(options.map((o) => o.value)).toEqual(['plan', 'default']);
+  });
+
+  it('keeps the labels rather than showing raw values', () => {
+    const options = permissionModeOptions('default', ['default', 'plan']);
+    expect(options.find((o) => o.value === 'default').label).toBe('Ask');
+  });
+
+  it('drops the modes that would be refused', () => {
+    const values = permissionModeOptions('default', ['default', 'plan'])
+      .map((o) => o.value);
+    for (const refused of ['acceptEdits', 'bypassPermissions', 'dontAsk', 'auto']) {
+      expect(values).not.toContain(refused);
+    }
+  });
+
+  it('shows the whole table when the engine reports nothing', () => {
+    // Every build before this key existed, and any engine that does not
+    // report one. Identity preserved so Lit does not re-render the control.
+    expect(permissionModeOptions('default', null)).toBe(PERMISSION_MODES);
+    expect(permissionModeOptions('default', [])).toBe(PERMISSION_MODES);
+  });
+
+  it('still contains the current mode even if the engine omits it', () => {
+    // A `<select>` whose value is not among its options renders the first
+    // one, which would misreport the posture the session is actually in.
+    const options = permissionModeOptions('acceptEdits', ['default', 'plan']);
+    expect(options.map((o) => o.value)).toContain('acceptEdits');
+  });
+
+  it('renders a mode this build has no label for', () => {
+    // A newer engine reporting a posture this webapp predates. Filtering
+    // it out would make a real mode unreachable.
+    const options = permissionModeOptions('default', ['default', 'newMode']);
+    const extra = options.find((o) => o.value === 'newMode');
+    expect(extra).toBeTruthy();
+    expect(extra.label).toBe('newMode');
+  });
+});

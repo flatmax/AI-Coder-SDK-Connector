@@ -5,11 +5,11 @@ rather than from documentation, blog posts or recollection. Verified **2026-08-3
 
 | What | Version | Where it was read |
 |---|---|---|
-| `google-antigravity` | **0.1.15** — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
-| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF | `~/.local/bin/agy` |
+| `google-antigravity` | **0.1.15** when this was written; **0.1.16** installed since 2026-09-03 — *Development Status :: 3 - Alpha*, Apache-2.0 | `.venv/lib/python3.14/site-packages/google/antigravity/`, `google_antigravity-0.1.15.dist-info/METADATA` |
+| `agy` CLI | **1.1.22** (`agy --version`; released 2026-08-27), 208,429,312 bytes, stripped ELF. **Re-probed at 1.1.25 on 2026-09-03** for its hook surface — see [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). **1.1.26 installed since 2026-09-05**, which is what phase 8's live gate, write and isolation runs were driven against; nothing in this file was contradicted by that bump except as noted under the write-diversion amendment below | `~/.local/bin/agy` |
 | `claude-agent-sdk` (for comparison) | 0.2.137 | `.venv/lib/python3.14/site-packages/claude_agent_sdk/` |
 
-> **Do not re-derive this by guessing.** The SDK is at 0.1.15 and alpha; it will move faster than
+> **Do not re-derive this by guessing.** The SDK is at 0.1.x and alpha; it will move faster than
 > `claude-agent-sdk` did. This file is a snapshot, not a contract. Re-read the installed package when
 > implementing, and see [§ The probe](#the-probe) for the half of it that should be machine-checked.
 
@@ -67,6 +67,21 @@ gemini-3.5-flash-{high,medium,low}    claude-opus-4-6-thinking
 CLI, none of Claude Code's tools, no Anthropic billing — and surfacing it naively in a UI that also
 hosts a real Claude Code engine would make "which engine am I talking to" unanswerable.
 
+**The output is two tab-separated columns, and both are load-bearing** — recorded because the model
+picker parses it. Re-read at 1.1.25 on 2026-09-04, where the list has grown a `gemini-3.8-flash`
+family and is fourteen entries:
+
+```
+gemini-3.8-flash-low<TAB>Gemini 3.8 Flash (Low)
+claude-sonnet-4-6<TAB>Claude Sonnet 4.6 (Thinking)
+```
+
+The first column is the id `--model` takes; the second is a display label. The label was originally
+discarded on the belief that the webapp's model list is a list of names — it is a list of
+`{value, displayName, …}` objects, and discarding the label came from the same misreading that had
+the ids sent as bare strings and rendered as nothing. Both columns are used now. The *"Fetching
+available models…"* banner goes to **stderr**, so a parser reading stdout does not have to filter it.
+
 Note also that reasoning effort is baked into the *model name* here, where the SDK models it as a
 separate `ThinkingLevel` enum (`models.py:44-63`). The two Antigravity surfaces do not agree with
 each other on this.
@@ -119,7 +134,70 @@ One turn per line, session held open across lines. `{"event":"user_message",…}
 `agy -p --input-format stream-json` silently consumes `--input-format` as the prompt. The `=` form is
 required: `--print="" --input-format stream-json`.
 
+### The stream, measured in bidirectional mode (2026-09-03)
+
+The vocabulary above was read from `-p` captures and is **incomplete in three ways** that matter to a
+pump. Captured from one bidirectional turn, since that is the mode an adapter uses.
+
+**Every frame is nested under its own event name**, exactly as `init` is:
+
+```json
+{"event":"step_update","step_update":{ … }}
+{"event":"result","result":{ … }}
+```
+
+A parser written against a flat shape reads `None` for every field *without erroring* — the same
+failure `diff_agy_init` was corrected for at 1.1.22, on a different frame.
+
+**`step_type` has a fourth member.** The recorded vocabulary is
+`user_input | agent_response | tool`; a plain read-a-file turn also produced **`system_message`**. On
+a CLI releasing weekly a closed vocabulary that is not actually closed is how a step type arrives as
+silence in the chat, so a pump must render an unknown `step_type` rather than drop it.
+
+| `step_type` | Fields beyond `conversation_id`, `step_index`, `state` |
+|---|---|
+| `user_input` | — |
+| `agent_response` | `text_delta`, `duration_seconds`, `usage` |
+| `tool` | `tool_name`, `tool_info: {name, parameters}`, `duration_seconds` |
+| `system_message` | `duration_seconds` |
+
+`state` is `ACTIVE` or `DONE`.
+
+**`text_delta` is a real delta, and the SDK's equivalent is not.** This is the one that would produce
+a plausible, wrong pump. `streamChunk` on the SDK path carries the *whole accumulated block* — checked
+in phase 3 and recorded above as "content is cumulative", with the browser replacing by `block_id`.
+`agy`'s `text_delta` carries only the new fragment:
+
+```
+step_index 5 : "I am searching for `calc.py` to read its contents and summarize what it does.\n"
+step_index 9 : "[calc.py](file:///…/calc.py) defines a "
+```
+
+A pump that replaced on this would render only the last fragment of every message; one that
+accumulated on the SDK's would repeat the prefix of every message. The two transports need opposite
+handling, and neither failure raises anything.
+
+**Tool arguments are nested differently from the hook's.** The stream gives
+`tool_info.parameters`, the hook gives `toolCall.args` — the same values under two paths, which is
+[§ One call, two vocabularies](#one-call-two-vocabularies--measured-in-the-phase-4-live-run-2026-09-03)
+appearing a third time. And `tool_info.output` was **absent** on a completed `find_by_name` here,
+where the 1.1.22 `-p` correction found it present for `run_command`; so it is per-tool rather than
+universal, and a pump must not require it.
+
+**`result`** carries `status`, `response` (the turn's whole prose), `duration_seconds`, `num_turns`
+and `usage` — `{input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens}`.
+
 ### Why `agy` is nonetheless not the engine
+
+> **Superseded 2026-09-03 — read this section as history, not as the current reasoning.** Both
+> measurements below were re-checked against `agy` 1.1.25 and **both are obsolete**: each measured a
+> channel that is not the lifecycle hook. A `PreToolUse` hook gates a call, carries the replacement
+> text before the write, and can amend the arguments. The exclusion this section argued for was
+> **reversed the same day** by [AG-14](decisions.md#ag-14), which adds `agy` as a second transport
+> beside the SDK engine — and the measurements that replaced these are in
+> [§ The `agy` hook surface](#the-agy-hook-surface--measured-2026-09-03). Kept in full because the
+> decision stood on it for four days and because how it was superseded is worth reading: neither
+> measurement was wrong, both were about the wrong channel.
 
 Two measurements settle it. **Both were re-run against 1.1.22 on 2026-08-30** and one of them came
 back materially different from the first pass — see the correction under point 2, which matters
@@ -223,10 +301,216 @@ agent believes it succeeded. For a product whose file tree and diff viewer are r
 that presents as "the agent says it edited the file and the diff is empty."
 See [`risks.md` AG-R-3](risks.md#ag-r-3).
 
+> **Amended 2026-09-05 — the diversion is real and `trustedWorkspaces` is not a sufficient
+> explanation for it.** On 1.1.26, three phase-8 probe runs diverted a newly-created file from
+> **inside** `/tmp/temp`, which *is* on the trust list above; git-initialising the workspace changed
+> nothing. Every diverted file on record — `probe.txt` here, plus `hello.txt`,
+> `test_hello_world.py` and `stranger.txt` — was **created**, whereas a same-day browser run
+> *edited an existing* file under the same trusted root and the edit landed at its real path. The
+> better-supported reading is that a bare filename handed to `write_to_file` does not resolve against
+> the session's cwd. **This has not been isolated with a controlled probe**, so it is a sharper
+> hypothesis, not a measurement — which is exactly the standard the rest of this file is held to, and
+> the paragraph above did not meet it either.
+
 **Unknown:** whether the Python SDK's `workspaces` field
 (`connections/local/local_connection_config.py:147`) is subject to the same trust list. It appears to
 be a separate mechanism — `workspace_only` policies are enforced at the platform layer
 (`hooks/policy.py:442`, `:541-543`) — but this was not confirmed.
+
+---
+
+## The `agy` hook surface — measured 2026-09-03
+
+§ *Why `agy` is nonetheless not the engine* rules `agy` out on the `--permission-mode` postures and
+the `stream-json` output. **Neither is the hook**, and `agy` 1.1.25 has lifecycle hooks. This section
+is what a direct probe found, kept whole because [AG-2](decisions.md#ag-2)'s amendment turns on it and
+because most of it stays true whatever is decided.
+
+Probed by installing a `PreToolUse` hook, capturing its stdin verbatim, and running headless turns
+against a scratch workspace. All artefacts removed afterwards.
+
+### Headless spends the paid subscription
+
+`agy -p` authenticates from the OS keyring (`zalando/go-keyring`, service `antigravity`) and reaches
+`daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent` — the same OAuth identity and the
+same Google AI Pro quota as the interactive TUI. `--conversation <id>` resumes a conversation created
+interactively, loading its existing turns.
+
+This is the whole reason the question was reopened: the SDK path cannot reach that backend at any
+price (AG-2 § *a backend split*), and the Gemini API key it must use instead refuses at 20 requests
+per model per day.
+
+### The `PreToolUse` payload carries the write
+
+Captured stdin, unedited but for indentation:
+
+```json
+{
+  "conversationId": "...", "modelName": "gemini-3.8-flash-low", "stepIdx": 4,
+  "artifactDirectoryPath": "/home/.../brain/<id>",
+  "transcriptPath": "/home/.../brain/<id>/.system_generated/logs/transcript_full.jsonl",
+  "workspacePaths": [],
+  "toolCall": {
+    "name": "replace_file_content",
+    "args": {
+      "TargetFile": "/home/.../target.txt",
+      "TargetContent": "FOOBAR_123",
+      "ReplacementContent": "FOOBAR_456",
+      "StartLine": "1", "EndLine": "1",
+      "AllowMultiple": false, "Description": "...", "Instruction": "...",
+      "toolAction": "Editing file", "toolSummary": "..."
+    }
+  }
+}
+```
+
+`write_to_file` carries `CodeContent`. **These are the SDK's own argument names** — the ones
+`permissions.ARG_ALIASES` already maps — so `normalise_args`, `build_diff_payload` and
+`denormalise_args` would work on this payload essentially unchanged. Two products, one tool-argument
+vocabulary, across two transports that share nothing else.
+
+Other tools captured in the same run: `find_by_name` (`Pattern`, `SearchDirectory`), `view_file`
+(`AbsolutePath`), `run_command` (`CommandLine`, `Cwd`, `WaitMsBeforeAsync`). Note `find_by_name` —
+`agy` and the SDK do **not** agree on tool *names*, only on argument names.
+
+### The response contract
+
+`allow` / `deny` / `ask` / `force_ask`, plus `reason` (*"shown to the user/agent"*) and `overwrite`
+— a shallow top-level merge into the tool call's arguments, where *"the modified tool call is what
+actually executes and is recorded"*. `overwrite` is `modified_args` under another name, so the amend
+path [AG-5](decisions.md#ag-5) chose the raw SDK hook to preserve exists here too.
+
+`ask` is useless headlessly — it auto-denies, logged as `Print mode: soft-denying tool confirmation`
+— but an adapter would never return it. The hook blocks, asks AIC⚡DC's own dialog, and returns the
+human's answer.
+
+### The response contract fails closed, except in one place
+
+Measured across five failure modes on live edit turns. Only the last allows the tool:
+
+| Hook behaviour | Tool | `agy`'s own words |
+|---|---|---|
+| exceeds `timeout` | **blocked** | killed at the deadline → non-zero exit |
+| exits non-zero | **blocked** | `command failed: exit status 1` |
+| prints malformed JSON | **blocked** | `failed to unmarshal result from hook … syntax error` |
+| command missing | **blocked** | `exit status 127` |
+| **exit 0, empty stdout** | **allowed** | parsed as `{}`; an empty decision defaults to allow |
+
+`timeout` is passed straight to `context.WithTimeout` with **no ceiling** — verified at `86400`, where
+a 40-second hook ran to completion and its `deny` was honoured. What *does* bound a dialog is
+`--print-timeout`, which defaults to **5m** and caps the whole headless turn.
+
+**This was initially measured backwards, and the way it went wrong is the finding.** A first probe
+used `"matcher": "replace_file_content"`, saw a timed-out hook and a modified file, and concluded the
+gate failed open. Re-run with `"matcher": "*"` the same timeout blocked the write. A blocked tool is
+an error the model can see, and it reaches for a different tool — so anything outside the matcher is
+ungated. [AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher) carries it;
+the seam is every tool, never a list.
+
+### Bidirectional mode, and the isolation key — measured 2026-09-03
+
+The two questions [AG-14](decisions.md#ag-14) turned on, both settled by one probe.
+
+**Hooks fire in bidirectional `stream-json` mode, not only under `-p`.** One turn driven as
+
+```
+agy --print="" --input-format stream-json --output-format stream-json --dangerously-skip-permissions
+{"event":"user","message":{"role":"user","content":"…"}}
+```
+
+produced **four** `PreToolUse` payloads — `run_command` ×2, `view_file`, `replace_file_content`. That
+`run_command` is gated in this mode matters as much as the edit: it is AG-R-11's route-around tool.
+
+**`conversationId` is a sound isolation key.** The hook payload's `conversationId` was *exactly* the
+`init` frame's `conversation_id`, and `init` is the stream's first event, so a host learns the id it
+owns before any tool call can arrive:
+
+```
+stream init conversation_id : cd4edb7f-6de3-468f-9815-e76b310a920a
+hook  conversationId        : cd4edb7f-6de3-468f-9815-e76b310a920a   → match
+hook  workspacePaths        : []                                     → unusable
+```
+
+This is what makes a **global** hook shippable. It will see the user's own unrelated `agy` sessions —
+workspace-local `hooks.json` does not load headlessly — and it can allow-and-return immediately for
+any conversation the host does not own. `workspacePaths` cannot do that job: it is empty in every
+payload captured here, in both `-p` and bidirectional modes.
+
+### The tool *names* differ, and only the tool names — measured 2026-09-03
+
+The trap for anyone reusing `permissions.py` here. `agy` and the SDK agree on **argument** names and
+disagree on **tool** names:
+
+| Job | SDK (`BuiltinTools`) | `agy` |
+|---|---|---|
+| edit a file | `edit_file` | `replace_file_content` |
+| create a file | `create_file` | `write_to_file` |
+| find files | `find_file` | `find_by_name` |
+| list a directory | `list_directory` | `list_dir` |
+| read a file | `view_file` | `view_file` |
+| run a command | `run_command` | `run_command` |
+
+So `TOOL_CLASSES`, `MUTATING_TOOLS` and `ALWAYS_ASK` — all keyed on SDK names — match `agy` on two
+entries and miss the rest. The failure is quiet rather than loud, and in the safe direction: an
+unrecognised name classifies as `exec` and is gated. But `replace_file_content` would not be in
+`ALWAYS_ASK`, the dialog would call a file edit a command, and `_diff_tool_for` would not recognise it,
+so **no diff would render** — the gate holding while the product's central feature silently degrades.
+
+A per-transport name map is therefore a requirement of phase 8, not a refinement. The argument names
+needing no such map is the genuine convenience; the tool names are the thing that looks like it
+transfers and does not.
+
+### Two limits that remain
+
+- **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local
+  `<workspace>/.agents/hooks.json` was **not** loaded in headless mode —
+  `hooks_manager.go:53] loaded 0 named hooks from 0 hooks.json file(s)` — including with the exact
+  workspace path in `trustedWorkspaces`. The embedded changelog's fix for this is wired to the TUI's
+  workspace-change event, not the headless bootstrap. The global file *"fires unconditionally"*, so a
+  gate installed there intercepts the user's own unrelated `agy` sessions and must pass them through.
+  **The natural isolation key does not work:** `workspacePaths` was **empty** in every payload
+  captured here. `conversationId` is the sound one — an adapter knows the conversation it started —
+  and it is unverified.
+- **Concurrency.** An `flock` on `presence/<id>.lock` serialises turns; an interactive session and a
+  headless turn on the same conversation conflict. An adapter must own its conversation, which is no
+  loss — driving the user's open TUI session was never necessary.
+
+### Defence in depth is available
+
+`permissions.allow` entries — `read_file(<path>)`, `write_file(<path>)`, `file(<glob>)`,
+`command(<prefix>)` — stop the headless layer soft-denying without `--dangerously-skip-permissions`,
+and a hook `deny` still overrides a settings `allow`: *"tool call denied by pre-tool hook"*, file
+untouched. So the hook can be an additional veto rather than the only gate.
+
+### `transcript_full.jsonl` is a phase-5 asset regardless
+
+Every conversation writes `.system_generated/logs/transcript.jsonl` and
+`transcript_full.jsonl`, in headless runs as well as interactive ones. The first truncates oversized
+fields and names them in `truncated_fields`; **the second never truncates**. Records are typed
+(`USER_INPUT`, `PLANNER_RESPONSE`, `CODE_ACTION`, `GENERIC`, `SEARCH_WEB`, `CHECKPOINT`), and a
+completed edit carries a real unified diff:
+
+```
+[diff_block_start]
+@@ -1,2 +1,2 @@
+-FOOBAR_123
++FOOBAR_456
+[diff_block_end]
+```
+
+That is *after the fact*, so it cannot serve the permission dialog — but it is exactly what the
+history browser and the repo-local mirror need, and those are two of the surfaces `capabilities.py`
+currently marks `unbuilt` for this engine.
+
+### Not an entry point: `--remote-control`
+
+The binary carries a `--remote-control` flag and a `remotecontrol` package, and a live session logs
+`[RemoteControl] CLI launched without --remote-control, staying disconnected`. It is **not** a local
+IPC: the symbols are WebRTC — `PeerSession`, ICE candidates, SCTP framing, `pendingPin`,
+`GetRemoteControlInfoRequest` — i.e. a brokered peer channel for Google's own remote UI, with pin
+pairing. A running `agy` listens only on two ephemeral localhost ports for its internal language
+server, which answer `400`/`404` to anything else. **There is no way to attach to an already-running
+session**, and that is architectural rather than a missing flag.
 
 ---
 
@@ -260,6 +544,7 @@ Verified line by line. This is the table that says the engine is viable.
 | Subagent tabs | `SubagentConfig`; per-trajectory usage; `trajectory_id` / `parent_trajectory_id` / `depth` on every `Step` | `connection.py:71`; `conversation.py:300-308`; `types.py:889-935` |
 | Serve the indexes to the agent | `tools: list[Callable]` — plain in-process Python callables | `connection.py:57`; `local_connection.py:206-271` |
 | Budget cap | `BudgetConfig` + `StopReason.MAX_*_EXCEEDED` | `types.py:829-887` |
+| Why the turn ended | `_last_turn_stop_reason` (private) today; `StopArgs.stop_reason` + `.error_message` from 0.1.16 — see § *The first drift it caught* | `conversation.py:326-328`; `hooks/hooks.py:239`, `types.py:1100-1119` |
 | Per-turn usage | `Conversation.last_turn_usage` — a difference against turn-start | `conversation.py:310-318` |
 | Image generation | `BuiltinTools.GENERATE_IMAGE`; image model wired by default | `types.py:308`; `local_connection_config.py:303-317` |
 
@@ -325,7 +610,7 @@ which AIC⚡DC would have to own itself. See [`decisions.md` AG-5](decisions.md#
 ### The permission gate — measured, and it passes
 
 This was the load-bearing unknown and the phase-2 go/no-go. It is now settled by measurement, not
-inference. `specs5/plan-ag/probe_edit_args.py`, run 2026-08-30 against `gemini-3.6-flash` on a
+inference. `scripts/probe_edit_args.py`, run 2026-08-30 against `gemini-3.6-flash` on a
 free-tier key, seeded a file and asked for an edit while a `PreToolCallDecideHook` logged the
 `ToolCall` and denied it.
 
@@ -426,6 +711,32 @@ should arrive with an SDK bump, and a new write tool must not.
 gate that stopped at the top-level trajectory is bypassed by asking a child to do the write. It is
 the same shape of hole as AG-R-11's `run_command`, one level down.
 
+#### One call, two vocabularies — measured in the phase-4 live run (2026-09-03)
+
+**The permission hook and the step stream do not name a call's arguments the same way**, and the
+difference is not a naming style — it is two independent spellings of the same values, with different
+path formats. Read off one live turn's raw frames:
+
+| Call | Hook `preToolArgs.argumentsJson` | Step stream |
+|---|---|---|
+| `find_file` | `Pattern`, `SearchDirectory` | `findFile.query`, `findFile.directoryPath` |
+| `view_file` | `AbsolutePath` | `viewFile.filePath`, `startLine`, `endLine` |
+| `edit_file` | `TargetFile`, `TargetContent`, `ReplacementContent`, `Instruction`, `StartLine`, `EndLine` | `editFile.filePath`, `editFile.diffBlock[].lines[].action` |
+
+The hook sends **bare paths**; the step stream sends **`file://` URIs**. So a module that learns a
+path key from one side and meets the other gets either a miss or a URI where it wanted a path, and
+neither announces itself.
+
+This is what `permissions.ARG_ALIASES` exists to absorb, and in the phase-4 run it had absorbed only
+half: the mutating entries matched (which is why the dialog's diff rendered), and `view_file` was
+aliased against `TargetFile` — a name the hook does not send — while `find_file` had no entry at all.
+The dialog showed `PATH (none named)` above an input block containing the path.
+
+**The probe cannot cover this.** § *The probe* states that reflection sees shape, and an argument name
+inside a JSON string is not shape — the same blind spot that let `agy`'s contentless frames and
+`policy.ask_user`'s bare bool through. Argument names are settled by reading a live frame, and this
+table is that reading. Anything relying on it is relying on a measurement, not a contract.
+
 ### Usage and cost
 
 `UsageMetadata` (`types.py:700-771`) is tokens only:
@@ -463,11 +774,12 @@ field worth surfacing.
 | USD cost — turn footer, session cost, `max_budget_usd` | `cost.py` from `total_cost_usd` | **None.** Tokens only. |
 | Live context-window usage / compaction thresholds | `get_context_usage`, Context tab | **None.** `compaction_threshold` is write-only. |
 | Slash-command palette | `list_commands`, `SLASH_ROUTES` (`service.py:97-130`) | **Near-total loss.** `BuiltinSlashCommandName` has exactly one member: `PLAN` (`types.py:1455-1463`). |
-| "Always allow" / persisted rules | `updated_permissions` | **None.** AIC⚡DC would own persistence. |
+| "Always allow" / persisted rules | `updated_permissions` | **None from the engine** — but see [AG-15](decisions.md#ag-15): AIC⚡DC owns the store, `derive_suggested_rules` already works with no CLI suggestions, and `pre_verdict` is the seam that consults it. Absent in the shipped dialog as of 2026-09-05. |
 | Amend input before approving | `updated_input` | **Recoverable** via `HookResult.modified_args`, not via `policy.ask_user`. |
 | In-process MCP bridge | `create_sdk_mcp_server` | **Does not port**, and is **obsolete** — pass callables instead. |
-| Repo-local verbatim session mirror | `session_store.py` over the SDK's `SessionStore` protocol | **No protocol counterpart.** Antigravity owns an opaque `save_dir`. Rebuild as a step observer. |
-| Transcript history rendering | `history.py` over the CLI's transcript shape | **Needs a full sibling.** `Step` is flat with `trajectory_id`/`depth`, not nested content blocks. |
+| Repo-local verbatim session mirror | `session_store.py` over the SDK's `SessionStore` protocol | **No protocol counterpart.** Antigravity owns an opaque `save_dir`. Rebuilt as a step observer in phase 5 (`antigravity/mirror.py`) — the store already takes its root as an argument, so this cost a root and an observer rather than an implementation. |
+| Transcript history rendering | `history.py` over the CLI's transcript shape | **Needed no sibling after all**, and this row said it did. `history.py` takes the store as an argument and is engine-agnostic, so phase 5 is seven delegations to it. `Step` being flat with `trajectory_id`/`depth` is a fact about the *pump*, which absorbed it in phase 3; by the time anything is stored it is already the CLI's block shape. |
+| Forking a past conversation | `resume_session(fork=True)` copies a transcript the CLI rebuilds its context from | **None.** The conversation store belongs to the harness and is opaque, so there is nothing to copy. Forking our own mirror would branch the *record* while both branches still pointed at one engine conversation. Hidden on the descriptor (`session_fork`) rather than offered and refused — found in a browser once phase 5 made the history browser reachable here. |
 | `RateLimitEvent`, `ConversationResetMessage`, `Task*Message` | `messages.py` dispatch | Claude-specific. Nearest equivalents: `StopReason.QUOTA_EXHAUSTED`, per-trajectory steps. |
 
 ### Antigravity capabilities with no home in the current UI
@@ -489,7 +801,7 @@ field worth surfacing.
 `../plan/sdk-surface.md` § *The probe* argues that a hand-written inventory drifts silently and that
 the fix is to diff the *installed* package against this repo's own syntax trees, bucketing every name
 as `handled` / `declined` / `pending` and failing the gate only on a name in **none** of the three.
-That argument applies here with more force, not less: this SDK is at **0.1.15 and alpha**, where
+That argument applies here with more force, not less: this SDK is at **0.1.16 and alpha**, where
 `claude-agent-sdk` was at 0.2.137 and stable.
 
 `src/aic_dc/antigravity/surface.py` should therefore be built in phase 1, alongside the consultant
@@ -509,6 +821,36 @@ And the CLI half, which static reflection structurally cannot reach: **`agy`'s `
 free, machine-readable capability inventory** — model, cwd, permission mode, and the full tool list.
 One `agy models` call and one no-op `-p` turn produce it. That is the `diff_server_info` analogue,
 and it is worth wiring even though `agy` is not the engine.
+
+### The first drift it caught — `StopHook`, 0.1.16 (2026-09-03)
+
+The gate earned itself on the first bump after it was written. `google-antigravity` 0.1.16 adds
+**`StopHook`** (`hooks/hooks.py:239`), a `TransformHook[StopArgs, StopHookResult]` invoked when the root
+trajectory reaches fully idle, and `tests/test_antigravity_surface.py` went red with that name in the
+failure message. Nothing else in the release moved: no config field, no builtin tool, no enum member, no
+stale entry. That is the mechanism working exactly as § *The probe* argues it should — a name arriving as
+a red test rather than as a capability nobody notices for months.
+
+**It is deferred, and on its observability half rather than its control one.** The two halves pull in
+opposite directions and only one is worth having:
+
+| Half | What it offers | Verdict |
+|---|---|---|
+| `StopArgs.stop_reason`, `.error_message` | A **public, typed** read of why the turn ended, plus a fatal-error string with no step-stream equivalent. | The reason to want it. |
+| `StopDecision.CONTINUE` | Blocks termination and injects `reason` as a system prompt, resuming the agent loop. | Not a host's call to make silently. Resuming a turn the user did not ask to resume is the agent deciding it is not finished. |
+
+The first half matters more than it looks. `session.stop_reason_of` currently reaches for
+`_last_turn_stop_reason` on the conversation or its `_connection` — a private attribute whose
+public-looking sibling **does not exist**, and every turn reported a blank reason until that was found on
+2026-09-02 (see [`delivery.md` § *Phase 3*](delivery.md#phase-3--the-live-run-and-the-three-bugs-it-found-2026-09-02)).
+`StopHook` is the documented route to the same value.
+
+It waits anyway, because **the `StopReason` rows in `STEP_MEMBERS` are pending for a reason that applies
+here first**: the pump forwards a stop reason verbatim onto `streamComplete` and nothing renders the
+difference between a budget cap and an ordinary stop. Hardening the *source* of a value that has no
+*sink* is the wrong order, and it would also mean registering a transform hook on the turn-termination
+path of a daily-releasing alpha SDK to improve a read that currently works. Both move together when
+something renders a stop reason.
 
 **Two things the probe will not be able to do**, stated here because a green gate invites the wrong
 inference. It reads *shape*, never semantics — every correction in this file that mattered

@@ -125,6 +125,10 @@ export function bindEventHandlers(panel) {
   panel._onCommitResult = (e) => onCommitResult(panel, e);
   panel._onChatTabShortcutBound = (e) => onChatTabShortcut(panel, e);
   panel._onSpeechPlayerState = (e) => onSpeechPlayerState(panel, e);
+  // Not an engine push either: the shell re-broadcasts it after it has
+  // replaced the capability descriptor, so a listener here can trust that
+  // `supports()` already answers for the incoming engine.
+  panel._onEngineChangedBound = (e) => panel._onEngineChanged(e);
 }
 
 // ---------------------------------------------------------------
@@ -331,6 +335,7 @@ export function attachEventListeners(panel) {
   window.addEventListener('hook-event', panel._onHookEvent);
   window.addEventListener('rate-limit', panel._onRateLimit);
   window.addEventListener('engine-health', panel._onEngineHealth);
+  window.addEventListener('engine-changed', panel._onEngineChangedBound);
   window.addEventListener('system-event', panel._onSystemEvent);
   window.addEventListener('permission-request', panel._onPermissionRequest);
   window.addEventListener('permission-resolved', panel._onPermissionResolved);
@@ -413,6 +418,7 @@ export function detachEventListeners(panel) {
   window.removeEventListener('hook-event', panel._onHookEvent);
   window.removeEventListener('rate-limit', panel._onRateLimit);
   window.removeEventListener('engine-health', panel._onEngineHealth);
+  window.removeEventListener('engine-changed', panel._onEngineChangedBound);
   window.removeEventListener('system-event', panel._onSystemEvent);
   window.removeEventListener('permission-request', panel._onPermissionRequest);
   window.removeEventListener(
@@ -926,6 +932,12 @@ export async function loadEngineState(panel) {
   } else if (!panel._permissionMode) {
     panel._permissionMode = INITIAL_PERMISSION_MODE;
   }
+  // The postures this engine will accept. Absent from an engine that does
+  // not report them, which leaves the selector showing the full table —
+  // the behaviour of every build before this key existed.
+  panel._permissionModes = Array.isArray(state.permission_modes)
+    ? state.permission_modes
+    : null;
   if (state.engine_health && typeof state.engine_health === 'object') {
     panel._engineHealth = state.engine_health;
   }

@@ -83,7 +83,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.options import MUTATING_TOOLS
+from aic_dc.antigravity.rules import RuleStore, derive_rules
 from aic_dc.claude_code.permissions import (
     GATED_BY_DEFAULT,
     PermissionBroker,
@@ -125,10 +127,17 @@ TOOL_CLASSES: dict[str, str] = {
 #: Antigravity's hook-argument names, in the spelling the existing payload
 #: builders read.
 #:
-#: Measured, not guessed: every key on the left is from a live capture in
-#: ``sdk-surface.md`` § The permission gate. The Go side sends CamelCase
-#: through ``PreToolArgs.arguments_json`` and this is the only place that
-#: knows it.
+#: Mostly measured, and the two exceptions are labelled where they sit.
+#: The Go side sends CamelCase through ``PreToolArgs.arguments_json`` and
+#: this is the only place that knows it — see ``sdk-surface.md``
+#: § *One call, two vocabularies*, which is the phase-4 finding that the
+#: hook's spelling and the step stream's are not the same spelling.
+#:
+#: An entry that stops matching degrades to "no path named, full input
+#: shown". That is legible, and it is also quiet: the read tools sat
+#: mis-aliased from the day they were written and the dialog looked
+#: healthy throughout, because the *mutating* entries were correct and
+#: they are the ones that render the diff.
 ARG_ALIASES: dict[str, dict[str, str]] = {
     "edit_file": {
         "TargetFile": "file_path",
@@ -151,8 +160,27 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
         "WorkingDir": "cwd",
         "Explanation": "description",
     },
-    "view_file": {"TargetFile": "file_path"},
+    # Measured off live hook frames in the phase-4 run (2026-09-03). The
+    # read tools had been aliased against names the SDK does not send —
+    # `view_file` against `TargetFile`, and `find_file` not at all — so the
+    # dialog rendered `PATH (none named)` above an input block containing
+    # the path. The mutating entries above were right, which is exactly why
+    # nobody noticed: the diff rendered, so the dialog looked healthy.
+    #
+    # `TargetFile` is kept beside `AbsolutePath` rather than replaced. The
+    # aliases are additive and cost nothing when absent, and on an SDK at
+    # 0.1.x a name that moved once can move back.
+    "view_file": {"AbsolutePath": "file_path", "TargetFile": "file_path"},
+    # `find_file`'s path is the directory it searches; `Pattern` is the
+    # query and is deliberately not aliased to a path field, because the
+    # dialog would then name a glob where it promises a file.
+    "find_file": {"SearchDirectory": "file_path"},
+    # Unmeasured, and marked as such rather than quietly trusted: no live
+    # frame for either has been read, and the phase-4 finding was precisely
+    # that the step stream's spelling is not the hook's. They degrade to
+    # "no path named, full input shown", which is legible.
     "list_directory": {"DirectoryPath": "file_path"},
+    "search_directory": {"SearchDirectory": "file_path"},
 }
 
 #: The tools this gate must never allow without asking.
@@ -163,7 +191,26 @@ ARG_ALIASES: dict[str, dict[str, str]] = {
 #: ``run_command`` is in it: a denied ``edit_file`` came back as ``sed -i``
 #: on both probe runs, so a gate that covered only the file tools would
 #: produce a manufactured record of consent.
-ALWAYS_ASK = MUTATING_TOOLS
+ALWAYS_ASK = MUTATING_TOOLS | agy_tools.MUTATING_TOOLS
+
+# --- The `agy` transport's vocabulary, merged rather than kept beside ---
+#
+# AG-14 adds a second transport that reaches the *same* Antigravity through
+# the CLI, and the two products agree on argument names while disagreeing on
+# tool names — `replace_file_content` rather than `edit_file`. The names do
+# not collide, so one table can hold both vocabularies, and one table cannot
+# disagree with itself; two would be the copy that drifts. Same reasoning as
+# `ALWAYS_ASK is MUTATING_TOOLS` above, which is why that seam is widened
+# here rather than duplicated.
+#
+# Merged *after* the SDK entries and with `setdefault` semantics in mind:
+# where a name is shared (`run_command`, `view_file`, `generate_image`) the
+# two agree, and an SDK entry must win any future disagreement, because the
+# SDK path is the one with an enforcing gate.
+for _name, _cls in agy_tools.TOOL_CLASSES.items():
+    TOOL_CLASSES.setdefault(_name, _cls)
+for _name, _aliases in agy_tools.ARG_ALIASES.items():
+    ARG_ALIASES.setdefault(_name, _aliases)
 
 
 def normalise_args(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -203,7 +250,19 @@ def denormalise_args(tool_name: str, amended: dict[str, Any]) -> dict[str, Any]:
     aliases = ARG_ALIASES.get(tool_name)
     if not aliases:
         return dict(amended)
-    reverse = {target: source for source, target in aliases.items()}
+    # First alias wins, which is why this is a loop and not a
+    # comprehension. Two source names can share a target — `CommandLine`
+    # and `Command` both mean `command`, `AbsolutePath` and `TargetFile`
+    # both mean `file_path` — and a comprehension keeps the *last*, so an
+    # amended command went back as `Command` while the engine sends and
+    # reads `CommandLine`. `overwrite`/`modified_args` is a merge, so an
+    # unrecognised key lands *beside* the real one and leaves it in place:
+    # the amend silently does nothing and the original command runs. The
+    # aliases are ordered with the engine's own spelling first for exactly
+    # this reason, and `setdefault` is what honours that order.
+    reverse: dict[str, str] = {}
+    for source, target in aliases.items():
+        reverse.setdefault(target, source)
     out: dict[str, Any] = {}
     for key, value in amended.items():
         out[reverse.get(key, key)] = value
@@ -218,6 +277,42 @@ class _AntigravityBroker(PermissionBroker):
     be a seam with one caller. If a third engine ever arrives, that is the
     moment to lift the table lookup into a strategy — not before.
     """
+
+    def __init__(self, *args: Any, rules: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._rules = rules
+
+    def _to_result(self, pending: Any, decision: dict[str, Any]) -> Any:
+        """Allow or deny, and **persist** an always-allow rule ourselves.
+
+        The base implementation turns ``decision['rule']`` into a
+        ``PermissionUpdate`` on ``updated_permissions``, which is the Claude
+        CLI's channel for writing a rule into a settings file. Antigravity
+        has no such channel at any layer — that is
+        [AG-5](../../../specs5/plan-ag/decisions.md#ag-5)'s one unrecovered
+        capability — and on the ``agy`` transport the field is not even read:
+        `gate_server.decide` looks at ``message`` and ``updated_input`` only.
+
+        So the rule is written here instead, and then **dropped from the
+        result**. Leaving it on would send the engine a permission update it
+        cannot apply, which is worse than useless: it would look like the
+        rule had been handled by something other than us.
+        """
+        rule = decision.get("rule")
+        if rule and self._rules is not None:
+            if self._rules.add(rule):
+                logger.info(
+                    "Antigravity standing rule stored: %s", rule.get("label")
+                )
+            else:
+                # Allowed once regardless — the user answered the question
+                # in front of them and the call should proceed. What is lost
+                # is the standing part, and it is said out loud rather than
+                # left to look like it worked.
+                logger.warning(
+                    "Antigravity standing rule NOT stored: %s", rule.get("label")
+                )
+        return super()._to_result(pending, {**decision, "rule": None})
 
     async def _build_payload(
         self,
@@ -280,11 +375,15 @@ class _AntigravityBroker(PermissionBroker):
             "title": None,
             "display_name": None,
             "description": normalised.get("description") or None,
-            # Empty rather than absent. Antigravity has no
-            # `updated_permissions` at any layer, so there is no rule for
-            # the dialog to offer to persist — and an offer it cannot keep
-            # is worse than no offer. See this module's docstring.
-            "suggested_rules": [],
+            # AG-15. This was `[]`, on reasoning that was right about the
+            # engine and stopped one step short: Antigravity has no
+            # `updated_permissions` at any layer, so there is nothing to
+            # persist a rule *into* — and therefore AIC⚡DC keeps it, which
+            # `sdk-surface.md` had already said in the same breath. The
+            # offer is one we can now keep, so it is made.
+            "suggested_rules": derive_rules(
+                self._repo_root, tool_name, normalised, tool_class
+            ),
             "suggested_mode": None,
             "diff": diff,
             "command": (
@@ -311,7 +410,15 @@ def _diff_tool_for(tool_name: str) -> str:
     ``edit_file`` carries old and new text, which is Claude's ``Edit``.
     ``create_file`` and ``generate_image`` carry whole content or no
     content, which is ``Write``.
+
+    ``agy``'s names are answered from :data:`agy_tools.DIFF_SHAPE`, because
+    that transport calls the same operations something else. Getting this
+    wrong is the quiet failure ``agy/tools.py`` documents: the gate still
+    holds, and the dialog renders no diff.
     """
+    shape = agy_tools.DIFF_SHAPE.get(tool_name)
+    if shape is not None:
+        return shape
     return "Edit" if tool_name == "edit_file" else "Write"
 
 
@@ -343,15 +450,234 @@ class AntigravityPermissionGate:
         broadcast: Any,
         note_prompt: Any = None,
         localhost_available: Any = None,
+        denied_reads: Any = None,
+        config_dir: Any = None,
+        permission_mode: Any = None,
         **broker_kwargs: Any,
     ) -> None:
+        self._repo_root = Path(repo_root)
+        # AG-15. One store per repository, shared by both transports —
+        # a grant the user made on the subscription must not evaporate when
+        # they switch to the API key, since it is one engine reached two
+        # ways. Held on the gate rather than the broker because
+        # `pre_verdict` is the reader and it is the gate's.
+        self.rules = RuleStore(repo_root, config_dir=config_dir)
+        # A callable, not a list. The user toggles these from the file tree
+        # mid-session, and a snapshot taken when the gate was built would
+        # go stale at the first shift-click.
+        self._denied_reads = denied_reads or (lambda: [])
+        # The session's posture, read live for the reason the denied list
+        # is: the user changes it from the action bar mid-session, and a
+        # value copied in when the gate was built would be the posture they
+        # had two turns ago.
+        self._permission_mode = permission_mode or (lambda: "default")
         self.broker = _AntigravityBroker(
             repo_root,
             broadcast=broadcast,
             note_prompt=note_prompt,
             localhost_available=localhost_available,
+            rules=self.rules,
             **broker_kwargs,
         )
+
+    def _accept_edits_verdict(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> tuple[bool, str] | None:
+        """Allow an in-repo file write without asking, under ``acceptEdits``.
+
+        ``None`` for everything else, which leaves the ordinary path
+        untouched — this method can only ever *remove* a dialog for a
+        write, never add one or allow anything else.
+
+        Three conditions, and each is doing work:
+
+        - **The posture is ``acceptEdits``.** Read live from the session.
+        - **The tool is classed ``write``.** Not "is in ALWAYS_ASK", which
+          also holds ``run_command`` and the subagent spawners — the two
+          this posture must keep asking about, because AG-R-11 measured
+          the agent reaching for exactly them when an edit was refused.
+        - **The target resolves inside the repository.** A write to
+          somewhere else is not the thing the user waved through; they
+          accepted edits to their project, not to their home directory.
+          ``_absolute_path`` resolves first, so ``../`` cannot walk out.
+
+        A path we cannot read falls through to the dialog rather than
+        being allowed, which is the safe direction: the one case where we
+        do not know what is being written is the case to ask about.
+        """
+        if self._permission_mode() != "acceptEdits":
+            return None
+        if TOOL_CLASSES.get(tool_name) != "write":
+            return None
+        target = self._absolute_path(args)
+        if target is None:
+            return None
+        try:
+            root = self._repo_root.resolve()
+        except (OSError, ValueError):  # noqa: BLE001 - fall back to asking
+            return None
+        if root != Path(target) and root not in Path(target).parents:
+            logger.info(
+                "Antigravity %s still asks under acceptEdits: %s is outside %s",
+                tool_name,
+                target,
+                root,
+            )
+            return None
+        logger.info("Antigravity %s allowed by acceptEdits: %s", tool_name, target)
+        return (True, "")
+
+    def _absolute_path(self, args: dict[str, Any]) -> str | None:
+        """The call's path, resolved, in the form a stored rule holds.
+
+        Both sides of the comparison go through the same resolution, which
+        is the point: a rule stored from an absolute hook path must match a
+        call whose path arrived relative, and vice versa.
+        """
+        raw = args.get("file_path") or args.get("path")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                target = self._repo_root / target
+            return str(target.resolve())
+        except (OSError, ValueError):  # noqa: BLE001 - a probe, not a control path
+            return None
+
+    def _denied_read_target(self, tool_name: str, args: dict[str, Any]) -> str | None:
+        """The denied path this read would touch, or ``None``.
+
+        The user's shift-click on the file tree is a **deny**, not an ask,
+        so this answers a different question from the dialog's: matching
+        means the call is refused with a reason, never presented.
+
+        Prefix matching rather than equality, so denying a directory
+        denies the files under it — which is what shift-clicking a folder
+        in the tree means. Paths are resolved first because the hook is
+        handed absolute paths while the tree records repo-relative ones.
+        """
+        raw = args.get("file_path")
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            target = Path(raw)
+            if not target.is_absolute():
+                target = self._repo_root / target
+            target = target.resolve()
+        except (OSError, ValueError):  # noqa: BLE001 - a probe, not a control path
+            return None
+        for entry in self._denied_reads() or []:
+            if not isinstance(entry, str) or not entry.strip():
+                continue
+            try:
+                denied = Path(entry.strip())
+                if not denied.is_absolute():
+                    denied = self._repo_root / denied
+                denied = denied.resolve()
+            except (OSError, ValueError):  # noqa: BLE001
+                continue
+            if target == denied or denied in target.parents:
+                return entry.strip()
+        return None
+
+    def pre_verdict(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> tuple[bool, str] | None:
+        """The answer this gate gives *without* opening a dialog, or ``None``.
+
+        ``None`` means "ask the user". Anything else is decided here.
+
+        **Shared by both Antigravity transports on purpose.** The SDK path
+        reaches it through :meth:`run`; the ``agy`` path reaches it from
+        :mod:`~aic_dc.agy.gate_server`, which otherwise calls
+        ``broker.can_use_tool`` directly and would therefore raise a dialog
+        for every read. That is exactly the defect fixed on the SDK path on
+        2026-09-03 — four dialogs for a turn whose only mutation was one
+        edit — and putting the narrowing in one method is what stops a
+        third transport reintroducing it a third time.
+
+        Two decisions live here, and only these two:
+
+        - A **read** is allowed without asking, as the Claude CLI does
+          before the shared broker ever sees one. ``ALWAYS_ASK`` is checked
+          first, so a mutating tool cannot slip through on a class that
+          happens to be ungated — ``start_subagent`` is ``delegate``, which
+          is.
+        - A read of a **denied** path is refused outright. That is the
+          user's own shift-click on the file tree, and it must not be
+          softened into an auto-allow by the very change that stops the
+          asking.
+        """
+        normalised = normalise_args(tool_name, args)
+
+        # AG-15. Checked **before** ALWAYS_ASK, because a standing rule is
+        # the user having already answered this exact question — and
+        # ALWAYS_ASK is where every write tool lives, so checking after it
+        # would mean the one control the user pressed had no effect on the
+        # calls they pressed it for.
+        #
+        # Safe only because matching is exact: one command, or one path with
+        # one tool name. `rules.py` carries that argument, and it is the
+        # load-bearing one for this whole feature.
+        standing = self.rules.allows(
+            command=normalised.get("command"),
+            path=self._absolute_path(normalised),
+            tool_name=tool_name,
+        )
+        if standing is not None:
+            # A denied read still wins over a standing allow: shift-clicking
+            # a file in the tree is a later, more specific instruction than
+            # a rule granted earlier, and the user would reasonably expect
+            # the newer one to hold.
+            denied = self._denied_read_target(tool_name, normalised)
+            if denied is None:
+                logger.info(
+                    "Antigravity %s allowed by a standing rule: %s",
+                    tool_name,
+                    standing.get("label"),
+                )
+                return (True, "")
+
+        # `acceptEdits`, and the boundary is deliberately `agy`'s own.
+        #
+        # Checked here — after a standing rule, before ALWAYS_ASK — because
+        # ALWAYS_ASK is where every write tool lives, so a check after it
+        # could never fire for the calls this posture exists for.
+        #
+        # **AG-5 is amended by this, not overturned.** That decision makes
+        # the dialog a requirement of this engine rather than a feature,
+        # and what it was protecting is the *execution* path: AG-R-11
+        # measured the agent, refused an edit, reaching for `sed -i`, then
+        # inline `python3`, then `list_dir` — three routes to one write,
+        # all through the shell. So the dialog stays mandatory for
+        # `run_command` and for `start_subagent`/`invoke_subagent`, which
+        # is the same line `agy`'s own accept-edits draws, and the same one
+        # Claude's draws. What this lets through is a file write, to a file
+        # inside the repository, which the diff viewer will show and git
+        # will keep.
+        allowed = self._accept_edits_verdict(tool_name, normalised)
+        if allowed is not None:
+            return allowed
+
+        if tool_name in ALWAYS_ASK:
+            return None
+        if GATED_BY_DEFAULT.get(TOOL_CLASSES.get(tool_name, "exec"), True):
+            return None
+        denied = self._denied_read_target(tool_name, normalised)
+        if denied is not None:
+            logger.info(
+                "Antigravity %s refused: %s is denied to the agent",
+                tool_name,
+                denied,
+            )
+            return (
+                False,
+                f"The user has denied the agent read access to {denied}. Do "
+                f"not try to read it by another route; ask them for what you "
+                f"need from it instead.",
+            )
+        return (True, "")
 
     def as_hook(self) -> Any:
         """This gate as a real ``PreToolCallDecideHook``, for the config.
@@ -386,11 +712,43 @@ class AntigravityPermissionGate:
         adding a tool: an unknown name classifies as ``exec`` and gets the
         most cautious dialog, where the alternative would ungate whatever
         arrives next.
+
+        **The read class is answered here rather than by the broker**, and
+        the phase-4 live run is why. A ``PreToolCallDecideHook`` fires for
+        *every* call, so forwarding all of them produced a modal for
+        ``find_file`` and two more for ``view_file`` in a turn whose only
+        mutation was one edit — four dialogs, three of them for reads. On
+        Claude the CLI decides which calls need ``can_use_tool`` at all and
+        allows reads itself, so the shared broker never sees them; sharing
+        a broker does not by itself give two engines one behaviour, because
+        half of Claude's behaviour lives in the CLI rather than in the
+        broker. The harness agrees, incidentally — its own log reads
+        ``permissions: skipping check for step 2: handler *handlers.FindHandler
+        does not declare permissions``.
+
+        It also made the dialog lie. It explains a gated read with *"read
+        calls are not normally gated. This one is: a deny or ask rule
+        matched"* — true on Claude, and on this engine a sentence about an
+        exception that was in fact the rule.
+
+        The narrowing is not a blanket allow. ``ALWAYS_ASK`` wins over the
+        class, so a tool that is both mutating and somehow classed ``read``
+        is still asked about, and a **denied** read is refused outright —
+        that is the user's own shift-click on the file tree, and it must
+        not be softened into an auto-allow by the very change that stops
+        the asking.
         """
         from google.antigravity.types import HookResult
 
         tool_name = str(getattr(data, "name", "") or "")
         args = dict(getattr(data, "args", None) or {})
+
+        verdict = self.pre_verdict(tool_name, args)
+        if verdict is not None:
+            allow, message = verdict
+            if allow:
+                return HookResult(allow=True)
+            return HookResult(allow=False, message=message)
 
         try:
             result = await self.broker.can_use_tool(

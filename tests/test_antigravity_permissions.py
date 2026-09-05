@@ -34,6 +34,7 @@ from aic_dc.antigravity import permissions as ag_permissions
 from aic_dc.antigravity.options import MUTATING_TOOLS
 from aic_dc.antigravity.permissions import (
     ALWAYS_ASK,
+    ARG_ALIASES,
     TOOL_CLASSES,
     AntigravityPermissionGate,
     denormalise_args,
@@ -65,6 +66,11 @@ class Recorder:
 
 
 def gate(tmp_path, recorder, **kw) -> AntigravityPermissionGate:
+    # `config_dir` defaulted here rather than left to the caller, because
+    # the gate now owns a *persistent* rule store (AG-15) and the fallback
+    # is the developer's own `~/.config/aic-dc`. The first version of these
+    # tests wrote three standing permission grants into the real file.
+    kw.setdefault("config_dir", tmp_path / "cfg")
     return AntigravityPermissionGate(
         tmp_path, broadcast=recorder, localhost_available=lambda: True, **kw
     )
@@ -297,10 +303,117 @@ class TestArgumentTranslation:
 # ----------------------------------------------------------------------
 
 
+class TestTheAmendPathGoesBackSpelledRight:
+    """`overwrite`/`modified_args` is a *merge*, which is what makes this bite.
+
+    An unrecognised key lands beside the real one rather than replacing it,
+    so a mis-spelled amend does not error — the original argument stays and
+    the call runs as the agent proposed it. The user watches themselves
+    edit a command, allows it, and the command they edited away executes.
+    That is a manufactured record of consent, the same family as AG-R-11.
+
+    Found 2026-09-03 while wiring the `agy` transport, and present on the
+    SDK path since the aliases were written: two source names can share a
+    target, and the reverse map was a dict comprehension, so the *last*
+    won.
+    """
+
+    def test_a_command_goes_back_as_the_engine_spells_it(self):
+        assert denormalise_args("run_command", {"command": "ls"}) == {
+            "CommandLine": "ls"
+        }
+
+    def test_the_first_alias_wins_wherever_two_share_a_target(self):
+        """The tables are ordered with the engine's own spelling first."""
+        assert denormalise_args("view_file", {"file_path": "/a"}) == {
+            "AbsolutePath": "/a"
+        }
+
+    def test_an_edits_fields_survive_the_round_trip(self):
+        """The case that already worked, pinned so the fix cannot regress it."""
+        original = {
+            "TargetFile": "/tmp/a.py",
+            "TargetContent": "old",
+            "ReplacementContent": "new",
+        }
+        assert denormalise_args("edit_file", normalise_args("edit_file", original)) | original == (
+            denormalise_args("edit_file", normalise_args("edit_file", original))
+        )
+
+    def test_an_unknown_key_is_passed_through(self):
+        """A newer engine's field is more likely than a mistake."""
+        assert denormalise_args("run_command", {"Newfangled": 1}) == {"Newfangled": 1}
+
+
 class TestNothingMutatingIsUngated:
-    def test_the_seam_is_read_from_options_not_restated(self):
-        """One seam, so the two modules cannot drift."""
-        assert ALWAYS_ASK is MUTATING_TOOLS
+    def test_the_seam_is_read_from_the_transports_not_restated(self):
+        """One seam per transport, and neither restated here.
+
+        This asserted ``ALWAYS_ASK is MUTATING_TOOLS`` until AG-14 added a
+        second transport whose tool names differ — ``replace_file_content``
+        rather than ``edit_file`` — so the seam is now the union of both.
+        Identity no longer holds and the property it stood for does: the
+        write boundary is *read from* the modules that define it, so a tool
+        added to either set is gated here without anyone editing this file.
+
+        A literal set in ``permissions.py`` would be the copy that drifts,
+        and the direction it drifts is a mutating tool nobody gates.
+        """
+        from aic_dc.agy import tools as agy_tools
+
+        assert MUTATING_TOOLS <= ALWAYS_ASK
+        assert agy_tools.MUTATING_TOOLS <= ALWAYS_ASK
+        assert ALWAYS_ASK == MUTATING_TOOLS | agy_tools.MUTATING_TOOLS
+
+    def test_every_agy_write_tool_is_gated(self):
+        """The trap `agy/tools.py` exists for, asserted from this side.
+
+        An unrecognised name still classifies as ``exec`` and is gated, so
+        omitting one of these would not ungate it — it would render a file
+        edit as a shell command with no diff. That is a gate holding while
+        the product's central feature degrades, which is why this checks
+        the *class* and not merely that a dialog appears.
+        """
+        from aic_dc.agy import tools as agy_tools
+
+        for tool in agy_tools.MUTATING_TOOLS:
+            assert tool in ALWAYS_ASK, tool
+            assert TOOL_CLASSES[tool] in ("write", "exec", "delegate"), tool
+
+    def test_an_agy_edit_renders_as_a_diff_not_a_command(self):
+        """`replace_file_content` is Claude's `Edit` in shape, not `Write`."""
+        from aic_dc.antigravity.permissions import _diff_tool_for
+
+        assert _diff_tool_for("replace_file_content") == "Edit"
+        assert _diff_tool_for("multi_replace_file_content") == "Edit"
+        assert _diff_tool_for("write_to_file") == "Write"
+        # The SDK's own names are untouched by the merge.
+        assert _diff_tool_for("edit_file") == "Edit"
+        assert _diff_tool_for("create_file") == "Write"
+
+    def test_an_agy_edits_arguments_reach_the_diff_builder(self):
+        """The half the two products agree on, pinned."""
+        merged = normalise_args(
+            "replace_file_content",
+            {
+                "TargetFile": "/tmp/x/a.py",
+                "TargetContent": "old",
+                "ReplacementContent": "new",
+            },
+        )
+        assert merged["file_path"] == "/tmp/x/a.py"
+        assert merged["old_string"] == "old"
+        assert merged["new_string"] == "new"
+
+    def test_a_shared_name_keeps_the_sdks_meaning(self):
+        """Where the two agree, the SDK entry wins any future divergence.
+
+        The SDK path is the one with an enforcing gate, so it is the one a
+        disagreement must resolve toward.
+        """
+        assert TOOL_CLASSES["run_command"] == "exec"
+        assert TOOL_CLASSES["view_file"] == "read"
+        assert ARG_ALIASES["run_command"]["CommandLine"] == "command"
 
     def test_every_mutating_tool_is_classified(self):
         assert set(ALWAYS_ASK) <= set(TOOL_CLASSES)
@@ -341,6 +454,164 @@ class TestNothingMutatingIsUngated:
         payload = recorder.requests()[0].payload
         assert payload["tool_class"] == "exec"
         assert payload["gated_by_default"] is True
+
+
+class TestReadsAreAllowedWithoutADialog:
+    """The phase-4 live run's second finding.
+
+    A ``PreToolCallDecideHook`` fires for every call, and this gate used to
+    forward all of them to the broker — so one turn whose only mutation was
+    a single edit raised four dialogs, three of them for reads. On Claude
+    the CLI answers the read class itself and the shared broker never sees
+    it, which is why one shared broker did not give one behaviour.
+
+    See ``specs5/plan-ag/delivery.md`` § *Phase 4 — the live run*.
+    """
+
+    @pytest.mark.parametrize(
+        "tool,args",
+        [
+            ("find_file", {"Pattern": "calc.py", "SearchDirectory": "/tmp/x"}),
+            ("view_file", {"AbsolutePath": "/tmp/x/calc.py"}),
+            ("list_directory", {"DirectoryPath": "/tmp/x"}),
+            ("search_web", {"Query": "python"}),
+            ("finish", {}),
+        ],
+    )
+    def test_a_read_never_reaches_the_broker(self, tmp_path, tool, args):
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        # No responder: if this asks, it hangs, and the timeout is the
+        # assertion. Nothing may be waiting on a human here.
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(None, FakeCall(tool, args))
+
+        result = asyncio.run(go())
+        assert result.allow is True
+        assert recorder.requests() == [], f"{tool} raised a dialog"
+
+    @pytest.mark.parametrize("tool", sorted(MUTATING_TOOLS))
+    def test_the_narrowing_does_not_reach_a_mutating_tool(self, tmp_path, tool):
+        """``ALWAYS_ASK`` is checked before the class, not after.
+
+        ``start_subagent`` is the one that would slip: its class is
+        ``delegate``, which is ungated by default, so a narrowing that
+        consulted only the class would ungate the tool that spawns a child
+        with the same write access.
+        """
+        recorder = Recorder()
+        g = gate(tmp_path, recorder)
+
+        async def go():
+            await ask(g, FakeCall(tool, {}), {"action": "deny"})
+
+        asyncio.run(go())
+        assert len(recorder.requests()) == 1
+
+    def test_a_denied_file_is_refused_rather_than_quietly_read(self, tmp_path):
+        """The control this change must not soften.
+
+        Shift-clicking a file in the tree is a **deny**. While every read
+        raised a dialog the user could refuse it by hand, so the list
+        having no reader never showed; allowing reads without asking is
+        exactly what turns that into a silent read.
+        """
+        secret = tmp_path / "secrets.env"
+        secret.write_text("TOKEN=1", encoding="utf-8")
+        recorder = Recorder()
+        g = gate(tmp_path, recorder, denied_reads=lambda: ["secrets.env"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(secret)})
+                )
+
+        result = asyncio.run(go())
+        assert result.allow is False
+        # A reason the model can act on, not a bare refusal.
+        assert "denied" in result.message
+        assert "another route" in result.message
+        assert recorder.requests() == [], "a deny is not a question"
+
+    def test_denying_a_directory_denies_what_is_under_it(self, tmp_path):
+        """Which is what shift-clicking a folder in the tree means."""
+        (tmp_path / "private").mkdir()
+        target = tmp_path / "private" / "notes.md"
+        target.write_text("x", encoding="utf-8")
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: ["private"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(go()).allow is False
+
+    def test_an_undenied_neighbour_is_still_allowed(self, tmp_path):
+        """A check that cannot pass the wrong way is decoration."""
+        target = tmp_path / "public.md"
+        target.write_text("x", encoding="utf-8")
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: ["secrets.env"])
+
+        async def go():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(go()).allow is True
+
+    def test_the_denied_list_is_read_per_call(self, tmp_path):
+        """The user toggles these mid-session, from the file tree."""
+        target = tmp_path / "a.py"
+        target.write_text("x", encoding="utf-8")
+        denied: list[str] = []
+        g = gate(tmp_path, Recorder(), denied_reads=lambda: denied)
+
+        async def once():
+            async with asyncio.timeout(5):
+                return await g.run(
+                    None, FakeCall("view_file", {"AbsolutePath": str(target)})
+                )
+
+        assert asyncio.run(once()).allow is True
+        denied.append("a.py")
+        assert asyncio.run(once()).allow is False
+
+
+class TestTheReadToolsPathIsNamed:
+    """The third phase-4 finding: aliases against names nobody sends.
+
+    The dialog rendered ``PATH (none named)`` directly above an input block
+    reading ``{"AbsolutePath": "/tmp/ag-repo/calc.py"}``. The mutating
+    aliases were correct throughout, which is why the drift went unseen —
+    those are the ones that render the diff.
+    """
+
+    def test_view_file_carries_the_path_the_sdk_actually_sends(self):
+        merged = normalise_args("view_file", {"AbsolutePath": "/tmp/x/calc.py"})
+        assert merged["file_path"] == "/tmp/x/calc.py"
+        # The engine's own words are kept beside the alias.
+        assert merged["AbsolutePath"] == "/tmp/x/calc.py"
+
+    def test_the_old_spelling_still_works(self):
+        """Additive, because a name that moved once can move back."""
+        assert normalise_args("view_file", {"TargetFile": "/a"})["file_path"] == "/a"
+
+    def test_find_file_names_the_directory_it_searches(self):
+        merged = normalise_args(
+            "find_file", {"Pattern": "*.py", "SearchDirectory": "/tmp/x"}
+        )
+        assert merged["file_path"] == "/tmp/x"
+
+    def test_a_glob_is_never_presented_as_a_path(self):
+        """The dialog promises a file where it says PATH."""
+        merged = normalise_args("find_file", {"Pattern": "*.py"})
+        assert "file_path" not in merged
 
 
 # ----------------------------------------------------------------------
@@ -397,20 +668,19 @@ class TestResultConversion:
         assert result.allow is True
         assert result.modified_args == {"ReplacementContent": "safer"}
 
-    def test_always_allow_degrades_to_allow_once_by_construction(self, tmp_path):
-        """AG-5's one genuine loss, and it is closed at the right end.
+    def test_always_allow_is_offered_and_kept(self, tmp_path):
+        """**Restated for AG-15, not deleted.** The property is unchanged.
 
-        Antigravity has no ``updated_permissions`` at any layer, so a rule
-        cannot be persisted. Rather than accepting an always-allow and
-        quietly dropping the rule, the payload offers **no**
-        ``suggested_rules`` at all — so the broker's own normalisation has
-        nothing to bind an always-allow to and degrades it to allow-once,
-        logging that it did.
+        This test used to assert ``suggested_rules == []``, on the rule that
+        *an offer the engine cannot keep is worse than no offer*: Antigravity
+        has no ``updated_permissions`` at any layer, so an always-allow could
+        only have been accepted and silently discarded.
 
-        That ordering matters: an offer the engine cannot keep is worse
-        than no offer, because the user believes they will not be asked
-        again. This asserts the offer is absent, which is the thing that
-        makes the degradation honest rather than a silent discard.
+        That rule still holds and the premise no longer does. AG-15 gives the
+        store to AIC⚡DC, so the offer is one we can keep — and the honest
+        assertion flips with it: the rule is offered, **and** it is written.
+        Asserting only that it is offered would pass on exactly the silent
+        discard the original was written to prevent.
         """
         recorder = Recorder()
         g = gate(tmp_path, recorder)
@@ -424,8 +694,34 @@ class TestResultConversion:
 
         result = asyncio.run(go())
         assert result.allow is True
-        assert recorder.requests()[0].payload["suggested_rules"] == []
+        rules = recorder.requests()[0].payload["suggested_rules"]
+        assert [r["rule_content"] for r in rules] == ["ls", "ls:*"]
+        # Kept, not merely offered.
+        assert [r["rule_content"] for r in g.rules.rules()] == ["ls"]
+        # Still no mode escalation: AG-15 leaves that alone until the rule
+        # path is proven, because it grants more than the call on screen.
         assert recorder.requests()[0].payload["suggested_mode"] is None
+
+    def test_a_stored_rule_stops_the_next_identical_call_asking(self, tmp_path):
+        """The exit criterion, at the seam that decides it.
+
+        `pre_verdict` returning `(True, "")` is what "no dialog" means — the
+        call never reaches `broker.can_use_tool`, which is the assertion
+        AG-15 asks for rather than "the dialog was dismissed".
+        """
+        g = gate(tmp_path, Recorder())
+
+        async def go():
+            return await ask(
+                g,
+                FakeCall("run_command", {"CommandLine": "ls"}),
+                {"action": "allow_always"},
+            )
+
+        asyncio.run(go())
+        assert g.pre_verdict("run_command", {"CommandLine": "ls"}) == (True, "")
+        # And a different command still asks.
+        assert g.pre_verdict("run_command", {"CommandLine": "rm -rf /"}) is None
 
     def test_a_rule_that_somehow_arrived_is_warned_about(self, tmp_path, caplog):
         """Defence in depth for a path the payload should make unreachable.
@@ -498,3 +794,105 @@ class TestRegistration:
         )
         assert MUTATING_TOOLS <= set(kwargs["capabilities"]["enabled_tools"])
         assert options.build_config(**kwargs).hooks
+
+
+class TestAcceptEditsStopsAtTheShell:
+    """The 2026-09-05 amendment to AG-5, and exactly how far it goes.
+
+    A file write inside the repository applies without a dialog. Execution
+    does not, and neither does a write outside the repository. That is the
+    same line ``agy``'s own ``accept-edits`` draws and the same one
+    Claude's does — and it is where AG-R-11 says it has to be, having
+    measured the agent, refused an edit, reaching for ``sed -i``, then
+    inline ``python3``, then ``list_dir``: three routes to one write, all
+    through the shell.
+
+    Every assertion here is about ``pre_verdict`` answering *without* a
+    dialog. ``None`` means "ask the user", which is the unchanged path.
+    """
+
+    def gate(self, tmp_path, mode="acceptEdits"):
+        async def broadcast(_event):
+            return None
+
+        return AntigravityPermissionGate(
+            tmp_path,
+            broadcast=broadcast,
+            localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+            permission_mode=lambda: mode,
+        )
+
+    def test_an_in_repo_edit_is_allowed_without_asking(self, tmp_path):
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) == (True, "")
+
+    def test_the_agy_spelling_of_the_same_call_too(self, tmp_path):
+        """One posture, both transports — the tool tables are merged."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict(
+            "replace_file_content", {"TargetFile": str(tmp_path / "a.py")}
+        ) == (True, "")
+
+    def test_a_command_still_asks(self, tmp_path):
+        """AG-R-11's route, and the reason the line is drawn here."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("run_command", {"command": "sed -i s/a/b/ a.py"}) is None
+
+    def test_a_subagent_still_asks(self, tmp_path):
+        """A gate that stopped at the top trajectory is bypassed by asking
+        a child to do the write — the same hole one level down."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("start_subagent", {"prompt": "edit it"}) is None
+        assert gate.pre_verdict("invoke_subagent", {"prompt": "edit it"}) is None
+
+    def test_a_write_outside_the_repository_still_asks(self, tmp_path):
+        """They accepted edits to their project, not to their home directory."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {"file_path": "/etc/passwd"}) is None
+
+    def test_a_relative_path_cannot_walk_out(self, tmp_path):
+        """`_absolute_path` resolves before the containment check."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {"file_path": "../../etc/passwd"}) is None
+
+    def test_a_write_with_no_readable_path_still_asks(self, tmp_path):
+        """The one case where we do not know what is being written is the
+        case to ask about."""
+        gate = self.gate(tmp_path)
+        assert gate.pre_verdict("edit_file", {}) is None
+
+    def test_default_is_unchanged(self, tmp_path):
+        """The posture has to be *on*. Everything above must be inert
+        under the mode the session starts in."""
+        gate = self.gate(tmp_path, mode="default")
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) is None
+
+    def test_plan_is_unchanged(self, tmp_path):
+        gate = self.gate(tmp_path, mode="plan")
+        assert gate.pre_verdict(
+            "edit_file", {"file_path": str(tmp_path / "a.py")}
+        ) is None
+
+    def test_a_read_of_a_denied_path_is_still_refused(self, tmp_path):
+        """The user's shift-click outranks the posture: this posture is
+        about writes, and softening a denial would be a different change
+        smuggled in with it."""
+        async def broadcast(_event):
+            return None
+
+        denied = str(tmp_path / "secret.env")
+        gate = AntigravityPermissionGate(
+            tmp_path,
+            broadcast=broadcast,
+            localhost_available=lambda: True,
+            config_dir=tmp_path / "cfg",
+            denied_reads=lambda: [denied],
+            permission_mode=lambda: "acceptEdits",
+        )
+        allowed, _reason = gate.pre_verdict("view_file", {"file_path": denied})
+        assert allowed is False

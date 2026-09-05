@@ -73,6 +73,10 @@ import { findFileMentions } from '../file-mentions.js';
 import { imageRefKey, imageRefsOf } from '../image-refs.js';
 import { renderMarkdown } from '../markdown.js';
 import { SURFACE, supports } from '../engine-capabilities.js';
+import {
+  renderEngineChip,
+  renderEngineNotice,
+} from './engine-notice.js';
 import { toRepoPath } from '../repo-path.js';
 import {
   compactionSummary,
@@ -238,6 +242,7 @@ export function render(panel) {
       </div>
       ${fileMode ? renderFileSearchOverlay(panel) : ''}
     </div>
+    ${renderEngineNotice(panel)}
     ${renderHealthBanner(panel)}
     ${!panel.rpcConnected
       ? html`<div class="disconnected-note">
@@ -274,6 +279,7 @@ export function render(panel) {
                       📜
                     </button>`
                   : ''}
+                ${renderEngineChip(panel)}
               </div>
             `}
       </div>

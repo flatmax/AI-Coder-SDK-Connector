@@ -50,7 +50,7 @@ Usage
 ::
 
     export GEMINI_API_KEY=...          # or the AG-11 key file
-    .venv/bin/python specs5/plan-ag/probe_session.py
+    .venv/bin/python scripts/probe_session.py
 
 ``--repo`` points it at a real repository instead of the scratch one.
 ``--prompt`` overrides the question, in which case criterion 3 may not
@@ -83,7 +83,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from aic_dc.antigravity import (  # noqa: E402
     AntigravitySession,

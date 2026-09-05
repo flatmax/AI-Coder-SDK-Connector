@@ -2862,3 +2862,194 @@ describe('ChatPanel paste-to-prompt action', () => {
     expect(p._input).toBe('AA');
   });
 });
+
+describe('ChatPanel start-error wording', () => {
+  // Found by running a live agy turn: the reply was
+  // {error: "engine", message: "agy exited before sending its init frame"}
+  // and the panel rendered **"Error: engine"** — a category the user
+  // cannot act on, with the actionable half unread in the same payload.
+
+  it('shows the message rather than the error code', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': () => ({
+        error: 'engine',
+        phase: 'connect',
+        message: 'agy exited before sending its init frame',
+      }),
+    });
+    const panel = mountPanel();
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    const text = panel.messages.map((m) => m.content).join(' ');
+    expect(text).toContain('agy exited before sending its init frame');
+    expect(text).not.toMatch(/Error:\s*engine\s*$/);
+  });
+
+  it('still shows the code when that is all there is', async () => {
+    // Several refusals carry only `error`, and it is a sentence there.
+    publishFakeRpc({
+      'ClaudeCodeService.chat_streaming': () => ({
+        error: 'The Claude Code engine is not connected.',
+      }),
+    });
+    const panel = mountPanel();
+    await settle(panel);
+    panel._input = 'hi';
+    await panel._send();
+    await settle(panel);
+    expect(panel.messages.map((m) => m.content).join(' ')).toContain(
+      'engine is not connected',
+    );
+  });
+});
+
+
+describe('ChatPanel engine switch gate prompt', () => {
+  // Asked at the moment of choosing rather than left to be discovered.
+  // Without it the switch succeeds, the next prompt is refused with
+  // `gate_not_installed`, and the user has to find a Settings panel they
+  // had no reason to open.
+
+  function withGate(gate, extra = {}) {
+    publishFakeRpc({
+      'Settings.get_agy_gate': () => gate,
+      'ClaudeCodeService.switch_engine': () => ({ status: 'ok' }),
+      ...extra,
+    });
+  }
+
+  const ABSENT = {
+    state: 'absent',
+    path: '/home/u/.gemini/config/hooks.json',
+    needed_by: 'agy',
+  };
+
+  afterEach(() => {
+    delete window.confirm;
+  });
+
+  it('asks before writing outside the project, and says where', async () => {
+    let asked = '';
+    window.confirm = (m) => { asked = m; return false; };
+    withGate(ABSENT);
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(asked).toContain('/home/u/.gemini/config/hooks.json');
+    expect(asked).toContain('outside this project');
+    expect(asked).toContain('0.03s');
+    expect(asked).toContain('until you remove it in Settings');
+  });
+
+  it('does not switch when the user declines', async () => {
+    // A selector that moved and then refused every turn would be the
+    // confusing half of both options.
+    const calls = [];
+    window.confirm = () => false;
+    withGate(ABSENT, {
+      'ClaudeCodeService.switch_engine': (e) => { calls.push(e); return { status: 'ok' }; },
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(calls).toEqual([]);
+  });
+
+  it('installs then switches when the user accepts', async () => {
+    const calls = [];
+    window.confirm = () => true;
+    withGate(ABSENT, {
+      'Settings.install_agy_gate': () => { calls.push('install'); return { state: 'current' }; },
+      'ClaudeCodeService.switch_engine': (e) => { calls.push(`switch:${e}`); return { status: 'ok' }; },
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(calls).toEqual(['install', 'switch:agy']);
+  });
+
+  it('asks nothing when the gate is already there', async () => {
+    let asked = false;
+    window.confirm = () => { asked = true; return true; };
+    withGate({ ...ABSENT, state: 'current' });
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(asked).toBe(false);
+  });
+
+  it('asks nothing when switching to an engine that needs no gate', async () => {
+    // `needed_by` is the server's, so the browser never hard-codes which
+    // engine this belongs to — AG-R-4.
+    let asked = false;
+    window.confirm = () => { asked = true; return true; };
+    withGate(ABSENT);
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'agy', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('claude');
+    expect(asked).toBe(false);
+  });
+
+  it('switches anyway when the server has no such method', async () => {
+    // Every engine but this transport answers "no such method", and a
+    // switch that failed on that would break the ones that never needed a
+    // gate at all.
+    const calls = [];
+    window.confirm = () => { throw new Error('must not ask'); };
+    publishFakeRpc({
+      'ClaudeCodeService.switch_engine': (e) => { calls.push(e); return { status: 'ok' }; },
+    });
+    const p = mountPanel();
+    await settle(p);
+    p._engines = { active: 'agy', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('claude');
+    expect(calls).toEqual(['claude']);
+  });
+});
+
+
+describe('ChatPanel engine switch failure is visible', () => {
+  // The selector showed the engine the user picked while the session
+  // stayed on the old one, and the only account of why lived inside a
+  // notice they may have dismissed. A failed switch looked exactly like a
+  // successful one.
+
+  it('toasts the refusal rather than only recording it', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.switch_engine': () => ({
+        error: 'A turn is still running',
+        reason: 'turn_active',
+      }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    p._emitToast = (m, kind) => toasts.push([m, kind]);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(p._engineSwitchError).toContain('A turn is still running');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0][0]).toContain('A turn is still running');
+    expect(toasts[0][1]).toBe('error');
+  });
+
+  it('says nothing when the switch works', async () => {
+    publishFakeRpc({
+      'ClaudeCodeService.switch_engine': () => ({ engine: 'agy', changed: true }),
+    });
+    const p = mountPanel();
+    await settle(p);
+    const toasts = [];
+    p._emitToast = (m) => toasts.push(m);
+    p._engines = { active: 'claude', mountable: ['claude', 'agy'], labels: {} };
+    await p._onSwitchEngine('agy');
+    expect(toasts).toEqual([]);
+  });
+});

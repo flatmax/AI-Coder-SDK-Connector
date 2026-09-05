@@ -1,8 +1,15 @@
 # What Is Next To Implement
 
-**Status:** the implementation queue. Current as of **2026-08-29**, HEAD `442d48d` — C9's record, the
-most recent thing below marked as landed. The tree is clean at that SHA, so every claim here is about a
-committed state and nothing is owed to a working copy.
+**Status:** the implementation queue. Current as of **2026-09-03**, HEAD `a698fdb`. The tree is clean at
+that SHA, so every claim here is about a committed state and nothing is owed to a working copy.
+
+**This file covers the Claude engine and the app around it. It does not cover the second engine.**
+[`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
+and [`delivery.md`](plan-ag/delivery.md), and it moved a long way between 2026-08-30 and 2026-09-03
+while this file said nothing. That separation is deliberate — but it made the sentence *"what is left
+is § D"* below read as a claim about the whole tree when it was only ever a claim about this one. It
+is scoped now, and [`plan-ag/README.md`](plan-ag/README.md) is named as a fourth rolling source in the
+table under it.
 
 This file adds no design. Every item below is already specified somewhere in this suite; what it
 records is *that nothing implements it yet*, what "done" looks like, and which file holds the
@@ -18,6 +25,7 @@ Three rolling records feed this queue, and none of them is a queue on its own:
 | [`plan/README.md`](plan/README.md) § *Open items carried forward* | items 1–11, each with the interlude that found it | dated 2026-08-18; reasoning, not sequence, and some entries have closed since |
 | [`impl-history/work-log.md`](impl-history/work-log.md) § *Specified but not yet built* | the Settings-tab drift, item by item | scoped to one tab |
 | [`known-issues.md`](known-issues.md) | the raw inbox — defects as they are noticed | unsorted by design |
+| [`plan-ag/README.md`](plan-ag/README.md) § *Phases* | the second engine, phase by phase | a different plan of record, not a queue against this one — its open work is tracked there and never mirrored here |
 
 Claims marked **(verified 2026-08-27)** were checked against the tree at HEAD, not carried forward
 from a dated paragraph.
@@ -110,7 +118,8 @@ bigger than the documentation bug** — the argument for reading the inbox befor
 rather than only when something cites it. Both of the other rolling records emptied with it: the
 work-log's § *Specified but not yet built* closed on B4's decline, and the inbox closed on B6's finding.
 **So all three sources that feed this queue are empty, and §§ A–C hold nothing open but C9, whose exit
-criterion is an event.** What is left is § D. **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
+criterion is an event.** What is left is § D — **of this file**, which as of 2026-09-03 is a narrower
+claim than it reads: the second engine's queue is [`plan-ag/`](plan-ag/)'s and is not empty. **Then § C reopened and closed again on 2026-08-29 with C10** — `/usage` opening onto a tab that did
 not contain what the command's own reply said it did — **and that one arrived from a source none of the
 three rolling records covers: a user comparing this app against the CLI it wraps.** It is worth naming
 as a fourth source, because no audit in this file would have found it. A routed slash command tells the
@@ -131,6 +140,23 @@ feature shipped had gone nowhere. **This is § C2's own thesis arriving from the
 exists because a failure that reports nothing is indistinguishable from success, and the mechanism for
 reporting was itself an instance of it. The lesson generalises past this file: *a reporting path is not
 exercised by the happy case, so nothing tells you it is broken until you need it.*
+
+**Where it stands 2026-09-03.** Six commits landed, none of them from this file — every one came from
+driving the app rather than reading it. Four defects on the Claude side found by walking the UI with
+Claude as master (an unstarted state painted as a failure, a table headed over no rows, a raw
+`org_level_disabled` leaking into prose, and a turn's two text blocks concatenated mid-sentence), and
+two shared chat-panel defects found by driving the *second* engine: every `systemEvent` but one falling
+off the end of its handler, so a turn killed by a rate limit rendered nothing at all, and a
+`{role: 'system'}` row rendering under an "Assistant" heading. All six are in the sections they belong
+to rather than here; what belongs here is the pattern. **Five of the six were invisible to 4,169 passing
+tests and visible within minutes of opening the app**, which is § D's whole argument arriving twice in
+one day — and the second pair were found while *verifying the fix for the first pair*, which is the
+argument for finishing a change in the browser rather than in the runner.
+
+**So the honest next pick is § D**, and D2 in particular: it now holds three cases rather than two, and
+the newest one — a permission dialog with 570px of empty editor for a one-line diff — is visible in a
+single frame with no resizing, which is the cheapest a screenshot harness will ever be to justify.
+C11 is a small companion to it. C9 still waits on an event.
 
 **§ C3 closed 2026-08-28**, and with it § C: everything left in this file is § D's verification debt or
 § E's declined. The convergence went the way the item guessed, onto the client-side rule, and the item
@@ -749,6 +775,14 @@ it before planning a sitting rather than only when it is cited.
 *(It refilled and emptied again: a stale-reference-twin entry noticed 2026-08-28 was cleared 2026-08-29,
 and clearing it produced § B6. The advice above earned itself in one day.)*
 
+**C11 — The Debug section still paints "no engine yet" red.** ✳ *Open, small.* The Usage and Session
+sections were corrected on 2026-09-03 — a `no-engine` headline renders in secondary grey, because a
+window nobody has prompted in yet is not a fault — but the Debug section's *"Server info unavailable"*
+and *"Last refresh failed"* still use the error colour for the same pre-session state, and *"failed"*
+is the wrong word for a call that never had an engine to reach. Defensible where it sits, since Debug
+is where raw facts belong; recorded because the two halves of one tab now disagree about what red
+means. Reasoning in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) § *When the breakdown fails*.
+
 **C10 — `/usage` opened onto a tab that did not hold what its reply named.** ✅ *Built 2026-08-29 —
 leaves this queue.* Reported by a user against the CLI's own `/usage` panel: "I don't see that level of
 detail here". Reasoning in [`5-webapp/viewers-hud.md`](5-webapp/viewers-hud.md) §§ *Session Usage Is The
@@ -872,6 +906,13 @@ the editor lays out. A screenshot-based regression harness is the only thing tha
 re-break, and it **must write files rather than return images inline** — raising the buffer ceiling
 made one inline screenshot survivable, and a ceiling is not a budget.
 [`plan/README.md`](plan/README.md) open item 6.
+
+**A third case joined it on 2026-09-03, from the first live Antigravity turn.** The permission dialog
+renders roughly 570px of empty editor for a one-line diff — a +1 −0 change filling the viewport,
+because the Monaco panes size to the dialog rather than to the hunk. Seen by eye in a browser, absent
+from 60 passing dialog tests, and unfixable-by-assertion for the same reason as the two above: the
+rules arrive, and nothing measures what they lay out. It is the clearest argument yet for the
+screenshot harness, because unlike the clamp it is visible in a single frame with no resizing.
 
 **The clamp is gone and this item grew rather than shrank (2026-08-28).** What replaced it is *more*
 layout, not less: the header is a two-column grid, its left rail is a fixed `7rem` chosen because a

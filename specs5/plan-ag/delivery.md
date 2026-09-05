@@ -109,7 +109,7 @@ it turned out to be cheap. `src/` and `webapp/` remain untouched.
 
 | File | Role |
 |---|---|
-| `probe_edit_args.py` | The phase-2 spike. Seeds a file, requests an edit, logs every `ToolCall` at `pre_tool_call_decide`, denies all mutating tools, then asserts the file's bytes are unchanged and prints a verdict. |
+| `scripts/probe_edit_args.py` | The phase-2 spike. Seeds a file, requests an edit, logs every `ToolCall` at `pre_tool_call_decide`, denies all mutating tools, then asserts the file's bytes are unchanged and prints a verdict. |
 
 `sdk-surface.md`, `decisions.md` and `risks.md` were amended with the measurements; the amendments
 are marked as corrections rather than silently applied.
@@ -162,7 +162,7 @@ Nothing is blocked. Phase 1 proceeds as written, with two amendments now settled
 the permission hook's shape is known, and `run_command` must be gated alongside the file tools from
 the first line of the engine adapter rather than retrofitted.
 
-`probe_edit_args.py` needs a real key and hits the network, so it is a spike and not a test. Its
+`scripts/probe_edit_args.py` needs a real key and hits the network, so it is a spike and not a test. Its
 assertions should be lifted into the phase-1 probe as the AG-R-1 and AG-R-11 tripwires.
 
 ---
@@ -186,7 +186,7 @@ questions about *this* build are both met and were measured live.
 | `src/aic_dc/antigravity/consultant.py` | AG-7's one-shot `async with Agent(...)`, with AG-R-3 verification |
 | `src/aic_dc/antigravity/bridge.py` | The two tools, on their **own** MCP server |
 | `tests/test_antigravity_{surface,credentials,consultant,bridge}.py` | 145 tests, offline — no key, no harness, no network |
-| `probe_consultant.py` | The live spike. Three checks, runnable, costs money |
+| `scripts/probe_consultant.py` | The live spike. Three checks, runnable, costs money |
 
 ### Live verification
 
@@ -265,7 +265,7 @@ message retries forever — which is why `_explain` distinguishes the two and sa
 **Exit criterion:** *"A CLI-side smoke test sends a prompt and prints the streamed step taxonomy,
 including a tool call and its result."*
 
-**The code and the probe are built; the live run has not been made.** `probe_session.py` exists,
+**The code and the probe are built; the live run has not been made.** `scripts/probe_session.py` exists,
 asserts the criterion and is runnable, and it has not been pointed at the network — the owner has not
 yet decided whether to spend free-tier quota on it. Everything that does not need a key is done and
 measured: the pump's behaviour is pinned by 46 offline tests, and the three SDK facts it is built on
@@ -280,7 +280,7 @@ demonstration, not the evidence.
 | `src/aic_dc/antigravity/steps.py` | The `Step` → `Event` pump. Emits only names the Claude pump emits |
 | `src/aic_dc/antigravity/session.py` | Lifecycle: `Agent` for the lifetime, `agent.conversation` for the turn |
 | `tests/test_antigravity_{options,steps,session}.py` | 94 tests, offline — no key, no harness, no network |
-| `specs5/plan-ag/probe_session.py` | The live spike. Read-only, costs money, not yet run |
+| `scripts/probe_session.py` | The live spike. Read-only, costs money, not yet run |
 
 `sdk-surface.md` gained [§ The step stream](sdk-surface.md#the-step-stream--read-in-phase-3-and-it-is-not-shaped-like-claudes)
 with the three measurements below. `surface.py`'s tables moved where phase 3 made them stale.
@@ -381,7 +381,7 @@ five can be trusted.
 
 ### The live run, and what happens when the free tier says no
 
-`probe_session.py` is read-only by construction — no decide hook, so no mutating tool is enabled —
+`scripts/probe_session.py` is read-only by construction — no decide hook, so no mutating tool is enabled —
 which makes it safe to point at a real repository. It **does not retry**: the SDK's own
 `retry_config` already retries a 429 or a 503 invisibly (measured in phase 1), so a failure that
 reaches the probe has been retried through already, and a loop on top would burn the same quota to no
@@ -479,7 +479,7 @@ engine-name leak [AG-R-4](risks.md#ag-r-4) exists to prevent.
    against the Claude pump's source, not against a rendered conversation.
 3. **`PostToolCallHook` is unwired.** It is the trigger for broadcasting a write and queueing the
    re-index, both engine-agnostic jobs. Still pending in the probe.
-4. **No live turn has been run through the gate.** `probe_edit_args.py` measured the raw hook in
+4. **No live turn has been run through the gate.** `scripts/probe_edit_args.py` measured the raw hook in
    phase 2; nothing has yet driven a real dialog from a real Antigravity turn.
 
 ---
@@ -1164,7 +1164,7 @@ this trade is available.
 
 ## Phase 3 — the live run, and the three bugs it found (2026-09-02)
 
-`probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
+`scripts/probe_session.py`, built 2026-09-01 with 94 offline tests and never executed. **Exit criterion met on
 the first run**: a real `localharness` session, a `list_directory` tool call, its result in the same
 sub-message as the arguments, and a `PASS`. The taxonomy printed exactly as phase 3 predicted —
 `TEXT_RESPONSE`/`USER` echo, four `TOOL_CALL` frames going `ACTIVE`→`DONE`, then `TEXT_RESPONSE`
@@ -1237,3 +1237,2505 @@ reason that is now correctly silent.
 each `seq` printing a longer prefix of the same sentence. That is right: `blocks.js:107` documents
 "content is cumulative" and the browser replaces by `block_id`. Checked because the probe made it
 look like duplication, and worth recording so the next reader does not re-open it.
+
+---
+
+## Phase 6b — the consultation as an agent tab (2026-09-02)
+
+[AG-13](decisions.md#ag-13), and the tier-2 shape rather than the cheap one: the consultation
+**streams** into its own tab instead of filling in at the end.
+
+**No webapp change**, which was the exit criterion and is the thing worth checking first. The tab
+strip joins on identifiers alone, so the whole feature is server-side.
+
+### What the consultant became, and why that is not AG-R-9 firing
+
+`_chat` no longer calls `agent.chat()`. It drives `conversation.send()` + `receive_steps()` and hands
+each step to an optional observer, which the bridge feeds to the **existing** `StepTranslator`.
+
+That reverses AG-7's "it stays a one-shot `async with Agent(...)`", and the amendment argues it out:
+the risk was the consultant *inventing* session machinery **ahead of** the engine, so the engine
+inherits a shape built for one turn. Phase 3 built that machinery properly, against `Conversation`
+directly, and the consultant now consumes it. The direction of dependency was the whole of the risk.
+
+`chat()` is still not called, and that is the other half: it returns a lazy cursor whose read after
+`Agent.__aexit__` hung until killed in phase 1.
+
+**The tripwire in `tests/test_antigravity_consultant.py` was rewritten to match the redrawn risk**,
+not deleted. `receive_steps` and `cancel` are now expected; what is forbidden is a *second
+implementation* — the test asserts `consultant.py` defines no `StepTranslator`, `Event`, `_Block` or
+`translate` of its own, and that it reaches the stop reason and usage through the shared readers
+rather than the SDK's private attributes.
+
+To make that reuse real, `stop_reason_of` and `turn_usage_of` were lifted out of
+`AntigravitySession` into module-level functions taking a conversation. Both were spelled wrongly
+once already (phase 3's live run); a second copy would be a second place to get them wrong, found the
+same way — live, months later.
+
+### The identity, minted rather than borrowed
+
+An in-process MCP tool handler receives **only its own `args` dict** — no `tool_use_id`, no context
+object. So a consultation cannot learn the id of the tool card that invoked it, and the bridge mints
+its own. Correlating against the most recent `mcp__aic-dc-antigravity__*` card in the pump would be a
+race whose failure mode is attaching output to the *wrong* card.
+
+Accepted cost: the row does not nest inside its spawning card the way a `Task` subagent's does.
+
+### Settling, which is the part that would have been forgotten
+
+`_tab` is an async context manager, and the terminal `subagentEvent` is in its `finally`. The webapp
+sets `state.streaming = !row.terminal`, so a consultation that raised without one leaves a tab
+spinning for the rest of the session — and a refusal, a timeout and a cancel all take that path. It
+also drains the observer's scheduled pushes first, or the terminal event can overtake the text it is
+meant to be terminating.
+
+Two tests cover the failure directly: one for the ordinary end, one where the consultation raises.
+
+### A latent bug found while writing it
+
+`_first_output_path` read `chunk.result.output_path` — the `ChatResponse.resolve()` shape. It now
+receives `Step` objects, where the path is a *tool-call argument*. Every test passed either way,
+because the fakes carried the old shape; only a real image would have shown it. Both shapes are now
+tried, which is the same class of near-miss phase 3's live run found three of.
+
+### And one real bug in committed code, found by running the app
+
+`_heavy_init` referenced `capabilities` without importing it into its own scope — the name is bound
+in `main()`, a different function. **The whole deferred initialisation died on a `NameError`**, so no
+adapter ever received the symbol index and every hover, definition and reference answered "no answer"
+for the life of the session.
+
+It was invisible in the way that matters: one traceback at startup, and thereafter it reads as a slow
+or empty index rather than as a crash. No unit test touched the attachment loop, because it is
+startup plumbing. `tests/test_main_symbol_index_attach.py` is the regression — checked structurally,
+since reproducing it needs the real deferred path — and it fails on the pre-fix tree, which was
+verified rather than assumed.
+
+### The live run (2026-09-02, same day)
+
+`scripts/probe_consultation_tab.py` drives a real `second_opinion` through the real bridge with a recording
+emit, and checks the five-point contract read off `subagent-tabs.js`. **All six checks pass**: 13
+chunks arrived progressively, every one carrying the consultation id, turn-scoped to the live
+request, with the terminal event last.
+
+Two things the run taught that the offline tests could not.
+
+**The first attempt 503'd, and that was the more useful result.** Google returned *"this model is
+currently experiencing high demand"* mid-turn. The consultation failed — and the **terminal event
+still fired**, because it is in a `finally`. That is the tab-spins-forever failure mode, exercised
+live and against a real provider fault rather than a mocked raise. It is the single thing about 6b
+most likely to have been got wrong, and it was right.
+
+**The probe's own check was too narrow**, and the 503 is what exposed it: it counted only
+`streamChunk` and reported "the answer did not stream" on a turn that had streamed two
+*thinking* chunks before the provider gave up. Thinking renders in the tab exactly as prose does, so
+the check now counts both. A green run would never have shown this — it took a turn that produced
+thinking and no answer, which is exactly what a transient provider error produces.
+
+### The browser run (2026-09-02) — the tab draws, and it found a real bug
+
+Driven through Chrome against a live `--preview` server in a scratch repo. Three things were
+confirmed and one was wrong.
+
+**Confirmed.** The permission dialog fires for `mcp__aic-dc-antigravity__second_opinion` — AG-5's
+whole reason for the second server name, seen working rather than argued. The tab appears in the
+strip labelled *"Antigravity — Second opinion"*, carries the ⏹ Stop affordance and the read-only
+note, mirrors a row into Main, and settles. No webapp file was changed to make any of that happen,
+which was 6b's exit criterion.
+
+**Wrong: a failed consultation settled as a green `completed`.** `_tab` announced the terminal event
+from a `finally` with a hard-coded status, so a consultation that timed out after 180s reported
+success. The webapp maps `completed` straight to a green LED (`subagent-tabs.js` `_TERMINAL_LED`), so
+the row read as a clean result for a call that returned nothing. That is the manufactured-success
+shape AG-5 and AG-R-3 are both written against, arriving in the one place nobody had looked.
+
+Fixed with `try/except/else`: `completed` is now *earned* by the body not raising, and the handlers
+catch **outside** the `async with` so the failure propagates through the manager. `failed` was then
+observed live, red LED and all.
+
+**Note what the existing tests did not catch.** All 26 bridge tests passed against the broken
+version, because every one of them asserted `terminal` was true and none asserted *what the status
+said*. The three new tests close that, and the fix was verified by reverting it alone — with the
+tests kept — and watching the new one fail.
+
+### The finding that has nothing to do with our code
+
+**Both browser consultations timed out at 180s, while the standalone probe answered in seconds.** The
+harness stderr says why:
+
+```
+received model response error: doRequest: error sending request:
+Post ".../gemini-3.7-flash:streamGenerateContent?alt=sse": context canceled
+```
+
+`context canceled` is our own timeout cutting a request that had been in flight the whole 180s. The
+harness started, authenticated and sent; Google never answered. The same model returned 503 *"this
+model is currently experiencing high demand"* twice during the probe runs an hour earlier, so the
+likeliest reading is provider-side unavailability rather than anything about the query — which is
+also what the master engine concluded unprompted after the second failure.
+
+Three consequences worth carrying:
+
+- **A hung provider is indistinguishable from a hung engine, for 180s.** The tab shows a spinner and
+  nothing else for three minutes. `DEFAULT_TIMEOUT_SECONDS = 180` was chosen when a consultation was
+  a blocking tool call with no UI; now that it has a visible tab, that is a long time to say nothing.
+- **The harness's stderr is where the diagnosis was**, and it reaches only the server log. Routing it
+  into the tab as a `systemEvent` would have made this self-diagnosing.
+- **Neither probe could have found it.** Both run the consultant on a bare event loop; the failure
+  needs a real provider having a bad afternoon. That is not a gap in the probes so much as a reminder
+  of what they are for.
+
+### What is left
+
+- **A successful consultation has not been watched streaming into the tab.** Both live attempts
+  failed provider-side, so the chunk-by-chunk rendering is verified only by
+  `scripts/probe_consultation_tab.py` (13 chunks, all carrying the consultation id) and not by eye.
+  The tab was *correct* to be empty both times — there was nothing to draw.
+- **The browser has not drawn the tab.** The contract is verified end to end on the server; that the
+  webapp renders it needs a real session with a browser attached and a Claude turn calling the tool.
+  It is the one part of 6b a script cannot stand in for.
+- **⏹ Stop is wired to the bridge but not to `stop_task`.** `ConsultantBridge.cancel()` exists and
+  reaches `Conversation.cancel()`; nothing routes the RPC to it yet.
+- **`usage` rides on the terminal event** and nothing renders it. Tokens only, per AG-6.
+
+---
+
+## Making a stalled consultation legible (2026-09-02)
+
+Three changes, all of them consequences of the browser run above rather than of the plan. The
+consultation worked; what failed was every part of *saying so* when it did not.
+
+### 1. The failure carries the harness's own words
+
+The diagnosis on 2026-09-02 — `Post ".../streamGenerateContent": context canceled`, meaning the
+request had been in flight the whole timeout and Google never answered — was in the harness's stderr,
+which the SDK logs at INFO on the **root** logger and nowhere else. Finding it took a `grep` of the
+server log. Nobody using the app could have.
+
+`Consultant._stderr_tail()` now appends the last six lines to a timeout or an SDK error. Read off
+`Conversation.connection._stderr_lines`, the bounded deque the SDK already fills, rather than
+captured with a logging handler: a handler would be global, would fire on a thread that is not the
+event loop, and would pick up every other engine's lines.
+
+**The ordering here was a bug in the first draft and is the reason there is a test for it.**
+`_chat`'s except handlers run *after* `_drive`'s `finally` has cleared the live conversation, so a
+tail read from that attribute would always have been empty — the feature would have been a silent
+no-op, which is the exact failure it exists to prevent, one layer up. The connection is now retained
+past teardown for diagnostics.
+
+### 2. Silence is reported while it is happening
+
+A heartbeat `systemEvent` every 20s into the consultation's tab, saying only how long the wait has
+been. Deliberately **not** dressed up as progress: the harness is blocked on a socket and there is no
+progress to report, and a bar that moves while nothing happens is worse than a number that grows.
+Cancelled in the `finally`, with a test that it stops — a background task outliving the thing it
+reports on is how "harmless" tasks accumulate.
+
+The failure's reason now also goes **into the tab**, attributed to the consultation. Until now it
+went to the *model*, as the tool's text result, which the person watching the tab does not read: the
+row went red and said nothing.
+
+### 3. `DEFAULT_TIMEOUT_SECONDS`: 180 → 120
+
+Two live runs sat at the full 180 and returned nothing. The number is not the real fix and does not
+pretend to be — silence was the problem rather than duration — but the cost is asymmetric: a
+consultation needing more than two minutes is already a bad second opinion, while every extra second
+of a hung one blocks the Claude turn that asked.
+
+### 4. ⏹ Stop is no longer decorative
+
+A consultation is a subagent row, so its Stop click arrives at `stop_task` — where the CLI has never
+heard of the id. `ClaudeCodeService.stop_task` now routes ids prefixed `consultation-` to
+`ConsultantBridge.cancel()`, which reaches `Conversation.cancel()`.
+
+Routed by the id's shape rather than by asking the CLI and falling back on its error, because an
+unknown id is not a failure the CLI reports cleanly. A test pins the minting site and the routing
+site against each other, since they are two constants that must agree and live in different packages.
+
+### What this does not fix
+
+The provider hanging. If Google accepts a request and never answers, the consultation still waits out
+its timeout — it just now says so every 20s, ends 60s sooner, and explains itself with the harness's
+own stderr when it gives up.
+
+---
+
+## The hangs were the model, not the code (2026-09-02)
+
+The two 180s timeouts in the browser run were blamed, reasonably, on "the Antigravity side isn't
+responding". That was right and not specific enough. Measuring it took three minutes and changes a
+pinned default.
+
+### The measurement
+
+A trivial five-token prompt — *"Reply with the single word: ok"* — sent **straight at
+`generativelanguage.googleapis.com`** with this free-tier key, bypassing the harness, the SDK and our
+code entirely:
+
+| model | run 1 | run 2 |
+|---|---|---|
+| `gemini-3.7-flash` | 30.9 s | **timed out at 70 s** |
+| `gemini-3.6-flash` | 3.1 s | 22.7 s |
+| `gemini-3.5-flash` | — | 3.9 s |
+
+A latency ladder by model recency. `gemini-3.7-flash` — what `DEFAULT_TEXT_MODEL` was pinned to since
+phase 1 — is effectively unusable on a free key, and an agent turn is many model calls, so *any*
+timeout would have been exceeded.
+
+**It arrives as slowness, not as a 429**, which is why nothing in the stack reported it. The SDK's
+`retry_config` has nothing to retry; the harness's stderr says only `context canceled`, which is our
+own timeout; and `_explain`'s quota branch never fires. A provider rationing capacity by queueing is
+invisible to every mechanism built to notice rationing.
+
+### What changed
+
+`DEFAULT_TEXT_MODEL`: `gemini-3.7-flash` → `gemini-3.5-flash`, with the table above in the docstring
+so the next reader gets the evidence rather than a bare constant. `scripts/probe_consultation_tab.py`
+then passed all six contract checks on the first run, streaming 11 chunks — the same probe that had
+been passing intermittently for days.
+
+**This is a free-tier default, not a judgement about the models.** The point of a second opinion is an
+independent and *capable* one, and pinning an older model to make it respond is a real cost. It joins
+[AG-12](decisions.md#ag-12)'s list of things a paid key should revisit, and it is a constructor
+argument so that revisiting is one line.
+
+### Why this took a browser to find
+
+Every probe run before today either passed or failed for a reason that looked like weather — a 503, a
+"high demand" notice. The pattern only became visible with two consecutive 180s timeouts on different
+questions, which is what a human watching a UI noticed and a passing test suite could not. The
+measurement that settled it deliberately used **neither** our code nor the SDK: when the question is
+"is it us or them", the answer has to come from a path that contains neither.
+
+### Confirmed by Google (2026-09-02)
+
+The measurement above was put to Google and the behaviour is intended, which turns a guess into a
+constraint the design can rest on. Their answer, in the parts that change something:
+
+- **Free tier is best-effort and queues rather than refuses.** *"When backend capacity is highly
+  utilized, rather than rejecting requests with a `429 RESOURCE_EXHAUSTED` error, Google queues Free
+  Tier requests behind paid traffic."* Newer models carry heavier traffic, which is the ladder
+  exactly.
+- **There is no availability signal to query.** *"The `models.list` endpoint only verifies
+  authorization, not current network load."* Worth recording because it is the endpoint anyone would
+  reach for: this key lists `gemini-3.7-flash` and cannot practically use it.
+- **60–90 s is their own free-tier guidance**, *"just to survive the queue"* — and they add that *"an
+  agent waiting a full minute per turn is practically unusable for interactive work."* Our 120 s sits
+  deliberately above their figure: that number is what a request needs to *clear* the queue, so
+  timing out at it would abandon calls that were about to succeed.
+- **The whole wait is time-to-first-token.** *"The capacity queueing occurs at the routing layer
+  before a model is allocated … Once your request finally clears the queue, the tokens will stream out
+  at their normal rate."*
+- **Billing removes the queueing**, not merely the rate ceiling, and restores fail-fast `429`s.
+
+### The one that changed code
+
+The TTFT detail is the actionable one. A consultation with **no step yet** is queued; one that has
+started is merely thinking. Same spinner, opposite meanings — and only the first is something a
+reader can act on. So the heartbeat now says which:
+
+> Waiting for Google to start — 40s so far, and nothing has arrived yet. On a free-tier key requests
+> are queued behind paid traffic rather than refused, and the whole wait lands before the first token.
+
+and switches to a plain *"Antigravity is working"* once a step arrives. Saying "queued" after the
+first token would be the wrong kind of wrong: it would blame the provider for a model taking its time.
+
+### What it means for AG-12
+
+The billing case is now stronger than the two costs [AG-12](decisions.md#ag-12) records, and stronger
+on the vendor's own account: the free tier does not merely defer image generation and train on
+prompts, it makes an interactive agent *"practically unusable"* — Google's phrase — and it does so
+invisibly, because queueing looks like nothing at all. Lowering the model pin buys usability today; it
+does not buy back the capability, and a paid key should raise it again.
+
+---
+
+## Phase 4 — the live run, and the four things it found (2026-09-03)
+
+The first conversation ever held through the Antigravity engine as master. The adapter, the gate and
+the per-session switch all landed on 2026-09-01 and had never been driven; the phase-4 row said *"no
+live turn has run through it, which is now the whole of the gap"*. One has now, and **the exit
+criterion is not met**.
+
+Setup: a fresh repo (`calc.py`, two functions), `switch_engine` to Antigravity through the chat
+panel's own notice, permission mode **Ask**, one prompt — *"Read calc.py, then add a multiply(a, b)
+function that returns a * b. Make only that one edit."*
+
+**What worked.** The engine notice and the amber chip both read correctly, and `switch_engine` did
+what AG-1 says it does. The `edit_file` dialog rendered a real side-by-side diff at **+5 −0** with the
+correct hunk, so [AG-5](decisions.md#ag-5)'s central claim — that the raw `PreToolCallDecideHook`
+carries enough to render a diff — holds in the browser and not only in the phase-2 probe. The write
+landed correctly. The step stream drove tool cards as they arrived.
+
+**What did not.** The turn was declared dead in the UI while it was still running, and then edited the
+file anyway.
+
+### 1. `chat_streaming` awaits the whole turn, and the browser gives up at 75s
+
+The transcript ended at a single line —
+
+> **ASSISTANT** — **Error:** Timed out waiting for response
+
+— with every tool card that had already rendered *replaced* by it: no diff, no answer, no footer, tab
+reading `Main: idle`. Meanwhile the server log ran on to `STATE_FULLY_IDLE` three minutes later and
+`calc.py` gained its function.
+
+The two engines implement the same router method with opposite lifetime contracts, and the docstrings
+say so plainly:
+
+| | Returns when | Survives a disconnect |
+|---|---|---|
+| `claude_code/service.py:1232` | *"as soon as the engine has accepted it"* — the turn runs in a background task | yes, *"a client that disconnects mid-turn re-attaches to a turn that kept running"* |
+| `antigravity/service.py:318` | after `async for event in session.stream_turn(...)` drains — i.e. the whole turn | no |
+
+The browser's JRPC deadline is 75s (`webapp/src/app-shell/index.js:230`). So **any Antigravity turn
+longer than 75 seconds renders a fatal error while continuing to run**, and a permission dialog makes
+that a certainty rather than a risk, because the user's own thinking time is inside the budget. Timed
+from the log: prompt at 12:30:47, the deadline fired at ~12:32:02 while the `view_file` dialog was
+open, the turn finished at 12:35:32.
+
+**This is the worst available failure mode**, and worth naming as such: the app tells the user the
+turn failed, destroys the record of what it did, and *then* writes to their file. A user who read that
+error and walked away would have an edited working tree and no idea. Everything else on this list is
+cosmetic beside it, and nothing downstream is trustworthy until it is fixed. The fix is a port rather
+than a design — Claude's implementation is the template.
+
+The same defect costs the reload case: an Antigravity turn does not survive a refresh, and a Claude
+one does.
+
+### 2. Every read-only tool call raises a modal
+
+Four dialogs for one edit — `find_file`, `view_file`, `edit_file`, `view_file` — of which exactly one
+is a mutation.
+
+`ALWAYS_ASK` and `GATED_BY_DEFAULT` are both computed correctly at
+`antigravity/permissions.py:271`, but they only populate the payload's `gated_by_default` field, which
+shapes the dialog's *wording*. Nothing consults them before `broker.can_use_tool`, so the gate
+forwards every call the `PreToolCallDecideHook` sees, and in Ask mode the broker asks about all of
+them. On Claude the CLI decides which calls need `can_use_tool` and auto-allows reads, so the shared
+broker never sees them — which is why one shared broker across two engines does not by itself give one
+behaviour.
+
+The dialog then states something false. It says:
+
+> read calls are not normally gated. This one is: A deny or ask rule matched, or a hook asked for
+> confirmation.
+
+No rule matched. On this engine every read is gated, so the sentence explaining why *this* one is
+unusual is the sentence that is wrong. **The harness agrees with Claude, not with us** — its own log
+reads `permission_manager.go:917] permissions: skipping check for step 2: handler *handlers.FindHandler
+does not declare permissions`, so Antigravity's own permission manager considers `find_file`
+permission-free while AIC⚡DC asks about it.
+
+The fix is to consult the existing classification before the broker, honouring deny rules and
+`denied_read_files` so the narrowing cannot become a hole.
+
+### 3. The read tools' argument aliases are against names the SDK does not send
+
+The dialog rendered `PATH (none named)` directly above an input block reading
+`{"AbsolutePath": "/tmp/ag-repo/calc.py"}`.
+
+`ARG_ALIASES["view_file"]` maps `TargetFile`; the hook is handed **`AbsolutePath`**. `find_file` has
+no entry at all and is handed `Pattern` / `SearchDirectory`. The **mutating** aliases are all correct
+— `edit_file` really does send `TargetFile`, `TargetContent`, `ReplacementContent`, `Instruction` —
+which is exactly why the diff rendered and nobody noticed the read half had drifted.
+
+**The surface probe structurally cannot catch this**, and its own docstring says why: reflection sees
+*shape*, and an argument name inside a JSON string is not shape. This is the third finding in this
+directory of that kind, after `agy` frames with no content and `policy.ask_user`'s bare bool.
+
+### 4. The hook and the step stream use different names for the same call
+
+Not a defect yet, and the thing most likely to become one:
+
+| Call | Hook `argumentsJson` | Step stream |
+|---|---|---|
+| `find_file` | `Pattern`, `SearchDirectory` | `findFile.query`, `findFile.directoryPath` |
+| `view_file` | `AbsolutePath` | `viewFile.filePath` |
+| `edit_file` | `TargetFile`, `TargetContent`, `ReplacementContent` | `editFile.filePath`, `editFile.diffBlock` |
+
+Two vocabularies for one call, and the step stream's paths are `file://` URIs where the hook's are
+bare. Recorded in [`sdk-surface.md`](sdk-surface.md) so the next module to read a path picks
+deliberately rather than by whichever it met first.
+
+### What this says about the phase
+
+Phase 3's entry ended on *"the fakes described a friendlier SDK than the real one"*. This run is the
+same lesson one layer up: **the offline suite described a friendlier engine than the real one**, and
+every one of these four is a thing no unit test was ever going to fail on — a lifetime contract, a
+call that is asked about rather than allowed, an alias against a name nobody sent, and two spellings
+that agree until they do not. The gate for phase 4 is a conversation, and it has to be held.
+
+### The first three fixed, and a fifth found while verifying them (2026-09-03)
+
+**1. The turn lifetime.** `chat_streaming` now admits, spawns
+`_run_turn` as a background task, and returns `{"status": "started"}` — the Claude
+adapter's shape to the letter. No webapp change went with it, because `input.js`
+already reads only `error` / `routed` / `unsupported` from the reply and takes
+everything else off the event stream. Two things came with it rather than after:
+the turn-in-progress refusal moved *ahead* of the spawn (`stream_turn` raises, but
+it is a generator, so its `TurnInProgressError` now lands where no synchronous
+refusal can be made of it), and the failure branch emits the translator's own
+closing events. With no RPC reply left to carry a failure, the event stream is the
+only channel there is, so a path that emits no terminal event is a spinner that
+never stops — survivable before only because the browser ignored the status anyway.
+
+**The regression test hangs against the old code rather than failing**, which was
+discovered by running it: checking the new tests against the pre-fix
+implementation timed out a five-minute command with nothing to show. Every one of
+them now goes through a `_start` helper that wraps the call in
+`asyncio.wait_for`, so the six fail in 31s with a `TimeoutError` naming the test.
+A guard that hangs is worse than one that fails, so the deadline is part of the
+assertion rather than a convenience.
+
+**2. The read class.** The gate answers `read` itself and never reaches the
+broker with it — `ALWAYS_ASK` is still checked first, so `start_subagent` (class
+`delegate`, ungated by default) cannot slip through the narrowing.
+
+**This required wiring a control that had never been connected.** `denied_read_files`
+had *no reader at all*: the service stored the list, answered `get_denied_read_files`
+with it, and nothing consulted it. That was invisible while every read raised a
+dialog the user could refuse by hand — and allowing reads without asking is exactly
+what would have turned it into a silent read of a file the user had marked. So the
+gate now takes a `denied_reads` callable (a callable, not a snapshot: the list is
+toggled from the file tree mid-session) and **denies** a matching read with a reason
+the model can act on, rather than asking about it. Directory prefixes match, which
+is what shift-clicking a folder means.
+
+**3. The read aliases.** `view_file` gains `AbsolutePath` and `find_file` gains
+`SearchDirectory`; `Pattern` is deliberately *not* aliased to a path, because the
+dialog promises a file where it says PATH and a glob is not one. `list_directory`'s
+inherited `DirectoryPath` turned out to be correct — confirmed on the verification
+run's live frame — and `search_directory` remains unmeasured and is labelled so.
+
+### Verified live, and the honest gaps
+
+A second conversation on the fixed build (2026-09-03): `list_directory` and
+`view_file` both ran with **zero dialogs**, both tool cards rendered and **stayed**,
+and the turn settled with the composer re-enabled. The first run's single
+`Error: Timed out waiting for response` replacing the whole transcript did not
+recur.
+
+Two things this run did **not** establish, stated rather than implied:
+
+- **The deny path was not exercised live.** The turn died before it reached
+  `secrets.env`, so the refusal is covered by unit tests only.
+- **The edit dialog was not re-reached**, so the end-to-end criterion — a full
+  conversation including an approved write — is still unmet. It failed for a
+  reason that has nothing to do with any of this: `429`, *"Quota exceeded for
+  metric: generativelanguage.googleapis.com/generate_content_free_tier_requests,
+  limit: 20"*. The same free-tier ceiling § *The hangs were the model* and AG-12
+  are about.
+
+### 5. A turn killed by a rate limit says nothing at all
+
+Found while verifying the above, and the reason the run's failure was confusing:
+the engine explained itself perfectly and the browser dropped it.
+
+The step arrived as `STATE_ERROR` / `SOURCE_SYSTEM` / **`TARGET_USER`** — addressed
+to the human — carrying the whole story: the 429, the quota metric, the limit of
+20, and *"Please retry in 29.957436016s."* `steps.py` translated it correctly into
+a `systemEvent` with `subtype: "engine_error"`. Then
+`chat-panel/streaming.js`'s `onSystemEvent` **handles exactly one subtype,
+`conversation_reset`, and silently returns for every other**.
+
+So a turn that died of a rate limit renders as two tool cards and a stop, with no
+badge, no message and no retry advice — while the payload naming the wait in
+seconds sits unread on the window channel. This is not Antigravity-specific in
+its mechanism: the handler is the shared chat panel's, and any engine's
+`engine_error` meets the same silence. It is Antigravity-specific in how often it
+fires, because the free tier's ceiling is 20 requests.
+
+**Fixed the same day.** `onSystemEvent` now renders the three subtypes that carry
+something a *user* must read — `engine_error`, `turn_timeout` and `engine_notice` —
+as durable transcript cards, with a toast only as the glance. The reasoning lives in
+[`chat.md` § Engine Event Routing](../5-webapp/chat.md#engine-event-routing); the
+short version is that a toast expires in about three seconds and neither the rate
+limit nor the reader's absence does. Repeats are dropped, because one error arrives
+as several `stepUpdate` frames for one step — three, in the run that found this.
+
+The forward-compat diagnostics (`unknown_step`, `unknown_message`, `step_unreadable`)
+deliberately stay out of the transcript: they are about our reader rather than the
+user's turn, and `engine-errors.jsonl` and the Debug section are their home.
+
+**And a sixth thing fell out of building it.** The first attempt appended
+`{role: 'system'}` and the card rendered under an **"Assistant"** heading, because
+`renderMessage` reads `system_event` for the label and treats every non-`user` role
+as the assistant. That is precisely the attribution `steps.py` routes
+`SYSTEM_MESSAGE` away from a text block to avoid, arrived at from the other
+direction. Five producers already had the flag right; `handleUnsupportedSlash` did
+not, and had been telling users the engine's refusal of a slash command in the
+assistant's voice. Corrected with the same change.
+
+Verified end to end against a **real live 429** later the same day: the card rendered
+under a SYSTEM heading carrying the engine's own words, the HTTP code, the quota
+metric and the retry delay, where before the fix the same failure rendered nothing.
+
+**And that verification immediately found the opposite failure.** One rate limit
+produced **four** cards totalling ~4,500 characters, because the engine retries and
+each attempt reports the same failure with a little more gRPC detail than the last —
+four walls of `map[@type:type.googleapis.com/google.rpc.QuotaFailure…]`. A transcript
+nobody can read is not an improvement on a transcript that says nothing. So a notice
+marked `collapse` now **replaces** the previous card of its own subtype within the
+same turn rather than stacking, and the last telling wins because it is the most
+complete; the toast fires once per distinct report rather than once per attempt. The
+trade is stated rather than hidden — two genuinely different errors in one turn leave
+only the second on screen — and `engine_notice` is deliberately *not* collapsible,
+because two harness notices are two facts.
+
+The collapse itself is covered by tests and **not** re-verified live, for the reason
+in the next section.
+
+
+### The free tier refuses 20 requests a day, and that is what stopped phase 4
+
+*Measured 2026-09-03, and it corrects a claim in this directory.* § *The hangs were
+the model* records Google confirming that free-tier requests are **queued rather than
+refused**, so rationing arrives as latency and never as a `429`. That is true of the
+*per-minute* limit and it is not the whole story. There is a second ceiling that
+refuses outright:
+
+```
+quotaId:    GenerateRequestsPerDayPerProjectPerModel-FreeTier
+quotaValue: 20
+status:     RESOURCE_EXHAUSTED   httpCode: 429
+```
+
+Twenty agent *requests* per model per day — not turns, and an agent turn is several
+requests. An afternoon of phase-4 verification spent it, and every Antigravity turn
+after that failed instantly for the rest of the day.
+
+**This is what leaves phase 4's exit criterion unmet.** One conversation running end
+to end *including an approved write* has still not been demonstrated: the write path
+was proved on the first run (a real `edit_file` dialog, a correct +5 −0 diff, the
+write landing), and the fixed build has been shown to allow reads without asking and
+to keep its transcript — but no single conversation has yet done all of it, because
+the quota ran out between the two. The deny path is likewise unit-tested only.
+
+It also sharpens [AG-12](decisions.md#ag-12) further than § *What it means for AG-12*
+already did. The billing case is no longer just that the free tier is slow enough to
+be *"practically unusable for interactive work"* in Google's words; it is that
+**twenty requests a day is not enough to test the engine, let alone use it**. Every
+remaining phase-4 and phase-5 verification is gated on a paid key or on waiting a day
+per handful of turns.
+
+---
+
+## Phase 8 — the gate, before the adapter (2026-09-03)
+
+[AG-14](decisions.md#ag-14) landed and the first thing built under it is the permission gate, for the
+reason phase 2 was taken out of order: everything downstream is contingent on it, and on this
+transport it is **the only gate there is**. `agy`'s own headless layer auto-denies rather than asking,
+so the adapter runs with `--dangerously-skip-permissions` and nothing stands behind the hook.
+
+**What landed.** `src/aic_dc/antigravity/agy/` — a sub-package rather than more files beside
+`service.py`, deliberately: `surface.py` derives its `handled` bucket by globbing `*.py` next to
+itself, and code in here touches no SDK symbol, so it must stay outside that glob or it would report
+SDK surface as covered that is not.
+
+- `registry.py` — which conversations this host owns, as files on disk.
+- `hook.py` — the process `agy` runs before every tool call.
+- `scripts/probe_agy_gate.py` — the live tripwire.
+- `tests/test_agy_gate.py` — 35 tests, nearly all of them failure paths.
+
+**The design decision worth recording is the split.** The obvious shape is to ask the running app and
+let it answer "not mine". That is wrong, and the failure case says why: with the host down, *every*
+question goes unanswered, and one channel cannot tell "not ours" from "ours but unreachable". Reading
+silence as the first ungates our own sessions; as the second, it breaks the user's. So ownership is a
+fact on disk and the decision is a question over a socket, and each fails safely on its own terms:
+
+| Situation | Answer | Why |
+|---|---|---|
+| No registry entry | **allow** | Somebody else's `agy` session. The common case — the hook is global. |
+| Entry present, host answers | the human's answer | The dialog did its job. |
+| Entry present, host unreachable | **deny** | Ours and unreviewable. A dead host makes our sessions un-runnable rather than un-gated. |
+| Payload unparseable, we own nothing | **allow** | Cannot be ours, and refusing would break a stranger's session on a bug of ours. |
+| Payload unparseable, we own something | **deny** | Might be ours. |
+
+**The live tripwire passed, and its first version passed for the wrong reason.** The gate denied
+*everything*, so the model gave up before proposing a write — leaving "the file is unchanged" true and
+meaningless. That is the same shape as the AG-R-12 error two entries up, caught this time before it
+was committed. The sharpened version allows the read class so the model can actually reach an edit,
+and asserts that a write was refused as well as that the file is intact:
+
+```
+tools the gate was asked about: run_command, find_by_name ×8, list_dir, view_file ×6,
+                                replace_file_content, grep_search ×2
+of those, refused:              run_command, list_dir, replace_file_content
+file after the turn:            'ORIGINAL_TEXT'
+PASS: 3 write attempt(s) refused across 3 distinct route(s), file unchanged
+```
+
+**Three distinct routes.** Denied the edit, the model tried `run_command`, and `list_dir`. That is
+[AG-R-11](risks.md#ag-r-11) live on this transport — the same behaviour as `sed -i` and inline
+`python3` on the SDK — and it is exactly what the `"*"` matcher is for. A per-tool matcher would have
+shipped a gate the model walks around.
+
+**And it surfaced the trap for reusing `permissions.py`:** `agy` and the SDK agree on *argument*
+names and disagree on *tool* names — `replace_file_content` not `edit_file`, `write_to_file` not
+`create_file`, `find_by_name` not `find_file`, `list_dir` not `list_directory`. The argument names
+transferring is the real convenience; the tool names look like they transfer and do not, and the
+failure is quiet: an unknown name classifies as `exec`, so the call is still gated, but the dialog
+calls a file edit a command and `_diff_tool_for` renders no diff. A gate that holds while the
+product's central feature silently degrades. Recorded in
+[`sdk-surface.md`](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03);
+a per-transport name map is a requirement of the adapter rather than a refinement.
+
+### The vocabulary, merged rather than kept beside (same day)
+
+The trap above is closed. `agy/tools.py` holds this transport's tool classes, write seam, argument
+aliases and diff shapes, and `permissions.py` **merges** them into the tables it already has rather
+than consulting a second set. The names do not collide — no SDK tool is called
+`replace_file_content` — so one table can hold both vocabularies, and one table cannot disagree with
+itself. Two would be the copy that drifts, and the direction it drifts is a mutating tool nobody
+gates.
+
+`ALWAYS_ASK` widens from `MUTATING_TOOLS` to the union of both transports' write seams, which broke
+`test_the_seam_is_read_from_options_not_restated` — a test asserting `ALWAYS_ASK is MUTATING_TOOLS`.
+Restated rather than deleted: identity no longer holds and the property it stood for does, so it now
+asserts the seam is *derived from* both modules and equal to their union. A literal set in
+`permissions.py` would be exactly the drift it was written to prevent.
+
+Four new assertions come with it, and they check the *class* rather than merely that a dialog appears
+— because an unrecognised name is already gated, so the omission this guards against does not ungate
+anything. It renders a file edit as a shell command with no diff.
+
+### The host end, and a shipped bug it exposed (same day)
+
+`agy/gate_server.py` is what `hook.py` connects to: one unix socket per session, one connection per
+tool call. It owns almost nothing — the queue, the countdown, the localhost rule, the dialog payload
+and the diff are all the *shared* `PermissionBroker`'s, reached through the existing
+`AntigravityPermissionGate`. So a request raised by `agy` lands in the same `pending()` list and
+renders in the same dialog as one raised by any other engine, which is
+[`permissions.md`](../3-engine/permissions.md)'s *one ask path* holding across a third transport.
+
+Three things are genuinely this module's, and each is a small surprise:
+
+- **There is no call id.** The hook's JSON carries `conversationId`, `stepIdx`, `toolCall`,
+  `transcriptPath`, `workspacePaths` and `artifactDirectoryPath` — the raw protobuf has a `callId`
+  and the hook's payload does not. One is composed from the conversation and the step index: unique
+  within a conversation, stable across a retry of the same step.
+- **`stop()` releases before it closes**, and the order is load-bearing. While the registry entry
+  stands the hook *denies* anything it cannot get an answer for, so closing the socket first would
+  refuse a tool call racing the shutdown. Releasing first makes it pass through as unowned, which is
+  what it is.
+- **A stale socket file is removed on `start()`**, because a killed process leaves one and `bind`
+  would fail on it — at session start, where it reads as "the engine will not run" rather than as
+  stale state.
+
+**And writing the amend test found a bug in shipped code.** `denormalise_args` built its reverse map
+with a dict comprehension, so where two source names share a target the *last* won: `CommandLine` and
+`Command` both mean `command`, so an amended command went back as `Command` while the engine sends
+and reads `CommandLine`.
+
+That failure is silent and worse than an error, because `overwrite`/`modified_args` is a **merge**:
+the unrecognised key lands *beside* the real one rather than replacing it, so the original argument
+survives. **The user watches themselves edit a dangerous command, allows it, and the command they
+edited away runs.** A manufactured record of consent — the same family as
+[AG-R-11](risks.md#ag-r-11), reached by a third road, and present on the SDK path since the aliases
+were written.
+
+Fixed by preferring the *first* alias, which is why the tables are ordered with the engine's own
+spelling first. Four regression tests, and the near-miss is worth naming: nothing on the SDK path
+exercised an amend, so it took building a second transport to notice.
+
+### The stream reader, and the capture that had to come first (same day)
+
+`agy/steps.py` translates the CLI's NDJSON into the *same* events the SDK pump emits —
+`streamChunk`, `toolUse`, `toolResult`, `systemEvent`, `turnUsage`, `streamComplete` — so the chat
+panel needs no branch for a third transport (AG-R-4).
+
+**It could not be written until the stream was captured**, and the capture is the entry's real
+content. `sdk-surface.md` recorded the vocabulary from `-p` runs, and against a bidirectional turn
+that record was incomplete in three ways, each of which would have produced a pump that was plausible
+and wrong:
+
+- **Frames are nested** under their own event name, not flat. Read flat, every field is `None` and the
+  turn renders empty *without raising* — the failure `diff_agy_init` was corrected for at 1.1.22, on a
+  different frame. `unwrap` is a named function with five tests rather than an inline `.get`.
+- **`text_delta` is a real delta, and the SDK's `streamChunk` is cumulative.** The browser replaces by
+  `block_id`, so forwarding `agy`'s fragment would render only the last few words of every message —
+  and accumulating the SDK's would repeat every prefix. The two transports need *opposite* handling
+  and neither mistake raises anything. This pump accumulates, so the browser keeps one rule.
+- **`step_type` is not the closed vocabulary it was recorded as.** Three members documented; a plain
+  read-a-file turn produced a fourth, `system_message`. An unknown member renders as a notice rather
+  than being dropped — the rule `StepType.UNKNOWN` earns on the SDK side, for the same reason.
+
+One absence is load-bearing: `tool_info.output` was **not** present on a completed `find_by_name`,
+where the 1.1.22 correction found it for `run_command`. So it is per-tool, and a completed call with
+no output is reported complete with none rather than left pending, which would spin forever.
+
+The fixtures are transcribed from the capture rather than invented, because phase 3's lesson was that
+a fake describing a friendlier engine than the real one passes every test while the pump is wrong.
+28 tests.
+
+### The session, and a narrowing that nearly went missing for a third time (same day)
+
+`agy/session.py` holds one `agy` process open across turns — `--print= --input-format stream-json`,
+prompts on stdin, frames on stdout — and does the forced handshake: spawn, read `init`, claim, then
+prompt. Fifteen tests drive it through a **fake `agy` that is a real subprocess** speaking the real
+protocol, because a fake answering in-process would exercise neither the handshake's order nor the
+pipes.
+
+**Stop has no halt frame on this transport.** The input protocol accepts one event, `user`; the
+binary answers anything else with *"unsupported stream input message event"*. The SDK has
+`conversation.cancel()` and there is no counterpart. What there is instead is the gate: ⏹ **starves**
+the turn by refusing every subsequent tool call with a reason naming the user's stop, which is the
+mechanism the Claude adapter already leans on — `cancel_streaming` releases the turn's open
+permissions *before* interrupting, because a released dialog is what makes an interrupt actionable.
+
+The limit is stated rather than discovered: **a turn producing only prose cannot be starved**,
+because it asks permission for nothing. Killing the process would stop it and end the session, so
+`cancel()` starves and `close()` is the separate, explicit act.
+
+**Two bugs the tests caught, and both were repeats.**
+
+The first is the one worth the entry. `gate_server.decide` called `broker.can_use_tool` **directly**,
+bypassing the read-class narrowing that lives in `AntigravityPermissionGate.run` — so every read on
+this transport would have raised a dialog. That is precisely the phase-4 defect fixed this morning
+on the SDK path, four dialogs for a turn whose only mutation was one edit, **reintroduced by a third
+transport within hours of being fixed on the second.** The narrowing is now
+`AntigravityPermissionGate.pre_verdict`, called by both, so a fourth transport cannot reintroduce it
+by writing plausible code.
+
+The second: a prompt that could not be written to a dead process `return`ed, skipping
+`stream_complete` and leaving the browser spinning — the *same* mistake as the SDK adapter's error
+path, fixed this morning, made again this afternoon in a different file. Both now close the turn out
+whatever happens.
+
+Neither was caught by review. Both were caught by a test asserting on the outcome the user sees.
+
+### Installing into somebody else's configuration (same day)
+
+The gate must live in `~/.gemini/config/hooks.json` — outside this repository, in a file belonging to
+Google's CLI that the user may already be using — because workspace-local hooks are not loaded
+headlessly on 1.1.25. That is the most invasive thing this project does, and `agy`'s own docs say
+global hooks *"fire unconditionally"*, so it is handed every tool call from every `agy` session on the
+machine including the user's own.
+
+**What that costs a session that has nothing to do with us, measured.** The answer was nearly
+unacceptable and the measurement is why:
+
+| | Per tool call, on the user's own sessions |
+|---|---|
+| As first written | **~500 ms** |
+| After moving the package | **~30 ms** |
+
+The hook lived at `aic_dc/antigravity/agy/`, and **importing `aic_dc.antigravity` alone costs 500 ms
+and pulls in the Claude SDK.** Every tool call in the user's unrelated `agy` work would have paid that,
+to be told "not mine". So the package moved to `aic_dc/agy/` — `import aic_dc` is as cheap as starting
+Python — and the remainder is interpreter startup, which is unavoidable when the caller spawns a
+process per call. It also reads better: this transport does not touch the SDK, and
+`antigravity/surface.py` globs its own directory for the `handled` bucket, so being outside that glob
+was always the point.
+
+Nothing else changes for standalone `agy`: a call from an unclaimed conversation is answered
+`{"decision": "allow"}` and never reaches a dialog, a socket or a queue.
+
+**And one failure would have been unacceptable.** `agy` **blocks** a tool whose hook command cannot be
+run — exit 127, measured. A stale entry left by a crash, pointing at a virtualenv since deleted, would
+stop the user's own `agy` working *entirely*, with an error naming a program they may not recognise.
+The installed command is wrapped:
+
+```
+<python> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+The fallback is sound rather than convenient: `hook.main` exits 0 on every path it controls, including
+a denial and including an unexpected exception, so a **non-zero exit means the interpreter never
+started** — which means this host is not running, owns no conversations, and allow is the correct
+answer. The one case it does not cover is a transient fork failure while a turn is genuinely being
+gated; recorded rather than hidden, and the reason `status()` reports a stale install loudly instead of
+silently repairing it.
+
+`install.py` therefore answers four states rather than a boolean — `absent`, `current`, `stale`,
+`unreadable` — because "installed" and "installed and usable" are different and a settings surface has
+to explain the difference. It **merges** rather than writes, preserves every other key, removes only
+its own entry, deletes the file only if ours was the last thing in it, and refuses to touch a file it
+cannot parse rather than replacing it. 16 tests, most of them about restraint.
+
+### The adapter, and the one place inheritance is right (same day)
+
+`agy/service.py` mounts everything above behind the engine router. It **inherits**
+`AntigravityService`, which is the opposite of what this project does everywhere else — the
+Antigravity adapter holds a real `ReviewMode` and calls `commit.py` rather than subclassing the Claude
+adapter, deliberately, because those are two engines and a shared base invites each into the other's
+lifecycle.
+
+Here it is one engine reached two ways. AG-14 calls `agy` a *transport*, not an engine, and the class
+says so: two-thirds of the surface is repository, index and review work that is not transport-specific,
+and a parallel class would duplicate 31 method bodies whose only content is `return
+self._repo.something()`. The copy is what drifts — which is the argument this file would otherwise be
+making against itself. What is overridden is exactly what differs: how a session starts, how a turn is
+pumped, and what ⏹ does.
+
+**It refuses to start a session without the gate installed, and the refusal is the feature.** `agy`
+launches with `--dangerously-skip-permissions`, which is safe *only* while our hook is in the user's
+global configuration. A session started without it is not a degraded experience — it is an agent
+editing the tree with nothing in the way. So `connect_engine` answers `gate_not_installed`, names the
+file, and says the gate is removed again on shutdown. `stale` is refused as well as `absent`: a hook
+pointing at another checkout gates *that* build, not this one.
+
+Two smaller declarations: `resume` is declined rather than silently starting a fresh conversation, and
+`gate_status()` is public so the settings surface can ask its whole question without starting anything.
+
+### The settings surface, and where it turned out to belong (same day)
+
+The panel that asks. It is the only control in the app that writes **outside the repository**, so the
+wording is the feature and the tests assert on what it *says*, not only on what it does — it names the
+file, says it is outside the project, counts the user's own hooks it will leave alone, states the
+~0.2 s per tool call that **every** `agy` session on the machine pays including ones started in a
+terminal, and says it is removed on shutdown.
+
+The four states `status()` reports are rendered as four, not as a checkbox: `absent`, `current`,
+`stale`, `unreadable`. A stale gate is explained rather than silently taken over — it usually means a
+second checkout is also installed, and seizing the hook would break whichever one the user was using.
+An unreadable file gets no button at all, because offering an action that will refuse is worse than
+not offering it.
+
+**And a cross-cutting test moved the methods.** `test_the_browser_calls_nothing_the_server_does_not_expose`
+went red: the panel called `ClaudeCodeService.gate_status`, which exists only when the `agy` transport
+is mounted, and nothing mounts it yet. The guard was right, and the fix it forced is better than the
+design it rejected.
+
+**Installing the gate is a machine setting, not an engine capability.** What it changes is the user's
+own `agy` configuration, not a property of a running session — so it must be answerable and reversible
+with **no engine running at all**, and on an engine they are not currently using. It lives on
+`Settings` now. `AgyService` keeps only the half that genuinely is the session's: removing the gate on
+`shutdown`, so the cost is paid while it buys something.
+
+That is a distinction the panel would have got wrong on its own, and the test found it by asking a
+question about the wire rather than about the design.
+
+**Phase 8's transport is complete**: registry, hook, vocabulary, host socket, stream reader, session,
+installer, adapter and settings surface, at 4,299 Python and 4,407 webapp tests. What has *not*
+happened is a live conversation through it end to end — the gate is proved against the real binary,
+and the turn path is proved only against a fake. That run is phase 8's exit criterion and it is the
+next thing to do. The handshake it needs is proved and written down in
+the probe: spawn, read `init`, claim, then prompt. That order is forced, because the id is unknown
+before `init` and a tool call cannot precede the first prompt.
+
+
+---
+
+## The 200 ms that was 30 ms (2026-09-04)
+
+A measurement error worth its own entry, because a design decision was made against it.
+
+`install.py` recorded the gate as costing **~200 ms per tool call** on every `agy` session on the
+machine. It costs **~30 ms**, against ~10 ms for starting Python at all. The figure was taken through
+`uv run`, which adds ~170 ms of its own startup — and `uv run` is **not what gets installed**:
+`hook_command` writes `sys.executable`, the virtualenv's interpreter. The convenience wrapper was
+measured instead of the command under test, and it overstated the cost sevenfold.
+
+**What it bought was the wrong design.** Uninstall-on-shutdown existed *because* 200 ms per tool call
+seemed too much to leave running — the tax should be paid only while it bought something. At 30 ms
+that argument does not hold, and what it cost instead was a Settings toggle that silently un-set
+itself and a next session refusing to start because the thing the user switched on had been taken
+away behind them.
+
+**So the gate is sticky (user, 2026-09-04).** `uninstall` is reached only from Settings, by the person
+who put it there. The drawbacks are real and smaller than the one being traded away: the 30 ms is
+permanent rather than session-scoped, and an entry left pointing at a deleted virtualenv persists —
+harmlessly, because the `||` fallback answers *allow*, and visibly, because `status()` reports
+`stale` rather than repairing it.
+
+A shell fast-path was measured and **declined**: testing the registry directory before starting Python
+answers an unowned call in ~0 ms rather than 30 ms. It was not adopted because it puts a third branch
+of globbing shell into the one command whose correctness is the whole gate, and 30 ms does not buy
+that risk.
+
+**And one test was reading the developer's machine.** `test_a_turn_is_refused_when_the_gate_is_not_installed`
+did not patch `GLOBAL_HOOKS`, so it asserted against the real `~/.gemini/config/hooks.json` — green for
+a day because that file was absent, red the moment a gate was installed for real. Now pointed at a temp
+path, like its neighbours.
+
+
+---
+
+## The `agy` transport, driven from the browser (2026-09-04)
+
+**It works.** Claude, then a switch to *antigravity (subscription)*, then a turn on the paid account —
+reported by the user after the two defects below were fixed. That is the transport end to end through
+the UI rather than through a probe.
+
+Three things had to be fixed first, and all three were found by running it rather than by 4,300
+passing tests.
+
+**The SDK's model name.** `AgyService` inherited `options.DEFAULT_MODEL` and passed it as `--model`.
+`agy` bakes reasoning effort into the name and rejects the bare form, so it exited before its init
+frame on *every* session. `sdk-surface.md` had recorded that disagreement on 2026-08-30.
+
+**The discarded message.** `_record_error` answers `{error: "engine", message: …}` and `input.js`
+rendered the *code*, so the whole failure read as **"Error: engine"** while the sentence sat unread in
+the same payload.
+
+**A selector that lied.** After a refused switch the `<select>` kept showing the engine the user picked
+— Lit re-applies `.value` only when the bound value changes, and `active` had not — while the session
+stayed on the old engine and the refusal sat inside a dismissible notice. `live()` and a toast.
+
+That last one is the third instance in two days of one rule, now an invariant in
+[`chat.md`](../5-webapp/chat.md): **a control that reports its own success must read its state back
+from the thing it changed**, not from the input the user gave it.
+
+### The model surface (same day)
+
+Setting the model to `None` was the right fix for the crash and left a hole: `get_model` answered
+`{"model": None, "models": [None]}`, so the picker showed one blank entry on the subscription engine.
+
+`agy models` is read once — it is a subprocess, and the answer belongs to the account rather than the
+session — and its 14 ids are served through the existing contract. The labels it also returns are
+dropped: `get_model`'s shape is a list of names on every engine, and a second shape for one transport
+would make the picker engine-aware, which is AG-R-4.
+
+**`set_model` validates against that list**, and that is the substance rather than a nicety. An
+unrecognised name does not fail at selection; it fails at the *next session start*, as `agy` exiting
+before its init frame — which is precisely the failure above, and `options.DEFAULT_MODEL` is exactly
+such a name. Refusing it here turns a day of diagnosis into a sentence.
+
+An unreadable list means **unknown**, never *none*: a picker blank because a subprocess timed out
+looks identical to a transport with no models, and refusing every name on that basis would strand the
+user. So an empty list validates nothing.
+
+The Claude models Google routes to — `claude-sonnet-4-6`, `claude-opus-4-6-thinking` — are offered
+rather than hidden. `sdk-surface.md` warns that surfacing them naively makes "which engine am I
+talking to" unanswerable; the engine selector now answers it, reading *antigravity (subscription)*
+beside them.
+
+### Closed: the model picker was empty because `models` was the wrong shape (2026-09-04)
+
+**The cause was in neither the transport nor the event chain, and the section below excluded every
+place it was not.** `get_model`'s `models` is a list of **objects** — the Claude adapter returns the
+CLI's own `{value, displayName, resolvedModel, description}` dicts — and `AgyService` returned a list
+of bare **id strings**. `settings-tab.js`'s `modelEntries` opens with `if (!m || typeof m !==
+'object') continue`, so all fourteen names were dropped one at a time, `entries` came out empty, and
+`offline` — which is literally `entries.length === 0` — disabled the select and printed *"The engine
+has not connected yet…"*.
+
+So every observation in the note below was true and none of them was the fault. The backend did
+answer with the fourteen ids; the event did reach the window; `_loadModel` did run and did assign
+them to `this._models`. The list was thrown away one layer further on, at render.
+
+**The wrong belief is quotable, which is why it survived a fix.** `1b48ba5`'s message states that
+*"`get_model`'s shape is a list of names on every engine"* and drops the display labels `agy models`
+prints in order to honour it, citing [AG-R-4](risks.md#ag-r-4). The shape is a list of objects; the
+labels were always welcome, under a `displayName` key the Claude CLI already fills in. Dropping them
+was harmless — returning strings was fatal — and the two came from one misreading.
+
+**It was invisible to the tests because they asserted on the wrong side of the boundary.** The Python
+test was named `test_the_ids_are_offered_and_the_labels_dropped` and pinned the string list as the
+contract; the webapp tests added in `9eb4a89` asserted on `el._models`, the raw array, and defined a
+`modelSelect` helper they never called. Both suites were green for the whole of the two reports. The
+tests now assert on the rendered `<option>` set, and the name-only case fails on the old renderer
+with `expected [] to deeply equal …` — the reported symptom, reproduced.
+
+The fix is in three places, and the third is the one worth arguing about:
+
+- `AgyService._list_models` returns `{value, displayName}` per model, keeping the label.
+- `AntigravityService.get_model` had the same defect one line long — `models: [self._model]`, a bare
+  string — so the SDK transport's one-entry menu rendered empty too. It returns an object, and an
+  empty list rather than `[None]` when no model is set.
+- `modelEntries` **normalises a bare string** to `{value}` rather than skipping it. This is defence
+  in depth and not a second contract: a transport answering with names is wrong, but the honest
+  failure is an option with no label, never a picker that blames the engine for not connecting.
+  Silently dropping an entire populated list is what made this cost two sessions.
+
+**The general lesson, because this surface has now had it twice.** `offline` conflates *"the engine
+has told us nothing"* with *"we could not read what it told us"*, and it renders the first. A caption
+that names a cause is an assertion, and this one was wrong while being the most prominent text on the
+panel — it is what sent both diagnoses at the transport. The note below is kept whole because its
+three hypotheses were reasonable, all three were wrong, and the shape of that error is the finding:
+every one of them was about *whether the data arrived*, and none about *what was done with it once it
+had*.
+
+### The note as it stood, before the cause was found (2026-09-04)
+
+**Reported twice, and the second report is after the fix that was supposed to close it.** With
+`agy` master — the chip reading *⚠ antigravity (subscription)* — Settings shows an **empty model
+select**, disabled, above the note *"The engine has not connected yet, so it has not said which models
+it offers — the list arrives with the first turn."* That note is the `offline` branch, and `offline` is
+literally `entries.length === 0`, so the browser has no list. (The ⚠ on the chip is the unfinished-engine
+marker and is expected; it is not this.)
+
+The first report was diagnosed as `settings-tab`'s `engine-changed` handler updating the active
+engine's *name* and nothing else, and fixed in `9eb4a89` by clearing and re-reading. The symptom
+survived that, so the diagnosis was incomplete rather than wrong — the clear-and-re-read is still
+correct, it just is not the whole path.
+
+What is excluded by measurement rather than by argument:
+
+- **The backend answers.** `AgyService.get_model()`, probed in-process, returns the 14 ids with
+  `model: None`. `agy models` exits 0 and prints `id<TAB>Label`; its *"Fetching available models…"*
+  banner goes to stderr, which is already discarded, so it is not being parsed as a fourteenth-and-a-half
+  model name.
+- **The router does not refuse it.** Neither `get_model` nor `set_model` is in `RPC_SURFACES`, so
+  both delegate to whichever adapter is master; there is no `UnsupportedOnThisEngine` path here.
+- **The event chain exists end to end**: `_announce_engine` → `engineChanged` → `app-shell`
+  re-dispatches `engine-changed` on `window` → `settings-tab._onEngineChanged` clears and calls
+  `_loadModel`.
+
+So the failure is between the browser making that call and the list arriving — which leaves these,
+in the order worth probing:
+
+1. **The window was running code older than the fix.** `--dev` runs Vite, so a reload picks the edit
+   up, but a window left open across the commit does not. The cheapest thing to check first, and the
+   one that would make this a non-defect.
+2. **`_loadModel` returned early on `!this.rpcConnected`**, or `get_model` came back with an
+   `error` — both paths `console.warn('[settings] get_model failed', …)` and leave the list alone.
+   **The browser console is the next artefact needed**; nothing else distinguishes them.
+3. **`engine-changed` never reached this window.** The chat panel listens on the same event and
+   clears its transcript, so *did the conversation clear on the switch* is a free observation that
+   separates "the event did not arrive" from "the reload ran and got nothing".
+
+Worth stating plainly because it shaped the wrong first diagnosis: with **Claude** master and no turn
+yet run, this panel is *also* empty, for the honest reason the note gives. Empty-before and
+empty-after look identical on screen, which is why the switch appeared to be the thing that broke it.
+
+### What phase 8 still owes
+
+> **Superseded 2026-09-05 for the first half — see
+> [§ The approved write](#phase-8--the-approved-write-and-what-running-it-found-2026-09-05).**
+
+Its exit criterion, both halves, neither demonstrated:
+
+- a conversation on the subscription **including an approved write**, so the dialog renders a real
+  diff from `replace_file_content` and the edit lands;
+- a **second `agy` session of the user's own, running concurrently and never intercepted** — the half
+  that has had no test at all, and the one that matters for trusting a hook installed globally.
+
+---
+
+## Phase 8 — the approved write, and what running it found (2026-09-05)
+
+**The first half of the exit criterion is met, in a browser, on the paid subscription.** Not through a
+probe: a real dialog, answered by a person clicking **Allow once**.
+
+```
+10:23:55  run_command  pwd && ls -la                        → allow
+10:24:03  run_command  find /home/flatmax -name target.txt  → deny, with a reason
+10:25:16  replace_file_content  target.txt                  → dialog, +1 −1
+10:25:37  …                                                 resolved as allow by localhost
+          target.txt on disk: MODIFIED_TEXT   git diff: 1 insertion(+), 1 deletion(-)
+```
+
+The dialog rendered `replace_file_content` **as a write with a side-by-side diff** — `−ORIGINAL_TEXT`
+against `+MODIFIED_TEXT`, counted `+1 −1` — which is the thing
+[§ The tool *names* differ](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03)
+warned would degrade silently if the per-transport name map had a hole. It does not.
+
+**The deny path was exercised without being planned, and it is the better half of the record.** The
+agent's second move was `find /home/flatmax -name "target.txt"` — a search of the whole home
+directory for a file that was in its own cwd. Denied with a reason naming the working directory, it
+adapted and edited the right file. That is [AG-R-11](risks.md#ag-r-11)'s route-around instinct being
+*steered* rather than escaping, and it is the first time the reason-carrying deny has been watched
+changing an agent's course on this transport.
+
+### Set up the way the previous entries said to, and that mattered twice
+
+Driven from a **second, freshly started** server — `--server-port 18081 --webapp-port 19000` — because
+the instance hosting the session is both the software under test and the thing whose child process the
+session is. And pointed by `--repo-path` at a **throwaway git repo**, `/tmp/temp/agy-write-test`,
+rather than at this working tree: the demonstration has an agent editing a file, and the working tree
+is where the work is.
+
+### AG-R-3, live, and the tripwire it had already been quietly holding up
+
+The isolation probe was written at the same time and **failed on its first two runs — for a reason
+that had nothing to do with the gate.** Its assertion "the stranger never reached our gate" passed
+immediately and every time: 9 calls on the first run, 15 on the second, **every one of them ours**.
+What failed was the *other* assertion, that the stranger's own work completed:
+
+```
+[probe] the gate decided 15 call(s), for conversation(s) {'ad55c68b-…'}   ← ours only
+[probe] stranger's run status: SUCCESS
+[probe] FAIL: the stranger's file was never written
+```
+
+`SUCCESS` with no file is [AG-R-3](risks.md#ag-r-3): the probe's workspaces were plain `/tmp`
+temporary directories, `/tmp` is not in `trustedWorkspaces` (`/tmp/temp` is, one path component
+away), and `agy` had written `stranger.txt` into `~/.gemini/antigravity-cli/scratch/` while reporting
+success. Confirmed by finding the file there, timestamped to the run.
+
+**That is a hole in `probe_agy_gate.py`, and it is the finding worth keeping.** The deny tripwire's
+entire assertion is *the target file is unchanged*. Under diversion that is true **whether the gate
+denied the write or waved it through** — so its recorded PASS rested on an assumption nobody had
+checked, and would have kept reading green through a gate that had stopped working. It is the same
+"passed for the wrong reason" failure the probe was rewritten once to avoid, arriving by a second
+road: the first time the model never proposed a write, this time the write could not land anyway.
+
+`scripts/_agy_probe_support.py` now owns the setup for all three probes and **raises rather than
+warns** when it cannot find a trusted workspace, because the failure it prevents is a green test that
+means nothing.
+
+**A correction to that helper, worth its own paragraph.** Its first version took the first trusted
+root it found — which on this machine is `culvertHouse`, **a real project** — so a helper written to
+make write probes safe had arranged for an agent to run loose in the user's own repository. It now
+refuses anything outside the system temp directory.
+
+### The trusted workspace was not the whole story, and the first two explanations were wrong
+
+Being under a trusted root turned out to be necessary and **not sufficient**, and the two hypotheses
+tried before the evidence was read properly are recorded because each was reasonable and each cost a
+subscription turn.
+
+1. *"`/tmp` is untrusted."* True, and it was not the cause: moved to `/tmp/temp`, which **is**
+   trusted, the write diverted again.
+2. *"The working demonstration was a git repo and the probe was not."* Also true, also not the cause:
+   `git init`-ing the probe's workspaces changed nothing.
+
+What every diverted file ever recorded has in common is that it was **newly created** — `probe.txt`
+(2026-08-30), `hello.txt` and `test_hello_world.py` (2026-09-04), `stranger.txt` on all three runs
+here. Against that, the browser demonstration *edited an existing* file and the edit landed. So the
+working reading is that a bare filename handed to `write_to_file` is not resolved against the
+session's cwd, and the trusted-workspace story was the most visible correlate rather than the
+mechanism.
+
+**That is a reading of the evidence and not a measured rule.** It has not been isolated with a
+controlled probe, and "creation and modification are trusted differently" is not excluded. It does
+change what a probe must do: seed the file and ask for an *edit*, which both live probes now do.
+
+It also puts a question against [AG-R-3](risks.md#ag-r-3) as currently written, which attributes the
+diversion to `trustedWorkspaces` alone. The risk is real either way — a write reported as successful
+that is not where the user thinks — but its stated trigger may be wrong, and a mitigation aimed at the
+trust list would then miss.
+
+### A shipped bug, found by reading the log rather than by a test
+
+`AgyTranslator` had no `stats` attribute. `AntigravityService._note_permission_prompt` — **inherited**
+by `AgyService` — does `translator.stats.permission_prompts += 1`, so **every permission dialog on
+this transport** raised `AttributeError` there:
+
+```
+ERROR aic_dc.claude_code.permissions: Could not record the permission prompt on the turn
+  File ".../antigravity/service.py", line 466, in _note_permission_prompt
+    translator.stats.permission_prompts += 1
+AttributeError: 'AgyTranslator' object has no attribute 'stats'
+```
+
+It was caught and logged, so the gate kept working, the dialog kept rendering, the tool card kept its
+`gated` badge, and only the turn's prompt count was lost. **4,317 tests stayed green through it**, and
+so did two live browser runs, because nothing asserted on a count that nothing displayed prominently.
+
+Fixed by giving the translator the *same* `TurnStats` the SDK transport's translator carries rather
+than a second one, and folding `_tool_calls` onto it — one counter, so a HUD and a `streamComplete`
+payload cannot disagree about one turn. Three tests pin it, written as the *caller* writes it, and
+they fail against the old code.
+
+The near-miss worth naming: this is the second defect in phase 8 that inheritance produced and tests
+did not see. The first was `denormalise_args` preferring the last alias; both are shared code meeting
+a second transport whose shape nobody re-checked.
+
+### And a third, an hour later, which was not survivable
+
+The user restarted onto the fixed build and the browser could not render the engine at all:
+
+```
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_current_state() failed:
+      'AgySession' object has no attribute 'read_only'          ← three times in one page load
+```
+
+`AntigravityService.get_current_state` and `get_engine_status` both do `session.read_only`,
+`AgyService` inherits both, and **neither catches** — so where the `stats` bug cost a prompt count,
+this cost the whole app-state load.
+
+`AntigravitySession.read_only` is `self._decide_hook is None`. The `agy` counterpart is the gate: this
+transport runs with `--dangerously-skip-permissions`, so `AgyGateServer` is the only thing between the
+model and the tree, and no gate would mean no way to review a write. `AgySession.read_only` is
+therefore `self._gate is None`.
+
+**Three instances of one pattern is a pattern, so the test is written against the pattern.** Inheriting
+a method also inherits every attribute that method reads off objects the subclass supplies, and
+nothing enumerated those: `tests/test_agy_service.py` now pins the *session contract*
+(`conversation_id`, `started`, `read_only`) as a list, asserts the SDK session answers the same names
+so a new one is noticed here, and calls `get_current_state` to reproduce the reported symptom exactly.
+The adapter test above it pins which **methods** exist, which is a different contract and is why it
+stayed green through all three.
+
+### The second half, met the same day
+
+```
+[probe] ours     : c7090b73-a6c8-4161-aced-8199294f6fec
+[probe] stranger : be99f0b7-7113-44bb-b55f-b30052d6364b
+[probe] the gate decided 9 call(s), for conversation(s) {'c7090b73-…'}
+[probe] PASS: 9 call(s) of ours gated, 0 of the stranger's, its work completed, 13.2s of overlap
+```
+
+**Phase 8's exit criterion is met in both halves.** A second `agy` session belonging to the user, in
+its own workspace, ran concurrently with one this host owned and was **never intercepted** — while a
+gate installed in the user's *global* `hooks.json` was firing on every tool call on the machine. That
+is what `conversationId` isolation was designed for and the first time it has been shown working
+against a real second session rather than in a unit test.
+
+Four assertions, and three of them exist because the fourth is easy to pass by accident:
+
+- the stranger's `conversationId` never appears in the gate's record — the one that matters;
+- the stranger's own work **completed**, so it was not stalled on
+  `hook.SOCKET_TIMEOUT_SECONDS` or denied;
+- **our own** calls did reach the gate in the same window — the control, without which the whole
+  thing passes trivially against a hook that is not installed at all;
+- the two turns **overlapped in time**, measured at 13.2s, since sequential sessions would not test
+  concurrency and the registry is keyed per conversation precisely so simultaneous ones can disagree
+  about ownership.
+
+The only change between the three failing runs and this one was **seeding the stranger's file and
+asking for an edit** instead of asking it to create one, which is the strongest evidence for the
+reading in the section above: nothing about the gate, the workspace or the trust list moved.
+
+### The probes, as they now stand
+
+`scripts/probe_agy_write.py` was also run end to end, and it is the regression harness the browser
+demonstration cannot be:
+
+```
+[probe] dialog: run_command ×11 [exec] → allow
+[probe] dialog: replace_file_content [write] → allow
+[probe] tools the gate decided: run_command ×11, view_file, replace_file_content, view_file
+[probe] diff: target.txt  +1 −1  new_file=False
+[probe] PASS: replace_file_content was presented as a write with a real diff (+1 −1), approved,
+        and the edit landed
+```
+
+Worth reading the two lists against each other: `view_file` appears in what the **gate decided** and
+never in what raised a **dialog**. That is `pre_verdict` narrowing reads away from the modal — the
+defect fixed on the SDK path on 2026-09-03, which this transport could have reintroduced and did not.
+
+It asserts four things rather than the obvious one, because the obvious one is weak: that a dialog was
+raised at all; that it was classified `write` and not `exec`; that it carried a real diff with both
+texts and a non-zero count each side; and only then that the file changed. The first three would pass
+against a gate that rendered beautifully and dropped the answer; the fourth alone would pass against a
+gate that never ran.
+
+### What phase 8 still owes, as of this entry
+
+- The `agy` version in the specs is stale: these runs were against **1.1.26**, where
+  [`sdk-surface.md`](sdk-surface.md) records 1.1.22 and 1.1.25.
+- ~~The webapp calls surfaces the descriptor says are hidden.~~ **Fixed the same day — see
+  [§ The startup wall of ERROR](#the-startup-wall-of-error-and-the-two-reasons-for-it-2026-09-05).**
+- **The dialog offers no "always allow"**, reported from a live `run_command` on 2026-09-05. Now
+  [AG-15](decisions.md#ag-15) and phase 9: the reasoning that put `suggested_rules: []` there was
+  sound about the *engine* and stopped one sentence short of the conclusion `sdk-surface.md` had
+  already drawn — that AIC⚡DC owns persistence. `derive_suggested_rules`' no-suggestions fallback and
+  `pre_verdict` are the two pieces that make it small.
+
+---
+
+## The startup wall of ERROR, and the two reasons for it (2026-09-05)
+
+Every page load on the `agy` engine produced this, in the server log and the browser console:
+
+```
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_context_usage() failed: … the agy engine cannot feed …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_context_usage() failed: …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_mcp_status()     failed: …
+ERROR aic_dc.rpc: RPC ClaudeCodeService.get_account_usage(False) failed: …
+```
+
+Every one of those refusals is **correct**. The router raises `UnsupportedOnThisEngine` rather than
+answering with a synthesised empty value, which is [AG-9](decisions.md#ag-9--engine-specific-surfaces-are-hidden-never-stubbed)
+working exactly as designed — and each message says so in its own words: *"the panel should be hidden
+rather than calling this."* Something asked anyway, four times, before the user had done anything.
+
+**Why it is worth fixing despite being cosmetic.** It is the same failure AG-9's amendment already
+named once: hiding twelve surfaces at once reads as a broken build rather than as a different engine.
+A wall of red `ERROR` at startup reads worse. It also trains the reader to ignore the log, on the one
+transport whose gate is the only thing between a model and the working tree.
+
+### Two causes, and the second is the interesting one
+
+**1. One fetch had no guard at all.** `_refreshBreakdown` called `get_context_usage` with no
+capability check, while `_fetchAccountUsage` and `_fetchMcpStatus` on either side of it both had one.
+Neighbours that do the right thing are good camouflage for one that does not.
+
+**2. The guards that existed were consulted but not awaited**, and that is a genuine design seam
+rather than an oversight. `supports()` answers **true while the descriptor is still loading**, and
+`engine-capabilities.js` argues for that default at length: answering `false` would hide every panel
+for one RPC round trip on the shipped engine, and a panel that draws and then hides costs nothing
+because every reader already tolerates absent data.
+
+That reasoning is sound **for a render path and only for a render path.** A fetch is not undoable by a
+later re-render: by the time the descriptor arrives, the request has gone and been refused. The same
+file even anticipates the consequence — *"a fetch that slips through during load fails loudly instead
+of drawing a synthesised zero"* — and treats it as acceptable. Four red lines per page load is what
+"acceptable" turned out to look like.
+
+So the rule is now explicit: **render paths consult the descriptor, fetch paths await it.**
+`await loadCapabilities(host)` before the guard, which costs at most one round trip for the whole page
+because the promise is cached and shared.
+
+### A bug introduced while fixing it, caught by an existing test
+
+The first version put the `await` between `_fetchContext`'s in-flight check and the line that sets the
+flag — so two overlapping polls could both pass the guard and issue two control requests, which is
+precisely what the flag exists to prevent. `collapses overlapping fetches into one control request`
+failed, and the ordering rule is now stated where the flag is claimed: **claim, then await.**
+
+### What the tests assert, and why it has to be the handler
+
+`188` context-tab tests failed on the first run for a duller reason: the shared `settle()` helper loops
+a fixed number of microtasks for "the whole chain", and the chain grew a hop. Raised from 6 to 12,
+with the reason recorded there rather than left as a bumped constant.
+
+The four new tests assert **the RPC handler was never called**, which is the only thing that separates
+a guarded fetch from a refused one — both leave the panel empty, so asserting on the panel would pass
+either way. Three cover the missing guard with the descriptor pre-loaded; the fourth leaves it unloaded
+and lets the component fetch it over RPC, which is the only one that catches the unawaited guard, and
+is what a real page load does. Both fail against the old code. A fifth is the control: with the surface
+supported, the call still goes out — without it, a guard that refused everything would pass the rest
+while breaking the shipped engine.
+
+---
+
+## Phase 9 — "Always allow" on Antigravity (2026-09-05)
+
+[AG-15](decisions.md#ag-15) built. The dialog on this engine offered `Allow once` and `Deny`; it now
+offers a standing rule, and AIC⚡DC keeps it.
+
+**What landed.** `src/aic_dc/antigravity/rules.py` — the store, the matching, and the derivation —
+plus three wiring points in `permissions.py`: `_build_payload` offers the rules, an overridden
+`_to_result` persists the chosen one, and `pre_verdict` consults the store before anything else.
+
+### The prediction AG-15 made about the webapp was almost exactly right
+
+It said **no webapp change**, and that if one were needed the rule shape had been got wrong. One line
+was needed and it is not the shape: `DESTINATION_FILES` gained a label for the new destination, because
+the dialog renders "→ *where the rule went*" beside the rule and every existing entry names a
+`.claude/` settings file. Reusing `localSettings` would have been a plain lie about where the grant
+lives. The shape, the `allow_always` action and the control that sends it all already existed.
+
+### Matching is exact, and that is the whole of the safety argument
+
+The only bug this feature can have is an ungated write, so every choice is the narrow one:
+
+| Rule | Matches | Does **not** match |
+|---|---|---|
+| `rm -rf build/` (literal) | that command | `rm -rf /`, `rm -rf build`, `rm -rf build/ /` |
+| `git push:*` (prefix) | `git push`, `git push --force origin main` | `git pushover`, `git pull` |
+| `src/a.py` (path) | that file, that tool | `src/`, `src/b.py`, `src/a.py.bak` |
+
+**Path rules are keyed on the tool name, not the tool class**, and that is the conservative choice
+rather than the convenient one. Both transports have two tools that write a file — `edit_file`/
+`create_file`, `replace_file_content`/`write_to_file` — so matching by class would let a grant the user
+made *by reading a diff* also permit a whole-file overwrite they never saw. The cost is one extra
+prompt the first time the agent reaches for the other tool. Being too narrow costs a click; being too
+wide is an unreviewed write.
+
+**The matching data rides on the rule dict** under `aic_dc_match`, written when the rule is derived and
+the resolved path and parsed command are already in hand. The alternative is re-deriving them from
+`rule_content` at match time — unescaping gitignore metacharacters and re-parsing a prefix pattern in
+the one code path whose failure mode is granting more than was clicked. The dialog echoes the dict back
+verbatim, so the extra key survives the round trip for free.
+
+`derive_rules` is **not** `claude_code.permissions.derive_suggested_rules`, and the reason is the trap
+AG-15 named in advance: that function's path branch is keyed on `_RULE_TOOL_FOR_PATHS`, a table of
+Claude tool names mapping to the tool the *Claude CLI* consults — both halves meaningless here. Fed an
+Antigravity name it returns nothing, so the control would silently never appear for file edits. What
+*is* reused is `_derived_command_rules` and `_derived_path_rule`: the prefix-splitting and the
+gitignore escaping encode decisions that took a CLI-behaviour investigation to get right, and a second
+copy would drift toward granting more.
+
+### `pre_verdict` checks the store before `ALWAYS_ASK`, deliberately
+
+Every write tool lives in `ALWAYS_ASK`, so checking the store after it would mean the one control the
+user pressed had no effect on the calls they pressed it for. Safe **only** because matching is exact.
+
+One ordering inside that: a **denied read still beats a standing allow**. Shift-clicking a file in the
+tree is a later and more specific instruction than a rule granted earlier, and the newer one holds.
+
+### A test restated rather than deleted
+
+`test_always_allow_degrades_to_allow_once_by_construction` asserted `suggested_rules == []`, on the
+rule that *an offer the engine cannot keep is worse than no offer*. That rule still holds; its premise
+no longer does. It is now `test_always_allow_is_offered_and_kept`, and it asserts **both** halves —
+offered, and written — because asserting only the first would pass on exactly the silent discard the
+original existed to prevent. Same treatment as `ALWAYS_ASK is MUTATING_TOOLS` when the seam widened.
+
+### Two mistakes made while building it, both of a kind
+
+**The tests wrote standing permission grants into the developer's real `~/.config/aic-dc`.** Three
+entries, keyed by `pytest` temp directories, in the actual store — noticed only by opening the file by
+hand. `store_path` takes its config directory rather than resolving one, exactly as
+`agy.registry.registry_dir` does, and the fixture now defaults it under `tmp_path`; every one of the
+five gate constructions across the suite passes it.
+
+That is the **second** time in two days a helper written to make this work safe reached into the
+user's own files — the probe helper picked `culvertHouse`, a real project, as a scratch root. Both had
+the same shape: a default that is correct in production and catastrophic in a test, with nothing
+forcing the test to say which it wanted.
+
+**And lifting `_config_dir` to the base class had to be done, not merely tidied.** `AgyService`
+defined it as a `@property`; the SDK transport now needs the same value, so it moved to
+`AntigravityService.__init__` as an attribute. A property on a subclass **shadows** a base-class
+instance attribute, so leaving the override in place would have raised
+`AttributeError: property has no setter` on every `AgyService` construction — not a style point.
+
+### What is not built
+
+`suggested_mode` stays `None`. Mode escalation grants far more than the call on screen, and AG-15 puts
+it behind the rule path being proven first.
+
+**The exit criterion is met at the seam and not yet in a browser.** `pre_verdict` returning
+`(True, "")` is what "no dialog" means, and that is asserted — the call never reaches
+`broker.can_use_tool`. Persistence across a restart is asserted at the store. What has not been done is
+a live turn where a human clicks *always allow* and the next identical call passes silently.
+
+---
+
+## Phase 9b — the half AG-15 shipped without: seeing and revoking (2026-09-05)
+
+**AG-15 gave the user a way to grant a standing permission and no way to take it back.** Granting was
+one click; revoking meant hand-editing `~/.config/aic-dc/antigravity-rules.json`. That is the wrong
+shape for a permission — someone who cannot see what they granted cannot audit it, and someone who
+cannot revoke it has to trust they clicked the row they meant.
+
+Claude gets this for free: its rules are lines in settings files the user already edits, and the CLI
+warns about ones that will not match. Antigravity's live in a store *we* keep, so the app is the only
+thing that can show them.
+
+**What landed.** `rules.rule_id` and `RuleStore.remove`, two `Settings` RPCs, and a settings panel
+listing the rules with a Forget button beside each.
+
+### It went on `Settings`, and the first attempt was architecturally wrong
+
+The obvious home was `AntigravityService`, and two router tests rejected it immediately:
+
+- `test_claude_refuses_nothing` — `RPC_SURFACES` may hide a method on Antigravity and **never** on
+  Claude. Claude is the reference surface and refuses nothing.
+- `test_the_real_adapters_both_mount` — Antigravity exposes **nothing Claude does not**, which is what
+  keeps `48 = 31 + 17` true and lets an engine switch be a field assignment rather than a
+  re-registration.
+
+Two Antigravity-only methods on the engine surface break both. The precedent was already there and had
+been missed: `Settings.get_agy_gate` puts a per-engine control that is *not part of a conversation* on
+the settings service, for a reason that applies here with more force — **a standing permission
+outlives the session that granted it.** A user is entitled to ask what they have granted with no
+engine running, and especially about the engine they are *not* on, which is exactly when they are
+about to switch to it.
+
+A capability-descriptor row was written for this and then removed. `get_agy_gate` has none either: the
+panel hides by the method being absent, which is the established idiom for a settings control, and a
+descriptor row would have implied a hideable *engine* surface that does not exist.
+
+### The id is derived, and over the grant rather than the label
+
+`rule_id` hashes the matching data and the behaviour — **not** the label or `rule_content`. Two
+reasons, both about revoking the wrong thing:
+
+- **Not an index.** A list refreshed between render and click would revoke a different rule than the
+  one the user pointed at.
+- **Not the label.** A future change that reworded a label would change every id, and the browser's
+  "forget this one" would silently stop finding the rule it was looking at.
+
+Derived rather than stored, so rules written before this existed have one too, and two identical grants
+cannot end up with different ids.
+
+### Three smaller decisions
+
+- **Listing is not localhost-gated; forgetting is.** Reading what you have granted is not a privileged
+  act, and a remote viewer who cannot see the rules cannot notice one they would object to. Revoking
+  only ever *narrows* what the agent may do — but the authority question is the same one
+  `resolve_permission` answers, and answering it differently here would make the rule about the
+  direction rather than about the surface.
+- **The panel does not hide when empty.** "You have granted nothing" is precisely what someone
+  auditing their permissions wants to be told, and a panel that vanished would be indistinguishable
+  from a bug. It hides only when the *method* is absent, which means a build too old to have it.
+- **`forget` answers with the remaining rules**, and the panel renders that rather than its own
+  prediction — [`chat.md`](../5-webapp/chat.md)'s invariant that a control reporting its own success
+  reads its state back from the thing it changed. Recorded there after three separate instances; this
+  is the fourth place it applies.
+
+### And the descriptor was lying by then
+
+Checking this work turned up that `capabilities.py` still had `persisted_permission_rules` as **ABSENT**
+on Antigravity, with a note ending *"AIC-DC would have to own the rule store to change this"* — which
+is what AG-15 had done an hour earlier. `capabilities.py` is meant to be the to-do list as data, so a
+stale row defeats its purpose.
+
+Two tests encoded the old premise and both were restated rather than deleted. The interesting one
+asserted the surface *"must never drift into the unbuilt list and become somebody's sprint task"*,
+reasoning from `updated_permissions` having no counterpart at any layer. True — and it only meant the
+**engine** could not persist a rule, not that the **product** could not. The row's own note had said
+what would change it. **A surface can be absent from an SDK and present in the app**, and that is now
+the recorded lesson rather than an assumption sitting in a test.
+
+---
+
+## AG-R-3 becomes a sentence instead of a silence (2026-09-05)
+
+The register's mitigation for the silent write-diversion is a **startup health check** asserting *"the
+repo root is a workspace the engine will actually write to"*. It has not been built, and working on it
+turned up that it cannot be built as specified.
+
+**The specified check cannot be honest.** A check phrased against `trustedWorkspaces` passes on a
+machine where writes divert anyway — measured three times that morning, from inside a trusted root. So
+the check has to assert an *outcome*, and the only thing that produces an outcome is a real write,
+which costs a turn on the user's paid subscription **every time the app starts**. That is a poor trade
+for a check that mostly says yes.
+
+**So it moved to where it is free.** A completed write already names its target, so one `stat` answers
+the question. `agy/steps.py` inspects every completed call in the write seam, and a target that is
+missing *here* while a file of that name sits in `~/.gemini/antigravity-cli/scratch/` becomes a
+`systemEvent` naming both paths.
+
+Three decisions in it, each about not making things worse:
+
+- **Narrow on purpose.** It fires only on the *pair* — missing here, present there. "The file is
+  missing" alone has innocent explanations: the model naming a path it never created, a tool that
+  failed for an unrelated reason. A false alarm about a write that did land would be worse than the
+  silence it replaces; the pair has no innocent reading.
+- **It says the edit is not lost**, and names the file holding it. A user told only "the file is not
+  there" would redo work that has already been done.
+- **It sits beside the tool card, not inside it.** `agy` reported success and the card says so.
+  Rewriting the card to say "failed" would be this pump asserting something the engine did not — and
+  the two disagreeing is exactly the information the user needs.
+
+**This does not close the risk.** A diverted write still happens and nothing here prevents it. What
+changes is that it stops being undiagnosable, which was the whole of the severity: the failure was
+never that a file went to the wrong place, it was that the symptom — *"the agent says it edited my
+file and the diff is empty"* — had no path to a cause sitting in another product's settings directory.
+
+---
+
+## The deny tripwire's third false pass, and its fix verified (2026-09-05)
+
+`probe_agy_gate.py` passed after the trusted-workspace fix, and **the pass was still not honest**:
+
+```
+tools the gate was asked about: ['run_command', 'find_by_name', 'list_dir']
+of those, refused:              ['run_command', 'list_dir']
+PASS: 2 write attempt(s) refused across 2 distinct route(s), file unchanged
+```
+
+`replace_file_content` never appears. The model never proposed the edit, so the refusal of a *write*
+was never tested — and the run went green anyway because `list_dir` was counted as a refused write
+attempt.
+
+**The cause is this phase's signature failure, for the third time.** The probe's `READ_CLASS` was a
+hand-written set containing `list_directory` — the **SDK's** name — where `agy` sends `list_dir`. So
+the probe's own gate refused a read; the model lost the ability to look around, gave up before
+proposing an edit, and the misclassified read padded the "writes refused" count.
+
+`READ_CLASS` is now **derived** from `permissions.TOOL_CLASSES`, the merged table that already holds
+both vocabularies. A second copy of a tool-name table is precisely the drift phase 8 has now been
+caught by three times: the dialog calling a file edit a shell command, the read-class hole here, and
+the `_RULE_TOOL_FOR_PATHS` trap AG-15 had to route around.
+
+**Re-run and verified live:**
+
+```
+tools the gate was asked about: ['run_command', 'find_by_name', 'view_file', 'view_file', 'grep_search']
+of those, refused:              ['run_command']
+PASS: 1 write attempt(s) refused across 1 distinct route(s), file unchanged
+```
+
+Three read tools now pass through where one was being wrongly refused. **What this run does not
+show** is worth stating: the model reached for the shell rather than the edit tool, so this is
+[AG-R-11](risks.md#ag-r-11)'s route-around being blocked rather than `replace_file_content` being
+refused. Both are real gate tests and the probe accepts either, but which one a given run exercises is
+the model's choice, not the probe's — so a single green run does not prove the edit path specifically.
+The 2026-09-03 run that refused three routes including `replace_file_content` remains the stronger
+record.
+
+---
+
+## AG-15 verified in a browser, and the one thing only a browser found (2026-09-05)
+
+**Phase 9's exit criterion is met end to end**, on the paid subscription, in a fresh instance on a
+throwaway repo:
+
+```
+14:13:46  run_command  echo RULE_TEST_ONE   → dialog, offering "Always allow"
+14:13:56  …            resolved as allow_always by localhost
+14:13:56  Antigravity standing rule stored: Always allow run_command(echo RULE_TEST_ONE)
+14:14:20  Antigravity run_command allowed by a standing rule   ← second identical turn
+          dialogs asked, across both turns: 1
+```
+
+The dialog count stayed at **one** across two identical commands. The second call never reached
+`broker.can_use_tool`, which is what AG-15 asked to be asserted rather than "the dialog was dismissed".
+The rule is on disk in `~/.config/aic-dc/antigravity-rules.json`, keyed by repository, with the
+matching data that makes it exact.
+
+### The tooltip was lying, and no test could have caught it
+
+The always-allow control rendered with this title:
+
+> *Writes a rule to a settings file you can read and revoke. **It applies to the claude CLI in this
+> repository too**, not just AIC-DC.*
+
+For an Antigravity rule that is false in both halves. It is not a settings file the CLI reads; it is a
+file AIC⚡DC keeps, and `claude` has never heard of it. **A misleading sentence on a permission control
+is worse than a missing one, because the user acts on it** — someone reading that would believe a
+grant they made here also loosened their Claude gate.
+
+The cause is a shape that was already documented as wrong. `constants.js` says, of these tooltips:
+*"Two tooltips, because **the destination decides which is true**."* The call site then chose with
+`rule.session ? A : B` — a boolean, not a destination — so `aicDcRules`, a third destination added the
+same day, fell through to the Claude sentence and asserted it.
+
+Fixed by making the choice a function of the destination, where the destinations are described:
+`alwaysAllowTooltip(rule)`. Four tests pin all three cases, including the control — a fix that told
+*everyone* "not the claude CLI" would be wrong in the other direction, on the engine that ships.
+
+**Only a browser finds this.** Every unit test passed on both sides, before and after; the string was
+correct for the engine it was written for and nobody had asked what the other engine renders. That is
+the third defect in two days found by running the app and not by 4,400 tests — after `translator.stats`
+and `session.read_only`, and the same shape as both: **shared code meeting a second transport whose
+case nobody re-checked.**
+
+### The diversion: concurrency excluded, emptiness excluded, and a pattern that is not a cause
+
+`scripts/probe_agy_concurrent_write.py` was written to test the one candidate left in AG-R-3 — that a
+second concurrent `agy` process is what causes the write diversion. It ran the same create twice in
+one workspace, once alone and once beside a working second session.
+
+**Both diverted, including the solo control.** So concurrency is excluded, and the probe reported
+itself **INCONCLUSIVE** rather than claiming a result: a comparison whose control also fails proves
+nothing about the variable. That is worth more than a green run would have been — the alternative was
+to report "concurrency confirmed" from two failures that had a common cause neither of them was
+testing.
+
+The solo failure pointed somewhere else: it happened in an **empty** git repository, while the run
+where a create *did* land had a file in the workspace. Seeded and re-run the same afternoon —
+**diverted again**. Emptiness excluded too.
+
+Three explanations offered for this behaviour so far, all confidently reasoned and all wrong: the
+trust list, git-repository-ness, and create-versus-edit. This entry adds a fourth thing that is
+**deliberately not called a cause**. Holding the workspace root constant, every run on record lines up
+on the shape of the *turn*:
+
+| Turn | Outcome |
+|---|---|
+| edit an existing file **and** create a new one | both landed |
+| edit an existing file | landed |
+| create only — empty workspace, seeded workspace, fresh directory | diverted, five times |
+
+**A create lands when the turn also touches an existing file, and diverts when creating is all the
+turn does.** Five runs, one correlation, no mechanism.
+
+The reason this is fit to stop on rather than chase further: **the mitigation does not depend on it.**
+The detection added earlier fires on the *outcome* — target missing here, file of that name in the
+scratch directory — so it catches a diverted write whatever produced it. Every hour spent on the cause
+buys a better explanation of a failure that is already caught and named.
+
+---
+
+## Phase 5 groundwork — the mirror's contract, measured (2026-09-05)
+
+Phase 5 says the repo-local mirror is *"rebuilt as a step observer rather than as a store
+implementation, since there is no `SessionStore` protocol to implement"*. That says what to build and
+leaves open the thing that decides whether it is cheap or expensive: **what shape must an entry be for
+the existing history stack to render it?**
+
+Read out of the code rather than guessed, and then measured against the real parser.
+
+### The stack is already engine-agnostic, and that is most of the phase
+
+Three facts, each of which removes work:
+
+- **`RepoSessionStore(root)` takes its root as a constructor argument.** AG-1's *"its own store root, so
+  a record written by one engine cannot be handed to the other"* is therefore a parameter, not a
+  second implementation.
+- **The store is format-agnostic.** `_append_sync` writes dicts as JSONL and dedups on `uuid`;
+  `_parse_lines` reads them back as dicts. It has no opinion about what is in them.
+- **`history.load_session(store, session_id, directory, …)` takes the store as an argument**, as do the
+  other helpers. Nothing in the history stack is bound to the Claude adapter — the same arrangement
+  that already lets this engine import `claude_code.review` and `claude_code.commit`.
+
+So the mirror is: write entries the parser accepts, into a second store root, and delegate all seven
+RPC methods to helpers that already exist.
+
+### What the parser requires, and the two hours it took to find out
+
+`load_session` hands the entries to the SDK's own `get_session_messages_from_store`, so the entry
+shape is the CLI's, not ours. Four guesses at it all parsed **zero** messages, including — puzzlingly
+— a **verbatim entry copied out of the real mirror**.
+
+The bisect that settled it: a real entry parses down to `{uuid, type, message}` and **nothing else is
+required**. `parentUuid`, `sessionId`, `cwd`, `isSidechain`, `userType`, `version`, `gitBranch`,
+`permissionMode`, `promptId`, `promptSource`, `entrypoint` and `timestamp` are all droppable.
+
+The reason every synthetic attempt failed was in the argument, not the entry:
+
+```
+session id "sess-abc"                        → 0 messages parsed
+session id "a3f1…-uuid"                      → 2 messages parsed
+```
+
+**The session id must be a UUID.** Nothing says so, nothing raises, and an empty list is the same
+answer the parser gives for a session that does not exist — so a mirror keyed on `agy-1` or
+`antigravity-session-3` would have written perfectly good transcripts that the history browser
+reported as missing, with no error anywhere.
+
+**This is free for us, and worth stating because it constrains a decision nobody would have thought
+to make.** Both transports already produce UUIDs: `agy`'s `init` frame carries
+`conversation_id: cd4edb7f-6de3-468f-9815-e76b310a920a`, and the SDK's `Conversation.conversation_id`
+is the same shape. **The mirror must key on the engine's own conversation id and must never invent a
+readable one** — which is also what makes `resume_session` possible, since that id is exactly what
+`agy --conversation <id>` and `SessionContinuationMode.RESUME` take.
+
+Recorded here rather than in a comment because it is a measured property of somebody else's parser on
+an SDK that moves, and because the failure it causes is silent in both directions.
+
+### What phase 5 does next, in order
+
+Written down because the contract above was the expensive part and it should not have to be
+rediscovered.
+
+1. **`src/aic_dc/antigravity/mirror.py`** — an observer that turns the events **both** translators
+   already emit (`streamChunk`, `toolUse`, `toolResult`, `systemEvent`) into `{uuid, type, message}`
+   entries and appends them to a `RepoSessionStore` rooted at its own directory. One observer serves
+   both transports *because* phase 8 made `AgyTranslator` and `StepTranslator` emit the same
+   vocabulary — that is the payoff for a decision made for a different reason.
+2. **Key on the engine's conversation id**, which is already a UUID on both transports. See the
+   contract above: a readable key silently renders as "no such session".
+3. **Its own store root** (AG-1), so a record written by one engine cannot be handed to the other.
+   `RepoSessionStore` takes it as an argument.
+4. **The seven RPCs** — `history_list`, `history_load`, `history_search`, `history_delete`,
+   `history_image`, `get_session_storage`, `resume_session` — delegating to `claude_code.history`
+   with that store. They are mapped in `RPC_SURFACES` already, so the router refuses them today and
+   will stop refusing when `capabilities.py` flips.
+5. **Flip `session_mirror` and `transcript_history`** from `UNBUILT` to `SUPPORTED`. Two of the five
+   surfaces the chat panel currently lists as not built for this engine.
+6. **Resume**, which is the exit criterion's other half: `agy --conversation <id>` and the SDK's
+   `SessionContinuationMode.RESUME` + `save_dir`. Both take the same id the mirror is keyed on, which
+   is why step 2 is not merely tidy.
+
+**Do not** start by writing a session-store implementation. There is no protocol to implement and the
+existing store already does the work; the phase is an observer plus seven delegations.
+
+---
+
+## Phase 5 — history and sessions, and the two things a browser found (2026-09-05)
+
+**The exit criterion is met.** *"Restarting the server resumes the previous Antigravity conversation
+with context intact, and the history browser renders it"* — proven twice: once headlessly by
+`scripts/probe_agy_resume.py` against the paid subscription, and once by a human driving two fresh
+servers over one throwaway repository.
+
+The groundwork entry above was right about the shape, and the phase cost about what it predicted:
+**one new module, seven delegations, and no `SessionStore` implementation.**
+
+### What was built
+
+`src/aic_dc/antigravity/mirror.py` — a `SessionMirror` that observes the events **both** translators
+already emit and appends CLI-shaped entries to a `RepoSessionStore` rooted at this transport's own
+directory. It is wired at `AntigravityService._dispatch`, which is the one point every event of both
+transports passes through: `AgyService` inherits that method and overrides only what *produces* the
+events. Observing in the two turn runners instead would have been two call sites for one job, which
+is how one of them comes to be forgotten.
+
+The five history RPCs, `get_session_storage` and `resume_session` are delegations to
+`claude_code.history` with this engine's store. Resume is the engine's own on both transports —
+`agy --conversation <id>` and `conversation_id` + `SessionContinuationMode.RESUME` — so nothing here
+replays a transcript into a prompt. `save_dir` is deliberately left unset: it defaults to the store
+the harness wrote the session into, and pointing it somewhere of ours would make every conversation
+recorded before the change unresumable.
+
+**Its own store root, per [AG-1](decisions.md#ag-1) — and *three* roots rather than two.**
+`.aic-dc/antigravity-sessions/` and `.aic-dc/agy-sessions/` are separate from each other as well as
+from Claude's. The two transports reach the same *product* and not the same conversation store: an
+`agy` conversation id means nothing to `localharness` and the other way about, so one root would have
+offered the user a list half of which the running transport would fail to resume.
+
+### The fact the groundwork entry got half right
+
+It recorded that an entry parses down to `{uuid, type, message}` and that everything else is
+droppable. That is true **of one entry**, and it is why the bisect that established it did not see
+the other half:
+
+> `_build_conversation_chain` finds the terminal entry and walks *back* through `parentUuid`. With no
+> links every entry is its own terminal, the walk picks the last one, and the conversation is one
+> message long.
+
+So `parentUuid` is not droppable once there are two entries, and a mirror written to the letter of
+the earlier note would have rendered every conversation as its most recent message — silently, and
+looking like a rendering bug rather than a storage one. The chain is also **re-seeded from disk** on
+the first append after a resume: an unparented entry appended to an existing transcript starts a
+second chain, and the reader walks back from one terminal only, so the older half would stop
+rendering the moment a resumed session took a turn.
+
+`tests/test_antigravity_mirror.py` asserts this by outcome rather than by field — events in one end,
+`history.load_session` out the other — because that is the only assertion the four failed guesses
+would not also have passed.
+
+### The tool-name table, merged rather than copied
+
+`history._Turn._attach_result` attributes a browsed turn's files with
+`claude_code.messages.files_written_by`, and the live pump had its own
+`antigravity.steps.TOOL_WRITTEN_PATH_FIELDS`. Two tables for one fact, and the failure was exactly
+the one this plan has now paid for four times: a turn would list the files it touched while it
+streamed and list none after a refresh. Nothing errors; the number is just smaller.
+
+`_FILE_WRITING_TOOLS` now holds all three vocabularies — Claude's, the SDK's and `agy`'s — and
+`_files_written` delegates to it. The names do not collide, so one table can hold them all and one
+table cannot disagree with itself. That is `agy/tools.py`'s own argument, applied to the fourth
+table it applies to. `generate_image` is why the values became tuples: it exists in both Antigravity
+vocabularies under two different argument names.
+
+### What the live probe proved that the mirror could not
+
+`scripts/probe_agy_resume.py` runs two processes over one work directory. The first tells the model a
+passphrase it could not otherwise know; the second — a **different process**, with the session
+object, the conversation id and the mirror's chain all gone — asks for it back.
+
+```
+[probe] conversation 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] phase one done; mirrored under 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] --- restarting: phase two runs in a new process ---
+[probe] state snapshot: 2 messages ['user', 'assistant']
+[probe] reconnected to 1c951b0f-f98f-45a2-abac-2768085d1c83
+[probe] the model answered: 'KESTREL-9-ORRERY'
+[probe] history_load after the resume: ['user', 'assistant', 'user', 'assistant']
+```
+
+**The passphrase is the point, and it is not decoration.** A mirror looks perfect for a resume that
+silently opened a blank conversation — the transcript is ours and it is on disk either way. Only the
+engine can answer whether its context came back, and only a token it could not guess makes the answer
+mean anything.
+
+`AgySession.start` now **refuses** rather than warning when a resume comes back with a different
+conversation id. A resume that quietly became a new conversation is the one failure worth not
+starting over: the user asked to continue, the context is gone, and nothing downstream would say so —
+the turn would simply behave as though the agent had forgotten everything.
+
+### The two things only a browser found
+
+Both were invisible to 4,412 green Python tests and 4,431 green webapp tests, and both are the same
+shape: **a surface newly enabled exposes an unguarded call to a *different* surface.** Until phase 5
+these travelled together — an engine with no history browser was never asked for a session's
+subagents, and was never shown a Fork button — so the pairing had never had to be a decision.
+
+**1. The router's refusal rendered as red text at the top of every preview.** Selecting a session
+called `list_subagent_transcripts`, which serves `subagent_tabs`, which `agy` cannot feed; the router
+refused it correctly and the browser drew the refusal. The refusal was right and asking at all was
+the bug. `_loadSubagents` now checks `supports(SURFACE.SUBAGENT_TABS)` first.
+
+**2. Fork was offered on an engine that refuses it.** `resume_session(fork=True)` returns
+`unsupported`, because Claude forks by copying a transcript the CLI rebuilds its context from while
+Antigravity's conversation store belongs to the harness and is opaque. Copying our mirror would fork
+the *record* and leave both branches pointed at one engine conversation — two transcripts of one
+session, diverging the moment either took a turn. A refusal the user can reach by clicking is a
+stub with extra steps, so this became a descriptor row (`session_fork`) and the button is hidden on
+it, per [AG-9](decisions.md#ag-9). No engine-name branch: the webapp reads the descriptor.
+
+Both are pinned by tests in `webapp/src/history-browser.test.js` that set a descriptor with one
+surface on and the other off — the configuration that did not exist before this phase.
+
+### A third finding, and the design change it forced
+
+The first cut wrote a closing assistant entry per turn to carry the engine's token counters. It
+rendered nothing, and **the history browser counted it**: a two-message conversation showed as
+`3 msgs`, seen in the browser and not by any test. It bought nothing either — Antigravity reports
+`prompt_token_count` / `candidates_token_count`, which share no field name with the four counters
+`_Turn.freeze` sums, and `turn-cost.js` skips this engine's flat usage shape on the live path too.
+
+So the counters are not mirrored at all, and the reason is **placement rather than squeamishness**:
+this engine has no per-message usage — the SDK reports a turn diff at close and `agy` a running total
+on its result frame — so there is no entry either of them belongs on. Every assistant entry of a turn
+now carries an *empty* `usage` under one shared `message.id`, which is the CLI's own arrangement and
+is what still makes a browsed turn read as **one engine turn** rather than one per block. The footer
+of the resumed conversation reads `2.0s · 1 engine turn` with no token chip, which is what the live
+turn shows.
+
+### A fourth: a switch said "blank" and meant "continue"
+
+`switch_engine`'s docstring has said since AG-1 landed that a switch *"ends the outgoing session and
+starts a new one… the incoming one connects lazily on the next turn, **with no resume**, which is what
+makes it a new session."* Nothing enforced it. Each adapter's auto-resume flag survived the switch, so
+the incoming engine's next connect quietly reattached to whatever conversation it was last in.
+
+**This was inert while only one engine could resume**, and phase 5 is what makes it a contradiction:
+the switch broadcasts `sessionChanged` with an empty message list, so a browser is told the panel is
+blank while the server intends to reattach — and the next state load repopulates the chat with a
+conversation the user was told had been left behind. Watched happening in the browser during this
+phase's verification.
+
+Both adapters now implement `_start_blank_session`, and the router calls it on the **incoming**
+engine only — the outgoing one is being stopped, not restarted, and clearing its target would decide
+on its behalf that it may never be switched back to. Nothing is deleted either way: the conversation
+left behind stays listed and loadable, which is the whole reason a switch can afford to be a
+boundary.
+
+Worth naming that the Claude half of this was a **pre-existing** gap, not one phase 5 introduced. It
+is fixed here because this is where it became observable, and because a rule that holds on one engine
+and not the other is not a rule.
+
+### What phase 5 deliberately did not build
+
+- **No events log for this engine.** `EventsLog`'s `event` domain is closed on purpose and none of
+  its members is a thing this engine reports, so a browsed Antigravity conversation carries the
+  model's work and not the operational lines around it. `systemEvent` reaches the transcript only for
+  `compaction`, which is the one subtype with a CLI counterpart (`compact_boundary`) that
+  `history._compaction_divider` already renders.
+- **No derived history index.** It caches a finished row keyed by transcript mtime; a cold index is a
+  slower listing, never a wrong one, and a second one for this engine before anybody has felt the
+  cost would be a file to keep in agreement for no measured gain.
+- **No fork**, as above.
+
+### One deviation from the testing recipe, recorded because it was deliberate
+
+The house rule is to test against a new instance started with `--preview`. Three of the user's own
+`--preview` servers were running at the time, and `--preview` does `rm -rf dist` on startup — which
+would have pulled the static bundle out from under two live windows. `--dev` was used instead: it
+serves through Vite and touches no `dist`, and the load-bearing half of the rule — *a Python process
+started fresh, on a throwaway repository under a trusted root* — is unaffected either way.
+
+---
+
+## Phase 7 — the SDK becomes an extra, and what that exposed (2026-09-05)
+
+**The exit criterion is met.** *"A base install is a one-engine install with no broken UI, and its
+size has not moved."* Measured against two clean Python 3.14 venvs:
+
+| Install | `site-packages` |
+|---|---|
+| `aic-dc` | **273.1 MiB** |
+| `aic-dc[antigravity]` | 408.3 MiB |
+
+The extra is **135.2 MiB**, of which the bundled `localharness` binary alone is 123.1 MiB
+(129,065,896 bytes in 0.1.16 — it was 119,721,512 in 0.1.15, so it grew ~9 MB in four days, which is
+its own small argument for this phase).
+
+**Those are the second numbers, and the first ones were wrong.** The base column originally read
+285.8 MiB, because that venv had already *run* a server and `__pycache__` had put ~9 MiB of bytecode
+into `site-packages` while the comparison venv had not been run. The absolute figure was wrong, the
+difference inherited the error, and nothing about the table looked suspect — it was caught only
+because 285.8 MiB is smaller than the bundled `claude` binary that has to be inside it. Two rules
+follow, and they are in AG-R-10 because this table is a per-release tripwire: **measure a fresh
+install before its first run**, and **sum apparent file sizes rather than `du` blocks**, since `uv`
+hardlinks from its cache and block counting then answers a question about the machine rather than
+about the install.
+
+### It is a *two*-engine base install, and that is what made the extra affordable
+
+The criterion says "one-engine install" and the answer came out better than the criterion. The `agy`
+transport ([AG-14](decisions.md#ag-14)) drives the Antigravity CLI over a pipe on the owner's own
+subscription; it imports nothing from `google.antigravity` and mounts on the binary being on PATH. So
+a base install still reaches this engine.
+
+That reframes the extra. **It is not "Antigravity is optional"; it is "the metered route to
+Antigravity is optional"** — which is a much easier trade to defend, and it is why the phase-8
+decision to add `agy` paid for itself a second time. What a base install genuinely loses is the
+API-key session and the **consultant**, because `second_opinion` and `generate_image` are the SDK's
+and the CLI has no one-shot consultation mode. That loss is stated rather than papered over: the
+startup log names it, and points at `aic-dc[antigravity]`.
+
+### The `pyproject.toml` edit was the easy half
+
+The interesting part is why this phase was not a one-line change, and it is the same property that
+made the phase *possible*:
+
+> Every `from google.antigravity import …` in the package is function-local by design, so these
+> modules stay importable where the SDK is not installed.
+
+That was written in phase 3 as a testability argument and it is what lets a base install exist at
+all. It also means **nothing fails without the wheel** — not an import, not a construction, not a
+mount. A base install imported cleanly, built `AntigravityService`, put it in the engine selector,
+and reported the consultant as available. The absence surfaced only on the first turn, as an
+`ImportError` from an engine the user had picked out of a menu.
+
+That is precisely the "broken UI" the criterion forbids, and no offline test could see it: the test
+environment has the wheel. So the phase's real work was making absence *visible at mount time*:
+
+- **`surface.sdk_installed()`** is the one authority on the question. `importlib.util.find_spec`
+  rather than an import, because it is asked at every startup including the runs that never touch
+  this engine, and importing pydantic and gRPC to answer a yes/no is a cost on a path meant to be
+  free. `surface._sdk()` — the probe's importer — now asks it first rather than deciding for itself,
+  so the diagnostic and the mount cannot disagree about whether this install has an SDK.
+- **The engine mounts on the wheel and the credential**, where it used to mount on the credential
+  alone. Same rule, one more condition, and "not offered" is the same honest answer a missing key
+  already got.
+- **The consultant likewise.** `Consultant.available` was credentials-only, so a base install *with*
+  a Gemini key registered both tools, spent context describing them on every turn, and answered the
+  first call with an `ImportError`. AG-9's "hidden rather than stubbed", applied to a tool
+  definition.
+
+**`find_spec` raises rather than returning `None`** when the `google` namespace package is absent
+entirely — which is exactly the state a base install is in, and unguarded it would have been an
+uncaught exception at startup: a worse failure than the one this phase is about. Found by running the
+base install rather than by reading the docs, and pinned by a test.
+
+### The diagnostic that sent the user to fix the wrong thing
+
+Running the base install found one more, and it is the kind of thing only running finds. With a valid
+Gemini key on disk and no wheel, startup logged:
+
+```
+Antigravity consultant not mounted: no Gemini API key or Vertex project. Set one to…
+```
+
+The mount was correct and the *reason* was wrong. `available` had become two conditions and the
+message still named one, so a user with a key was told to go and set a key. A diagnostic that sends
+somebody to fix the wrong thing is worse than no diagnostic. Both reasons are now reported
+separately, on both the engine and the consultant.
+
+### What the release binary was already doing, now by declaration
+
+The release workflow syncs `--extra build --extra docs-convert` and has no `--collect-all` for
+`google.antigravity`. Since the SDK's imports are function-local, PyInstaller's static analysis never
+saw them — so **the shipped binary has never carried a usable Antigravity SDK**, while every `uv sync`
+of it paid for the wheel. Phase 7 does not change that artefact; it makes it correct on purpose, and
+adds the assertion that keeps it so.
+
+### Tripwires, because AG-R-10's is a number a human has to notice
+
+The risk register asks for "base-install size, measured per release", and the failure it guards is
+"a `pyproject.toml` edit nobody reviews as a size change". A release note is a poor place for that to
+be caught, so two of the three now fail by themselves:
+
+1. `tests/test_antigravity_packaging.py` reads `pyproject.toml` and fails if `google-antigravity`
+   returns to `[project.dependencies]`, or if the extra loses its version floor.
+2. The release workflow fails the build if `localharness` appears in the PyInstaller archive.
+3. The measured size table, per release, for the part a test cannot see.
+
+The same file also pins the property the whole phase rests on — that no module imports the SDK at
+module scope — by walking the package's syntax trees. A single top-level import would turn a base
+install into an `ImportError` at startup, in whichever module happened to be imported first.
+
+### The floor, finally set
+
+`pyproject.toml` carried a note saying the version floor was deliberately unset because *"this one
+has not been read yet. The floor gets set in the same pass that writes the surface doc."* That pass
+happened in phase 0 and the note outlived it. `>=0.1.16` — the version the surface was re-probed
+against — and a floor rather than a pin, because the package is 0.1.x and alpha
+([AG-R-2](risks.md#ag-r-2)) and the drift gate is what handles movement above it.
+
+### Verified by running both
+
+Not by reasoning about dependency metadata:
+
+```
+base:   Antigravity engine not mounted: google-antigravity is not installed…
+        Antigravity consultant not mounted: google-antigravity is not installed…
+        agy transport mounted (Antigravity CLI on PATH)
+extra:  Antigravity engine mounted (credential from Gemini API key…)
+        Antigravity consultant mounted as aic-dc-antigravity…
+        agy transport mounted (Antigravity CLI on PATH)
+```
+
+No traceback, no error, and no engine offered that could not answer — the selector renders
+`list_engines().mountable`, which is the adapters actually constructed, so a base install offers
+`claude` and `agy` and nothing else. **With this, every phase in this directory is closed.**
+
+---
+
+## The gate that reported itself installed and allowed everything (2026-09-05)
+
+Found by a question rather than by a test: *"what does the agy subscription mode require to be
+installed?"* Answering it meant reading `hook_command` closely enough to notice that its output is
+not always runnable.
+
+### The bug
+
+The gate `agy` runs for every tool call is a command string in the user's own
+`~/.gemini/config/hooks.json`:
+
+```
+<sys.executable> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+On a pip install `sys.executable` is a Python and this is correct. **On a PyInstaller release binary
+it is the frozen binary**, which does not honour `-m`:
+
+```
+$ aic-dc -m aic_dc.agy.hook ~/.config/aic-dc
+aic-dc: error: unrecognized arguments: -m aic_dc.agy.hook ...
+exit=2
+```
+
+The `||` fallback then fires and prints `{"decision":"allow"}` — for every tool call, on a session
+this host owned and was supposed to be gating. Meanwhile `gate_status()` reported `current`, because
+it decides by string-comparing the installed command against the one it would write, and the string
+was exactly right.
+
+**An ungated agent that reports itself gated**, on the transport where the gate *is* the product
+([AG-5](decisions.md#ag-5)). `connect_engine` refuses to start without a `current` gate, and that
+check passed.
+
+### Why nothing caught it
+
+Every test runs where `sys.executable` is a Python, so the `-m` form is correct and the suite is
+green. The pip installs used to verify phase 7 the same afternoon were green for the same reason. The
+only shape that fails is the released binary, and nothing in `agy/install.py` had ever distinguished
+the two — the only `_MEIPASS` handling in the tree is in `config.py` and `main.py`.
+
+This is [AG-R-12](risks.md#ag-r-12)'s lesson for the third time, in its sharpest form yet: **a string
+that is correct is not a mechanism that works.** `status` was measuring the first and reporting the
+second.
+
+### The fix, at two layers
+
+**The specific one.** `hook_command` branches on `getattr(sys, "frozen", …)` and emits
+`<binary> --agy-hook <config_dir>` — a new `argparse.SUPPRESS`-ed flag on the CLI whose only caller is
+that string. It dispatches before logging and before the banner, because this process is `agy` asking
+about one tool call and anything else on stdout is a parse failure at the other end.
+
+**The general one, and the more valuable.** `install` now *probes* the command before writing it and
+**refuses** one that does not answer with a JSON decision:
+
+```
+old frozen-shaped command -> exit 2: aic-dc: error: unrecognized arguments: -m aic_dc.agy.hook /tmp/x
+new frozen-shaped command -> accepted
+```
+
+The frozen binary was one way to get a correct string naming an unrunnable command; a moved
+virtualenv and an uninstalled package are others, and this catches all of them. It runs the **left
+side only** — running the whole command would execute the fallback, print a perfectly good decision,
+and mask exactly the failure it exists to find. Failing closed here costs an error message at the
+moment the user asked for a gate, which is the cheapest place in the system to spend one.
+
+`install` answers a fifth state, `unrunnable`, and the Settings panel renders it with its reason
+rather than falling through to the raw word.
+
+### Two tests had to be rewritten, and that is the fix working
+
+`test_stale_when_it_points_at_another_interpreter` and `test_a_stale_gate_is_refused_too` both
+*constructed* their stale state by calling `install(python="/somewhere/else/python")` — which `install`
+now correctly refuses, because that interpreter does not exist. Both now write the entry to disk
+directly, which is also more honest about what they describe: a file left behind by an installation
+that has since moved, not something anybody installs on purpose.
+
+### What is verified and what is not
+
+Verified by running: the new entry point answers a real payload end to end through `cli.main` — the
+same function a frozen binary runs — and the probe rejects the old frozen-shaped command and accepts
+the new one. **Not verified on an actual PyInstaller artefact**, because building one is a
+multi-minute per-platform job; the argument-parser rejection was demonstrated against the console
+script, which runs the same parser. The release workflow builds the binary on every release and the
+gate is installed by a click rather than at startup, so the first real artefact will exercise it.
+
+---
+
+## AG-R-3, solved: the agent was never in the repository (2026-09-05)
+
+Six days, four disproven causes, and the answer was one missing flag in our own argv.
+
+### What the user saw
+
+A new git repository, a fresh `agy` session, and *"create a helloworld script"*. The chat said the
+file was created and linked it. The file was not in the repository.
+
+### What the transcript said
+
+**Readable because phase 5 shipped the mirror a few hours earlier** — this is its first real user
+session, and the first time this failure has been inspectable after the fact rather than reconstructed:
+
+```
+[user]        create a helloworld script
+[tool_use]    write_to_file {"TargetFile": ".../antigravity-cli/scratch/hello_world/hello.py"}
+[tool_result] err=True                      ← "not a valid artifact path"
+[tool_use]    run_command   cat << 'EOF' > .../scratch/hello_world/hello.py
+[tool_result] err=False
+```
+
+The model never aimed at the repository. `write_to_file` was refused, so it fell back to a shell
+heredoc — which is also why no permission dialog rendered a diff for it.
+
+Then the second turn, which is where the model diagnosed the bug on our behalf:
+
+```
+[user]        create it in this repo
+[tool_use]    run_command  pwd && git rev-parse --show-toplevel
+[tool_result] /home/flatmax/.gemini/antigravity-cli/scratch
+```
+
+It went on to find the `agy` pid, read `/proc/<pid>/cwd` → `/tmp/temp`, check git there, and write the
+file where it had been asked. The agent worked out where it was supposed to be by inspecting its own
+process.
+
+### The cause
+
+`AgySession` spawned `agy` with `cwd=repo_root` and **never told it the repository was its
+workspace**. `agy`'s own log even reported `workspaceDirs=[/tmp/temp]` while running its tools in the
+scratch directory — which is exactly the kind of near-miss that keeps a wrong theory alive.
+
+Its system prompt completes the picture: when the model needs somewhere to write, it is told it may
+use *"the default project directory at `~/.gemini/antigravity-cli/scratch`"* and should *"recommend
+the user set that subdirectory as the active workspace."* Given where it was standing, the model
+behaved correctly every time.
+
+### The measurement
+
+Everything held constant — same parent directory, same `git init`, same seed file, same process cwd —
+one flag different:
+
+| | tool `pwd` | `git rev-parse --show-toplevel` |
+|---|---|---|
+| `--add-dir <repo>` | `/tmp/temp/wstest` | `/tmp/temp/wstest` |
+| *(control)* | `~/.gemini/antigravity-cli/scratch` | `fatal: not a git repository` |
+
+The control was run second and deliberately, because the treatment alone would have been a
+correlation with the directory rather than with the flag.
+
+### The fix, and the same prompt afterwards
+
+`AgySession._argv()` passes `--add-dir <repo_root>` — one directory, never a list, because AG-10 is
+one repo root and one working tree and the diff viewer resolves against a single one.
+
+Driven live through the shipping adapter with the identical prompt that failed:
+
+```
+[probe] dialog: write_to_file -> allow
+[probe] dialog: run_command  -> allow
+=== what landed in the repo:  hello_world.py
+=== anything new in scratch?  (nothing)
+```
+
+The file lands in the repository, nothing goes to scratch, and the write arrives as `write_to_file`
+through the permission dialog instead of as a heredoc that no diff could be rendered from. That last
+part is a second defect this fixes without having been aimed at it: the gate was reviewing the
+model's *workaround* rather than its intent.
+
+### Why four hypotheses missed it
+
+`trustedWorkspaces`, git-ness, workspace emptiness, concurrency. Every one was a hypothesis about
+`agy`'s behaviour, and each was disproven by a probe that changed something about the *workspace*. The
+variable nobody controlled for was in our own argv, and it was invisible from inside the failing
+system: `agy` reported the right `workspaceDirs`, the process had the right `cwd`, and the file was
+genuinely written where the tool call said it would be.
+
+The register's last correlation — *"a create lands when the turn also touches an existing file, and
+diverts when creating is all the turn does"* — is now explained rather than replaced. A turn that
+edits an existing file is handed a path and writes there. A turn that only creates picks its own
+location, and its own location was the scratch directory.
+
+**The reusable lesson**: when four hypotheses about somebody else's product have all failed, the
+variable is probably in the argument list you control. And the thing that finally exposed it was a
+user asking an ordinary question, in a transcript that had only been readable for a few hours.
+
+---
+
+## The write that could not be a write, and the field that caused it (2026-09-05)
+
+Reported by a user immediately after `--add-dir` landed: the agent now had the right repository, targeted
+the right path, *asked for permission*, was allowed — and still did not use the write tool. It fell
+back to `cat`. Their three questions were the diagnosis: **why did it fail after I allowed it, why
+`cat`, and why is the dialog not the one Claude shows?**
+
+### The failure
+
+```
+declaring permissions: cortex tool write_to_file: convert tool call for permissions:
+model output error: invalid tool call error (invalid_args)
+/tmp/temp/hello.py is not a valid artifact path;
+artifacts must be in ~/.gemini/antigravity-cli/brain/<conversation-id>/
+```
+
+`agy` declares `write_to_file` as *"Use this tool to create new files"*, with `ArtifactMetadata`
+described as *"Required when creating an artifact file"* — optional, by its own schema, for anything
+else. The model supplied it anyway, for an ordinary source file:
+
+```json
+{"ArtifactMetadata":{…,"UserFacing":true},"CodeContent":"…","TargetFile":"/tmp/temp/hello.py"}
+```
+
+**The presence of that field is what makes `agy` classify the write as an artifact** and enforce the
+brain-directory path rule. One optional field, and the call is unrecoverable.
+
+### Three consequences, and the user found all three
+
+1. **"I allowed it and it still failed."** The permission they granted was not the one that failed.
+   The refusal happens inside `agy` while *declaring permissions* — **before any hook runs** — so the
+   gate never saw the call and could not have amended it. `HookResult.modified_args` is the SDK
+   transport's; this hook protocol is allow/deny only.
+2. **"It reverted to `cat`."** [AG-R-11](risks.md#ag-r-11) again, on a third mechanism: a refused write
+   re-attempted through the shell. Except this refusal came from `agy` itself rather than from a
+   permission decision, so nothing in the register predicted it.
+3. **"The dialog seemed different."** Because it was no longer a write. A `run_command` dialog renders
+   a *command*, not a diff; `files_written_by` cannot attribute the file (CC-18); and
+   [AG-15](decisions.md#ag-15)'s "always allow" is structurally useless against it, because rules match
+   exactly and a heredoc embeds the whole file — a rule granted for one could never match again.
+
+So the sharp statement is: **edits already behaved like Claude on this transport** — phase 8 watched
+`replace_file_content` render `+1 −1`, get allowed by a click and land — **and creates did not**,
+because `agy` rejected its own create tool.
+
+### Asked the engine, and it answered
+
+There is no `settings.json` toggle, so `agy` itself was asked to create a file with the field omitted
+and explain the rule. It did both:
+
+> *"The presence of the `ArtifactMetadata` parameter object in the tool arguments tells the tool
+> implementation that the target file is intended to be an artifact. When provided, the tool validates
+> that `TargetFile` resides strictly within the session artifact directory."*
+
+and its recommended host-side remedy was to *"clarify in system prompts that `ArtifactMetadata` must
+only be supplied when writing artifact documents"*. The probe file landed in the workspace.
+
+### The fix, and what it is not
+
+`agy_tools.WRITE_GUIDANCE`, prepended to every `agy` prompt: name the field, say that including it
+makes the write fail unrecoverably, and prefer the file tools over shell redirection.
+
+**It is a workaround on a model behaviour, and it is recorded as one.** It is not a config setting,
+because there is none; it is not a gate fix, because the failure precedes the gate. What makes it
+tolerable is that the guidance is *specific* — "prefer `write_to_file`" would have changed nothing,
+since the model was already choosing it. What it could not know is that one optional field made the
+call impossible.
+
+Wrapped in `<aic-dc-ui-context>`, the framing block `history.strip_framing` already removes, so the
+model reads it and the user does not. The framed text is what the mirror stores, deliberately: a
+transcript's job is to say what the model was actually sent.
+
+### Verified live, on the prompt that had failed twice
+
+```
+[probe] dialog: write_to_file class=write diff=True -> allow
+[probe] dialog: run_command   class=exec  diff=False -> allow   ← `python3 hello.py`, verifying it
+[tool_result] is_error=False
+=== repo: hello.py
+```
+
+`write_to_file` succeeded, gated as a **write** with a **real diff**, and the file landed in the
+repository. Rendered back through `history.load_session`, the user's first message reads
+`'please create a hello world script'` — the guidance stripped.
+
+The remaining `run_command` is the model running the script it just wrote, which is the behaviour we
+want reviewed rather than suppressed.
+
+### Worth reporting upstream
+
+`agy`'s own schema says the field is optional and its permission converter treats it as decisive.
+Every host driving `agy` headlessly will hit this, and none of them can see why: the error is only in
+the conversation database, not on the wire, and the model's fallback makes the turn *look* successful.
+
+---
+
+## The picker that never learned about a write (2026-09-05)
+
+Reported straight after the write path started working: the file landed, the diff dialog was right,
+and **the file tree went on showing the repository as it was before**.
+
+### How the tree learns anything
+
+One push and nothing else. `files-tab.js` reloads on a `files-modified` DOM event, which
+`app-shell/index.js` dispatches from the `filesModified` server push. On the Claude engine that push
+comes from a **`PostToolUse` hook** (`claude_code/hooks.py`): it extracts the written paths, queues a
+re-index, and broadcasts them session-wide.
+
+**Neither Antigravity transport has that hook, and neither had a substitute.** Every approved write on
+this engine has been invisible to the picker since the transport shipped. It was never noticed because
+the writes that had been demonstrated were probes asserting on `stat`, not humans watching a tree.
+
+### Two gaps, one behind the other
+
+`AgyTranslator`'s `toolResult` carried **no `files_modified` key at all** — so even a consumer that
+wanted to know could not. `StepTranslator` had computed it since phase 3, which is why this looked
+like one transport's bug and was really two:
+
+1. `agy`'s pump now derives the written files from the shared table
+   (`claude_code.messages.files_written_by`, which since phase 5 knows all three engines'
+   vocabularies) and puts them on the result, and accumulates them into `stats.files_modified` so the
+   turn footer stops reporting an empty list for every turn that wrote something.
+2. `AntigravityService._dispatch` — the seam both transports funnel through, and where the phase-5
+   mirror already observes — pushes `filesModified` when a result names files.
+
+Derived from the event rather than from a second walk of the filesystem: the result already names
+what it wrote, from the same table the turn footer and the browsed transcript read. One source, three
+readers.
+
+**Session-wide, never turn-scoped**, for the reason the Claude hook records: the tree is the same tree
+for every watching browser, including ones that did not send the turn. A turn-scoped push carries the
+request id first and would be dropped by exactly the clients most likely to be watching rather than
+driving.
+
+### Verified live
+
+```
+[probe] PUSH filesModified -> ['/tmp/temp/tree/notes.md']
+[probe] toolResult files_modified=['/tmp/temp/tree/notes.md']
+=== repo: notes.md
+```
+
+### The half deliberately not built
+
+The Claude hook does two things and this does one. It also queues a **symbol re-index**, which needs a
+`Reindexer` this engine has never had. Left out rather than half-done, and named here so it is a known
+gap: a stale symbol index degrades autocomplete, where a stale tree hides the agent's work from the
+person who approved it. The second is the one worth fixing first.
+
+---
+
+## A posture between "ask every time" and "ask nothing" (2026-09-05)
+
+Two changes from one question — *"is there a way to permit all changes and writes rather than having
+to accept each one?"* One was a defect; the other was a decision only the user could make.
+
+### The defect: a control that was reachable and refused
+
+The permission-mode dropdown is a hardcoded table of **Claude's six** postures. Antigravity accepted
+two. Picking one of the other four returned:
+
+```
+{'error': 'unsupported', 'message': "'acceptEdits' is not a posture this engine offers…"}
+```
+
+Four options that answered an error when chosen — the same shape phase 5 found in the history
+browser's Fork button, and found the same way: by a user reaching for something the UI offered.
+
+Fixed the way AG-9 says: the engine reports the postures it accepts in `get_current_state`, exactly
+as `get_model` reports its own menu, and the selector renders that. **Not** a table in the browser
+keyed on which engine is running, which is what AG-R-4 forbids. A mode the engine reports that this
+build has no label for still renders, because filtering it out would make a real posture unreachable
+on a newer engine — and the current mode is always included, since a `<select>` whose value is absent
+from its options silently displays the *first* one.
+
+`_onEngineChanged` now re-reads the state too. Without that the list would be right until the first
+switch and stale afterwards — the same defect, one action later.
+
+### The decision: AG-5, amended by its owner
+
+The reason there was nothing to select is [AG-5](decisions.md#ag-5): the dialog is *a requirement of
+this engine rather than a feature*, so no posture may skip it. That is a decision, not a bug, and
+changing it was the user's call. They took the narrow version:
+
+| | under `acceptEdits` |
+|---|---|
+| file write, target **inside** the repository | applies, no dialog |
+| file write, target outside the repository | still asks |
+| `run_command` | **still asks** |
+| `start_subagent` / `invoke_subagent` | **still asks** |
+| a write whose path cannot be read | still asks |
+
+**The line is where the evidence puts it.** AG-5 was never protecting "edits are dangerous" — it was
+protecting the *execution* path. [AG-R-11](risks.md#ag-r-11) measured the agent, refused an
+`edit_file`, reaching for `sed -i`, then inline `python3`, then `list_dir`: three routes to one
+write, all through the shell. Letting `run_command` through would hand that route an ungated agent.
+Letting an in-repo file write through does not — the diff viewer shows it and git keeps it.
+
+It is also not a line we invented. `agy`'s own `accept-edits` auto-approves `write_to_file` and
+`replace_file_content` and explicitly does not auto-approve `run_command` — measured by asking it the
+same afternoon — and Claude's `acceptEdits` draws the same boundary. Three products agreeing is a
+better argument than any one of them.
+
+`bypassPermissions` is still absent and that half of AG-5 has not moved.
+
+### Where it is enforced, and the ordering that matters
+
+`AntigravityPermissionGate._accept_edits_verdict`, consulted **after** a standing AG-15 rule and
+**before** `ALWAYS_ASK`. The ordering is the whole of it: `ALWAYS_ASK` holds every write tool, so a
+check placed after it could never fire for the calls this posture exists for — the same trap AG-15
+documents for its own rule lookup.
+
+Three conditions, each doing work: the posture is on (read live, because the user flips it from the
+action bar mid-session); the tool is classed `write` (**not** "is in `ALWAYS_ASK`", which also holds
+`run_command` and the subagent spawners); and the target resolves inside the repository, resolved
+first so `../` cannot walk out. A path that cannot be read falls through to the dialog — the one case
+where we do not know what is being written is the case to ask about.
+
+Ten tests pin the boundary rather than the implementation, including that `default` and `plan` are
+completely inert and that a shift-clicked denied read is still refused: this posture is about writes,
+and softening a denial would be a different change smuggled in with it.
+
+### Asked the engine first
+
+Everything above about `agy`'s own permission surface came from asking `agy`, not from guessing:
+`--mode accept-edits`, `settings.json` `permissions.allow` with `write_file(<path>)`, and the
+confirmation that `--dangerously-skip-permissions` still fires `PreToolUse` hooks and a hook `deny`
+still blocks.
+
+**None of it applies to what the user was seeing**, and that is worth recording because it is the
+obvious wrong turn. We run `agy` with `--dangerously-skip-permissions`, so its permission layer is
+out of the loop entirely — every dialog on this transport is ours. Configuring `--mode accept-edits`
+would have configured a layer that is not running. What the answer *did* confirm is the property
+AG-R-12 relies on: our hook keeps an absolute veto regardless of that flag.

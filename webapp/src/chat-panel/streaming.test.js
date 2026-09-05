@@ -1658,6 +1658,156 @@ describe('ChatPanel compaction toast', () => {
     return seen;
   }
 
+  it('puts an engine error in the transcript, not only in a toast', async () => {
+    // The phase-4 live run: a turn died on a free-tier 429, the engine said
+    // so in a step addressed to the user carrying the quota and the retry
+    // delay, and the chat rendered two tool cards and a stop. A toast alone
+    // would not fix it — it expires in about three seconds and the reader
+    // may be away, which is the same lesson `pre_compact` teaches below.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: {
+        subtype: 'engine_error',
+        data: {
+          message: 'Quota exceeded. Please retry in 29.957436016s.',
+          http_code: 429,
+          status: 'ERROR',
+        },
+      },
+    });
+    await settle(p);
+
+    const last = p.messages[p.messages.length - 1];
+    // `system_event`, not `role` — the flag is what renderMessage labels on,
+    // and a `{role:'system'}` row renders under an "Assistant" heading.
+    expect(last.system_event).toBe(true);
+    // The engine's own words survive, including the actionable half.
+    expect(last.content).toContain('retry in 29.957436016s');
+    expect(last.content).toContain('HTTP 429');
+    expect(toasts).toEqual([['❌ The engine reported an error', 'error']]);
+  });
+
+  it('does not repeat one error once per frame', async () => {
+    const p = mountPanel();
+    await settle(p);
+    const detail = {
+      requestId: 'r1',
+      data: { subtype: 'engine_error', data: { message: 'boom', http_code: 0 } },
+    };
+    for (let i = 0; i < 3; i += 1) pushEvent('system-event', detail);
+    await settle(p);
+    expect(p.messages.filter((m) => m.system_event)).toHaveLength(1);
+  });
+
+  it('reports one failing turn once, however many attempts it made', async () => {
+    // Measured against a live 429: one rate limit produced four cards and
+    // ~4,500 characters, because the engine retries and each attempt reports
+    // the same failure with a little more gRPC detail. Four walls of
+    // `map[@type:…QuotaFailure…]` is the opposite failure to the silence this
+    // handler fixed, and no better.
+    const p = mountPanel();
+    await settle(p);
+    const toasts = toastsOf(p);
+    const attempts = [
+      'Quota exceeded, limit: 20. Please retry in 29s.',
+      'Quota exceeded, limit: 20. Please retry in 21s. Status: RESOURCE_EXHAUSTED',
+      'Quota exceeded, limit: 20. Please retry in 17s. Status: RESOURCE_EXHAUSTED, '
+        + 'Details: map[@type:type.googleapis.com/google.rpc.QuotaFailure ...]',
+    ];
+    for (const message of attempts) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'engine_error', data: { message, http_code: 429 } },
+      });
+    }
+    await settle(p);
+
+    const cards = p.messages.filter((m) => m.system_event);
+    expect(cards).toHaveLength(1);
+    // The last telling wins, because it is the most complete.
+    expect(cards[0].content).toContain('QuotaFailure');
+    expect(cards[0].content).toContain('retry in 17s');
+    // And the reader is interrupted once, not once per attempt.
+    expect(toasts).toHaveLength(1);
+  });
+
+  it('keeps a later turn distinct from the one before it', async () => {
+    const p = mountPanel();
+    await settle(p);
+    for (const requestId of ['r1', 'r2']) {
+      pushEvent('system-event', {
+        requestId,
+        data: { subtype: 'engine_error', data: { message: `failed ${requestId}` } },
+      });
+    }
+    await settle(p);
+    expect(p.messages.filter((m) => m.system_event)).toHaveLength(2);
+  });
+
+  it('never collapses two harness notices into one', async () => {
+    // Two notices are two facts; only the retrying subtypes supersede.
+    const p = mountPanel();
+    await settle(p);
+    for (const message of ['Switching model.', 'Compacting context.']) {
+      pushEvent('system-event', {
+        requestId: 'r1',
+        data: { subtype: 'engine_notice', data: { message } },
+      });
+    }
+    await settle(p);
+    const cards = p.messages.filter((m) => m.system_event);
+    expect(cards.map((m) => m.content)).toEqual([
+      'Switching model.',
+      'Compacting context.',
+    ]);
+  });
+
+  it('says a timed-out turn may still have written files', async () => {
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'turn_timeout', data: { seconds: 600 } },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.content).toContain('after 600s');
+    // The half a reader acts on: the tree may have moved under them.
+    expect(last.content).toContain('already written');
+  });
+
+  it('renders a harness notice as the harness, not as the assistant', async () => {
+    // `steps.py` routes SYSTEM_MESSAGE here rather than into a text block so
+    // it is not read as the model's prose — which only works if it is
+    // rendered at all.
+    const p = mountPanel();
+    await settle(p);
+    pushEvent('system-event', {
+      requestId: 'r1',
+      data: { subtype: 'engine_notice', data: { message: 'Switching model.' } },
+    });
+    await settle(p);
+    const last = p.messages[p.messages.length - 1];
+    expect(last.system_event).toBe(true);
+    expect(last.content).toBe('Switching model.');
+  });
+
+  it('keeps our own forward-compat diagnostics out of the transcript', async () => {
+    // These are about our reader, not the user's turn, and they have a home
+    // in engine-errors.jsonl and the Debug section.
+    const p = mountPanel();
+    await settle(p);
+    const before = p.messages.length;
+    for (const subtype of ['unknown_step', 'unknown_message', 'step_unreadable']) {
+      pushEvent('system-event', { requestId: 'r1', data: { subtype, data: {} } });
+    }
+    await settle(p);
+    expect(p.messages).toHaveLength(before);
+  });
+
   it('leaves the compaction pause to the progress overlay', async () => {
     // This used to toast. A toast lives 3 seconds and the compaction it
     // announces runs for tens, so the stall went unexplained for most of its

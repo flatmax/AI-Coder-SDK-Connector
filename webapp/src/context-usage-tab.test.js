@@ -90,10 +90,16 @@ function publishWithStatus(usage, status, fetchedAt = '2026-08-15T10:30:00Z') {
 }
 
 async function settle(el) {
-  // The fetch chain is rpcExtract → proxy fn → envelope unwrap → state
-  // write → Lit re-render. Each hop is a microtask; loop enough times for
-  // the whole chain plus the render it triggers.
-  for (let i = 0; i < 6; i += 1) {
+  // The fetch chain is capability gate → rpcExtract → proxy fn → envelope
+  // unwrap → state write → Lit re-render. Each hop is a microtask; loop
+  // enough times for the whole chain plus the render it triggers.
+  //
+  // The gate is the newest hop and the reason this count went from 6 to 12:
+  // every fetch now awaits `loadCapabilities`, which in these tests is an
+  // RPC that rejects with "method not found" and is caught — cheap, but two
+  // or three microtasks all the same, and `_refreshBreakdown` pays it twice
+  // because `_fetchMcpStatus` runs beside it under `Promise.all`.
+  for (let i = 0; i < 12; i += 1) {
     await Promise.resolve();
     await el.updateComplete;
   }
@@ -368,6 +374,40 @@ describe('ContextUsageTab fetching', () => {
     expect(el._errorReason).toBe('no-engine');
     expect(el.shadowRoot.querySelector('.note').textContent).toContain(
       'unavailable until a session is connected',
+    );
+  });
+
+  it('does not paint a session that has not started yet as an error', async () => {
+    // Opening this tab before the first prompt is the ordinary way to
+    // reach it, and red says a fault. The Settings tab answers the same
+    // state in secondary grey; this one was the odd surface out.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'The Claude Code engine is not connected.',
+        reason: 'no-engine',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error')).toBeNull();
+    expect(el.shadowRoot.querySelector('.empty').textContent).toContain(
+      'engine is not connected',
+    );
+  });
+
+  it('keeps red for a request that actually failed', async () => {
+    // The other half of the same decision: 'failed' is a fault and must
+    // still read as one, or the distinction has just moved the problem.
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({
+        error: 'Could not read context usage: Control request timeout',
+        reason: 'failed',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el.shadowRoot.querySelector('.error').textContent).toContain(
+      'Control request timeout',
     );
   });
 
@@ -3384,6 +3424,41 @@ describe('ContextUsageTab session usage', () => {
     expect(note).toContain('42s since the engine connected');
     expect(note).toContain('per-turn or cumulative');
   });
+
+  it('does not head an empty per-model table with its columns', async () => {
+    // The state a live session sits in before the first priced result:
+    // seconds are known, cost and model usage are not. The section renders
+    // on the seconds, and it used to draw Model/Prompt/Completion over no
+    // rows — with the "no per-model figures yet" note suppressed, because
+    // that note was gated on there being a cost. Three headings promising
+    // data that never arrives read as a load that failed.
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', { session_usage: { duration_seconds: 42 } });
+    await settle(el);
+    const section = sectionFor(el, 'Session');
+    expect(section.querySelector('table')).toBeNull();
+    expect(section.textContent.replace(/\s+/g, ' ')).toContain(
+      'No per-model figures yet',
+    );
+  });
+
+  it('still heads the table once there are rows to head', async () => {
+    publishUsage(usageFixture());
+    const el = mountTab();
+    await settle(el);
+    pushEvent('state-loaded', {
+      session_usage: {
+        duration_seconds: 42,
+        model_usage: { 'claude-opus-5': { inputTokens: 10, outputTokens: 2 } },
+      },
+    });
+    await settle(el);
+    const section = sectionFor(el, 'Session');
+    expect(section.querySelector('table')).toBeTruthy();
+    expect(section.textContent).not.toContain('No per-model figures yet');
+  });
 });
 
 describe('ContextUsageTab rate limits', () => {
@@ -3947,5 +4022,97 @@ describe('ContextUsageTab capability hiding', () => {
     });
     await settle(el);
     expect(heading(el, 'Session')).toContain('$3.21 so far');
+  });
+});
+
+describe('ContextUsageTab does not call what the engine refuses', () => {
+  // The bug these pin, reported from a live `agy` session on 2026-09-05:
+  // every page load produced a wall of red `ERROR` in the server log and
+  // the browser console — `get_context_usage` twice, `get_mcp_status`,
+  // `get_account_usage` — because these fetches went out on an engine
+  // whose descriptor says it cannot feed them. The router refused each
+  // one, correctly and loudly, and the result reads as a broken build
+  // rather than as an engine with fewer surfaces.
+  //
+  // Two separate causes, and the tests below cover both:
+  //
+  //   1. `_refreshBreakdown` had **no capability guard at all**, while
+  //      `_fetchAccountUsage` and `_fetchMcpStatus` either side of it did.
+  //   2. The guards that existed were consulted without being awaited.
+  //      `supports()` answers "yes" until the descriptor lands — the right
+  //      default for a *render* path, where a panel that draws and then
+  //      hides costs nothing, and the wrong one for a *fetch*, because an
+  //      RPC already refused cannot be un-sent by a later re-render.
+  //
+  // So these assert on the handler **never being called**, which is the
+  // only thing that distinguishes a guarded fetch from a refused one: both
+  // leave the panel empty.
+
+  const NOTHING_SUPPORTED = {
+    context_window_usage: { supported: false, status: 'absent', note: '' },
+    mcp_server_inventory: { supported: false, status: 'unbuilt', note: '' },
+    account_rate_limits: { supported: false, status: 'absent', note: '' },
+  };
+
+  afterEach(() => resetCapabilities());
+
+  it('never asks for a context window the engine cannot report', async () => {
+    resetCapabilities();
+    setCapabilities(NOTHING_SUPPORTED);
+    const usage = vi.fn(() => ({ usage: usageFixture() }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': usage });
+    const el = mountTab();
+    await settle(el);
+    expect(usage).not.toHaveBeenCalled();
+  });
+
+  it('never asks for an MCP inventory the engine cannot report', async () => {
+    resetCapabilities();
+    setCapabilities(NOTHING_SUPPORTED);
+    const status = vi.fn(() => ({ mcpServers: [] }));
+    publishFakeRpc({
+      'ClaudeCodeService.get_context_usage': () => ({ usage: usageFixture() }),
+      'ClaudeCodeService.get_mcp_status': status,
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(status).not.toHaveBeenCalled();
+  });
+
+  it('still asks when the engine can feed the surface', async () => {
+    // The control. Without it, a guard that refused *everything* would
+    // pass the two tests above while breaking the shipped engine.
+    resetCapabilities();
+    const usage = vi.fn(() => ({ usage: usageFixture() }));
+    publishFakeRpc({ 'ClaudeCodeService.get_context_usage': usage });
+    const el = mountTab();
+    await settle(el);
+    expect(usage).toHaveBeenCalled();
+  });
+});
+
+describe('ContextUsageTab waits for the descriptor before fetching', () => {
+  // The half the tests above do NOT cover, and the subtler of the two
+  // causes. They call `setCapabilities` first, so the descriptor is already
+  // loaded and a merely-consulted guard is enough. This one leaves it
+  // unloaded and lets the component fetch it over RPC, which is what
+  // happens on a real page load — and it is where an unawaited
+  // `supports()` lets the call out, because the loading default is "yes".
+  afterEach(() => resetCapabilities());
+
+  it('does not fetch before the descriptor says whether it may', async () => {
+    resetCapabilities();
+    const usage = vi.fn(() => ({ usage: usageFixture() }));
+    publishFakeRpc({
+      'ClaudeCodeService.get_engine_capabilities': () => ({
+        context_window_usage: { supported: false, status: 'absent', note: '' },
+        mcp_server_inventory: { supported: false, status: 'absent', note: '' },
+        account_rate_limits: { supported: false, status: 'absent', note: '' },
+      }),
+      'ClaudeCodeService.get_context_usage': usage,
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(usage).not.toHaveBeenCalled();
   });
 });

@@ -20,7 +20,7 @@ Antigravity-as-master consulting Claude.
 
 **Why it matters:** the two engines have genuinely disjoint capabilities. Google offers image
 generation, which Anthropic does not; Claude Code offers a mature permission and transcript surface
-that Antigravity at 0.1.15 does not. The point of hosting both is to use each for what it is good at,
+that Antigravity at 0.1.x does not. The point of hosting both is to use each for what it is good at,
 not to average them.
 
 **Consequence:** every surface downstream of the engine — chat rendering, the Context tab, the HUD,
@@ -46,6 +46,10 @@ carries the current conversation across. The outgoing engine is stopped and the 
 blank. Nothing is deleted — each engine keeps its own mirror, and the conversation left behind stays
 loadable.
 
+The call that does it is `switch_engine`, one of the three the router owns rather than delegates
+([AG-3](#ag-3)) — because which engine is master is a fact about the router, not something an engine
+can answer about itself.
+
 **Switching models is a different thing entirely, and stays one.** `set_model` changes the model
 mid-session with the transcript intact, because within one engine the CLI rebuilds its own context.
 The model is not a history boundary; the engine is. Anything that ends up treating the two the same
@@ -60,6 +64,13 @@ by a check somebody has to remember to write.
 ---
 
 ## AG-2 — The Python SDK is the engine; `agy` is not
+
+> **Reversed in part on 2026-09-03 by [AG-14](#ag-14).** The SDK remains *an* engine and the one with
+> an enforcing gate. What is no longer true is the exclusion: `agy` ships alongside it as a second
+> transport, because it is the only route to the user's paid subscription and every objection below
+> has now been answered by measurement. Read this decision for the reasoning that held for four days
+> and for the two amendments that dismantled it; read AG-14 for what is being built.
+
 
 `google.antigravity` driving the bundled `localharness` binary is the Antigravity engine. The `agy`
 CLI is **not** an engine candidate, notwithstanding that its flag surface is a much closer analogue of
@@ -89,6 +100,67 @@ assumption: a `PreToolCallDecideHook` receives `TargetContent` + `ReplacementCon
 for `edit_file`, and `CodeContent` for `create_file`. The capability `agy` lacks is one the SDK
 demonstrably has. See [`sdk-surface.md` § The permission gate](sdk-surface.md#the-permission-gate--measured-and-it-passes).
 
+### Amended 2026-09-03 — both original reasons are obsolete, and the decision is now a cost question
+
+**Reopened deliberately**, because the paid Antigravity access is a Google AI Pro subscription
+reachable only through `agy`'s OAuth, while the SDK path is a metered Gemini API key that refuses at
+**20 requests per model per day** (§ *The free tier refuses 20 requests a day* in
+[`delivery.md`](delivery.md)). That makes "can `agy` be the engine?" worth re-measuring rather than
+settled, and the answer moved.
+
+**Both disqualifying measurements above were about channels that are not the hook.** `agy` 1.1.25
+supports lifecycle hooks; reason 1 measured the `--permission-mode` postures and reason 2 measured
+the `stream-json` output. Measured on 2026-09-03 by installing a `PreToolUse` hook and capturing its
+stdin:
+
+- **Reason 1 is obsolete.** `PreToolUse` returns `allow` / `deny` / `ask` / `force_ask`, a `reason`
+  *"shown to the user/agent"*, and **`overwrite`** — merged into the tool call's arguments before it
+  runs, which is `modified_args` under another name. `ask` auto-denies headlessly and is useless to
+  us, but an adapter would never return it: the hook blocks, calls AIC⚡DC, and returns the human's
+  answer itself. That is AG-5's architecture.
+- **Reason 2 is obsolete.** A captured payload for `replace_file_content` carried `TargetFile`,
+  `TargetContent`, `ReplacementContent`, `StartLine` and `EndLine` **before the write**;
+  `write_to_file` carries `CodeContent`. The field names are **the SDK's own**, so
+  `permissions.ARG_ALIASES`, `normalise_args` and `build_diff_payload` would work on them essentially
+  unchanged.
+
+**A third reason was raised and then withdrawn, which is worth recording.** The gate was reported as
+failing open on a hook timeout. That was wrong: the probe's `matcher` named one tool, and the model
+routed around it. With `"matcher": "*"` a timed-out hook **blocks** — it is killed at the deadline,
+which is a non-zero exit, which `agy` treats as a refusal. Three of four failure modes fail closed;
+only "exit 0 with empty stdout" allows, and that one is ours not to write. The real exposure is a
+narrow matcher, which is [AG-R-11](risks.md#ag-r-11) on a third mechanism and is now
+[AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher).
+
+**So the technical objections are gone.** `agy` can be gated with a real dialog, a reason the model
+reads, and an amend path; a hook may block indefinitely (`timeout` goes to `context.WithTimeout` with
+no ceiling, verified at `86400`) provided `--print-timeout` is raised from its 5-minute default; and
+`permissions.allow` grants of the form `file(<workspace>/*)` remove the need for
+`--dangerously-skip-permissions` while the hook keeps an absolute veto over a settings allow.
+
+**AG-2 nevertheless stands, and now for reasons of cost and containment rather than capability:**
+
+1. **A third adapter is roughly phases 3–4 again** — hook bridge, IPC, stream reader, session
+   lifecycle, cancel — against an SDK engine that is built, tested and working. The SDK engine's only
+   problem is quota, and quota is a purchase.
+2. **The gate cannot yet be scoped to our own sessions.** In 1.1.25 `<workspace>/.agents/hooks.json`
+   is **not** loaded in headless mode (measured: `loaded 0 named hooks from 0 hooks.json file(s)`,
+   including with the workspace trusted); only `~/.gemini/config/hooks.json` loads, and it fires
+   unconditionally. So shipping this means installing a global hook into the user's own `agy`
+   configuration that intercepts *their* unrelated sessions and passes them through. That is a large
+   thing to do to someone's machine, and the natural isolation key is unreliable — `workspacePaths`
+   was **empty** in the payloads captured here. `conversationId` is the sound key, since an adapter
+   knows the conversation it started, and that should be verified before anything is built.
+3. **The terms question below is no longer moot.** AG-2 previously made it so by not driving `agy` at
+   all; an adapter would have to answer it.
+
+**What would change the decision:** the quota constraint becoming permanent (a paid Gemini key
+refused or impractical), or workspace-local hook loading arriving in a later `agy`, which removes
+objection 2 entirely. Both are external events rather than engineering, so this is a decision to
+revisit rather than to build around. The measured surface is kept in
+[`sdk-surface.md` § The `agy` hook surface](sdk-surface.md#the-agy-hook-surface--measured-2026-09-03)
+so a revisit starts from evidence rather than a re-probe.
+
 **A third reason, not needed for the decision but recorded because it bears on any future
 reconsideration:** Antigravity's terms state *"Using third party software, tools, or services to
 access the Service … is a breach of this Agreement."* Whether a host driving `agy` as a subprocess
@@ -98,9 +170,18 @@ know". AG-2 makes the question moot by not driving `agy` at all.
 The Python SDK's `Step` carries content, thinking, deltas, full tool calls and per-step usage, and
 `PostToolCallHook` receives a `ToolResult`. The data exists there.
 
-**Consequence:** a Gemini API key or Vertex project is **mandatory, not conditional** — `agy` was the
-path that would have inherited the owner's existing login, and it is closed. This is a procurement
-gate on everything past phase 1.
+**Consequence:** a Gemini API key or Vertex project is **mandatory, not conditional** *for the SDK
+engine* — `agy` was the path that would have inherited the owner's existing login, and it is closed
+**to the SDK**. This is a procurement gate on everything past phase 1.
+
+**Sharpened 2026-09-03, because "closed" was doing too much work.** What is closed is the SDK's route
+to the subscription, and that is a backend split rather than a credential-format problem (below).
+What is *not* closed is `agy` itself: headless `agy -p` spends the paid Google AI Pro quota on the
+same keyring OAuth as the interactive TUI, measured. So the honest statement is that **the paid
+account is reachable, and not by the engine we built** — which is why the amendment above weighs a
+second adapter against simply billing the key's Cloud project, rather than treating the subscription
+as unreachable. Anyone reading this paragraph to mean "the subscription cannot be used at all" would
+be drawing a stronger conclusion than the measurements support.
 
 **Why it is closed, measured 2026-08-31 — a backend split, not a missing auth format.** This was
 originally argued from absence ("the SDK contains no OAuth code"), which is true and is the weaker
@@ -150,6 +231,30 @@ descriptor lets the webapp **hide** a surface rather than draw an empty one.
 reads oddly and is the correct trade — it is an interface identifier, not a description of the
 implementation. A rename is a separate, mechanical change that can happen later or never.
 
+### What this became: a router (2026-09-01)
+
+Recorded here because this decision was written before the mechanism existed, and a reader of this
+file would otherwise not learn that one does. `src/aic_dc/engine_router.py` is what
+`main.py` registers under `RPC_NAME`, in place of either adapter.
+
+Its delegating methods are **generated** from the master adapter's rather than hand-written. That is
+forced rather than stylistic: jrpc-oo reads a service's method list off the *class*
+(`ExposeClass.py:37-41`), so a `__getattr__` forwarder would expose nothing at all, and a
+hand-maintained list drifts into methods that work in Python and 404 on the wire.
+
+**Three methods are the router's own and are never delegated** — `get_engine_capabilities`,
+`list_engines`, `switch_engine` — and `build_router` refuses to start if an adapter defines one of
+them. The reason is this decision's own logic: an engine cannot be the authority on what it cannot
+do. A delegated `get_engine_capabilities` would make the descriptor whatever that engine returned,
+which is the failure [AG-9](#ag-9) exists to prevent, arriving through the door AG-3 opened.
+
+The distinction between the two read-only ones matters for [AG-R-4](risks.md#ag-r-4):
+`get_engine_capabilities` is what a *component* asks to decide whether to render, and carries no
+engine identity; `list_engines` names the engine and is for a human-facing selector and diagnostics
+only. A render path reaching for the second is the branch AG-R-4 forbids.
+
+Mechanics, and what nearly shipped wrong, are in [`delivery.md`](delivery.md); this names the choices.
+
 ---
 
 ## AG-4 — The indexes reach Antigravity as callables, not as MCP
@@ -186,6 +291,45 @@ amend path permanently and for nothing.
 **What is genuinely lost:** rule persistence. Claude's `updated_permissions` has no counterpart at
 any layer. "Always allow" must be implemented AIC⚡DC-side, as its own store consulted by the hook
 before it opens a dialog. It cannot be delegated.
+
+### Amended 2026-09-05 (user): the dialog is mandatory for *execution*, not for every edit
+
+**What changed and who changed it.** The engine offered `default` and `plan` and nothing else, on the
+reasoning that "a posture that skips the dialog is the blanket bypass this decision says must never
+ship". A user asked how to stop approving every write, and decided the amendment. `acceptEdits` now
+exists on this engine.
+
+**The line, and it is not a compromise between two positions — it is where the evidence puts it.**
+
+| | under `acceptEdits` |
+|---|---|
+| file write, target **inside** the repository | applies, no dialog |
+| file write, target outside the repository | still asks |
+| `run_command` | **still asks** |
+| `start_subagent` / `invoke_subagent` | **still asks** |
+| a write whose path cannot be read | still asks |
+
+What this decision was protecting was never "edits are dangerous". It was the *execution* path:
+[AG-R-11](risks.md#ag-r-11) measured the agent, refused an `edit_file`, reaching for `sed -i`, then
+inline `python3`, then `list_dir` — three routes to one write, every one through the shell. A posture
+that let `run_command` through would hand that route an ungated agent, which is the failure the
+original wording exists to prevent. A posture that lets an in-repo file write through does not: the
+diff viewer shows it and git keeps it.
+
+**It is also not a novel line.** `agy`'s own `accept-edits` auto-approves `write_to_file` and
+`replace_file_content` and explicitly does *not* auto-approve `run_command` — measured by asking it
+on 2026-09-05 — and Claude's `acceptEdits` draws the same one. Three products agreeing on where the
+boundary sits is a stronger argument than any of them alone.
+
+**`bypassPermissions` is still absent, and that half of this decision has not moved.** It is the one
+posture that turns the gate off for execution too.
+
+Enforced in `AntigravityPermissionGate._accept_edits_verdict`, consulted after a standing AG-15 rule
+and before `ALWAYS_ASK` — because `ALWAYS_ASK` is where every write tool lives, so a check after it
+could never fire for the calls this posture exists for.
+
+---
+
 
 **The gate is closed and it passed (2026-08-30).** A `PreToolCallDecideHook` receives
 `TargetContent` + `ReplacementContent` + a line range for `edit_file`, and `CodeContent` for
@@ -299,7 +443,7 @@ consultation that could be resumed is a session, and a session belongs to the en
 `src/aic_dc/antigravity/surface.py` and its test gate land with the consultant, before any engine
 work.
 
-**Why it matters:** `google-antigravity` is **0.1.15 and alpha**. The equivalent probe for
+**Why it matters:** `google-antigravity` is **0.1.x and alpha**. The equivalent probe for
 `claude-agent-sdk` was written against a 0.2.137 wheel that was already stable, and it still found
 things the hand-written inventory had missed and closed them the same day
 ([`../plan/README.md`](../plan/README.md) open item 10). Building it after the engine means the engine
@@ -331,6 +475,44 @@ the first is a measurement and the second is an absence.
 [`sdk-surface.md` § What does not translate](sdk-surface.md#what-does-not-translate) needs an entry,
 and adding a per-engine feature means adding its key there in the same commit. A surface that is
 hidden on both engines is dead code and should be deleted rather than described.
+
+### What hiding cost, and the half that was missing (2026-09-03)
+
+Found by a user reporting the application as "unusable": no history browser, no always-allow button
+on the permission dialog, no slash commands, no cost. Every one of those was this decision working
+exactly as written. `app.json`'s `engines.master` named Antigravity, the descriptor hid the twelve
+surfaces that engine cannot feed, and the UI drew nothing where each had been. Nothing was broken.
+
+**What was wrong is that nothing said so.** The reasoning above is about a *single* surface, and it
+holds at that scale: one missing bar is quieter than one wrong bar. It does not survive twelve at
+once, because at twelve the absence stops reading as "this engine works differently" and starts
+reading as "this build is broken" — and the two are indistinguishable to the person looking at them.
+The only place in the entire application that named the running engine was a selector inside the
+Settings tab, which is findable only by someone who already suspects the engine. That is precisely
+what a user cannot suspect, because the symptom gives them nothing to suspect it from.
+
+**So hiding stays, and it stops being anonymous.** Two additions, both in the chat panel's action
+bar and banner strip, specified in
+[`../5-webapp/chat.md` § Engine Indicator and Notice](../5-webapp/chat.md#engine-indicator-and-notice):
+
+- an engine chip, present whenever more than one engine is mountable, naming the engine that is
+  answering — because with one engine there is no question to answer and a permanent label is
+  furniture, and with two there is a question the application previously answered nowhere;
+- a dismissible notice listing, by name, the surfaces this engine has not had built for it.
+
+**The rule that decides whether the notice speaks is `unbuilt`, never an engine name.** This is
+where the `absent`/`unbuilt` split stops being bookkeeping for us and earns its place in the
+product. An `absent` surface is a real difference between two engines and the UI is *complete*
+without it; saying "this engine cannot report USD cost" where the figure used to be replaces a
+measurement with an apology, which is the failure this decision is written against. An `unbuilt`
+surface is a feature this project has built and has not wired to the running engine, and a UI
+without it is *unfinished*. Only the second is worth interrupting somebody about. On Claude the
+count is zero, so the shipped engine never draws the notice — which is the test that it is keyed to
+the right fact rather than to a convenient one.
+
+That keeps [AG-R-4](risks.md#ag-r-4) intact. *Whether* to speak is decided from the descriptor,
+which carries no engine identity; the *name* is read from `list_engines`, rendered as text and
+handed back to `switch_engine` as a choice. A third engine changes neither file.
 
 ---
 
@@ -433,6 +615,26 @@ price were the only axis. It is not.
    than delivering it. `second_opinion` is unaffected and works end-to-end — verified 2026-08-31,
    a live `Consultant.second_opinion` turn returning text on this key.
 
+**A third cost, measured 2026-09-02: the newest models are queued to the point of unusability.** A
+five-token prompt sent straight at the REST API on this key took 30.9 s then timed out at 70 s on
+`gemini-3.7-flash`, while `gemini-3.5-flash` answered in 3.9 s. An agent turn is many model calls, so
+the consultant's pinned model had to be lowered to keep the feature working at all
+([`delivery.md`](delivery.md) § The hangs were the model). This is worth recording beside the other
+two because it is the least visible: it arrives as *slowness*, never as a 429, so no quota check, no
+retry policy and no error branch reports it. A paid key should raise the pin back.
+
+**Google confirmed this is intended, 2026-09-02.** The free tier is best-effort: *"rather than
+rejecting requests with a `429 RESOURCE_EXHAUSTED` error, Google queues Free Tier requests behind
+paid traffic"*, the wait lands entirely before the first token, and `models.list` reports
+authorization rather than availability — so a key can list a model it cannot practically use. Their
+own guidance is a 60–90 s client timeout *"just to survive the queue"*, with the observation that
+*"an agent waiting a full minute per turn is practically unusable for interactive work"*. Billing
+removes the queueing rather than merely raising the ceiling, and restores fail-fast errors.
+
+That makes the upgrade case stronger than the two costs below, and on the vendor's own account: the
+free tier does not only defer image generation and train on prompts, it makes an interactive agent
+unusable in a way nothing in the stack can report.
+
 **Consequence — two explicit upgrade triggers, either of which ends this decision.** Billing must be
 enabled on the AI Studio project *before* the consultant is pointed at anything the owner would not
 publish, and *before* `generate_image` is expected to work. Neither is a code change:
@@ -464,6 +666,110 @@ choice should be re-made on its merits rather than inherited from this decision.
 
 **What is *not* a reason to prefer any of these:** the owner's Google AI Pro subscription. It funds
 none of them — see [AG-2](#ag-2).
+
+---
+
+## AG-14 — `agy` is a *second Antigravity transport*, and it is the one that reaches the paid account **(user)**
+
+**Decided 2026-09-03, and it reverses the operative half of [AG-2](#ag-2).** The SDK engine stays; a
+subprocess-driven `agy` joins it as a second way of reaching Antigravity. AG-2's conclusion — "the
+Python SDK is the engine; `agy` is not" — held for four days on two measurements that turned out to be
+about the wrong channel, and then on cost and containment, and both of those have now been answered by
+measurement rather than argument.
+
+**Why it matters:** the SDK engine cannot reach the user's paid Google AI Pro subscription **at any
+price**, because `agy` and the SDK address different backends (AG-2 § *a backend split*). The Gemini
+API key it must use instead refuses at **20 requests per model per day**, which is not enough to
+verify the engine, let alone use it — an afternoon of phase-4 work spent it and then blocked the rest
+of the day. So the choice is not "which transport is nicer" but "reach the account the user pays for,
+or do not run".
+
+### What was measured, and when
+
+| Question | Answer | When |
+|---|---|---|
+| Does headless `agy` spend the subscription? | **Yes** — same keyring OAuth, same Code Assist backend as the TUI | 2026-09-03 |
+| Does a `PreToolUse` hook carry the write before it happens? | **Yes** — `TargetFile`, `TargetContent`, `ReplacementContent`, `StartLine`, `EndLine`; `CodeContent` for `write_to_file`. **The SDK's own field names** | 2026-09-03 |
+| Can the hook refuse, with a reason, and amend? | **Yes** — `deny` + `reason`, and `overwrite` merged into the args before the call runs | 2026-09-03 |
+| Does the gate fail closed? | **Yes** on timeout, non-zero exit, malformed JSON and missing command. **No** on exit 0 with empty stdout — ours not to write | 2026-09-03 |
+| Do hooks fire in **bidirectional** `stream-json` mode, not just `-p`? | **Yes** — 4 payloads on one turn, covering `run_command`, `view_file` and `replace_file_content` | 2026-09-03 |
+| Can a global hook be scoped to our own sessions? | **Yes** — the hook payload's `conversationId` is **exactly** the `init` event's `conversation_id`, and `init` precedes every tool call | 2026-09-03 |
+
+That last row is what unblocked the decision. Workspace-local `hooks.json` does not load headlessly in
+1.1.25, so the gate has to live in the user's global `~/.gemini/config/hooks.json` and will see their
+own unrelated `agy` sessions. `workspacePaths` is **empty** in every captured payload and cannot scope
+it. `conversationId` can: AIC⚡DC learns its conversation id from the `init` frame before any tool call
+arrives, so the hook can allow-and-return immediately for any conversation the host does not own.
+
+### It is a selectable engine, labelled by which account pays **(user, 2026-09-03)**
+
+`agy` gets its own identifier in `capabilities.ENGINES` and its own row in the picker, rather than
+being a hidden setting on the Antigravity engine. A session runs on one or the other and they differ
+in what they can feed, so the descriptor has to be able to tell them apart.
+
+**The picker names them by credential, not by mechanism** — `antigravity (API key)` and
+`antigravity (subscription)` — because the thing a user is choosing between is which account pays.
+"SDK" and "CLI" describe how *we* reach the product and answer a question nobody asked.
+
+**The labels are supplied by the server.** A label table in the webapp would be a branch on an engine
+name, which [AG-R-4](risks.md#ag-r-4) forbids, and the billing fact behind the label is not something
+the browser can know. `list_engines()` carries them; a name with no label falls back to itself, so an
+engine added later reads as itself rather than blank.
+
+**`Surface.agy` defaults to "same as `antigravity`"**, and that default is the honest one: both reach
+the same product, so a surface the SDK cannot feed is one Antigravity cannot feed however it is
+driven. Only where the *transport* changes the answer does a surface override it — nothing does today,
+and the transcript surfaces are where it will, once phase 5 reads `transcript_full.jsonl`, which the
+SDK path has no equivalent of.
+
+**Selecting it with the gate absent refuses and points at Settings (user).** Not an inline offer and
+certainly not an automatic install: consent to write into `~/.gemini/config/hooks.json` should happen
+where the explanation is, not bundled into what looks like a routine dropdown change. `connect_engine`
+already answers `gate_not_installed` with the file named.
+
+**It mounts on the binary being present**, not on a credential — `agy` carries its own OAuth, which is
+the whole reason this transport exists.
+
+### The shape
+
+One long-lived process per session, not one per turn:
+
+```
+agy --print="" --input-format stream-json --output-format stream-json \
+    --print-timeout <long> --dangerously-skip-permissions
+{"event":"user","message":{"role":"user","content":"…"}}
+```
+
+- **The gate is a `PreToolUse` hook** that blocks on AIC⚡DC's own dialog and returns the human's
+  answer. `matcher` is `"*"`, never a tool list — [AG-R-12](risks.md#ag-r-12--an-agy-hook-gate-is-only-as-wide-as-its-matcher).
+- **`--dangerously-skip-permissions` is required**, because `agy`'s own headless layer auto-denies
+  anything it would otherwise prompt for and would refuse the turn before our hook ever ran. The flag
+  is not a relaxation here; it removes a gate that cannot ask, in favour of one that can. Where
+  `permissions.allow` grants can cover the workspace they should be used instead, since a hook `deny`
+  still overrides a settings `allow` and two gates beat one.
+- **The transcript is the stream**, plus `transcript_full.jsonl` for what the stream omits — which is
+  where the diff for a *completed* edit lives, untruncated.
+
+### What this does not authorise
+
+- **Not a replacement for the SDK engine.** That engine is built, tested and working, and it is the
+  one with an *enforcing* gate — `HookResult(allow=False)` blocks the write inside the harness. `agy`'s
+  hook is cooperative, and the difference is real even though the failure modes measured favourably.
+  Both transports ship; the user chooses.
+- **Not a licence to weaken AG-5.** Every mitigation in AG-R-12 is a **requirement** of this phase,
+  not a recommendation: `matcher: "*"`, never exit 0 silently, `--print-timeout` well past any dialog,
+  and a tripwire that asserts on the *file* rather than on the hook having fired.
+- **Not a decision about the terms clause**, which is below and is now live rather than moot. AG-2
+  made it moot by not driving `agy` at all; this decision does drive it. **The user was shown the
+  clause and chose to proceed** — recorded here so it is a decision rather than an oversight.
+
+### What would reverse this
+
+Workspace-local hook loading arriving in a later `agy` would *improve* it, not reverse it. What would
+reverse it: a paid Gemini key making the SDK engine sufficient, in which case this becomes a
+second transport nobody needs; or Google closing the hook surface, which on an alpha CLI releasing
+weekly is a live possibility and is the reason the probe belongs in the suite rather than in a
+paragraph.
 
 ---
 
@@ -537,3 +843,88 @@ engine and so shaping the engine around a one-shot call. Phase 3 has since built
 the consultant now **consumes** it — `Conversation.receive_steps()` through the existing
 `StepTranslator` — rather than growing its own. The direction of dependency is the whole difference,
 and the tripwire changes to match.
+
+---
+
+## AG-15 — "Always allow" is buildable on Antigravity, and AIC⚡DC owns the rule **(user)**
+
+**The dialog on this engine offers `Allow once` and `Deny`, and nothing else.** Reported from a live
+`agy` turn on 2026-09-05 against a `run_command`: the Claude dialog for the same call offers a third
+control that stops the question being asked again, and this one does not. That is a real difference
+in what the two engines cost a user to operate, not a cosmetic one — a session where every repeat of
+the same call raises a modal trains exactly the click-through habit [R-12](../3-engine/risks.md#r-12)
+is about.
+
+### Why it is absent today, which was a correct decision on a wrong assumption
+
+`antigravity/permissions.py` sends `"suggested_rules": []` with the reasoning recorded inline:
+*"Antigravity has no `updated_permissions` at any layer, so there is no rule for the dialog to offer
+to persist — and an offer it cannot keep is worse than no offer."*
+
+Both halves are true. The gap is that they only rule out **borrowing the engine's** rule store, and
+[`sdk-surface.md`](sdk-surface.md#what-does-not-translate) already says what follows from that in the
+same breath — *"**None.** AIC⚡DC would own persistence"*. Nobody had gone back to that sentence.
+
+### The decision
+
+**AIC⚡DC owns the rule store for this engine, and the gate consults it before the broker.** Not the
+engine, not `agy`'s `settings.json`, and not a second dialog concept.
+
+Three facts make this cheap rather than speculative:
+
+1. **The derivation already exists and is not Claude-specific.**
+   `claude_code.permissions.derive_suggested_rules` takes `(repo_root, tool_name, tool_input,
+   tool_class, suggestions)` and, when `suggestions` is empty — which is *always* on this engine —
+   falls through to its own derivation: command prefixes for `exec`, path rules for `read`/`write`.
+   That fallback is the whole of what is needed here. It is a function, not a method on the Claude
+   session.
+2. **There is already a seam in front of the dialog.** `AntigravityPermissionGate.pre_verdict` is
+   consulted before `broker.can_use_tool` on both transports — it is what keeps reads out of the
+   modal, and `AgyGateServer.decide` already calls it. A persisted allow-rule is a second thing it
+   answers, in the same place, for both transports at once.
+3. **The decision plumbing exists end to end.** `allow_always` is already in `_DECISION_ACTIONS` and
+   `ALLOW_ACTIONS`, `_normalise` already returns a `rule`, and the browser already renders the control
+   when `suggested_rules` is non-empty. **No webapp change should be needed**, and if one turns out to
+   be, the rule shape has been got wrong — the same test AG-13 set itself.
+
+So the work is: derive the rules, put them on the payload, persist the chosen one, and consult it.
+
+### What is deliberately *not* adopted
+
+- **`agy`'s `permissions.allow` in its own `settings.json`.**
+  [`sdk-surface.md` § Defence in depth](sdk-surface.md#defence-in-depth-is-available) records that
+  these entries exist and that a hook `deny` still overrides them. They are the wrong vehicle twice
+  over: the adapter runs with `--dangerously-skip-permissions`, so that layer is not consulted at all,
+  and writing rules into a file belonging to Google's CLI would put our state in another product's
+  configuration — the thing [`agy/install.py`](../../src/aic_dc/agy/install.py) is careful about for
+  the hook and should not stop being careful about for rules.
+- **A rule store per transport.** One engine, two transports ([AG-3](#ag-3)) — a rule the user set on
+  the subscription that stops applying when they switch to the API key would be an engine-name
+  distinction leaking into behaviour, which is [AG-R-4](risks.md#ag-r-4).
+- **`allow_mode` on this engine, for now.** The mode-escalation control is a larger grant than the
+  call on screen and Antigravity's `permission_mode` handling is not yet exercised against it.
+  `suggested_mode` stays `None` until the rule path is proven.
+
+### The trap this will hit, named in advance because it has been hit twice
+
+`derive_suggested_rules` reaches `_RULE_TOOL_FOR_PATHS` and `_WRITE_PATH_KEYS`, and **both are keyed
+on Claude tool names.** `agy` sends `replace_file_content` and `write_to_file`, the SDK sends
+`edit_file` and `create_file`. Unmapped, the path branch produces **no rule at all**, so the control
+would simply not appear for file edits — the quiet, safe-direction failure this phase has now met
+twice ([§ The tool *names* differ](sdk-surface.md#the-tool-names-differ-and-only-the-tool-names--measured-2026-09-03),
+and the read-class hole in `probe_agy_gate.py` on 2026-09-05).
+
+The fix is the one already chosen for `TOOL_CLASSES`: **merge**, so one table holds both vocabularies
+and cannot disagree with itself.
+
+### Exit criterion
+
+A repeated `run_command` on the `agy` transport is approved once with **"always allow"**, the rule
+survives a **server restart**, and the same command in a later session raises **no dialog** — while a
+*different* command still does. Proven by a test that asserts the second call never reaches
+`broker.can_use_tool`, not merely that the dialog was dismissed.
+
+**And a denial tripwire, because this is the one feature whose bug is an ungated write:** a persisted
+rule must never widen beyond what was shown. A rule derived from `rm -rf build/` must not match
+`rm -rf /`, and a path rule for `src/a.py` must not match `src/`. The stored form is asserted, not the
+dialog's label.

@@ -1277,7 +1277,14 @@ class _Turn:
 
         message: dict[str, Any] = {
             "role": "assistant",
-            "content": "".join(self._text),
+            # Blank-line joined, not concatenated. A turn's text arrives as
+            # one block per API message, so prose before a tool call and
+            # prose after it are two entries here — and joining on "" ran
+            # them together mid-sentence ("read the file first.Added the
+            # docstring"). `blocks` keeps them apart, which is why the
+            # resumed chat always looked right and only the preview and
+            # the search snippet showed the seam.
+            "content": "\n\n".join(part for part in self._text if part),
             "blocks": self.blocks,
             "subagents": list(self._subagents.values()),
             "files": list(self._files),

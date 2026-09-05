@@ -1060,6 +1060,14 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
 
   /** The breakdown and its health decoration; errors land in `_error`. */
   async _refreshBreakdown() {
+    // This one had **no** capability guard at all, where
+    // `_fetchAccountUsage` and `_fetchMcpStatus` beside it both did — so on
+    // an engine that cannot report a context window it called the one
+    // method the router is guaranteed to refuse, every refresh. The two
+    // neighbours having guards is what made the omission invisible on
+    // review.
+    await loadCapabilities(this);
+    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
     try {
       // Both calls go out together: they are separate control requests
       // to the same subprocess, and this one is slow enough (3-14s) that
@@ -1130,6 +1138,10 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // list, and an empty list here would render as "you have no limits"
     // — a reading, where the truth is that this engine takes no such
     // measurement (AG-9).
+    // Awaited — see app-shell/state-fetch.js. The optimistic loading
+    // default is for render paths; a fetch that slips through it is an
+    // RPC the router has already refused.
+    await loadCapabilities(this);
     if (!supports(SURFACE.ACCOUNT_RATE_LIMITS)) return;
     try {
       const res = await withRpcTimeout(
@@ -1161,6 +1173,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // one `EngineHealth.mcp` got wrong before it was deleted: an engine
     // that serves no MCP inventory must not be reported as an engine
     // with zero servers.
+    await loadCapabilities(this);
     if (!supports(SURFACE.MCP_SERVER_INVENTORY)) return null;
     try {
       const res = await withRpcTimeout(
@@ -1582,9 +1595,17 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
     // windows. Leaving it inside the success branch meant the panel
     // vanished precisely when it was the reason for opening the tab.
     if (this._error && !this._usage) {
+      // Red only for a *failure*. 'no-engine' is the ordinary state of a
+      // window nobody has sent a prompt in yet, and painting it in the
+      // error colour tells a reader something is wrong at the one moment
+      // nothing is — the same "unbuilt reads as broken" fault the engine
+      // notice was added for. The Settings tab already answers this exact
+      // state in secondary grey ("the list arrives with the first turn"),
+      // so this is the tab that was out of step rather than a new idiom.
+      const calm = this._errorReason === 'no-engine';
       return html`
         ${this._renderRateLimits()}
-        <p class="error">${this._error}</p>
+        <p class=${calm ? 'empty' : 'error'}>${this._error}</p>
         ${this._renderErrorNote()}
       `;
     }
@@ -1679,6 +1700,14 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
    *
    * Absent rather than empty before the first priced result: a session that
    * has run nothing has no cost, and `$0.0000` is a claim about it.
+   *
+   * The table goes with the rows, and the "no per-model figures yet" note
+   * stands on `rows.length` alone. Both used to be wrong in the same
+   * state: the note was gated on there being a cost, but the section
+   * renders on *any* of cost, seconds or rows — so a session with a
+   * connected engine and no priced result yet drew three column headings
+   * over nothing, with no word about why. Headings promising data that
+   * never arrives read as a load that failed.
    */
   _renderSessionUsage() {
     const usage = this._sessionUsage;
@@ -1712,27 +1741,31 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
             ? html`<span class="sub">— ${cost} so far</span>`
             : ''}
         </h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th class="num">Prompt</th>
-              <th class="num">Completion</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.map((row) => html`
-              <tr>
-                <td title=${row.model}>${row.model}</td>
-                <td
-                  class="num"
-                  title=${`${row.input.toLocaleString()} uncached · ${row.cacheRead.toLocaleString()} cache read · ${row.cacheCreation.toLocaleString()} cache write`}
-                >${_fmtTokens(row.prompt)}</td>
-                <td class="num">${_fmtTokens(row.output)}</td>
-              </tr>
-            `)}
-          </tbody>
-        </table>
+        ${rows.length > 0
+          ? html`
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th class="num">Prompt</th>
+                  <th class="num">Completion</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rows.map((row) => html`
+                  <tr>
+                    <td title=${row.model}>${row.model}</td>
+                    <td
+                      class="num"
+                      title=${`${row.input.toLocaleString()} uncached · ${row.cacheRead.toLocaleString()} cache read · ${row.cacheCreation.toLocaleString()} cache write`}
+                    >${_fmtTokens(row.prompt)}</td>
+                    <td class="num">${_fmtTokens(row.output)}</td>
+                  </tr>
+                `)}
+              </tbody>
+            </table>
+          `
+          : ''}
         ${seconds !== null
           ? html`<p class="note">
               ${_fmtDuration(seconds)} since the engine connected. No API-time
@@ -1741,7 +1774,7 @@ export class ContextUsageTab extends RpcMixin(LitElement) {
               silent.
             </p>`
           : ''}
-        ${rows.length === 0 && cost !== null
+        ${rows.length === 0
           ? html`<p class="note">
               No per-model figures yet — the engine reports them with the first
               priced result.

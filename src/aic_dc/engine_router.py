@@ -224,6 +224,17 @@ class EngineRouterBase:
             "active": self._engine,
             "available": list(capabilities.ENGINES),
             "mountable": sorted(self._adapters),
+            # Supplied by the server rather than mapped in the browser. A
+            # label table in the webapp would be a branch on an engine
+            # name, which AG-R-4 forbids — and the thing a user is choosing
+            # between here is *which account pays*, which is not something
+            # the browser can know. A name with no label falls back to
+            # itself, so an engine added without one is legible rather
+            # than blank.
+            "labels": {
+                name: capabilities.ENGINE_LABELS.get(name, name)
+                for name in capabilities.ENGINES
+            },
         }
 
     async def switch_engine(self, engine: str) -> dict[str, Any]:
@@ -277,6 +288,7 @@ class EngineRouterBase:
         outgoing = self._engine
         await _stop_engine(self._master)
         self._engine = engine
+        _start_blank(self._master)
         logger.info("Engine switched: %s -> %s", outgoing, engine)
         await self._announce_engine(outgoing)
         return {"engine": engine, "previous": outgoing, "changed": True}
@@ -398,6 +410,36 @@ def _engine_is_busy(adapter: Any) -> bool:
     if tasks is None:
         return streaming is None
     return any(not task.done() for task in tasks)
+
+
+def _start_blank(adapter: Any) -> None:
+    """Tell the incoming engine not to continue where it left off.
+
+    This method's docstring has always said a switch ends the outgoing
+    session and starts the incoming one blank, *"with no resume, which is
+    what makes it a new session"*. Nothing enforced it: each adapter's
+    auto-resume flag survived the switch, so the next connect quietly
+    reattached to whatever that engine was last in.
+
+    It was invisible while only one engine could resume — Antigravity
+    refused a resume outright until phase 5 — and it became a
+    contradiction the moment both could: the switch broadcasts
+    ``sessionChanged`` with an empty message list, so a browser was told
+    the panel is blank while the server intended to resume. The next state
+    load would then repopulate the chat with a conversation the user was
+    told had been left behind.
+
+    Synchronous and best-effort. An adapter without the hook is one that
+    cannot resume anyway, and a switch that has already happened must not
+    be undone by a failure to tidy up after it.
+    """
+    hook = getattr(adapter, "_start_blank_session", None)
+    if hook is None:
+        return
+    try:
+        hook()
+    except Exception:
+        logger.exception("The incoming engine could not be reset to blank")
 
 
 async def _stop_engine(adapter: Any) -> None:

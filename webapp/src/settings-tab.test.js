@@ -1915,145 +1915,11 @@ const TWO_ENGINES = {
   mountable: ['antigravity', 'claude'],
 };
 
-describe('aic-settings-tab engine panel', () => {
-  it('is absent when only one engine is mountable', async () => {
-    // A selector with one option is a control that cannot do
-    // anything. On the overwhelmingly common single-engine install
-    // it would be a permanent question about a feature that install
-    // does not have.
-    publishEngineListRpc({
-      active: 'claude',
-      available: ['claude', 'antigravity'],
-      mountable: ['claude'],
-    });
-    const el = mountTab();
-    await settle(el);
-    expect(enginePanel(el)).toBeNull();
-  });
-
-  it('is absent before list_engines answers', async () => {
-    // Not an empty selector. A control that cannot say what it would
-    // switch to is worse than no control.
-    publishFakeRpc({
-      'Settings.get_config_info': () => ({ config_dir: '/tmp/cfg' }),
-      'Settings.get_config_content': (key) => ({ type: key, content: '{}' }),
-    });
-    const el = mountTab();
-    await settle(el);
-    expect(enginePanel(el)).toBeNull();
-  });
-
-  it('offers every mountable engine and marks the master', async () => {
-    publishEngineListRpc(TWO_ENGINES);
-    const el = mountTab();
-    await settle(el);
-    expect(engineSelect(el).value).toBe('claude');
-    expect([...engineSelect(el).options].map((o) => o.value))
-      .toEqual(['claude', 'antigravity']);
-  });
-
-  it('offers a known-but-unmounted engine disabled, rather than hiding it', async () => {
-    // `available` and `mountable` are different questions. Dropping
-    // the row would make a missing credential look like a build that
-    // never had the engine — and only one of those is the user's to
-    // fix.
-    publishEngineListRpc({
-      active: 'antigravity',
-      available: ['claude', 'antigravity', 'future'],
-      mountable: ['antigravity', 'claude'],
-    });
-    const el = mountTab();
-    await settle(el);
-    const absent = [...engineSelect(el).options].find((o) => o.value === 'future');
-    expect(absent).toBeTruthy();
-    expect(absent.disabled).toBe(true);
-    expect(absent.textContent).toContain('not mounted');
-  });
-
-  it('warns that switching starts a new session', async () => {
-    // The sentence is the feature. A user who reads "switch" as
-    // "switch and continue" loses a conversation they thought they
-    // were keeping.
-    publishEngineListRpc(TWO_ENGINES);
-    const el = mountTab();
-    await settle(el);
-    const note = enginePanel(el).textContent.replace(/\s+/g, ' ');
-    expect(note).toContain('starts a new session');
-    expect(note).toContain('history browser');
-  });
-
-  it('sends the choice and lets the broadcast be the answer', async () => {
-    // The select's own value is a request. `_engines.active` is
-    // written from the `engineChanged` broadcast and nowhere else, so
-    // that one writer answers every window the same way.
-    const calls = [];
-    publishEngineListRpc(TWO_ENGINES, {
-      'ClaudeCodeService.switch_engine': (name) => {
-        calls.push(name);
-        return { engine: name, previous: 'claude', changed: true };
-      },
-    });
-    const el = mountTab();
-    await settle(el);
-    const select = engineSelect(el);
-    select.value = 'antigravity';
-    select.dispatchEvent(new Event('change'));
-    await settle(el);
-    expect(calls).toEqual(['antigravity']);
-    // Not flipped by the reply — still showing the master until the
-    // broadcast says otherwise.
-    expect(engineSelect(el).value).toBe('claude');
-
-    window.dispatchEvent(new CustomEvent('engine-changed', {
-      detail: { engine: 'antigravity', previous: 'claude' },
-    }));
-    await settle(el);
-    expect(engineSelect(el).value).toBe('antigravity');
-  });
-
-  it('shows the refusal rather than snapping back silently', async () => {
-    // `switch_engine` declines for reasons the user can act on — a
-    // turn is still running, that engine has no credential here — and
-    // a control that reverted without a word is indistinguishable
-    // from one that is broken.
-    publishEngineListRpc(TWO_ENGINES, {
-      'ClaudeCodeService.switch_engine': () => ({
-        error: 'A turn is still running',
-        reason: 'turn_active',
-      }),
-    });
-    const el = mountTab();
-    await settle(el);
-    const select = engineSelect(el);
-    select.value = 'antigravity';
-    select.dispatchEvent(new Event('change'));
-    await settle(el);
-    expect(enginePanel(el).textContent).toContain('A turn is still running');
-    expect(engineSelect(el).value).toBe('claude');
-  });
-
-  it('does not call the RPC for the engine already in force', async () => {
-    const calls = [];
-    publishEngineListRpc(TWO_ENGINES, {
-      'ClaudeCodeService.switch_engine': (name) => {
-        calls.push(name);
-        return { engine: name, changed: false };
-      },
-    });
-    const el = mountTab();
-    await settle(el);
-    const select = engineSelect(el);
-    select.value = 'claude';
-    select.dispatchEvent(new Event('change'));
-    await settle(el);
-    expect(calls).toEqual([]);
-  });
-});
-
-
-// ---------------------------------------------------------------------------
-// AG-9 — the session-storage card is one engine's mirror, not the product's
-// ---------------------------------------------------------------------------
+// The engine selector's tests left with it on 2026-09-04. The control
+// is the chat panel's action-bar chip now, and its behaviour — the
+// switch RPC, the server-supplied labels, the refusal — is asserted in
+// chat-panel/engine-notice.test.js. Asserting it here as well would be
+// two tests for one control, and the copy is what goes stale.
 
 describe('aic-settings-tab session storage hiding', () => {
   const NO_MIRROR = {
@@ -2094,5 +1960,385 @@ describe('aic-settings-tab session storage hiding', () => {
       session_mirror: { supported: true, status: 'supported', note: '' },
     });
     expect(el.shadowRoot.querySelector('.storage-note')).toBeTruthy();
+  });
+});
+
+
+describe('aic-settings-tab agy permission gate', () => {
+  // The only control in the app that writes outside the repository, into a
+  // file belonging to Google's CLI. The wording *is* the feature: a user
+  // deciding whether to allow that needs to know where it writes, what it
+  // costs sessions unrelated to this app, and that it is reversible. So
+  // these assert on what the panel says, not only on what it does.
+
+  function gate(overrides = {}) {
+    return {
+      state: 'absent',
+      path: '/home/u/.gemini/config/hooks.json',
+      other_hooks: [],
+      agy_present: true,
+      ...overrides,
+    };
+  }
+
+  function panel(el) {
+    return [...el.shadowRoot.querySelectorAll('.model-panel')].find((p) =>
+      p.getAttribute('aria-label') === 'Antigravity CLI permission gate',
+    );
+  }
+
+  it('is absent entirely on an engine that does not serve it', async () => {
+    // The honest rendering of "this does not apply to you". Every engine
+    // but the agy transport answers "no such method".
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el)).toBeUndefined();
+  });
+
+  it('says where it writes, that it is outside the project, and that it is reversible', async () => {
+    publishConfigFiles({ methods: { 'Settings.get_agy_gate': () => gate() } });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('/home/u/.gemini/config/hooks.json');
+    expect(text).toContain('outside this project');
+    expect(text).toContain('closing AIC⚡DC does not take it out');
+  });
+
+  it('says what it costs sessions that have nothing to do with this app', async () => {
+    // The tax the user is actually consenting to, and the one thing they
+    // could not discover for themselves until their agy felt slow.
+    publishConfigFiles({ methods: { 'Settings.get_agy_gate': () => gate() } });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('every');
+    expect(text).toContain('including ones you start yourself');
+    expect(text).toContain('0.03s');
+  });
+
+  it('promises the user their own hooks are left alone, and counts them', async () => {
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ other_hooks: ['my-linter', 'fmt'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('left alone');
+    expect(text).toContain('2 of them');
+  });
+
+  it('offers Install when absent and Remove when current', async () => {
+    for (const [state, label] of [['absent', 'Install'], ['current', 'Remove']]) {
+      publishConfigFiles({
+        methods: { 'Settings.get_agy_gate': () => gate({ state }) },
+      });
+      const el = mountTab();
+      await settle(el);
+      expect(panel(el).querySelector('button').textContent.trim()).toBe(label);
+    }
+  });
+
+  it('explains a stale gate rather than silently taking it over', async () => {
+    // It usually means a second checkout is also installed, and quietly
+    // seizing the hook would break whichever one the user was using.
+    publishConfigFiles({
+      methods: { 'Settings.get_agy_gate': () => gate({ state: 'stale' }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    const text = panel(el).textContent.replace(/\s+/g, ' ');
+    expect(text).toContain('different installation');
+    expect(text).toContain('Installing here takes it over');
+  });
+
+  it('offers no button at all when the file cannot be parsed', async () => {
+    // Nothing will be written to a file we cannot read, so offering the
+    // action would be offering something that will refuse.
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () =>
+          gate({ state: 'unreadable', detail: 'hooks.json is not valid JSON.' }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).querySelector('button')).toBeNull();
+    expect(panel(el).textContent).toContain('will not modify a file it cannot parse');
+  });
+
+  it('installs on click and reflects the new state', async () => {
+    const calls = [];
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate(),
+        'Settings.install_agy_gate': () => {
+          calls.push('install');
+          return gate({ state: 'current' });
+        },
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    panel(el).querySelector('button').click();
+    await settle(el);
+    expect(calls).toEqual(['install']);
+    expect(panel(el).querySelector('button').textContent.trim()).toBe('Remove');
+  });
+
+  it('reads the state back out of an uninstall reply', async () => {
+    // `uninstall` answers {status, removed, gate}; `install` answers the
+    // status directly. Both carry it, in different shapes.
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ state: 'current' }),
+        'Settings.uninstall_agy_gate': () => ({
+          status: 'ok',
+          removed: true,
+          gate: gate({ state: 'absent' }),
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    panel(el).querySelector('button').click();
+    await settle(el);
+    expect(panel(el).querySelector('button').textContent.trim()).toBe('Install');
+  });
+
+  it('says so when agy is not on PATH', async () => {
+    publishConfigFiles({
+      methods: {
+        'Settings.get_agy_gate': () => gate({ agy_present: false }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(panel(el).textContent).toContain('not on your PATH');
+  });
+});
+
+
+
+describe('aic-settings-tab model list follows the engine', () => {
+  // Reported from a live run: switched to the agy engine in the action
+  // bar, then could not choose a model in Settings. The panel was still
+  // showing the *previous* engine's models — names the new one rejects,
+  // in a control whose whole job is to offer names it accepts.
+
+  function modelSelect(el) {
+    return [...el.shadowRoot.querySelectorAll('select')].find(
+      (s) => (s.getAttribute('aria-label') || '') === 'Model',
+    );
+  }
+
+  it('re-reads the models when the engine changes', async () => {
+    let engine = 'claude';
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () =>
+          engine === 'claude'
+            ? { model: 'opus', models: ['opus', 'sonnet'] }
+            : { model: null, models: ['gemini-3.8-flash-low', 'claude-sonnet-4-6'] },
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(el._models).toEqual(['opus', 'sonnet']);
+
+    engine = 'agy';
+    window.dispatchEvent(
+      new CustomEvent('engine-changed', { detail: { engine: 'agy' } }),
+    );
+    await settle(el);
+    expect(el._models).toEqual(['gemini-3.8-flash-low', 'claude-sonnet-4-6']);
+  });
+
+  it('does not leave the old engine\'s models on screen while it asks', async () => {
+    // A stale list here is not a best-available answer, it belongs to a
+    // different engine — so it is cleared rather than left until the reply.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: 'opus', models: ['opus'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    el._onEngineChanged({ detail: { engine: 'agy' } });
+    // Synchronously after the event, before the RPC can have answered.
+    expect(el._models).toEqual([]);
+    expect(el._model).toBe('');
+  });
+
+  it('ignores an engine-changed carrying no engine', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: 'opus', models: ['opus'] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    el._onEngineChanged({ detail: {} });
+    expect(el._models).toEqual(['opus']);
+  });
+
+  // The tests above assert on `_models`, and every one of them passed
+  // while the picker rendered nothing at all. `_models` held the fourteen
+  // names the agy transport sent; `modelEntries` dropped every one of
+  // them, because it takes objects and they were strings — so the select
+  // was empty, disabled, and captioned "the engine has not connected
+  // yet". These assert on what is *on screen*, which is the only thing
+  // the report was ever about.
+
+  it('renders an option per model the engine offers', async () => {
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: [
+            { value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)' },
+            { value: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6' },
+          ],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const options = [...modelSelect(el).querySelectorAll('option')];
+    expect(options.map((o) => o.value)).toEqual(
+      expect.arrayContaining(['gemini-3.8-flash-low', 'claude-sonnet-4-6']),
+    );
+    expect(options.map((o) => o.textContent.trim())).toEqual(
+      expect.arrayContaining(['Gemini 3.8 Flash (Low)', 'Claude Sonnet 4.6']),
+    );
+  });
+
+  it('leaves the picker usable rather than disabled when models arrived', async () => {
+    // `offline` is `entries.length === 0`, and it both disables the
+    // control and swaps the caption for one blaming the transport. That
+    // caption is what made this read as an engine fault.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: [{ value: 'gemini-3.8-flash-low', displayName: 'Gemini 3.8 Flash (Low)' }],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(modelSelect(el).disabled).toBe(false);
+  });
+
+  it('renders a name-only list rather than dropping it', async () => {
+    // Defence in depth for the shape that failed. A transport answering
+    // with bare ids is wrong about the contract, but the honest failure
+    // is an option with no label — never a picker that claims the engine
+    // never connected.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({
+          model: null,
+          models: ['gemini-3.8-flash-low', 'claude-sonnet-4-6'],
+        }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    const options = [...modelSelect(el).querySelectorAll('option')];
+    expect(options.map((o) => o.value)).toEqual(
+      expect.arrayContaining(['gemini-3.8-flash-low', 'claude-sonnet-4-6']),
+    );
+    expect(modelSelect(el).disabled).toBe(false);
+  });
+
+  it('still says the engine has not connected when the list is genuinely empty', async () => {
+    // The `offline` caption is right in exactly one case, and the fix
+    // must not have cost it.
+    publishConfigFiles({
+      methods: {
+        'ClaudeCodeService.get_model': () => ({ model: null, models: [] }),
+      },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect([...modelSelect(el).querySelectorAll('option')]).toHaveLength(0);
+    expect(modelSelect(el).disabled).toBe(true);
+  });
+});
+
+describe('aic-settings-tab standing permission rules', () => {
+  // AG-15 shipped granting without un-granting: "always allow" was one
+  // click and revoking it meant hand-editing JSON. These cover the panel
+  // that closed that, and the property that matters is the *list* — a
+  // permission you cannot see is one you cannot audit.
+
+  const RULE = {
+    id: 'abc123',
+    label: 'Always allow run_command(ls)',
+    rule_content: 'ls',
+    behavior: 'allow',
+    destination: 'aicDcRules',
+  };
+
+  function rulesPanel(el) {
+    return [...el.shadowRoot.querySelectorAll('[role="group"]')].find(
+      (node) => node.getAttribute('aria-label') === 'Standing permission rules',
+    );
+  }
+
+  it('lists what has been granted', async () => {
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({
+        rules: [RULE], store: '/tmp/rules.json',
+      }),
+    });
+    const el = mountTab();
+    await settle(el);
+    const panel = rulesPanel(el);
+    expect(panel).toBeTruthy();
+    expect(panel.textContent).toContain('Always allow run_command(ls)');
+  });
+
+  it('says so plainly when nothing has been granted', async () => {
+    // Not hidden on empty. "You have granted nothing" is exactly what
+    // someone auditing their permissions wants to be told, and a panel
+    // that vanished would leave them unable to tell that from a bug.
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({ rules: [], store: '/tmp/r.json' }),
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(rulesPanel(el).textContent).toContain('not granted any standing');
+  });
+
+  it('forgetting one calls the server and renders what it answers', async () => {
+    // The answer is the server's remaining list, not this end's guess —
+    // the chat.md invariant that a control reporting its own success reads
+    // its state back from the thing it changed.
+    const forget = vi.fn(() => ({ ok: true, rule_id: 'abc123', rules: [] }));
+    publishFakeRpc({
+      'Settings.get_permission_rules': () => ({ rules: [RULE], store: '/x' }),
+      'Settings.forget_permission_rule': forget,
+    });
+    const el = mountTab();
+    await settle(el);
+    rulesPanel(el).querySelector('.rule-forget').click();
+    await settle(el);
+    expect(forget).toHaveBeenCalledWith('abc123');
+    expect(rulesPanel(el).textContent).toContain('not granted any standing');
+  });
+
+  it('is absent entirely when the server has no such method', async () => {
+    // An older build. A panel that cannot be populated should not appear,
+    // rather than appearing empty and reading as "you have granted
+    // nothing" — which would be a claim rather than an absence.
+    publishFakeRpc({});
+    const el = mountTab();
+    await settle(el);
+    expect(rulesPanel(el)).toBeFalsy();
   });
 });

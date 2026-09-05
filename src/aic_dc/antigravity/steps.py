@@ -122,18 +122,6 @@ TOOL_RESULT_FIELDS: dict[str, frozenset[str]] = {
     "start_subagent": frozenset(),
 }
 
-#: Tool arguments that name a file the engine wrote.
-#:
-#: Feeds ``files_modified`` on a tool result, which is what re-indexes the
-#: symbol table and refreshes the file tree. Only tools that actually
-#: write appear: ``view_file`` names a path too, and re-indexing on a read
-#: would make every turn look like it changed the tree.
-TOOL_WRITTEN_PATH_FIELDS: dict[str, tuple[str, ...]] = {
-    "create_file": ("file_path",),
-    "edit_file": ("file_path",),
-    "generate_image": ("output_path",),
-}
-
 #: The tool that ends a turn rather than doing work. Suppressed from the
 #: transcript; see :meth:`StepTranslator._tool_events`.
 FINISH_TOOL = "finish"
@@ -276,10 +264,32 @@ class StepTranslator:
         *,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        agent_id: str | None = None,
     ) -> None:
         self.request_id = request_id
         self._clock = clock
         self._wall_clock = wall_clock
+        #: When this turn began, in epoch seconds.
+        #:
+        #: A translator is constructed at the start of the turn it
+        #: translates, so this is the turn's start time and not an
+        #: approximation of it. It lives here rather than in a second dict
+        #: beside ``_turns`` because a browser reconnecting mid-turn reads
+        #: it from the same object it reads the blocks from — the Claude
+        #: side pairs the two in ``ActiveTurn`` for the same reason, and a
+        #: parallel map keyed by request id is one more thing that can
+        #: disagree with itself.
+        self.started_at = wall_clock()
+        # When set, *every* block and card this translator produces is
+        # attributed to that agent rather than to the main thread.
+        #
+        # This is how a consultation gets its own tab (AG-13): the whole
+        # turn belongs to one agent, so there is no per-step scope to
+        # derive — `_scope` reads `depth`, and a consultation's own steps
+        # are all at depth 0 because it *is* the top of its own
+        # trajectory. Nested trajectories inside it still nest, because
+        # `_scope` still wins where it has an answer.
+        self._agent_id = agent_id or None
         self._blocks: dict[str, _Block] = {}
         self._tools: dict[str, _ToolCall] = {}
         self._block_counter = 0
@@ -319,7 +329,9 @@ class StepTranslator:
 
     def _translate(self, step: Any) -> list[Event]:
         events: list[Event] = []
-        scope = _scope(step)
+        # A nested trajectory keeps its own identity; everything else in a
+        # scoped translator belongs to the agent that owns the whole turn.
+        scope = _scope(step) or self._agent_id
 
         self._absorb_usage(step)
 
@@ -807,12 +819,19 @@ def _nonzero_exit(results: dict[str, Any]) -> bool:
 
 
 def _files_written(name: str, inputs: dict[str, Any]) -> list[str]:
-    paths = []
-    for field_name in TOOL_WRITTEN_PATH_FIELDS.get(name, ()):
-        value = inputs.get(field_name)
-        if isinstance(value, str) and value:
-            paths.append(value)
-    return paths
+    """Files this call wrote, from the shared tool → path-key table.
+
+    Delegated rather than tabulated here. This pump feeds ``files_modified``
+    on a live tool result, and ``history._Turn._attach_result`` feeds the
+    same field when the turn is read back off disk — from
+    :func:`~aic_dc.claude_code.messages.files_written_by`. Two tables would
+    mean a turn that listed the files it touched while it streamed and
+    listed none after a refresh, which is the quiet kind of wrong: nothing
+    fails, the number is just smaller.
+    """
+    from aic_dc.claude_code.messages import files_written_by
+
+    return files_written_by(name, inputs)
 
 
 def _scope(step: Any) -> str | None:

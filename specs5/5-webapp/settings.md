@@ -89,6 +89,43 @@ dialog to intercept a phantom `change`, and what it changes is the host's bill.
 route also re-reads `get_model()`, and so does the tab becoming visible: the model list is empty until
 the engine's first-turn handshake and nothing pushes it when that arrives.
 
+**So does an engine change, and that one was found by running it.** *2026-09-04:* selecting `agy` in
+the action bar's engine selector and then opening this tab offered Claude's models — names the new
+engine rejects, in a control whose whole job is to offer names it accepts. `engine-changed` updated the
+active engine's name and nothing else. The list is **cleared** before the re-read rather than left
+until the reply lands: a stale list is the best-available answer after a transient RPC failure, and is
+not one here, because it belongs to a different engine.
+
+This is the same shape as the selector that lied about the active engine, one surface along — state
+that was correct when it was fetched and became wrong when something else changed. Moving the engine
+selector into the action bar is what made it reachable in one click, which is why it surfaced the day
+that move landed rather than eventually.
+
+**`models` entries are objects, and an engine that sends names renders as an empty panel.** *Reported
+twice on 2026-09-04, the second time after the clear-and-re-read above was supposed to close it.* The
+contract is the Claude CLI handshake's own `{value, displayName, resolvedModel, description}`; the
+`agy` transport sent a list of bare id strings, and `modelEntries` skips anything that is not an
+object. All fourteen were dropped one at a time, so a fully-populated list arrived in the browser and
+rendered as an **empty, disabled select captioned "the engine has not connected yet"** — the note in
+line 3 above, showing for a reason that was not true.
+
+Two rules come out of it, and the second is the one with teeth:
+
+- **`value` is what the panel selects on**, and an entry without one is not a model. An engine
+  reporting only names is wrong about the contract, but the panel now normalises a bare string to
+  `{value}` rather than skipping it: the honest failure is an option labelled with its id, never a
+  control that blames the transport for a shape error.
+- **The "has not connected" note is an assertion about a cause, and it must not be reachable from a
+  list that arrived.** It is the most prominent text on an empty panel, and it sent two separate
+  diagnoses at the engine while the defect was four layers downstream in the renderer. Anything that
+  can empty `entries` other than the engine genuinely having said nothing has to be fixed rather than
+  captioned.
+
+The reason it survived a fix is worth recording with it: the tests asserted on `_models`, the array
+as received, and never on the rendered `<option>` set — so both suites stayed green across both
+reports. They now assert on what is on screen. See
+[`../plan-ag/delivery.md` § Closed: the model picker was empty because `models` was the wrong shape](../plan-ag/delivery.md).
+
 ## Config Cards
 
 | Card | Format | Applies |
@@ -403,3 +440,5 @@ Controls.
   `default` in place of "no model pinned"
 - The model select shows what is in force, not what was clicked: it moves on the RPC reply, and a
   refused switch leaves it where it was
+- The model list belongs to the engine that answered for it. An engine change clears it and re-reads
+  it, so no model name is ever offered for an engine that would reject it

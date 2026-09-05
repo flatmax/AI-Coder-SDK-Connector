@@ -2,6 +2,9 @@
 // pull authoritative state snapshots from the backend and
 // hydrate the host's reactive properties.
 
+import {
+  SURFACE, loadCapabilities, supports,
+} from '../engine-capabilities.js';
 import { setRepoRoot } from '../repo-path.js';
 import { withRpcTimeout } from '../rpc.js';
 
@@ -184,6 +187,22 @@ export function onContextUsageRefresh(host) {
  */
 export async function fetchContextUsage(host) {
   if (!host.call) return;
+  // **Await the descriptor, do not merely consult it.** `supports()`
+  // answers "yes" until the real answer lands, and that optimistic default
+  // is right for *rendering* — a panel that draws and then hides costs
+  // nothing, which is the trade engine-capabilities.js explains. It is
+  // wrong for *fetching*: the router raises `UnsupportedOnThisEngine` for a
+  // surface this engine cannot feed, and an RPC already refused cannot be
+  // un-sent by a later re-render. On the `agy` engine that produced a wall
+  // of red `ERROR` at every page load — `get_context_usage` twice,
+  // `get_mcp_status`, `get_account_usage` — which reads as a broken build
+  // rather than as an engine with fewer surfaces, the exact impression
+  // AG-9 § "What hiding cost" is about.
+  //
+  // Cheap: `loadCapabilities` caches and shares one in-flight promise, so
+  // this is at most a single round trip for the whole page.
+  await loadCapabilities(host);
+  if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
   if (host._contextUsageFetchInFlight) return;
   host._contextUsageFetchInFlight = true;
   try {

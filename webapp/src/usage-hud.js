@@ -767,9 +767,22 @@ export class UsageHud extends RpcMixin(LitElement) {
     // This also stops a poll the server would refuse: the router raises
     // `UnsupportedOnThisEngine` for a method whose surface is hidden, so
     // without this the HUD would retry a guaranteed error every tick.
-    if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
+    // Awaited, not just consulted: `supports()` answers "yes" until the
+    // descriptor lands, so the first poll after connect would otherwise go
+    // out on an engine that refuses it. Shared, cached promise — see the
+    // note in app-shell/state-fetch.js.
+    //
+    // **The flag is claimed before the await, and that ordering is the
+    // point.** `_fetchInFlight` is checked at the top of this method, so an
+    // await between the check and the set lets two overlapping polls both
+    // pass the guard and issue two control requests — which is exactly what
+    // this flag exists to prevent, and what
+    // `collapses overlapping fetches into one control request` caught when
+    // the await was first put above it.
     this._fetchInFlight = true;
     try {
+      await loadCapabilities(this);
+      if (!supports(SURFACE.CONTEXT_WINDOW_USAGE)) return;
       // Bounded: a reply dropped by a reconnecting socket would
       // otherwise leave `_fetchInFlight` set forever and blank this
       // section for the rest of the session. See withRpcTimeout.
@@ -1235,6 +1248,13 @@ export class UsageHud extends RpcMixin(LitElement) {
    * `overage_disabled_reason` is printed in the CLI's own words. It is the
    * answer to the only question this line raises, and paraphrasing a reason
    * we have never enumerated would be inventing one.
+   *
+   * Its underscores are dropped, which is not a paraphrase — the words are
+   * still the CLI's, and `org_level_disabled` in running prose is a machine
+   * token that reads as a leaked identifier rather than an explanation. The
+   * Context tab has always spelled the same field this way; this line was
+   * the one showing the raw form, so the two surfaces disagreed about a
+   * value they both read from `rate_limit`.
    */
   _renderOverage(rl) {
     const status = rl.overage_status;
@@ -1243,7 +1263,7 @@ export class UsageHud extends RpcMixin(LitElement) {
     if (status === 'rejected') {
       const why = typeof rl.overage_disabled_reason === 'string'
         && rl.overage_disabled_reason
-        ? ` — ${rl.overage_disabled_reason}`
+        ? ` — ${rl.overage_disabled_reason.replace(/_/g, ' ')}`
         : '';
       return html`<div class="rl-note rl-rejected">Overage unavailable${why}</div>`;
     }

@@ -31,6 +31,7 @@ import {
 } from 'vitest';
 
 import { SharedRpc } from './rpc.js';
+import { resetCapabilities, setCapabilities } from './engine-capabilities.js';
 import './history-browser.js';
 import {
   formatRelativeTime,
@@ -2875,5 +2876,81 @@ describe('HistoryBrowser subagent listing', () => {
     await settle(el);
     expect(el._subagents).toEqual([]);
     expect(el._subagentsError).toBe('');
+  });
+});
+// ---------------------------------------------------------------------------
+// Phase 5: an engine with a history browser and no subagent tabs
+// ---------------------------------------------------------------------------
+
+describe('HistoryBrowser on an engine with only some of these surfaces', () => {
+  // Until phase 5 the two surfaces moved together — an engine with no
+  // history browser was never asked for a session's subagents, and one
+  // with no fork was never shown the button. The first engine to have a
+  // browser without either rendered the router's refusal as red text at
+  // the top of every preview, and offered a Fork the adapter refuses.
+  // Both found in a browser on 2026-09-05, on the agy transport.
+
+  const SESSIONS = [
+    {
+      session_id: 's1',
+      timestamp: new Date().toISOString(),
+      message_count: 2,
+      preview: 'Say only the word: pineapple',
+      first_role: 'user',
+    },
+  ];
+
+  function surface(supported) {
+    return { title: '', supported, status: supported ? 'supported' : 'unbuilt', note: '' };
+  }
+
+  afterEach(() => resetCapabilities());
+
+  async function setup({ subagents, fork }) {
+    setCapabilities({
+      transcript_history: surface(true),
+      subagent_tabs: surface(subagents),
+      session_fork: surface(fork),
+    });
+    const listSubagents = vi.fn().mockResolvedValue([]);
+    publishFakeRpc({
+      'ClaudeCodeService.history_list': vi.fn().mockResolvedValue(SESSIONS),
+      'ClaudeCodeService.history_load': vi
+        .fn()
+        .mockResolvedValue([{ role: 'user', content: 'hello' }]),
+      'ClaudeCodeService.list_subagent_transcripts': listSubagents,
+    });
+    const el = mountBrowser({ open: true });
+    await settle(el);
+    el.shadowRoot.querySelector('.session-item').click();
+    await settle(el);
+    return { el, listSubagents };
+  }
+
+  it('does not ask for subagents an engine cannot list', async () => {
+    const { listSubagents } = await setup({ subagents: false, fork: true });
+    expect(listSubagents).not.toHaveBeenCalled();
+  });
+
+  it('reports no subagent error when it never asked', async () => {
+    const { el } = await setup({ subagents: false, fork: true });
+    expect(el.shadowRoot.querySelector('.subagents-error')).toBeNull();
+  });
+
+  it('still asks where the engine can list them', async () => {
+    const { listSubagents } = await setup({ subagents: true, fork: true });
+    expect(listSubagents).toHaveBeenCalledWith('s1');
+  });
+
+  it('hides Fork on an engine that cannot fork', async () => {
+    const { el } = await setup({ subagents: true, fork: false });
+    expect(el.shadowRoot.querySelector('.fork-button')).toBeNull();
+    // Resume is a different surface and stays: this engine resumes.
+    expect(el.shadowRoot.querySelector('.resume-button')).not.toBeNull();
+  });
+
+  it('shows Fork where forking is real', async () => {
+    const { el } = await setup({ subagents: true, fork: true });
+    expect(el.shadowRoot.querySelector('.fork-button')).not.toBeNull();
   });
 });

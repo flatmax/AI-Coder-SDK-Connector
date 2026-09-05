@@ -88,23 +88,84 @@ from typing import Any
 
 from aic_dc.antigravity.credentials import Credentials
 from aic_dc.antigravity.credentials import resolve as resolve_credentials
+from aic_dc.antigravity.session import stop_reason_of, turn_usage_of
+from aic_dc.antigravity.steps import _name
+from aic_dc.antigravity.surface import sdk_installed
 
 logger = logging.getLogger(__name__)
 
 #: The text model a consultation runs on. Pinned rather than inherited:
 #: the SDK's own default moves between 0.1.x releases, and a second
 #: opinion whose model changed under us is not a second opinion.
-DEFAULT_TEXT_MODEL = "gemini-3.7-flash"
+#:
+#: **Lowered from ``gemini-3.7-flash`` on 2026-09-02, and the reason is a
+#: measurement rather than a preference.** Two live consultations timed
+#: out at 180s having produced nothing. Timing a *trivial* five-token
+#: prompt straight at the REST API with this free-tier key, bypassing the
+#: harness entirely, found a latency ladder by model recency:
+#:
+#: =====================  =========  =========
+#: model                  run 1      run 2
+#: =====================  =========  =========
+#: ``gemini-3.7-flash``   30.9 s     timed out at 70 s
+#: ``gemini-3.6-flash``   3.1 s      22.7 s
+#: ``gemini-3.5-flash``   —          3.9 s
+#: =====================  =========  =========
+#:
+#: An agent turn is many model calls, so a per-call latency of 30 s makes
+#: any consultation exceed any sane timeout. The newest models appear to
+#: be queued hard on a free key — which is a coherent way for a provider
+#: to ration capacity, and is invisible as a rate limit because it arrives
+#: as *slowness* rather than as a 429.
+#:
+#: **This is a free-tier default, not a judgement about the models.** The
+#: point of a second opinion is an independent and capable one, so a paid
+#: key should raise this — see AG-12, whose upgrade triggers this now
+#: joins. It is a constructor argument precisely so that is one line.
+DEFAULT_TEXT_MODEL = "gemini-3.5-flash"
 
 #: The image model. A separate ``ModelTarget`` with ``ModelType.IMAGE``,
 #: which is how ``generate_image`` picks a model distinct from the one
 #: holding the conversation.
 DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-lite-image"
 
-#: How long a single consultation may take before it is abandoned. A
-#: consultant that hangs blocks the Claude Code turn that called it, and
-#: the caller has no cancel path by construction.
-DEFAULT_TIMEOUT_SECONDS = 180.0
+#: How long a single consultation may take before it is abandoned.
+#:
+#: Lowered from 180s on 2026-09-02, after two live browser runs sat at the
+#: full 180 and returned nothing — the harness had sent its request and
+#: Google never answered. Three minutes of a spinner is a long time to say
+#: nothing, and the *cost* of waiting longer is asymmetric: a consultation
+#: that needs more than two minutes is already a bad second opinion,
+#: while every extra second of a hung one is spent blocking the Claude
+#: turn that asked.
+#:
+#: The number is not the real fix and is not pretending to be. Silence was
+#: the problem rather than duration, which is what
+#: :data:`HEARTBEAT_SECONDS` and the stderr tail below are for.
+#:
+#: **Confirmed by Google, 2026-09-02**, who put the free-tier figure at
+#: *"60–90 seconds just to survive the queue"*. 120 is deliberately above
+#: that: their number is what a request needs to *clear* the queue, so
+#: timing out at it would abandon calls that were about to succeed. The
+#: margin is the difference between a timeout that means "this failed" and
+#: one that means "we gave up early".
+DEFAULT_TIMEOUT_SECONDS = 120.0
+
+#: How many of the harness's own stderr lines to attach to a failure.
+#:
+#: The SDK drains the harness's stderr on a daemon thread into a bounded
+#: deque and logs each line at INFO on the *root* logger
+#: (``local_connection.py:477-494``). That is where the diagnosis lived on
+#: 2026-09-02 — ``Post ".../streamGenerateContent": context canceled``,
+#: meaning the request had been in flight the whole timeout — and it
+#: reached only the server log, so the person watching the tab saw a
+#: spinner and nothing else.
+#:
+#: Read off the connection rather than captured with a logging handler: a
+#: handler would be global, would fire on a thread that is not the event
+#: loop, and would pick up every other engine's lines too. The deque is
+#: already there, already bounded, and reading it needs no threading.
+STDERR_TAIL_LINES = 6
 
 
 class ConsultationError(RuntimeError):
@@ -129,6 +190,9 @@ class _Turn:
     text: str
     chunks: list[Any]
     stop_reason: str
+    #: ``Conversation.last_turn_usage`` — tokens, never a cost (AG-6).
+    #: No step carries it, which phase 3's live run found the hard way.
+    usage: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,6 +244,12 @@ class Consultant:
         self._text_model = text_model
         self._image_model = image_model
         self._timeout = timeout_seconds
+        #: The live conversation, while a consultation is running. Held so
+        #: :meth:`cancel` has something to halt (AG-13).
+        self._conversation: Any = None
+        #: The last connection, kept after teardown so a failure can still
+        #: be explained with the harness's own stderr.
+        self._last_connection: Any = None
 
     @property
     def credentials(self) -> Credentials:
@@ -191,17 +261,28 @@ class Consultant:
     def available(self) -> bool:
         """Whether a consultation can be attempted at all.
 
-        False is a normal state with a good explanation attached, not an
-        error: AG-R-8's whole point is that the most likely first
-        experience of this engine is a credential that does not exist yet.
+        Two conditions, and both are ordinary states rather than errors.
+        A credential may not exist yet — AG-R-8's whole point is that this
+        is the most likely first experience of this engine. And since
+        phase 7 the SDK may not be installed at all: it is an optional
+        extra (AG-R-10), so a base install has no ``google.antigravity``
+        to consult with.
+
+        The second was added because the first was not enough on its own.
+        A base install with a Gemini key registered both tools and then
+        raised ``ImportError`` the first time the agent called one —
+        context spent on every turn to buy a failure. AG-9's rule applied
+        to a tool definition: hidden rather than stubbed.
         """
-        return self._credentials.available
+        return self._credentials.available and sdk_installed()
 
     # ------------------------------------------------------------------
     # Consultations
     # ------------------------------------------------------------------
 
-    async def second_opinion(self, question: str, context: str = "") -> str:
+    async def second_opinion(
+        self, question: str, context: str = "", observer: Any = None
+    ) -> str:
         """Ask Antigravity one question and return its answer as text.
 
         No tools, no workspace, no file access — the ``context`` argument
@@ -214,7 +295,9 @@ class Consultant:
             raise ConsultationError("A second opinion needs a question to answer.")
 
         prompt = question if not context.strip() else f"{question}\n\n{context.strip()}"
-        turn = await self._chat(prompt, model=self._text_model, builtin_tools=())
+        turn = await self._chat(
+            prompt, model=self._text_model, builtin_tools=(), observer=observer
+        )
         if not turn.text:
             raise ConsultationError(
                 f"Antigravity returned an empty answer (stop reason: {turn.stop_reason})."
@@ -226,6 +309,7 @@ class Consultant:
         prompt: str,
         output_name: str = "",
         aspect_ratio: str = "",
+        observer: Any = None,
     ) -> ImageResult:
         """Generate an image into the repository, and verify where it went.
 
@@ -255,6 +339,7 @@ class Consultant:
             " ".join(instruction),
             model=self._image_model,
             builtin_tools=("GENERATE_IMAGE",),
+            observer=observer,
         )
         return self._verify_image(turn.chunks, turn.text)
 
@@ -262,12 +347,112 @@ class Consultant:
     # The single SDK call site
     # ------------------------------------------------------------------
 
+    async def _drive(
+        self, agent: Any, prompt: str, observer: Any = None
+    ) -> _Turn:
+        """Send one prompt and drain its steps, inside the agent's lifetime.
+
+        **Streaming, which AG-7 originally forbade and AG-13 reversed.**
+        The reversal is narrow and the reasoning is in
+        ``risks.md`` AG-R-9: the risk was the consultant *inventing*
+        session machinery ahead of the engine and so shaping the engine
+        around a one-shot call. Phase 3 built that machinery properly, so
+        this now *consumes* it — ``receive_steps()``, and the caller's
+        observer feeding the existing ``StepTranslator``. There is no
+        second translator and no second event vocabulary here, which is
+        what the redrawn tripwire watches for.
+
+        ``chat()`` is still not called, and that is the other half of the
+        boundary. It returns a lazy ``ChatResponse`` — a cursor over a
+        stream nothing has pulled — and reading one after
+        ``Agent.__aexit__`` hung until killed in phase 1. Driving the
+        conversation directly keeps the work inside the lifetime that owns
+        the connection.
+
+        The conversation is held for the duration so :meth:`cancel` has
+        something to halt, and dropped in ``finally`` so a stopped
+        consultation cannot be stopped twice.
+        """
+        conversation = agent.conversation
+        self._conversation = conversation
+        # Kept past the `finally` below on purpose. `_chat`'s except
+        # handlers run *after* it, so reading stderr off `_conversation`
+        # would always find None and the diagnosis would silently be
+        # empty — the failure this whole tail exists to prevent, one
+        # layer up.
+        self._last_connection = getattr(conversation, "connection", None)
+        steps: list[Any] = []
+        try:
+            await conversation.send(prompt)
+            async for step in conversation.receive_steps():
+                steps.append(step)
+                if observer is not None:
+                    observer(step)
+        finally:
+            self._conversation = None
+
+        return _Turn(
+            text=(conversation.last_response or "").strip(),
+            chunks=steps,
+            stop_reason=_name(stop_reason_of(conversation)),
+            usage=turn_usage_of(conversation),
+        )
+
+    def _stderr_tail(self) -> str:
+        """The harness's own last words, for a failure that needs them.
+
+        Empty string when there is nothing to add, so callers can
+        concatenate unconditionally. Read defensively through the whole
+        attribute path: this is private SDK surface reached from a failure
+        handler, and a diagnostic that raises while explaining a failure
+        replaces a useful message with a useless one.
+        """
+        try:
+            lines = list(self._connection_stderr())[-STDERR_TAIL_LINES:]
+        except Exception:  # noqa: BLE001 - a missing diagnosis is not a failure
+            logger.debug("Could not read the harness stderr", exc_info=True)
+            return ""
+        if not lines:
+            return ""
+        return "\n\nThe Antigravity harness last said:\n" + "\n".join(lines)
+
+    def _connection_stderr(self) -> Any:
+        """The harness's stderr deque, live connection or last one.
+
+        The live conversation first — a failure raised mid-turn still has
+        one — and the retained connection second, for the timeout and SDK
+        error paths, which run after the agent's context manager has
+        closed and cleared it.
+        """
+        live = getattr(self._conversation, "connection", None)
+        connection = live if live is not None else self._last_connection
+        return getattr(connection, "_stderr_lines", ()) or ()
+
+    async def cancel(self) -> bool:
+        """Halt a running consultation. Safe when there is none.
+
+        AG-13's ⏹ Stop. The subagent tab offers one on every row, and
+        without this it would be decorative — which is worse than absent,
+        because a button that does nothing reads as a hung engine rather
+        than as a missing feature.
+        """
+        conversation = self._conversation
+        if conversation is None:
+            return False
+        try:
+            await conversation.cancel()
+        except Exception:  # noqa: BLE001 - a cancel that fails is not fatal
+            logger.exception("Cancelling the consultation failed")
+            return False
+        return True
+
     async def _chat(
         self,
         prompt: str,
         *,
         model: str,
         builtin_tools: tuple[str, ...],
+        observer: Any = None,
     ) -> _Turn:
         """Start a harness, send one prompt, drain the answer, shut down.
 
@@ -326,21 +511,12 @@ class Consultant:
         try:
             async with asyncio.timeout(self._timeout):
                 async with Agent(config) as agent:
-                    response = await agent.chat(prompt)
-                    # Both drains, here, before the harness goes away.
-                    text = (await response.text()).strip()
-                    chunks = await response.resolve()
-                    return _Turn(
-                        text=text,
-                        chunks=chunks,
-                        stop_reason=getattr(
-                            response.stop_reason, "name", "unknown"
-                        ),
-                    )
+                    return await self._drive(agent, prompt, observer)
         except TimeoutError as exc:
             raise ConsultationError(
                 f"Antigravity did not answer within {self._timeout:.0f}s. "
                 "The consultation was abandoned; nothing was written."
+                + self._stderr_tail()
             ) from exc
         except (
             types.AntigravityConnectionError,
@@ -357,7 +533,7 @@ class Consultant:
             # MCP tool handler whose contract is "every failure comes back
             # as prose the model can act on". An unwrapped SDK error
             # escapes it and reaches the model as a stack trace.
-            raise ConsultationError(_explain(exc)) from exc
+            raise ConsultationError(_explain(exc) + self._stderr_tail()) from exc
 
     # ------------------------------------------------------------------
     # AG-R-3: believe the filesystem, not the tool
@@ -450,17 +626,35 @@ def _explain(exc: Exception) -> str:
 
 
 def _first_output_path(chunks: list[Any]) -> str:
-    """The ``output_path`` from a ``GenerateImageResult``, or ``""``.
+    """Where ``generate_image`` says it wrote, or ``""``.
 
     Read by attribute rather than by type, and defensively: this is an
-    alpha SDK, ``resolve()`` returns a union of three chunk kinds, and the
-    result object is a pydantic model the harness fills in. A shape that
-    moved should read as "no image" — which raises a clear error — rather
-    than as an ``AttributeError`` from inside a tool call.
+    alpha SDK and the result object is a pydantic model the harness fills
+    in. A shape that moved should read as "no image" — which raises a
+    clear error — rather than as an ``AttributeError`` from inside a tool
+    call.
+
+    **Two shapes, because AG-13 changed what is passed here.** Until the
+    consultation streamed, this read ``ChatResponse.resolve()`` chunks,
+    where the path hangs off ``chunk.result.output_path``. It now receives
+    ``Step`` objects, where it is a *tool-call argument*:
+    ``StepUpdate.generate_image`` carries ``prompt`` and ``output_path`` in
+    one sub-message, and the SDK copies the whole thing into
+    ``ToolCall.args`` (``sdk-surface.md`` § The step stream).
+
+    Both are tried, chunk shape first. Not defensiveness for its own sake:
+    dropping the old one would have been a silent regression of exactly
+    the kind phase 3's live run found three of — the tests pass either
+    way, and only a real image would have shown it.
     """
     for chunk in chunks:
         result = getattr(chunk, "result", None)
         path = getattr(result, "output_path", None)
         if isinstance(path, str) and path:
             return path
+        for call in getattr(chunk, "tool_calls", None) or []:
+            args = getattr(call, "args", None) or {}
+            path = args.get("output_path") if isinstance(args, dict) else None
+            if isinstance(path, str) and path:
+                return path
     return ""

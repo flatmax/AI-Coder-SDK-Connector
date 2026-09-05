@@ -1508,6 +1508,67 @@ export const STYLES = css`
     opacity: 1;
   }
 
+  /* Engine chip — which engine is answering, in the action bar.
+   * Only rendered when more than one engine is mountable, so its
+   * presence is already the signal that there is a question to
+   * ask; the text answers it. Secondary weight by default: on a
+   * complete engine this is orientation, not a warning. */
+  .engine-chip {
+    font-size: 0.75rem;
+    letter-spacing: 0.01em;
+  }
+  /* The engine has surfaces this build has not wired to it, so
+   * controls are missing from this very bar. Amber, matching the
+   * health banner, because it is the same class of fact — a
+   * standing condition about the channel — and because it has to
+   * stay visible after the notice has been dismissed. That is
+   * what makes dismissing the notice safe rather than a way to
+   * lose the only explanation. */
+  .engine-chip.engine-unfinished {
+    color: #d29922;
+    border-color: rgba(210, 153, 34, 0.35);
+    background: rgba(210, 153, 34, 0.08);
+  }
+  .engine-chip.engine-unfinished:hover {
+    color: #d29922;
+    background: rgba(210, 153, 34, 0.16);
+  }
+  /* The missing surfaces, by name. A list rather than a sentence:
+   * the reader is scanning for one particular feature they went
+   * looking for, and prose would make them read all of it. */
+  .engine-missing {
+    margin: 0.25rem 0 0;
+    padding-left: 1.1rem;
+  }
+  .engine-missing li {
+    margin: 0.1rem 0;
+  }
+  /* The way back to a complete engine. A real button rather than
+   * the banner's flat text, because unlike everything else in
+   * here it does something, and it ends the current session. */
+  .engine-switch {
+    background: rgba(210, 153, 34, 0.16);
+    border: 1px solid rgba(210, 153, 34, 0.4);
+    color: inherit;
+    border-radius: 4px;
+    padding: 0.2rem 0.6rem;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+  .engine-switch:hover:not(:disabled) {
+    background: rgba(210, 153, 34, 0.28);
+  }
+  .engine-switch:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .engine-switch-note {
+    display: block;
+    margin-top: 0.2rem;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.75rem;
+  }
+
   /* Edit blocks — visual cards for edits proposed by the
    * assistant. Minimal styling here; Phase 2d adds the
    * character-level diff highlighting. */

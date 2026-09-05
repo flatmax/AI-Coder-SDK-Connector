@@ -60,6 +60,7 @@ export const SURFACE = Object.freeze({
   MCP_SERVER_INVENTORY: 'mcp_server_inventory',
   SESSION_MIRROR: 'session_mirror',
   TRANSCRIPT_HISTORY: 'transcript_history',
+  SESSION_FORK: 'session_fork',
   RATE_LIMIT_EVENTS: 'rate_limit_events',
   SUBAGENT_TABS: 'subagent_tabs',
   AGENT_QUESTIONS: 'agent_questions',
@@ -182,4 +183,42 @@ export function resetCapabilities() {
 export function setCapabilities(value) {
   _descriptor = value && typeof value === 'object' ? value : null;
   _pending = null;
+}
+
+/**
+ * Surfaces the running engine reports with a given `status`.
+ *
+ * The webapp hides `absent` and `unbuilt` identically — that is AG-9, and
+ * it is right, because *why* a panel has no data is not the panel's
+ * business. This reader exists for the one place the distinction is the
+ * whole point: telling somebody why the application they are looking at
+ * is missing features it had yesterday.
+ *
+ * `unbuilt` is the honest answer to that question and `absent` is not. An
+ * absent surface is a real difference between two engines — the running
+ * one has no USD figure and never will — and the UI is complete without
+ * it. An unbuilt one is a feature this project has built, on an engine
+ * that cannot yet reach it, and its absence is a half-finished
+ * application rather than a design decision. Only the second is worth
+ * interrupting somebody about.
+ *
+ * Returns titles rather than keys because the caller renders them: the
+ * descriptor's `title` is the surface's user-facing name, written once on
+ * the server so that the browser is not a second author of what the
+ * surface is called. Empty before the descriptor has loaded, which reads
+ * correctly — nothing is known to be missing yet.
+ *
+ * @param {string} status — `'supported'`, `'absent'` or `'unbuilt'`
+ * @returns {Array<{key: string, title: string, note: string}>} sorted by title
+ */
+export function surfacesWithStatus(status) {
+  if (!_descriptor) return [];
+  return Object.entries(_descriptor)
+    .filter(([, entry]) => entry && entry.status === status)
+    .map(([key, entry]) => ({
+      key,
+      title: entry.title || key,
+      note: entry.note || '',
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
 }

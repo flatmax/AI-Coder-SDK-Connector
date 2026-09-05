@@ -52,30 +52,48 @@ KEYLESS = Credentials(mode=NONE, source="no credential, on purpose")
 # ----------------------------------------------------------------------
 
 
-class FakeResponse:
-    """What ``Agent.chat`` returns, in the two shapes we read."""
+class FakeConversation:
+    """The SDK's ``Conversation``, in the shape the consultant reads.
 
-    def __init__(self, text: str = "", chunks: list | None = None):
-        self._text = text
-        self._chunks = chunks or []
-        self.stop_reason = type("Stop", (), {"name": "UNSPECIFIED"})()
-        #: Set by :class:`FakeAgent` on teardown. Reading after that point
-        #: is the bug, so it raises rather than answering.
+    **Named after the real object's attributes, not after convenience.**
+    Phase 3's live run found three bugs that every offline test had missed
+    because ``FakeConversation`` carried a ``stop_reason`` the real class
+    does not have; a double that cannot fail the way the real object fails
+    is not standing in for it. So the spellings here are the SDK's:
+    ``last_response``, ``_last_turn_stop_reason``, ``last_turn_usage``.
+
+    ``receive_steps`` refuses to yield once the agent has exited, because
+    reading a stream after ``Agent.__aexit__`` is the phase-1 hang and a
+    fake that answers anyway is how it got through.
+    """
+
+    def __init__(self, text: str = "ok", steps: list | None = None):
+        self.last_response = text
+        self._steps = steps or []
+        self._last_turn_stop_reason = type("Stop", (), {"name": "UNSPECIFIED"})()
+        self.last_turn_usage = None
+        self.sent: list[str] = []
+        self.cancels = 0
         self.closed = False
 
-    def _check(self) -> None:
-        if self.closed:
-            raise RuntimeError(
-                "the stream was read after Agent.__aexit__ — this is the hang"
-            )
+    async def send(self, prompt):
+        self.sent.append(prompt)
+        # Also on the class-level list, which is where the tests that care
+        # about *what was asked* look. The prompt no longer passes through
+        # the agent at all, so recording it here keeps those assertions
+        # about the consultant rather than about the double's plumbing.
+        FakeAgent.prompts.append(prompt)
 
-    async def text(self) -> str:
-        self._check()
-        return self._text
+    async def receive_steps(self):
+        for step in self._steps:
+            if self.closed:
+                raise RuntimeError(
+                    "steps were drained after Agent.__aexit__ — this is the hang"
+                )
+            yield step
 
-    async def resolve(self) -> list:
-        self._check()
-        return self._chunks
+    async def cancel(self):
+        self.cancels += 1
 
 
 class FakeAgent:
@@ -84,11 +102,11 @@ class FakeAgent:
     ``configs`` is a class attribute so a test can read what the
     consultant built without threading a fixture through the call.
 
-    ``__aexit__`` **closes the responses it handed out**, which is not
-    decoration. The real ``ChatResponse`` is a lazy cursor over a stream
-    that dies with the connection, and a fake that stayed readable after
-    teardown let a hang-until-killed bug through every test in this file.
-    See :class:`TestTheStreamIsDrainedBeforeTeardown`.
+    ``__aexit__`` **closes the conversation it handed out**, which is not
+    decoration: the real stream dies with the connection, and a fake that
+    stayed readable after teardown let a hang-until-killed bug through
+    every test in this file. See
+    :class:`TestTheStreamIsDrainedBeforeTeardown`.
     """
 
     configs: list = []
@@ -96,23 +114,22 @@ class FakeAgent:
 
     def __init__(self, config):
         FakeAgent.configs.append(config)
-        self._handed_out: list[FakeResponse] = []
+        self._conversation = (
+            FakeAgent.responses.pop(0)
+            if FakeAgent.responses
+            else FakeConversation("ok")
+        )
+
+    @property
+    def conversation(self):
+        return self._conversation
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
-        for response in self._handed_out:
-            response.closed = True
+        self._conversation.closed = True
         return False
-
-    async def chat(self, prompt):
-        FakeAgent.prompts.append(prompt)
-        response = (
-            FakeAgent.responses.pop(0) if FakeAgent.responses else FakeResponse("ok")
-        )
-        self._handed_out.append(response)
-        return response
 
 
 FakeAgent.prompts = []
@@ -160,15 +177,31 @@ def consultant(repo):
 
 
 class TestTheBoundaryHolds:
-    """``risks.md`` AG-R-9's tripwire, as a test.
+    """``risks.md`` AG-R-9's tripwire, as a test — **redrawn 2026-09-01**.
 
-    "``receive_steps``, ``cancel``, ``conversation_id`` or a hook
-    registration appearing in the consultant module. Any of them means
-    the boundary has moved." A comment saying so would be noticed in
-    review at best; this fails the build.
+    The original list was ``receive_steps``, ``cancel``,
+    ``conversation_id`` and hook registration, on the grounds that the
+    consultant must not invent session machinery *ahead of* the engine and
+    so shape the engine around a one-shot call.
+
+    [AG-13](../specs5/plan-ag/decisions.md) makes the consultation stream,
+    and the risk entry's amendment explains why that is the boundary being
+    redrawn rather than crossed: phase 3 built the machinery properly,
+    against ``Conversation`` directly, and the consultant now **consumes**
+    it. The direction of dependency was the whole of the risk, and it
+    still points the right way.
+
+    So ``receive_steps`` and ``cancel`` are now *expected* — the tab's ⏹
+    Stop is decorative without the second. What is still forbidden is a
+    **second implementation**: its own translator, its own event
+    vocabulary, or the resume/history machinery that would make a
+    consultation a session.
     """
 
-    FORBIDDEN = ("receive_steps", "cancel", "conversation_id")
+    #: Names that still stand for re-implementation rather than for use.
+    #: ``conversation_id`` is resume, and a consultation that can be
+    #: resumed is a session — which belongs to the engine, not here.
+    FORBIDDEN = ("conversation_id", "SessionStore", "save_dir")
 
     def _names(self) -> set[str]:
         source = Path(inspect.getfile(consultant_module)).read_text(encoding="utf-8")
@@ -194,10 +227,54 @@ class TestTheBoundaryHolds:
         )
 
     def test_no_hook_registration(self):
-        """A hook is the other half of the same tripwire."""
+        """A hook is the other half of the same tripwire.
+
+        Unchanged by AG-13. The consultation carries a static allowlist
+        because it is a capability restriction with no user in the loop
+        (AG-5); a decide hook here would be a second permission gate, and
+        AG-5's whole point is that there is one.
+        """
         names = self._names()
         hooks = {n for n in names if n.endswith("Hook")}
         assert not hooks, f"hook machinery in the consultant: {sorted(hooks)}"
+
+    def test_it_reuses_the_pump_rather_than_growing_one(self):
+        """AG-R-9's redrawn tripwire, stated positively.
+
+        The consultant streams now, so the question is no longer *whether*
+        it touches steps but whether it invents a second vocabulary for
+        them. It must not define a translator, a block type or an event
+        name of its own: those belong to ``steps.py``, and a second copy
+        is how the two engines' payloads would quietly drift apart.
+        """
+        source = Path(inspect.getfile(consultant_module)).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for invented in ("StepTranslator", "Event", "_Block", "translate"):
+            assert invented not in defined, (
+                f"consultant.py defines {invented!r}. AG-R-9: reusing the "
+                "pump is the point; writing a second one beside it means "
+                "the boundary has moved after all."
+            )
+
+    def test_the_shared_figure_readers_are_imported_not_copied(self):
+        """One reader for the stop reason and the usage, not two.
+
+        Phase 3's live run found both of these spelled wrongly, on private
+        SDK attributes. A second copy here would be a second place to get
+        them wrong, and it would be found the same way — live, months
+        later.
+        """
+        source = Path(inspect.getfile(consultant_module)).read_text(encoding="utf-8")
+        assert "stop_reason_of" in source and "turn_usage_of" in source
+        assert "_last_turn_stop_reason" not in source, (
+            "consultant.py reaches for the SDK's private stop-reason "
+            "attribute directly; call stop_reason_of() instead."
+        )
 
     def test_it_really_is_one_shot(self):
         """One ``Agent(...)`` construction, in one function.
@@ -240,7 +317,7 @@ class TestTheStreamIsDrainedBeforeTeardown:
     async def test_second_opinion_drains_inside_the_context_manager(
         self, consultant, fake_agent
     ):
-        fake_agent.responses = [FakeResponse("an answer")]
+        fake_agent.responses = [FakeConversation("an answer")]
         assert await consultant.second_opinion("Well?") == "an answer"
 
     @pytest.mark.asyncio
@@ -249,7 +326,7 @@ class TestTheStreamIsDrainedBeforeTeardown:
     ):
         (repo / "a.png").write_bytes(b"\x89PNG")
         fake_agent.responses = [
-            FakeResponse("done", [ImageChunk(str(repo / "a.png"))])
+            FakeConversation("done", [ImageChunk(str(repo / "a.png"))])
         ]
         assert (await consultant.generate_image("a duck")).path == "a.png"
 
@@ -260,16 +337,21 @@ class TestTheStreamIsDrainedBeforeTeardown:
         """A timeout around ``Agent(...)`` alone bounds nothing.
 
         Starting a harness is fast; waiting for a model is what hangs. So
-        the slow part is put in ``text()`` here — where the real work is —
-        and the consultation must still give up.
+        the slow part goes where the real work is, and the consultation
+        must still give up.
+
+        Since AG-13 that place is ``receive_steps`` rather than ``text``:
+        the consultant drives the conversation itself, so the stream *is*
+        the model work. A fake that stalled somewhere else would let the
+        timeout pass while covering nothing.
         """
 
-        class SlowResponse(FakeResponse):
-            async def text(self):
+        class SlowResponse(FakeConversation):
+            async def receive_steps(self):
                 import asyncio
 
                 await asyncio.sleep(10)
-                return "too late"
+                yield  # pragma: no cover - the timeout fires first
 
         fake_agent.responses = [SlowResponse()]
         target = Consultant(repo, credentials=KEYED, timeout_seconds=0.05)
@@ -349,7 +431,7 @@ class TestSecondOpinionIsContained:
     ):
         """An empty second opinion rendered as a tool result reads as
         agreement, which is the one thing it is not."""
-        fake_agent.responses = [FakeResponse("   ")]
+        fake_agent.responses = [FakeConversation("   ")]
         with pytest.raises(ConsultationError, match="empty answer"):
             await consultant.second_opinion("Well?")
 
@@ -358,7 +440,7 @@ class TestGenerateImageIsContained:
     @pytest.mark.asyncio
     async def test_only_the_image_tool_is_enabled(self, consultant, fake_agent, repo):
         fake_agent.responses = [
-            FakeResponse("done", [ImageChunk(str(repo / "out.png"))])
+            FakeConversation("done", [ImageChunk(str(repo / "out.png"))])
         ]
         (repo / "out.png").write_bytes(b"\x89PNG\r\n")
         await consultant.generate_image("a duck")
@@ -377,7 +459,7 @@ class TestGenerateImageIsContained:
         exists to invoke. ``allow_all`` must appear nowhere.
         """
         fake_agent.responses = [
-            FakeResponse("done", [ImageChunk(str(repo / "out.png"))])
+            FakeConversation("done", [ImageChunk(str(repo / "out.png"))])
         ]
         (repo / "out.png").write_bytes(b"\x89PNG\r\n")
         await consultant.generate_image("a duck")
@@ -400,7 +482,7 @@ class TestGenerateImageIsContained:
         """AG-10. The SDK defaults to ``os.getcwd()``, which happens to be
         the same value and is not a promise."""
         fake_agent.responses = [
-            FakeResponse("done", [ImageChunk(str(repo / "out.png"))])
+            FakeConversation("done", [ImageChunk(str(repo / "out.png"))])
         ]
         (repo / "out.png").write_bytes(b"\x89PNG\r\n")
         await consultant.generate_image("a duck")
@@ -433,7 +515,7 @@ class TestImageWriteIsVerified:
     ):
         target = repo / "src" / "duck.png"
         target.write_bytes(b"\x89PNG\r\n\x1a\n")
-        fake_agent.responses = [FakeResponse("saved it", [ImageChunk(str(target))])]
+        fake_agent.responses = [FakeConversation("saved it", [ImageChunk(str(target))])]
 
         result = await consultant.generate_image("a duck", output_name="duck.png")
         assert isinstance(result, ImageResult)
@@ -454,7 +536,7 @@ class TestImageWriteIsVerified:
         elsewhere = tmp_path.parent / "scratch-duck.png"
         elsewhere.write_bytes(b"\x89PNG")
         fake_agent.responses = [
-            FakeResponse("Saved!", [ImageChunk(str(elsewhere))])
+            FakeConversation("Saved!", [ImageChunk(str(elsewhere))])
         ]
         with pytest.raises(ConsultationError, match="outside the repository"):
             await consultant.generate_image("a duck")
@@ -466,7 +548,7 @@ class TestImageWriteIsVerified:
         """Diagnosable without reading someone else's settings file."""
         elsewhere = tmp_path.parent / "diverted.png"
         elsewhere.write_bytes(b"x")
-        fake_agent.responses = [FakeResponse("ok", [ImageChunk(str(elsewhere))])]
+        fake_agent.responses = [FakeConversation("ok", [ImageChunk(str(elsewhere))])]
         with pytest.raises(ConsultationError) as exc:
             await consultant.generate_image("a duck")
         assert str(elsewhere) in str(exc.value)
@@ -477,7 +559,7 @@ class TestImageWriteIsVerified:
         self, consultant, fake_agent, repo
     ):
         fake_agent.responses = [
-            FakeResponse("ok", [ImageChunk(str(repo / "ghost.png"))])
+            FakeConversation("ok", [ImageChunk(str(repo / "ghost.png"))])
         ]
         with pytest.raises(ConsultationError, match="no file"):
             await consultant.generate_image("a duck")
@@ -488,7 +570,7 @@ class TestImageWriteIsVerified:
     ):
         (repo / "empty.png").write_bytes(b"")
         fake_agent.responses = [
-            FakeResponse("ok", [ImageChunk(str(repo / "empty.png"))])
+            FakeConversation("ok", [ImageChunk(str(repo / "empty.png"))])
         ]
         with pytest.raises(ConsultationError, match="empty"):
             await consultant.generate_image("a duck")
@@ -498,7 +580,7 @@ class TestImageWriteIsVerified:
         self, consultant, fake_agent
     ):
         """The model's own refusal is the useful half of this error."""
-        fake_agent.responses = [FakeResponse("I can't generate that.", [])]
+        fake_agent.responses = [FakeConversation("I can't generate that.", [])]
         with pytest.raises(ConsultationError, match="I can't generate that"):
             await consultant.generate_image("a duck")
 
@@ -508,7 +590,7 @@ class TestImageWriteIsVerified:
     ):
         """Which is the only root there is, per AG-10."""
         (repo / "rel.png").write_bytes(b"\x89PNG")
-        fake_agent.responses = [FakeResponse("ok", [ImageChunk("rel.png")])]
+        fake_agent.responses = [FakeConversation("ok", [ImageChunk("rel.png")])]
         result = await consultant.generate_image("a duck")
         assert result.path == "rel.png"
 
@@ -522,7 +604,7 @@ class TestImageWriteIsVerified:
         image" error, not an AttributeError from inside a tool call.
         """
         fake_agent.responses = [
-            FakeResponse("ok", [object(), type("T", (), {"result": None})()])
+            FakeConversation("ok", [object(), type("T", (), {"result": None})()])
         ]
         with pytest.raises(ConsultationError, match="no image file"):
             await consultant.generate_image("a duck")
@@ -540,10 +622,14 @@ class TestSdkErrorsBecomeProse:
     @pytest.fixture
     def raising_agent(self, monkeypatch, fake_agent):
         def _raise(exc):
-            async def chat(self, prompt):
+            async def send(self, prompt):
                 raise exc
 
-            monkeypatch.setattr(FakeAgent, "chat", chat)
+            # `send` rather than `chat`: the consultant drives the
+            # conversation directly since AG-13, and a harness that has
+            # died fails on the way in rather than on a cursor nobody has
+            # pulled yet.
+            monkeypatch.setattr(FakeConversation, "send", send)
 
         return _raise
 
@@ -676,11 +762,85 @@ class TestModelPinning:
         (repo / "a.png").write_bytes(b"\x89PNG")
         target = Consultant(repo, credentials=KEYED)
         fake_agent.responses = [
-            FakeResponse("x"),
-            FakeResponse("ok", [ImageChunk(str(repo / "a.png"))]),
+            FakeConversation("x"),
+            FakeConversation("ok", [ImageChunk(str(repo / "a.png"))]),
         ]
         await target.second_opinion("hi")
         await target.generate_image("a duck")
         text_model, image_model = (c.model for c in fake_agent.configs)
         assert text_model != image_model
         assert "image" in image_model
+
+
+class TestAFailureCarriesTheHarnessesOwnWords:
+    """The diagnosis reaches the caller, not just the server log.
+
+    On 2026-09-02 two live consultations sat at the full timeout and
+    returned nothing. The reason — ``Post ".../streamGenerateContent":
+    context canceled``, meaning the request had been in flight the whole
+    time and Google never answered — was in the harness's stderr, which
+    the SDK logs at INFO on the *root* logger and nowhere else. The person
+    watching the tab saw a spinner.
+
+    The ordering here is the part worth testing rather than the string:
+    ``_chat``'s except handlers run *after* ``_drive``'s ``finally`` has
+    cleared the live conversation, so a tail read from that attribute
+    would always be empty and the whole feature would be a silent no-op.
+    """
+
+    def connection_with(self, lines):
+        return type("Conn", (), {"_stderr_lines": list(lines)})()
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_names_what_the_harness_said(self, repo, fake_agent):
+        class Slow(FakeConversation):
+            @property
+            def connection(self):
+                return type(
+                    "C", (), {"_stderr_lines": ["Post ...: context canceled"]}
+                )()
+
+            async def receive_steps(self):
+                import asyncio
+
+                await asyncio.sleep(10)
+                yield  # pragma: no cover
+
+        fake_agent.responses = [Slow()]
+        target = Consultant(repo, credentials=KEYED, timeout_seconds=0.05)
+        with pytest.raises(ConsultationError) as exc:
+            await target.second_opinion("Well?")
+        assert "context canceled" in str(exc.value), (
+            "the timeout message carries no harness stderr — the tail is "
+            "read after _drive cleared the conversation, so it found None"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_consultation_with_no_stderr_says_nothing_extra(
+        self, consultant, fake_agent
+    ):
+        """An empty deque must not append a dangling header."""
+        assert consultant._stderr_tail() == ""
+
+    @pytest.mark.asyncio
+    async def test_only_the_tail_is_quoted(self, consultant):
+        """The deque holds 100 lines; a tool result is not a log file."""
+        from aic_dc.antigravity.consultant import STDERR_TAIL_LINES
+
+        consultant._last_connection = self.connection_with(
+            [f"line-{i}" for i in range(40)]
+        )
+        tail = consultant._stderr_tail()
+        assert "line-39" in tail and "line-0" not in tail
+        assert tail.count("line-") == STDERR_TAIL_LINES
+
+    def test_a_broken_diagnostic_does_not_replace_the_failure(self, consultant):
+        """A tail that raises while explaining a failure is worse than none."""
+
+        class Exploding:
+            @property
+            def _stderr_lines(self):
+                raise RuntimeError("gone")
+
+        consultant._last_connection = Exploding()
+        assert consultant._stderr_tail() == ""
