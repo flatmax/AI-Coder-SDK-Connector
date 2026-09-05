@@ -107,6 +107,25 @@ Measured, not hypothesised: `agy` was asked to create a file in the current dire
 > the one form of the check that does not depend on a mechanism nobody has pinned down. See
 > [`delivery.md` § The trusted workspace was not the whole story](delivery.md#the-trusted-workspace-was-not-the-whole-story-and-two-explanations-that-were-wrong).
 
+**Mitigated 2026-09-05, at detection rather than at startup — and the reason is that the specified
+mitigation cannot be built honestly.** The startup check above has to assert an *outcome*, and the
+only thing that produces an outcome is a real write, which costs a turn on the user's subscription
+every time the app starts. So the check was moved to where it is free: `agy/steps.py` inspects every
+completed call in the write seam, and a target that is **missing here** while a file of that name sits
+in `~/.gemini/antigravity-cli/scratch/` is reported as a `systemEvent` naming both paths.
+
+Deliberately narrow. "The file is missing" alone has innocent explanations — the model naming a path
+it never created, a tool that failed for an unrelated reason — and a false alarm about a write that
+did land would be worse than the silence it replaces. The pair has no innocent reading.
+
+The notice says the edit is **not lost** and names the file holding it, because a user told only "the
+file is not there" would redo work that has already been done. And it sits *beside* the tool card
+rather than rewriting it: `agy` reported success, the card says so, and the two disagreeing is exactly
+the information the user needs.
+
+This does not close the risk — a diverted write still happens, and nothing prevents it. What changes is
+that it stops being undiagnosable, which was the whole of the severity.
+
 **Why it bites:** it does not error. The agent believes it succeeded, the transcript says it
 succeeded, and the file tree and diff viewer — both rooted at the repo — show nothing. The user's
 reading is "the agent lied about editing my file", and the actual cause is in a settings file in

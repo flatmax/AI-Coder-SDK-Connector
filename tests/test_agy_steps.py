@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import pytest
 
+from aic_dc.agy import steps
 from aic_dc.agy.steps import AgyTranslator, unwrap
 
 
@@ -321,3 +322,101 @@ class TestTheSharedAccountingObject:
         t.translate(frame(TOOL_ACTIVE))
         assert t.stats.tool_calls == 1
         assert t.stream_complete()[-1].payload["num_tool_calls"] == 1
+
+
+class TestADivertedWriteIsReported:
+    """AG-R-3, turned from silence into a sentence.
+
+    `agy` writes a file into its own scratch directory, tells the model it
+    succeeded, and the file tree and diff viewer — both rooted at the repo
+    — show nothing. The user's reading is "the agent lied about editing my
+    file", and there is no path from that symptom to the cause.
+
+    `risks.md` specifies a *startup* check asserting the repo root is a
+    workspace the engine will write to. That cannot be built honestly: a
+    check phrased against `trustedWorkspaces` passes on a machine where
+    writes divert anyway — measured three times on 2026-09-05, from inside
+    a trusted root — and the only truthful check is a real write, which
+    costs a turn on the user's subscription at every startup. So the check
+    runs where it is free, on a completed write that already names its
+    target.
+    """
+
+    def _done(self, target):
+        return frame({
+            "conversation_id": "c",
+            "step_index": 2,
+            "state": "DONE",
+            "step_type": "tool",
+            "tool_name": "write_to_file",
+            "tool_info": {
+                "name": "write_to_file",
+                "parameters": {"TargetFile": str(target), "CodeContent": "x"},
+            },
+        })
+
+    def test_a_write_that_landed_says_nothing(self, tmp_path):
+        target = tmp_path / "landed.txt"
+        target.write_text("x", encoding="utf-8")
+        events = AgyTranslator("r1").translate(self._done(target))
+        assert not [e for e in events if e.name == "systemEvent"]
+
+    def test_a_missing_file_alone_is_not_reported(self, tmp_path, monkeypatch):
+        """Narrow on purpose: "missing" has innocent explanations.
+
+        The model may name a path it never created, or the tool may have
+        failed for an unrelated reason. A false alarm about a write that
+        did land would be worse than the silence it replaces, so only the
+        pair — missing *here*, present *there* — has no innocent reading.
+        """
+        monkeypatch.setattr(steps, "SCRATCH_DIR", tmp_path / "scratch")
+        events = AgyTranslator("r1").translate(self._done(tmp_path / "gone.txt"))
+        assert not [e for e in events if e.name == "systemEvent"]
+
+    def test_missing_here_and_present_in_scratch_is_reported(
+        self, tmp_path, monkeypatch
+    ):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / "diverted.txt").write_text("the real content", encoding="utf-8")
+        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
+
+        events = AgyTranslator("r1").translate(self._done(tmp_path / "diverted.txt"))
+        notices = [e for e in events if e.name == "systemEvent"]
+        assert len(notices) == 1
+        message = notices[0].payload["data"]["message"]
+        assert "diverted.txt" in message
+        assert str(scratch) in message
+        # It must say the edit is not lost. A user told only "the file is
+        # not there" would redo work that has already been done.
+        assert "content is in that file" in message
+
+    def test_the_tool_card_still_reports_what_agy_said(self, tmp_path, monkeypatch):
+        """The correction is beside the card, not folded into it.
+
+        `agy` reported success and the card says so; a card rewritten to
+        say "failed" would be this pump asserting something the engine did
+        not, and the two disagreeing is exactly the information the user
+        needs.
+        """
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / "d.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
+        events = AgyTranslator("r1").translate(self._done(tmp_path / "d.txt"))
+        assert [e.name for e in events] == ["toolUse", "systemEvent", "toolResult"]
+
+    def test_a_read_is_never_checked(self, tmp_path, monkeypatch):
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        (scratch / "v.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(steps, "SCRATCH_DIR", scratch)
+        events = AgyTranslator("r1").translate(frame({
+            "conversation_id": "c", "step_index": 3, "state": "DONE",
+            "step_type": "tool", "tool_name": "view_file",
+            "tool_info": {
+                "name": "view_file",
+                "parameters": {"TargetFile": str(tmp_path / "v.txt")},
+            },
+        }))
+        assert not [e for e in events if e.name == "systemEvent"]

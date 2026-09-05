@@ -50,8 +50,10 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from aic_dc.agy import tools as agy_tools
 from aic_dc.antigravity.steps import TurnStats
 from aic_dc.claude_code.messages import Event
 
@@ -257,6 +259,37 @@ class AgyTranslator:
             if state not in TERMINAL_STATES:
                 return events
 
+        # A completed write that landed somewhere else. Checked here
+        # because this is the first moment the target and the outcome are
+        # both known, and reported as a system event rather than folded
+        # into the tool card: the card says the call succeeded, which is
+        # what `agy` told us, and the correction has to be louder than the
+        # thing it corrects.
+        if name in agy_tools.MUTATING_TOOLS:
+            diverted = _diverted_copy(params)
+            if diverted is not None:
+                target, copy = diverted
+                logger.warning("agy diverted a write: %s -> %s", target, copy)
+                events = events + [
+                    Event(
+                        "systemEvent",
+                        {
+                            "subtype": "engine_error",
+                            "data": {
+                                "message": (
+                                    f"The agent reported writing {target}, but "
+                                    f"the file is not there — agy put it in "
+                                    f"{copy} instead and reported success. "
+                                    f"This is a known agy behaviour, not a "
+                                    f"failure of the edit: the content is in "
+                                    f"that file. Nothing in the repository was "
+                                    f"changed."
+                                )
+                            },
+                        },
+                    )
+                ]
+
         # `tool_info.output` is per-tool rather than universal, so a
         # completed call with none is complete with no output — never left
         # pending, which would spin forever.
@@ -336,6 +369,55 @@ class AgyTranslator:
                 },
             ),
         ]
+
+
+#: Where ``agy`` puts a write it declined to make where it was asked.
+#: See :data:`aic_dc.antigravity.rules` for why this is not simply a
+#: ``trustedWorkspaces`` question.
+SCRATCH_DIR = Path.home() / ".gemini" / "antigravity-cli" / "scratch"
+
+
+def _diverted_copy(params: dict[str, Any]) -> tuple[str, str] | None:
+    """``(target, scratch_copy)`` when a write went somewhere else.
+
+    [AG-R-3](../../../specs5/plan-ag/risks.md#ag-r-3) is the worst failure
+    this transport has, because it is **silent and looks like success**:
+    ``agy`` writes the file into its own scratch directory, tells the model
+    it succeeded, and the file tree and diff viewer — both rooted at the
+    repo — show nothing. The user's reading is "the agent lied about
+    editing my file", and there is no path from that symptom to the cause,
+    which sits in a settings file belonging to another product.
+
+    Detected here rather than prevented at startup, and that is a decision
+    forced by measurement. `risks.md` specifies a startup health check
+    asserting "the repo root is a workspace the engine will write to" — but
+    a check phrased against ``trustedWorkspaces`` **passes on a machine
+    where writes divert anyway**, measured three times on 2026-09-05 from
+    inside a trusted root. The only honest check is an actual write, and a
+    write costs a turn on the user's subscription at every startup.
+
+    So the check runs where it is free: a completed write already names its
+    target, so one ``stat`` says whether the file is there. Deliberately
+    **narrow** — it fires only when the target is missing *and* a file of
+    that name is sitting in the scratch directory. That pair has no
+    innocent explanation, where "the file is missing" alone has several
+    (the model named a path it never created, a tool that failed for an
+    unrelated reason), and a false alarm about a write that did land would
+    be worse than the silence it replaces.
+    """
+    raw = params.get("TargetFile") or params.get("OutputPath")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        target = Path(raw)
+        if target.exists():
+            return None
+        candidate = SCRATCH_DIR / target.name
+        if candidate.is_file():
+            return (str(target), str(candidate))
+    except OSError:  # noqa: BLE001 - a diagnostic, never a control path
+        return None
+    return None
 
 
 def _duration_ms(seconds: Any) -> int:

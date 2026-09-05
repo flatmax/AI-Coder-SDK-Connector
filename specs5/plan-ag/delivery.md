@@ -2756,3 +2756,81 @@ reasoning from `updated_permissions` having no counterpart at any layer. True �
 **engine** could not persist a rule, not that the **product** could not. The row's own note had said
 what would change it. **A surface can be absent from an SDK and present in the app**, and that is now
 the recorded lesson rather than an assumption sitting in a test.
+
+---
+
+## AG-R-3 becomes a sentence instead of a silence (2026-09-05)
+
+The register's mitigation for the silent write-diversion is a **startup health check** asserting *"the
+repo root is a workspace the engine will actually write to"*. It has not been built, and working on it
+turned up that it cannot be built as specified.
+
+**The specified check cannot be honest.** A check phrased against `trustedWorkspaces` passes on a
+machine where writes divert anyway — measured three times that morning, from inside a trusted root. So
+the check has to assert an *outcome*, and the only thing that produces an outcome is a real write,
+which costs a turn on the user's paid subscription **every time the app starts**. That is a poor trade
+for a check that mostly says yes.
+
+**So it moved to where it is free.** A completed write already names its target, so one `stat` answers
+the question. `agy/steps.py` inspects every completed call in the write seam, and a target that is
+missing *here* while a file of that name sits in `~/.gemini/antigravity-cli/scratch/` becomes a
+`systemEvent` naming both paths.
+
+Three decisions in it, each about not making things worse:
+
+- **Narrow on purpose.** It fires only on the *pair* — missing here, present there. "The file is
+  missing" alone has innocent explanations: the model naming a path it never created, a tool that
+  failed for an unrelated reason. A false alarm about a write that did land would be worse than the
+  silence it replaces; the pair has no innocent reading.
+- **It says the edit is not lost**, and names the file holding it. A user told only "the file is not
+  there" would redo work that has already been done.
+- **It sits beside the tool card, not inside it.** `agy` reported success and the card says so.
+  Rewriting the card to say "failed" would be this pump asserting something the engine did not — and
+  the two disagreeing is exactly the information the user needs.
+
+**This does not close the risk.** A diverted write still happens and nothing here prevents it. What
+changes is that it stops being undiagnosable, which was the whole of the severity: the failure was
+never that a file went to the wrong place, it was that the symptom — *"the agent says it edited my
+file and the diff is empty"* — had no path to a cause sitting in another product's settings directory.
+
+---
+
+## The deny tripwire's third false pass, and its fix verified (2026-09-05)
+
+`probe_agy_gate.py` passed after the trusted-workspace fix, and **the pass was still not honest**:
+
+```
+tools the gate was asked about: ['run_command', 'find_by_name', 'list_dir']
+of those, refused:              ['run_command', 'list_dir']
+PASS: 2 write attempt(s) refused across 2 distinct route(s), file unchanged
+```
+
+`replace_file_content` never appears. The model never proposed the edit, so the refusal of a *write*
+was never tested — and the run went green anyway because `list_dir` was counted as a refused write
+attempt.
+
+**The cause is this phase's signature failure, for the third time.** The probe's `READ_CLASS` was a
+hand-written set containing `list_directory` — the **SDK's** name — where `agy` sends `list_dir`. So
+the probe's own gate refused a read; the model lost the ability to look around, gave up before
+proposing an edit, and the misclassified read padded the "writes refused" count.
+
+`READ_CLASS` is now **derived** from `permissions.TOOL_CLASSES`, the merged table that already holds
+both vocabularies. A second copy of a tool-name table is precisely the drift phase 8 has now been
+caught by three times: the dialog calling a file edit a shell command, the read-class hole here, and
+the `_RULE_TOOL_FOR_PATHS` trap AG-15 had to route around.
+
+**Re-run and verified live:**
+
+```
+tools the gate was asked about: ['run_command', 'find_by_name', 'view_file', 'view_file', 'grep_search']
+of those, refused:              ['run_command']
+PASS: 1 write attempt(s) refused across 1 distinct route(s), file unchanged
+```
+
+Three read tools now pass through where one was being wrongly refused. **What this run does not
+show** is worth stating: the model reached for the shell rather than the edit tool, so this is
+[AG-R-11](risks.md#ag-r-11)'s route-around being blocked rather than `replace_file_content` being
+refused. Both are real gate tests and the probe accepts either, but which one a given run exercises is
+the model's choice, not the probe's — so a single green run does not prove the edit path specifically.
+The 2026-09-03 run that refused three routes including `replace_file_content` remains the stronger
+record.
