@@ -2834,3 +2834,85 @@ refused. Both are real gate tests and the probe accepts either, but which one a 
 the model's choice, not the probe's — so a single green run does not prove the edit path specifically.
 The 2026-09-03 run that refused three routes including `replace_file_content` remains the stronger
 record.
+
+---
+
+## AG-15 verified in a browser, and the one thing only a browser found (2026-09-05)
+
+**Phase 9's exit criterion is met end to end**, on the paid subscription, in a fresh instance on a
+throwaway repo:
+
+```
+14:13:46  run_command  echo RULE_TEST_ONE   → dialog, offering "Always allow"
+14:13:56  …            resolved as allow_always by localhost
+14:13:56  Antigravity standing rule stored: Always allow run_command(echo RULE_TEST_ONE)
+14:14:20  Antigravity run_command allowed by a standing rule   ← second identical turn
+          dialogs asked, across both turns: 1
+```
+
+The dialog count stayed at **one** across two identical commands. The second call never reached
+`broker.can_use_tool`, which is what AG-15 asked to be asserted rather than "the dialog was dismissed".
+The rule is on disk in `~/.config/aic-dc/antigravity-rules.json`, keyed by repository, with the
+matching data that makes it exact.
+
+### The tooltip was lying, and no test could have caught it
+
+The always-allow control rendered with this title:
+
+> *Writes a rule to a settings file you can read and revoke. **It applies to the claude CLI in this
+> repository too**, not just AIC-DC.*
+
+For an Antigravity rule that is false in both halves. It is not a settings file the CLI reads; it is a
+file AIC⚡DC keeps, and `claude` has never heard of it. **A misleading sentence on a permission control
+is worse than a missing one, because the user acts on it** — someone reading that would believe a
+grant they made here also loosened their Claude gate.
+
+The cause is a shape that was already documented as wrong. `constants.js` says, of these tooltips:
+*"Two tooltips, because **the destination decides which is true**."* The call site then chose with
+`rule.session ? A : B` — a boolean, not a destination — so `aicDcRules`, a third destination added the
+same day, fell through to the Claude sentence and asserted it.
+
+Fixed by making the choice a function of the destination, where the destinations are described:
+`alwaysAllowTooltip(rule)`. Four tests pin all three cases, including the control — a fix that told
+*everyone* "not the claude CLI" would be wrong in the other direction, on the engine that ships.
+
+**Only a browser finds this.** Every unit test passed on both sides, before and after; the string was
+correct for the engine it was written for and nobody had asked what the other engine renders. That is
+the third defect in two days found by running the app and not by 4,400 tests — after `translator.stats`
+and `session.read_only`, and the same shape as both: **shared code meeting a second transport whose
+case nobody re-checked.**
+
+### The diversion: concurrency excluded, emptiness excluded, and a pattern that is not a cause
+
+`scripts/probe_agy_concurrent_write.py` was written to test the one candidate left in AG-R-3 — that a
+second concurrent `agy` process is what causes the write diversion. It ran the same create twice in
+one workspace, once alone and once beside a working second session.
+
+**Both diverted, including the solo control.** So concurrency is excluded, and the probe reported
+itself **INCONCLUSIVE** rather than claiming a result: a comparison whose control also fails proves
+nothing about the variable. That is worth more than a green run would have been — the alternative was
+to report "concurrency confirmed" from two failures that had a common cause neither of them was
+testing.
+
+The solo failure pointed somewhere else: it happened in an **empty** git repository, while the run
+where a create *did* land had a file in the workspace. Seeded and re-run the same afternoon —
+**diverted again**. Emptiness excluded too.
+
+Three explanations offered for this behaviour so far, all confidently reasoned and all wrong: the
+trust list, git-repository-ness, and create-versus-edit. This entry adds a fourth thing that is
+**deliberately not called a cause**. Holding the workspace root constant, every run on record lines up
+on the shape of the *turn*:
+
+| Turn | Outcome |
+|---|---|
+| edit an existing file **and** create a new one | both landed |
+| edit an existing file | landed |
+| create only — empty workspace, seeded workspace, fresh directory | diverted, five times |
+
+**A create lands when the turn also touches an existing file, and diverts when creating is all the
+turn does.** Five runs, one correlation, no mechanism.
+
+The reason this is fit to stop on rather than chase further: **the mitigation does not depend on it.**
+The detection added earlier fires on the *outcome* — target missing here, file of that name in the
+scratch directory — so it catches a diverted write whatever produced it. Every hour spent on the cause
+buys a better explanation of a failure that is already caught and named.

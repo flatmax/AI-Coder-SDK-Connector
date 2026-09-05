@@ -100,6 +100,40 @@ Measured, not hypothesised: `agy` was asked to create a file in the current dire
 > The largest untested difference between the diverting runs and the clean ones is that the diverting
 > ones had **two `agy` processes running concurrently**. That is a candidate and nothing more.
 >
+> **Excluded 2026-09-05, and the run that excluded it found something better.**
+> `scripts/probe_agy_concurrent_write.py` ran the same create twice in one workspace — once alone,
+> once beside a second working `agy` session — and **both diverted**, the solo one included. So
+> concurrency is not the trigger, and the probe reported itself INCONCLUSIVE rather than claiming a
+> result, because a comparison whose control also fails proves nothing.
+>
+> What it does establish is sharper than what it set out to test. The *solo* create diverted in a
+> freshly-initialised **empty** git repository, while `probe_agy_write_target.py` — which seeded
+> `existing.txt` and asked for an edit *and* a create in one turn — had **both** land in a workspace
+> under the same root. The two differ in whether the workspace **contained a file at all**.
+>
+> **That hypothesis was tested immediately and is also wrong.** The probe was re-run with a file
+> seeded in the workspace and the create diverted again, solo and concurrent alike. Emptiness is not
+> the trigger.
+>
+> **What the four runs do line up on is the shape of the *turn*, not of the workspace.** Every
+> observation on record, with the workspace root held constant at `/tmp/temp`:
+>
+> | Turn | Outcome |
+> |---|---|
+> | edit an existing file **and** create a new one (`probe_agy_write_target`) | **both landed** |
+> | edit an existing file (browser demo; isolation probe's stranger) | **landed** |
+> | create only, empty workspace (`probe_agy_concurrent_write`, ×2) | **diverted** |
+> | create only, seeded workspace (same probe, re-run, ×2) | **diverted** |
+> | create only, fresh directory (the original 2026-08-30 capture) | **diverted** |
+>
+> So the sharpest statement the evidence supports is: **a create lands when the turn also touches an
+> existing file, and diverts when creating is all the turn does.** That is a correlation across five
+> runs and still not a mechanism — the third explanation offered here, after two that were confidently
+> wrong, so it is written as an observation rather than a cause.
+>
+> It does not change the mitigation, which is the useful part: the detection below fires on the
+> outcome and needs no theory about what produced it.
+>
 > **The consequence for the mitigation is the point, and it survives not knowing the cause.** AG-10's
 > health check asserts *"the repo root is a workspace the engine will write to"*. A check phrased
 > against `trustedWorkspaces` would pass on a machine where writes divert anyway — measured here. It
