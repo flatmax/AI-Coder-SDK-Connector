@@ -42,10 +42,10 @@ Both mount under the *same* RPC namespace through `engine_router.py`, so the bro
 
 ### What Antigravity can and cannot do
 
-`capabilities.py` holds a descriptor of 14 surfaces per engine, and the webapp asks it — never an engine name — before rendering anything. Twelve surfaces are hidden on Antigravity, and the descriptor distinguishes the two reasons:
+`capabilities.py` holds a descriptor of 15 surfaces per engine, and the webapp asks it — never an engine name — before rendering anything. Ten surfaces are hidden on Antigravity, and the descriptor distinguishes the two reasons:
 
-- **Absent — no source data, ever.** USD cost of any kind (there is no dollar figure anywhere on the SDK, so the turn footer's cost, the session total and `max_budget_usd` all have nothing to render), live context-window usage and the auto-compact threshold, account rate-limit windows, mid-turn rate-limit notices, the slash-command palette, "always allow" permission rules that outlive the call, and file checkpointing.
-- **Unbuilt — a to-do, not a wall.** The repo-local session mirror and the history browser (phase 5), subagent tabs, agent-initiated structured questions, and the MCP server inventory.
+- **Absent — no source data, ever.** USD cost of any kind (there is no dollar figure anywhere on the SDK, so the turn footer's cost, the session total and `max_budget_usd` all have nothing to render), live context-window usage and the auto-compact threshold, account rate-limit windows, mid-turn rate-limit notices, the slash-command palette, file checkpointing, and forking a past conversation.
+- **Unbuilt — a to-do, not a wall.** Subagent tabs, agent-initiated structured questions, and the MCP server inventory. The list used to open with the session mirror and the history browser; phase 5 built both, and "always allow" left the absent list the same way in phase 9 — which is the descriptor working as a to-do list rather than as a record.
 
 In the other direction, **image generation** is absent on Claude and supported on Antigravity. That asymmetry is the whole argument for a second engine.
 
@@ -61,10 +61,10 @@ Landed and usable:
 Not landed:
 
 - **No live Antigravity turn has ever run through the chat panel.** The adapter has ~350 offline tests behind it and one live SDK session from a probe script; a real conversation through the browser is not yet a thing that has happened. That probe is worth its own line, because it found three bugs no offline test could see — an empty turn usage, a stop reason that was always blank, and an `UNSPECIFIED` that would have put a red badge on every clean turn — all three traceable to a fake that answered to a method name the real SDK does not have.
-- **No history or resume on Antigravity** — its own store, rebuilt as a step observer, is phase 5.
+- ~~**No history or resume on Antigravity.**~~ **Landed 2026-09-05 (phase 5).** Conversations are mirrored per transport into their own store root, the history browser renders them, and a server restart resumes the previous conversation with the model's context intact — proven across two processes on the paid subscription. What is still not built is *forking* one: the harness owns the conversation store, so there is nothing to copy, and the button is hidden rather than offered.
 - **A consultation is opaque while it runs.** `second_opinion` returns one answer when it is finished; it does not yet open its own tab, stream Google's thinking as it arrives, or offer a stop button. That is phase 6b, and it is deliberately after the descriptor, because the tab has to hide its cost panel by *asking* rather than by checking for the string `antigravity`.
 - **Image generation has never returned an image.** Every Gemini image model reports `limit: 0` on a free-tier key. That is not a throttle and no wait fixes it; the tier is a property of the key's Cloud project, so enabling billing on that project moves the same key to a paid tier and nothing in the credential path changes.
-- **`google-antigravity` is still a base dependency, not an optional extra**, so it costs a second bundled binary in every install. Making it an extra is phase 7.
+- ~~**`google-antigravity` is still a base dependency.**~~ **Landed 2026-09-05 (phase 7).** It is the `antigravity` extra: `pip install "aic-dc[antigravity]"`. A base install is 273.1 MiB and the extra adds 135.2 MiB, almost all of it the bundled `localharness` binary. **A base install still reaches Antigravity** — the `agy` transport drives the CLI on your own subscription and needs no wheel. What the extra buys is the API-key route and the consultant, which has no `agy` equivalent.
 
 The plan of record, phase by phase, is [`specs5/plan-ag/`](specs5/plan-ag/) — start at [`decisions.md`](specs5/plan-ag/decisions.md).
 
@@ -449,7 +449,7 @@ cd webapp && npm run build
 | Package | Purpose |
 |---|---|
 | [claude-agent-sdk](https://github.com/anthropics/claude-agent-sdk-python) | The agent engine — session, tools, permissions, compaction, MCP |
-| [google-antigravity](https://pypi.org/project/google-antigravity/) | The second agent engine — partial; see [Engines](#engines). Currently a base dependency rather than an extra, which is a known cost |
+| [google-antigravity](https://pypi.org/project/google-antigravity/) (extra) | The second agent engine on a Gemini API key — partial; see [Engines](#engines). An extra because its wheel bundles a ~123 MiB binary; the `agy` transport reaches the same engine without it |
 | [jrpc-oo](https://github.com/flatmax/jrpc-oo) | Bidirectional JSON-RPC 2.0 over WebSocket |
 | [tree-sitter](https://tree-sitter.github.io/) | AST parsing for Python, JS, TS/TSX, C, C++, MATLAB |
 | [mcp](https://modelcontextprotocol.io/) | In-process MCP server (pulled in by the SDK) |
@@ -459,7 +459,7 @@ cd webapp && npm run build
 | [openpyxl](https://openpyxl.readthedocs.io/) (extra) | Excel with colour clustering |
 | [KeyBERT](https://maartengr.github.io/KeyBERT/) + [sentence-transformers](https://www.sbert.net/) (extras) | Keyword enrichment |
 
-The `claude` CLI is a Node application and is **not** installed by any of these — it is resolved at startup. Antigravity is the other way round: its `localharness` binary ships inside the wheel and is spawned from there, which is why `google-antigravity` becoming an optional extra is on the list.
+The `claude` CLI is a Node application and is **not** installed by any of these — it is resolved at startup. Antigravity is the other way round: its `localharness` binary ships inside the wheel and is spawned from there, which is why `google-antigravity` is an optional extra rather than a base dependency. The released binary is built without it.
 
 **Frontend**
 

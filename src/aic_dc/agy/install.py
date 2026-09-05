@@ -62,7 +62,30 @@ does not cover is a transient failure to fork while a turn is genuinely
 being gated; that is recorded rather than hidden, and it is the reason
 :func:`status` reports a stale install loudly.
 
-Governing spec: ``specs5/plan-ag/`` — AG-14.
+The fallback's other edge, and the bug it hid (2026-09-05)
+==========================================================
+That reasoning has a premise: *a non-zero exit means this host is not
+running*. It is true when the only reason the command can fail is that an
+interpreter is gone. It was **false on a PyInstaller release binary**,
+where ``sys.executable`` is the frozen binary rather than a Python:
+``<binary> -m aic_dc.agy.hook …`` exits 2 with *"unrecognized
+arguments"*, so `agy` took the fallback on every call — of a session this
+host *was* running and *did* own. An ungated agent, reporting itself
+gated, because :func:`status` judges "current" by comparing the command
+string and the string was the one we meant to write.
+
+Two changes close it, and they are deliberately at different layers:
+
+- :func:`hook_command` emits ``<binary> --agy-hook <config_dir>`` on a
+  frozen build — a suppressed CLI flag whose only caller is that string.
+- :func:`install` **probes the command before writing it** and refuses if
+  it does not answer (:func:`hook_runs`). That is the general fix: the
+  frozen binary was one way to get a correct string naming an unrunnable
+  command, and a moved virtualenv is another. Failing closed costs the
+  user an error message at the moment they asked for a gate, which is the
+  cheapest place to spend it.
+
+Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5.
 """
 
 from __future__ import annotations
@@ -71,6 +94,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -100,12 +124,76 @@ def hook_command(config_dir: Path | str, python: str | None = None) -> str:
     The ``||`` fallback is the safety net described in the module
     docstring: our hook exits 0 on every path it controls, so a non-zero
     exit means this host could not start and therefore owns nothing.
+
+    **Two forms, because ``sys.executable`` is not always a Python.**
+    Under PyInstaller it is the frozen binary, which does not honour
+    ``-m`` — so the ``-m`` form exited 2 there, ``agy`` took the fallback,
+    and every tool call was auto-approved while :func:`status` reported
+    the gate ``current``, because it compares command strings and the
+    string matched. An ungated agent that reports itself gated is exactly
+    what AG-5 rules out, and it was invisible from a source checkout,
+    where the ``-m`` form is correct.
+
+    The frozen form uses ``--agy-hook``, a suppressed flag on the CLI
+    whose only caller is this string. Detection is
+    ``getattr(sys, "frozen", …)`` — PyInstaller's own marker — and it is
+    read from ``python`` when that argument names a different interpreter,
+    because a caller passing one is describing an install that is not this
+    process.
     """
     interpreter = python or sys.executable
-    return (
-        f"{interpreter} -m aic_dc.agy.hook {config_dir} "
-        "|| printf '{\"decision\":\"allow\"}'"
+    frozen = python is None and bool(getattr(sys, "frozen", False))
+    invocation = (
+        f"{interpreter} --agy-hook {config_dir}"
+        if frozen
+        else f"{interpreter} -m aic_dc.agy.hook {config_dir}"
     )
+    return f"{invocation} || printf '{{\"decision\":\"allow\"}}'"
+
+
+def hook_runs(command: str, *, timeout: float = 30.0) -> str:
+    """``""`` if ``command`` answers a probe, else why it did not.
+
+    The check :func:`status` cannot make cheaply and :func:`install` must
+    not skip. A hook command is a *string in somebody else's config file*;
+    that it is the string we meant to write says nothing about whether the
+    thing it names can run. The frozen-binary bug was precisely that gap —
+    correct string, unrunnable command — and the same gap catches a moved
+    virtualenv or an uninstalled package.
+
+    Deliberately runs the **left side only**, without the ``|| printf``
+    fallback: the fallback exists to make a broken hook harmless to
+    *other people's* sessions, and running it here would mask the very
+    failure this is looking for.
+
+    A probe payload with no ``conversationId`` is one the gate does not
+    own, so this asks the question in the shape that is guaranteed to be
+    cheap and to touch no permission state.
+    """
+    invocation = command.split("||")[0].strip()
+    probe = json.dumps({"toolCall": {"name": "aic-dc-install-probe"}})
+    try:
+        completed = subprocess.run(
+            invocation,
+            shell=True,
+            input=probe,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"the command could not be run: {exc}"
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else "no output"
+        return f"exit {completed.returncode}: {tail}"
+    try:
+        answer = json.loads(completed.stdout)
+    except ValueError:
+        return f"printed no JSON decision: {completed.stdout.strip()[:200]!r}"
+    if not isinstance(answer, dict) or "decision" not in answer:
+        return f"printed JSON with no decision: {completed.stdout.strip()[:200]!r}"
+    return ""
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -199,8 +287,32 @@ def install(
     run in sequence, and clobbering somebody's lint-on-write hook to
     install a permission gate would be an unusually rude way to protect
     them.
+
+    **The command is probed before it is written, and a command that does
+    not run is refused rather than installed.** This is the one moment
+    where failing closed costs the user only an error message: they asked
+    for a gate, so telling them it could not be installed is actionable,
+    where installing a broken one hands them an ungated agent that reports
+    itself gated. The frozen-binary bug produced exactly that, and it is
+    not the only way to get there — a virtualenv that has moved, or a
+    package uninstalled from under an entry, both end in the same place.
     """
     target = path or GLOBAL_HOOKS
+    command = hook_command(config_dir, python)
+    problem = hook_runs(command)
+    if problem:
+        logger.error("Refusing to install an agy gate that does not run: %s", problem)
+        return {
+            "state": "unrunnable",
+            "path": str(target),
+            "command": command,
+            "detail": (
+                f"The permission gate was not installed, because the command "
+                f"it would write does not run here — {problem}. Installing it "
+                f"anyway would leave `agy` taking the allow-fallback on every "
+                f"tool call while this panel reported the gate as active."
+            ),
+        }
     data = _load(target)
     data[HOOK_NAME] = {
         "PreToolUse": [
@@ -212,7 +324,7 @@ def install(
                 "hooks": [
                     {
                         "type": "command",
-                        "command": hook_command(config_dir, python),
+                        "command": command,
                         "timeout": HOOK_TIMEOUT_SECONDS,
                     }
                 ],

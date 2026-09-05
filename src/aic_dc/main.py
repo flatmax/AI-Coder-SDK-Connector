@@ -1097,9 +1097,20 @@ async def run(
     try:
         from aic_dc.antigravity.credentials import resolve as resolve_credentials
         from aic_dc.antigravity.service import AntigravityService
+        from aic_dc.antigravity.surface import sdk_installed
 
+        # Two conditions, not one, and the second is phase 7's whole
+        # point. `google-antigravity` is an optional extra (AG-R-10), so a
+        # base install has no SDK to run this transport with — and none of
+        # these modules fails to *import* without it, because every
+        # `from google.antigravity` in the package is function-local by
+        # design. So absence is invisible until the first turn, where it
+        # arrives as an `ImportError` from an engine the user picked out
+        # of a selector. Checked here instead, where "not offered" is the
+        # honest answer and the same one a missing credential gets.
         antigravity_credentials = resolve_credentials()
-        if antigravity_credentials.available:
+        antigravity_sdk = sdk_installed()
+        if antigravity_credentials.available and antigravity_sdk:
             engines[capabilities.ANTIGRAVITY] = AntigravityService(
                 config,
                 repo=repo,
@@ -1117,6 +1128,12 @@ async def run(
         # it needs is *not* checked here: it is installed from Settings
         # with the user's consent, and `connect_engine` refuses without it
         # rather than running an ungated agent.
+        #
+        # **And not on the SDK either.** This transport drives a CLI over
+        # a pipe and imports nothing from `google.antigravity`, so it is
+        # the one that survives a base install — which is what makes the
+        # extra affordable: a user without the wheel still reaches
+        # Antigravity, on their subscription rather than on a metered key.
         import shutil as _shutil
 
         from aic_dc.agy.service import AgyService
@@ -1134,7 +1151,15 @@ async def run(
                 "agy transport not mounted: the Antigravity CLI is not on PATH"
             )
 
-        if not antigravity_credentials.available:
+        if not antigravity_sdk:
+            logger.info(
+                "Antigravity engine not mounted: google-antigravity is not "
+                "installed. It is an optional extra because it bundles a "
+                "second ~119 MB binary (AG-R-10); install aic-dc[antigravity] "
+                "to run a session on a Gemini API key. The agy transport "
+                "needs no wheel and is unaffected."
+            )
+        elif not antigravity_credentials.available:
             logger.info(
                 "Antigravity engine not mounted: %s",
                 antigravity_credentials.source or "no Gemini API key",

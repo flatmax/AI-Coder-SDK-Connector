@@ -833,13 +833,20 @@ class ClaudeCodeService:
         nothing would look wrong. Under ``aic-dc-antigravity`` they reach
         the dialog by the ordinary ``mcp`` classification.
 
-        **Absent when there is no credential, rather than present and
-        broken.** AG-R-8 makes a missing key the most likely first
-        experience of this engine, and two tools that always answer "no
+        **Absent when it cannot work, rather than present and broken.**
+        AG-R-8 makes a missing key the most likely first experience of
+        this engine, and since phase 7 a missing *wheel* is the other way
+        it can be absent (AG-R-10). Two tools that always answer "no
         credentials" cost context on every turn and buy nothing — AG-9's
         "hidden rather than stubbed" applied to a tool definition. That is
         also why this is not recorded as a degradation: an unconfigured
         optional engine is not a fault in this one.
+
+        The two reasons are reported separately, and that is worth a line
+        because the first version did not. A base install *with* a key
+        logged "no Gemini API key or Vertex project" and told the user to
+        set one they already had — a diagnostic that sends someone to fix
+        the wrong thing is worse than none.
         """
         try:
             from aic_dc.antigravity import Consultant, ConsultantBridge
@@ -860,11 +867,24 @@ class ClaudeCodeService:
             )
             self.consultant_bridge = bridge
             if not bridge.available:
-                logger.info(
-                    "Antigravity consultant not mounted: no Gemini API key or "
-                    "Vertex project. Set one to offer second opinions and "
-                    "image generation from a Claude turn (AG-R-8)."
-                )
+                from aic_dc.antigravity.surface import sdk_installed
+
+                if not sdk_installed():
+                    logger.info(
+                        "Antigravity consultant not mounted: "
+                        "google-antigravity is not installed. It is an "
+                        "optional extra because it bundles a second ~119 MB "
+                        "binary (AG-R-10); install aic-dc[antigravity] for "
+                        "second opinions and image generation from a Claude "
+                        "turn. There is no agy equivalent — the CLI has no "
+                        "one-shot consultation mode."
+                    )
+                else:
+                    logger.info(
+                        "Antigravity consultant not mounted: no Gemini API key "
+                        "or Vertex project. Set one to offer second opinions "
+                        "and image generation from a Claude turn (AG-R-8)."
+                    )
                 return mcp_servers
             servers = dict(mcp_servers or {})
             servers[AG_SERVER_NAME] = bridge.build_server()

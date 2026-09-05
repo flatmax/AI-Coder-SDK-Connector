@@ -14,6 +14,15 @@ reasoning is only sound because our hook exits 0 on every path it
 controls: a non-zero exit means the interpreter never started, which means
 this host owns nothing, which means allow is right.
 
+**And the second thing that matters is the edge of that reasoning**, added
+2026-09-05. "A non-zero exit means the interpreter never started" is true
+only while the command's *shape* is right. On a PyInstaller build it was
+not: ``sys.executable`` is the frozen binary, which does not honour
+``-m``, so the command exited 2 on every call of a session this host did
+own — an ungated agent, with Settings reporting the gate installed,
+because ``status`` compares command strings and the string was correct.
+``TestTheCommandMustActuallyRun`` is that hole, closed from both ends.
+
 Offline. Never touches the real ``~/.gemini``.
 """
 
@@ -38,6 +47,29 @@ def cfg(tmp_path):
     return tmp_path / "cfg"
 
 
+def _write_entry(hooks, command):
+    """Put a hook entry on disk without going through ``install``.
+
+    For the states ``install`` now refuses to create. Same shape it
+    writes, so ``status`` reads it the same way.
+    """
+    hooks.write_text(
+        json.dumps(
+            {
+                install.HOOK_NAME: {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class TestDetection:
     def test_absent_when_there_is_no_file(self, hooks, cfg):
         assert install.status(cfg, path=hooks)["state"] == "absent"
@@ -58,8 +90,16 @@ class TestDetection:
         Reported loudly rather than silently repaired: it usually means a
         second checkout is also installed, and quietly taking the hook over
         would break whichever one the user was actually using.
+
+        The entry is **written rather than installed**, and that is the
+        change rather than the test drifting: this describes a file left
+        behind by an installation that has since moved, and since
+        2026-09-05 ``install`` refuses to write a command that does not
+        run — which is exactly what ``/somewhere/else/python`` is. Reaching
+        the state through the function that now prevents it would be
+        asserting the old behaviour with new words.
         """
-        install.install(cfg, path=hooks, python="/somewhere/else/python")
+        _write_entry(hooks, install.hook_command(cfg, "/somewhere/else/python"))
         report = install.status(cfg, path=hooks)
         assert report["state"] == "stale"
         assert "/somewhere/else/python" in report["command"]
@@ -173,3 +213,139 @@ class TestTheInstalledCommand:
         # One decision, not two: the fallback appending a second object
         # would make the output unparseable.
         assert json.loads(done.stdout) == {"decision": "allow"}
+
+
+class TestTheCommandMustActuallyRun:
+    """The gap between "the string is right" and "the command works".
+
+    `status` judges `current` by comparing command strings, which is the
+    right check for *whose* gate is installed and says nothing about
+    whether it runs. On a PyInstaller build those two answers came apart:
+    the string was exactly the one we meant to write, and the command
+    exited 2 on every call.
+    """
+
+    def test_a_frozen_build_gets_a_command_the_binary_can_run(
+        self, cfg, monkeypatch
+    ):
+        """`-m` is a Python thing; a frozen binary is not a Python.
+
+        The bug, in one assertion. `sys.executable` under PyInstaller is
+        the binary, `<binary> -m aic_dc.agy.hook …` exits 2 with
+        "unrecognized arguments", and `agy` then takes the allow-fallback
+        for a session this host owns.
+        """
+        monkeypatch.setattr(install.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(install.sys, "executable", "/opt/aic-dc-linux")
+        command = install.hook_command(cfg)
+        assert "--agy-hook" in command
+        assert " -m aic_dc.agy.hook" not in command
+        assert command.startswith(f"/opt/aic-dc-linux --agy-hook {cfg}")
+
+    def test_a_source_install_still_uses_the_module_form(self, cfg, monkeypatch):
+        monkeypatch.delattr(install.sys, "frozen", raising=False)
+        command = install.hook_command(cfg)
+        assert " -m aic_dc.agy.hook " in command
+        assert "--agy-hook" not in command
+
+    def test_an_explicit_interpreter_is_never_treated_as_frozen(
+        self, cfg, monkeypatch
+    ):
+        """A caller passing one is describing an install that is not us."""
+        monkeypatch.setattr(install.sys, "frozen", True, raising=False)
+        command = install.hook_command(cfg, "/elsewhere/bin/python")
+        assert " -m aic_dc.agy.hook " in command
+
+    def test_the_fallback_survives_both_forms(self, cfg, monkeypatch):
+        """It is what keeps a stranger's agy working when we are not."""
+        for frozen in (True, False):
+            monkeypatch.setattr(install.sys, "frozen", frozen, raising=False)
+            assert install.hook_command(cfg).endswith(
+                """|| printf '{"decision":"allow"}'"""
+            )
+
+    def test_the_real_command_answers_a_probe(self, cfg):
+        assert install.hook_runs(install.hook_command(cfg)) == ""
+
+    def test_an_unrunnable_command_is_reported_with_its_reason(self, cfg):
+        problem = install.hook_runs("/nope/not/a/python -m aic_dc.agy.hook x")
+        assert problem
+        assert "127" in problem or "not found" in problem
+
+    def test_a_command_that_prints_no_decision_is_not_accepted(self):
+        """Exit 0 is not the assertion — a JSON decision is.
+
+        A command that succeeds and prints nothing is the exact shape
+        `agy` reads as allow, so "it ran" is not the question.
+        """
+        assert install.hook_runs("true") != ""
+
+    def test_the_probe_does_not_run_the_fallback(self):
+        """Running the whole command would mask the failure it looks for.
+
+        `false || printf '{"decision":"allow"}'` succeeds and prints a
+        perfectly good decision, which is precisely the outcome that must
+        not read as a working gate.
+        """
+        assert install.hook_runs(
+            """false || printf '{"decision":"allow"}'"""
+        ) != ""
+
+    def test_install_refuses_rather_than_writing_a_broken_gate(
+        self, hooks, cfg, monkeypatch
+    ):
+        """Fails closed, at the moment the user asked for a gate.
+
+        The alternative is what shipped: an entry that looks installed,
+        reports `current`, and allows everything.
+        """
+        monkeypatch.setattr(install.sys, "executable", "/nope/not/a/python")
+        report = install.install(cfg, path=hooks)
+        assert report["state"] == "unrunnable"
+        assert "detail" in report
+        assert not hooks.exists(), "a gate that cannot run was written anyway"
+
+    def test_a_refusal_leaves_somebody_elses_hooks_alone(
+        self, hooks, cfg, monkeypatch
+    ):
+        mine = {"my-linter": {"PostToolUse": [{"matcher": "*", "hooks": []}]}}
+        hooks.write_text(json.dumps(mine), encoding="utf-8")
+        monkeypatch.setattr(install.sys, "executable", "/nope/not/a/python")
+        install.install(cfg, path=hooks)
+        assert json.loads(hooks.read_text(encoding="utf-8")) == mine
+
+
+class TestTheCliEntryPointTheFrozenBuildNeeds:
+    def test_the_flag_dispatches_to_the_hook(self, cfg, monkeypatch):
+        """`--agy-hook` is the frozen build's replacement for `-m`.
+
+        Asserted through `cli.main` rather than by importing the hook,
+        because the thing that was broken was the *entry point*: the
+        parser rejected the arguments before any of our code ran.
+        """
+        import io
+
+        from aic_dc import cli
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+        assert cli.main(["--agy-hook", str(cfg)]) == 0
+
+    def test_it_prints_one_json_decision_and_nothing_else(
+        self, cfg, monkeypatch, capsys
+    ):
+        """It is stdout in the middle of agy's protocol. A banner here is
+        a parse failure there."""
+        import io
+
+        from aic_dc import cli
+
+        monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+        cli.main(["--agy-hook", str(cfg)])
+        out = capsys.readouterr().out.strip()
+        assert "decision" in json.loads(out)
+
+    def test_the_flag_is_hidden_from_help(self):
+        """Not a thing a user runs — agy runs it, once per tool call."""
+        from aic_dc import cli
+
+        assert "--agy-hook" not in cli._build_parser().format_help()

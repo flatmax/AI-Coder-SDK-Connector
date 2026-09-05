@@ -3179,3 +3179,227 @@ The house rule is to test against a new instance started with `--preview`. Three
 would have pulled the static bundle out from under two live windows. `--dev` was used instead: it
 serves through Vite and touches no `dist`, and the load-bearing half of the rule — *a Python process
 started fresh, on a throwaway repository under a trusted root* — is unaffected either way.
+
+---
+
+## Phase 7 — the SDK becomes an extra, and what that exposed (2026-09-05)
+
+**The exit criterion is met.** *"A base install is a one-engine install with no broken UI, and its
+size has not moved."* Measured against two clean Python 3.14 venvs:
+
+| Install | `site-packages` |
+|---|---|
+| `aic-dc` | **273.1 MiB** |
+| `aic-dc[antigravity]` | 408.3 MiB |
+
+The extra is **135.2 MiB**, of which the bundled `localharness` binary alone is 123.1 MiB
+(129,065,896 bytes in 0.1.16 — it was 119,721,512 in 0.1.15, so it grew ~9 MB in four days, which is
+its own small argument for this phase).
+
+**Those are the second numbers, and the first ones were wrong.** The base column originally read
+285.8 MiB, because that venv had already *run* a server and `__pycache__` had put ~9 MiB of bytecode
+into `site-packages` while the comparison venv had not been run. The absolute figure was wrong, the
+difference inherited the error, and nothing about the table looked suspect — it was caught only
+because 285.8 MiB is smaller than the bundled `claude` binary that has to be inside it. Two rules
+follow, and they are in AG-R-10 because this table is a per-release tripwire: **measure a fresh
+install before its first run**, and **sum apparent file sizes rather than `du` blocks**, since `uv`
+hardlinks from its cache and block counting then answers a question about the machine rather than
+about the install.
+
+### It is a *two*-engine base install, and that is what made the extra affordable
+
+The criterion says "one-engine install" and the answer came out better than the criterion. The `agy`
+transport ([AG-14](decisions.md#ag-14)) drives the Antigravity CLI over a pipe on the owner's own
+subscription; it imports nothing from `google.antigravity` and mounts on the binary being on PATH. So
+a base install still reaches this engine.
+
+That reframes the extra. **It is not "Antigravity is optional"; it is "the metered route to
+Antigravity is optional"** — which is a much easier trade to defend, and it is why the phase-8
+decision to add `agy` paid for itself a second time. What a base install genuinely loses is the
+API-key session and the **consultant**, because `second_opinion` and `generate_image` are the SDK's
+and the CLI has no one-shot consultation mode. That loss is stated rather than papered over: the
+startup log names it, and points at `aic-dc[antigravity]`.
+
+### The `pyproject.toml` edit was the easy half
+
+The interesting part is why this phase was not a one-line change, and it is the same property that
+made the phase *possible*:
+
+> Every `from google.antigravity import …` in the package is function-local by design, so these
+> modules stay importable where the SDK is not installed.
+
+That was written in phase 3 as a testability argument and it is what lets a base install exist at
+all. It also means **nothing fails without the wheel** — not an import, not a construction, not a
+mount. A base install imported cleanly, built `AntigravityService`, put it in the engine selector,
+and reported the consultant as available. The absence surfaced only on the first turn, as an
+`ImportError` from an engine the user had picked out of a menu.
+
+That is precisely the "broken UI" the criterion forbids, and no offline test could see it: the test
+environment has the wheel. So the phase's real work was making absence *visible at mount time*:
+
+- **`surface.sdk_installed()`** is the one authority on the question. `importlib.util.find_spec`
+  rather than an import, because it is asked at every startup including the runs that never touch
+  this engine, and importing pydantic and gRPC to answer a yes/no is a cost on a path meant to be
+  free. `surface._sdk()` — the probe's importer — now asks it first rather than deciding for itself,
+  so the diagnostic and the mount cannot disagree about whether this install has an SDK.
+- **The engine mounts on the wheel and the credential**, where it used to mount on the credential
+  alone. Same rule, one more condition, and "not offered" is the same honest answer a missing key
+  already got.
+- **The consultant likewise.** `Consultant.available` was credentials-only, so a base install *with*
+  a Gemini key registered both tools, spent context describing them on every turn, and answered the
+  first call with an `ImportError`. AG-9's "hidden rather than stubbed", applied to a tool
+  definition.
+
+**`find_spec` raises rather than returning `None`** when the `google` namespace package is absent
+entirely — which is exactly the state a base install is in, and unguarded it would have been an
+uncaught exception at startup: a worse failure than the one this phase is about. Found by running the
+base install rather than by reading the docs, and pinned by a test.
+
+### The diagnostic that sent the user to fix the wrong thing
+
+Running the base install found one more, and it is the kind of thing only running finds. With a valid
+Gemini key on disk and no wheel, startup logged:
+
+```
+Antigravity consultant not mounted: no Gemini API key or Vertex project. Set one to…
+```
+
+The mount was correct and the *reason* was wrong. `available` had become two conditions and the
+message still named one, so a user with a key was told to go and set a key. A diagnostic that sends
+somebody to fix the wrong thing is worse than no diagnostic. Both reasons are now reported
+separately, on both the engine and the consultant.
+
+### What the release binary was already doing, now by declaration
+
+The release workflow syncs `--extra build --extra docs-convert` and has no `--collect-all` for
+`google.antigravity`. Since the SDK's imports are function-local, PyInstaller's static analysis never
+saw them — so **the shipped binary has never carried a usable Antigravity SDK**, while every `uv sync`
+of it paid for the wheel. Phase 7 does not change that artefact; it makes it correct on purpose, and
+adds the assertion that keeps it so.
+
+### Tripwires, because AG-R-10's is a number a human has to notice
+
+The risk register asks for "base-install size, measured per release", and the failure it guards is
+"a `pyproject.toml` edit nobody reviews as a size change". A release note is a poor place for that to
+be caught, so two of the three now fail by themselves:
+
+1. `tests/test_antigravity_packaging.py` reads `pyproject.toml` and fails if `google-antigravity`
+   returns to `[project.dependencies]`, or if the extra loses its version floor.
+2. The release workflow fails the build if `localharness` appears in the PyInstaller archive.
+3. The measured size table, per release, for the part a test cannot see.
+
+The same file also pins the property the whole phase rests on — that no module imports the SDK at
+module scope — by walking the package's syntax trees. A single top-level import would turn a base
+install into an `ImportError` at startup, in whichever module happened to be imported first.
+
+### The floor, finally set
+
+`pyproject.toml` carried a note saying the version floor was deliberately unset because *"this one
+has not been read yet. The floor gets set in the same pass that writes the surface doc."* That pass
+happened in phase 0 and the note outlived it. `>=0.1.16` — the version the surface was re-probed
+against — and a floor rather than a pin, because the package is 0.1.x and alpha
+([AG-R-2](risks.md#ag-r-2)) and the drift gate is what handles movement above it.
+
+### Verified by running both
+
+Not by reasoning about dependency metadata:
+
+```
+base:   Antigravity engine not mounted: google-antigravity is not installed…
+        Antigravity consultant not mounted: google-antigravity is not installed…
+        agy transport mounted (Antigravity CLI on PATH)
+extra:  Antigravity engine mounted (credential from Gemini API key…)
+        Antigravity consultant mounted as aic-dc-antigravity…
+        agy transport mounted (Antigravity CLI on PATH)
+```
+
+No traceback, no error, and no engine offered that could not answer — the selector renders
+`list_engines().mountable`, which is the adapters actually constructed, so a base install offers
+`claude` and `agy` and nothing else. **With this, every phase in this directory is closed.**
+
+---
+
+## The gate that reported itself installed and allowed everything (2026-09-05)
+
+Found by a question rather than by a test: *"what does the agy subscription mode require to be
+installed?"* Answering it meant reading `hook_command` closely enough to notice that its output is
+not always runnable.
+
+### The bug
+
+The gate `agy` runs for every tool call is a command string in the user's own
+`~/.gemini/config/hooks.json`:
+
+```
+<sys.executable> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+On a pip install `sys.executable` is a Python and this is correct. **On a PyInstaller release binary
+it is the frozen binary**, which does not honour `-m`:
+
+```
+$ aic-dc -m aic_dc.agy.hook ~/.config/aic-dc
+aic-dc: error: unrecognized arguments: -m aic_dc.agy.hook ...
+exit=2
+```
+
+The `||` fallback then fires and prints `{"decision":"allow"}` — for every tool call, on a session
+this host owned and was supposed to be gating. Meanwhile `gate_status()` reported `current`, because
+it decides by string-comparing the installed command against the one it would write, and the string
+was exactly right.
+
+**An ungated agent that reports itself gated**, on the transport where the gate *is* the product
+([AG-5](decisions.md#ag-5)). `connect_engine` refuses to start without a `current` gate, and that
+check passed.
+
+### Why nothing caught it
+
+Every test runs where `sys.executable` is a Python, so the `-m` form is correct and the suite is
+green. The pip installs used to verify phase 7 the same afternoon were green for the same reason. The
+only shape that fails is the released binary, and nothing in `agy/install.py` had ever distinguished
+the two — the only `_MEIPASS` handling in the tree is in `config.py` and `main.py`.
+
+This is [AG-R-12](risks.md#ag-r-12)'s lesson for the third time, in its sharpest form yet: **a string
+that is correct is not a mechanism that works.** `status` was measuring the first and reporting the
+second.
+
+### The fix, at two layers
+
+**The specific one.** `hook_command` branches on `getattr(sys, "frozen", …)` and emits
+`<binary> --agy-hook <config_dir>` — a new `argparse.SUPPRESS`-ed flag on the CLI whose only caller is
+that string. It dispatches before logging and before the banner, because this process is `agy` asking
+about one tool call and anything else on stdout is a parse failure at the other end.
+
+**The general one, and the more valuable.** `install` now *probes* the command before writing it and
+**refuses** one that does not answer with a JSON decision:
+
+```
+old frozen-shaped command -> exit 2: aic-dc: error: unrecognized arguments: -m aic_dc.agy.hook /tmp/x
+new frozen-shaped command -> accepted
+```
+
+The frozen binary was one way to get a correct string naming an unrunnable command; a moved
+virtualenv and an uninstalled package are others, and this catches all of them. It runs the **left
+side only** — running the whole command would execute the fallback, print a perfectly good decision,
+and mask exactly the failure it exists to find. Failing closed here costs an error message at the
+moment the user asked for a gate, which is the cheapest place in the system to spend one.
+
+`install` answers a fifth state, `unrunnable`, and the Settings panel renders it with its reason
+rather than falling through to the raw word.
+
+### Two tests had to be rewritten, and that is the fix working
+
+`test_stale_when_it_points_at_another_interpreter` and `test_a_stale_gate_is_refused_too` both
+*constructed* their stale state by calling `install(python="/somewhere/else/python")` — which `install`
+now correctly refuses, because that interpreter does not exist. Both now write the entry to disk
+directly, which is also more honest about what they describe: a file left behind by an installation
+that has since moved, not something anybody installs on purpose.
+
+### What is verified and what is not
+
+Verified by running: the new entry point answers a real payload end to end through `cli.main` — the
+same function a frozen binary runs — and the probe rejects the old frozen-shaped command and accepts
+the new one. **Not verified on an actual PyInstaller artefact**, because building one is a
+multi-minute per-platform job; the argument-parser rejection was demonstrated against the console
+script, which runs the same parser. The release workflow builds the binary on every release and the
+gate is installed by a click rather than at startup, so the first real artefact will exercise it.

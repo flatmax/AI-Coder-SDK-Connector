@@ -92,6 +92,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "was found but could not be run"
         ),
     )
+    parser.add_argument(
+        "--agy-hook",
+        metavar="CONFIG_DIR",
+        default=None,
+        # Suppressed: this is not a thing a user runs. `agy` runs it, once
+        # per tool call, from the command `aic_dc.agy.install` wrote into
+        # the user's hooks file — and listing it here would invite someone
+        # to invoke a permission gate by hand.
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -231,6 +241,27 @@ def main(argv: list[str] | None = None) -> int:
     # Parse (and validate) arguments — argparse will exit on --help/--version
     # or on parse errors.
     args = parser.parse_args(argv)
+
+    # The permission gate, before logging is configured and before the
+    # banner. This process is `agy` asking whether one tool call may run:
+    # it reads a payload on stdin, prints one JSON decision on stdout, and
+    # anything else this entry point would print is noise in the middle of
+    # that protocol.
+    #
+    # **It exists because `python -m aic_dc.agy.hook` is not available in
+    # every install.** Under PyInstaller `sys.executable` is the frozen
+    # binary, which does not honour `-m`, so the installed hook command
+    # exited 2 and `agy` took the `|| printf '{"decision":"allow"}'`
+    # fallback — every tool call auto-approved, while Settings reported
+    # the gate as installed and current because it compares command
+    # strings. An ungated agent that says it is gated is the one outcome
+    # AG-5 rules out, so the frozen build needs a command it can actually
+    # run. See `aic_dc.agy.install.hook_command`.
+    if args.agy_hook is not None:
+        from aic_dc.agy.hook import main as agy_hook_main
+
+        return agy_hook_main([args.agy_hook])
+
     # Install logging before anything else that might want to log.
     configure_logging(verbose=args.verbose)
     logger.debug("aic-dc invoked with args=%s", args)

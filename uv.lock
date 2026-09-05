@@ -35,7 +35,6 @@ version = "0.0.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
-    { name = "google-antigravity" },
     { name = "jrpc-oo" },
     { name = "tree-sitter" },
     { name = "tree-sitter-c" },
@@ -46,6 +45,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+antigravity = [
+    { name = "google-antigravity" },
+]
 build = [
     { name = "pyinstaller" },
 ]
@@ -92,7 +94,7 @@ dev = [
 requires-dist = [
     { name = "aic-dc", extras = ["docs-convert", "docs-enrich"], marker = "extra == 'docs'" },
     { name = "claude-agent-sdk", specifier = ">=0.2.136" },
-    { name = "google-antigravity" },
+    { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = ">=0.1.16" },
     { name = "huggingface-hub", marker = "extra == 'docs-enrich'", specifier = ">=0.24" },
     { name = "jrpc-oo", git = "https://github.com/flatmax/jrpc-oo.git" },
     { name = "keybert", marker = "extra == 'docs-enrich'", specifier = ">=0.8" },
@@ -114,7 +116,7 @@ requires-dist = [
     { name = "tree-sitter-python", specifier = ">=0.21" },
     { name = "tree-sitter-typescript", specifier = ">=0.21" },
 ]
-provides-extras = ["docs-convert", "docs-enrich", "docs", "dev", "build"]
+provides-extras = ["antigravity", "docs-convert", "docs-enrich", "docs", "dev", "build"]
 
 [package.metadata.requires-dev]
 dev = [

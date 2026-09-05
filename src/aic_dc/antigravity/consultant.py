@@ -90,6 +90,7 @@ from aic_dc.antigravity.credentials import Credentials
 from aic_dc.antigravity.credentials import resolve as resolve_credentials
 from aic_dc.antigravity.session import stop_reason_of, turn_usage_of
 from aic_dc.antigravity.steps import _name
+from aic_dc.antigravity.surface import sdk_installed
 
 logger = logging.getLogger(__name__)
 
@@ -260,11 +261,20 @@ class Consultant:
     def available(self) -> bool:
         """Whether a consultation can be attempted at all.
 
-        False is a normal state with a good explanation attached, not an
-        error: AG-R-8's whole point is that the most likely first
-        experience of this engine is a credential that does not exist yet.
+        Two conditions, and both are ordinary states rather than errors.
+        A credential may not exist yet — AG-R-8's whole point is that this
+        is the most likely first experience of this engine. And since
+        phase 7 the SDK may not be installed at all: it is an optional
+        extra (AG-R-10), so a base install has no ``google.antigravity``
+        to consult with.
+
+        The second was added because the first was not enough on its own.
+        A base install with a Gemini key registered both tools and then
+        raised ``ImportError`` the first time the agent called one —
+        context spent on every turn to buy a failure. AG-9's rule applied
+        to a tool definition: hidden rather than stubbed.
         """
-        return self._credentials.available
+        return self._credentials.available and sdk_installed()
 
     # ------------------------------------------------------------------
     # Consultations

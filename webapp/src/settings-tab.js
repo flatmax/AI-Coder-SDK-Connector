@@ -1596,6 +1596,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
       absent: 'Not installed',
       stale: 'Installed by another build',
       unreadable: 'Cannot be read',
+      // Returned by `install` when the command it would write does not
+      // run here — it refuses rather than writing one, because a gate
+      // that cannot run is `agy` taking its allow-fallback on every call
+      // while this panel says "Installed".
+      unrunnable: 'Could not be installed',
     }[state] || state;
     return html`
       <div class="model-panel" role="group" aria-label="Antigravity CLI permission gate">
@@ -1646,6 +1651,9 @@ export class SettingsTab extends RpcMixin(LitElement) {
           ? html`<p class="model-note engine-error">
               ${gate.detail} AIC⚡DC will not modify a file it cannot parse.
             </p>`
+          : ''}
+        ${state === 'unrunnable'
+          ? html`<p class="model-note engine-error">${gate.detail}</p>`
           : ''}
         ${gate.agy_present === false
           ? html`<p class="model-note">

@@ -42,21 +42,16 @@ dependencies = [
     # `claude` on PATH; engine.json's cli_path overrides both
     # (specs5/6-deployment/build.md § The Engine Is Not Bundleable).
     "claude-agent-sdk>=0.2.136",
-    # Antigravity engine — the second SDK behind the engine seam, and the
-    # reason this project is called a *connector* (README § the seam is
-    # deliberate). A core dependency rather than an extra: the engine layer
-    # is meant to offer a choice of agent SDK, and an engine you have to
-    # opt into installing is not a choice a user can make at runtime.
-    #
-    # Deliberately unpinned, unlike every other floor here. The others were
-    # chosen after reading what the package offers; this one has not been
-    # read yet. The floor gets set in the same pass that writes
-    # `specs5/plan/antigravity-sdk-surface.md`, alongside the per-package
-    # accounting of what it pulls in — which matters more than usual here,
-    # because `claude-agent-sdk` already costs a ~295 MiB platform-tagged
-    # wheel and a second engine's footprint lands on top of it, in a
-    # dependency set that is now mandatory (`specs5/plan/risks.md` R-7).
-    "google-antigravity",
+    # `google-antigravity` was here and is now an extra — see
+    # [project.optional-dependencies] below and specs5/plan-ag/risks.md
+    # AG-R-10. The argument for keeping it was real and lost to a
+    # measurement: "an engine you have to opt into installing is not a
+    # choice a user can make at runtime" is true, and it cost every
+    # install a second bundled 119 MiB binary on top of the ~295 MiB
+    # `claude` one. What settled it is that the `agy` transport reaches
+    # the *same product* over a pipe and needs no wheel at all, so a base
+    # install is still a two-engine install for anyone with the CLI — the
+    # extra buys the API-key route, not Antigravity itself.
     # Bidirectional JSON-RPC over WebSocket.
     "jrpc-oo @ git+https://github.com/flatmax/jrpc-oo.git",
     # Tree-sitter core plus grammars for supported languages.
@@ -78,6 +73,31 @@ dependencies = [
 # pages.
 
 [project.optional-dependencies]
+# The Antigravity engine on a Gemini API key or a Vertex project
+# (specs5/plan-ag/risks.md AG-R-10). An extra rather than a base
+# dependency because the wheel ships its own ~119 MiB `localharness`
+# binary, and an install that grew by that much to carry an engine the
+# user has no credentials for would be a bad trade made silently.
+#
+# **This extra is not "Antigravity"; it is the metered route to it.** The
+# `agy` transport (AG-14) drives the Antigravity CLI over a pipe on the
+# owner's own subscription, imports nothing from `google.antigravity`,
+# and mounts on the binary being on PATH — so a base install still
+# reaches this engine. What the extra adds is the API-key transport and,
+# with it, the consultant: `second_opinion` and `generate_image` are the
+# SDK's and have no `agy` equivalent, so they are absent from a base
+# install rather than broken in one.
+#
+# Floor set at the version the surface was read against and re-probed on:
+# `specs5/plan-ag/sdk-surface.md` records 0.1.15 and 0.1.16, and the
+# probe (AG-8) is what keeps a later release from drifting past us
+# quietly. A floor rather than a ceiling because the package is 0.1.x and
+# alpha (AG-R-2) — pinning exactly would freeze a moving surface we have
+# a gate for.
+antigravity = [
+    "google-antigravity>=0.1.16",
+]
+
 # Document-mode extras are split into two groups so release binaries
 # can bundle the small conversion libraries without dragging in
 # torch/sentence-transformers (~250MB per platform).

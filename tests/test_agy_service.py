@@ -41,6 +41,29 @@ def config(tmp_path):
     )
 
 
+def _write_gate_entry(hooks, command):
+    """A hooks file on disk, without going through ``install``.
+
+    For a state ``install`` now refuses to create — it probes the command
+    first, and the ones these tests want are the ones that do not run.
+    """
+    hooks.write_text(
+        json.dumps(
+            {
+                install.HOOK_NAME: {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": command}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def service(tmp_path, **kw):
     from aic_dc.antigravity.credentials import GEMINI_API, Credentials
 
@@ -103,10 +126,19 @@ class TestItWillNotRunUngated:
         assert "until you remove it" in result["message"]
 
     def test_a_stale_gate_is_refused_too(self, tmp_path, monkeypatch):
-        """A gate pointing at another checkout gates *that* one, not this."""
+        """A gate pointing at another checkout gates *that* one, not this.
+
+        Written rather than installed: since 2026-09-05 ``install`` probes
+        the command and refuses one that does not run, and
+        ``/other/python`` does not. This describes a file an installation
+        that has since moved left behind, which is a state that arrives on
+        disk rather than through the installer.
+        """
         hooks = tmp_path / "hooks.json"
         monkeypatch.setattr(install, "GLOBAL_HOOKS", hooks)
-        install.install(tmp_path / "cfg", path=hooks, python="/other/python")
+        _write_gate_entry(
+            hooks, install.hook_command(tmp_path / "cfg", "/other/python")
+        )
         svc = service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"

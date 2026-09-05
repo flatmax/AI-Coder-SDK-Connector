@@ -393,10 +393,17 @@ streamed. A consultation that could be resumed is a session, and a session belon
 
 ## AG-R-10 — A second bundled binary
 
+> **Mitigated 2026-09-05 (phase 7).** `google-antigravity` is now the `antigravity` extra. The
+> numbers below are measured rather than estimated, and the risk is closed to the extent a
+> dependency-set risk can be: it is now one `pyproject.toml` edit away from returning, and there is a
+> test and a build-time assertion in the way of that edit.
+
 **Severity: medium. Likelihood: certain if the SDK is a hard dependency.**
 
-`localharness` is 119,721,512 bytes inside the wheel. The bundled `claude` CLI is already ~295 MB and
-is the reason packaging is its own phase on the Claude side.
+`localharness` is **129,065,896 bytes** inside the 0.1.16 wheel — it was 119,721,512 in 0.1.15, so it
+grew by ~9 MB in the four days between the two measurements, which is its own small argument. The
+bundled `claude` CLI is already ~295 MB and is the reason packaging is its own phase on the Claude
+side.
 
 **Why it bites:** it compounds a problem that is already the most likely thing to block a release,
 and it does so for a capability many users will not enable. An install that grows by 120 MB to ship a
@@ -407,8 +414,39 @@ install. The engine reports its own absence through the capability descriptor
 ([AG-9](decisions.md#ag-9)) exactly as it reports a missing surface, so a base install is a
 one-engine install with no broken UI rather than an error.
 
-**Tripwire:** base-install size, measured per release. A jump means the extra has leaked into the
-default dependency set — which is a `pyproject.toml` edit nobody reviews as a size change.
+**What it costs, measured on 2026-09-05** with `uv pip install` into two clean Python 3.14 venvs,
+`claude-agent-sdk` 0.2.152:
+
+| Install | `site-packages` |
+|---|---|
+| `aic-dc` | **273.1 MiB** |
+| `aic-dc[antigravity]` | 408.3 MiB |
+
+So the extra is **135.2 MiB**, of which `localharness` alone is 123.1 MiB (129,065,896 bytes).
+
+**Measure a *fresh* install, before its first run.** The first attempt at this table reported 285.8 MiB
+for the base, because that venv had already started a server and `__pycache__` had added ~9 MiB of
+bytecode to `site-packages` — while the comparison venv had not been run. The absolute number moved,
+the difference moved with it, and nothing looked wrong. Sum apparent file sizes rather than `du`
+blocks, too: `uv` hardlinks from its cache, so block counting answers a different question depending
+on what else is installed.
+
+**And the extra is narrower than its name.** It buys the *metered* route, not the engine: the `agy`
+transport ([AG-14](decisions.md#ag-14)) reaches the same Antigravity product over a pipe on the
+owner's own subscription, imports nothing from `google.antigravity`, and mounts on the CLI being on
+PATH — so a base install is still a two-engine install for anyone who has it. What a base install
+genuinely loses is the API-key session and the **consultant**, since `second_opinion` and
+`generate_image` are the SDK's and `agy` has no one-shot consultation mode.
+
+**Tripwire, in three places** — because the leak is a `pyproject.toml` edit nobody reviews as a size
+change, and a number in a release note is something a human has to notice:
+
+1. `tests/test_antigravity_packaging.py` reads `pyproject.toml` and fails if `google-antigravity` is
+   back in `[project.dependencies]`, or if the extra loses its version floor.
+2. The release workflow's verify step fails if `localharness` appears in the PyInstaller archive.
+3. Base-install size, measured per release against the table above.
+
+The first two are what make this a caught regression rather than a noticed one.
 
 ---
 
@@ -499,3 +537,48 @@ time: it fired, and the file changed anyway.
 [AG-2](decisions.md#ag-2) before it was checked against a second matcher. It survived one probe and
 one commit. The lesson is the one AG-R-11's own tripwire already states — assert on the artefact, not
 on the mechanism — and it is recorded twice because it has now been learned twice.
+
+### The second way it failed open, found 2026-09-05
+
+Read the table again and notice what it says about *`agy`*: four of five failures **block**. `agy`
+fails closed. The one fail-open row is the one we write.
+
+**Our installed command converts all four into fail-open**, deliberately:
+
+```
+<interpreter> -m aic_dc.agy.hook <config_dir> || printf '{"decision":"allow"}'
+```
+
+That is sound on one premise, stated in `agy/install.py`: *a non-zero exit means the interpreter
+could not start, which means this host is not running, which means it owns no conversations, so allow
+is correct.* The premise buys something real — a stale entry must not stop a stranger's `agy` — and it
+holds exactly while the only way the command can fail is that a Python has gone missing.
+
+**It was false on a PyInstaller build.** There `sys.executable` is the frozen binary, not a Python, so
+`<binary> -m aic_dc.agy.hook …` exits 2 with *"unrecognized arguments"* — on every call, of a session
+this host **was** running and **did** own. Every tool call auto-approved. And `status()` reported the
+gate `current`, because it decides by comparing the installed command against the one it would write,
+and the string matched perfectly.
+
+So: an ungated agent, reporting itself gated, on the transport where the gate *is* the product
+([AG-5](decisions.md#ag-5)). It was invisible from a source checkout, where the `-m` form is correct
+and every test passes, and no test could have caught it — the suite runs where `sys.executable` is a
+Python.
+
+**What closes it, at two layers:**
+
+- `hook_command` emits `<binary> --agy-hook <config_dir>` on a frozen build — a suppressed CLI flag
+  whose only caller is that string.
+- **`install` probes the command before writing it** (`hook_runs`) and refuses one that does not
+  answer with a JSON decision. That is the general fix, and the frozen binary was only its first
+  instance: a moved virtualenv or an uninstalled package reach the same place. It runs the left side
+  only, without the fallback — running the whole command would print a perfect decision and mask
+  precisely the failure being looked for.
+
+Failing closed here costs the user an error message at the moment they asked for a gate, which is the
+cheapest place in the system to spend one.
+
+**Added tripwire:** `install` returns `unrunnable` rather than writing, and the Settings panel renders
+that state with its reason. The deeper lesson is a third instance of this entry's own: **a string that
+is correct is not a mechanism that works**, and `status` comparing strings was measuring the first
+while claiming the second.

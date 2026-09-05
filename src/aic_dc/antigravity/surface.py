@@ -67,6 +67,7 @@ from __future__ import annotations
 import ast
 import functools
 import importlib.metadata
+import importlib.util
 import logging
 from pathlib import Path
 from typing import Any
@@ -503,6 +504,37 @@ CAPABILITY_FIELDS: dict[str, tuple[str, str]] = {
 # ----------------------------------------------------------------------
 
 
+def sdk_installed() -> bool:
+    """Whether ``google-antigravity`` is present in this install.
+
+    **The one authority on that question**, and it is a control path
+    rather than a diagnostic: phase 7 made the SDK an optional extra
+    (AG-R-10), so a base install is one where the API-key engine and the
+    consultant do not exist. Both are mounted on this, exactly as they
+    are already mounted on a credential — an engine in the selector that
+    raises ``ImportError`` on its first turn is the "broken UI" the
+    phase's exit criterion forbids, and it is worse than an engine that
+    is simply not offered.
+
+    ``find_spec`` rather than an import, deliberately. The answer is
+    needed at startup, on every run, including the ones that will never
+    touch this engine; importing the SDK to find out costs pydantic and
+    gRPC on a path that is meant to be free. It also asks the honest
+    question — *is this installed* — where a failed import conflates that
+    with a broken one.
+
+    Not cached. A cache here is a third thing that can be wrong about an
+    install, and the call is a spec lookup.
+    """
+    try:
+        return importlib.util.find_spec("google.antigravity") is not None
+    except (ImportError, ValueError):
+        # ModuleNotFoundError for a missing `google` namespace package,
+        # ValueError for a parent that exists but has no `__spec__`.
+        # Both mean the same thing to every caller.
+        return False
+
+
 def _sdk() -> Any:
     """Import the SDK, or ``None`` when it is not installed.
 
@@ -511,13 +543,21 @@ def _sdk() -> Any:
     that says "unknown". ``google-antigravity`` is an optional extra
     (AG-R-10 — it bundles a second ~119 MB binary), so absent is a
     supported state rather than a broken install.
+
+    Asks :func:`sdk_installed` first rather than deciding for itself, so
+    the probe and the mount cannot disagree about whether this install
+    has an SDK. The import that follows is for *reflection* — the probe
+    needs the module object, not the answer.
     """
+    if not sdk_installed():
+        logger.debug("google-antigravity is not installed; surface unknown")
+        return None
     try:
         import google.antigravity
 
         return google.antigravity
     except Exception:  # noqa: BLE001 - a probe, never a control path
-        logger.debug("google-antigravity is not importable; surface unknown")
+        logger.debug("google-antigravity is installed but did not import")
         return None
 
 
