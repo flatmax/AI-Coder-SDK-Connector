@@ -928,3 +928,95 @@ survives a **server restart**, and the same command in a later session raises **
 rule must never widen beyond what was shown. A rule derived from `rm -rf build/` must not match
 `rm -rf /`, and a path rule for `src/a.py` must not match `src/`. The stored form is asserted, not the
 dialog's label.
+
+---
+
+## AG-16 — The consultant runs over `agy` too, and by default prefers it **(user)**
+
+**The consultant has never been able to do the thing it was built for.** AG-1's worked example for
+having a second engine at all is image generation — a capability Anthropic does not offer — and
+`generate_image` has been implemented, tested and mounted since phase 1 without once returning an
+image. The reason is not code: on a free-tier Gemini key **every image model reports `limit: 0`**,
+which is an allowance of zero rather than a throttle, so no amount of retrying or waiting changes it
+([AG-12](#ag-12--the-free-ai-studio-tier-is-chosen-not-defaulted-into-user)). The same key caps agent
+requests at 20 per model per day and queues what is left behind paid traffic.
+
+**`agy` is the same product on an account that has an allowance.** It authenticates by OAuth against
+the owner's Google subscription — the entire reason [AG-14](#ag-14) added it as a second transport —
+and its `init` frame advertises `generate_image` among its 57 tools. So the consultant gains a second
+implementation, and the second one is the first that can run.
+
+`claude_code/service.py` said the opposite in a log line: *"There is no agy equivalent — the CLI has
+no one-shot consultation mode."* That was written before anything drove `agy`, and it is wrong twice:
+`agy` runs headlessly per prompt, and phase 8 had already built the process, the stream reader and the
+gate a consultation composes. **A sentence about a capability, written while nothing exercised it,
+outlived the reason it was true** — the same shape as the read tools' `ARG_ALIASES` and
+`EngineHealth.mcp` before it.
+
+### The decision
+
+**Both transports implement one consultant contract, `ConsultantBridge` holds either, and `auto`
+prefers `agy`.** `choose_consultant` answers with a consultant and a sentence saying which and why, or
+with `None` and a sentence saying why there is none. `app.json`'s `engines.consultant` names one
+explicitly — `agy`, `sdk`, or `auto`.
+
+Auto prefers `agy` because the alternative is a transport that cannot generate an image at all. It
+falls back to the SDK rather than refusing, since a second opinion on a metered key is still a second
+opinion. **`sdk` is worth naming explicitly rather than being the fallback only:** a user with a
+*paid* key may want it, because the SDK consultant pins its model and an opinion whose model moved is
+not a second opinion.
+
+### Containment is the whole of the design, and it is not the SDK's
+
+The SDK consultant restricts itself by **enabling** only what a consultation needs — `FINISH`, plus
+`GENERATE_IMAGE` for an image — so the agent never holds the rest. **That option does not exist on
+this transport.** `agy`'s tool set is the binary's, its headless permission layer auto-denies rather
+than asking, and AIC⚡DC therefore runs it with `--dangerously-skip-permissions` and reviews the calls
+itself. A consultation cannot subtract a tool; it can only answer for one.
+
+So the restriction is a `StaticPolicy` on the gate: the consultation's conversation is claimed in the
+registry exactly as a session's is, and every call is answered from a fixed allowlist **with no
+dialog**. A second opinion is allowed nothing; an image generation is allowed `generate_image`.
+Everything else is denied with prose the model reads, which turns a refusal into "answer the question"
+rather than into [AG-R-11](risks.md#ag-r-11)'s search for another route — the same mechanism, used the
+useful way round.
+
+**Two reasons a consultation must not raise a dialog, and the second is structural.** It was already
+answered: a consultation only happens inside an `mcp__aic-dc-antigravity__*` tool call, which reached
+the dialog by the ordinary path. And nobody is watching the right window: the Claude turn that asked
+is *blocked on the tool result*, so a dialog raised here interrupts a turn to ask about a call the user
+never made.
+
+### It refuses to run without the gate installed, and that is AG-5 rather than tidiness
+
+An unclaimed conversation is passed straight through by the hook — correctly, since that is how the
+user's own `agy` sessions stay untouched. An unclaimed *consultation* is therefore an agent with 57
+tools, `--dangerously-skip-permissions`, and the repository as its working directory. So
+`AgyConsultant.available` is false without a `current` gate and the tools are not offered at all,
+which is AG-9's "hidden rather than stubbed" arriving at a much sharper edge than usual.
+
+### What it borrows, and the one thing it must not
+
+[AG-R-9](risks.md#ag-r-9) warned that a consultant grown into an engine adapter is all cost and no
+reuse. This is that relationship reversed and the risk does not apply: the engine was built first and
+this *consumes* it — `AgySession` for the process and the frames, `AgyTranslator` for the rendering,
+`files_written_by` for which file a call wrote, `verify_image_write` for whether to believe it.
+
+**The one thing it does not borrow is the turn's close.** `AgySession.stream_turn` ends by emitting
+`streamComplete`, which carries a request id and tells the browser a turn is over — and the turn that
+is open is the *Claude* turn holding this tool call. So the session grew `stream_frames`, the reader
+with no rendering in it, and `stream_turn` became that plus a translator and the close. One reader,
+two callers, and the consultant is the one that must not end anything.
+
+### Exit criterion
+
+A real `generate_image` on the paid subscription writes a picture **inside the repository**, verified
+by `stat` and a containment test rather than by the tool's own success report (AG-R-3), while the gate
+records that `generate_image` was the only tool allowed. And a real `second_opinion` returns prose
+having been allowed **nothing at all**, with no `streamComplete` reaching the tab.
+
+`scripts/probe_agy_consultant.py` is that criterion, and it settles one thing the offline tests
+structurally cannot: **which argument name `agy` gives the output path.** `files_written_by` knows
+`output_path` and `OutputPath`, both from the SDK's vocabulary; whether the CLI spells it either way is
+unmeasured, so the probe prints the tool frame verbatim on failure. This is phase 4's `PATH (none
+named)` trap in advance — a table that looks right, is never exercised, and degrades quietly.

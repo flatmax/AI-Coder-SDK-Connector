@@ -53,8 +53,10 @@ Governing spec: ``specs5/plan-ag/`` — AG-14, AG-5; and
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +79,46 @@ UNREADABLE = {
         "by the user."
     ),
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class StaticPolicy:
+    """A fixed answer for every tool call, with no dialog in it.
+
+    The consultant's posture (AG-16), and it is a *capability
+    restriction* rather than a permission decision — the same distinction
+    :mod:`aic_dc.antigravity.consultant` draws for the SDK transport,
+    where a one-shot consultation runs with a static allowlist while the
+    engine runs with the dialog.
+
+    Two reasons a consultation cannot use the dialog, and the second is
+    the one that makes this structural rather than a preference:
+
+    - **It was already answered.** A consultation only happens inside a
+      ``mcp__aic-dc-antigravity__*`` tool call, which reached the dialog by
+      the ordinary path before any of this ran. Asking again, per tool the
+      consultant's own agent reaches for, would put a second permission
+      question in front of a user who has already said yes to the thing
+      they can see.
+    - **Nobody is watching the right window.** The Claude turn that asked
+      is blocked on the tool result, so a dialog raised here interrupts a
+      turn to ask about a call the user never made and cannot evaluate.
+
+    ``allowed`` is therefore the whole policy: a name in it runs, anything
+    else is denied with ``reason``, and the reason is prose the model
+    reads — it is what steers a refused agent into answering rather than
+    into looking for another route (AG-R-11's mechanism, used positively).
+    """
+
+    #: Tool names, in ``agy``'s own spelling, that may run without asking.
+    allowed: frozenset[str]
+    #: What the model is told when it reaches for anything else.
+    reason: str
+
+    @classmethod
+    def of(cls, allowed: Iterable[str], reason: str) -> StaticPolicy:
+        """Build one from any iterable of names."""
+        return cls(allowed=frozenset(allowed), reason=reason)
 
 
 class _AgyContext:
@@ -118,15 +160,39 @@ class AgyGateServer:
         self,
         socket_path: Path | str,
         *,
-        gate: AntigravityPermissionGate,
+        gate: AntigravityPermissionGate | None = None,
         config_dir: Path | str | None = None,
+        policy: StaticPolicy | None = None,
     ) -> None:
+        if (gate is None) == (policy is None):
+            # Refused at construction rather than at the first tool call.
+            # A gate server with neither would answer every call by
+            # raising inside `_handle`, which fails closed — but a session
+            # whose every tool is refused for an internal reason is a
+            # defect that reads as an unhelpful model, and one with *both*
+            # would have two answers to one question.
+            raise ValueError(
+                "an agy gate server needs exactly one of `gate` (the "
+                "dialog) or `policy` (a static allowlist); it was given "
+                + ("both" if gate is not None else "neither")
+            )
         self._socket_path = Path(socket_path)
         self._gate = gate
+        self._policy = policy
         self._config_dir = config_dir
         self._server: Any = None
         self._claimed: str | None = None
         self._refusal: str | None = None
+
+    @property
+    def asks(self) -> bool:
+        """Whether this gate can put a call to the user.
+
+        ``False`` for a consultation's static allowlist. Read where the
+        difference matters rather than inferred from the presence of a
+        broker, so a caller cannot be wrong about which posture it built.
+        """
+        return self._gate is not None
 
     @property
     def socket_path(self) -> Path:
@@ -228,6 +294,19 @@ class AgyGateServer:
         if self._refusal is not None:
             # Stopped. Answered without a dialog: the user already said so.
             return {"decision": "deny", "reason": self._refusal}
+
+        if self._policy is not None:
+            # A consultation (AG-16). Terminal on purpose: this does not
+            # fall through to `pre_verdict`, because that path exists to
+            # decide *which* calls reach the dialog and there is no dialog
+            # here. A read is denied as firmly as a write — the SDK
+            # consultant enables no tools at all for a second opinion, and
+            # this is the nearest posture `agy` allows, since its tool set
+            # is the binary's rather than ours to restrict.
+            if tool_name in self._policy.allowed:
+                return {"decision": "allow"}
+            logger.debug("Consultation gate refused %s", tool_name)
+            return {"decision": "deny", "reason": self._policy.reason}
 
         # The narrowing that keeps reads out of the dialog, shared with the
         # SDK transport rather than reimplemented. Calling the broker

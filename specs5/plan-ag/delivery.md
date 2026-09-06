@@ -3852,3 +3852,117 @@ on the posture selector does nothing at all. That is the **gesture latch** worki
 requires a pointer or key event before it honours a change, so a browser restoring form state cannot
 arm a destructive posture. It has to be driven with a real gesture, which is a fact about testing
 this control rather than a fault in it.
+
+---
+
+## AG-16 — the consultant learns the transport that can pay for it (2026-09-06)
+
+Built in one sitting after the queue review that found it. The user's framing is the whole of the
+reasoning: *"using the agy subscription, there is no longer a blocker."*
+
+**What was blocked.** Two items in this directory had sat open since phase 1 with "not a code
+problem" beside them — `generate_image` had never returned an image, and no *successful* consultation
+had been watched streaming into its tab. Both were the free tier: every Gemini image model reports
+`limit: 0` on such a key, which is an allowance of zero rather than a throttle, and what is left is
+capped at 20 agent requests per model per day and queued behind paid traffic. The recorded fix was to
+enable billing on the key's Cloud project ([AG-12](decisions.md#ag-12)), and nobody had.
+
+**What was already sitting there.** `agy` is the same product reached over a pipe, authenticated by
+OAuth against the owner's *subscription*, and its `init` frame advertises `generate_image` among its
+57 tools. Phase 8 had already built the process, the stream reader, the registry claim and the gate.
+So the second implementation of the consultant is the first one that can run, and it is composition
+rather than new machinery.
+
+### The sentence that was true when it was written and wrong when it was read
+
+`claude_code/service.py`'s own log line said *"There is no agy equivalent — the CLI has no one-shot
+consultation mode."* It was written in phase 1, when nothing in the tree drove `agy` at all. By
+2026-09-05 it was wrong twice over — `agy` runs headlessly per prompt, and phase 8 had built every
+piece a consultation needs — and it was still being printed to users as the reason they had no
+consultant.
+
+**This is the fourth time this file has recorded the same shape** (`EngineHealth.mcp`, the read tools'
+`ARG_ALIASES`, the terminal HUD's four specifications) and the first where the stale claim was
+*addressed to the user*. A field with no reader is invisible until an audit; a **diagnostic** with no
+reader is worse, because it is read exactly when somebody is trying to fix something and it sends
+them to the wrong place.
+
+### Containment, which is where the two transports genuinely differ
+
+The SDK consultant contains itself by *enabling* only `FINISH` and, for an image, `GENERATE_IMAGE`.
+That is not available here: `agy`'s tool set belongs to the binary, its headless posture auto-denies
+rather than asking, and AIC⚡DC therefore runs it with `--dangerously-skip-permissions` and answers
+the hook itself. A consultation cannot subtract a tool; it can only answer for one.
+
+So `AgyGateServer` grew a second posture — `StaticPolicy`, a fixed allowlist with **no dialog** —
+beside the broker it already had. Exactly one of the two must be given, checked at construction rather
+than at the first tool call, because a gate server with neither would fail closed in a way that reads
+as an unhelpful model rather than as a defect.
+
+**A consultation must not raise a dialog, and the second reason is the structural one.** It was
+already answered — the `mcp__aic-dc-antigravity__*` call reached the dialog by the ordinary path
+before any of this ran. And the Claude turn that asked is *blocked on the tool result*, so a dialog
+raised mid-consultation interrupts a turn to ask about a call the user never made and cannot
+evaluate. Denials carry prose instead, which is [AG-R-11](risks.md#ag-r-11)'s mechanism used the
+useful way round: a refused agent that is told *"answer from what you were given"* answers, where one
+told nothing goes looking for another route.
+
+**It refuses to run without the gate installed.** An unclaimed conversation is passed through by the
+hook — correctly, that is how the user's own sessions stay untouched — so an unclaimed *consultation*
+is an agent with 57 tools and the repository as its cwd. `available` is false without a `current`
+gate, and a `stale` one (another checkout's hook) does not count.
+
+### The turn it must not end
+
+`AgySession.stream_turn` finishes by emitting `streamComplete`, which carries a request id and tells
+the browser a turn is over — and the open turn is the *Claude* one holding this tool call. A
+consultation that used it would settle the user's turn from inside a tool.
+
+So the session was split: `stream_frames` is the reader with no rendering in it, and `stream_turn` is
+that plus a translator and the close. One reader, two callers, and a test asserts no `streamComplete`
+reaches the tab.
+
+**Splitting it broke something a test caught immediately, and the failure is worth keeping.** An async
+generator's `finally` runs when it is closed, and closing the *outer* generator does not close the
+inner one — it is left suspended until garbage collection. So ⏹ on a turn (which closes the outer
+generator) stopped clearing the turn latch, and the next `stream_turn` was refused with
+`TurnInProgressError` on a session with no turn running. Before the split there was one generator and
+no inner one to forget. `stream_turn` now closes it explicitly, in a `finally`.
+
+### Three things reused rather than rebuilt, and one field name that is still a guess
+
+`files_written_by` already maps `generate_image` to its path argument under *both* Antigravity
+spellings, so the image path is read through the shared table rather than a fourth vocabulary.
+`verify_image_write` was lifted out of the SDK consultant unchanged and is now the one rule for
+believing a write: `stat` at the absolute path, containment against the repo root, non-zero bytes.
+`AgyTranslator` gained the `agent_id` its SDK counterpart has carried since the consultation tab was
+built — three hardcoded `None`s — which is the whole of what puts a consultation's blocks in its own
+tab.
+
+**What is not settled is which name `agy` gives that path.** Both spellings in the table come from the
+SDK's vocabulary; the CLI's `generate_image` arguments have never been captured. The offline tests
+feed the shape they assume, so they cannot find this — it is phase 4's `PATH (none named)` trap
+exactly, a table that looks right and is never exercised. `scripts/probe_agy_consultant.py` prints the
+tool frame verbatim on failure so one run settles it.
+
+### A limit found by a test, in the place least likely to be reasoned about
+
+The consultation's gate socket was first placed under `config_dir`, beside the engine's. A test whose
+`tmp_path` was long failed with **`AF_UNIX path too long`** — `sockaddr_un` bounds a socket path at
+about 107 bytes, and `config_dir` is configurable while the engine's short path is merely a
+coincidence of `~/.config/aic-dc` being short. Consultation sockets now live in the system temp
+directory under a short name; the registry entry carries the path to the hook, so where it lives is
+immaterial.
+
+### What is proven and what is not
+
+Thirty-two new tests, and the suite is 4,547 green. What they prove is the shape: the policy denies
+what it should, the claim is released, no `streamComplete` reaches the tab, every block is attributed
+to the consultation, a diverted image fails loudly, and an explicit `engines.consultant` never
+silently uses the other transport.
+
+**What they cannot prove is that any of it generates an image**, and that is the exit criterion.
+`scripts/probe_agy_consultant.py` is two real turns on the paid subscription: a second opinion allowed
+*nothing*, and an image verified on disk with the gate's own decision log showing `generate_image` as
+the only allow. Until it runs, this entry describes a build and not a result — which is the
+distinction phase 7's two inert checks and phase 3's three live-only bugs were all about.

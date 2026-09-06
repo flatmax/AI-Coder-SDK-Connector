@@ -610,6 +610,42 @@ class ConfigManager:
         return chosen
 
     @property
+    def consultant_transport(self) -> str:
+        """Which Antigravity transport answers ``second_opinion`` (AG-16).
+
+        ``"auto"`` by default, and auto prefers ``agy``: the SDK path
+        authenticates with a metered Gemini key whose free tier allows
+        twenty agent requests a day and *zero* image generations, while
+        ``agy`` reaches the account holder's own subscription. A default
+        that picks the transport which cannot generate an image would
+        leave AG-1's worked example broken for the reason it has always
+        been broken.
+
+        ``"sdk"`` and ``"agy"`` name one explicitly. The first is worth
+        having rather than theoretical: a user with a *paid* key may
+        prefer it, because it pins the model, and an opinion whose model
+        moves is not a second opinion.
+
+        An unknown value falls back to ``"auto"`` with a warning, for the
+        reason :meth:`master_engine` does — a typo should cost a
+        preference, not the application.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("consultant")
+        if chosen is None:
+            return "auto"
+        if chosen not in ("auto", "agy", "sdk"):
+            logger.warning(
+                "app.json engines.consultant is %r, which is not one of "
+                "auto, agy, sdk. Choosing automatically.",
+                chosen,
+            )
+            return "auto"
+        return str(chosen)
+
+    @property
     def history_config(self) -> dict[str, Any]:
         """Transcript-history section with defaults filled in.
 

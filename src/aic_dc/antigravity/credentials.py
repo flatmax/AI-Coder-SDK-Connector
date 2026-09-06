@@ -105,6 +105,22 @@ GEMINI_API = "gemini-api"
 VERTEX = "vertex"
 NONE = "none"
 
+#: The third mode, which is not the SDK's at all: ``agy``'s own OAuth.
+#:
+#: Added by AG-16, when the consultant learned to run over the CLI
+#: transport. It never carries a key — nothing here can read ``agy``'s
+#: login and nothing should try — so :meth:`Credentials.config_kwargs`
+#: answers ``{}`` for it, which is correct rather than incomplete: no
+#: ``LocalAgentConfig`` is ever built from it, because this mode means
+#: "a subprocess authenticates itself".
+#:
+#: It exists so the browser and the log line naming a credential source
+#: need no branch for the transport that does not have one. AG-R-8's
+#: warning does not apply here and neither does AG-12's data-terms
+#: condition: a paid subscription is not the free tier the warning is
+#: about, and the account is one the user already signed into.
+AGY_OAUTH = "agy-oauth"
+
 #: The key the Gemini Developer API path uses (``models.py:119``).
 API_KEY_VAR = "GEMINI_API_KEY"
 
@@ -373,6 +389,34 @@ def _key_from_files(
         if key and not found:
             found, source = key, str(path)
     return (found or None), source, warnings, billing
+
+
+def agy_credentials(installed: bool) -> Credentials:
+    """What the ``agy`` transport authenticates with, as a report.
+
+    There is nothing to resolve — the CLI holds its own OAuth in its own
+    state directory and AIC⚡DC never sees it — so this is a *description*
+    rather than a lookup, and its only input is whether the binary is
+    there at all.
+
+    Reported through :class:`Credentials` so every reader of a credential
+    source keeps working unchanged: the Context tab, the log line the
+    consultant mounts with, and anything else that asks who pays. The
+    alternative was a second shape meaning the same thing, which is the
+    convergence this suite keeps deciding against.
+    """
+    if not installed:
+        return Credentials(
+            mode=NONE,
+            source=(
+                "the agy CLI is not installed, so its Google account cannot "
+                "be reached"
+            ),
+        )
+    return Credentials(
+        mode=AGY_OAUTH,
+        source="the agy CLI's own Google sign-in (a subscription, not a key)",
+    )
 
 
 def resolve(

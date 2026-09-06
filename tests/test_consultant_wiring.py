@@ -39,21 +39,33 @@ class Service(ClaudeCodeService):
     """Just enough of the service to exercise the mount point.
 
     The real constructor builds a session store, an events log and a
-    symbol-index handle, none of which this decision touches.
+    symbol-index handle, none of which this decision touches. ``_config``
+    is here because the mount point reads it since AG-16: which transport
+    answers is an ``app.json`` preference, so a fake without one is
+    under-specified rather than minimal.
     """
 
     def __init__(self, repo_root="/tmp"):
         self._repo_root = Path(repo_root)
+        self._config = type(
+            "Config", (), {"config_dir": None, "consultant_transport": "auto"}
+        )()
 
 
 def mount(monkeypatch, *, available: bool, existing=None, explode=False,
           want_bridge=False):
-    """Run the mount with the credential state a test asks for."""
+    """Run the mount with the credential state a test asks for.
+
+    The choice of transport is faked at
+    :func:`~aic_dc.agy.consultant.choose_consultant` rather than at the
+    two consultant classes, because since AG-16 that function *is* the
+    decision — it answers with a consultant or with the sentence saying
+    why there is none, and the mount point does no credential reasoning
+    of its own any more.
+    """
 
     class FakeConsultant:
-        def __init__(self, repo_root, **kw):
-            if explode:
-                raise RuntimeError("the SDK is not installed")
+        def __init__(self):
             self.credentials = type(
                 "C", (), {"source": "test", "available": available}
             )()
@@ -74,9 +86,17 @@ def mount(monkeypatch, *, available: bool, existing=None, explode=False,
         def build_server(self):
             return {"kind": "sdk-mcp-server"}
 
+    def choose(repo_root, **kw):
+        if explode:
+            raise RuntimeError("the SDK is not installed")
+        if not available:
+            return None, "no credential on this machine (test)"
+        return FakeConsultant(), "a fake transport (test)"
+
+    import aic_dc.agy.consultant as chooser
     import aic_dc.antigravity as ag
 
-    monkeypatch.setattr(ag, "Consultant", FakeConsultant)
+    monkeypatch.setattr(chooser, "choose_consultant", choose)
     monkeypatch.setattr(ag, "ConsultantBridge", FakeBridge)
     service = Service()
     servers = service._add_consultant(existing)
@@ -160,17 +180,12 @@ class TestAbsenceIsNotAFailure:
         """
         service = Service()
         service._degradations = []
-        import aic_dc.antigravity as ag
+        import aic_dc.agy.consultant as chooser
 
         monkeypatch.setattr(
-            ag, "Consultant", lambda *a, **k: type(
-                "C", (), {"credentials": type("D", (), {"available": False})()}
-            )()
-        )
-        monkeypatch.setattr(
-            ag, "ConsultantBridge", lambda c: type(
-                "B", (), {"available": False}
-            )()
+            chooser,
+            "choose_consultant",
+            lambda *a, **k: (None, "no credential on this machine (test)"),
         )
         service._add_consultant(None)
         assert service._degradations == []
@@ -198,10 +213,19 @@ class TestItIsActuallyWired:
         real objects construct and produce a server — the failure the
         mocked tests structurally cannot catch.
         """
+        from aic_dc.agy.consultant import AgyConsultant
         from aic_dc.antigravity import resolve_credentials
 
-        if not resolve_credentials().available:
-            pytest.skip("no Gemini credential on this machine")
+        # Either transport will do, which is AG-16's point: the SDK needs
+        # a Gemini credential and a wheel, `agy` needs a binary and an
+        # installed gate, and a machine with either can mount a
+        # consultant. Skipped only when a machine has neither, because
+        # that branch is what the fakes above cover.
+        if not (
+            resolve_credentials().available
+            or AgyConsultant(tmp_path).available
+        ):
+            pytest.skip("neither consultant transport is usable on this machine")
         servers = Service(tmp_path)._add_consultant(None)
         assert AG_SERVER_NAME in servers
 

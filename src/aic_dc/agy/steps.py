@@ -95,8 +95,22 @@ class AgyTranslator:
     wants the running total. Everything else could be a function.
     """
 
-    def __init__(self, request_id: str) -> None:
+    def __init__(self, request_id: str, *, agent_id: str | None = None) -> None:
         self.request_id = request_id
+        # When set, every block and card this translator produces is
+        # attributed to that agent rather than to the main thread — which
+        # is how a consultation on this transport gets its own tab
+        # (AG-13, reached over `agy` by AG-16). The SDK translator has
+        # carried this since the consultation tab was built; this one was
+        # written for the engine, where there is only ever the main
+        # thread, and hardcoded `None` in the four places below.
+        #
+        # There is no per-step scope to derive here, unlike the SDK
+        # translator's `_scope`: `agy`'s stream carries no trajectory or
+        # depth field at all, so a nested trajectory is invisible to this
+        # pump and the whole turn belongs to one agent. That is also why
+        # the `subagent_tabs` surface is unbuilt on this transport.
+        self._agent_id = agent_id or None
         self._text: dict[int, str] = {}
         self._seq: dict[int, int] = {}
         self._tools: dict[int, dict[str, Any]] = {}
@@ -220,7 +234,7 @@ class AgyTranslator:
                     "seq": self._seq[index],
                     "content": self._text[index],
                     "done": state in TERMINAL_STATES,
-                    "agent_id": None,
+                    "agent_id": self._agent_id,
                 },
             )
         ]
@@ -247,7 +261,7 @@ class AgyTranslator:
                 # so the card says so from the moment it appears rather
                 # than after the fact.
                 "gated": True,
-                "agent_id": None,
+                "agent_id": self._agent_id,
                 "server_tool": False,
             }
             self._tools[call_id] = card
@@ -316,7 +330,7 @@ class AgyTranslator:
                     "status": "error" if failed else "success",
                     "content": "" if output is None else str(output),
                     "duration_ms": _duration_ms(step.get("duration_seconds")),
-                    "agent_id": None,
+                    "agent_id": self._agent_id,
                     "files_modified": files,
                 },
             )

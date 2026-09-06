@@ -305,9 +305,13 @@ SURFACES: tuple[Surface, ...] = (
         antigravity=SUPPORTED,
         note="AG-1's worked example and the reason for a second engine: a "
         "thing one engine can do and the other cannot. Reachable from "
-        "Claude as a consultant tool (AG-7). Note that a free-tier key "
-        "reports limit: 0 for every image model, so this is supported by "
-        "the engine and gated by the account (AG-12).",
+        "Claude as a consultant tool (AG-7). A free-tier key reports "
+        "limit: 0 for every image model, so on the SDK transport this is "
+        "supported by the engine and refused by the account (AG-12) — "
+        "which is why AG-16 gave the consultant a second transport: agy "
+        "reaches the owner's subscription, where the allowance is not "
+        "zero. Still 'supported' either way; the descriptor answers what "
+        "the engine can feed, never which account is paying.",
     ),
 )
 

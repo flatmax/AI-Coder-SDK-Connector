@@ -842,17 +842,42 @@ class ClaudeCodeService:
         also why this is not recorded as a degradation: an unconfigured
         optional engine is not a fault in this one.
 
-        The two reasons are reported separately, and that is worth a line
+        The reason is reported *specifically*, and that is worth a line
         because the first version did not. A base install *with* a key
         logged "no Gemini API key or Vertex project" and told the user to
         set one they already had — a diagnostic that sends someone to fix
-        the wrong thing is worse than none.
+        the wrong thing is worse than none. There are now four ways to be
+        absent across two transports, and
+        :func:`~aic_dc.agy.consultant.choose_consultant` returns the
+        sentence rather than leaving this method to guess which held.
+
+        **Which transport answers is AG-16's question, not this one's.**
+        This method used to construct the SDK consultant directly and its
+        own log line said *"There is no agy equivalent — the CLI has no
+        one-shot consultation mode"*, which was true of nothing except
+        the state of the tree when it was written: ``agy`` runs headlessly
+        per prompt, and phase 8 had already built the process, the stream
+        reader and the gate a consultation needs. It now asks for one and
+        logs which arrived, because on a free-tier key the SDK transport
+        cannot generate an image at all (AG-12) and ``agy`` reaches the
+        account holder's own subscription.
         """
         try:
-            from aic_dc.antigravity import Consultant, ConsultantBridge
+            from aic_dc.agy.consultant import choose_consultant
+            from aic_dc.antigravity import ConsultantBridge
             from aic_dc.antigravity.bridge import SERVER_NAME as AG_SERVER_NAME
 
-            consultant = Consultant(self._repo_root)
+            # AG-16: two transports reach the same product, and which one
+            # is here decides whether `generate_image` can work at all.
+            consultant, why = choose_consultant(
+                self._repo_root,
+                config_dir=getattr(self._config, "config_dir", None),
+                transport=getattr(self._config, "consultant_transport", "auto"),
+            )
+            if consultant is None:
+                self.consultant_bridge = None
+                logger.info("Antigravity consultant not mounted: %s", why)
+                return mcp_servers
             # AG-13: the consultation streams into its own agent tab. The
             # bridge needs two things from the session to do that — a way
             # to push, and the id of the turn the tab belongs to.
@@ -866,31 +891,13 @@ class ClaudeCodeService:
                 request_id=lambda: self.session.active_request_id,
             )
             self.consultant_bridge = bridge
-            if not bridge.available:
-                from aic_dc.antigravity.surface import sdk_installed
-
-                if not sdk_installed():
-                    logger.info(
-                        "Antigravity consultant not mounted: "
-                        "google-antigravity is not installed. It is an "
-                        "optional extra because it bundles a second ~119 MB "
-                        "binary (AG-R-10); install aic-dc[antigravity] for "
-                        "second opinions and image generation from a Claude "
-                        "turn. There is no agy equivalent — the CLI has no "
-                        "one-shot consultation mode."
-                    )
-                else:
-                    logger.info(
-                        "Antigravity consultant not mounted: no Gemini API key "
-                        "or Vertex project. Set one to offer second opinions "
-                        "and image generation from a Claude turn (AG-R-8)."
-                    )
-                return mcp_servers
             servers = dict(mcp_servers or {})
             servers[AG_SERVER_NAME] = bridge.build_server()
             logger.info(
-                "Antigravity consultant mounted as %s (credential from %s)",
+                "Antigravity consultant mounted as %s over %s (credential "
+                "from %s)",
                 AG_SERVER_NAME,
+                why,
                 consultant.credentials.source,
             )
             return servers

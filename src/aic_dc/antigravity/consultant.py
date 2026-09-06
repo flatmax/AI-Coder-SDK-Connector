@@ -276,6 +276,20 @@ class Consultant:
         """
         return self._credentials.available and sdk_installed()
 
+    def make_translator(
+        self, request_id: str, agent_id: str | None = None
+    ) -> Any:
+        """The pump this transport's raw steps must go through.
+
+        The SDK's ``Step`` objects, so ``StepTranslator``. Added with
+        AG-16, when a second consultant made "which translator" a
+        question the bridge could no longer answer by naming a class —
+        and answered here, where the objects being translated come from.
+        """
+        from aic_dc.antigravity.steps import StepTranslator
+
+        return StepTranslator(request_id, agent_id=agent_id)
+
     # ------------------------------------------------------------------
     # Consultations
     # ------------------------------------------------------------------
@@ -542,54 +556,76 @@ class Consultant:
     def _verify_image(self, chunks: list[Any], summary: str) -> ImageResult:
         """Find the written file and check it is where it claims to be.
 
-        The tool's own success report is not evidence. ``agy`` reported a
-        successful write, with a ``file://`` link, for a file it had
-        diverted into ``~/.gemini/`` — so the check that matters is a
-        ``stat`` at the absolute path, and a containment test against the
-        repository root.
+        The path comes out of the SDK's own chunks; everything after that
+        is :func:`verify_image_write`, which the ``agy`` transport's
+        consultant shares. Extracting the file was the transport-specific
+        half and checking it was never one of the two.
         """
-        reported = _first_output_path(chunks)
-        if not reported:
-            raise ConsultationError(
-                "Antigravity generated no image file. "
-                + (f"It said: {summary}" if summary else "It gave no reason.")
-            )
-
-        absolute = Path(reported).expanduser()
-        if not absolute.is_absolute():
-            # A relative path is resolved against the workspace, which is
-            # the only root there is.
-            absolute = self._repo_root / absolute
-        absolute = absolute.resolve()
-
-        contained = absolute.is_relative_to(self._repo_root)
-        if not contained:
-            raise ConsultationError(
-                f"Antigravity wrote the image to {absolute}, which is outside "
-                f"the repository at {self._repo_root}. This is AG-R-3: the "
-                "write was diverted and reported as a success. The file tree "
-                "and the viewer cannot reach it."
-            )
-        if not absolute.is_file():
-            raise ConsultationError(
-                f"Antigravity reported writing {absolute} but there is no file "
-                "there. The path is inside the repository, so this is not a "
-                "workspace diversion — treat it as a failed generation."
-            )
-
-        size = absolute.stat().st_size
-        if size == 0:
-            raise ConsultationError(
-                f"Antigravity wrote an empty file at {absolute}. "
-                "An empty image is a failure that looks like a success."
-            )
-        return ImageResult(
-            path=str(absolute.relative_to(self._repo_root)),
-            absolute_path=str(absolute),
-            bytes_written=size,
-            contained=True,
-            summary=summary,
+        return verify_image_write(
+            _first_output_path(chunks), self._repo_root, summary
         )
+
+
+def verify_image_write(
+    reported: str, repo_root: Path, summary: str = ""
+) -> ImageResult:
+    """A reported image path, checked against the filesystem.
+
+    **The tool's own success report is not evidence**, and this is the one
+    rule that says so, shared by both transports rather than written twice
+    (AG-16). ``agy`` reported a successful write, with a ``file://`` link,
+    for a file it had put in ``~/.gemini/`` — so what counts is a ``stat``
+    at the absolute path and a containment test against the repository
+    root, and both consultants owe the caller the same answer.
+
+    Raises :exc:`ConsultationError` on every way this can be false: no path
+    at all, a path outside the repository (AG-R-3's diversion), a path with
+    no file at it, and a file of zero bytes. Each is separately worded,
+    because "the image did not arrive" and "the image arrived somewhere
+    the viewer cannot open" send a reader to different places.
+    """
+    repo_root = Path(repo_root).resolve()
+    if not reported:
+        raise ConsultationError(
+            "Antigravity generated no image file. "
+            + (f"It said: {summary}" if summary else "It gave no reason.")
+        )
+
+    absolute = Path(reported).expanduser()
+    if not absolute.is_absolute():
+        # A relative path is resolved against the workspace, which is the
+        # only root there is.
+        absolute = repo_root / absolute
+    absolute = absolute.resolve()
+
+    contained = absolute.is_relative_to(repo_root)
+    if not contained:
+        raise ConsultationError(
+            f"Antigravity wrote the image to {absolute}, which is outside "
+            f"the repository at {repo_root}. This is AG-R-3: the "
+            "write was diverted and reported as a success. The file tree "
+            "and the viewer cannot reach it."
+        )
+    if not absolute.is_file():
+        raise ConsultationError(
+            f"Antigravity reported writing {absolute} but there is no file "
+            "there. The path is inside the repository, so this is not a "
+            "workspace diversion — treat it as a failed generation."
+        )
+
+    size = absolute.stat().st_size
+    if size == 0:
+        raise ConsultationError(
+            f"Antigravity wrote an empty file at {absolute}. "
+            "An empty image is a failure that looks like a success."
+        )
+    return ImageResult(
+        path=str(absolute.relative_to(repo_root)),
+        absolute_path=str(absolute),
+        bytes_written=size,
+        contained=True,
+        summary=summary,
+    )
 
 
 #: How much of an SDK error to keep. Quota failures arrive as the same

@@ -73,6 +73,15 @@ class TurnInProgressError(RuntimeError):
     """One turn at a time, and the second one is refused rather than queued."""
 
 
+class PromptNotSentError(RuntimeError):
+    """The process would not take the prompt, so the turn never started.
+
+    Distinct from a turn that failed: nothing ran, and nothing was
+    written. :meth:`AgySession.stream_turn` converts it into the system
+    event a browser can render; a Python caller catches it.
+    """
+
+
 class AgySession:
     """A conversation held open across turns.
 
@@ -292,15 +301,26 @@ class AgySession:
         except Exception:  # noqa: BLE001 - draining must not kill a turn
             logger.debug("agy stderr drain ended", exc_info=True)
 
-    async def stream_turn(
-        self, prompt: str, *, translator: AgyTranslator
-    ) -> AsyncIterator[Event]:
-        """Send one prompt and yield its events until the ``result`` frame.
+    async def stream_frames(self, prompt: str) -> AsyncIterator[dict[str, Any]]:
+        """Send one prompt and yield its raw frames until ``result``.
 
-        Ends on ``result``, or on end-of-stream if the process died. Both
-        close the turn out through the translator, because with no RPC
-        reply left to carry a failure the event stream is the only channel
-        there is — the lesson the SDK transport learned the hard way.
+        The reader, with no rendering in it. :meth:`stream_turn` is this
+        plus a translator and the turn's close; the consultant
+        (:mod:`aic_dc.agy.consultant`, AG-16) is this plus a translator
+        and *no* close, because a consultation is not a turn — emitting a
+        ``streamComplete`` for one would end the user's Claude turn in the
+        browser, which is holding the tool call the consultation is
+        answering.
+
+        One reader rather than two: the frame loop, the turn latch and the
+        gate's ``resume`` are the parts that must not diverge between the
+        two callers, and a second copy of them is how the SDK transport's
+        two fetch paths quietly stopped being copies.
+
+        Raises rather than reporting when the prompt cannot be sent. The
+        event-shaped version of that failure belongs to :meth:`stream_turn`,
+        whose caller is a browser waiting on a stream; a consultation's
+        caller is a Python ``await`` that can be told with an exception.
         """
         if self._proc is None:
             raise RuntimeError("the agy session has not been started")
@@ -312,11 +332,6 @@ class AgySession:
         self._turn_active = True
         self._cancelled = False
         self._gate.resume()
-        # False if the prompt never reaches the process. The turn is closed
-        # out below either way — returning early here would skip
-        # `stream_complete` and leave the browser spinning, which is the
-        # same mistake the SDK transport's error path made this morning.
-        sent = True
         try:
             try:
                 self._proc.stdin.write(
@@ -329,37 +344,67 @@ class AgySession:
                     + b"\n"
                 )
                 await self._proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, RuntimeError, OSError):
-                # The process died between turns. Reported as an event
-                # rather than raised, and then closed out below: the
-                # browser is waiting on this stream and an exception here
-                # would leave it spinning with no explanation.
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+                RuntimeError,
+                OSError,
+            ) as exc:
                 logger.warning("agy would not accept a prompt; the process is gone")
-                yield Event(
-                    "systemEvent",
-                    {
-                        "subtype": "engine_error",
-                        "data": {
-                            "message": (
-                                "The agy process is no longer running, so the "
-                                "turn was not sent. Restart the session."
-                            )
-                        },
-                    },
-                )
-                sent = False
+                raise PromptNotSentError(
+                    "The agy process is no longer running, so the turn was "
+                    "not sent. Restart the session."
+                ) from exc
 
-            while sent:
+            while True:
                 frame = await self._read_frame()
                 if frame is None:
                     logger.warning("agy's stream ended mid-turn")
                     break
-                for event in translator.translate(frame):
-                    yield event
+                yield frame
                 if frame.get("event") == "result":
                     break
         finally:
             self._turn_active = False
+
+    async def stream_turn(
+        self, prompt: str, *, translator: AgyTranslator
+    ) -> AsyncIterator[Event]:
+        """Send one prompt and yield its events until the ``result`` frame.
+
+        Ends on ``result``, or on end-of-stream if the process died. Both
+        close the turn out through the translator, because with no RPC
+        reply left to carry a failure the event stream is the only channel
+        there is — the lesson the SDK transport learned the hard way.
+        """
+        frames = self.stream_frames(prompt)
+        try:
+            async for frame in frames:
+                for event in translator.translate(frame):
+                    yield event
+        except PromptNotSentError as exc:
+            # Reported as an event rather than raised, and then closed out
+            # below: the browser is waiting on this stream and an exception
+            # here would leave it spinning with no explanation.
+            yield Event(
+                "systemEvent",
+                {
+                    "subtype": "engine_error",
+                    "data": {"message": str(exc)},
+                },
+            )
+        finally:
+            # **Closed explicitly, and this is not tidiness.** A caller
+            # that stops early — ⏹ is exactly that — closes *this*
+            # generator, which raises `GeneratorExit` at the yield above
+            # and leaves the inner one suspended, its `finally` waiting on
+            # a garbage collection that has not happened. The turn latch it
+            # clears would still be set, so the next `stream_turn` would be
+            # refused with `TurnInProgressError` on a session with no turn
+            # running. Found by the test that stops a turn and starts
+            # another; before the reader was split there was one generator
+            # and no inner one to forget.
+            await frames.aclose()
 
         for event in translator.stream_complete():
             yield event
