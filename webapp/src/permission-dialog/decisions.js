@@ -67,7 +67,7 @@ export function renderDecisions(host, payload) {
                   class="decision"
                   data-decision="allow-always"
                   ?disabled=${settling}
-                  title=${alwaysAllowTooltip(primaryRule)}
+                  title=${primaryRule?.tooltip ?? alwaysAllowTooltip(null)}
                   @click=${() => host._decide('allow_always')}
                 >
                   <span class="rule-label">${primaryRule?.label ?? 'Always allow'}</span>

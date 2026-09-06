@@ -13,6 +13,7 @@ import {
   DESTINATION_FILES,
   RED_SECONDS,
   RISKY_FLAGS,
+  alwaysAllowTooltip,
 } from './constants.js';
 
 /**
@@ -240,8 +241,8 @@ export function defaultDenyReason(payload) {
  * (permission-dialog.md § Always allow shows the rule, not a promise).
  *
  * @param {object|null} rule
- * @returns {{label: string, destination: string, derived: boolean,
- *   session: boolean, shared: boolean}|null}
+ * @returns {{label: string, destination: string, tooltip: string,
+ *   derived: boolean, session: boolean, shared: boolean}|null}
  */
 export function describeRule(rule) {
   if (!rule || !rule.tool_name) return null;
@@ -252,6 +253,14 @@ export function describeRule(rule) {
   return {
     label: `${verb} ${rule.tool_name}${target}`,
     destination: DESTINATION_FILES[rule.destination] || rule.destination || '',
+    // Chosen here, from the *raw* rule, and carried rather than recomputed.
+    // The line above replaces `rule.destination` with the filename a person
+    // reads, so a later `describedRule.destination === 'aicDcRules'` can
+    // never be true — which is what silently un-fixed this tooltip once
+    // already (found in a browser 2026-09-06, on the Antigravity dialog it
+    // had been fixed for the day before). One description of a rule, made
+    // once, from the shape that still has the key on it.
+    tooltip: alwaysAllowTooltip(rule),
     derived: rule.origin !== 'cli',
     // The one entry that writes to the git-tracked file (CC-16). The
     // destination chip alone does not carry it: two menu rows differing only

@@ -27,6 +27,10 @@ import {
   secondsRemaining,
   spokenSeconds,
 } from './queue.js';
+import {
+  ALWAYS_ALLOW_SESSION_TOOLTIP,
+  ALWAYS_ALLOW_TOOLTIP,
+} from './constants.js';
 
 // ---------------------------------------------------------------------------
 // expiryMs
@@ -417,6 +421,7 @@ describe('describeRule', () => {
     })).toEqual({
       label: 'Always allow Bash(npm test:*)',
       destination: '.claude/settings.local.json',
+      tooltip: ALWAYS_ALLOW_TOOLTIP,
       derived: false,
       session: false,
       shared: false,
@@ -438,6 +443,7 @@ describe('describeRule', () => {
     })).toEqual({
       label: 'Always allow Write',
       destination: '.claude/settings.json',
+      tooltip: ALWAYS_ALLOW_TOOLTIP,
       derived: true,
       session: false,
       shared: false,
@@ -457,6 +463,7 @@ describe('describeRule', () => {
     })).toEqual({
       label: 'Always allow Read(//home/someone/**)',
       destination: '(this session only)',
+      tooltip: ALWAYS_ALLOW_SESSION_TOOLTIP,
       derived: false,
       session: true,
       shared: false,

@@ -269,6 +269,42 @@ Two consequences are stated in the control's tooltip rather than left to be disc
 - The rule applies to the `claude` CLI in this repository too, not just to AIC⚡DC. That is the honest consequence of `setting_sources` including the project.
 - It is a file the user can read and revoke. There is no invisible session grant behind this button — an in-memory "always" is exactly what the engine spec forbids.
 
+**Both sentences are true of one destination out of three, so the tooltip is chosen by where the
+rule goes.** The paragraph above was written when a grant went to a Claude settings file or nowhere.
+There are now three answers, and each makes a different promise:
+
+| `destination` | What the tooltip must say |
+|---|---|
+| `localSettings` / `projectSettings` | the two sentences above — a settings file, read by the `claude` CLI in this repository too |
+| `session` | held for the rest of this session, written to no file, nothing to revoke and nothing to find later |
+| `aicDcRules` | a file AIC⚡DC keeps and Settings can revoke — this repository, this engine, this user, and explicitly **not** the `claude` CLI, which has never heard of it |
+
+`session` is a normal case rather than an edge one: the CLI suggests it for reads outside the working
+directory. `aicDcRules` is [AG-15](../plan-ag/decisions.md#ag-15) — Antigravity has no
+`updated_permissions` at any layer, so AIC⚡DC owns the rule itself.
+
+#### The tooltip is chosen from the rule the server sent, not the rule the button renders
+
+Found in a browser on 2026-09-06, and it is the *second* time this one sentence has been wrong on
+the Antigravity dialog. The first fix (2026-09-05) replaced a `rule.session ? A : B` at the call site
+with a function keyed on `destination`, which was right; what nobody checked was **which object the
+call site hands it.** `describeRule` normalises a rule for display, and part of normalising is
+replacing `destination` with the filename the chip shows — so by the time the button had a rule,
+`destination` was `~/.config/aic-dc/antigravity-rules.json` and the `aicDcRules` branch could never
+fire. The chip beside the tooltip named the right file while the tooltip named the wrong CLI.
+
+Two rules follow, and the second is the one with teeth:
+
+- **One description of a rule, made once, from the shape that still carries the key.** `describeRule`
+  computes the tooltip alongside the label and the destination chip; the button renders what it is
+  given and chooses nothing.
+- **A function that accepts two shapes is a function that is dead on one of them.** The first cut
+  read `session` (a boolean only the *described* rule has) and `destination` (a key only the *raw*
+  rule has), so whichever object it received, one of its two checks was unreachable. The four tests
+  passed because every one of them constructed a hybrid with both fields set — the one shape nothing
+  produces. **A test of a function is not a test of the thing on screen**, and the test that would
+  have caught this goes through `describeRule`.
+
 ### Editing the input
 
 For `Write` and `NotebookEdit`, the right-hand pane becomes editable on an explicit "edit proposed
@@ -426,7 +462,8 @@ back to the tab and reads the dialog.
 - The rendered command for an `exec` request is byte-identical to what will run, modulo an explicit truncation with an expander.
 - No decision control holds focus during the settling interval, and Enter/Space are swallowed for its duration — on first appearance and on reconnect alike.
 - Default focus is Deny for `mcp` requests and for `exec` requests flagged `deletes` or `network`.
-- The "always allow" control is labelled with the rule text and its destination file. It never writes a bare tool grant and never a session-only grant.
+- The "always allow" control is labelled with the rule text and its destination file. It never writes a bare tool grant.
+- The "always allow" tooltip is chosen by the rule's `destination` and agrees with the destination the chip beside it renders. A rule whose destination the build has no wording for reads as the settings-file case; none of the three wordings is ever shown for a destination it is not true of.
 - A deny always carries a non-empty reason.
 - An edited input is recorded in the transcript as the input that ran, marked as user-modified.
 - Every `preview` an `interact` call carries is rendered somewhere the user can see it before answering — in the compare pane for a single-select, under its own option for a multi-select. None is dropped.
