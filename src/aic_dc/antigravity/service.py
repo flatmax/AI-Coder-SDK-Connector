@@ -121,6 +121,13 @@ class AntigravityService:
         ``None`` until then, which every reader here treats as "no answer
         yet" rather than "nothing here" — the same contract the Claude
         adapter's LSP methods have.
+    reindexer:
+        The shared :class:`~aic_dc.claude_code.hooks.Reindexer` — the same
+        instance the Claude adapter's ``PostToolUse`` hook feeds and the
+        MCP bridge flushes. Injected for the same reason ``symbol_index``
+        is: there is one index over one tree, so there is one queue of
+        files owed a re-parse. ``None`` leaves the index unfed, which is
+        what this engine did until 2026-09-06.
     """
 
     #: Where this transport's transcript mirror lives, under ``.aic-dc/``.
@@ -144,6 +151,7 @@ class AntigravityService:
         repo: Any = None,
         event_callback: Any = None,
         symbol_index: Any = None,
+        reindexer: Any = None,
         credentials: Credentials | None = None,
         model: str = options.DEFAULT_MODEL,
     ) -> None:
@@ -152,6 +160,7 @@ class AntigravityService:
         self._event_callback = event_callback
         self._collab: Any = None
         self.symbol_index = symbol_index
+        self.reindexer = reindexer
 
         repo_root = getattr(config, "repo_root", None) or Path.cwd()
         self._repo_root = Path(repo_root)
@@ -1402,7 +1411,7 @@ class AntigravityService:
         await self._mirror.note_prompt(message, request_id=request_id)
 
     async def _note_disk_writes(self, event: Event) -> None:
-        """Tell every browser the tree changed, when a call wrote to it.
+        """Tell every browser — and every index — that a call wrote.
 
         The file picker reloads on a ``filesModified`` push and on nothing
         else. On the Claude engine that push comes from a ``PostToolUse``
@@ -1422,17 +1431,44 @@ class AntigravityService:
         every watching browser, including ones that did not send this
         turn — the same reasoning the Claude hook records.
 
-        What this deliberately does *not* do is re-index the symbol table.
-        The Claude hook does both, and the second half needs a
-        ``Reindexer`` this engine has never had; a stale symbol index
-        degrades autocomplete, where a stale tree hides the agent's work.
-        Named here so the gap is a known one rather than an oversight.
+        **The re-index is the other half, and it was missing until
+        2026-09-06.** The Claude hook queues the written paths for a
+        re-parse as well as pushing the tree; this engine pushed the tree
+        and told no index anything, so after an agy edit ``symbol_map``,
+        ``file_symbols``, ``find_references``, ``doc_outline`` and the
+        editor's own completions answered from the file as it was before
+        the write — confidently, with no marker saying so. It was left out
+        of the first cut because the queue lives on a ``Reindexer`` this
+        engine had never been given one of; the fix is to give it the
+        *shared* one rather than build a second, for the reason
+        ``symbol_index`` is shared. Two queues over one index would each
+        be right about their own engine's writes and wrong about the
+        other's, and a flush would drain whichever one the caller
+        happened to hold.
+
+        Queued before the browsers are told, so the ordering matches what
+        the two signals mean: the tree push says the disk changed, and by
+        the time anything acts on it the re-parse is at least *owed*.
+
+        A path outside the repository is dropped by ``note_writes``
+        itself, not here — the indexes are keyed on repo-relative paths,
+        and the agent is allowed to write to ``/tmp``.
         """
-        if event.name != "toolResult" or self._event_callback is None:
+        if event.name != "toolResult":
             return
         payload = event.payload if isinstance(event.payload, dict) else {}
         paths = payload.get("files_modified")
         if not isinstance(paths, list) or not paths:
+            return
+        if self.reindexer is not None:
+            try:
+                self.reindexer.note_writes(paths)
+            except Exception as exc:  # noqa: BLE001 - freshness, not the turn
+                # Same bargain the drain itself makes: a queue that would
+                # not take the path costs freshness, and raising here would
+                # fail a write that already succeeded.
+                logger.warning("Could not queue %s for re-index: %s", paths, exc)
+        if self._event_callback is None:
             return
         await self._dispatch(
             Event("filesModified", list(paths), turn_scoped=False), None
@@ -1467,12 +1503,42 @@ class AntigravityService:
         if self._mirror is not None:
             await self._mirror.observe(event)
         await self._note_disk_writes(event)
-        if self._event_callback is None:
+        if self._event_callback is not None:
+            args: tuple[Any, ...] = (
+                (request_id, event.payload) if event.turn_scoped else (event.payload,)
+            )
+            try:
+                await self._event_callback(event.name, *args)
+            except Exception:  # noqa: BLE001 - a dead client is not a turn failure
+                logger.exception("Dropping %s: the event callback failed", event.name)
+        await self._settle_indexes(event)
+
+    async def _settle_indexes(self, event: Event) -> None:
+        """Finish the turn's re-indexing once the turn has been reported.
+
+        The debounce alone would get there about two seconds later, and
+        every index-reading MCP tool flushes before it answers, so this is
+        not what makes the index correct — :meth:`_note_disk_writes` is.
+        What it buys is the moment *after* a turn, which is when a user
+        reads what the agent wrote and the editor asks for completions on
+        it; those LSP RPCs read the index directly and have no flush of
+        their own on either engine.
+
+        **After the browser has been told, never before.** A flush inside
+        the ``streamComplete`` dispatch would hold the event that stops
+        the spinner behind a whole-index rebuild.
+
+        The tally is taken and dropped, and that is deliberate. On the
+        Claude engine ``take_reindexed`` drains into
+        ``postResponseComplete.files_reindexed``; this engine has no such
+        event, so entries left in the shared tally would be handed to
+        whichever Claude turn came next — a turn claiming to have
+        re-indexed files a different engine wrote.
+        """
+        if event.name != "streamComplete" or self.reindexer is None:
             return
-        args: tuple[Any, ...] = (
-            (request_id, event.payload) if event.turn_scoped else (event.payload,)
-        )
         try:
-            await self._event_callback(event.name, *args)
-        except Exception:  # noqa: BLE001 - a dead client is not a turn failure
-            logger.exception("Dropping %s: the event callback failed", event.name)
+            await self.reindexer.flush()
+        except Exception as exc:  # noqa: BLE001 - a stale index, not a failed turn
+            logger.debug("Post-turn re-index flush failed: %s", exc)
+        self.reindexer.take_reindexed()

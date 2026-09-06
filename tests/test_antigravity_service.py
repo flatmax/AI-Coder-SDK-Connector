@@ -40,6 +40,7 @@ import pytest
 from aic_dc import capabilities
 from aic_dc.antigravity.credentials import GEMINI_API, NONE, Credentials
 from aic_dc.antigravity.service import PERMISSION_MODES, AntigravityService
+from aic_dc.claude_code.hooks import Reindexer
 from aic_dc.claude_code.messages import Event
 from aic_dc.capabilities import ANTIGRAVITY, CLAUDE
 from aic_dc.engine_router import RPC_SURFACES, build_router
@@ -861,6 +862,165 @@ class TestTheFileTreeLearnsAboutWrites:
             {"tool_use_id": "t1", "status": "ok", "files_modified": ["/r/a.py"]},
         )
         assert any(name == "toolResult" for name, _ in pushed)
+
+
+class TestTheIndexLearnsAboutWritesToo:
+    """The other half of the push above, missing until 2026-09-06.
+
+    The tree reloaded and no index heard anything, so after an agy edit
+    ``symbol_map``, ``file_symbols``, ``find_references``, ``doc_outline``
+    and the editor's completions all answered from the file as it was
+    before the write. The fix is the *shared* ``Reindexer``: one index
+    over one tree wants one queue of files owed a re-parse.
+    """
+
+    def _write(self, tmp_path, reindexer, paths=("a.py",), **kw):
+        pushed = []
+
+        async def callback(name, *args):
+            pushed.append((name, args))
+
+        svc = service(
+            tmp_path, event_callback=callback, reindexer=reindexer, **kw
+        )
+        payload = {
+            "tool_use_id": "t1",
+            "status": "ok",
+            "files_modified": [str(tmp_path / p) for p in paths],
+        }
+        asyncio.run(svc._dispatch(Event("toolResult", payload), "r1"))
+        return pushed
+
+    def test_a_write_is_queued_for_reindexing(self, tmp_path):
+        reindexer = Reindexer(repo_root=tmp_path)
+        self._write(tmp_path, reindexer, paths=("pkg/mod.py",))
+        assert reindexer._pending == {"pkg/mod.py"}
+
+    def test_a_path_outside_the_repo_is_dropped(self, tmp_path):
+        """``note_writes`` owns that rule; this asserts we did not re-add it.
+
+        The indexes are keyed on repo-relative paths, so a write to
+        ``/tmp`` has nothing to update. It is allowed, not an error.
+        """
+        reindexer = Reindexer(repo_root=tmp_path)
+        pushed = self._write(tmp_path, reindexer)
+        reindexer.note_writes(["/tmp/elsewhere.py"])
+        assert reindexer._pending == {"a.py"}
+        assert any(name == "filesModified" for name, _ in pushed)
+
+    def test_a_read_queues_nothing(self, tmp_path):
+        """A tool call that wrote nothing must not arm a re-index."""
+        reindexer = Reindexer(repo_root=tmp_path)
+        self._write(tmp_path, reindexer, paths=())
+        assert reindexer._pending == set()
+
+    def test_the_queue_does_not_need_a_browser(self, tmp_path):
+        """An index is not a UI surface.
+
+        The push returns early with no event callback; the re-index must
+        not, or a headless run would drift out of date silently.
+        """
+        reindexer = Reindexer(repo_root=tmp_path)
+        svc = service(tmp_path, event_callback=None, reindexer=reindexer)
+        payload = {
+            "tool_use_id": "t1",
+            "status": "ok",
+            "files_modified": [str(tmp_path / "a.py")],
+        }
+        asyncio.run(svc._dispatch(Event("toolResult", payload), "r1"))
+        assert reindexer._pending == {"a.py"}
+
+    def test_a_queue_that_raises_still_reloads_the_tree(self, tmp_path):
+        """Freshness is worth less than the write already on disk."""
+
+        class Broken:
+            def note_writes(self, paths):
+                raise RuntimeError("no")
+
+        pushed = self._write(tmp_path, Broken())
+        assert any(name == "filesModified" for name, _ in pushed)
+
+    def test_no_reindexer_is_not_an_error(self, tmp_path):
+        """The argument is optional, and the tree push predates it."""
+        pushed = self._write(tmp_path, None)
+        assert any(name == "filesModified" for name, _ in pushed)
+
+
+class TestTheTurnSettlesTheIndex:
+    """``streamComplete`` finishes the re-index, after reporting the turn.
+
+    Not what makes the index correct — the queue above is — but the
+    moment a user starts reading what the agent wrote is the moment the
+    editor asks for completions on it, and the LSP RPCs read the index
+    directly with no flush of their own.
+    """
+
+    class Recording:
+        def __init__(self):
+            self.flushed = 0
+            self.taken = 0
+            self.order = []
+
+        def note_writes(self, paths):
+            return list(paths)
+
+        async def flush(self):
+            self.flushed += 1
+            self.order.append("flush")
+
+        def take_reindexed(self):
+            self.taken += 1
+            return []
+
+    def _dispatch(self, tmp_path, event, reindexer):
+        order = reindexer.order
+
+        async def callback(name, *args):
+            order.append(name)
+
+        svc = service(tmp_path, event_callback=callback, reindexer=reindexer)
+        asyncio.run(svc._dispatch(event, "r1"))
+        return order
+
+    def test_the_end_of_a_turn_flushes(self, tmp_path):
+        reindexer = self.Recording()
+        self._dispatch(tmp_path, Event("streamComplete", {}), reindexer)
+        assert reindexer.flushed == 1
+
+    def test_it_flushes_after_the_browser_is_told(self, tmp_path):
+        """A flush ahead of the event would hold the spinner open."""
+        reindexer = self.Recording()
+        order = self._dispatch(tmp_path, Event("streamComplete", {}), reindexer)
+        assert order == ["streamComplete", "flush"]
+
+    def test_the_tally_is_drained(self, tmp_path):
+        """Or a later Claude turn's footer claims this engine's files.
+
+        ``take_reindexed`` is take-and-clear, and on the Claude engine a
+        turn drains it into ``postResponseComplete.files_reindexed``.
+        This engine emits no such event, so entries left behind would be
+        handed to whichever Claude turn came next.
+        """
+        reindexer = self.Recording()
+        self._dispatch(tmp_path, Event("streamComplete", {}), reindexer)
+        assert reindexer.taken == 1
+
+    def test_nothing_else_flushes(self, tmp_path):
+        """Every event passes through ``_dispatch``; one of them settles."""
+        reindexer = self.Recording()
+        for name in ("assistantText", "toolCall", "toolResult", "turnUsage"):
+            self._dispatch(tmp_path, Event(name, {}), reindexer)
+        assert reindexer.flushed == 0
+
+    def test_a_failing_flush_does_not_end_the_turn_badly(self, tmp_path):
+        class Broken(self.Recording):
+            async def flush(self):
+                raise RuntimeError("no")
+
+        reindexer = Broken()
+        order = self._dispatch(tmp_path, Event("streamComplete", {}), reindexer)
+        assert order == ["streamComplete"]
+        assert reindexer.taken == 1, "the tally is drained even on a failed flush"
 
 
 class TestItReportsThePosturesItAccepts:
