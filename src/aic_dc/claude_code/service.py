@@ -873,6 +873,12 @@ class ClaudeCodeService:
                 self._repo_root,
                 config_dir=getattr(self._config, "config_dir", None),
                 transport=getattr(self._config, "consultant_transport", "auto"),
+                # AG-17. The consultant follows the engine policy rather
+                # than carrying a switch of its own: reaching Antigravity
+                # from inside a Claude turn is the same question as
+                # running it as master, and two switches for one question
+                # are two things that can disagree.
+                enabled=getattr(self._config, "enabled_engines", None),
             )
             if consultant is None:
                 self.consultant_bridge = None

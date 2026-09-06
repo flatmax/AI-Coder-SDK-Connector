@@ -1020,3 +1020,110 @@ structurally cannot: **which argument name `agy` gives the output path.** `files
 `output_path` and `OutputPath`, both from the SDK's vocabulary; whether the CLI spells it either way is
 unmeasured, so the probe prints the tool frame verbatim on failure. This is phase 4's `PATH (none
 named)` trap in advance — a table that looks right, is never exercised, and degrades quietly.
+
+---
+
+## AG-17 — A Claude-only deployment is supported, and the second engine can be switched off **(user)**
+
+**Asked as a question and it had no answer.** *"Is there a way to disable agy engine calling in the
+settings? This would be necessary for some workplaces where they are only allowed to use Claude."*
+There is not, and reading for one is what produced this entry: every mechanism that looks like an off
+switch turns out to be something else wearing its clothes.
+
+### What was already there, and why none of it is this
+
+| Mechanism | What it actually does |
+|---|---|
+| `engines.master` ([AG-1](#ag-1)) | Names which engine a session *starts* on. `switch_engine` reaches any mounted engine at runtime, so this is a default, never a restriction |
+| The `agy` permission gate ([AG-14](#ag-14)) | `connect_engine` refuses without it, so removing it does stop a session — but it is a *safety interlock*, the engine still appears in `list_engines().mountable`, the refusal arrives only after the user has chosen it, and **one click in Settings puts it back** |
+| No Gemini key, or no wheel ([AG-R-8](risks.md#ag-r-8), [AG-R-10](risks.md#ag-r-10)) | Keeps the SDK engine absent, and it is the closest thing to a Claude-only story the app has. It is the *absence of a credential*, not a decision anybody made or can audit |
+| `mcp_servers` toggles | Cover user-configured servers. The consultant's is in-process and mounts before there is anything to toggle |
+
+And the `agy` adapter mounts on `shutil.which("agy") is not None` with **no configuration consulted at
+all**. A machine that has the CLI installed for any reason has the engine.
+
+### The finding, which is [AG-16](#ag-16)'s and arrived one message after it
+
+Until 2026-09-06 the consultant needed a Gemini API key, so a workplace that had never set one got no
+Antigravity surface anywhere. AG-16 mounted the consultant on the `agy` binary plus an installed gate
+instead — and `auto` prefers it — so **the same install now offers `second_opinion` and
+`generate_image` inside every Claude turn**, with source code as their intended argument
+([AG-7](#ag-7), [AG-12](#ag-12)).
+
+Every such call still reaches the permission dialog, because those two tools sit on their own gated
+MCP server rather than the ungated index one ([AG-5](#ag-5)) — so nothing is sent without a human
+click. **That is not the same as a policy, and the difference is the whole of this entry:** the tools
+are advertised to the model on every turn, the model will reach for them, and "the user approved it"
+is exactly the outcome a workplace rule exists to make impossible rather than to rely on.
+
+**A capability widened by a change is not automatically wanted by everyone the change reaches.** AG-16
+was written from the position of an owner who wants the second engine and cannot pay for it; the same
+default, on a machine that is not allowed a second provider, is a defect. Nothing in this directory
+had a place to notice that, which is why this is a decision rather than a follow-up.
+
+### The decision
+
+**One key: `engines.enabled` in `app.json`, an allowlist of engine names, defaulting to all of them.**
+When it does not name an Antigravity engine, that adapter does not mount, the selector does not offer
+it, `switch_engine` refuses it — and **the consultant does not mount either**.
+
+Three properties, each chosen against an alternative that looked simpler:
+
+- **`claude` cannot be removed.** An empty allowlist, or one naming only engines this install does not
+  have, would produce an application with no engine at all — a config typo costing the user the whole
+  product, which is the failure `engines.master`'s fallback already exists to prevent. Claude is
+  always enabled and a list that omits it is corrected with a warning.
+- **The consultant follows the engine rather than getting its own switch.** It would have been one
+  more boolean, and two switches for one question are two things that can disagree — the convergence
+  this suite keeps choosing (§ C3 of the Claude queue, the merged tool tables, one `windowIsOpen`).
+  "May this install reach Antigravity at all" is one question. AG-16's `engines.consultant` answers a
+  different one — *which transport*, given that it may — so the two compose by intersection: the
+  allowlist decides **whether**, the transport preference decides **which**, and naming a transport
+  that is not enabled yields no consultant rather than an override.
+- **It is `app.json`, not `engine.json`.** Same reasoning as `engines.master`: every key in
+  `engine.json` is a Claude session option, and a cross-engine fact does not belong inside one
+  engine's option file.
+
+### A Settings toggle as well, and what it is not **(user, 2026-09-06)**
+
+The user asked for the control to exist in Settings, and it does. The reasoning against was put and
+the choice was made with it in view, so it is recorded rather than re-argued: **a control the user can
+switch off is a control the user can switch back on**, so the toggle is a convenience for one person
+on one machine and the file is the thing an organisation manages. A workplace that needs enforcement
+ships `app.json` read-only or writes it from configuration management; the toggle then reflects a
+state it cannot change, which is the honest rendering of a policy — the same shape as the gate panel
+being absent on an engine that has no gate.
+
+**The two halves take effect at different times, and the card has to say so**, because this is one key
+with two consumers. The engine adapters are constructed at **startup**, so disabling is an
+app-restart field and joins the restart confirmation's list. The consultant mounts when a **session**
+is built, so it goes on the next session. Neither takes effect now, and a toggle that silently did
+nothing until a restart is the failure the preference cards were given their disposition sentence for
+([`../5-webapp/settings.md`](../5-webapp/settings.md) § *Preference Cards*).
+
+### What this does not do, stated so it is not mistaken for more
+
+It governs **what AIC⚡DC mounts**. It does not uninstall `agy`, stop the user running it in their own
+terminal, or prevent an MCP server they configure themselves from reaching anything. It is not a
+network control and must not be described as one: a workplace that needs traffic blocked blocks
+traffic. What it removes is this application's own ability to reach a second provider — the engine,
+the consultant, and the tools offered to the model — which is the part this repository owns.
+
+### Exit criterion
+
+With `engines.enabled: ["claude"]` in `app.json` on a machine that has **both** the `agy` binary with
+its gate installed and a Gemini key with the wheel — the configuration where every other mechanism
+would have mounted something — a freshly started server:
+
+1. mounts no Antigravity adapter, so `list_engines().mountable` is `["claude"]`;
+2. refuses `switch_engine("agy")` and `switch_engine("antigravity")` with a reason naming the policy
+   rather than a missing binary, since "you have not installed it" would send an administrator to fix
+   something that is not the cause;
+3. builds a Claude session whose MCP servers **do not include** `aic-dc-antigravity` — asserted
+   against the mounted server list, never against the log line, because a log line saying it was
+   skipped is what a build that mounted it anyway would also print.
+
+And the tripwire that keeps it true: a test asserting that **every** Antigravity-reaching mount point
+consults the allowlist, so a future surface cannot be added beside them and inherit the old default.
+That is the failure this entry was written about — a mount condition that answered `which("agy")` and
+nothing else, correct on the day it was written and wrong the day the product met a workplace.

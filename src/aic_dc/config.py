@@ -610,6 +610,76 @@ class ConfigManager:
         return chosen
 
     @property
+    def enabled_engines(self) -> tuple[str, ...]:
+        """Which engines this install may mount at all (AG-17).
+
+        `app.json`'s `engines.enabled`, defaulting to every engine. It is
+        a *policy* rather than a preference: some workplaces are only
+        permitted to use Claude, and until this existed nothing could
+        express that — the `agy` adapter mounted on the binary being on
+        PATH with no configuration consulted, and `engines.master` names
+        which engine starts rather than which may run.
+
+        **The consultant follows this too**, which is the reason it is an
+        engine list rather than a set of feature switches. Reaching
+        Antigravity from inside a Claude turn is the same question as
+        running it as master — one provider, one answer — and two
+        switches for one question are two things that can disagree.
+
+        **Claude cannot be removed.** A list that omits it, or names only
+        engines this install does not have, would leave the application
+        with no engine at all: a config typo costing the user the whole
+        product, which is the failure `master_engine`'s fallback already
+        exists to prevent. It is added back with a warning.
+
+        Unknown names are dropped with a warning rather than raising, for
+        the same reason, and an `engines.enabled` that is not a list is
+        ignored entirely — a malformed policy must not read as a
+        *narrower* policy than the user wrote, because the direction of
+        that mistake decides whether they lose a feature or lose a
+        restriction. Ignoring it keeps every engine, which is the state
+        they had before writing it, and the Settings panel shows what is
+        in force.
+        """
+        section = self.app_config.get("engines", {})
+        if not isinstance(section, dict):
+            section = {}
+        chosen = section.get("enabled")
+        if chosen is None:
+            return tuple(capabilities.ENGINES)
+        if not isinstance(chosen, list):
+            logger.warning(
+                "app.json engines.enabled is %r, which is not a list of "
+                "engine names. Ignoring it; every engine stays enabled.",
+                chosen,
+            )
+            return tuple(capabilities.ENGINES)
+
+        named = [name for name in chosen if isinstance(name, str)]
+        unknown = [name for name in named if name not in capabilities.ENGINES]
+        if unknown:
+            logger.warning(
+                "app.json engines.enabled names %s, which %s not %s. "
+                "Ignoring the unknown %s.",
+                ", ".join(repr(name) for name in unknown),
+                "is" if len(unknown) == 1 else "are",
+                " or ".join(capabilities.ENGINES),
+                "name" if len(unknown) == 1 else "names",
+            )
+        enabled = [name for name in named if name in capabilities.ENGINES]
+        if capabilities.CLAUDE not in enabled:
+            logger.warning(
+                "app.json engines.enabled does not name %s. Adding it: an "
+                "install with no engine is not a configuration this "
+                "application can run.",
+                capabilities.CLAUDE,
+            )
+            enabled.insert(0, capabilities.CLAUDE)
+        # Ordered by ENGINES rather than by the file, so two configs that
+        # enable the same engines compare equal however they were written.
+        return tuple(name for name in capabilities.ENGINES if name in enabled)
+
+    @property
     def consultant_transport(self) -> str:
         """Which Antigravity transport answers ``second_opinion`` (AG-16).
 

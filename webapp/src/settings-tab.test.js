@@ -250,9 +250,14 @@ describe('aic-settings-tab preference cards', () => {
     publishConfigFiles();
     const el = mountTab();
     await settle(el);
-    expect(prefCards(el)).toHaveLength(2);
+    expect(prefCards(el)).toHaveLength(3);
     expect(el.shadowRoot.textContent).toContain('Thinking display');
     expect(el.shadowRoot.textContent).toContain('Doc enrichment');
+    // AG-17. Third because it is a policy rather than a preference, and
+    // it is on this grid rather than beside the engine selector because
+    // it also governs the consultant — which is not an engine anybody
+    // picks, and is the surface a Claude-only workplace actually meets.
+    expect(el.shadowRoot.textContent).toContain('Engines allowed');
     // The Agentic-coding switch and its machinery are gone for good.
     expect(el.shadowRoot.querySelector('.card.toggle-card')).toBeNull();
     expect(el.shadowRoot.querySelector('.toggle-switch')).toBeNull();
@@ -2340,5 +2345,122 @@ describe('aic-settings-tab standing permission rules', () => {
     const el = mountTab();
     await settle(el);
     expect(rulesPanel(el)).toBeFalsy();
+  });
+});
+
+// ----------------------------------------------------------------------
+// AG-17 — the engine policy
+// ----------------------------------------------------------------------
+
+/** The engine-policy card's select, addressed by its card rather than by order. */
+function policySelect(el) {
+  return el.shadowRoot.querySelector('.pref-card[data-pref="engine-policy"] select');
+}
+
+/** `app.json` text with an `engines` section a test supplies. */
+function appWith(engines) {
+  return `${JSON.stringify({ doc_index: { keywords_enabled: true }, engines }, null, 2)}\n`;
+}
+
+describe('aic-settings-tab engine policy', () => {
+  it('shows every engine allowed when the file names no policy', async () => {
+    // The state every install had before this control existed. A default
+    // that read as a restriction would take a feature from somebody who
+    // never wrote one.
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('all');
+    expect(policySelect(el).disabled).toBe(false);
+  });
+
+  it('writes a Claude-only policy as a list the file can be read back from', async () => {
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.saves).toHaveLength(1);
+    expect(backend.saves[0].key).toBe('app');
+    expect(JSON.parse(backend.saves[0].content).engines.enabled).toEqual(['claude']);
+  });
+
+  it('writes the full list rather than removing the key', async () => {
+    // A reader meeting this file should see what is permitted, not an
+    // absence whose meaning they have to know.
+    const backend = publishConfigFiles({
+      files: { app: appWith({ enabled: ['claude'] }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'all';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(JSON.parse(backend.saves[0].content).engines.enabled)
+      .toEqual(['claude', 'antigravity', 'agy']);
+  });
+
+  it('hydrates from a policy that permits one transport', async () => {
+    publishConfigFiles({ files: { app: appWith({ enabled: ['claude', 'agy'] }) } });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('claude-agy');
+  });
+
+  it('reads a list that omits claude as claude being in force anyway', async () => {
+    // The server adds it back rather than leaving the app with no
+    // engine, so a control that showed something else would be
+    // describing a configuration that cannot exist.
+    publishConfigFiles({ files: { app: appWith({ enabled: ['agy'] }) } });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).value).toBe('claude-agy');
+  });
+
+  it('disables itself rather than rounding a hand-written policy', async () => {
+    // `decode` returning null: the file says something these four
+    // presets cannot. Overwriting it on the next gesture would be a
+    // control editing what it was not asked about.
+    publishConfigFiles({
+      files: { app: appWith({ enabled: ['claude', 'antigravity', 'gpt-5'] }) },
+    });
+    const el = mountTab();
+    await settle(el);
+    expect(policySelect(el).disabled).toBe(true);
+    const card = el.shadowRoot.querySelector('.pref-card[data-pref="engine-policy"]');
+    expect(card.getAttribute('title')).toContain('cannot show');
+  });
+
+  it('says the application must restart, not the session', async () => {
+    // The third disposition. Restart session restarts the engine, and
+    // engines are mounted once when the application starts — so naming
+    // the session control here would be a promise this tab cannot keep.
+    const toasts = toastSpy();
+    publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    const said = toasts.map((t) => t.message).join(' ');
+    expect(said).toContain('when AIC⚡DC next starts');
+    expect(said).not.toContain('Restart session');
+  });
+
+  it('does not reload app.json for a value that is only read at startup', async () => {
+    // A reload would suggest the running process picked it up. It did
+    // not: the adapters were constructed before this was written.
+    const backend = publishConfigFiles();
+    const el = mountTab();
+    await settle(el);
+    const select = policySelect(el);
+    select.value = 'claude';
+    select.dispatchEvent(new Event('change'));
+    await settle(el);
+    expect(backend.reloads).toHaveLength(0);
   });
 });

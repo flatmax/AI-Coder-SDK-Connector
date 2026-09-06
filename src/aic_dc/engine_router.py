@@ -179,6 +179,7 @@ class EngineRouterBase:
         engine: str,
         alternates: dict[str, Any] | None = None,
         event_callback: Any = None,
+        enabled: tuple[str, ...] | None = None,
     ) -> None:
         for name in (engine, *(alternates or {})):
             if name not in capabilities.ENGINES:
@@ -196,6 +197,19 @@ class EngineRouterBase:
         self._adapters[engine] = master
         self._engine = engine
         self._event_callback = event_callback
+        # AG-17's policy, held so a refusal can name the right cause. An
+        # engine can be absent for two unrelated reasons — nobody
+        # installed it, or this install is not permitted it — and a
+        # refusal that says "missing credential" to an administrator who
+        # wrote the policy sends them to fix something that is not broken.
+        #
+        # `None` means "no policy was supplied", which is every engine
+        # rather than none: a router constructed without one is a test or
+        # an older caller, and defaulting to a *restriction* nobody wrote
+        # is the wrong direction for a mistake to go.
+        self._enabled: tuple[str, ...] = tuple(
+            enabled if enabled is not None else capabilities.ENGINES
+        )
 
     # ------------------------------------------------------------------
     # The router's own RPC methods
@@ -222,7 +236,19 @@ class EngineRouterBase:
         """
         return {
             "active": self._engine,
-            "available": list(capabilities.ENGINES),
+            # Policy-filtered, and that is a deliberate difference from
+            # what this key meant before AG-17. An engine with no
+            # credential is still *offered* — disabled, with the reason —
+            # because omitting it would make a missing key look like a
+            # build that never had the engine. An engine this install is
+            # not permitted is a different sentence: offering it invites
+            # a user to go and fix a credential that would change
+            # nothing. The Settings policy panel is where a missing
+            # engine is accounted for, and it names the file.
+            "available": [
+                name for name in capabilities.ENGINES if name in self._enabled
+            ],
+            "enabled": list(self._enabled),
             "mountable": sorted(self._adapters),
             # Supplied by the server rather than mapped in the browser. A
             # label table in the webapp would be a branch on an engine
@@ -273,6 +299,19 @@ class EngineRouterBase:
             return {"engine": self._engine, "changed": False}
         adapter = self._adapters.get(engine)
         if adapter is None:
+            if engine not in self._enabled:
+                # Named first, because it is the only one of the two that
+                # is a decision. AG-17.
+                return {
+                    "error": (
+                        f"The {engine} engine is disabled for this install: "
+                        f"app.json's engines.enabled does not name it. This "
+                        f"is a configured policy rather than a missing "
+                        f"credential or dependency, so installing anything "
+                        f"will not change it."
+                    ),
+                    "reason": "engine_disabled",
+                }
             return {
                 "error": (
                     f"The {engine} engine is not mounted in this session. It "
@@ -566,6 +605,7 @@ def build_router(
     alternates: dict[str, Any] | None = None,
     event_callback: Any = None,
     require_full_surface: bool = True,
+    enabled: tuple[str, ...] | None = None,
 ) -> Any:
     """A router exposing every mounted adapter's surface, plus its own.
 
@@ -590,6 +630,13 @@ def build_router(
         ``async (event_name, payload) -> None``. Used for one event,
         ``engineChanged``. Optional: a router with no callback switches
         silently, which is right for a test and wrong for a server.
+    enabled:
+        Which engines this install is *permitted* to mount (AG-17), for
+        the refusal `switch_engine` gives an engine that is absent by
+        policy rather than by circumstance. ``None`` means every engine:
+        a caller that supplies no policy has not written one, and
+        inferring a restriction from silence is the wrong direction for
+        this particular mistake to go.
     require_full_surface:
         Refuse to build if the adapter is missing a core method — one that
         no capability marks optional. On by default, and the reason is
@@ -680,6 +727,7 @@ def build_router(
         engine=engine,
         alternates={k: v for k, v in mounted.items() if k != engine},
         event_callback=event_callback,
+        enabled=enabled,
     )
 
 

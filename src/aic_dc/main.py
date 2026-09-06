@@ -1094,6 +1094,21 @@ async def run(
     from aic_dc import capabilities
 
     engines: dict[str, Any] = {}
+    # AG-17: what this install is *permitted* to mount, before anything
+    # about what it *can*. Read once here and passed to the router, which
+    # needs it to refuse a switch with the right reason — "your workplace
+    # disabled this" and "you have not installed it" send an
+    # administrator to different places, and only one of them is the
+    # cause.
+    enabled_engines = tuple(
+        getattr(config, "enabled_engines", None) or capabilities.ENGINES
+    )
+    if set(enabled_engines) != set(capabilities.ENGINES):
+        logger.info(
+            "Engine policy: app.json enables %s. The rest are not mounted, "
+            "not offered in the selector, and unreachable by the consultant.",
+            ", ".join(enabled_engines),
+        )
     try:
         from aic_dc.antigravity.credentials import resolve as resolve_credentials
         from aic_dc.antigravity.service import AntigravityService
@@ -1110,7 +1125,16 @@ async def run(
         # honest answer and the same one a missing credential gets.
         antigravity_credentials = resolve_credentials()
         antigravity_sdk = sdk_installed()
-        if antigravity_credentials.available and antigravity_sdk:
+        # Three conditions now, and the policy one comes first because it
+        # is the only one that is a *decision*. The other two describe
+        # what the machine happens to have (AG-17, AG-R-13).
+        if capabilities.ANTIGRAVITY not in enabled_engines:
+            logger.info(
+                "Antigravity engine not mounted: app.json's engines.enabled "
+                "does not include it. This is a policy, not a missing "
+                "credential — no wheel or key will change it."
+            )
+        elif antigravity_credentials.available and antigravity_sdk:
             engines[capabilities.ANTIGRAVITY] = AntigravityService(
                 config,
                 repo=repo,
@@ -1139,7 +1163,12 @@ async def run(
 
         from aic_dc.agy.service import AgyService
 
-        if _shutil.which("agy") is not None:
+        if capabilities.AGY not in enabled_engines:
+            logger.info(
+                "agy transport not mounted: app.json's engines.enabled does "
+                "not include it. This is a policy, not a missing binary."
+            )
+        elif _shutil.which("agy") is not None:
             engines[capabilities.AGY] = AgyService(
                 config,
                 repo=repo,
@@ -1153,7 +1182,13 @@ async def run(
                 "agy transport not mounted: the Antigravity CLI is not on PATH"
             )
 
-        if not antigravity_sdk:
+        # Only when the policy would have allowed it. Telling a
+        # Claude-only install to go and install a wheel is the diagnostic
+        # that sends someone to fix the wrong thing — the same mistake
+        # this block's own first version made about a Gemini key.
+        if capabilities.ANTIGRAVITY not in enabled_engines:
+            pass
+        elif not antigravity_sdk:
             logger.info(
                 "Antigravity engine not mounted: google-antigravity is not "
                 "installed. It is an optional extra because it bundles a "
@@ -1248,6 +1283,7 @@ async def run(
             if name != master_engine
         },
         event_callback=event_callback,
+        enabled=enabled_engines,
     )
 
     server.add_service(repo)

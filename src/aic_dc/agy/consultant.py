@@ -94,6 +94,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -527,6 +528,7 @@ def choose_consultant(
     *,
     config_dir: Path | str | None = None,
     transport: str = "auto",
+    enabled: Iterable[str] | None = None,
 ) -> tuple[Any, str]:
     """The consultant to mount, and one sentence saying why.
 
@@ -545,11 +547,48 @@ def choose_consultant(
     It falls through to the SDK when the CLI is absent or its gate is not
     installed — a fallback rather than a refusal, since a second opinion
     on a metered key is still a second opinion.
+
+    ``enabled`` is AG-17's engine policy, and the two arguments compose by
+    **intersection**: the policy decides *whether* this install may reach
+    Antigravity at all, ``transport`` decides *which* way given that it
+    may. So naming a transport the policy excludes yields no consultant
+    rather than an override — a preference cannot widen a policy, which is
+    the only ordering that makes the policy one.
+
+    Consulting it here rather than at the mount point is deliberate. This
+    function is where "can we reach Antigravity" is already answered, and
+    a second place asking the same question is a second place that can
+    forget to.
     """
+    from aic_dc import capabilities
     from aic_dc.antigravity.consultant import Consultant
+
+    permitted = (
+        set(capabilities.ENGINES) if enabled is None else {str(n) for n in enabled}
+    )
+    if not permitted & {capabilities.AGY, capabilities.ANTIGRAVITY}:
+        return None, (
+            "app.json's engines.enabled does not permit any Antigravity "
+            "engine, so this install offers no second opinion and no image "
+            "generation. This is a configured policy rather than a missing "
+            "credential (AG-17)."
+        )
 
     agy_consultant = AgyConsultant(repo_root, config_dir=config_dir)
     sdk_consultant = Consultant(repo_root)
+    if capabilities.AGY not in permitted:
+        # Reported as unusable for the same reason a missing binary is,
+        # and through the same channel: every caller below already knows
+        # how to say why a transport is not available, and a policy is
+        # one more why.
+        agy_consultant = _Excluded(
+            "app.json's engines.enabled does not permit the agy transport"
+        )
+    if capabilities.ANTIGRAVITY not in permitted:
+        sdk_consultant = _Excluded(
+            "app.json's engines.enabled does not permit the Antigravity SDK "
+            "transport"
+        )
 
     if transport == "agy":
         if agy_consultant.available:
@@ -562,9 +601,8 @@ def choose_consultant(
         if sdk_consultant.available:
             return sdk_consultant, "the Antigravity SDK, named by app.json"
         return None, (
-            "app.json names the SDK consultant transport, and it has no "
-            "Gemini API key or Vertex project, or no google-antigravity "
-            "wheel to run one with."
+            "app.json names the SDK consultant transport, and "
+            f"{_sdk_reason(sdk_consultant)}"
         )
 
     if agy_consultant.available:
@@ -580,10 +618,48 @@ def choose_consultant(
         )
     return None, (
         "neither transport is usable: "
-        f"{agy_consultant._unavailable_reason()} And the SDK transport has "
-        "no Gemini API key or Vertex project, or no google-antigravity "
-        "wheel (AG-R-8, AG-R-10)."
+        f"{agy_consultant._unavailable_reason()} And "
+        f"{_sdk_reason(sdk_consultant)}"
     )
+
+
+def _sdk_reason(consultant: Any) -> str:
+    """Why the SDK consultant cannot run, in one clause.
+
+    The SDK consultant has no ``_unavailable_reason`` of its own — its
+    two absences are AG-R-8's missing credential and AG-R-10's missing
+    wheel, and it reports them through ``credentials.source`` and
+    ``sdk_installed()`` rather than as a sentence. Composed here rather
+    than added there, because this is the only caller that has to
+    explain a *choice* between transports.
+    """
+    excluded = getattr(consultant, "reason", None)
+    if excluded:
+        return f"{excluded}."
+    return (
+        "the SDK transport has no Gemini API key or Vertex project, or no "
+        "google-antigravity wheel to run one with (AG-R-8, AG-R-10)."
+    )
+
+
+class _Excluded:
+    """A transport the engine policy does not permit (AG-17).
+
+    Stands where a consultant would, answering the two questions the
+    chooser asks of one — ``available`` and why not — so a policy
+    exclusion travels the same path as a missing binary instead of
+    needing a branch at every comparison. It has no other methods,
+    deliberately: anything that got hold of one of these and tried to
+    consult with it should fail loudly rather than silently do nothing.
+    """
+
+    available = False
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def _unavailable_reason(self) -> str:
+        return self.reason
 
 
 def _image_path_from(frames: list[dict[str, Any]]) -> str:

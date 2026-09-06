@@ -628,3 +628,43 @@ cheapest place in the system to spend one.
 that state with its reason. The deeper lesson is a third instance of this entry's own: **a string that
 is correct is not a mechanism that works**, and `status` comparing strings was measuring the first
 while claiming the second.
+
+---
+
+## AG-R-13 — A Claude-only deployment acquires a second provider by accident
+
+**Raised 2026-09-06**, by a user asking whether the second engine could be turned off and finding that
+it could not. [AG-17](decisions.md#ag-17) is the answer; this is the register entry, because the risk
+is not the missing switch but the *shape of the mount conditions* that made one necessary.
+
+**Every Antigravity surface mounted on evidence that something was possible, never on anything saying
+it was wanted.** The `agy` adapter mounted on `shutil.which("agy")`. The SDK engine mounted on a
+resolvable credential and an installed wheel. [AG-16](decisions.md#ag-16) then mounted the consultant
+on the `agy` binary plus a gate, where it had previously needed a Gemini key. Each of those is a
+reasonable condition read alone, and together they mean **an install acquires a second provider by
+having a file on disk** — which is invisible to the person who did not put it there for this purpose.
+
+**The exposure is the advertisement, not the traffic.** `second_opinion` and `generate_image` reach
+the permission dialog like any other `mcp` tool ([AG-5](decisions.md#ag-5)), so no code leaves without
+a click. But they are described to the model on every turn, the model reaches for them when they fit,
+and the dialog then asks a user — who is not the person who wrote the workplace's policy — to approve
+something the policy forbids. **A control that resolves to "the human said yes" is not a control an
+organisation can rely on**, which is the same reason [AG-5](decisions.md#ag-5) refuses a blanket-bypass
+posture from the other direction.
+
+**Why it took a question from outside to see it.** This directory reasons throughout from the position
+of an owner who *wants* a second engine — the whole of "Why a second engine" is an argument for having
+one. Nothing in it had a place to hold the reader who is not allowed one, so a default that widened on
+2026-09-06 read as a feature and was one, for everybody the plan had in mind. **This is the class of
+defect that is only visible from outside the plan**, the same class as the routed `/usage` command
+that named a tab which did not hold what it promised — found by a user comparing the app against the
+CLI it wraps, and unreachable by any audit of this suite against itself.
+
+**Mitigation, and it is a requirement rather than advice:** every mount point for an Antigravity
+surface consults `engines.enabled` — the engine adapters, the consultant, the selector, and
+`switch_engine` — with a test asserting that the set of such mount points is exactly the set that
+consults it. A surface added beside them that forgets is the recurrence, and it would look exactly
+like today's condition did: locally correct, and wrong for a deployment nobody in the room had.
+
+**Tripwire that says it has fired:** a Claude-only install where `list_engines().mountable` names more
+than `claude`, or where a Claude session's MCP server list contains `aic-dc-antigravity`.

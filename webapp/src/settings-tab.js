@@ -144,6 +144,70 @@ const PREFERENCE_CARDS = [
       + ' and the pass that loads it; outlines keep their structure either'
       + ' way. app.json → doc_index.keywords_enabled.',
   },
+  {
+    key: 'engine-policy',
+    configType: 'app',
+    path: ['engines', 'enabled'],
+    icon: '🛡️',
+    label: 'Engines allowed',
+    control: 'select',
+    // No key means every engine — the state every install had before
+    // this control existed, and the only default that cannot silently
+    // take a feature away from somebody who never asked for a policy.
+    fallback: null,
+    options: [
+      { value: 'all', label: 'Claude and Antigravity' },
+      { value: 'claude-agy', label: 'Claude + Antigravity subscription' },
+      { value: 'claude-sdk', label: 'Claude + Antigravity API key' },
+      { value: 'claude', label: 'Claude only' },
+    ],
+    applies: 'app-restart',
+    note: 'Engines mount at startup — restart AIC⚡DC to apply.',
+    title:
+      'Which engines this install may mount at all (plan-ag AG-17). Claude'
+      + ' only removes the Antigravity engines from the selector *and* the'
+      + ' second_opinion and generate_image tools from every Claude turn,'
+      + ' which are the surfaces that reach Google without anyone switching'
+      + ' engine. This is a convenience, not an enforced policy: whoever can'
+      + ' set it here can unset it here, so a workplace rule belongs in a'
+      + ' managed app.json. app.json → engines.enabled.',
+    /**
+     * The file's list as one of the options above, or null for a
+     * combination this control cannot say.
+     *
+     * Null is not an error and is not "off": it is a config the user
+     * wrote by hand that the select has no way to represent, and
+     * `_prefState` renders that as a disabled control with the reason
+     * rather than as a preset that would overwrite it on the next
+     * gesture. A four-option select that silently rounded a hand-written
+     * policy to the nearest preset would be a control that edits
+     * something it was not asked to.
+     */
+    decode(raw) {
+      if (raw === null || raw === undefined) return 'all';
+      if (!Array.isArray(raw)) return null;
+      const names = new Set(raw.filter((n) => typeof n === 'string'));
+      // `claude` is always in force whatever the file says — the reader
+      // adds it back rather than leaving the app with no engine — so it
+      // is not part of what distinguishes these.
+      names.delete('claude');
+      if (names.has('antigravity') && names.has('agy')) return 'all';
+      if (names.size === 0) return 'claude';
+      if (names.size === 1 && names.has('agy')) return 'claude-agy';
+      if (names.size === 1 && names.has('antigravity')) return 'claude-sdk';
+      return null;
+    },
+    /** An option back into the list the file holds. */
+    encode(option) {
+      if (option === 'claude') return ['claude'];
+      if (option === 'claude-agy') return ['claude', 'agy'];
+      if (option === 'claude-sdk') return ['claude', 'antigravity'];
+      // Written out in full rather than as `null`. A reader meeting this
+      // file should see what is permitted, not an absence they have to
+      // know the default for.
+      return ['claude', 'antigravity', 'agy'];
+    },
+  },
 ];
 
 /**
@@ -1075,11 +1139,25 @@ export class SettingsTab extends RpcMixin(LitElement) {
           + ' edit it. Open the card below and fix the file.',
       };
     }
-    return {
-      value: readPreference(content, card.path, card.fallback),
-      ready: true,
-      reason: card.title,
-    };
+    const raw = readPreference(content, card.path, card.fallback);
+    if (!card.decode) return { value: raw, ready: true, reason: card.title };
+    // A card whose file value is not what its control offers — a list
+    // where the select has presets. `decode` answering null means the
+    // file says something this control cannot, and the honest response
+    // is to show it disabled with the reason: rounding a hand-written
+    // policy to the nearest preset would make the next gesture edit
+    // something the user did not ask about.
+    const decoded = card.decode(raw);
+    if (decoded === null) {
+      return {
+        value: card.fallback,
+        ready: false,
+        reason:
+          `${card.configType}.json holds a combination this control cannot`
+          + ' show. Open the card below to read or change it.',
+      };
+    }
+    return { value: decoded, ready: true, reason: card.title };
   }
 
   /**
@@ -1116,7 +1194,11 @@ export class SettingsTab extends RpcMixin(LitElement) {
         }
         base = typeof res.content === 'string' ? res.content : '';
       }
-      const next = writePreference(base, card.path, value);
+      // The control's own vocabulary back into the file's. Only the
+      // engine-policy card has one today; every other card's value *is*
+      // what the file holds.
+      const written = card.encode ? card.encode(value) : value;
+      const next = writePreference(base, card.path, written);
       if (next === null) {
         this._emitToast(
           `${card.configType}.json does not parse, so ${card.label} could not be`
@@ -1204,6 +1286,23 @@ export class SettingsTab extends RpcMixin(LitElement) {
       this._emitToast(
         `${card.label}: ${label}. Applies when the session next starts —`
         + ' use Restart session below.',
+        'info',
+      );
+      return;
+    }
+    if (card.applies === 'app-restart') {
+      // The third disposition, added with AG-17. This tab had two and
+      // said so — a field takes effect on the next session or on the
+      // next background pass — and neither is true of a value read
+      // *once*, while the engine adapters are being constructed. There
+      // is no control here that can get it there: Restart session
+      // restarts the engine, not the application, so saying "restart the
+      // session" would be a promise this tab cannot keep. The toast
+      // names the thing the user has to do instead, and does not offer a
+      // button that would do something else.
+      this._emitToast(
+        `${card.label}: ${label}. Applies when AIC⚡DC next starts —`
+        + ' the engines are mounted once, at startup.',
         'info',
       );
       return;

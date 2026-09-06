@@ -203,9 +203,10 @@ regression named in
 
 ## Preference Cards
 
-**Two of the three are built.** Thinking display and Doc enrichment render above the config grid; Deny-read
-scope waits on the prompt it would reset (§ B4 of [`../next.md`](../next.md)), because a control that
-forgets a remembered answer to a question nobody is asked yet is a control over nothing.
+**Three cards, and the third is a policy rather than a preference.** Thinking display, Doc enrichment and
+Engines allowed render above the config grid; Deny-read scope was declined rather than deferred (§ E of
+[`../next.md`](../next.md)), because a control that forgets a remembered answer to a question nobody is
+asked yet is a control over nothing.
 
 Cards that hold a switch rather than an editor, laid out in the same card shape with the control beneath
 the icon and label, in a grid of their own — a `<select>` with "Engine default" in it does not fit the
@@ -217,6 +218,7 @@ uniform.
 | Thinking display | `engine.json` `thinking_display` | Whether thinking regions arrive at all. Labelled as next-session |
 | ~~Deny-read scope~~ | — | **Declined 2026-08-29 — this card will never exist.** It was to reset a remembered answer to the file picker's denial-scope prompt, and that prompt is now decided against rather than deferred, so there is no preference to reset. A reset control is downstream of a choice; when the choice went, the card went with it. [`file-picker.md`](file-picker.md) § *Denial Scope Prompt — declined*, [`../next.md`](../next.md) § E |
 | Doc enrichment | `app.json` `doc_index.keywords_enabled` | Whether keyword enrichment runs |
+| Engines allowed | `app.json` `engines.enabled` | Which engines this install may mount at all, the consultant included. Labelled as app-restart — the third disposition this grid has ([plan-ag AG-17](../plan-ag/decisions.md#ag-17)) |
 
 **The note under each control is the card.** Both fields were already editable in the textarea below —
 `engine.json` and `app.json` are the two config cards — so a switch adds no capability whatsoever. What it
@@ -230,6 +232,36 @@ true. The two cards deliberately answer that differently, and **neither answers 
   consumer is a background build, not a value read per use. Switching enrichment off stops the next pass;
   it does not remove keywords already computed, and switching it back on does not start one. Reporting it
   as applied would be wrong in both directions
+- **Engines allowed** is **app-restart**, and it is the third disposition this section once said did not
+  exist. The engine adapters are constructed once, while the application starts; nothing on this tab can
+  get a new value there, because *Restart session* restarts the engine rather than the process. So the
+  toast names what the reader has to do instead and offers no button that would do something else, and
+  the card deliberately does **not** call `reload_app_config` — a reload here would suggest the running
+  process had picked the value up, and it cannot have
+
+### Engines Allowed
+
+**What it governs is larger than the engine selector**, which is why it is on this grid rather than beside
+that control. Naming Claude alone removes the Antigravity engines from the selector *and* removes
+`second_opinion` and `generate_image` from every Claude turn — the surfaces that reach a second provider
+without anybody switching engine, and the ones a Claude-only workplace actually meets
+([plan-ag AG-R-13](../plan-ag/risks.md#ag-r-13)).
+
+**It is a convenience and not an enforced policy, and the card's own text says so.** Whoever can set this
+here can unset it here, so a workplace rule lives in a managed `app.json` and this control then reflects a
+state it cannot change. That is the honest rendering of a policy rather than a defeat: the same shape as
+the `agy` gate panel being absent on an engine that has no gate.
+
+**Four presets over a list, and a fifth state that refuses.** The file holds an allowlist of engine names,
+and the select offers the four combinations anybody has asked for. A hand-written list the presets cannot
+express — an unknown name, or a future engine — leaves the control **disabled with the reason**, pointing
+at the textarea. Rounding it to the nearest preset would mean the next gesture silently rewrote a policy
+the user wrote deliberately, which is § *A switch writes text, not a re-serialised file* applied to
+meaning rather than to formatting.
+
+**`claude` is not part of what the presets distinguish**, because it is always in force: a list omitting
+it has it added back server-side, since an install with no engine is not a configuration this application
+can run. A control showing anything else would be describing a state that cannot exist.
 
 **Thinking display is a three-state select, not a switch.** `null` means "let the CLI decide", which is a
 different claim from either `summarized` or `omitted` — the null rule in
