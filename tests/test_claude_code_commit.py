@@ -481,6 +481,20 @@ class TestOneShotOptions:
         await commit(service)
         assert sdk_query.options.thinking == {"type": "disabled"}
 
+    async def test_it_states_its_own_effort(self, service, sdk_query):
+        """Disabling thinking is not enough on its own — it is half a pair.
+
+        The ``effortLevel`` in ``settings.json`` rides in with the
+        provider, and the API refuses its top two rungs when thinking is
+        disabled: a user whose conversations run at ``xhigh`` got "400
+        output_config.effort 'xhigh' is not supported when thinking is
+        disabled on this model" instead of a commit, every time. Stating
+        the effort here is what keeps the two halves of the options dict
+        consistent whatever the machine prefers.
+        """
+        await commit(service)
+        assert sdk_query.options.effort == "low"
+
     async def test_the_provider_comes_over_as_a_settings_file(
         self, service, sdk_query, tmp_path, monkeypatch
     ):

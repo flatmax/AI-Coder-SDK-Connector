@@ -261,8 +261,20 @@ record is and the browser cannot pick the wrong one ([`../next.md`](../next.md) 
 **Nothing is written and the refresh token is never used.** The CLI refreshes its own token on a 401 and
 rewrites the credential file; doing that from here would rotate the token out from under the CLI's copy
 and could lock the user out of their own editor — a far worse outcome than a missing gauge. An expired
-token is reported as a reason, not repaired, which costs nothing in practice because AIC⚡DC *spawns*
-the CLI and a turn is what keeps the file fresh.
+token is reported as a reason, not repaired.
+
+**That last part used to carry a reason that was false**, and it is recorded here rather than deleted
+because it licensed a real bug for as long as it stood. The claim was that a stale token "costs nothing
+in practice because AIC⚡DC *spawns* the CLI and a turn is what keeps the file fresh". It does not. A
+resumed session — which is every server start after the first — runs its CLI child under a temporary
+`CLAUDE_CONFIG_DIR` whose `.credentials.json` has `refreshToken` stripped by the SDK on purpose
+(`_write_redacted_credentials`). That child therefore *cannot* refresh, and what it does write goes to
+the temp dir rather than to `~/.claude`. Turns taken inside AIC⚡DC never refreshed anything; only an
+interactive `claude` in a terminal did, which is why "run the CLI, then restart AIC⚡DC" was the folk
+remedy for `Failed to authenticate: OAuth session expired and could not be refreshed`. Repairing the
+token is now [`token_refresh`](../../src/aic_dc/claude_code/token_refresh.py)'s job — before connect, and
+again before expiry for a session already running — and it stays out of this panel, which still only
+reads.
 
 **A redirected engine is never asked.** With `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, an API
 key, or a base-URL override in the environment, turns bill somewhere this endpoint knows nothing about

@@ -38,6 +38,7 @@ from claude_agent_sdk import (
 )
 
 from aic_dc.claude_code import session as session_module
+from aic_dc.claude_code import token_refresh
 from aic_dc.claude_code.engine_config import EngineConfig
 from aic_dc.claude_code.health import CliResolution, EngineStartupError
 from aic_dc.claude_code.messages import Event
@@ -420,6 +421,68 @@ class TestConnect:
         assert session.health.cli_version == "2.1.229"
         assert session.health.cli_source == "bundled"
         assert session.health.last_error is None
+
+    async def test_connect_refreshes_the_access_token_first(self, tmp_path, monkeypatch):
+        """Before the SDK materialises a temp config dir and snapshots the
+        token into it — the copy has `refreshToken` stripped, so a token
+        captured here short is one the CLI child can never renew."""
+        calls = []
+
+        async def fake_ensure_fresh(**kwargs):
+            calls.append(kwargs)
+            return token_refresh.RefreshOutcome(ok=True, attempted=False)
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", fake_ensure_fresh)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+        await session.disconnect()
+
+        assert len(calls) == 1
+        # The binary connect just version-checked, not whatever discovery
+        # would find a moment later.
+        assert calls[0]["cli_path"] == "/fake/claude"
+        assert calls[0]["cwd"] == tmp_path
+
+    async def test_a_failed_refresh_still_connects(self, tmp_path, monkeypatch):
+        """A pre-flight check that could refuse a session which would have
+        worked is worse than the expiry it guards against."""
+
+        async def failing(**kwargs):
+            return token_refresh.RefreshOutcome(
+                ok=False, attempted=True, detail="could not refresh"
+            )
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", failing)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+
+        assert session.connected is True
+        assert "could not refresh" in session.health.degradations
+        await session.disconnect()
+
+    async def test_a_raising_refresh_still_connects(self, tmp_path, monkeypatch):
+        async def boom(**kwargs):
+            raise RuntimeError("credential store on fire")
+
+        monkeypatch.setattr(token_refresh, "ensure_fresh", boom)
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+
+        assert session.connected is True
+        await session.disconnect()
+
+    async def test_disconnect_stops_the_token_watchdog(self, tmp_path):
+        """It can be sitting in a refresh subprocess; a cancel it never
+        observes would leave a CLI running past the session."""
+        session = EngineSession(tmp_path, EngineConfig())
+        await session.connect()
+        watchdog = session._token_watchdog_task
+        assert watchdog is not None
+
+        await session.disconnect()
+
+        assert watchdog.done()
+        assert session._token_watchdog_task is None
 
     async def test_session_id_is_null_until_the_init_message(self, engine):
         """connect() completes the handshake; the ID comes with the turn."""

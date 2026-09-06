@@ -43,10 +43,16 @@ from typing import Any
 
 from aic_dc.claude_code.cost import CostLedger
 from aic_dc.claude_code.engine_config import EngineConfig
-from aic_dc.claude_code.health import EngineHealth, EngineStartupError, resolve_cli
+from aic_dc.claude_code.health import (
+    EngineHealth,
+    EngineStartupError,
+    cli_config_dir,
+    resolve_cli,
+    subscription_credential_path,
+)
 from aic_dc.claude_code.messages import Event, TurnTranslator
 from aic_dc.claude_code.options import build_options, file_checkpointing_available
-from aic_dc.claude_code import resume_cleanup
+from aic_dc.claude_code import resume_cleanup, token_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,12 @@ CONNECT_TIMEOUT = 60.0
 # the client is disconnected and the session reported lost, rather than
 # reading the next turn's messages over an undrained buffer.
 INTERRUPT_DRAIN_TIMEOUT = 30.0
+
+# Floor on the token watchdog's sleep. The delay it computes is normally
+# hours; this only bites when the token is already inside the refresh
+# margin, and it exists so a token that cannot be renewed produces one
+# attempt a minute rather than a spin loop against a subprocess.
+TOKEN_WATCHDOG_MIN_SLEEP = 60.0
 
 
 # Task types whose completion the engine waits for past a result message —
@@ -418,6 +430,15 @@ class EngineSession:
         # reading it the wrong way makes the figure silently wrong — which is
         # the exact failure `cost.py` exists to prevent for its neighbour.
         self._connected_since: float | None = None
+        # The SDK's temp CLAUDE_CONFIG_DIR for this connect, when it made
+        # one. Where `_token_watchdog` puts a refreshed access token.
+        self._materialized_dir: Path | None = None
+        self._token_watchdog_task: asyncio.Task[None] | None = None
+        # The binary this session's connect resolved and version-checked.
+        # Kept so `_token_watchdog` does not have to call `resolve_cli`,
+        # which probes `claude --version` with a *blocking* subprocess and
+        # would stall the event loop for up to CLI_VERSION_PROBE_TIMEOUT.
+        self._cli_path: str | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -648,6 +669,16 @@ class EngineSession:
             if self.health.auth_warning:
                 logger.warning("%s", self.health.auth_warning)
 
+            # Before the SDK materialises a temp config dir and snapshots
+            # the access token into it, make sure the token being copied
+            # has a full lifetime ahead of it. The copy has its
+            # `refreshToken` redacted by the SDK, so a short-lived token
+            # captured here is one the CLI child can never renew — see
+            # `token_refresh` for the whole failure and why it is ours to
+            # prevent rather than the SDK's.
+            self._cli_path = str(resolution.path)
+            await self._refresh_access_token(self._cli_path)
+
             options = build_options(
                 repo_root=self.repo_root,
                 config=self.config,
@@ -705,7 +736,14 @@ class EngineSession:
             # that only disconnect() cleans up, and the exit path reaches
             # disconnect() on a 2s budget at best (next.md § C8) and not at
             # all on Windows. Recorded here, removed by resume_cleanup.
-            resume_cleanup.remember(client)
+            #
+            # Kept as well as registered: it is also the directory whose
+            # `.credentials.json` this session's CLI child reads, and
+            # `_token_watchdog` writes a refreshed access token into it.
+            self._materialized_dir = resume_cleanup.remember(client)
+            self._token_watchdog_task = asyncio.create_task(
+                self._token_watchdog(), name="aic-dc-token-watchdog"
+            )
             if resume and not fork_session:
                 # The init message will report the resumed ID; recording it
                 # now means get_current_state() is right before the first
@@ -722,6 +760,63 @@ class EngineSession:
                 self.repo_root,
                 self._permission_mode,
                 f", resume={resume}" if resume else "",
+            )
+
+    async def _refresh_access_token(self, cli_path: str) -> None:
+        """Renew the subscription access token if it is close to lapsing.
+
+        Called once per connect, before options are built. Never raises:
+        a pre-flight check that could refuse a session which would have
+        worked is worse than the expiry it guards against, so a failure
+        becomes a health degradation and the connect continues.
+        """
+        try:
+            outcome = await token_refresh.ensure_fresh(
+                credential_path=subscription_credential_path(),
+                config_dir=cli_config_dir(),
+                cli_path=cli_path,
+                cwd=self.repo_root,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a pre-flight check, never a connect
+            logger.exception("Access-token pre-flight refresh failed; connecting anyway")
+            return
+        if outcome.detail:
+            if outcome.ok:
+                logger.info("%s", outcome.detail)
+            else:
+                self.health.note_degradation(outcome.detail)
+
+    async def _token_watchdog(self) -> None:
+        """Keep a *running* session's access token from lapsing under it.
+
+        The connect-time refresh only fixes the token a session starts
+        with. A session that outlives its access token — eight hours,
+        which an editor left open comfortably exceeds — hits the same
+        wall, and reconnecting to fix it would be a heavier remedy than
+        the problem needs.
+
+        So this refreshes the parent and then copies the new access token
+        into the config dir the CLI child is already reading. No reconnect,
+        no refresh token in the child's file, and the parent stays the only
+        thing that ever holds one.
+        """
+        credential_path = subscription_credential_path()
+        if credential_path is None:
+            return
+        while True:
+            expires_at = token_refresh.read_expiry(credential_path)
+            if expires_at is None:
+                return
+            delay = token_refresh.seconds_remaining(expires_at) - token_refresh.REFRESH_MARGIN_SECONDS
+            await asyncio.sleep(max(delay, TOKEN_WATCHDOG_MIN_SLEEP))
+            if self._client is None or self._cli_path is None:
+                return
+            await self._refresh_access_token(self._cli_path)
+            token_refresh.propagate(
+                credential_path=credential_path,
+                materialized_dir=self._materialized_dir,
             )
 
     def adopt_config(self, config: EngineConfig) -> None:
@@ -780,6 +875,7 @@ class EngineSession:
     async def disconnect(self) -> None:
         """Shut the session down as part of graceful shutdown."""
         await self._stop_background_drain()
+        await self._stop_token_watchdog()
         async with self._lifecycle_lock:
             client, self._client = self._client, None
             self.health.connected = False
@@ -1014,6 +1110,20 @@ class EngineSession:
         if task is None or task.done():
             return
         logger.info("Ending the background drain; the stream has a new consumer")
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _stop_token_watchdog(self) -> None:
+        """Cancel the token watchdog, if one is running.
+
+        Awaited rather than fired and forgotten: the watchdog can be inside
+        a refresh subprocess, and a cancel it never gets to observe would
+        leave that CLI running past the session that spawned it.
+        """
+        task, self._token_watchdog_task = self._token_watchdog_task, None
+        if task is None or task.done():
+            return
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task

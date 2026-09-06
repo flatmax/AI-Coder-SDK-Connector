@@ -26,10 +26,26 @@ Every one of them existed to shape a prompt AIC⚡DC no longer assembles.
 
 `commit.md` survives as the system prompt for the one auxiliary model call the conversion did not
 remove: a **stateless one-shot** — its own short-lived CLI process, no tools, no settings sources, no
-thinking, one turn — that takes the staged diff and returns a commit message. It is not a user turn
-on the live session, and deliberately so: routing a whole staged diff through the conversation would
-put it in the transcript the user is reading and would queue behind a turn in flight. See
-[`../3-engine/session.md`](../3-engine/session.md).
+thinking, `low` effort, one turn — that takes the staged diff and returns a commit message. It is not
+a user turn on the live session, and deliberately so: routing a whole staged diff through the
+conversation would put it in the transcript the user is reading and would queue behind a turn in
+flight. See [`../3-engine/session.md`](../3-engine/session.md).
+
+### The one-shot states its own effort
+
+The one-shot names an effort of `low` rather than letting one be inherited, and the reason is that
+"no thinking" and "no stated effort" are not a combination the API accepts. `settings.json` is passed
+to this session as a file — it is the only place a machine says which provider to talk to, and
+`setting_sources=[]` would otherwise withhold it — so whatever `effortLevel` the user chose for their
+conversations arrives with it. The top two rungs of that setting are refused outright alongside
+disabled thinking: a user whose conversations run at `xhigh` clicked Commit (September 2026) and got
+`400 output_config.effort 'xhigh' is not supported when thinking is disabled on this model` in place
+of a message, every time, with no way to commit from the UI at all until the effort was stated here.
+
+`low` is both the floor and the honest description of the work — a diff in, a paragraph out, nothing
+to weigh — and it keeps the two halves of the option set from contradicting each other whatever the
+machine prefers. It is not configurable: a conversational reasoning depth is a preference, and this
+call is not a conversation.
 
 ## Engine Config
 
@@ -179,4 +195,5 @@ the native engine is ignored rather than read.
 - App-config hot-reload takes effect without a server restart and without disturbing the engine session
 - The whitelist rejects unknown config type names
 - A setting that cannot take effect until a new session is labelled as such in the UI
+- The commit-message one-shot inherits the provider from `settings.json` and nothing else from it: every option that shapes the turn — thinking, effort, permission mode, tools, turn count — is stated outright, so a preference set for conversations can neither reshape nor refuse that call
 - Which engine is master is read from configuration, never inferred from what happens to be installed. An engine that is configured but not mountable falls back with a warning rather than starting silently on something else
