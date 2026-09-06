@@ -1192,11 +1192,38 @@ class AntigravityService:
         return {"permission_mode": applied}
 
     async def _apply_permission_mode(self, mode: str) -> str | None:
+        """Set the posture and tell every browser, under the *shared* name.
+
+        The event is ``permissionModeChanged`` with ``{mode, by}``, which is
+        what ``AcApp`` has a method for — this emitted ``permissionMode``
+        with ``{mode}`` until 2026-09-06, and the browser has no handler by
+        that name, so the server logged ``no remote method
+        AcApp.permissionMode`` and dropped it.
+
+        **The selector flips on this broadcast and on nothing else**, and it
+        disables itself while the call is in flight, clearing on the same
+        broadcast. So a dropped event did not merely leave the display
+        stale: the posture applied, the control stayed disabled reading the
+        *old* mode with "Waiting for the engine to confirm the new mode…"
+        on it, and there was no second gesture available to correct it. One
+        use per session, and the surface it disabled was the one AG-5's
+        ``acceptEdits`` had just been added to.
+
+        Found by driving the browser, not by a test — the offline suites
+        assert the mode this method *returns*, which was right the whole
+        time. AG-R-4 is the rule it broke: the browser renders what the
+        engine reports, so the engine has to report in the vocabulary the
+        browser has.
+        """
         if mode not in PERMISSION_MODES:
             return None
         self._permission_mode = mode
         await self._broadcast(
-            Event("permissionMode", {"mode": mode}, turn_scoped=False)
+            Event(
+                "permissionModeChanged",
+                {"mode": mode, "by": "user"},
+                turn_scoped=False,
+            )
         )
         return mode
 

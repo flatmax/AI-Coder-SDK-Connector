@@ -566,9 +566,11 @@ class TestEvents:
 
         svc, seen = self.collect(tmp_path)
         asyncio.run(
-            svc._dispatch(Event("permissionMode", {"mode": "plan"}, False), None)
+            svc._dispatch(
+                Event("permissionModeChanged", {"mode": "plan"}, False), None
+            )
         )
-        assert seen == [("permissionMode", ({"mode": "plan"},))]
+        assert seen == [("permissionModeChanged", ({"mode": "plan"},))]
 
     def test_a_dead_client_does_not_raise(self, tmp_path):
         from aic_dc.claude_code.messages import Event
@@ -1021,6 +1023,79 @@ class TestTheTurnSettlesTheIndex:
         order = self._dispatch(tmp_path, Event("streamComplete", {}), reindexer)
         assert order == ["streamComplete"]
         assert reindexer.taken == 1, "the tally is drained even on a failed flush"
+
+
+class TestThePostureChangeReachesTheBrowser:
+    """The selector flips on the broadcast and on nothing else.
+
+    This engine emitted ``permissionMode``; ``AcApp`` has a method called
+    ``permissionModeChanged``. So the posture applied, the server logged
+    ``no remote method AcApp.permissionMode``, and the browser sat on
+    ``_permissionModePending`` — the control disabled, reading the *old*
+    mode, with "Waiting for the engine to confirm the new mode…" on it and
+    no second gesture available to correct it. One use per session.
+
+    Found by driving a browser on 2026-09-06. Every offline test passed:
+    they assert the mode this method *returns*, which was right.
+    """
+
+    def _emitted(self, tmp_path, mode="acceptEdits"):
+        seen = []
+
+        async def callback(name, *args):
+            seen.append((name, args))
+
+        svc = service(tmp_path, event_callback=callback)
+        answer = asyncio.run(svc.set_permission_mode(mode))
+        return answer, seen
+
+    def test_it_broadcasts_under_the_name_the_browser_handles(self, tmp_path):
+        _, seen = self._emitted(tmp_path)
+        assert [name for name, _ in seen] == ["permissionModeChanged"]
+
+    def test_the_payload_is_the_shape_the_handler_reads(self, tmp_path):
+        """``onPermissionModeChanged`` returns early without ``mode``."""
+        _, seen = self._emitted(tmp_path)
+        assert seen[0][1] == ({"mode": "acceptEdits", "by": "user"},)
+
+    def test_a_session_event_carries_no_request_id(self, tmp_path):
+        """Or every browser but the one that asked would drop it."""
+        _, seen = self._emitted(tmp_path)
+        assert len(seen[0][1]) == 1, "a request id leaked into a session event"
+
+    def test_a_refused_posture_broadcasts_nothing(self, tmp_path):
+        answer, seen = self._emitted(tmp_path, "bypassPermissions")
+        assert answer["error"] == "unsupported"
+        assert seen == []
+
+    def test_the_name_is_one_the_webapp_has_a_method_for(self):
+        """The tripwire for the class, not the instance.
+
+        The defect was not a typo in a payload — it was two vocabularies
+        for one event, which is the shape phase 4 already found once
+        between the hook and the step stream. A name nothing answers to
+        fails silently on the wire, so read the browser's own handler list
+        rather than a copy of it.
+        """
+        from pathlib import Path
+
+        import aic_dc
+
+        shell = (
+            Path(aic_dc.__file__).resolve().parent.parent.parent
+            / "webapp" / "src" / "app-shell" / "index.js"
+        )
+        if not shell.is_file():
+            pytest.skip("installed-package run: no webapp/src to scan")
+        source = shell.read_text(encoding="utf-8")
+        assert "permissionModeChanged(data)" in source, (
+            "AcApp has no permissionModeChanged handler; this engine's "
+            "broadcast would be dropped with 'no remote method'"
+        )
+        assert "\n  permissionMode(data)" not in source, (
+            "a second handler for the old name would hide the divergence "
+            "rather than fix it"
+        )
 
 
 class TestItReportsThePosturesItAccepts:
