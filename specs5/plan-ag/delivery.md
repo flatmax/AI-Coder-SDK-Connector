@@ -3739,3 +3739,116 @@ obvious wrong turn. We run `agy` with `--dangerously-skip-permissions`, so its p
 out of the loop entirely — every dialog on this transport is ours. Configuring `--mode accept-edits`
 would have configured a layer that is not running. What the answer *did* confirm is the property
 AG-R-12 relies on: our hook keeps an absolute veto regardless of that flag.
+
+---
+
+## The verification sitting, and the two defects it cost to buy (2026-09-06)
+
+Everything from 2026-09-05 was green and almost none of it had been watched. Phase 9's own entry said
+so — *"not yet in a browser: no human has clicked always allow on a live turn and watched the next
+call pass"* — and the `acceptEdits` posture had shipped the same day with ten tests and no live run.
+So this sitting was a browser against a throwaway repository, with one small build carried into it.
+
+**Four things were confirmed and two were broken.** The ratio is the argument for the sitting: both
+defects were invisible to 4,485 passing tests and visible within minutes of opening the app, which is
+the fourth time this suite has written that sentence down.
+
+### The build: the second engine finally feeds the symbol index
+
+The one gap [§ *The picker that never learned about a write*](#the-picker-that-never-learned-about-a-write-2026-09-05) named as deliberate. That entry gave this
+engine a `filesModified` push so the file tree reloaded, and left the other half of the Claude hook
+undone: **it queued no re-index**, because the queue lives on a `Reindexer` this engine had never
+been given one of. So after an `agy` edit the tree was right and every index was wrong — `symbol_map`,
+`file_symbols`, `find_references`, `doc_outline` and the editor's completions all answering from the
+file as it was before the write, with nothing on the answer to say so.
+
+**The fix is an injection, not a build**, and that is the whole design. `main.py` hands the second
+adapter the `Reindexer` the first one constructed, exactly as it already hands over the symbol index —
+one index over one tree, therefore one queue of files owed a re-parse. Two queues would have been the
+easy version and a worse outcome than the bug: each right about its own engine's writes and wrong
+about the other's, with `flush()` draining whichever one the caller happened to hold, so the failure
+would depend on which engine wrote last.
+
+Three smaller decisions, each doing work:
+
+- **Queued before the browsers are told**, so the two signals mean what they say — by the time
+  anything acts on "the disk changed", the re-parse is at least owed.
+- **The queue does not need a browser.** The tree push returns early with no event callback; the
+  re-index must not, or a headless run drifts out of date silently.
+- **The end of a turn flushes and drops the tally.** Flushing is not what makes the index correct —
+  the queue is, and every index-reading MCP tool flushes before it answers. What it buys is the
+  moment *after* a turn, when a user reads what the agent wrote and the editor asks for completions
+  on it; those LSP RPCs read the index directly with no flush of their own on either engine. The
+  tally is dropped because `take_reindexed` is take-and-clear and this engine emits no
+  `postResponseComplete` to carry it, so entries left behind would go to whichever Claude turn came
+  next — a turn claiming to have re-indexed files a different engine wrote.
+
+Verified twice live, on both paths into a write: a dialog-approved `replace_file_content` under
+`default`, and an undialogued one under `acceptEdits`. `lsp_get_completions` on `calc.py` returned
+five symbols before the turn and six after, then seven, with the new function present each time.
+
+### Defect 1: the always-allow tooltip, wrong for the second time in two days
+
+The Antigravity dialog told the user *"It applies to the claude CLI in this repository too"* about a
+rule going into `~/.config/aic-dc/antigravity-rules.json`, which the `claude` CLI has never heard of.
+That is verbatim the defect [§ Phase 9b](#phase-9b--the-half-ag-15-shipped-without-seeing-and-revoking-2026-09-05) fixed the day before, on the same control.
+
+**The first fix was correct and inert.** It replaced a `rule.session ? A : B` at the call site with
+`alwaysAllowTooltip(rule)` keyed on `destination`, and added four tests. What nobody checked was
+which object the call site hands it: `describeRule` normalises a rule for display, and part of
+normalising is replacing `destination` with the filename the chip renders — so by the time the button
+had a rule, `destination` was `~/.config/aic-dc/antigravity-rules.json` and the `aicDcRules` branch
+was unreachable. **The chip beside the tooltip named the right file while the tooltip named the wrong
+CLI**, which is as close to the fix as a bug gets.
+
+**And the function was dead on both shapes, not one.** It read `session` — a boolean only the
+*described* rule carries — and `destination` — a key only the *raw* rule carries. Whichever object it
+received, one of its two checks could never fire; the session case worked in production only because
+the render passed the described rule, and the `aicDcRules` case failed for exactly the same reason.
+The four tests all passed a hybrid with **both** fields set, which is the one shape nothing produces.
+A function that accepts two shapes is a function that is dead on one of them, and a test that
+constructs the union will never say so.
+
+The fix is one shape and one owner: `alwaysAllowTooltip` reads `destination` only and takes the rule
+as the server sent it, `describeRule` computes the tooltip alongside the label and the chip, and the
+button renders what it is given. Four new tests go through `describeRule`, because **a test of a
+function is not a test of the thing on screen**. Recorded in
+[`5-webapp/permission-dialog.md`](../5-webapp/permission-dialog.md) § *Always allow shows the rule,
+not a promise*, which also gains the three-destination table it had never had.
+
+### Defect 2: a posture that applied and a selector that never heard
+
+Picking *Accept edits* changed the engine's posture and left the control **disabled, reading "Ask",
+with "Waiting for the engine to confirm the new mode…" on it** — permanently, because the selector
+flips on the broadcast and on nothing else, and clears its pending flag on the same broadcast. One
+use per session, on the surface `acceptEdits` had just been added to.
+
+The cause is two vocabularies for one event: this engine emitted `permissionMode` with `{mode}`, and
+`AcApp` has a method called `permissionModeChanged` taking `{mode, by}`. **The server said so out
+loud** — `WARNING no remote method AcApp.permissionMode` — into a log nobody reads during a turn.
+This is [AG-R-4](risks.md#ag-r-4) from the engine's side: the browser renders what the engine
+reports, so the engine has to report in the vocabulary the browser has. It is also phase 4's fourth
+finding — *"the hook and the step stream use two vocabularies for one call"* — recurring in a new
+place, which is the argument for the tripwire rather than the one-line rename.
+
+Every offline test passed, and they were not wrong: they assert the mode `set_permission_mode`
+**returns**, which was correct throughout. Nothing asserted the name it broadcasts, because a name is
+only wrong relative to a listener that lives in another language in another directory. So one of the
+five new tests reads `webapp/src/app-shell/index.js` and asserts the handler exists — the same idiom
+`test_rpc_surface.py` uses to derive browser callers, applied to events instead of RPCs.
+
+### What was confirmed, and what it took
+
+| Claim | Result |
+|---|---|
+| Phase 9's exit criterion, in a browser | **Met.** *Always allow* on a live `run_command`, then the same command in a later turn allowed by the standing rule — `broker.can_use_tool` never reached, asserted from the log rather than from the absence of a dialog on screen. |
+| `acceptEdits` lets an in-repo write through | **Met.** `replace_file_content` on `calc.py` applied with no dialog, `allowed by acceptEdits` in the log, the diff on disk. |
+| `acceptEdits` still asks about commands | **Met.** `ls -la` raised the dialog with the posture still in force. |
+| The posture selector offers only what the engine accepts | **Met.** Three options on `agy` where Claude shows six — [§ *A posture between "ask every time" and "ask nothing"*](#a-posture-between-ask-every-time-and-ask-nothing-2026-09-05) verified. |
+| The symbol index sees an `agy` write | **Met**, after the build above. |
+
+One non-finding worth recording, because it looked like a defect for a minute: a synthetic `change`
+on the posture selector does nothing at all. That is the **gesture latch** working — the control
+requires a pointer or key event before it honours a change, so a browser restoring form state cannot
+arm a destructive posture. It has to be driven with a real gesture, which is a fact about testing
+this control rather than a fault in it.
