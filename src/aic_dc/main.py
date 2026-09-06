@@ -1115,6 +1115,7 @@ async def run(
                 config,
                 repo=repo,
                 event_callback=event_callback,
+                reindexer=claude_code_service.reindexer,
                 credentials=antigravity_credentials,
             )
             logger.info(
@@ -1143,6 +1144,7 @@ async def run(
                 config,
                 repo=repo,
                 event_callback=event_callback,
+                reindexer=claude_code_service.reindexer,
                 credentials=antigravity_credentials,
             )
             logger.info("agy transport mounted (Antigravity CLI on PATH)")

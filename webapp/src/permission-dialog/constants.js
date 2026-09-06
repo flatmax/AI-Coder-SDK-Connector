@@ -187,9 +187,19 @@ export const ALWAYS_ALLOW_AIC_DC_TOOLTIP =
  * had one — `rule.session ? A : B` — and a third destination fell through
  * to B and asserted something untrue. Destinations are added from the
  * server; the mapping belongs where the destinations are described.
+ *
+ * **Takes the rule as the server sent it**, and reads only `destination`.
+ * The first cut also accepted a `session` boolean, which looked like
+ * tolerance and was the bug: `describeRule` computes that boolean *and*
+ * overwrites `destination` with the filename the chip shows, so the two
+ * checks wanted two different shapes. Whichever object you passed, one of
+ * them was dead — the render passed the described rule and got the Claude
+ * sentence on an Antigravity grant; the tests passed a hybrid with both
+ * fields set, which is the one shape that made the function look right and
+ * the one shape nothing produces. One field, one shape, one caller.
  */
 export function alwaysAllowTooltip(rule) {
-  if (rule?.session) return ALWAYS_ALLOW_SESSION_TOOLTIP;
+  if (rule?.destination === 'session') return ALWAYS_ALLOW_SESSION_TOOLTIP;
   if (rule?.destination === 'aicDcRules') return ALWAYS_ALLOW_AIC_DC_TOOLTIP;
   return ALWAYS_ALLOW_TOOLTIP;
 }

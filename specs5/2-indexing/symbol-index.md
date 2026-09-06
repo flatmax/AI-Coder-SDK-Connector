@@ -136,6 +136,34 @@ than when it finishes, so files it writes after that moment are not seen by the 
 launch armed. The next shell command re-arms the flag and picks them up, so this self-corrects in an
 active session and persists only for a long build that nothing follows.
 
+## Freshness After Either Engine's Write
+
+One index over one tree, so **one queue of files owed a re-parse**, shared by both engines. The
+Claude adapter fills it from its `PostToolUse` hook; the Antigravity and `agy` adapters fill it from
+the completed tool result they already read to push `filesModified` at the file tree — the same
+`files_written_by` table, now with a third reader. `main.py` hands the second adapter the
+`Reindexer` the first one built, exactly as it hands over the index itself.
+
+**It did not, until 2026-09-06.** The second engine pushed the tree and told no index anything, so
+after an Antigravity edit `symbol_map`, `file_symbols`, `find_references`, `doc_outline` and the
+editor's own completions answered from the file as it was before the write — confidently, with no
+marker on the answer. The gap was recorded as deliberate when the tree push was built, on the
+grounds that a `Reindexer` was Claude-side machinery this engine had never been given; the fix was
+to give it the existing one rather than build a second.
+
+**Two queues would have been worse than one late one.** Each would be right about its own engine's
+writes and wrong about the other's, and `flush()` — which every index-reading MCP tool awaits — would
+drain whichever one the caller happened to hold. The failure would then depend on which engine wrote
+last, which is the least debuggable shape available.
+
+The end of an Antigravity turn flushes, and drops the tally rather than reporting it. Flushing is not
+what makes the index correct — the queue is, and every MCP reader flushes before it answers — but the
+moment a user starts reading what the agent wrote is the moment the editor asks for completions on
+it, and the LSP RPCs read the index directly with no flush of their own on either engine. The tally
+is dropped because `take_reindexed` is take-and-clear and this engine emits no
+`postResponseComplete` to carry it; entries left behind would be handed to whichever Claude turn came
+next, which would then claim to have re-indexed files a different engine wrote.
+
 ## Consumers
 
 The index has three consumers, none of which is prompt assembly:
@@ -147,8 +175,9 @@ The index has three consumers, none of which is prompt assembly:
    [`../3-engine/mcp-bridge.md`](../3-engine/mcp-bridge.md).
 3. **Browser navigation surfaces** — file picker outlines and the file-navigation grid.
 
-The agent and the browser read the **same index instance**. A symbol resolvable in Monaco is
-resolvable by the agent, and vice versa; there is no second copy and no divergence to reconcile.
+The agent and the browser read the **same index instance**, and since 2026-09-06 both engines write
+into it through the **same re-index queue**. A symbol resolvable in Monaco is resolvable by the
+agent, and vice versa; there is no second copy and no divergence to reconcile, on either axis.
 
 ## Snapshot Discipline
 
@@ -206,6 +235,7 @@ threads within a query window are safe because the index is not being mutated du
 
 ## Invariants
 
+- A write by either engine queues the written paths for re-indexing, into one queue, before the file tree is told
 - A file's mtime-unchanged entry is never re-parsed
 - Stale entries are removed from both memory and cache on each full index pass
 - The signature hash is deterministic — identical symbol structure produces identical hash
