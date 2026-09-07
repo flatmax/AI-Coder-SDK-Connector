@@ -73,6 +73,20 @@ def service(tmp_path, **kw):
     return AgyService(config(tmp_path), **kw)
 
 
+def gated_service(tmp_path, **kw):
+    """A service whose executable is certainly on ``PATH``.
+
+    The gate refusals below are *after* the missing-binary refusal, so on
+    a machine with no ``agy`` they never reached the check they are about
+    and asserted the wrong error — the same machine-dependence the
+    ``GLOBAL_HOOKS`` comment warns of, one branch earlier. `connect_engine`
+    only asks whether the name resolves, and refuses long before anything
+    is launched, so a name that always resolves is enough.
+    """
+    kw.setdefault("executable", "sh")
+    return service(tmp_path, **kw)
+
+
 class TestItMounts:
     def test_the_router_accepts_it(self, tmp_path):
         assert build_router(service(tmp_path), engine=ANTIGRAVITY) is not None
@@ -115,7 +129,7 @@ class TestItWillNotRunUngated:
         # passes or fails on whether *they* have the gate installed — which
         # is how it went green for a day and then red the moment one was.
         monkeypatch.setattr(install, "GLOBAL_HOOKS", tmp_path / "hooks.json")
-        svc = service(tmp_path)
+        svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
         assert result["reason"] == "absent"
@@ -139,7 +153,7 @@ class TestItWillNotRunUngated:
         _write_gate_entry(
             hooks, install.hook_command(tmp_path / "cfg", "/other/python")
         )
-        svc = service(tmp_path)
+        svc = gated_service(tmp_path)
         result = asyncio.run(svc.connect_engine())
         assert result["error"] == "gate_not_installed"
         assert result["reason"] == "stale"
