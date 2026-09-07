@@ -1094,6 +1094,18 @@ ships `app.json` read-only or writes it from configuration management; the toggl
 state it cannot change, which is the honest rendering of a policy — the same shape as the gate panel
 being absent on an engine that has no gate.
 
+**That sentence needed the config layer to be true, and on 2026-09-06 it was not.** `app.json` was a
+managed file, so the first start after any version change replaced it from the bundle and the policy
+went with it — a Claude-only install became a two-provider install by being upgraded
+([AG-R-13](risks.md#ag-r-13)). Read-only did hold, but by aborting the upgrade pass, which then
+repeated on every start. Both were found by phase 11's verification and fixed on 2026-09-07: the file
+is merged key by key against a pristine copy of the bundle, so a value configuration management writes
+survives an upgrade while a default nobody touched still moves
+([`../1-foundation/configuration.md`](../1-foundation/configuration.md#appjson-is-merged-key-by-key-commitmd-is-overwritten)).
+Read-only is still a legitimate way to pin the file; it is no longer the only thing standing between a
+policy and its own expiry date. **The general form is worth naming for whatever policy comes next: the
+file a policy lives in is part of the decision, not an implementation detail of it.**
+
 **The two halves take effect at different times, and the card has to say so**, because this is one key
 with two consumers. The engine adapters are constructed at **startup**, so disabling is an
 app-restart field and joins the restart confirmation's list. The consultant mounts when a **session**

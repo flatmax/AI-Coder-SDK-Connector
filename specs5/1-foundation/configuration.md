@@ -17,8 +17,8 @@ not through anything in this spec.
 | File | Kind | Purpose |
 |---|---|---|
 | `engine.json` | User | Model, commit-message model, default permission posture, reasoning depth, thinking display, optional budget, CLI discovery override, stdout line ceiling |
-| `app.json` | Managed | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, presets |
-| `commit.md` | Managed | The commit-message request text |
+| `app.json` | Managed, **merged** | Document conversion, document index, indexing debounce, permission timeouts, mirror and session-directory policy, engine master and allowlist, consultant transport, presets |
+| `commit.md` | Managed, overwritten | The commit-message request text |
 
 Deleted by the conversion: `llm.json` (superseded by `engine.json`), `system.md`, `system_doc.md`,
 `system_extra.md`, `system_agentic_appendix.md`, `review.md`, `compaction.md`, `system_reminder.md`.
@@ -104,10 +104,61 @@ cache that no longer exists; the last gated a spawn protocol replaced by the `Ta
 
 ## Managed vs User Files
 
-- Managed files — safe to overwrite on upgrade (`app.json`, `commit.md`)
+- Managed files — the bundle owns their content (`app.json`, `commit.md`)
 - User files — never overwritten (`engine.json`)
 - Upgrade creates backup copies of overwritten managed files with a version suffix
 - Files outside either set are skipped during iteration
+
+### `app.json` is merged key by key, `commit.md` is overwritten
+
+Both are managed, and the word means something different for each. `commit.md` is prose the bundle
+owns: a user who edits it is patching a prompt, an upgrade replaces it, and the backup is how they get
+their text back. `app.json` is the file **our own Settings tab writes** — `CONFIG_TYPES` exposes `app`
+for editing, `engines.master` moves when a session switches engines, and `engines.enabled` is an
+organisation's *policy*. Overwriting it reverted all of that on a version bump, which meant a
+Claude-only deployment came back two-provider without anybody being told
+([plan-ag AG-R-13](../plan-ag/risks.md#ag-r-13)).
+
+So it is merged, and the merge needs three legs rather than two: a user's copy of this file *is* a copy
+of the bundle, taken at install, so comparing it against the new bundle cannot tell "I chose this" from
+"this was the default". A hidden `.pristine/` directory inside the user config dir holds each merged
+managed file as the bundle last shipped it, and the pass is the familiar three-way one, per key:
+
+| On disk | Ancestor | Bundle | Result |
+|---|---|---|---|
+| absent | — | present | the bundled value — this is how a key a release *adds* arrives |
+| equals the ancestor | present | changed | the bundled value — nobody touched it, so a changed default lands |
+| differs from the ancestor | present | anything | the value on disk — an upgrade does not overrule an edit |
+| anything | **no record** | anything | the value on disk — with no ancestor there is no evidence the value came from us |
+| present | — | absent | the value on disk, left unread, exactly as a retired *file* is |
+
+Nested objects recurse, so `engines.enabled` survives a release that changes `engines.master`'s
+default. Lists compare whole: a user who edits `doc_convert.extensions` owns the list, and there is no
+per-element ancestry to merge against. The pristine copy is refreshed on every upgrade, so release *n+1*
+compares against what release *n* shipped rather than against the original install. The merged file is
+re-serialised — key order follows the file on disk with bundled additions appended, and the bundle's
+hand-wrapped arrays come back expanded; JSON carries no comments, so there is nothing else to lose. A
+file that will not parse is **left for the user to fix** rather than replaced: overwriting swaps text we
+cannot read for text they did not write, and every accessor already falls back to its own default, so
+the application starts either way.
+
+The merge is also why the accessors' in-code defaults matter. Every key in this file has its default
+in Python as well (`doc_convert_config`, `doc_index_config`, `_DISK_WARNING_BYTES`, `master` → Claude,
+`enabled` → every engine), which is what makes the file *documentation of what can be set* rather than
+the source of the values. Promoting it to a user file instead would have been one line, and would have
+frozen every install-time literal in place forever, unreachable by any later default.
+
+### One unwritable file does not cost the others their upgrade
+
+Each file is upgraded inside its own error handling, and the version marker is written even when one of
+them could not be. A workplace that pins the policy by shipping `app.json` read-only used to get the
+opposite: the `OSError` aborted the whole pass, the marker was never written, so **every subsequent
+start retried it** — a fresh backup each time, and `commit.md` never upgraded at all. The pass now
+reports the file it left as found, names the marker to delete to retry, and moves on. A backup taken
+for a write that then failed is removed again, because a copy of a file we did not change is litter.
+
+The wrapper around the whole pass stays as a backstop, for the case where the user config *directory*
+cannot be created at all — there the fallback is reading the bundle directly.
 
 ### Retired files are ignored, not deleted
 
@@ -129,14 +180,16 @@ notices the file, reports it once in the health banner as ignored, and does not 
 
 - On startup, compare the bundled version against the installed version marker
 - Matching versions — no action (fast path)
-- Differing versions — new files copied, managed files backed up and overwritten, user files preserved
-- Version marker updated to current
+- Differing versions — new files copied, `app.json` merged, `commit.md` backed up and overwritten, user files preserved
+- Version marker updated to current, including when a file had to be left as found
 
 ## Backup Naming
 
 - Timestamped with UTC
 - Version SHA appended when known
 - Allows users to recover customizations made directly to managed files
+- Taken only when the upgrade actually replaces something: a merge that changes nothing leaves no
+  backup, since a directory of identical copies is noise rather than a recovery path
 
 ## Loading and Caching
 

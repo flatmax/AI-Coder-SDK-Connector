@@ -685,3 +685,20 @@ therefore the enforcement path to document rather than an equivalent alternative
 It has a cost of its own — the aborted pass never advances the version marker, so it repeats on every
 start, leaving one timestamped backup per launch and never upgrading `commit.md`. Measurements and the
 reasoning are in [`delivery.md` § Phase 11](delivery.md#phase-11--the-engine-policy-and-what-a-fresh-server-said-about-it-2026-09-07).
+
+**Closed in the config layer the same day.** `app.json` is now merged key by key against a pristine
+copy of the bundle rather than overwritten, so an upgrade keeps a value the user or their configuration
+management set and still delivers a default they never touched
+([`../1-foundation/configuration.md` § `app.json` is merged key by key](../1-foundation/configuration.md#appjson-is-merged-key-by-key-commitmd-is-overwritten)).
+Re-measured on two fresh servers: the policy survives a version change, `list_engines().enabled` stays
+`['claude']`, and the read-only case now writes no backup at all because the merge finds nothing to
+change. The read-only recommendation stands but is no longer load-bearing — and its cost is gone too,
+since one unwritable file no longer aborts the pass or blocks the marker.
+
+**The tripwire gains a third arm, and it is a test rather than a run:** an upgrade across two versions
+that leaves `engines.enabled` on disk. It lives in `tests/test_config.py`
+(`test_an_upgrade_keeps_the_engine_policy`) rather than here, because what recurs is not the mount
+conditions but the *file category* — a future maintainer moving `app.json` back to a plain overwrite,
+or a second policy key landing in a file with the same problem, is the recurrence. Note what this
+implies for any policy added later: **the file it lives in is part of the decision**, and a policy in a
+managed file needs the merge or it needs a file of its own.

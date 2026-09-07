@@ -4084,11 +4084,12 @@ A fresh backup per start, unbounded. And because `app.json` sorts first among th
 upgraded on such an install — a second consequence of a single broad `except OSError` around the whole
 pass.
 
-**Neither finding is fixed here.** Both are decisions about the config layer rather than about this
-phase: making `app.json` merge rather than overwrite changes the upgrade contract for every key in it
-(`../1-foundation/configuration.md`), and per-file error handling in `_run_upgrade` changes what a
-partial failure means. They are recorded with their measurements so the choice is made once, in
-daylight, by the person who owns the enforcement story.
+**Neither finding is fixed in the phase-11 work above.** Both are decisions about the config layer
+rather than about this phase: making `app.json` merge rather than overwrite changes the upgrade contract
+for every key in it (`../1-foundation/configuration.md`), and per-file error handling in `_run_upgrade`
+changes what a partial failure means. They were recorded with their measurements so the choice could be
+made once, in daylight, by the person who owns the enforcement story — **and both were then taken, the
+same day: see § The two findings, fixed below.**
 
 ### What is now true
 
@@ -4103,3 +4104,100 @@ the live checks, so one invocation answers the whole entry.
 What is *not* proven is anything about the transports themselves, and the probe says so in its own
 output: a stub binary and a placeholder key prove that the mount conditions were satisfied and then
 overruled, which is precisely what the criterion asks and no more.
+
+### The two findings, fixed — `app.json` is merged, not overwritten (2026-09-07)
+
+Both findings above were put to the person who owns the enforcement story, with their measurements, and
+both were taken. What follows is what changed and what was measured after it.
+
+**The finding is wider than the policy, which is what settled the design.** `app.json` was in
+`_MANAGED_FILES`, *and* it is the file the application's own Settings tab writes — `CONFIG_TYPES`
+exposes `app` for editing, `engines.master` moves when a session switches engines, and AG-16's
+`engines.consultant` lives there too. So the upgrade did not only revert AG-17's policy: it reverted
+every value a user had ever set through our own UI. The policy is just the case where reverting it
+changes what the software is *permitted* to do, which is why that is the case that got noticed.
+
+**Three ways to fix it, and the cheap two are worse than they look.**
+
+| | What it costs |
+|---|---|
+| Preserve the `engines` block across the overwrite | Fixes the policy and nothing else. The Settings tab's other writes keep reverting, and the rule needs a paragraph of its own explaining why one section of one file is special |
+| Move `app.json` to `_USER_FILES` | One line. But a user's copy of this file is a *copy of the bundle taken at install*, so every literal in it would outlive every future change to that default — the code default becomes permanently unreachable for existing installs, and nothing tells anybody |
+| **Merge it key by key** | Chosen. Needs a third leg: a pristine copy of the bundle to compare against |
+
+The third leg is the whole design. Without an ancestor, "the user's file differs from the new bundle"
+cannot distinguish *I chose this* from *this was the default in the release I installed*. A hidden
+`.pristine/` directory in the user config dir holds each merged managed file exactly as the bundle last
+shipped it, refreshed on every upgrade, and the pass is then the familiar three-way one: value absent
+from disk → take the bundle's (this is how a key a release adds arrives); on disk and equal to the
+ancestor → take the bundle's (nobody touched it, so a changed default lands); on disk and different →
+keep it (an upgrade does not overrule an edit); **no ancestor recorded → keep it**, which is the safe
+direction and is what every install existing today gets on its first upgrade after this change. A key
+the bundle dropped stays on disk unread, for the same reason a retired *file* does. Nested objects
+recurse, which is what lets `engines.enabled` survive a release that changes `engines.master`'s default
+— measured, not assumed.
+
+`commit.md` is still overwritten, and the distinction is not an inconsistency: it is prose the bundle
+owns, a user who edits it is patching a prompt, and the backup is how they get their text back.
+
+**The second finding needed no policy argument, only per-file scope.** Each file is now upgraded inside
+its own error handling, and the marker is written even when one of them could not be — deliberately, and
+stated in the code: the alternative is what was measured, a pass that repeats on every start, drops a
+backup each time, and never upgrades the files it *could* write. The pass names the file it left as
+found and the marker to delete to retry. A backup taken for a write that then failed is removed again,
+because a copy of a file we did not change is exactly the litter the old behaviour produced. The
+try/except around the whole pass stays as a backstop for the case it was really for: the user config
+*directory* being uncreatable, where the fallback is reading the bundle directly.
+
+**What was measured after the change**, in the order it was run:
+
+- **57 tests** in `tests/test_config.py`, 15 of them new, including the two findings as regression
+  tests by name: `test_an_upgrade_keeps_the_engine_policy` and
+  `test_a_read_only_app_json_holds_and_does_not_repeat`. The rest pin the parts a merge gets wrong when
+  it is written in a hurry — a changed default reaching an install that never touched it, a user edit
+  outranking that same default, a key a release introduces, the nested case, a dropped key surviving, an
+  install with no ancestor keeping everything, the pristine copy tracking *this* release so a third one
+  lands, no backup when the merge changes nothing, a backup holding the pre-merge text when it does, and
+  an unparseable file left for the user to fix rather than replaced. Two unit tests cover `_merge_json`
+  directly: a recorded `null` ancestor is not the same as no ancestor (`.get()` cannot tell them apart
+  and they mean opposite things), and the merge does not mutate its inputs.
+- **The whole suite: 4,581 passed, 1 skipped.**
+- **The durability measurement, re-run.** Same script, same two scenarios, against the new code:
+
+  ```
+  --- upgrade (stale_marker=True, read_only=False) ---
+    app.json before    : engines={'master': 'claude', 'enabled': ['claude']}
+    app.json after     : engines={'master': 'claude', 'enabled': ['claude']}
+    list_engines.enabled: ['claude']
+    backups            : []
+
+  --- readonly (stale_marker=True, read_only=True) ---
+    app.json before    : engines={'master': 'claude', 'enabled': ['claude']}
+    app.json after     : engines={'master': 'claude', 'enabled': ['claude']}
+    list_engines.enabled: ['claude']
+    backups            : []
+  ```
+
+  Before the change the first block's `after` line read
+  `engines={'master': 'claude'}` with `list_engines.enabled` back to all three. The read-only run's
+  empty backup list is the second finding gone: the merge finds nothing to change, so there is no write
+  to fail and nothing to back up.
+- **`scripts/probe_engine_policy.py` re-run end to end: `PASS — 18 checks, both servers`.** The
+  criterion still holds through a changed config layer, which is the point of having run it against a
+  fresh server rather than against the pieces.
+
+**A red test the re-run surfaced, unrelated to any of this.**
+`tests/test_agy_service.py::TestItWillNotRunUngated` had two tests asserting `gate_not_installed` that
+could only reach the gate check on a machine with an `agy` binary on `PATH`; on this one they hit the
+*missing-binary* refusal first and asserted the wrong error. Red at `HEAD` before this work, in a file
+whose own docstring says "Offline. No `agy`" — and one branch below a comment warning about exactly this
+machine-dependence, "which is how it went green for a day and then red the moment one was". Fixed with a
+`gated_service` helper whose executable is a name that always resolves; `connect_engine` only asks
+whether the name resolves and refuses long before launching anything, so nothing is executed.
+
+**What this does not do.** It does not make `app.json` a user file, so the bundle still owns any key
+nobody has touched — which is the intent, and is why the pristine copy is refreshed rather than written
+once. It does not preserve formatting: the merged file is re-serialised, so key order follows the file
+on disk with bundled additions appended and the bundle's hand-wrapped arrays come back expanded. And it
+does not give a user any *notice* that a merge happened beyond the log line and the backup; a Settings
+surface for that would be a new decision, not a completion of this one.

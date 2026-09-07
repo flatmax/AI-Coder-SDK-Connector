@@ -60,17 +60,24 @@ OAuth credentials live in ``~/.claude`` and are untouched by that
 override, which is what lets a real session start at all.
 
 **The scratch config directory is seeded as an established install, and
-the first run of this probe failed because it was not.** ``app.json`` is
-a *managed* file: on any version mismatch — and a directory with no
-``.bundled_version`` marker is the largest possible mismatch —
-``_run_upgrade`` backs the user's copy up and overwrites it from the
-bundle. So the first attempt's ``engines.enabled`` was on disk, was read
-by nothing, and both servers mounted everything. The scratch directory
-therefore starts as a copy of the bundled config plus a current marker,
-with the policy merged into that, which is what an install a user has
-edited actually looks like. That the upgrade discards the key at all is
-recorded in ``delivery.md`` as a finding about AG-17's premise rather
-than worked around silently here.
+the first run of this probe failed because it was not.** ``app.json``
+was then a managed file that an upgrade *overwrote*: on any version
+mismatch — and a directory with no ``.bundled_version`` marker is the
+largest possible mismatch — ``_run_upgrade`` backed the user's copy up
+and replaced it from the bundle. So the first attempt's
+``engines.enabled`` was on disk, was read by nothing, and both servers
+mounted everything. That was reported as a finding rather than worked
+around silently, because the same code path runs on a *real* upgrade:
+see ``delivery.md`` § Phase 11 and AG-R-13.
+
+**It has since been fixed** (2026-09-07): ``app.json`` is merged key by
+key against a pristine copy of the bundle, so an upgrade keeps the
+policy — ``configuration.md`` § ``app.json`` is merged key by key. The
+seeding stays anyway, and is now about isolation rather than about the
+defect: a scratch directory that is a copy of the bundled config plus a
+current marker, with the policy merged into it, is what an install a
+user has edited actually looks like, and it keeps this probe measuring
+startup rather than measuring the upgrader.
 
 Ports are read back from the child's own log line rather than trusted:
 ``main.py`` probes for a free port and the one it binds need not be the
@@ -297,10 +304,15 @@ def _seed_config_dir(config_dir: Path, engines: dict) -> None:
     """A config directory that looks edited, not freshly installed.
 
     Copies the bundled config and writes the version marker, so
-    ``_run_upgrade`` takes its fast path and leaves ``app.json`` alone;
-    then merges the run's ``engines`` block into the bundled
-    ``app.json``. Without the marker the upgrade pass overwrites the file
-    from the bundle before anything reads it — see the module docstring.
+    ``_run_upgrade`` takes its fast path; then merges the run's
+    ``engines`` block into the bundled ``app.json``.
+
+    The marker used to be load-bearing — without it the pass overwrote
+    the file from the bundle before anything read it, which is the defect
+    this probe found and which is now fixed. It stays because taking the
+    fast path keeps the probe measuring startup rather than the upgrader:
+    if this ever fails again, the failure should be the upgrade pass's own
+    tests, not eighteen assertions about engine mounting.
     """
     from aic_dc.config import (  # noqa: PLC0415 - probe, reaching in on purpose
         _bundled_config_dir,

@@ -16,6 +16,7 @@ override env var is the designated test hook.
 from __future__ import annotations
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,7 @@ from aic_dc.config import (
     ConfigManager,
     _bundled_config_dir,
     _bundled_version,
+    _merge_json,
     _user_config_dir,
 )
 # ---------------------------------------------------------------------------
@@ -624,3 +626,353 @@ def test_an_upgrade_leaves_retired_files_alone(isolated_config_dir):
     assert kept.is_file()
     assert kept.read_text() == "months of work\n"
     assert manager.retired_files_present() == ["system_extra.md"]
+
+# ---------------------------------------------------------------------------
+# app.json is merged, not overwritten
+# ---------------------------------------------------------------------------
+#
+# The finding that put this section here: `app.json` was a managed file,
+# so an upgrade copied the bundle over it — and `app.json` is also the
+# file the Settings tab writes and the file AG-17's `engines.enabled`
+# policy lives in. A Claude-only deployment came back two-provider after
+# a version bump, silently. See specs5/plan-ag/risks.md § AG-R-13.
+#
+# These tests use a *fake* bundle rather than the shipped one, because
+# what they assert is how a value that changed between two releases is
+# resolved, and the shipped bundle only ever has one version at a time.
+
+
+@pytest.fixture
+def fake_bundle(tmp_path, monkeypatch):
+    """A bundled config dir whose contents the test controls.
+
+    Yields a writer: ``bundle(app={...})`` rewrites the bundled
+    ``app.json`` and returns the dir, so a test can ship one version,
+    install, then ship the next.
+    """
+    bundled = tmp_path / "bundled-config"
+    bundled.mkdir()
+    (bundled / "commit.md").write_text("bundled commit prompt\n", encoding="utf-8")
+    (bundled / "engine.json").write_text('{"model": "bundled"}\n', encoding="utf-8")
+    monkeypatch.setattr("aic_dc.config._bundled_config_dir", lambda: bundled)
+
+    def bundle(app: dict) -> Path:
+        (bundled / "app.json").write_text(
+            json.dumps(app, indent=2) + "\n", encoding="utf-8"
+        )
+        return bundled
+
+    bundle({"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 3}})
+    yield bundle
+
+
+def _install(version: str) -> ConfigManager:
+    """Construct a manager as release ``version`` would."""
+    with patch("aic_dc.config._bundled_version", return_value=version):
+        return ConfigManager()
+
+
+def test_an_upgrade_keeps_the_engine_policy(isolated_config_dir, fake_bundle):
+    """The finding, as a regression test.
+
+    `engines.enabled` is an organisation's policy. Nothing about
+    upgrading the application says they stopped being Claude-only.
+    """
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps({"engines": {"master": "claude", "enabled": ["claude"]}}),
+        encoding="utf-8",
+    )
+
+    fake_bundle({"engines": {"master": "claude"}})
+    _install("v2")
+
+    assert json.loads(app.read_text())["engines"]["enabled"] == ["claude"]
+
+
+def test_an_upgrade_delivers_a_changed_default_nobody_touched(
+    isolated_config_dir, fake_bundle
+):
+    """The other half of the contract, and the reason this is a merge
+    rather than a promotion to `_USER_FILES`.
+
+    A value the user never edited still belongs to the bundle, so a
+    release that changes it reaches an existing install.
+    """
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    assert json.loads(app.read_text())["history"]["mirror_gap_tolerance"] == 3
+
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 5}}
+    )
+    _install("v2")
+
+    assert json.loads(app.read_text())["history"]["mirror_gap_tolerance"] == 5
+
+
+def test_a_user_edit_outranks_a_changed_default(isolated_config_dir, fake_bundle):
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps(
+            {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 9}}
+        ),
+        encoding="utf-8",
+    )
+
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 5}}
+    )
+    _install("v2")
+
+    assert json.loads(app.read_text())["history"]["mirror_gap_tolerance"] == 9
+
+
+def test_an_upgrade_adds_a_key_the_release_introduced(
+    isolated_config_dir, fake_bundle
+):
+    """Merging must not freeze the file at its install-time shape — a
+    section a release adds has to arrive, or the file stops documenting
+    what can be set."""
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+
+    fake_bundle(
+        {
+            "engines": {"master": "claude"},
+            "history": {"mirror_gap_tolerance": 3},
+            "doc_convert": {"enabled": True},
+        }
+    )
+    _install("v2")
+
+    assert json.loads(app.read_text())["doc_convert"] == {"enabled": True}
+
+
+def test_a_nested_policy_survives_its_neighbour_upgrading(
+    isolated_config_dir, fake_bundle
+):
+    """One key of `engines` is the user's and one is the bundle's. The
+    merge is per key, not per section, or the two would fight."""
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps({"engines": {"master": "claude", "enabled": ["claude"]}}),
+        encoding="utf-8",
+    )
+
+    fake_bundle({"engines": {"master": "agy"}})
+    _install("v2")
+
+    engines = json.loads(app.read_text())["engines"]
+    assert engines == {"master": "agy", "enabled": ["claude"]}
+
+
+def test_a_key_the_bundle_dropped_is_left_on_disk(isolated_config_dir, fake_bundle):
+    """Same reasoning as retired *files*: deleting a user's text is
+    irreversible, and an unread key costs bytes."""
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps({"engines": {"master": "claude"}, "url_cache": {"ttl": 60}}),
+        encoding="utf-8",
+    )
+
+    fake_bundle({"engines": {"master": "claude"}})
+    _install("v2")
+
+    assert json.loads(app.read_text())["url_cache"] == {"ttl": 60}
+
+
+def test_an_install_with_no_pristine_copy_keeps_every_value(
+    isolated_config_dir, fake_bundle
+):
+    """The upgrade *into* this change, which is every existing install.
+
+    With no ancestor on disk there is no evidence a value came from us,
+    so every one of them is treated as the user's. New keys still land.
+    """
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps(
+            {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 3}}
+        ),
+        encoding="utf-8",
+    )
+    # Simulate a pre-merge install: the file is here, the ancestor isn't.
+    shutil.rmtree(isolated_config_dir / ".pristine")
+
+    fake_bundle(
+        {
+            "engines": {"master": "claude"},
+            "history": {"mirror_gap_tolerance": 5},
+            "doc_convert": {"enabled": True},
+        }
+    )
+    _install("v2")
+
+    merged = json.loads(app.read_text())
+    assert merged["history"]["mirror_gap_tolerance"] == 3  # kept, not upgraded
+    assert merged["doc_convert"] == {"enabled": True}  # still added
+
+
+def test_the_pristine_copy_tracks_the_shipped_bundle(
+    isolated_config_dir, fake_bundle
+):
+    """Recorded on install and refreshed on upgrade, so the next release
+    compares against what this one shipped rather than against v1."""
+    _install("v1")
+    pristine = isolated_config_dir / ".pristine" / "app.json"
+    assert json.loads(pristine.read_text())["history"]["mirror_gap_tolerance"] == 3
+
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 5}}
+    )
+    _install("v2")
+    assert json.loads(pristine.read_text())["history"]["mirror_gap_tolerance"] == 5
+
+    # And the refresh is what makes a *third* release land: the user's 5
+    # came from v2's bundle, not from them.
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 7}}
+    )
+    _install("v3")
+    app = json.loads((isolated_config_dir / "app.json").read_text())
+    assert app["history"]["mirror_gap_tolerance"] == 7
+
+
+def test_a_merge_that_changes_nothing_leaves_no_backup(
+    isolated_config_dir, fake_bundle
+):
+    """Backups exist so a user can recover a value the upgrade took. An
+    upgrade that took nothing has nothing to hand back, and a directory
+    of identical copies is just noise."""
+    _install("v1")
+    fake_bundle({"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 3}})
+    _install("v2")
+
+    assert list(isolated_config_dir.glob("app.json.*")) == []
+
+
+def test_a_merge_that_changes_something_backs_up_what_it_replaced(
+    isolated_config_dir, fake_bundle
+):
+    _install("v1")
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 5}}
+    )
+    _install("v2")
+
+    backups = list(isolated_config_dir.glob("app.json.*"))
+    assert len(backups) == 1
+    assert json.loads(backups[0].read_text())["history"]["mirror_gap_tolerance"] == 3
+    assert "v1" in backups[0].name
+
+
+def test_an_unparseable_app_json_is_left_for_the_user_to_fix(
+    isolated_config_dir, fake_bundle, caplog
+):
+    """Their file, unreadable. Overwriting replaces text we cannot read
+    with text they did not write; every accessor already defaults, so the
+    application starts either way."""
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text("{ not json at all", encoding="utf-8")
+
+    fake_bundle({"engines": {"master": "claude"}})
+    with caplog.at_level("WARNING"):
+        _install("v2")
+
+    assert app.read_text() == "{ not json at all"
+    assert any("app.json" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# One unwritable file does not cost the others their upgrade
+# ---------------------------------------------------------------------------
+
+
+def test_a_read_only_app_json_holds_and_does_not_repeat(
+    isolated_config_dir, fake_bundle, caplog
+):
+    """The second finding, as a regression test.
+
+    A workplace that pins the policy by shipping the file read-only used
+    to get: the OSError aborted the whole pass, the marker was never
+    written, and every subsequent start retried it — another backup each
+    time, and `commit.md` never upgraded at all.
+    """
+    _install("v1")
+    app = isolated_config_dir / "app.json"
+    app.write_text(
+        json.dumps({"engines": {"master": "claude", "enabled": ["claude"]}}),
+        encoding="utf-8",
+    )
+    app.chmod(0o444)
+    commit = isolated_config_dir / "commit.md"
+    commit.write_text("stale\n", encoding="utf-8")
+
+    fake_bundle(
+        {"engines": {"master": "claude"}, "history": {"mirror_gap_tolerance": 5}}
+    )
+    with caplog.at_level("WARNING"):
+        _install("v2")
+
+    # The policy held.
+    assert json.loads(app.read_text())["engines"]["enabled"] == ["claude"]
+    # The file it could write, it wrote.
+    assert commit.read_text() == "bundled commit prompt\n"
+    # The marker moved, so the pass is over.
+    assert (isolated_config_dir / ".bundled_version").read_text().strip() == "v2"
+    # It said so, naming the file and how to retry.
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert any("app.json" in w and ".bundled_version" in w for w in warnings)
+
+    # A third start is a no-op, and left no litter behind on the second.
+    _install("v2")
+    assert list(isolated_config_dir.glob("app.json.*")) == []
+
+
+def test_the_marker_is_written_even_when_a_file_is_left_alone(
+    isolated_config_dir, fake_bundle
+):
+    """Stated separately from the read-only case because it is the
+    decision, not the symptom: a pass that cannot finish still records
+    that it ran, or it runs forever."""
+    _install("v1")
+    (isolated_config_dir / "app.json").write_text("{ broken", encoding="utf-8")
+
+    fake_bundle({"engines": {"master": "claude"}})
+    _install("v2")
+
+    assert (isolated_config_dir / ".bundled_version").read_text().strip() == "v2"
+
+
+# ---------------------------------------------------------------------------
+# _merge_json, directly
+# ---------------------------------------------------------------------------
+
+
+def test_merge_distinguishes_a_null_ancestor_from_no_ancestor():
+    """`pristine.get(key)` cannot tell these apart and they mean opposite
+    things: a recorded null is an ancestor the user's value may match, an
+    absent key is no ancestor at all."""
+    # Recorded as null, user still has null → the bundle's new value.
+    assert _merge_json({"k": None}, {"k": None}, {"k": 5}) == {"k": 5}
+    # Not recorded → the user's null is theirs.
+    assert _merge_json({"k": None}, {}, {"k": 5}) == {"k": None}
+
+
+def test_merge_leaves_its_inputs_alone():
+    """The pass reads the pristine copy once and writes the result;
+    mutating either argument would be a silent second writer."""
+    user = {"engines": {"enabled": ["claude"]}}
+    bundled = {"engines": {"master": "claude"}}
+    _merge_json(user, {}, bundled)
+    assert user == {"engines": {"enabled": ["claude"]}}
+    assert bundled == {"engines": {"master": "claude"}}

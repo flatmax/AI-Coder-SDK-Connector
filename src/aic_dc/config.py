@@ -74,6 +74,26 @@ _MANAGED_FILES = frozenset({
     "app.json",
 })
 
+# Managed files upgraded key-by-key rather than wholesale. `app.json` is
+# the only one, and it is here because "managed" and "written by the
+# Settings tab" were both true of it: `CONFIG_TYPES` exposes `app` for
+# editing, `engines.master` moves when a session switches engines, and
+# AG-17's `engines.enabled` is an organisation's *policy* — so the
+# upgrade that overwrote this file reverted every one of those, and
+# quietly turned a Claude-only deployment back into a two-provider one
+# (plan-ag AG-R-13). Overwriting is still right for `commit.md`: it is
+# prose the bundle owns, a user who edits it is patching a prompt, and
+# the backup is how they get their text back.
+#
+# Merging needs a third leg, because a user's file is a *copy of the
+# bundle* taken at install: comparing it against the new bundle cannot
+# tell "I chose this" from "this was the default". `_PRISTINE_DIR` holds
+# the bundled file as it was last installed, so the comparison is the
+# familiar three-way one — see `_merge_json`.
+_MERGED_MANAGED_FILES = frozenset({
+    "app.json",
+})
+
 _USER_FILES = frozenset({
     "engine.json",
 })
@@ -101,6 +121,16 @@ RETIRED_FILES: tuple[str, ...] = (
 # Version marker filename inside the user config dir. Hidden (leading
 # dot), not in either file set so the upgrade iterator skips it.
 _VERSION_MARKER = ".bundled_version"
+
+# Where the pristine copies live: a hidden directory inside the user
+# config dir holding each merged managed file exactly as the bundle last
+# shipped it. Hidden and a directory, so neither the upgrade iterator
+# (which walks filenames) nor the retired-file scan (which looks for
+# files by name) sees it. An install that predates this directory has no
+# pristine copy, and the merge reads that as "every value on disk is the
+# user's" — the safe direction, since the alternative reverts an edit we
+# cannot prove was ours.
+_PRISTINE_DIR = ".pristine"
 
 # Per-repo working directory name. Created under the repo root on
 # first run; added to .gitignore.
@@ -245,6 +275,59 @@ def _backup_name(original: Path, installed_version: str) -> Path:
     return original.with_name(original.name + suffix)
 
 
+# Distinguishes "the pristine copy records null for this key" from "the
+# pristine copy does not mention this key". ``.get(key)`` cannot: both
+# answer None, and they mean opposite things here.
+_ABSENT = object()
+
+
+def _merge_json(
+    user: Mapping[str, Any],
+    pristine: Mapping[str, Any],
+    bundled: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Three-way merge of one managed JSON file, key by key.
+
+    ``pristine`` is the bundled file as it was last installed — the
+    common ancestor. Per key:
+
+    - Absent from ``user`` → take the bundled value. This is how a key
+      a release *adds* reaches an existing install.
+    - Present in all three and ``user == pristine`` → take the bundled
+      value. The user never touched it, so a changed default lands.
+    - ``user != pristine`` → keep the user's. Their edit is the answer,
+      and an upgrade is not the place to overrule it.
+    - No pristine record for the key → keep the user's, for the same
+      reason as above: without an ancestor there is no evidence the
+      value came from us.
+    - Present in ``user`` but not in ``bundled`` → keep it. A key the
+      bundle dropped is left on disk unread, exactly as a retired *file*
+      is (see § Retired files are ignored, not deleted).
+
+    Nested objects recurse, so ``engines.enabled`` survives a release
+    that changes ``engines.master``'s default. Lists are compared whole:
+    a user who edits ``doc_convert.extensions`` owns the list, and there
+    is no per-element ancestry to merge against.
+    """
+    merged = dict(user)
+    for key, bundled_value in bundled.items():
+        if key not in merged:
+            merged[key] = bundled_value
+            continue
+        user_value = merged[key]
+        pristine_value = pristine.get(key, _ABSENT)
+        if isinstance(user_value, Mapping) and isinstance(bundled_value, Mapping):
+            merged[key] = _merge_json(
+                user_value,
+                pristine_value if isinstance(pristine_value, Mapping) else {},
+                bundled_value,
+            )
+            continue
+        if pristine_value is not _ABSENT and user_value == pristine_value:
+            merged[key] = bundled_value
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # ConfigManager
 # ---------------------------------------------------------------------------
@@ -292,8 +375,11 @@ class ConfigManager:
         self._app_config: dict[str, Any] | None = None
 
         # Run the upgrade pass. Failure here is non-fatal — if the
-        # user config directory can't be created (permissions, etc.)
-        # we log and fall back to reading the bundle directly.
+        # user config directory itself can't be created (permissions,
+        # etc.) we log and fall back to reading the bundle directly.
+        # Per-*file* failures inside the pass no longer reach this
+        # handler: they are reported and skipped there, so one
+        # unwritable file cannot cost the others their upgrade.
         try:
             self._ensure_user_dir()
             self._run_upgrade()
@@ -342,17 +428,57 @@ class ConfigManager:
         marker = self._user_dir / _VERSION_MARKER
         marker.write_text(version, encoding="utf-8")
 
+    def _pristine_path(self, filename: str) -> Path:
+        """Path of the last-installed bundled copy of ``filename``."""
+        return self._user_dir / _PRISTINE_DIR / filename
+
+    def _record_pristine(self, filename: str, bundled_path: Path) -> None:
+        """Snapshot the bundled file as the ancestor for the next merge.
+
+        Written on install and after every upgrade of a merged managed
+        file, so the next release compares against what *this* release
+        shipped rather than against the original install.
+        """
+        target = self._pristine_path(filename)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(bundled_path, target)
+
+    def _read_json_path(self, path: Path) -> dict[str, Any] | None:
+        """Parse a JSON object at ``path``, or None if it isn't one.
+
+        Distinct from :meth:`_read_user_json`, which answers ``{}`` for
+        both "absent" and "unparseable" because its callers want a dict
+        to ``.get()`` from. The merge cannot use that: an empty dict
+        would read as "the user set nothing" and hand the whole bundled
+        file back, which is the overwrite this method exists to avoid.
+        """
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def _run_upgrade(self) -> None:
         """Version-aware upgrade pass.
 
         Compares the bundled version against the installed marker:
 
         - Match → no action (fast path)
-        - Mismatch or first install → copy new files, back up and
-          overwrite managed files, leave user files alone
+        - Mismatch or first install → copy new files, merge or overwrite
+          managed files, leave user files alone
 
-        Files not in either category set (the marker itself, any
-        stray files users may have added) are skipped.
+        Files not in either category set (the marker itself, the
+        pristine directory, any stray files users may have added) are
+        skipped.
+
+        Each file is upgraded inside its own error handling. A file the
+        pass cannot write — a read-only ``app.json`` shipped by
+        configuration management is the case that happens — is reported
+        and skipped, and the remaining files still upgrade. The marker is
+        written even then, deliberately: the alternative left every
+        subsequent startup repeating the whole pass, dropping another
+        backup each time, and never upgrading the files it *could*
+        write.
         """
         bundled_version = _bundled_version()
         installed_version = self._read_installed_version()
@@ -369,35 +495,24 @@ class ConfigManager:
             bundled_version or "(none)",
         )
 
+        left_alone: list[str] = []
         for filename in sorted(_MANAGED_FILES | _USER_FILES):
-            bundled_path = self._bundled_dir / filename
-            user_path = self._user_dir / filename
+            try:
+                reason = self._upgrade_one(filename, installed_version)
+            except OSError as exc:
+                reason = str(exc)
+            if reason is not None:
+                left_alone.append(f"{filename} ({reason})")
 
-            if not bundled_path.is_file():
-                # Missing from bundle — nothing to copy. Not an
-                # error (some files may be optional in future).
-                continue
-
-            if not user_path.exists():
-                # New file — copy from bundle regardless of category.
-                logger.info("Config install: %s", filename)
-                shutil.copy2(bundled_path, user_path)
-                continue
-
-            if filename in _USER_FILES:
-                # User file already exists — never touch.
-                continue
-
-            if filename in _MANAGED_FILES:
-                # Back up then overwrite.
-                backup = _backup_name(user_path, installed_version)
-                logger.info(
-                    "Config upgrade: %s → backup %s",
-                    filename,
-                    backup.name,
-                )
-                shutil.copy2(user_path, backup)
-                shutil.copy2(bundled_path, user_path)
+        if left_alone:
+            logger.warning(
+                "Config upgrade left %s as found: %s. The version marker "
+                "is written anyway so startup does not retry on every run "
+                "— resolve the cause and delete %s to run the pass again.",
+                "one file" if len(left_alone) == 1 else "files",
+                ", ".join(left_alone),
+                self._user_dir / _VERSION_MARKER,
+            )
 
         # Only write the marker if we actually have a bundled
         # version to record. Source installs (VERSION == "dev" or
@@ -405,6 +520,104 @@ class ConfigManager:
         # triggers an upgrade.
         if bundled_version:
             self._write_installed_version(bundled_version)
+
+    def _upgrade_one(self, filename: str, installed_version: str) -> str | None:
+        """Bring one config file up to the bundled version.
+
+        Returns None when the file needed nothing or was brought up to
+        date, and a short reason when it was deliberately left as found.
+        Raises :class:`OSError` for the write failures the caller
+        reports per file.
+        """
+        bundled_path = self._bundled_dir / filename
+        user_path = self._user_dir / filename
+
+        if not bundled_path.is_file():
+            # Missing from bundle — nothing to copy. Not an
+            # error (some files may be optional in future).
+            return None
+
+        if not user_path.exists():
+            # New file — copy from bundle regardless of category.
+            logger.info("Config install: %s", filename)
+            shutil.copy2(bundled_path, user_path)
+            if filename in _MERGED_MANAGED_FILES:
+                self._record_pristine(filename, bundled_path)
+            return None
+
+        if filename in _USER_FILES:
+            # User file already exists — never touch.
+            return None
+
+        if filename in _MERGED_MANAGED_FILES:
+            return self._merge_one(
+                filename, bundled_path, user_path, installed_version
+            )
+
+        # Managed prose — back up then overwrite.
+        backup = _backup_name(user_path, installed_version)
+        logger.info("Config upgrade: %s → backup %s", filename, backup.name)
+        shutil.copy2(user_path, backup)
+        shutil.copy2(bundled_path, user_path)
+        return None
+
+    def _merge_one(
+        self,
+        filename: str,
+        bundled_path: Path,
+        user_path: Path,
+        installed_version: str,
+    ) -> str | None:
+        """Three-way merge one managed JSON file in place.
+
+        The user's file is backed up and rewritten only when the merge
+        actually changes something, so an install that has diverged from
+        no default collects no backups. The pristine copy is refreshed
+        either way — it records what the bundle shipped, not what we
+        wrote.
+
+        Note that the merged file is re-serialised: key order follows the
+        user's file with bundled additions appended, and the bundle's
+        hand-wrapped arrays come back expanded. JSON carries no comments,
+        so there is nothing else to lose.
+        """
+        user_data = self._read_json_path(user_path)
+        bundled_data = self._read_json_path(bundled_path)
+        if user_data is None:
+            # Their file, unreadable or not an object. Overwriting would
+            # replace text we cannot read with text they did not write;
+            # every accessor already falls back to its own default, so
+            # the application runs either way and the user keeps the file
+            # they have to fix.
+            return "unparseable JSON, left for the user to fix"
+        if bundled_data is None:
+            return "bundled copy is not a JSON object"
+
+        pristine_data = self._read_json_path(self._pristine_path(filename)) or {}
+        merged = _merge_json(user_data, pristine_data, bundled_data)
+
+        if merged != user_data:
+            backup = _backup_name(user_path, installed_version)
+            logger.info(
+                "Config merge: %s → backup %s", filename, backup.name
+            )
+            shutil.copy2(user_path, backup)
+            try:
+                user_path.write_text(
+                    json.dumps(merged, indent=2) + "\n", encoding="utf-8"
+                )
+            except OSError:
+                # A read-only file is a workplace pinning it, not a
+                # fault. Take the backup back out: a copy of a file we
+                # failed to change is litter, and littering once per
+                # startup is what the old pass did.
+                backup.unlink(missing_ok=True)
+                raise
+        else:
+            logger.info("Config merge: %s already current", filename)
+
+        self._record_pristine(filename, bundled_path)
+        return None
 
     def _init_aic_dc_dir(self) -> None:
         """Create the per-repo ``.aic-dc/`` working directory.
