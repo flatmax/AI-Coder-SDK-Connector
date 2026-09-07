@@ -668,3 +668,20 @@ like today's condition did: locally correct, and wrong for a deployment nobody i
 
 **Tripwire that says it has fired:** a Claude-only install where `list_engines().mountable` names more
 than `claude`, or where a Claude session's MCP server list contains `aic-dc-antigravity`.
+
+**Both halves of that tripwire were run against a fresh server on 2026-09-07 and are clean — and doing
+so found a second way this risk recurs, which the entry above does not cover.** `app.json` is a
+*managed* config file, so the first start after **any** version change backs the user's copy up and
+replaces it from the bundle: `engines.enabled` disappears and `list_engines().enabled` is
+`['claude', 'antigravity', 'agy']` again, with the consultant's tools back inside every Claude turn
+and no warning that a policy was dropped. The mount conditions are all correct; the policy is simply
+not there any more. So the mitigation above is necessary and not sufficient — **a policy that lives in
+a file the upgrader rewrites is a policy with an expiry date**, and an audit of the mount points cannot
+see it.
+
+Shipping `app.json` read-only, which [AG-17](decisions.md#ag-17) already recommends, does hold: the
+overwrite fails, the `OSError` is caught, startup continues and the policy stays in force. It is
+therefore the enforcement path to document rather than an equivalent alternative to the writable one.
+It has a cost of its own — the aborted pass never advances the version marker, so it repeats on every
+start, leaving one timestamped backup per launch and never upgrading `commit.md`. Measurements and the
+reasoning are in [`delivery.md` § Phase 11](delivery.md#phase-11--the-engine-policy-and-what-a-fresh-server-said-about-it-2026-09-07).

@@ -3966,3 +3966,140 @@ silently uses the other transport.
 *nothing*, and an image verified on disk with the gate's own decision log showing `generate_image` as
 the only allow. Until it runs, this entry describes a build and not a result — which is the
 distinction phase 7's two inert checks and phase 3's three live-only bugs were all about.
+
+## Phase 11 — the engine policy, and what a fresh server said about it (2026-09-07)
+
+[AG-17](decisions.md#ag-17) was built on 2026-09-06 with 20 tests and no delivery entry, and its exit
+criterion was explicitly not met: *"not met until a fresh server has been started on a Claude-only
+`app.json`, since everything above tests the pieces rather than the startup that assembles them."*
+This is that sitting. `scripts/probe_engine_policy.py` is the artefact, **18 checks green across two
+servers**, and the criterion is met. It also cost two findings, both in the config layer rather than
+in phase 11's code, and both about whether `engines.enabled` is a policy an organisation can rely on
+rather than a preference one machine happens to hold.
+
+### The check that would have passed for the wrong reason
+
+**This machine has no `agy` binary and no Gemini key.** So `mountable == ["claude"]` was *already
+true* before any policy existed, and a probe that started one server on a Claude-only `app.json`
+would have gone green while proving nothing — it cannot tell "the policy removed the second engine"
+from "there was never a second engine here". That is the same shape as `probe_agy_gate.py`'s deny
+tripwire resting on write diversion, and the same shape as phase 9's note that an absent dialog is
+also what a turn that never got that far looks like. This suite has now learned it three times, which
+is the argument for the probe carrying its own control rather than for another paragraph.
+
+So the probe runs **two servers on the same machine in the same environment**, and the first one is
+the point:
+
+| | `app.json` | `mountable` | Claude session's MCP servers |
+|---|---|---|---|
+| **A. control** | no `engines.enabled` | `agy`, `antigravity`, `claude` | `aic-dc`, **`aic-dc-antigravity`**, `chrome-devtools` |
+| **B. criterion** | `enabled: ["claude"]` | `claude` | `aic-dc`, `chrome-devtools` |
+
+Run A is what makes run B a measurement. Both Antigravity engines mount, the consultant's server is
+in the session, and then the *only* thing that changes is one key in one file.
+
+**What the probe supplies and what it does not.** Nothing in the startup path authenticates either
+transport — the SDK engine mounts on a credential *resolving* plus the wheel importing, and `agy`
+mounts on `shutil.which("agy")` — so the probe puts a `GEMINI_API_KEY` in the child's environment and
+an executable named `agy` on its `PATH`, and reports that it did. Both are substitutes for a **mount
+condition**, never for a working transport, and no turn is taken through either. The stub records
+every invocation of itself and there were none, so "startup only asked whether it existed" is
+measured rather than assumed.
+
+**Assertion 3 reads the engine's own answer.** `get_mcp_status()` is a control request to the `claude`
+CLI asking which MCP servers *it* connected — the criterion's "asserted against the mounted server
+list, never against the log line, because a log line saying it was skipped is what a build that
+mounted it anyway would also print". An answer with no `aic-dc` in it is treated as **uninterpretable
+rather than as a pass**, since a session that mounted nothing of ours also mounted no
+`aic-dc-antigravity`.
+
+### Two instrument defects, and the first one is the finding
+
+The first run reported **10 of 16 checks failed**, and neither failure was in the product.
+
+**1. The scratch config directory was a fresh install, not an edited one.** `app.json` is a *managed*
+file (`config.py` § `_MANAGED_FILES`), and a directory with no `.bundled_version` is the largest
+possible version mismatch, so `_run_upgrade` backed the probe's `app.json` up and overwrote it from
+the bundle **before anything read it**. Run B mounted everything and its `engines.enabled` was on disk
+the whole time, read by nobody. The probe now seeds the directory as an established install — bundled
+config, current marker, the policy merged in — which is what a file a user has edited looks like.
+That the upgrade discards the key at all is finding 1 below, and it is recorded rather than worked
+around.
+
+**2. The MCP instrument broke on the first non-empty list.** Servers are dialled asynchronously, and
+the first answer was `['chrome-devtools']` — a server inherited from the user's own `~/.claude.json`,
+arriving before ours, read as "the session mounted nothing of ours". It now waits for `aic-dc`, the
+one server that must be present on both runs; only once it is there does the presence or absence of
+`aic-dc-antigravity` beside it mean anything. **The docstring had already named this trap** ("an empty
+list means *not yet* rather than *none*") and the loop below it broke on non-empty anyway, which is
+worth recording because the gap between a stated principle and the code under it is invisible to a
+green run.
+
+One ordering change came out of it: assertion 3 now runs **before** assertion 2, against the
+criterion's own numbering. A `switch_engine` that succeeded when it should not would change which
+engine the session assertion is about, and a missing `aic-dc-antigravity` would then be explained by
+the master no longer being Claude rather than by the policy.
+
+### Finding 1: an upgrade silently reverts the policy
+
+`app.json` is managed, so on **any** version change the user's copy is backed up and replaced from the
+bundle. Measured directly, one server, marker set to a stale version:
+
+```
+app.json before      : engines={'master': 'claude', 'enabled': ['claude']}
+app.json after       : engines={'master': 'claude'}
+list_engines.enabled : ['claude', 'antigravity', 'agy']
+backups              : ['app.json.2026.09.07-04.19-0.0.1-old']
+```
+
+The first start after an upgrade is a **two-provider install again**, with both Antigravity engines
+mountable and the consultant's tools back inside every Claude turn. Nothing is lost — the value is in
+the timestamped backup — but nothing is *in effect* either, and no warning says so, because from the
+config layer's point of view this is a routine managed-file refresh. This is
+[AG-R-13](risks.md#ag-r-13) recurring through a door that entry did not look at: the risk register
+reasons about mount *conditions*, and this is the mount conditions being right and the policy being
+gone.
+
+It bears directly on AG-17's premise. That entry answers "a control the user can switch off is a
+control the user can switch back on" by making the *file* the thing an organisation manages — and the
+file is the one artefact in this system that an upgrade rewrites.
+
+### Finding 2: read-only `app.json` holds, and repeats an aborted upgrade forever
+
+AG-17's own recommendation is that "a workplace that needs enforcement ships `app.json` read-only or
+writes it from configuration management". The read-only half was measured and it **works**: the policy
+survives, `list_engines().enabled` is `['claude']`, and startup does not fail, because
+`ConfigManager.__init__` catches `OSError` around the upgrade pass and logs a warning naming the file.
+
+What it also does is never advance the marker, so the upgrade pass re-runs on **every start**. Two
+consecutive starts on the same read-only directory:
+
+```
+start 1 enabled: ['claude']   backups: ['app.json.…-04.20-0.0.1-old']
+start 2 enabled: ['claude']   backups: ['app.json.…-04.20-0.0.1-old', 'app.json.…-04.21-0.0.1-old']
+```
+
+A fresh backup per start, unbounded. And because `app.json` sorts first among the managed files, the
+`PermissionError` aborts the loop before `commit.md` is reached, so the *other* managed file is never
+upgraded on such an install — a second consequence of a single broad `except OSError` around the whole
+pass.
+
+**Neither finding is fixed here.** Both are decisions about the config layer rather than about this
+phase: making `app.json` merge rather than overwrite changes the upgrade contract for every key in it
+(`../1-foundation/configuration.md`), and per-file error handling in `_run_upgrade` changes what a
+partial failure means. They are recorded with their measurements so the choice is made once, in
+daylight, by the person who owns the enforcement story.
+
+### What is now true
+
+Phase 11's criterion is met, in full and on a fresh server: `mountable` is exactly `["claude"]`, the
+selector is offered nothing else, both `switch_engine` calls are refused with `engine_disabled` and a
+reason naming `app.json`'s `engines.enabled` rather than a missing binary, Claude is still master
+afterwards, and the Claude session's own MCP server list contains `aic-dc` and not
+`aic-dc-antigravity`. The static half — the tripwire asserting that the set of Antigravity mount
+points is exactly the set consulting the allowlist — is run by the same command and reported beside
+the live checks, so one invocation answers the whole entry.
+
+What is *not* proven is anything about the transports themselves, and the probe says so in its own
+output: a stub binary and a placeholder key prove that the mount conditions were satisfied and then
+overruled, which is precisely what the criterion asks and no more.
