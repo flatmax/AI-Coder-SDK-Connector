@@ -49,24 +49,41 @@ from aic_dc.antigravity.consultant import ConsultationError
 CONV = "0d9d1f3a-6c1e-4a51-9b0e-3f5f0f1b2c34"
 
 
-def _fake_agy(*, image_path: str | None = None, answer: str = "It depends.") -> str:
+def _fake_agy(
+    *,
+    image_path: str | None = None,
+    answer: str = "It depends.",
+    log: str = "",
+) -> str:
     """A fake ``agy``: init, prose, optionally an image tool call, result.
 
     ``image_path`` is written by the fake itself, which is the point —
     :func:`~aic_dc.antigravity.consultant.verify_image_write` stats the
     file rather than believing the frame, so a fake that only *claimed* to
     write would fail the same way a diverted real one does.
+
+    **The frame this emits was wrong until 2026-09-08**, and wrong in the
+    way AG-16 predicted an offline test would be: it carried an
+    ``OutputPath`` parameter, because that is the shape the code assumed.
+    The first live run showed the real call carries ``ImageName`` and
+    ``Prompt`` and no path at all — the harness picks the location. So the
+    fake now writes where ``agy`` writes and names the arguments ``agy``
+    names, and the collection is what is under test.
     """
     tool = ""
     if image_path is not None:
         tool = textwrap.dedent(
             f'''
-            open({image_path!r}, "wb").write(b"PNG-ish bytes")
+            path = {image_path!r}
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "wb").write(b"PNG-ish bytes")
             emit({{"event": "step_update", "step_update": {{
                 "step_index": 2, "state": "DONE", "step_type": "tool",
+                "conversation_id": conv,
                 "tool_name": "generate_image",
                 "tool_info": {{"name": "generate_image",
-                              "parameters": {{"OutputPath": {image_path!r}}},
+                              "parameters": {{"ImageName": "hero",
+                                             "Prompt": "a hero image"}},
                               "output": "done"}}}}}})
             '''
         )
@@ -74,6 +91,7 @@ def _fake_agy(*, image_path: str | None = None, answer: str = "It depends.") -> 
         '''
         import json, sys, os
         conv = "{conv}"
+        log = {log!r}
         def emit(o):
             sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
         emit({{"event": "init", "conversation_id": conv,
@@ -82,6 +100,8 @@ def _fake_agy(*, image_path: str | None = None, answer: str = "It depends.") -> 
             if not line.strip():
                 continue
             json.loads(line)
+            if log:
+                open(log, "a").write(line)
             emit({{"event": "step_update", "step_update": {{
                 "step_index": 1, "state": "DONE",
                 "step_type": "agent_response", "text_delta": {answer!r}}}}})
@@ -90,7 +110,21 @@ def _fake_agy(*, image_path: str | None = None, answer: str = "It depends.") -> 
                 "conversation_id": conv, "status": "SUCCESS",
                 "response": {answer!r}, "usage": {{"total_tokens": 7}}}}}})
         '''
-    ).format(conv=CONV, answer=answer, tool=textwrap.indent(tool, "    ").strip("\n"))
+    ).format(
+        conv=CONV,
+        answer=answer,
+        log=log,
+        tool=textwrap.indent(tool, "    ").strip("\n"),
+    )
+
+
+def brain_image(tmp_path, name: str = "hero_1788851691210.jpg"):
+    """Where ``agy`` would put an image, in the fake brain directory.
+
+    ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg`` — measured on
+    2026-09-08, and the reason the consultant collects rather than asks.
+    """
+    return tmp_path / "brain" / CONV / name
 
 
 @pytest.fixture
@@ -104,10 +138,20 @@ def gated(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     config_dir = tmp_path / "cfg"
+    # The image is collected out of agy's own per-conversation directory,
+    # so a test that did not move this would read the developer's real one.
+    monkeypatch.setattr("aic_dc.agy.consultant.BRAIN_DIR", tmp_path / "brain")
 
-    def build(*, image_path: str | None = None, answer: str = "It depends."):
+    def build(
+        *,
+        image_path: str | None = None,
+        answer: str = "It depends.",
+        log: str = "",
+    ):
         fake = tmp_path / "fake_agy.py"
-        fake.write_text(_fake_agy(image_path=image_path, answer=answer), "utf-8")
+        fake.write_text(
+            _fake_agy(image_path=image_path, answer=answer, log=log), "utf-8"
+        )
         launcher = tmp_path / "agy"
         launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {fake}\n", "utf-8")
         launcher.chmod(0o755)
@@ -343,26 +387,89 @@ class TestItDoesNotEndTheTurnThatAskedIt:
 
 
 class TestAnImage:
-    def test_it_returns_the_repo_relative_path_it_verified(self, gated):
+    """Collected, not requested — the correction the first live run bought.
+
+    ``agy``'s ``generate_image`` takes ``ImageName``, not a path, and writes
+    into ``~/.gemini/antigravity-cli/brain/<conversation_id>/``. So the
+    subject of these tests is the *collection*: what the consultant does
+    after a turn that generated a picture somewhere the file tree cannot
+    see.
+    """
+
+    def test_it_collects_the_image_into_the_repository(self, gated, tmp_path):
         build, repo, _cfg = gated
-        consultant = build(image_path=str(repo / "docs" / "hero.png"))
-        (repo / "docs").mkdir()
-        result = asyncio.run(consultant.generate_image("a hero image"))
-        assert result.path == "docs/hero.png"
+        consultant = build(image_path=str(brain_image(tmp_path)))
+        result = asyncio.run(
+            consultant.generate_image("a hero image", output_name="docs/hero.png")
+        )
+        assert result.path == "docs/hero.jpg"
         assert result.bytes_written > 0
         assert result.contained is True
+        assert (repo / "docs" / "hero.jpg").is_file()
 
-    def test_a_diverted_image_is_a_failure_however_cheerfully_reported(
+    def test_the_produced_extension_wins_over_the_requested_one(
         self, gated, tmp_path
     ):
-        """AG-R-3, and the reason nothing here trusts the tool's own word."""
+        """A ``.png`` holding JPEG bytes is a second lie told to tidy the first."""
+        build, repo, _cfg = gated
+        consultant = build(image_path=str(brain_image(tmp_path)))
+        result = asyncio.run(
+            consultant.generate_image("a hero image", output_name="icon.png")
+        )
+        assert result.path == "icon.jpg"
+        assert not (repo / "icon.png").exists()
+
+    def test_an_image_it_cannot_find_is_loud_rather_than_silent(
+        self, gated, tmp_path
+    ):
+        """AG-R-3's shape on this transport, now that the destination is ours.
+
+        The consultant chooses where the file goes, so a *diverted* write
+        cannot land outside the repository any more — it fails one step
+        earlier, as an image that was generated and is not in the
+        conversation's directory. The wording has to distinguish that from
+        "no image was generated", because the two send a reader to
+        different places.
+        """
         build, _repo, _cfg = gated
-        outside = tmp_path / "elsewhere.png"
-        consultant = build(image_path=str(outside))
+        diverted = tmp_path / "scratch" / "hero.jpg"
+        consultant = build(image_path=str(diverted))
         with pytest.raises(ConsultationError) as caught:
             asyncio.run(consultant.generate_image("a hero image"))
-        assert "outside the repository" in str(caught.value)
-        assert "AG-R-3" in str(caught.value)
+        assert "could not be found" in str(caught.value)
+        assert "generated no image file" not in str(caught.value)
+
+    def test_it_does_not_ask_the_model_to_place_the_file(self, gated, tmp_path):
+        """The instruction that caused the denied ``run_command``, removed.
+
+        The first live run told the model to *"write it inside <repo> and
+        report the absolute path"* — which the tool cannot do, so the model
+        reached for ``run_command`` to move the file and the policy denied
+        it. Correct, and avoidable: the prompt no longer asks.
+        """
+        build, _repo, _cfg = gated
+        log = tmp_path / "prompt.jsonl"
+        consultant = build(image_path=str(brain_image(tmp_path)), log=str(log))
+        asyncio.run(consultant.generate_image("a hero image", output_name="icon.png"))
+        sent = log.read_text("utf-8")
+        assert "do not try to move, copy or save it" in sent.lower()
+        assert str(consultant._repo_root) not in sent
+
+    def test_the_shared_table_cannot_answer_this_and_that_is_the_finding(self):
+        """Why the collector exists rather than a third spelling in the table.
+
+        ``files_written_by`` maps a tool to its *path argument*.
+        ``generate_image`` has none: the real call carries ``ImageName`` and
+        ``Prompt``, and ``output_path`` — which the table names — is a
+        **result** field that only looks like an argument on the SDK
+        transport, because that stream merges results back into ``args`` at
+        ``DONE``. Adding ``ImageName`` here would encode the wrong belief:
+        it is a name, not a path, and no file exists at it.
+        """
+        from aic_dc.claude_code.messages import files_written_by
+
+        real = {"ImageName": "hero", "Prompt": "a hero image"}
+        assert files_written_by("generate_image", real) == []
 
     def test_a_turn_that_never_called_the_tool_is_not_an_image(self, gated):
         """Prose claiming success is not a picture."""

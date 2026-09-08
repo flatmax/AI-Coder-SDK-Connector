@@ -4201,3 +4201,108 @@ once. It does not preserve formatting: the merged file is re-serialised, so key 
 on disk with bundled additions appended and the bundle's hand-wrapped arrays come back expanded. And it
 does not give a user any *notice* that a merge happened beyond the log line and the backup; a Settings
 surface for that would be a new decision, not a completion of this one.
+
+---
+
+## Phase 10 — the consultant on the paid transport, and the argument that does not exist (2026-09-08)
+
+**Exit criterion:** *"A real `generate_image` writes a picture inside the repository on the
+subscription, verified by `stat` and containment rather than by the tool's own report (AG-R-3), with
+the gate's log showing `generate_image` as the only allow; and a real `second_opinion` returns prose
+having been allowed nothing at all, with no `streamComplete` reaching the tab."* **Met.**
+
+`scripts/probe_agy_consultant.py`, two real turns on the account holder's subscription. This was the
+last open item in this directory, and [AG-16](decisions.md#ag-16) had said what it was for: *"until it
+runs, this entry describes a build and not a result."* It ran, it failed, and the failure was the
+point — the build was wrong in the exact place AG-16 had flagged as unmeasurable offline, and one
+layer deeper than it had guessed.
+
+### The half that passed first time
+
+**A second opinion, allowed nothing.** A real answer on the subscription, every block attributed to
+the consultation's own tab, and no `streamComplete` reaching the browser. The gate's log for that turn
+is `allowed []` — not even `finish` was asked for. That is the whole of AG-16's containment claim,
+measured: an agent running under `--dangerously-skip-permissions` with the binary's 57 tools
+available, restrained to prose by a `StaticPolicy` and a registry claim.
+
+### The half that failed, and what it was
+
+`generate_image` **worked** — for the first time since phase 1. A 1024×1024 JPEG, 269,874 bytes, on
+the subscription that has an allowance where the free-tier key reports `limit: 0` for every image
+model. AG-1's worked example, four weeks after it was specified.
+
+Then the probe refused it, correctly. The picture was at
+`~/.gemini/antigravity-cli/brain/<conversation_id>/probe_icon_1788851691210.jpg` — outside the
+repository, invisible to the file tree and the viewer, and unverifiable from the frame. The frame is
+the finding:
+
+```json
+"parameters": {"ImageName": "probe_icon", "Prompt": "A simple flat-colour icon of a padlock…"}
+```
+
+**There is no output-path argument, and not on either transport.** AG-16 left open *"which name does
+`agy` give that path"*, expecting a spelling. The answer is that the tool does not take one: its
+schema declares `ImageName`, *"Short descriptive name for the saved file"*, and the harness picks the
+location. The requested `.png` came back as `.jpg` for the same reason — the caller was never choosing.
+
+**`sdk-surface.md` had recorded this correctly and nobody had read the column headings.** Its
+step-stream table lists `generate_image`'s inputs as `prompt`, `image_name`, `aspect_ratio`, with
+`output_path` among the **outputs**. `files_written_by` — a table of tools to their *path arguments* —
+has held `("output_path", "OutputPath")` throughout, and it worked on the SDK transport for the reason
+phase 3's finding 1 gives: that stream merges a tool's results back into `args` at `DONE`, so a result
+field is readable as an argument there. `agy` does not merge. On this transport the path is nowhere in
+the machine-readable stream at all, only in the model's prose, which is precisely what AG-R-3 forbids
+believing.
+
+So this is a **fourth** instance of the shape this log keeps recording — a table that looks right,
+is never exercised, and degrades quietly — and the first where the table was not merely unexercised
+but was answering a question its subject does not accept.
+
+### The fix: collected, not requested
+
+The image is copied out of `brain/<conversation_id>/` into the repository, and the location is derived
+from what the frame *does* carry — the conversation's own id and the name the model chose — rather
+than parsed out of prose. A consultation holds one conversation for the length of one call, so that
+directory belongs to this call and nothing else writes into it; "the newest file in it" is either this
+image or nothing.
+
+Three details are decisions rather than mechanics:
+
+- **The produced extension wins.** Asking for `icon.png` and receiving JPEG bytes yields `icon.jpg`. A
+  `.png` holding a JPEG is a second lie told to make the first one tidy.
+- **The prompt no longer asks the model to place the file.** It used to say *"write it inside `<repo>`
+  and report the absolute path"*, and the first run showed exactly what a model does when asked for
+  something its tools cannot do: it reached for `run_command` to move the file. The policy denied it,
+  which is AG-R-11 contained — and the denial was avoidable, because we had asked for it.
+- **"Could not be found" is worded apart from "generated no image".** The first means the collector or
+  the write location is wrong; the second means prose claimed a picture nobody made. The old code
+  said the second in both cases, so the first live failure reported *"Antigravity generated no image
+  file"* about an image sitting on disk.
+
+`files_written_by` is left alone. Adding `ImageName` to it would encode the wrong belief — a name is
+not a path and no file exists at it — and `test_the_shared_table_cannot_answer_this_and_that_is_the_finding`
+pins the emptiness so a future reader finds the reason rather than the gap.
+
+### What the closing run measured
+
+`PASS`, both turns, exit 0: a second opinion allowed nothing, and `probe-icon.jpg`, 322,638 bytes,
+inside the probe's own directory, with `generate_image` the only allow. One line of it is the
+instruction change reporting on itself — **`denied along the way: []`**, where the first run had
+denied a `run_command`. The model no longer tries to move the file, because it is no longer asked to.
+
+Offline: 4,608 tests, five of them new, including the fake `agy` corrected to emit the shape that was
+measured rather than the shape the code assumed. That fake had been feeding `OutputPath` — AG-16
+predicted this in as many words (*"the offline tests feed the shape they assume, so they cannot find
+this"*), and the prediction is worth more than the bug, because it is the argument for the probe
+existing at all.
+
+### What this does not do
+
+- **The engine has the same gap.** A user asking the `agy` engine — rather than the consultant — for
+  an image gets a file in `brain/` that the file tree cannot see. The collector lives in the
+  consultant because that is where the criterion was; the same reasoning applies one level up, and it
+  is unbuilt rather than decided against.
+- **Nothing renders the collected image.** It lands in the repository, so the file tree and the
+  viewer find it by the ordinary path, but no consultation tab shows a thumbnail.
+- **The `.jpg` is not converted.** What the harness produced is what lands, which is the honest thing
+  to store and means a caller asking for a specific format does not get one.

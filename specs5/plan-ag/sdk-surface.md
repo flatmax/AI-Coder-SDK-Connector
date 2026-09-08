@@ -460,6 +460,48 @@ A per-transport name map is therefore a requirement of phase 8, not a refinement
 needing no such map is the genuine convenience; the tool names are the thing that looks like it
 transfers and does not.
 
+### `generate_image` takes a name, not a path — measured 2026-09-08
+
+The exception to the paragraph above, and it cost phase 10 a run to find. `agy`'s `generate_image`
+carries **`ImageName` and `Prompt`, and no path at all**:
+
+```json
+{"tool_name": "generate_image", "state": "DONE",
+ "tool_info": {"name": "generate_image",
+               "parameters": {"ImageName": "probe_icon",
+                              "Prompt": "A simple flat-colour icon of a padlock…"}}}
+```
+
+The binary's own schema for that field reads `jsonschema:"required,minLength=1"`,
+`jsonschema_description:"Short descriptive name for the saved file."` — a name, and the harness picks
+the location: `~/.gemini/antigravity-cli/brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg`. The
+requested extension is not honoured either; a request for `.png` produced JPEG.
+
+**The same is true of the SDK, and this document already said so.** The step-stream table above lists
+`generate_image`'s inputs as `prompt`, `image_name`, `aspect_ratio` and `output_path` among its
+*outputs*. AIC⚡DC nonetheless read `output_path` as an argument for a year, and it worked on the SDK
+transport for the reason finding 1 gives: that stream merges a tool's results back into `args` at
+`DONE`, so a result field is readable as an argument there. `agy` does not merge, so on this
+transport the path is **nowhere in the machine-readable stream** — only in the model's prose, which
+AG-R-3 forbids believing.
+
+Two consequences, both structural rather than cosmetic:
+
+- **`files_written_by` cannot answer for this tool**, on any transport. It is a table of tools to
+  their *path arguments*, and this tool has none. Its `("output_path", "OutputPath")` entry describes
+  a result. Adding `ImageName` to it would be worse than leaving it: a name is not a path and no file
+  exists at it.
+- **An image has to be collected, not requested.** The location is derivable from what the frame does
+  carry — the conversation's own id and the name the model chose — so it can be found by `stat` and
+  copied into the repository, which is what `agy/consultant.py` does. Telling the model to write it
+  inside the repository instead is asking for something the tool cannot do, and the first live run
+  showed what the model does when asked anyway: it reached for `run_command` to move the file, and the
+  static policy denied it.
+
+This is AG-2's original disqualifying finding — *tool content is not on the wire* — in its narrowest
+surviving form. It does not re-open AG-14: a path that can be derived and `stat`-ed is not a diff that
+does not exist.
+
 ### Two limits that remain
 
 - **Discovery.** Hooks load from `~/.gemini/config/hooks.json`. In 1.1.25 a workspace-local

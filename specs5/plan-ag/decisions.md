@@ -1021,6 +1021,21 @@ structurally cannot: **which argument name `agy` gives the output path.** `files
 unmeasured, so the probe prints the tool frame verbatim on failure. This is phase 4's `PATH (none
 named)` trap in advance — a table that looks right, is never exercised, and degrades quietly.
 
+**Met 2026-09-08, and the question above was answered by being falsified.** There is no output-path
+argument on *either* transport: the tool takes `ImageName`, and the harness chooses the location. The
+trap was real and one layer deeper than this paragraph guessed — the table did not have the wrong
+spelling, it was answering a question the tool does not accept. So the consultant **collects** the
+image out of `brain/<conversation_id>/` and copies it into the repository, and `files_written_by` is
+no longer asked. Measured contract in
+[`sdk-surface.md` § `generate_image` takes a name, not a path](sdk-surface.md#generate_image-takes-a-name-not-a-path--measured-2026-09-08);
+the run in [`delivery.md` § Phase 10](delivery.md#phase-10--the-consultant-on-the-paid-transport-and-the-argument-that-does-not-exist-2026-09-08).
+
+One line of this decision is superseded by it. § *What it borrows* names `files_written_by` as the
+borrowed answer to "which file a call wrote"; for images that borrowing is withdrawn, for the reason
+above. The other three — `AgySession`, `AgyTranslator`, `verify_image_write` — stand, and
+`verify_image_write` is now the judge of a file *we* placed rather than one the harness did, which is
+a stronger position for it rather than a weaker one.
+
 ---
 
 ## AG-17 — A Claude-only deployment is supported, and the second engine can be switched off **(user)**

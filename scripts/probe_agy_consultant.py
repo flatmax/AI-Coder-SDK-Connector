@@ -20,17 +20,28 @@ it is an unreviewed agent with 57 tools and the repository as its working
 directory. So this asserts on what the gate *decided*, not only on what
 came back.
 
-What it settles that nothing else can
--------------------------------------
-The image path is read through
-:func:`~aic_dc.claude_code.messages.files_written_by`, which knows
-``generate_image`` under ``output_path`` and ``OutputPath`` — both taken
-from the *SDK's* vocabulary. Whether ``agy`` spells it either way is
-**unmeasured**, and the offline tests cannot settle it because they feed
-the shape they assume. So a failure here prints the tool frame verbatim:
-one run tells you the field name, which is the same trap the read tools'
-``ARG_ALIASES`` fell into on the SDK transport in phase 4 (``PATH (none
-named)`` above an input block containing the path).
+What it settled that nothing else could
+---------------------------------------
+It was written asking *which name does ``agy`` give ``generate_image``'s
+output path*, since the two spellings in the shared table
+(``output_path``, ``OutputPath``) both come from the SDK's vocabulary and
+the offline tests could only feed the shape they assumed.
+
+**The first run, 2026-09-08, answered that the question was wrong.**
+There is no output-path argument on either transport: the tool's schema
+declares ``ImageName``, *"Short descriptive name for the saved file"*, the
+real call carried ``{"ImageName", "Prompt"}``, and the harness chose the
+location — ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``, outside
+the repository. ``output_path`` is a *result* field, which only reads as
+an argument on the SDK transport because that stream merges results back
+into ``args`` at ``DONE`` (phase 3, finding 1).
+
+So the consultant now **collects** the image out of the conversation's own
+directory and copies it into the repository, and what this probe checks is
+that collection end to end: the picture exists, it is inside the work
+directory, and the gate allowed ``generate_image`` and nothing else. A
+failure still prints the tool frame verbatim, because that is what turned
+one wrong assumption into a measurement.
 
 What it costs: two turns on the paid subscription, and it **writes an
 image file** — inside a temporary directory that is removed afterwards.
@@ -179,9 +190,10 @@ async def generate_image(consultant: AgyConsultant, work: Path) -> int:
             log("a generate_image call *was* made; its frame was:")
             log(json.dumps(steps[-1], indent=2)[:2000])
             log(
-                "if the path is in there under a key files_written_by does "
-                "not know, add it to _FILE_WRITING_TOOLS rather than reading "
-                "it here"
+                "the frame carries no path by design — the harness picks "
+                "one. If the image is missing, look in "
+                f"{consultant_module.BRAIN_DIR}/<conversation_id>/ and fix "
+                "the collector, not the shared table"
             )
         else:
             log("no generate_image call appears in the stream at all")

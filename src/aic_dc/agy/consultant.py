@@ -71,11 +71,14 @@ AG-R-9 warned that a consultant grown into an engine adapter is all cost
 and no reuse. This is the same relationship in the opposite direction and
 the risk does not apply: the engine was built first, and this *consumes*
 it — :class:`~aic_dc.agy.session.AgySession` for the process and the
-frames, :class:`~aic_dc.agy.steps.AgyTranslator` for the rendering,
-:func:`~aic_dc.claude_code.messages.files_written_by` for which file a
-call wrote, and
+frames, :class:`~aic_dc.agy.steps.AgyTranslator` for the rendering, and
 :func:`~aic_dc.antigravity.consultant.verify_image_write` for whether to
-believe it. Nothing here is a second copy of any of those.
+believe a write. Nothing here is a second copy of any of those.
+
+It borrowed a fourth, :func:`~aic_dc.claude_code.messages.files_written_by`,
+for which file a ``generate_image`` call wrote — and the first live run
+showed that question has no answer in that table, because the tool takes
+no path argument on either transport. See :data:`BRAIN_DIR`.
 
 The one thing it deliberately does *not* borrow is the turn's close.
 ``AgySession.stream_turn`` ends by emitting ``streamComplete``, which
@@ -112,7 +115,6 @@ from aic_dc.antigravity.consultant import (
     verify_image_write,
 )
 from aic_dc.antigravity.credentials import Credentials, agy_credentials
-from aic_dc.claude_code.messages import files_written_by
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,31 @@ _IMAGE_ONLY_REASON = (
     "report the absolute path you wrote it to, and do nothing else — do "
     "not read, search, or run commands."
 )
+
+#: Where ``agy`` puts an image, because the caller cannot say.
+#:
+#: **Measured on 2026-09-08, and it falsified the question AG-16 left
+#: open.** That question was *which name does ``agy`` give
+#: ``generate_image``'s output path* — and the answer is that there is no
+#: such argument on either transport. The tool's own schema declares
+#: ``ImageName``, *"Short descriptive name for the saved file"*, and the
+#: observed call carried exactly ``{"ImageName", "Prompt"}``. The harness
+#: chooses the location: ``brain/<conversation_id>/<ImageName>_<epoch_ms>.jpg``,
+#: outside the repository and invisible to the file tree and the viewer.
+#:
+#: ``output_path`` is a **result** field, which
+#: [`sdk-surface.md`](../../../specs5/plan-ag/sdk-surface.md) had recorded
+#: in the right column all along. It reads as an argument on the SDK
+#: transport only because that stream merges a tool's results back into
+#: its ``args`` at ``DONE`` (phase 3, finding 1); ``agy`` does not merge,
+#: so on this transport the path is nowhere in the machine-readable stream
+#: at all — only in the model's prose, which AG-R-3 forbids believing.
+#:
+#: So the image is **collected** rather than requested, and it is located
+#: from data the frame does carry: the conversation's own id, and the name
+#: the model chose. A consultation is one process holding one conversation,
+#: so this directory belongs to this call and nothing else writes into it.
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 
 #: A second opinion: prose in, prose out, nothing else permitted.
 SECOND_OPINION_POLICY = StaticPolicy.of(CONTROL_TOOLS, _NO_TOOLS_REASON)
@@ -324,7 +351,7 @@ class AgyConsultant:
         aspect_ratio: str = "",
         observer: Any = None,
     ) -> ImageResult:
-        """Generate an image into the repository, and verify where it went.
+        """Generate an image, collect it into the repository, and verify it.
 
         The capability AG-1 exists for, on the account that can pay for
         it. The verification is
@@ -332,6 +359,21 @@ class AgyConsultant:
         with the SDK path rather than restated, because "the tool said it
         succeeded" is not evidence on *either* transport and AG-R-3 was
         measured on this one.
+
+        **Collected, not requested**, and that is the correction the first
+        real run bought (see :data:`BRAIN_DIR`). ``agy``'s ``generate_image``
+        takes a *name*, not a path, so asking it to write inside the
+        repository asks for something the tool cannot do — and the first
+        run showed what the model does when asked anyway: it reached for
+        ``run_command`` to move the file, which the policy denied and
+        should. So the prompt no longer asks, and the file is copied here
+        afterwards, where the file tree and the viewer can reach it.
+
+        The caller's ``output_name`` therefore names the file rather than
+        placing it, and **the extension the harness actually produced
+        wins**: asking for ``icon.png`` and receiving JPEG bytes yields
+        ``icon.jpg``, because a ``.png`` holding a JPEG is a second lie
+        told to make the first one tidy.
         """
         prompt = (prompt or "").strip()
         if not prompt:
@@ -339,11 +381,12 @@ class AgyConsultant:
 
         instruction = [prompt]
         if output_name.strip():
-            instruction.append(f"Save the image as {output_name.strip()}.")
+            instruction.append(f"Name the image {Path(output_name.strip()).stem}.")
         if aspect_ratio.strip():
             instruction.append(f"Use aspect ratio {aspect_ratio.strip()}.")
         instruction.append(
-            f"Write it inside {self._repo_root} and report the absolute path."
+            "Generate the image and then stop. Do not try to move, copy or "
+            "save it anywhere — that is done for you."
         )
 
         translator, frames = await self._run(
@@ -352,9 +395,71 @@ class AgyConsultant:
             observer=observer,
             timeout=self._image_timeout,
         )
+        summary = translator.response_text().strip()
+        call = _image_call(frames)
+        if call is None:
+            # No tool call at all: the honest reading is that prose claimed
+            # a picture nobody generated, which is what this wording says.
+            return verify_image_write("", self._repo_root, summary)
         return verify_image_write(
-            _image_path_from(frames), self._repo_root, translator.response_text().strip()
+            self._collect(call, frames, output_name), self._repo_root, summary
         )
+
+    def _collect(
+        self,
+        call: dict[str, Any],
+        frames: list[dict[str, Any]],
+        output_name: str,
+    ) -> str:
+        """Copy the generated image into the repository, and say where.
+
+        Raises rather than returning ``""`` when the file cannot be found,
+        because the two failures send a reader to different places: an
+        empty path means *no image was generated*, and this means *one was
+        generated and we could not collect it* — which is a defect in this
+        function or a change in where ``agy`` writes, not a failed turn.
+        """
+        conversation_id = _conversation_id(frames)
+        info = call.get("tool_info")
+        info = info if isinstance(info, dict) else {}
+        params = info.get("parameters")
+        params = params if isinstance(params, dict) else {}
+        image_name = str(params.get("ImageName") or params.get("image_name") or "")
+
+        source = _locate_image(BRAIN_DIR, conversation_id, image_name)
+        if source is None:
+            raise ConsultationError(
+                f"Antigravity generated an image named {image_name!r} and it "
+                f"could not be found under {BRAIN_DIR / (conversation_id or '?')}. "
+                "The generation itself succeeded, so this is where the image "
+                "is collected from rather than the generation being at fault."
+            )
+
+        relative = Path(output_name.strip() or source.name)
+        destination = (self._repo_root / relative).with_suffix(source.suffix)
+        try:
+            destination = destination.resolve()
+        except OSError as exc:
+            raise ConsultationError(
+                f"Could not resolve a destination for the image: {exc}"
+            ) from exc
+        if not destination.is_relative_to(self._repo_root):
+            # The caller's own name escaped the repository. Distinguished
+            # from AG-R-3 deliberately: nothing was diverted, we were asked
+            # to put it there.
+            raise ConsultationError(
+                f"The requested image name resolves to {destination}, outside "
+                f"the repository at {self._repo_root}."
+            )
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError as exc:
+            raise ConsultationError(
+                f"Antigravity generated {source} and it could not be copied "
+                f"into the repository: {exc}"
+            ) from exc
+        return str(destination)
 
     async def cancel(self) -> bool:
         """Stop a running consultation. Safe when there is none.
@@ -662,32 +767,74 @@ class _Excluded:
         return self.reason
 
 
-def _image_path_from(frames: list[dict[str, Any]]) -> str:
-    """Where a ``generate_image`` call said it put the file.
+def _image_call(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last ``generate_image`` step in a consultation, or ``None``.
 
-    Read from the tool frame's own parameters through
-    :func:`~aic_dc.claude_code.messages.files_written_by`, which is the
-    one table mapping a tool name to its path argument for all three
-    vocabularies — and which already knows ``generate_image`` under both
-    of Antigravity's spellings, ``output_path`` and ``OutputPath``. A
-    second reader here would be a fourth vocabulary to keep in step.
+    **Not** :func:`~aic_dc.claude_code.messages.files_written_by`, which is
+    what this used to be and which is a table of tools to their *path
+    arguments*. ``generate_image`` has none on either transport, so the
+    shared table cannot answer this question and adding a third spelling to
+    it would encode the wrong belief rather than fix it. See
+    :data:`BRAIN_DIR`.
 
-    Returns ``""`` when no such call appears, which
-    :func:`~aic_dc.antigravity.consultant.verify_image_write` turns into
-    "generated no image file" — the honest answer, since a turn that
-    never called the tool did not produce a picture whatever its prose
-    says.
+    The last one wins because a turn may generate more than once and the
+    caller asked for an image, singular — the most recent is the one the
+    prose is about.
     """
+    found = None
     for frame in frames:
         step = unwrap(frame, "step_update")
         if step is None or step.get("step_type") != "tool":
             continue
         info = step.get("tool_info")
         info = info if isinstance(info, dict) else {}
-        name = str(step.get("tool_name") or info.get("name") or "")
-        params = info.get("parameters")
-        params = dict(params) if isinstance(params, dict) else {}
-        written = files_written_by(name, params)
-        if written:
-            return written[0]
+        if str(step.get("tool_name") or info.get("name") or "") == "generate_image":
+            found = step
+    return found
+
+
+def _conversation_id(frames: list[dict[str, Any]]) -> str:
+    """The conversation these frames belong to, from whichever carries it.
+
+    Three frame shapes carry it and they disagree about depth: ``init``
+    has it at the top level, ``result`` inside its payload, and a
+    ``step_update`` inside the step. Read from all of them rather than
+    from the session, because what has to match is the directory ``agy``
+    named after *this* conversation.
+    """
+    for frame in frames:
+        nested = [value for value in frame.values() if isinstance(value, dict)]
+        for candidate in (frame, *nested):
+            found = candidate.get("conversation_id")
+            if isinstance(found, str) and found:
+                return found
     return ""
+
+
+def _locate_image(brain_dir: Path, conversation_id: str, image_name: str) -> Path | None:
+    """The file ``agy`` wrote for this conversation, or ``None``.
+
+    Matched by the name the model chose first, then by anything in the
+    directory. The fallback is safe rather than lax: the directory is
+    ``agy``'s own per-conversation one, a consultation holds exactly one
+    conversation for the length of one call, and nothing else writes
+    there — so "the newest file in it" is this call's image or there is
+    none. Sub-directories (``scratch``, ``.system_generated``,
+    ``.user_uploaded``) are skipped, since an image is a file.
+    """
+    if not conversation_id:
+        return None
+    directory = brain_dir / conversation_id
+    if not directory.is_dir():
+        return None
+    stem = image_name.strip()
+    patterns = [f"{stem}_*", f"{stem}.*"] if stem else []
+    patterns.append("*")
+    for pattern in patterns:
+        try:
+            files = [path for path in directory.glob(pattern) if path.is_file()]
+        except OSError:
+            return None
+        if files:
+            return max(files, key=lambda path: path.stat().st_mtime)
+    return None
