@@ -1972,6 +1972,50 @@ The classification tests work because they refuse to be read past, and that is t
   already answers on the concurrent channel while a turn blocks on it. See
   [`3-engine/session.md` § Mid-turn availability](../3-engine/session.md#mid-turn-availability).
 
+- **The question-preview contract is gated offline, and the A/B never had to be automated** —
+  2026-09-08, closing [`../next.md`](../next.md) § D3 and [`../plan/README.md`](../plan/README.md) open
+  item 8.
+
+  The item asked for a live A/B to re-run on every CLI upgrade, and it was blocked by its own framing.
+  What that A/B established is not behaviour — it is **text in the CLI binary**: the variable name the
+  CLI reads, the per-format prompt block the variable selects between, the `preview` field that sits in
+  the tool's input schema unconditionally, and the sentence inside that field's own description — *"See
+  the tool description for the expected content format"* — which is the thing that makes the variable
+  load-bearing at all. Read back out of the bytes, the recorded finding is confirmed word for word.
+  `claude_code/cli_surface.py` scans the ~300 MiB executable with `mmap` (no resident cost, and the
+  claims are substring searches), and `test_claude_code_cli_surface.py` fails **by name, with what the
+  absence would mean**, when a release moves one. Offline, no credentials, no tokens, every suite run —
+  strictly stronger than a note asking somebody to remember.
+
+  Three decisions carry the weight. **The markers are string literals, not code**, because the bundle is
+  minified: the format branch is `if(i==="markdown"||i==="html")` and `i` is whatever the minifier chose
+  that day, so what is anchored on is the English the CLI shows a model. One claim is code-shaped
+  (`startsWith("sdk-")`, the exemption that makes an *unset* format mean "nobody chose" rather than
+  "markdown"), and a test asserts it stays the only one — the temptation when a marker goes red is to
+  replace it with the surrounding minified code, which would go red again next release for no reason.
+  **`holds` is `None`, not `False`, when nothing could be scanned**: a binary that is absent, empty or
+  unreadable has disproved nothing, and reporting `False` would make a stripped install look like a CLI
+  regression *and* make a real regression indistinguishable from a missing file. **The measured version
+  is recorded and not gated on** — a bump that leaves the claims standing needs no action, and failing
+  on the number alone is how a tripwire gets switched off.
+
+  It reads the *bundled* copy rather than `resolve_cli().path`, so a reader's `engine.json` `cli_path`
+  cannot make the result machine-dependent — the same fault `0de670c` had just fixed elsewhere. The gate
+  was proved able to fail against synthetic binaries before it was believed, this project having shipped
+  two inert checks already ([`../next.md`](../next.md) § A2 (a) and (d)). And the claims about *our* side
+  never skip, so an install with no binary still gates the format being one the CLI accepts (a typo
+  falls through silently rather than erroring) and `CLAUDE_CODE_ENTRYPOINT` never being set by us, since
+  `options.env` merges *after* the SDK's `sdk-py` stamp and would win.
+
+  The live script was not declared obsolete, which was the other tempting wrong answer. A string in the
+  binary does not prove the block reaches the model, and nothing static shows the CLI *accepts* the
+  answer we build — a `FakeSession` accepts any shape we invent. So `question_preview_smoke.py` keeps
+  exactly those two jobs, and its new `--ab` runs both arms in one process with the expected outcome
+  stated up front: **no difference**, because the field is unconditional. Previews in the "with" arm only
+  contradicts the record and exits 1; previews in neither is a model declining an optional field and
+  exits 2. That turns the judgement call into one command with a stated answer, rather than a reader
+  holding two runs in their head.
+
 ## Resumption protocol
 
 If a response drops mid-layer, the next response begins by:

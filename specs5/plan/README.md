@@ -273,9 +273,14 @@ interlude that found it; this list exists so that none of them has to be redisco
    diff viewer has always paid, for the same reason (Monaco's constructor adds rules synchronously), and a
    request builds at most one editor — so it is unmeasured rather than known-cheap. Incremental cloning is
    the optimisation if that ever stops being true.
-8. **The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
-   supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
-   and what it measures is exactly the kind of detail a version bump moves.
+8. ~~**The question-preview `--without` A/B is not automated.**~~ **Built 2026-09-08**, and not by
+   automating the A/B — the item's framing was the obstacle. Every fact the A/B established is a string
+   literal in the CLI binary (the variable name, the per-format prompt block, the unconditional `preview`
+   field, and the sentence deferring its format to that block), so `claude_code/cli_surface.py` reads them
+   with `mmap` and `test_claude_code_cli_surface.py` fails by name when a release moves one — offline, no
+   credentials, every run. `scripts/question_preview_smoke.py` keeps only what bytes cannot show: that the
+   block reaches the model, and that the CLI accepts the answer we build. Reasoning in
+   [`../impl-history/work-log.md`](../impl-history/work-log.md) § *Landed since*.
 9. ~~**Live subagent tabs have never watched a real fan-out.**~~ **Watched on 2026-08-17**, and it found
    what 33 green tests could not: **the CLI reports a slow `Bash` command as a task**
    (`task_type="local_bash"`, one per command past its backgrounding threshold) through the same four

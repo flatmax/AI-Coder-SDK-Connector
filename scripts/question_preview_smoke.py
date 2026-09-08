@@ -22,11 +22,39 @@ single unit test:
    allow is where that shows up. Nothing mocked stands in for it: a
    ``FakeSession`` would accept any shape we invented.
 
+**Most of what this script established is now checked offline.**
+``aic_dc.claude_code.cli_surface`` reads the four load-bearing facts
+straight out of the CLI binary — the variable name, the per-format prompt
+block, the unconditional schema field and the sentence that defers the
+format to the block — and ``tests/test_claude_code_cli_surface.py`` fails by
+name when a release moves one. That is ``specs5/next.md`` § D3's purpose:
+the static half no longer waits on somebody remembering to run this.
+
+What still needs a real turn is everything that is *behaviour* rather than
+bytes. A string in the binary does not prove the block reaches the model,
+and no static read can show that the CLI accepts the answer we build. Those
+are this script's two jobs, and ``--ab`` is the first of them made
+repeatable.
+
 Usage::
 
     python scripts/question_preview_smoke.py
+    python scripts/question_preview_smoke.py --ab
     python scripts/question_preview_smoke.py --neutral --without
     python scripts/question_preview_smoke.py --deny
+
+``--ab``
+    Run both arms in one invocation and compare them, instead of two runs
+    and a reader holding one in their head. Forces ``--neutral``, because
+    naming the field settles in the prompt the very thing being measured.
+
+    **The expected result is no difference**, and that is the recorded
+    finding rather than a null result: the ``preview`` field is in the
+    tool's input schema unconditionally, so previews arrive with the
+    variable unset. A run where previews appear *only* in the "with" arm
+    contradicts the record and means the CLI has begun gating the field on
+    the format — exit 1, loudly. Previews in neither arm is the model
+    declining an optional field, which is inconclusive and exits 2.
 
 ``--neutral``
     Ask for the previews' *purpose* — seeing the layouts — without naming the
@@ -181,9 +209,125 @@ class Probe:
         return PermissionResultAllow(updated_input=updated)
 
 
-async def main() -> int:
+async def _one_arm(
+    *,
+    repo: str,
+    without: bool,
+    neutral: bool,
+    answer: bool,
+) -> tuple[Probe, list[str]]:
+    """One session, start to finish, returning what it saw.
+
+    Split out of ``main`` so ``--ab`` can run two of these in one process
+    rather than asking a reader to compare two invocations by eye. The
+    environment surgery has to happen per arm and in this order: the
+    "without" arm removes the variable from ``options.env`` *and* from the
+    inherited environment, because the SDK spawns the CLI with
+    ``{**os.environ, **options.env}`` and emptying the dict alone leaves an
+    inherited value in place. A session hosted by AIC⚡DC inherits one,
+    which is how the first attempt at this A/B produced two identical runs.
+    """
     from claude_agent_sdk import ClaudeSDKClient
 
+    probe = Probe(answer=answer)
+    options = build_options(
+        repo_root=repo,
+        config=EngineConfig.load(None),
+        cli_path=resolve_cli(None).path,
+        can_use_tool=probe,
+        # Nothing here should edit anything; plan is the posture that says so.
+        permission_mode="plan",
+    )
+    if without:
+        options.env = {key: value for key, value in options.env.items()
+                       if key != PREVIEW_ENV_KEY}
+        inherited = os.environ.pop(PREVIEW_ENV_KEY, None)
+        if inherited is not None:
+            print(f"popped an inherited {PREVIEW_ENV_KEY}={inherited}")
+
+    print(f"{PREVIEW_ENV_KEY} in options.env: "
+          f"{options.env.get(PREVIEW_ENV_KEY, '(unset)')}")
+    prompt = PROMPT_NEUTRAL if neutral else PROMPT_EXPLICIT
+    print(f"asking: {'neutral — the field is not named' if neutral else 'the field is named'}")
+
+    replies: list[str] = []
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(prompt)
+        async for message in client.receive_response():
+            for block in getattr(message, "content", None) or []:
+                text = getattr(block, "text", None)
+                if isinstance(text, str) and text.strip():
+                    replies.append(text)
+    return probe, replies
+
+
+def _filled_count(probe: Probe) -> int:
+    """How many options across every call carried an example.
+
+    Counted off the raw tool input rather than the normalised payload, so
+    it answers "what did the model send" — which is the arm's measurement.
+    ``_report`` counts the normalised side separately and compares.
+    """
+    return sum(
+        1
+        for call in probe.calls
+        for question in call.get("questions") or []
+        for option in question.get("options") or []
+        if isinstance(option, dict) and option.get("preview")
+    )
+
+
+async def _ab(repo: str) -> int:
+    """Both arms, compared, with the recorded expectation stated up front.
+
+    Neutral is forced rather than offered: the whole variable under test is
+    whether the model was *told* the field exists, and a prompt naming it
+    answers that in the prompt.
+    """
+    print("=" * 66)
+    print("A/B — does the format variable change whether previews arrive?")
+    print("Recorded finding: NO. The `preview` field is in the tool's input")
+    print("schema unconditionally; the variable buys the format, not the")
+    print("field. A difference here contradicts the record.")
+    print("The static half of this is now in tests/test_claude_code_cli_surface.py.")
+    print("=" * 66)
+
+    arms: dict[str, int] = {}
+    for label, without in (("with", False), ("without", True)):
+        print(f"\n--- arm: {label} the variable ---")
+        probe, _ = await _one_arm(
+            repo=repo, without=without, neutral=True, answer=True
+        )
+        if not probe.calls:
+            print(f"\nNO AskUserQuestion CALL in the {label!r} arm — "
+                  "inconclusive, rerun")
+            return 2
+        arms[label] = _filled_count(probe)
+        print(f"  {label}: {arms[label]} option(s) carried an example")
+
+    print("\n" + "=" * 66)
+    print(f"with the variable:    {arms['with']} example(s)")
+    print(f"without the variable: {arms['without']} example(s)")
+    if arms["with"] and arms["without"]:
+        print("\nMATCHES THE RECORD — previews arrive either way, so the "
+              "field is still unconditional and the variable still buys "
+              "only the format.")
+        return 0
+    if arms["with"] and not arms["without"]:
+        print("\nCONTRADICTS THE RECORD — previews arrived only with the "
+              "variable set. The CLI may have started gating the field "
+              "itself, which would make this variable load-bearing for "
+              "presence rather than format. Re-read the tool's input "
+              "schema in the binary before believing one run: a model "
+              "declining an optional field looks identical.")
+        return 1
+    print("\nINCONCLUSIVE — the model filled no example in the arm that "
+          "should be easiest. That is a model declining an optional field, "
+          "not a finding. Rerun.")
+    return 2
+
+
+async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--without",
@@ -195,6 +339,11 @@ async def main() -> int:
         "--neutral",
         action="store_true",
         help="ask without naming the preview field — what --without needs",
+    )
+    parser.add_argument(
+        "--ab",
+        action="store_true",
+        help="run both arms and compare them; forces --neutral",
     )
     parser.add_argument(
         "--deny",
@@ -210,35 +359,17 @@ async def main() -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    probe = Probe(answer=not args.deny)
-    options = build_options(
-        repo_root=args.repo,
-        config=EngineConfig.load(None),
-        cli_path=resolve_cli(None).path,
-        can_use_tool=probe,
-        # Nothing here should edit anything; plan is the posture that says so.
-        permission_mode="plan",
+    if args.ab:
+        if args.deny:
+            parser.error("--ab needs an answered turn; drop --deny")
+        return await _ab(args.repo)
+
+    probe, replies = await _one_arm(
+        repo=args.repo,
+        without=args.without,
+        neutral=args.neutral,
+        answer=not args.deny,
     )
-    if args.without:
-        options.env = {key: value for key, value in options.env.items()
-                       if key != PREVIEW_ENV_KEY}
-        inherited = os.environ.pop(PREVIEW_ENV_KEY, None)
-        if inherited is not None:
-            print(f"popped an inherited {PREVIEW_ENV_KEY}={inherited}")
-
-    print(f"{PREVIEW_ENV_KEY} in options.env: "
-          f"{options.env.get(PREVIEW_ENV_KEY, '(unset)')}")
-    prompt = PROMPT_NEUTRAL if args.neutral else PROMPT_EXPLICIT
-    print(f"asking: {'neutral — the field is not named' if args.neutral else 'the field is named'}")
-
-    replies: list[str] = []
-    async with ClaudeSDKClient(options=options) as client:
-        await client.query(prompt)
-        async for message in client.receive_response():
-            for block in getattr(message, "content", None) or []:
-                text = getattr(block, "text", None)
-                if isinstance(text, str) and text.strip():
-                    replies.append(text)
 
     if not probe.calls:
         print("\nNO AskUserQuestion CALL — inconclusive, rerun")
@@ -251,13 +382,16 @@ async def main() -> int:
     ]
     print(f"\n--- the model made {len(probe.calls)} call(s), "
           f"{len(all_questions)} question(s) ---")
-    filled = 0
     for call_index, call in enumerate(probe.calls):
         for index, question in enumerate(call.get("questions") or []):
             print(f"  [{call_index}.{index}] {question.get('question')}")
-            filled += _summarise_previews(
+            _summarise_previews(
                 f"[{call_index}.{index}]", question.get("options") or [],
             )
+    # One definition of the total, shared with ``--ab``'s per-arm count.
+    # Accumulating it here as well would be a second way to count the same
+    # thing, and the two could then disagree about what the arm measured.
+    filled = _filled_count(probe)
 
     # The same content again after normalisation. A preview the model sent
     # and the payload dropped is our bug, and this is where it shows: the

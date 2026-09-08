@@ -2213,6 +2213,18 @@ template had put a CSS class name in backticks, which terminates the template li
   re-runs it on a CLI upgrade, and the thing it measures — whether the tool's prompt documents the field —
   is exactly the kind of detail a version bump moves. Running `--neutral --without` after an upgrade is a
   judgement call, not a check.
+
+  **Closed on 2026-09-08, and this bullet named the wrong obstacle.** It read as "the A/B needs
+  automating", which is why it sat for two weeks: an A/B asks a model to fill an optional field, so a null
+  arm is inconclusive and no amount of scheduling makes it a gate. But *"whether the tool's prompt
+  documents the field"* is not behaviour — the prompt block is a string literal in the CLI binary, and so
+  are the other three facts underneath it. `claude_code/cli_surface.py` reads them with `mmap` and
+  `test_claude_code_cli_surface.py` fails by name when a release moves one, offline and on every run. The
+  bytes also confirmed the recorded finding word for word: the schema's `preview` field is unconditional
+  and its description says *"See the tool description for the expected content format"*, which is exactly
+  the division § *Interlude* argued for. The script keeps the two halves no static read can reach — that
+  the block reaches the model, and that the CLI accepts the answer — and `--ab` runs both arms in one
+  process with the expected outcome (no difference) stated before it starts.
 - **`annotations` on a question answered with prose alone carries the note and no preview.** Correct by the
   rule above, but it means a user who typed an answer *and* attached a note sends two free-text strings the
   model must tell apart by key. Nothing tests how well it does.

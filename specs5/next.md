@@ -3,6 +3,9 @@
 **Status:** the implementation queue. Current as of **2026-09-03**, HEAD `a698fdb`. The tree is clean at
 that SHA, so every claim here is about a committed state and nothing is owed to a working copy.
 
+**One entry post-dates that survey:** § D3 closed on 2026-09-08. Everything else was last checked at the
+SHA above, and closing D3 re-checked nothing else.
+
 **This file covers the Claude engine and the app around it. It does not cover the second engine.**
 [`plan-ag/`](plan-ag/) is a separate plan of record with its own decisions (`AG-n`), risks (`AG-R-n`)
 and [`delivery.md`](plan-ag/delivery.md), and it moved a long way between 2026-08-30 and 2026-09-03
@@ -922,10 +925,13 @@ guards now in `block-render.test.js` say the rules exist — which is the same d
 the Monaco clone tests are. Widths were read at 520, 400 and 300px by hand, twice, and neither reading
 is repeatable by anything in the suite.
 
-**D3 — The question-preview `--without` A/B is not automated.** `scripts/question_preview_smoke.py`
-supports it and the specs record its result, but nothing re-runs it when the CLI ships a new build —
-and what it measures is exactly the kind of detail a version bump moves.
-[`plan/README.md`](plan/README.md) open item 8.
+~~**D3 — The question-preview `--without` A/B is not automated.**~~ **Built 2026-09-08, and the item was
+blocked by its own framing.** It asked for the A/B to re-run on a CLI upgrade; everything the A/B
+measured is a *string literal in the CLI binary*, so the check is a static scan that runs offline on
+every suite run — `claude_code/cli_surface.py` with `test_claude_code_cli_surface.py`. The live script
+keeps the two halves no static read can reach (that the block reaches the model, that the CLI accepts
+our answer), and `--ab` makes that half one command with its expected outcome stated. Reasoning in
+[`impl-history/work-log.md`](impl-history/work-log.md) § *Landed since*.
 
 **D4 — The cost chip's two exceptional renderings are unobserved.** "Nothing extra" and "cost unknown"
 hold in 60 tests and no ordinary turn causes either. Phase 6's entry says so in its exit criterion;

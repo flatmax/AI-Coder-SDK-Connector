@@ -219,7 +219,12 @@ field, where for a single-select it replaces the choice instead of qualifying it
 - **The engine also fills in `annotations[…].preview`**, which the schema describes as the preview content of *the* selected option, singular — so it is sent only when exactly one option was chosen and that option carried an example. See [`../../specs-reference/3-engine/permissions.md` § Answering an `interact` request](../../specs-reference/3-engine/permissions.md#answering-an-interact-request).
 
 The note is read: `scripts/question_preview_smoke.py` round-trips one against the real CLI, and the
-model's reply quoted it back and revised its own proposal to match.
+model's reply quoted it back and revised its own proposal to match. That the CLI still *names* the key
+the engine fills is no longer left to a hand-run — `src/aic_dc/claude_code/cli_surface.py` reads the
+`annotations` description out of the bundled binary alongside the four preview facts, and the suite fails
+by name if a release moves it. Only the round trip itself needs the live script: a shape the CLI ignores
+presents as a note that never reaches the model, and nothing static can tell that from a model with
+nothing to say about it.
 
 This class is always gated by the SDK, so it is the one dialog a user cannot make go away with a rule or
 a permissive mode. In `dontAsk` it is denied without ever reaching us, which the dialog therefore cannot
